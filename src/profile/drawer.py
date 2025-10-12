@@ -20,7 +20,6 @@ from src.base.plot import(
     TextBox,
     colored_text_box,
     ImageBox,
-    Widget
 )
 
 from src.base.draw import roundrect_bg
@@ -33,6 +32,8 @@ class DetailedProfileCardRequest(BaseModel):
     mode: str = None
     is_hide_uid: bool = False
     leader_image_path: str
+    has_frame: bool = False
+    frame_path: Optional[str] = None
 
 # 获取头像框图片，失败返回None
 async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
@@ -118,8 +119,15 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             if profile:
                 mode = profile.mode
-                frames = get_player_frames(ctx, profile["userGamedata"]["userId"], profile)
-                await get_avatar_widget_with_frame(ctx, avatar_info.img, 80, frames)
+                frame_path = profile.frame_path
+                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
+                avatar_widget = await get_avatar_widget_with_frame(
+                    is_frame=bool(frame_path),
+                    frame_path=frame_path,
+                    avatar_img=avatar_img,
+                    avatar_w=80,
+                    frame_data=[]
+                )
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
                     source = profile.get('source', '?')
                     if local_source := profile.get('local_source'):
