@@ -793,6 +793,9 @@ class TextStyle:
     font: str = DEFAULT_FONT
     size: int = 16
     color: tuple[int, int, int, int] = BLACK
+    use_shadow: bool = False
+    shadow_offset: tuple[int, int] | int = 1
+    shadow_color: tuple[int, int, int, int] = SHADOW
 
 
 class TextBox(Widget):
