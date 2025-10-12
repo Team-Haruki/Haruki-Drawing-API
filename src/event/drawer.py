@@ -91,7 +91,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         TextBox(f"{detail.etype_name}", text_style)
                         if detail.banner_cid:
                             Spacer(w=8)
-                            ImageBox(get_img_from_path(rqd.event_info.bonus_attr))
+                            ImageBox(await get_img_from_path(rqd.event_info.bonus_attr))
                             TextBox(f"{banner_index}箱", label_style)
 
                 # 活动时间
@@ -118,7 +118,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                 cur_chapter = chapter
                                 break
                         if cur_chapter:
-                            TextBox(f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style)
+                            TextBox(f"距章节结束还有{await get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style)
 
                     # 进度条
                     progress = (datetime.now() - detail.start_time) / (detail.end_time - detail.start_time)
@@ -160,12 +160,12 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                     with HSplit().set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
                         if detail.bonus_attr:
                             TextBox("加成属性", label_style)
-                            ImageBox(get_img_from_path(ASSETS_BASE_DIR, rqd.event_asset.event_attr_image), size=(None, 40))
+                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_asset.event_attr_image), size=(None, 40))
                         if detail.bonus_cuids:
                             TextBox("加成角色", label_style)
                             bonus_chara_image = []
                             for chara in rqd.event_asset.bonus_chara:
-                                bonus_chara_image.append(get_img_from_path(ASSETS_BASE_DIR, chara))
+                                bonus_chara_image.append(await get_img_from_path(ASSETS_BASE_DIR, chara))
                             with Grid(col_count=5 if len(bonus_chara_image) < 20 else 7).set_sep(4, 4):
                                 for image in bonus_chara_image:
                                     ImageBox(image, size=(None, 40))
