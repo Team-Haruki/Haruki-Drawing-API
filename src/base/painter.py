@@ -176,10 +176,10 @@ SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
 
-FONT_DIR = "data/utils/fonts/"
-DEFAULT_FONT = "SourceHanSansCN-Regular"
-DEFAULT_BOLD_FONT = "SourceHanSansCN-Bold"
-DEFAULT_HEAVY_FONT = "SourceHanSansCN-Heavy"
+FONT_DIR = "/Users/deseer/PycharmProjects/Haruki-Drawing-API/data"
+DEFAULT_FONT = "SourceHanSansSC-Regular"
+DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
+DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
 DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
 
 
