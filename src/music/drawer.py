@@ -91,7 +91,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     publish_time = datetime.fromtimestamp(rqd.music_info.publishedAt / 1000).strftime("%Y-%m-%d %H:%M:%S")
     bpm = rqd.bpm
     is_full_length = rqd.music_info.isFullLength
-    cover_img = get_img_from_path(ASSETS_BASE_DIR,rqd.music_jacket)
+    cover_img = await get_img_from_path(ASSETS_BASE_DIR,rqd.music_jacket)
     length = rqd.length
     cn_name = rqd.cn_name
     region = rqd.region
@@ -99,14 +99,14 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     vocal_logos_raw = rqd.vocal.vocal_assets
     caption_vocals = {}
     has_append = rqd.difficulty.has_append
-    event_banner = get_img_from_path(ASSETS_BASE_DIR,rqd.event_banner)
+    event_banner = await get_img_from_path(ASSETS_BASE_DIR,rqd.event_banner)
 
     if not has_append:
         DIFF_COLORS.pop("append")
 
     vocal_logos = {}
     for char_name, logo_path in vocal_logos_raw.items():
-        img = get_img_from_path(ASSETS_BASE_DIR,logo_path)
+        img = await get_img_from_path(ASSETS_BASE_DIR,logo_path)
         if img:
             vocal_logos[char_name] = img
 
@@ -284,7 +284,7 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str =
                 style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=WHITE)
 
                 with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16):
-                    ImageBox(get_img_from_path(ASSETS_BASE_DIR,m.music_jacket), size=(80, 80))
+                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR,m.music_jacket), size=(80, 80))
                     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
                         TextBox(f"【{region.upper()}-{mid}】{music_name}", style1).set_w(250)
                         if publish_dlt <= "0秒":

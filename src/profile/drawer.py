@@ -1,9 +1,10 @@
 from datetime import datetime
 from pydantic import BaseModel
 from PIL import Image
+from pathlib import Path
 from typing import Optional
 from src.base.configs import ASSETS_BASE_DIR
-from src.base.utils import get_readable_datetime, truncate
+from src.base.utils import get_readable_datetime, truncate, get_img_from_path
 from src.base.painter import(
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
@@ -18,6 +19,8 @@ from src.base.plot import(
     TextStyle,
     TextBox,
     colored_text_box,
+    ImageBox,
+    Widget
 )
 
 from src.base.draw import roundrect_bg
@@ -32,12 +35,8 @@ class DetailedProfileCardRequest(BaseModel):
     leader_image_path: str
 
 # 获取头像框图片，失败返回None
-async def get_player_frame_image(ctx: SekaiHandlerContext, frame_id: int, frame_w: int) -> Image.Image | None:
-    frame = await ctx.md.player_frames.find_by_id(frame_id)
-    frame_group = await ctx.md.player_frame_groups.find_by_id(frame["playerFrameGroupId"])
-    asset_name = frame_group["assetbundleName"]
-    asset_path = f"player_frame/{asset_name}/{frame_id}/"
-
+async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
+    frame_base_path = Path(frame_path)
     scale = 1.5
     corner = 20
     corner2 = 50
@@ -46,12 +45,12 @@ async def get_player_frame_image(ctx: SekaiHandlerContext, frame_id: int, frame_
     border2 = 80
     inner_w = w - 2 * border
 
-    base = await ctx.rip.img(asset_path + "horizontal/frame_base.png", allow_error=False)
-    ct = await ctx.rip.img(asset_path + "vertical/frame_centertop.png", allow_error=False)
-    lb = await ctx.rip.img(asset_path + "vertical/frame_leftbottom.png", allow_error=False)
-    lt = await ctx.rip.img(asset_path + "vertical/frame_lefttop.png", allow_error=False)
-    rb = await ctx.rip.img(asset_path + "vertical/frame_rightbottom.png", allow_error=False)
-    rt = await ctx.rip.img(asset_path + "vertical/frame_righttop.png", allow_error=False)
+    base = await get_img_from_path(frame_base_path, "/horizontal/frame_base.png")
+    ct = await get_img_from_path(frame_base_path,"vertical/frame_centertop.png")
+    lb = await get_img_from_path(frame_base_path,"vertical/frame_leftbottom.png")
+    lt = await get_img_from_path(frame_base_path, "vertical/frame_lefttop.png")
+    rb = await get_img_from_path(frame_base_path, "vertical/frame_rightbottom.png")
+    rt = await get_img_from_path(frame_base_path, "vertical/frame_righttop.png")
 
     ct = resize_keep_ratio(ct, scale, mode="scale")
     lt = resize_keep_ratio(lt, scale, mode="scale")
@@ -93,11 +92,11 @@ async def get_player_frame_image(ctx: SekaiHandlerContext, frame_id: int, frame_
     return img
 
 # 获取带框头像控件
-async def get_avatar_widget_with_frame(ctx: SekaiHandlerContext, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
+async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
     try:
-        if frame := find_by(frame_data, 'playerFrameAttachStatus', "first"):
-            frame_img = await get_player_frame_image(ctx, frame['playerFrameId'], avatar_w + 5)
+        if is_frame:
+            frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
     except:
         pass
     with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
@@ -119,6 +118,8 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             if profile:
                 mode = profile.mode
+                frames = get_player_frames(ctx, profile["userGamedata"]["userId"], profile)
+                await get_avatar_widget_with_frame(ctx, avatar_info.img, 80, frames)
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
                     source = profile.get('source', '?')
                     if local_source := profile.get('local_source'):

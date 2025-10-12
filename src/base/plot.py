@@ -177,6 +177,7 @@ class Widget:
         self.offset = (0, 0)
         self.offset_x_anchor = "l"
         self.offset_y_anchor = "t"
+        self.allow_draw_outside = False
 
         self._calc_w = None
         self._calc_h = None
@@ -289,6 +290,10 @@ class Widget:
 
     def set_omit_parent_bg(self, omit: bool)-> Self:
         self.omit_parent_bg = omit
+        return self
+
+    def set_allow_draw_outside(self, allow: bool):
+        self.allow_draw_outside = allow
         return self
 
     def _get_content_size(self) -> tuple[int, int]:

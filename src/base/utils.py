@@ -32,7 +32,7 @@ def get_readable_timedelta(delta: timedelta, precision: str = 'm', use_en_unit=F
         ret += f"{s}秒"   if not use_en_unit else f"{s}s"
     return ret
 
-def get_img_from_path(base_path: Path, path: str) -> Image.Image:
+async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
     """
     通过路径获取图片
     """
