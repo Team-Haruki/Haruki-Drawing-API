@@ -101,9 +101,9 @@ async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_im
     except:
         pass
     with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
-        ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alphablend=False)
+        ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
         if frame_img:
-            ImageBox(frame_img, use_alphablend=True)
+            ImageBox(frame_img, use_alpha_blend=True)
     return ret
 
 def process_hide_uid(is_hide_uid: bool, uid: str, keep: int=0) -> str:
