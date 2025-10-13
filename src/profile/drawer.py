@@ -115,7 +115,7 @@ def process_hide_uid(is_hide_uid: bool, uid: str, keep: int=0) -> str:
 
 async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
     profile = rqd
-    with Frame().set_bg(roundrect_bg()).set_padding(16) as f:
+    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             if profile:
                 mode = profile.mode
@@ -129,9 +129,7 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
                     frame_data=[]
                 )
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
-                    source = profile.get('source', '?')
-                    if local_source := profile.get('local_source'):
-                        source += f"({local_source})"
+                    source = profile.source or "?"
                     update_time = datetime.fromtimestamp(rqd.update_time / 1000)
                     update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
                     user_id = process_hide_uid(profile.is_hide_uid,rqd.id, keep=6)
