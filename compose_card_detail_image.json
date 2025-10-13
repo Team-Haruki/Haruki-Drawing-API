@@ -1,0 +1,66 @@
+{
+  "card_info": {
+    "id": 1011,
+    "character_id": 20,
+    "character_name": "晓山瑞希",
+    "unit": "school_refusal",
+    "release_at": 1728723600000,
+    "supply_type": "非限定",
+    "card_rarity_type": "rarity_4",
+    "attr": "cute",
+    "prefix": "失われてしまったもの",
+    "assetbundle_name": "res020_no038",
+    "skill_type": "score_up"
+  },
+  "region": "jp",
+  "power_info": {
+    "power_total": 31742,
+    "power1": 10590,
+    "power2": 10590,
+    "power3": 10562
+  },
+  "skill_info": {
+    "skill_id": 11,
+    "skill_name": "みんなとの時間",
+    "skill_type": "score_up",
+    "skill_detail": "5秒間 PERFECTのときのみスコアが110/115/120/130%UPする",
+    "skill_type_icon_path": "skill/skill_score_up.png",
+    "skill_detail_cn": "5秒内 PERFECT 得分提高110/115/120/130%"
+  },
+  "event_info": {
+    "event_id": 145,
+    "event_name": "荊棘の道は何処へ",
+    "start_time": 1728723600000,
+    "end_time": 1729490399000,
+    "event_banner_path": "event/event_thorns_2024.png",
+    "bonus_attr": "Cute",
+    "unit": "school_refusal",
+    "banner_cid": 20
+  },
+  "gacha_info": {
+    "gacha_id": 598,
+    "gacha_name": "朽ちゆく花はやがてガチャ",
+    "start_time": 1728723600000,
+    "end_time": 1729479599000,
+    "gacha_banner_path": "gacha/banner_gacha598.png"
+  },
+  "card_images": [
+    "card/normal/res020_no038_normal.png",
+    "card/normal/res020_no038_after_training.png"
+  ],
+  "thumbnail_images": [
+    "card/thumbnails/res020_no038_normal.png",
+    "card/thumbnails/res020_no038_after_training.png"
+  ],
+  "costume_images": [
+    "thumbnail/costume_rip/cos0676_head.png",
+    "thumbnail/costume_rip/cos0676_unique_head.png",
+    "thumbnail/costume_rip/cos0676_body.png"
+  ],
+  "character_icon_path": "chara_icon/mzk.png",
+  "unit_logo_path": "logo_school_refusal.png",
+  "background_image_path": "bg/bg_school_refusal.png",
+  "event_attr_icon_path": "card/attr_icon_cute.png",
+  "event_unit_icon_path": "icon_school_refusal.png",
+  "event_chara_icon_path": "chara_icon/mzk.png"
+}
