@@ -32,7 +32,7 @@ def get_readable_timedelta(delta: timedelta, precision: str = 'm', use_en_unit=F
         ret += f"{s}秒"   if not use_en_unit else f"{s}s"
     return ret
 
-async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
+def get_img_from_path(base_path: Path, path: str) -> Image.Image:
     """
     通过路径获取图片
     """
@@ -77,7 +77,6 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
     if show_original_time:
         text = f"{t.strftime('%Y-%m-%d %H:%M:%S')} ({text})"
     return text
-
 
 def truncate(s: str, limit: int) -> str:
     """

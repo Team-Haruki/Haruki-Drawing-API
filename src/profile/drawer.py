@@ -2,7 +2,7 @@ from datetime import datetime
 from pydantic import BaseModel
 from PIL import Image
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict
 from src.base.configs import ASSETS_BASE_DIR
 from src.base.utils import get_readable_datetime, truncate, get_img_from_path
 from src.base.painter import(
@@ -23,17 +23,24 @@ from src.base.plot import(
 )
 
 from src.base.draw import roundrect_bg
+
 class DetailedProfileCardRequest(BaseModel):
+    """用户信息模型 - 扩展版本，支持完整的游戏数据"""
+    # 基本信息字段
     id: str
     region: str
     nickname: str
     source: str
     update_time: int
-    mode: str = None
+    mode: Optional[str] = None
     is_hide_uid: bool = False
     leader_image_path: str
     has_frame: bool = False
     frame_path: Optional[str] = None
+
+    user_cards: Optional[List[Dict]] = None  # 用户拥有的卡牌列表
+    user_decks: Optional[List[Dict]] = None  # 用户卡组信息
+    user_gamedata: Optional[Dict] = None     # 用户游戏数据
 
 # 获取头像框图片，失败返回None
 async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
@@ -93,10 +100,10 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     return img
 
 # 获取带框头像控件
-async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
+async def get_avatar_widget_with_frame(is_frame: bool, frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
     if is_frame:
-        frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
+        frame_img = await get_player_frame_image(frame_path, avatar_w + 5)
 
     with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
@@ -104,22 +111,79 @@ async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_im
             ImageBox(frame_img, use_alpha_blend=True)
     return ret
 
-def process_hide_uid(is_hide_uid: bool, uid: str, keep: int=0) -> str:
+def process_hide_uid(is_hide_uid: bool, uid: str, keep: int = 0) -> str:
+    """处理UID隐藏"""
     if is_hide_uid:
         if keep:
             return "*" * (16 - keep) + str(uid)[-keep:]
         return "*" * 16
     return uid
 
+
+def get_user_card_ids(user_info: DetailedProfileCardRequest) -> List[int]:
+    """
+    从用户信息中提取卡牌ID列表
+
+    Args:
+        user_info: 用户信息
+
+    Returns:
+        用户拥有的卡牌ID列表
+    """
+    if not user_info.user_cards:
+        return []
+
+    # 从user_cards中提取cardId
+    card_ids = []
+    for card in user_info.user_cards:
+        if isinstance(card, dict) and 'cardId' in card:
+            card_ids.append(card['cardId'])
+        elif isinstance(card, int):
+            card_ids.append(card)
+
+    return card_ids
+
+async def generate_user_avatar(user_info: DetailedProfileCardRequest, avatar_size: int = 80) -> Optional[Image.Image]:
+    """获取用户头像（使用固定路径）"""
+    try:
+        # 使用固定的leader_image_path
+        try:
+            return get_img_from_path(ASSETS_BASE_DIR, user_info.leader_image_path)
+        except FileNotFoundError:
+            # 如果找不到指定头像，使用默认头像
+            try:
+                return get_img_from_path(ASSETS_BASE_DIR, "user/default_avatar.png")
+            except FileNotFoundError:
+                # 如果都找不到，返回None让调用方处理
+                return None
+
+    except Exception as e:
+        print(f"获取用户头像失败: {e}")
+        return None
+
+
 async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
+    """获取详细用户信息卡片"""
     profile = rqd
-    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
+    with Frame().set_bg(roundrect_bg()).set_padding(16) as f:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             if profile:
                 mode = profile.mode
                 frame_path = profile.frame_path
                 has_frame = profile.has_frame
-                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
+
+                # 动态生成用户头像
+                avatar_img = await generate_user_avatar(profile)
+                if avatar_img is None:
+                    # 如果生成失败，创建一个简单的彩色头像作为备选
+                    from src.base.painter import Painter
+                    from PIL import ImageColor
+                    p = Painter(size=(80, 80))
+                    # 创建一个珊瑚色的背景
+                    color = ImageColor.getrgb('cornflowerblue')
+                    bg_image = Image.new('RGBA', (80, 80), color + (255,))  # 添加alpha通道
+                    avatar_img = bg_image
+
                 avatar_widget = await get_avatar_widget_with_frame(
                     is_frame=bool(has_frame),
                     frame_path=frame_path,
@@ -128,10 +192,10 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
                     frame_data=[]
                 )
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
-                    source = profile.source or "?"
+                    source = profile.source or '?'
                     update_time = datetime.fromtimestamp(rqd.update_time / 1000)
                     update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                    user_id = process_hide_uid(profile.is_hide_uid,rqd.id, keep=6)
+                    user_id = process_hide_uid(profile.is_hide_uid, rqd.id, keep=6)
                     colored_text_box(
                         truncate(profile.nickname, 64),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),

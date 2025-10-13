@@ -1,0 +1,70 @@
+{
+  "card_info": {
+    "id": 1252,
+    "character_id": 5,
+    "character_name": "花里みのり",
+    "unit": "idol",
+    "release_at": 1759201200000,
+    "supply_type": "BFes限定",
+    "card_rarity_type": "rarity_4",
+    "attr": "cute",
+    "prefix": "キラキラのアイドル！",
+    "assetbundle_name": "res005_no047",
+    "skill_type": "score_up"
+  },
+  "region": "jp",
+  "power_info": {
+    "power_total": 31742,
+    "power1": 10590,
+    "power2": 10590,
+    "power3": 10562
+  },
+  "skill_info": {
+    "skill_id": 23,
+    "skill_name": "今日がいい日じゃなくても",
+    "skill_type": "score_up",
+    "skill_detail": "5秒間 スコアが60/65/70/80%UP、更に編成からランダムに選んだ他メンバー1人が持つスキルのスコアUP最大値の50%をUP(最大で合計120/130/140/150%)",
+    "skill_type_icon_path": "skill/skill_score_up.png",
+    "skill_detail_cn": "5秒内 得分提高60/65/70/80%,并且从编组中随机选择其他1名成员,提高其得分提高技能最大值的50%UP(最多合计提高120/130/140/150%)"
+  },
+  "special_skill_info": {
+    "skill_id": 22,
+    "skill_name": "『わたし』に届ける希望",
+    "skill_type": "score_up",
+    "skill_detail": "5秒間 スコアが90/95/100/110%UP、更に「花里 みのり」のキャラクターランクによって...%UPする(ランク2毎に+1%、現在の合計...%/最大140/145/150/160%)",
+    "skill_type_icon_path": "skill/skill_score_up.png",
+    "skill_detail_cn": "太长了实在不想写了对不起喵"
+  },
+  "event_info": {
+    "event_id": 181,
+    "event_name": "Our Golden Days",
+    "start_time": 1759212000000,
+    "end_time": 1760162399000,
+    "event_banner_path": "event/event_golden_2025.png",
+    "bonus_attr": "pure"
+  },
+  "gacha_info": {
+    "gacha_id": 825,
+    "gacha_name": "[5周年記念]ブルームフェスティバルガチャ ドリームピック | [5周年記念]ブルームフェスティバルガチャ ドリームピック",
+    "start_time": 1759201200000,
+    "end_time": 1759546799000,
+    "gacha_banner_path": "gacha/banner_gacha825.png"
+  },
+  "card_images": [
+    "card/normal/res005_no047_normal.png",
+    "card/normal/res005_no047after_training.png"
+  ],
+  "thumbnail_images": [
+    "card/thumbnails/res005_no047_normal.png",
+    "card/thumbnails/res005_no047after_training.png"
+  ],
+  "costume_images": [
+    "thumbnail/costume_rip/cos0865_head.png",
+    "thumbnail/costume_rip/cos0865_unique_head.png",
+    "thumbnail/costume_rip/cos0865_body.png",
+    "thumbnail/costume_rip/cos0865_unique_hair.png"
+  ],
+  "character_icon_path": "chara_icon/mnr.png",
+  "unit_logo_path": "logo_idol.png",
+  "event_attr_icon_path": "card/attr_icon_pure.png"
+}
