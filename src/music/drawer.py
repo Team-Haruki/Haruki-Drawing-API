@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Any, List, Dict
-
+import asyncio
 from PIL import Image
 from pydantic import BaseModel
 
-from src.base.configs import ASSETS_BASE_DIR
+from src.profile.drawer import get_detailed_profile_card, DetailedProfileCardRequest
+from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 from src.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -20,6 +21,8 @@ from src.base.painter import (
     LinearGradient,
     adjust_color,
     lerp_color,
+    BLACK,
+    RED
 )
 from src.base.plot import Canvas, FillBg, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
@@ -51,7 +54,6 @@ class UserProfileInfo(BaseModel):
     nickname: str
     data_source: str
     update_time: int
-    music_results: list[dict[str, Any]] # {"musicId": int, "musicDifficultyType": str, "musicDifficulty": str, "playResult": str}
 
 class MusicDetailRequest(BaseModel):
     region: str
@@ -76,9 +78,11 @@ class MusicBriefListRequest(BaseModel):
     region: str
 
 class MusicListRequest(BaseModel):
-    user_info: UserProfileInfo
+    user_results: Dict[int, Any] # {"musicId": int, "musicDifficultyType": str, "musicDifficulty": str, "playResult": str}
     music_list: List[Dict[str, Any]] # [{"id": int, "difficulty": str}]
-    jackets: Dict[str, str] # {musicId: jacket_path}
+    jackets_path_list: Dict[int, str] # {musicId: jacket_path}
+    required_difficulties: str
+    profile_info: DetailedProfileCardRequest
 
 async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, title_style: TextStyle=None, title_shadow=False):
     # 数据准备
@@ -310,24 +314,29 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str =
 async def compose_music_list_image(
         rqd: MusicListRequest, show_id: bool, show_leak: bool, play_result_filter: list[str] = None,
 ) -> Image.Image:
-    lv_musics = rqd.music_list
-    for i in range(len(lv_musics)):
-        id, lv = lv_musics[i]
-        covers = rqd.jackets[id]
-        for m, cover in zip(id, covers):
-            m["cover_img"] = cover
+    jackets = {}
+    jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
+    loaded_jackets = await asyncio.gather(*jacket_tasks)
+    for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
+        jackets[music_id] = img
 
-    profile = rqd.user_info
-
+    profile = rqd.profile_info
     if play_result_filter is None:
         play_result_filter = ["clear", "not_clear", "fc", "ap"]
+    lv_musics_map = {}
+    for music in rqd.music_list:
+        lv = music["difficulty"]
+        if lv not in lv_musics_map:
+            lv_musics_map[lv] = []
+        lv_musics_map[lv].append(music)
+    lv_musics = sorted(lv_musics_map.items(), key=lambda x: x[0], reverse=False)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16) as vs:
             if profile:
-                await get_detailed_profile_card(ctx, profile, err_msg)
+                await get_detailed_profile_card(profile)
 
-            with VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(16):
+            with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 lv_musics.sort(key=lambda x: x[0], reverse=False)
                 for lv, musics in lv_musics:
                     musics.sort(key=lambda x: x["publishedAt"], reverse=False)
@@ -341,29 +350,16 @@ async def compose_music_list_image(
                         if is_leak and not show_leak:
                             continue
                         # 获取游玩结果
-                        result_type = None
-                        if profile:
-                            mid = music["id"]
-                            results = find_by(profile["userMusicResults"], "musicId", mid, mode="all")
-                            results = find_by(results, "musicDifficultyType", diff, mode="all") + find_by(results, "musicDifficulty", diff, mode="all")
-                            if results:
-                                has_clear, full_combo, all_prefect = False, False, False
-                                for item in results:
-                                    has_clear = has_clear or item["playResult"] != "not_clear"
-                                    full_combo = full_combo or item["fullComboFlg"]
-                                    all_prefect = all_prefect or item["fullPerfectFlg"]
-                                result_type = "clear" if has_clear else "not_clear"
-                                if full_combo: result_type = "fc"
-                                if all_prefect: result_type = "ap"
-                            # 过滤游玩结果(无结果视为not_clear)
-                            if (result_type or "not_clear") not in play_result_filter:
-                                continue
+                        result_type = rqd.user_results[music["id"]]
+                        if (result_type or "not_clear") not in play_result_filter:
+                            continue
                         music["play_result"] = result_type
                         filtered_musics.append(music)
 
                     if not filtered_musics: continue
 
-                    with VSplit().set_bg(roundrect_bg()).set_padding(8).set_item_align("lt").set_sep(8):
+                    diff = rqd.required_difficulties
+                    with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
                         lv_text = TextBox(f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE))
                         lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=5))
 
@@ -371,12 +367,12 @@ async def compose_music_list_image(
                             for music in filtered_musics:
                                 with VSplit().set_sep(2):
                                     with Frame():
-                                        ImageBox(music["cover_img"], size=(64, 64), image_size_mode="fill")
+                                        ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
                                         if music["is_leak"]:
                                             TextBox("LEAK", TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=RED)) \
                                                 .set_bg(roundrect_bg(radius=4)).set_offset((64, 64)).set_offset_anchor("rb")
                                         if music["play_result"]:
-                                            result_img = ctx.static_imgs.get(f"icon_{music['play_result']}.png")
+                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+f"/icon_{music['play_result']}.png")
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset((64 - 10, 64 - 10))
                                     if show_id:
                                         TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(64)
