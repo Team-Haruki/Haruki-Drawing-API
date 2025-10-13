@@ -37,7 +37,7 @@ class DetailedProfileCardRequest(BaseModel):
 
 # 获取头像框图片，失败返回None
 async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
-    frame_base_path = Path(frame_path)
+    frame_base_path = ASSETS_BASE_DIR.joinpath(frame_path)
     scale = 1.5
     corner = 20
     corner2 = 50
@@ -46,7 +46,7 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     border2 = 80
     inner_w = w - 2 * border
 
-    base = await get_img_from_path(frame_base_path, "/horizontal/frame_base.png")
+    base = await get_img_from_path(frame_base_path, "horizontal/frame_base.png")
     ct = await get_img_from_path(frame_base_path,"vertical/frame_centertop.png")
     lb = await get_img_from_path(frame_base_path,"vertical/frame_leftbottom.png")
     lt = await get_img_from_path(frame_base_path, "vertical/frame_lefttop.png")
@@ -95,11 +95,9 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
 # 获取带框头像控件
 async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
-    try:
-        if is_frame:
-            frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
-    except:
-        pass
+    if is_frame:
+        frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
+
     with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
         if frame_img:
@@ -120,9 +118,10 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
             if profile:
                 mode = profile.mode
                 frame_path = profile.frame_path
+                has_frame = profile.has_frame
                 avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
                 avatar_widget = await get_avatar_widget_with_frame(
-                    is_frame=bool(frame_path),
+                    is_frame=bool(has_frame),
                     frame_path=frame_path,
                     avatar_img=avatar_img,
                     avatar_w=80,
