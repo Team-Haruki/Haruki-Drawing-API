@@ -19,6 +19,8 @@ from src.card.drawer import (
     CardBasicInfo,
     CardPowerInfo,
     SkillInfo,
+    EventInfo,
+    GachaInfo,
     CardDetailRequest,
     CardListRequest,
     CardBoxRequest
@@ -105,8 +107,10 @@ async def test_card_detail():
     print("\n=== 测试卡牌详情功能 ===")
 
     try:
-        # 尝试加载JSON测试数据
-        test_data = load_json_test_data('compose_card_detail_image.json')
+        # 尝试加载JSON测试数据，优先测试 compose_card_detail_image_3.json
+        test_data = load_json_test_data('compose_card_detail_image_3.json')
+        if not test_data:
+            test_data = load_json_test_data('compose_card_detail_image.json')
 
         if test_data:
             print("从JSON加载测试数据")
@@ -114,14 +118,25 @@ async def test_card_detail():
             power_info = CardPowerInfo(**test_data['power_info'])
             skill_info = SkillInfo(**test_data['skill_info'])
 
+            # 加载可选的活动和招募信息
+            event_info = None
+            if 'event_info' in test_data:
+                event_info = EventInfo(**test_data['event_info'])
+                print("加载活动信息: 活动ID", event_info.event_id)
+
+            gacha_info = None
+            if 'gacha_info' in test_data:
+                gacha_info = GachaInfo(**test_data['gacha_info'])
+                print("加载招募信息: 招募ID", gacha_info.gacha_id)
+
             rqd = CardDetailRequest(
                 card_info=card_info,
                 region=test_data['region'],
                 power_info=power_info,
                 skill_info=skill_info,
                 special_skill_info=None,
-                event_info=None,
-                gacha_info=None,
+                event_info=event_info,
+                gacha_info=gacha_info,
                 card_images=test_data['card_images'],
                 thumbnail_images=test_data['thumbnail_images'],
                 costume_images=test_data['costume_images'],

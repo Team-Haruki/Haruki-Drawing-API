@@ -52,11 +52,11 @@
   },
   "card_images": [
     "card/normal/res005_no047_normal.png",
-    "card/normal/res005_no047after_training.png"
+    "card/normal/res005_no047_after_training.png"
   ],
   "thumbnail_images": [
     "card/thumbnails/res005_no047_normal.png",
-    "card/thumbnails/res005_no047after_training.png"
+    "card/thumbnails/res005_no047_after_training.png"
   ],
   "costume_images": [
     "thumbnail/costume_rip/cos0865_head.png",
