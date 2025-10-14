@@ -37,8 +37,8 @@
     "mode": "lastest",
     "is_hide_uid": false,
     "leader_image_path": "user/leader.png",
-    "has_frame": false,
-    "frame_path": null,
+    "has_frame": true,
+    "frame_path": "frame/end_chapter_20",
     "user_cards": [
       {
         "cardId": 1011,
@@ -50,7 +50,7 @@
     ]
   },
   "show_id": false,
-  "show_box": true,
+  "show_box": false,
   "use_after_training": true,
   "character_icon_paths": {
     "20": "chara_icon/mzk.png",
