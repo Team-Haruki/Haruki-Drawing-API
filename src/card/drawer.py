@@ -141,8 +141,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     skill_info = rqd.skill_info
 
     # 获取图片
-    card_images = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images]
-    costume_images = [apply_rounded_corners(get_img_from_path(ASSETS_BASE_DIR, path)) for path in rqd.costume_images]
+    card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images]
+    costume_images = [apply_rounded_corners(await get_img_from_path(ASSETS_BASE_DIR, path)) for path in rqd.costume_images]
 
     # 构建完整缩略图（带框体、属性、星级）- 使用card_utils中的函数
     thumbnail_images = []
@@ -153,19 +153,19 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
         full_thumbnail = await get_card_full_thumbnail(card_info, after_training)
         if full_thumbnail:
             thumbnail_images.append(full_thumbnail)
-    character_icon = get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
-    unit_logo = get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
+    character_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
+    unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
 
     # 技能图标：优先使用JSON中的路径，否则根据skill_type自动生成
     if skill_info.skill_type_icon_path:
         try:
-            skill_type_icon = get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
+            skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
         except FileNotFoundError:
             skill_type_icon = None
     elif skill_info.skill_type:
         try:
             skill_icon_path = f"skill/skill_{skill_info.skill_type}.png"
-            skill_type_icon = get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
+            skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
         except FileNotFoundError:
             skill_type_icon = None
     else:
@@ -175,13 +175,13 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     if rqd.special_skill_info:
         if rqd.special_skill_info.skill_type_icon_path:
             try:
-                sp_skill_type_icon = get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
+                sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
             except FileNotFoundError:
                 sp_skill_type_icon = None
         elif rqd.special_skill_info.skill_type:
             try:
                 sp_skill_icon_path = f"skill/skill_{rqd.special_skill_info.skill_type}.png"
-                sp_skill_type_icon = get_img_from_path(ASSETS_BASE_DIR, sp_skill_icon_path)
+                sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, sp_skill_icon_path)
             except FileNotFoundError:
                 sp_skill_type_icon = None
         else:
@@ -212,7 +212,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     if rqd.background_image_path:
         try:
-            bg_img = get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
             bg = ImageBg(bg_img)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
@@ -235,7 +235,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                             TextBox("当期活动", label_style)
                             TextBox(f"【{event_detail.event_id}】{event_detail.event_name}", small_style).set_w(360)
                         with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
-                            ImageBox(get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path), size=(250, None))
+                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path), size=(250, None))
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
                                 TextBox(f"开始时间: {event_detail.start_time.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 TextBox(f"结束时间: {event_detail.end_time.strftime('%Y-%m-%d %H:%M')}", small_style)
@@ -243,11 +243,11 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                                 with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
                                     # 属性、团队、角色图标
                                     if event_detail.bonus_attr and rqd.event_attr_icon_path:
-                                        ImageBox(get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path), size=(32, None))
+                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path), size=(32, None))
                                     if event_detail.unit and rqd.event_unit_icon_path:
-                                        ImageBox(get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path), size=(32, None))
+                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path), size=(32, None))
                                     if event_detail.banner_cid and rqd.event_chara_icon_path:
-                                        ImageBox(get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path), size=(32, None))
+                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path), size=(32, None))
 
                 # 关联卡池
                 if gacha_detail:
@@ -256,7 +256,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                             TextBox("当期卡池", label_style)
                             TextBox(f"【{gacha_detail.gacha_id}】{gacha_detail.gacha_name}", small_style).set_w(360)
                         with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
-                            ImageBox(get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path), size=(250, None))
+                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path), size=(250, None))
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
                                 TextBox(f"开始时间: {gacha_detail.start_time.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 TextBox(f"结束时间: {gacha_detail.end_time.strftime('%Y-%m-%d %H:%M')}", small_style)
@@ -388,7 +388,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_image_path:
         try:
-            bg_img = get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
             bg = ImageBg(bg_img)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
@@ -420,7 +420,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                             if card.skill_type:
                                 skill_icon_path = f"skill/skill_{card.skill_type}.png"
                                 try:
-                                    skill_img = get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
+                                    skill_img = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
                                     ImageBox(skill_img, image_size_mode='fit').set_w(32).set_margin(8)
                                 except FileNotFoundError:
                                     # 如果找不到对应的技能图标，静默跳过
@@ -535,6 +535,38 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
         if value < best_value:
             best_height, best_value = i, value
 
+    # 预加载所有图标
+    term_img = None
+    fes_img = None
+    if rqd.term_limited_icon_path:
+        try:
+            term_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        except FileNotFoundError:
+            pass
+    if rqd.fes_limited_icon_path:
+        try:
+            fes_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        except FileNotFoundError:
+            pass
+
+    # 预加载角色图标
+    chara_icons = {}
+    if rqd.character_icon_paths:
+        for chara_id, path in rqd.character_icon_paths.items():
+            try:
+                chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
+            except FileNotFoundError:
+                try:
+                    chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
+                except FileNotFoundError:
+                    chara_icons[chara_id] = None
+
+    unknown_icon = None
+    try:
+        unknown_icon = await get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
+    except FileNotFoundError:
+        pass
+
     # 绘制单张卡
     sz = 48
     def draw_card(card_data):
@@ -544,19 +576,11 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
             # 限定类型图标
             supply_name = card_data.get('supply_type', '')
             if supply_name in ['期间限定', 'WL限定', '联动限定']:
-                if rqd.term_limited_icon_path:
-                    try:
-                        term_img = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
-                        ImageBox(term_img, size=(int(sz*0.75), None))
-                    except FileNotFoundError:
-                        pass
+                if term_img:
+                    ImageBox(term_img, size=(int(sz*0.75), None))
             elif supply_name in ['Fes限定', 'BFes限定']:
-                if rqd.fes_limited_icon_path:
-                    try:
-                        fes_img = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
-                        ImageBox(fes_img, size=(int(sz*0.75), None))
-                    except FileNotFoundError:
-                        pass
+                if fes_img:
+                    ImageBox(fes_img, size=(int(sz*0.75), None))
 
             # 如果用户没有此卡牌，添加遮罩
             if not card_data['has'] and user_info:
@@ -568,7 +592,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_image_path:
         try:
-            bg_img = get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
             bg = ImageBg(bg_img)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
@@ -587,24 +611,11 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                 for chara_id, cards in chara_cards:
                     with VSplit().set_content_align('t').set_item_align('t').set_sep(4):
                         # 角色图标
-                        if rqd.character_icon_paths and chara_id in rqd.character_icon_paths:
-                            try:
-                                chara_icon = get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_paths[chara_id])
-                                ImageBox(chara_icon, size=(sz, sz))
-                            except FileNotFoundError:
-                                # 使用默认未知图标
-                                try:
-                                    unknown_icon = get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
-                                    ImageBox(unknown_icon, size=(sz, sz))
-                                except FileNotFoundError:
-                                    Spacer(w=sz, h=sz)
+                        chara_icon = chara_icons.get(chara_id, unknown_icon)
+                        if chara_icon:
+                            ImageBox(chara_icon, size=(sz, sz))
                         else:
-                            # 使用默认未知图标
-                            try:
-                                unknown_icon = get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
-                                ImageBox(unknown_icon, size=(sz, sz))
-                            except FileNotFoundError:
-                                Spacer(w=sz, h=sz)
+                            Spacer(w=sz, h=sz)
 
                         Spacer(w=sz, h=8)
 
