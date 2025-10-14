@@ -101,8 +101,8 @@ class CardDetailRequest(BaseModel):
     card_images: List[str]  # 卡面图片路径
     thumbnail_images: List[str]  # 卡面缩略图路径
     costume_images: List[str]  # 服装图片路径
-    character_icon_path: str
-    unit_logo_path: str
+    character_icon_path: str #角色图标路径
+    unit_logo_path: str #团队图标路径
     background_image_path: Optional[str] = None  # 背景图片路径
     event_attr_icon_path: Optional[str] = None  # 活动增幅属性图标路径
     event_unit_icon_path: Optional[str] = None  # 活动增幅组合图标路径

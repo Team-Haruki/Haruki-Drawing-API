@@ -1,0 +1,64 @@
+{
+  "card_info": {
+    "id": 190,
+    "character_id": 5,
+    "character_name": "花里みのり",
+    "unit": "idol",
+    "release_at": 1616392800000,
+    "supply_type": "非限定",
+    "card_rarity_type": "rarity_4",
+    "attr": "happy",
+    "prefix": "“あなた”のために",
+    "assetbundle_name": "res005_no007",
+    "skill_type": "score_up"
+  },
+  "region": "jp",
+  "power_info": {
+    "power_total": 31742,
+    "power1": 9865,
+    "power2": 10107,
+    "power3": 11770
+  },
+  "skill_info": {
+    "skill_id": 4,
+    "skill_name": "４人分の“もっともっと”",
+    "skill_type": "score_up",
+    "skill_detail": "5秒間 スコアが100/105/110/120%UPする",
+    "skill_type_icon_path": "skill/skill_score_up.png",
+    "skill_detail_cn": "在5秒内得分提高100/105/110/120%"
+  },
+  "event_info": {
+    "event_id": 17,
+    "event_name": "届け! HOPEFUL STAGE♪",
+    "start_time": 1616392800000,
+    "end_time": 1617256799000,
+    "event_banner_path": "event/event_angelclover_2021.png",
+    "bonus_attr": "happy",
+    "banner_cid": 5
+  },
+  "gacha_info": {
+    "gacha_id": 63,
+    "gacha_name": "ここから羽ばたく天使ガチャ",
+    "start_time": 1616392800000,
+    "end_time": 1617256799000,
+    "gacha_banner_path": "gacha/banner_gacha63.png"
+  },
+  "card_images": [
+    "card/normal/res005_no007_normal.png",
+    "card/normal/res005_no007_after_training.png"
+  ],
+  "thumbnail_images": [
+    "card/thumbnails/res005_no007_normal.png",
+    "card/thumbnails/res005_no007_after_training.png"
+  ],
+  "costume_images": [
+    "thumbnail/costume_rip/cos0080_head.png",
+    "thumbnail/costume_rip/cos0080_unique_head.png",
+    "thumbnail/costume_rip/cos0080_body.png"
+  ],
+  "character_icon_path": "chara_icon/mnr.png",
+  "unit_logo_path": "logo_idol.png",
+  "event_attr_icon_path": "card/attr_icon_happy.png",
+  "event_unit_icon_path": "icon_idol.png",
+  "event_chara_icon_path": "chara_icon/mnr.png"
+}

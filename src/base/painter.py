@@ -26,7 +26,32 @@ DEBUG = True
 
 def debug_print(*args, **kwargs) -> None:
     if DEBUG:
-        print(*args, **kwargs, flush=True)
+        try:
+            print(*args, **kwargs, flush=True)
+        except UnicodeEncodeError:
+            # 最少改动：从 GBK 改为 UTF-8，errors='ignore' 改为 errors='replace'
+            safe_args = []
+            for arg in args:
+                if isinstance(arg, str):
+                    try:
+                        safe_args.append(arg.encode('utf-8', errors='replace').decode('utf-8'))
+                    except:
+                        safe_args.append(str(arg).encode('utf-8', errors='replace').decode('utf-8'))
+                else:
+                    safe_args.append(arg)
+            # 确保最终的print调用也不会出错
+            try:
+                print(*safe_args, **{k: v for k, v in kwargs.items() if k != 'flush'}, flush=False)
+            except UnicodeEncodeError:
+                # 最后的保险：逐个处理并替换特殊字符
+                for arg in safe_args:
+                    try:
+                        print(arg, end=' ', flush=False)
+                    except UnicodeEncodeError:
+                        # 替换所有可能的问题字符
+                        safe_str = str(arg).replace('\u266a', '[music]').replace('\u266b', '[music]')
+                        print(safe_str, end=' ', flush=False)
+                print()  # 换行
 
 
 def get_memo_usage() -> Union[float, int]:
