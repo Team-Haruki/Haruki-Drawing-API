@@ -1,7 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel
 from PIL import Image
-from pathlib import Path
 from typing import Optional
 from src.base.configs import ASSETS_BASE_DIR
 from src.base.utils import get_readable_datetime, truncate, get_img_from_path
@@ -12,7 +11,7 @@ from src.base.painter import(
     resize_keep_ratio,
     Painter
 )
-from src.base.plot import(
+from src.base.plot import (
     Frame,
     HSplit,
     VSplit,
@@ -21,7 +20,6 @@ from src.base.plot import(
     colored_text_box,
     ImageBox,
 )
-
 from src.base.draw import roundrect_bg
 class DetailedProfileCardRequest(BaseModel):
     id: str
@@ -93,7 +91,7 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     return img
 
 # 获取带框头像控件
-async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
+async def get_avatar_widget_with_frame(is_frame: bool, frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
     if is_frame:
         frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)

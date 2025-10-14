@@ -78,7 +78,6 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
         text = f"{t.strftime('%Y-%m-%d %H:%M:%S')} ({text})"
     return text
 
-
 def truncate(s: str, limit: int) -> str:
     """
     截断字符串到指定长度，中文字符算两个字符
