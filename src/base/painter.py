@@ -921,7 +921,7 @@ class Painter:
             gradient_img = gradient.get_img(overlay_size, overlay)
             overlay = gradient_img
 
-        overlay = overlay.resize((size[0] + 1, size[1] + 1), Image.Resampling.BICUBIC)
+        overlay = overlay.resize((size[0], size[1]), Image.Resampling.BICUBIC)
         self.img.alpha_composite(overlay, (pos[0], pos[1]))
 
         return self
