@@ -98,9 +98,9 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
 async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
     if is_frame:
-        frame_img = await get_player_frame_image(frame_path ,avatar_w - 5)
+        frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
 
-    with Frame().set_size((avatar_w + 30, avatar_w + 30)).set_content_align('c') as ret:
+    with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
         if frame_img:
             ImageBox(frame_img, use_alpha_blend=True)

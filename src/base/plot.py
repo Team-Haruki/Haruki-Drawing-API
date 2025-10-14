@@ -177,6 +177,7 @@ class Widget:
         self.offset = (0, 0)
         self.offset_x_anchor = "l"
         self.offset_y_anchor = "t"
+        self.allow_draw_outside = False
 
         self._calc_w = None
         self._calc_h = None
@@ -258,6 +259,10 @@ class Widget:
             self.v_padding = padding[1]
         return self
 
+    def set_allow_draw_outside(self, allow: bool) -> 'Widget':
+        self.allow_draw_outside = allow
+        return self
+
     def set_size(self, size: tuple[int, int])-> Self:
         if not size:
             size = (None, None)
@@ -300,9 +305,13 @@ class Widget:
             content_w_limit = self.w - self.h_padding * 2 if self.w is not None else content_w
             content_h_limit = self.h - self.v_padding * 2 if self.h is not None else content_h
             if content_w > content_w_limit or content_h > content_h_limit:
-                raise ValueError(
-                    f"Content size is too large with ({content_w}, {content_h}) > ({content_w_limit}, {content_h_limit})"
-                )
+                if not self.allow_draw_outside:
+                    raise ValueError(
+                        f"Content size is too large with ({content_w}, {content_h}) > ({content_w_limit}, {content_h_limit})"
+                    )
+                else:
+                    content_w = min(content_w, content_w_limit)
+                    content_h = min(content_h, content_h_limit)
             self._calc_w = content_w_limit + self.h_margin * 2 + self.h_padding * 2
             self._calc_h = content_h_limit + self.v_margin * 2 + self.v_padding * 2
         return int(self._calc_w), int(self._calc_h)
