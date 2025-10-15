@@ -7,7 +7,6 @@ import hashlib
 import asyncio
 import colorsys
 import numpy as np
-from pathlib import Path
 
 from pilmoji import Pilmoji
 from typing import Union, Any, Self
@@ -19,39 +18,13 @@ from dataclasses import dataclass, is_dataclass, fields
 from PIL import Image, ImageFont, ImageDraw, ImageFilter, ImageChops
 
 from .img_utils import mix_image_by_color, adjust_image_alpha_inplace
-from .configs import ASSETS_BASE_DIR
 
 DEBUG = True
 
 
 def debug_print(*args, **kwargs) -> None:
     if DEBUG:
-        try:
-            print(*args, **kwargs, flush=True)
-        except UnicodeEncodeError:
-            # 最少改动：从 GBK 改为 UTF-8，errors='ignore' 改为 errors='replace'
-            safe_args = []
-            for arg in args:
-                if isinstance(arg, str):
-                    try:
-                        safe_args.append(arg.encode('utf-8', errors='replace').decode('utf-8'))
-                    except:
-                        safe_args.append(str(arg).encode('utf-8', errors='replace').decode('utf-8'))
-                else:
-                    safe_args.append(arg)
-            # 确保最终的print调用也不会出错
-            try:
-                print(*safe_args, **{k: v for k, v in kwargs.items() if k != 'flush'}, flush=False)
-            except UnicodeEncodeError:
-                # 最后的保险：逐个处理并替换特殊字符
-                for arg in safe_args:
-                    try:
-                        print(arg, end=' ', flush=False)
-                    except UnicodeEncodeError:
-                        # 替换所有可能的问题字符
-                        safe_str = str(arg).replace('\u266a', '[music]').replace('\u266b', '[music]')
-                        print(safe_str, end=' ', flush=False)
-                print()  # 换行
+        print(*args, **kwargs, flush=True)
 
 
 def get_memo_usage() -> Union[float, int]:
@@ -203,8 +176,11 @@ SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
 
-FONT_DIR = ASSETS_BASE_DIR
-FONTS_DIR = ASSETS_BASE_DIR / "fonts"
+FONT_DIR = "D:/pjskdata/data/fonts"
+DEFAULT_FONT = "SourceHanSansSC-Regular"
+DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
+DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
+DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
 
 
 ALIGN_MAP = {
@@ -241,12 +217,6 @@ class FontCacheEntry:
 
 FONT_CACHE_MAX_NUM = 128
 font_cache: dict[str, FontCacheEntry] = {}
-
-# 默认字体名称
-DEFAULT_FONT = "SourceHanSansSC-Regular"
-DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
-DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
-DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
 
 
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
@@ -318,48 +288,20 @@ def get_font_desc(path: str, size: int) -> FontDesc:
 def get_font(path: str, size: int) -> Font:
     global font_cache
     key = f"{path}_{size}"
+    paths = [
+        path,
+        os.path.join(FONT_DIR, path),
+        os.path.join(FONT_DIR, path + ".ttf"),
+        os.path.join(FONT_DIR, path + ".otf"),
+    ]
     if key not in font_cache:
-        font = None
-
-        # 从字体目录查找
-        fonts_dir = Path(FONTS_DIR)
-        font_extensions = ['.ttf', '.otf', '.ttc']
-
-        # 尝试不同的字体文件扩展名
-        for ext in font_extensions:
-            font_path = fonts_dir / (path + ext)
-            if font_path.exists():
-                try:
-                    font = ImageFont.truetype(str(font_path), size)
-                    break
-                except Exception:
-                    continue
-
-        # 如果找不到字体文件，使用系统字体
+        font: Union[ImageFont.ImageFont, ImageFont.FreeTypeFont] | None = None
+        for path in paths:
+            if os.path.exists(path):
+                font = ImageFont.truetype(path, size)
+                break
         if font is None:
-            try:
-                # 优先尝试常见中文字体
-                system_fonts = [
-                    "C:/Windows/Fonts/msyh.ttc",      # 微软雅黑
-                    "C:/Windows/Fonts/simhei.ttf",    # 黑体
-                    "C:/Windows/Fonts/simsun.ttc",    # 宋体
-                    "C:/Windows/Fonts/NotoSansCJK-Regular.ttc",
-                    "arial.ttf"
-                ]
-
-                for system_font in system_fonts:
-                    try:
-                        font = ImageFont.truetype(system_font, size)
-                        break
-                    except:
-                        continue
-
-                # 如果系统字体也找不到，使用默认字体
-                if font is None:
-                    font = ImageFont.load_default()
-            except:
-                font = ImageFont.load_default()
-
+            raise FileNotFoundError(f"Font file not found: {path}")
         font_cache[key] = FontCacheEntry(font, datetime.now())
         # 清理过期的字体缓存
         while len(font_cache) > FONT_CACHE_MAX_NUM:
@@ -1115,22 +1057,7 @@ class Painter:
         self.img.alpha_composite(overlay, (draw_pos[0], draw_pos[1]))
         return self
 
-    def _impl_draw_random_triangle_bg(self, time_color: bool, main_hue: float, size_fixed_rate: float):
-        # 加载三角形资源
-        try:
-            tri1 = Image.open(ASSETS_BASE_DIR / "tri" / "tri1.png")
-            tri2 = Image.open(ASSETS_BASE_DIR / "tri" / "tri2.png")
-            tri3 = Image.open(ASSETS_BASE_DIR / "tri" / "tri3.png")
-            preset_tris = [
-                tri1.convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR),
-                tri2.convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR),
-                tri3.convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR)
-            ]
-        except FileNotFoundError:
-            # 如果三角形文件不存在，回退到原来的动态生成方法
-            self._impl_draw_random_triangle_bg_fallback(time_color, main_hue, size_fixed_rate)
-            return
-
+    def _impl_draw_random_triangle_bg(self, use_time_color: bool, main_hue: float, size_fixed_rate: float):
         timecolors = [
             (0, 0.57, 7.0, 0.1),
             (5, 0.57, 3.0, 0.2),
@@ -1141,13 +1068,13 @@ class Painter:
             (24, 0.57, 7.0, 0.1),
         ]
 
-        def get_timecolor(t: datetime) -> tuple | None:
+        def get_timecolor(t: datetime):
             if t.hour < timecolors[0][0]:
                 return timecolors[0][1:]
             elif t.hour >= timecolors[-1][0]:
                 return timecolors[-1][1:]
             for i in range(0, len(timecolors) - 1):
-                if timecolors[i][0] <= t.hour < timecolors[i + 1][0]:
+                if t.hour >= timecolors[i][0] and t.hour < timecolors[i + 1][0]:
                     hour1, h1, s1, l1 = timecolors[i]
                     hour2, h2, s2, l2 = timecolors[i + 1]
                     t1 = datetime(t.year, t.month, t.day, hour1)
@@ -1161,23 +1088,24 @@ class Painter:
                         s1 + (s2 - s1) * x,
                         l1 + (l2 - l1) * x,
                     )
-            return None
+
+        now = datetime.now()
+        # now = datetime.strptime("2024-06-21 23:00", "%Y-%m-%d %H:%M")
 
         w, h = self.size
-        if time_color:
-            mh, ms, ml = get_timecolor(datetime.now())
+        if use_time_color:
+            mh, ms, ml = get_timecolor(now)
         else:
             mh = main_hue
             ms = 1.0
             ml = 1.0
 
-        def h2c(_h: float, _s: float, _l: float, a=255) -> list[int]:
-            _h = (_h + 1.0) % 1.0
-            r, g, b = colorsys.hls_to_rgb(_h, _l * ml, _s * ms)
+        def h2c(h, s, l, a=255):
+            h = (h + 1.0) % 1.0
+            r, g, b = colorsys.hls_to_rgb(h, l * ml, s * ms)
             return [int(255 * c) for c in (r, g, b)] + [a]
 
-        ofs, s = 0.025, 4  # 恢复原始渐变参数，与Haruki-Drawing-API保持一致
-        # 只降低背景亮度，保持颜色不变
+        ofs, s = 0.025, 4
         bg = LinearGradient(c1=h2c(mh, 0.5, 1.0), c2=h2c(mh + ofs, 0.9, 0.5), p1=(0, 1), p2=(1, 0)).get_img(
             (w // s, h // s)
         )
@@ -1189,7 +1117,14 @@ class Painter:
         bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
+        preset_tris = [
+            Image.open(f"D:/pjskdata/data/tri/tri{i+1}.png")
+            .convert("RGBA")
+            .resize((128, 128), Image.Resampling.BILINEAR)
+            for i in range(3)
+        ]
         preset_colors = [
+            # (255, 255, 255),
             (255, 189, 246),
             (183, 246, 255),
             (255, 247, 146),
@@ -1234,127 +1169,5 @@ class Painter:
 
         rand_tri(int(20 * dense_factor), (128 * size_factor, 16 * size_factor))
         rand_tri(int(200 * dense_factor), (64 * size_factor, 16 * size_factor))
-
-        self.img.paste(bg, self.offset)
-
-    def _impl_draw_random_triangle_bg_fallback(self, time_color: bool, main_hue: float, size_fixed_rate: float):
-        """原来的三角形背景生成方法，作为回退方案"""
-        timecolors = [
-            (0, 0.57, 7.0, 0.1),
-            (5, 0.57, 3.0, 0.2),
-            (9, 0.57, 1.0, 0.8),
-            (12, 0.57, 1.0, 1.0),
-            (15, 0.57, 1.0, 0.8),
-            (19, 0.57, 3.0, 0.2),
-            (24, 0.57, 7.0, 0.1),
-        ]
-
-        def get_timecolor(t: datetime) -> tuple | None:
-            if t.hour < timecolors[0][0]:
-                return timecolors[0][1:]
-            elif t.hour >= timecolors[-1][0]:
-                return timecolors[-1][1:]
-            for i in range(0, len(timecolors) - 1):
-                if timecolors[i][0] <= t.hour < timecolors[i + 1][0]:
-                    hour1, h1, s1, l1 = timecolors[i]
-                    hour2, h2, s2, l2 = timecolors[i + 1]
-                    t1 = datetime(t.year, t.month, t.day, hour1)
-                    if hour2 == 24:
-                        t2 = datetime(t.year, t.month, t.day, 0) + timedelta(days=1)
-                    else:
-                        t2 = datetime(t.year, t.month, t.day, hour2)
-                    x = (t - t1) / (t2 - t1)
-                    return (
-                        h1 + (h2 - h1) * x,
-                        s1 + (s2 - s1) * x,
-                        l1 + (l2 - l1) * x,
-                    )
-            return None
-
-        w, h = self.size
-        if time_color:
-            mh, ms, ml = get_timecolor(datetime.now())
-        else:
-            mh = main_hue
-            ms = 1.0
-            ml = 1.0
-
-        def h2c(_h: float, _s: float, _l: float, a=255) -> list[int]:
-            _h = (_h + 1.0) % 1.0
-            r, g, b = colorsys.hls_to_rgb(_h, _l * ml, _s * ms)
-            return [int(255 * c) for c in (r, g, b)] + [a]
-
-        ofs, s = 0.025, 4  # 恢复原始渐变参数，与Haruki-Drawing-API保持一致
-        # 只降低背景亮度，保持颜色不变
-        bg = LinearGradient(c1=h2c(mh, 0.5, 1.0), c2=h2c(mh + ofs, 0.9, 0.5), p1=(0, 1), p2=(1, 0)).get_img(
-            (w // s, h // s)
-        )
-        bg.alpha_composite(
-            LinearGradient(c1=h2c(mh, 0.9, 0.7, 100), c2=h2c(mh - ofs, 0.5, 0.5, 100), p1=(0, 0), p2=(1, 1)).get_img(
-                (w // s, h // s)
-            )
-        )
-        bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
-        bg = bg.resize((w, h), Image.Resampling.LANCZOS)
-
-        tri1 = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(tri1)
-        draw.polygon([(0, 0), (64, 32), (32, 64)], fill=WHITE)
-
-        tri2 = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(tri2)
-        draw.polygon([(0, 0), (64, 32), (32, 64)], outline=WHITE, width=4)
-
-        def draw_tri(
-            x: float, y: float, rot: float, size: int, color: float | tuple[float, ...] | str, type_: int
-        ) -> None:
-            img = tri1 if type_ == 0 else tri2
-            img = img.resize((size, size), Image.Resampling.BILINEAR)
-            img = img.rotate(rot, expand=True)
-            img = ImageChops.multiply(img, Image.new("RGBA", img.size, color))
-            bg.alpha_composite(img, (int(x) - img.width // 2, int(y) - img.height // 2))
-
-        preset_colors = [
-            (255, 189, 246),
-            (183, 246, 255),
-            (255, 247, 146),
-            (255, 255, 255),  # 增加白色三角形
-            (255, 220, 150),  # 增加浅橙色三角形
-        ]
-
-        factor = min(w, h) / 2048 * 1.5
-        size_factor = 1.0 + (factor - 1.0) * (1.0 - size_fixed_rate)
-        dense_factor = 1.0 + (factor * factor - 1.0) * size_fixed_rate
-
-        def rand_tri(num: int, sz: tuple[float, float]) -> None:
-            for i in range(num):
-                x = random.uniform(0, w)
-                y = random.uniform(0, h)
-                if x < 0 or x >= w or y < 0 or y >= h:
-                    continue
-                rot = random.uniform(0, 360)
-                size = max(1, min(1000, int(random.normalvariate(sz[0], sz[1]))))
-                dist = ((x - w // 2) / w * 2) ** 2 + ((y - h // 2) / h * 2) ** 2
-                size = int(size * dist)
-                size_alpha_factor, std_size = 1.0, 32 * size_factor
-                if size < std_size:
-                    size_alpha_factor = size / std_size
-                if size > std_size:
-                    size_alpha_factor = 1.0 - (size - std_size * 1.5) / (std_size * 1.5)
-                # 增加亮度因子，让三角形更亮
-                brightness_factor = max(1.2, ml * 1.3)
-                alpha = int(random.normalvariate(80, 180) * max(0, min(1.5, size_alpha_factor * brightness_factor)))
-                if alpha <= 0:
-                    continue
-                # 增加白色三角形的权重
-                color_choices = preset_colors + [(255, 255, 255)] * 3 + [(255, 240, 200)] * 2
-                color = random.choice(color_choices)
-                color = (*color, min(255, alpha))
-                type_ = i % 3 // 2
-                draw_tri(x, y, rot, size, color, type_)
-
-        # 增加三角形数量，让背景更亮
-        rand_tri(int(120 * dense_factor), (48 * size_factor, 16 * size_factor))
-        rand_tri(int(1200 * dense_factor), (16 * size_factor, 16 * size_factor))
 
         self.img.paste(bg, self.offset)
