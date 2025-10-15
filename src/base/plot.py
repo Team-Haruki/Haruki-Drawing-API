@@ -259,10 +259,6 @@ class Widget:
             self.v_padding = padding[1]
         return self
 
-    def set_allow_draw_outside(self, allow: bool) -> 'Widget':
-        self.allow_draw_outside = allow
-        return self
-
     def set_size(self, size: tuple[int, int])-> Self:
         if not size:
             size = (None, None)
@@ -294,6 +290,10 @@ class Widget:
 
     def set_omit_parent_bg(self, omit: bool)-> Self:
         self.omit_parent_bg = omit
+        return self
+
+    def set_allow_draw_outside(self, allow: bool):
+        self.allow_draw_outside = allow
         return self
 
     def _get_content_size(self) -> tuple[int, int]:

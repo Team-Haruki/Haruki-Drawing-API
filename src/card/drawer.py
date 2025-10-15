@@ -620,11 +620,10 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                         Spacer(w=sz, h=8)
 
                         # 卡牌列表
-                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
-                            for i in range(0, len(cards), best_height):
-                                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
-                                    for card_data in cards[i:i + best_height]:
-                                        draw_card(card_data)
+                        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
+                            for card_data in cards:
+                                with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
+                                    draw_card(card_data)
 
     add_watermark(canvas)
     return await canvas.get_img()
