@@ -91,7 +91,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         TextBox(f"{detail.etype_name}", text_style)
                         if detail.banner_cid:
                             Spacer(w=8)
-                            ImageBox(await get_img_from_path(rqd.event_info.bonus_attr))
+                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_info.bonus_attr))
                             TextBox(f"{banner_index}箱", label_style)
 
                 # 活动时间
