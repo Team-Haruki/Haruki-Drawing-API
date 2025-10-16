@@ -95,7 +95,7 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     return img
 
 # 获取带框头像控件
-async def get_avatar_widget_with_frame(is_frame: bool,frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
+async def get_avatar_widget_with_frame(is_frame: bool, frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
     if is_frame:
         frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
