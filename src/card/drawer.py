@@ -141,8 +141,10 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     skill_info = rqd.skill_info
 
     # 获取图片
+
     card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images]
     costume_images = [apply_rounded_corners(await get_img_from_path(ASSETS_BASE_DIR, path)) for path in rqd.costume_images]
+
 
     # 构建完整缩略图（带框体、属性、星级）- 使用card_utils中的函数
     thumbnail_images = []
@@ -153,19 +155,25 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
         full_thumbnail = await get_card_full_thumbnail(card_info, after_training)
         if full_thumbnail:
             thumbnail_images.append(full_thumbnail)
+
     character_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
     unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
+
 
     # 技能图标：优先使用JSON中的路径，否则根据skill_type自动生成
     if skill_info.skill_type_icon_path:
         try:
+
             skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
+
         except FileNotFoundError:
             skill_type_icon = None
     elif skill_info.skill_type:
         try:
             skill_icon_path = f"skill/skill_{skill_info.skill_type}.png"
+
             skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
+
         except FileNotFoundError:
             skill_type_icon = None
     else:
@@ -175,13 +183,17 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     if rqd.special_skill_info:
         if rqd.special_skill_info.skill_type_icon_path:
             try:
+
                 sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
+
             except FileNotFoundError:
                 sp_skill_type_icon = None
         elif rqd.special_skill_info.skill_type:
             try:
                 sp_skill_icon_path = f"skill/skill_{rqd.special_skill_info.skill_type}.png"
+
                 sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, sp_skill_icon_path)
+
             except FileNotFoundError:
                 sp_skill_type_icon = None
         else:

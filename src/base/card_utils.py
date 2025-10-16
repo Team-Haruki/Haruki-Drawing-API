@@ -81,12 +81,14 @@ async def build_card_full_thumbnail(
 
         if level:
             draw = ImageDraw.Draw(img)
+
             draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
             try:
                 # 导入字体获取函数
                 from src.base.painter import get_font, DEFAULT_BOLD_FONT
 
                 font = get_font(DEFAULT_BOLD_FONT, 20)
+
 
                 draw.text((6, img_h - 31), f"Lv.{level}", font=font, fill=(255, 255, 255, 255))
             except Exception as e:
@@ -124,7 +126,9 @@ async def build_card_full_thumbnail(
         if master_rank:
             try:
                 rank_path = f"card/train_rank_{master_rank}.png"
+
                 rank_img = await get_img_from_path(ASSETS_BASE_DIR, rank_path)
+
                 rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
                 rank_img_w, rank_img_h = rank_img.size
                 composite_img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
@@ -286,7 +290,9 @@ async def get_card_full_thumbnail(card, after_training=False, user_card_info=Non
     thumbnail_path = f"card/thumbnails/{card.assetbundle_name}_{image_type}.png"
 
     try:
+
         base_thumbnail = await get_img_from_path(ASSETS_BASE_DIR, thumbnail_path)
+
     except FileNotFoundError:
         # 如果找不到文件，返回None
         return None
@@ -296,20 +302,25 @@ async def get_card_full_thumbnail(card, after_training=False, user_card_info=Non
         # 稀有度框体
         frame_path = f"card/frame_{card.card_rarity_type}.png"
         frame_img = await get_img_from_path(ASSETS_BASE_DIR, frame_path)
+
     except FileNotFoundError:
         frame_img = None
 
     try:
         # 属性图标
         attr_path = f"card/attr_{card.attr}.png"
+
         attr_img = await get_img_from_path(ASSETS_BASE_DIR, attr_path)
+
     except FileNotFoundError:
         attr_img = None
 
     try:
         # 星级图标 - 根据lunabot逻辑选择正确的星星
         star_type = "after_training" if after_training else "normal"
+
         rare_img = await get_img_from_path(ASSETS_BASE_DIR, f"card/rare_star_{star_type}.png")
+
     except FileNotFoundError:
         rare_img = None
 
