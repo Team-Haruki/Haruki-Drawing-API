@@ -176,7 +176,7 @@ SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
 
-FONT_DIR = "/Users/deseer/PycharmProjects/Haruki-Drawing-API/data"
+FONT_DIR = "D:/pjskdata/data/fonts"
 DEFAULT_FONT = "SourceHanSansSC-Regular"
 DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
 DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
@@ -1118,7 +1118,7 @@ class Painter:
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
         preset_tris = [
-            Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
+            Image.open(f"D:/pjskdata/data/tri/tri{i+1}.png")
             .convert("RGBA")
             .resize((128, 128), Image.Resampling.BILINEAR)
             for i in range(3)
