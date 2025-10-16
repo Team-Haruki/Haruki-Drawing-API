@@ -1,6 +1,6 @@
 from datetime import datetime
 from pydantic import BaseModel
-from PIL import Image
+from PIL import Image, ImageDraw
 from typing import Optional
 from src.base.configs import ASSETS_BASE_DIR
 from src.base.utils import get_readable_datetime, truncate, get_img_from_path
@@ -9,7 +9,9 @@ from src.base.painter import(
     DEFAULT_BOLD_FONT,
     BLACK,
     resize_keep_ratio,
-    Painter
+    Painter,
+    get_font,
+    WHITE
 )
 from src.base.plot import (
     Frame,
@@ -21,6 +23,7 @@ from src.base.plot import (
     ImageBox,
 )
 from src.base.draw import roundrect_bg
+
 class DetailedProfileCardRequest(BaseModel):
     id: str
     region: str
@@ -32,6 +35,74 @@ class DetailedProfileCardRequest(BaseModel):
     leader_image_path: str
     has_frame: bool = False
     frame_path: Optional[str] = None
+
+class CardFullThumbnailRequest(BaseModel):
+    cid: int
+    card_thumbnail: Image.Image
+    frame_img: Image.Image
+    attr_img: Image.Image
+    rare_star_img: Image.Image
+    train_rank_img: Optional[Image.Image] = None
+    attr: str
+    rare: str
+    level: Optional[int] = None
+    birthday_icon_path: Optional[str] = None
+    after_training: bool = None
+    custom_text: Optional[str] = None
+    user_card_info: Optional[dict] = None
+    is_pcard: bool = False
+
+async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
+    img = rqd.card_thumbnail
+    img = img.copy()
+    if rqd.rare == "rarity_birthday":
+        rare_img = rqd.birthday_icon
+        rare_num = 1
+    else:
+        rare_num = int(rqd.rare.split("_")[1])
+
+    img_w, img_h = img.size
+    custom_text = rqd.custom_text
+    pcard= rqd.is_pcard
+    # 如果是profile卡片则绘制等级/加成
+    if pcard:
+        if custom_text is not None:
+            draw = ImageDraw.Draw(img)
+            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
+            draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+        else:
+            level = rqd.level
+            draw = ImageDraw.Draw(img)
+            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
+            draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+
+    # 绘制边框
+    frame_img = rqd.frame_img.resize((img_w, img_h))
+    img.paste(frame_img, (0, 0), frame_img)
+    # 绘制特训等级
+    if pcard:
+        rank = pcard["masterRank"]
+        if rank:
+            rank_img = rqd.train_rank_img
+            rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
+            rank_img_w, rank_img_h = rank_img.size
+            img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
+    # 左上角绘制属性
+    attr_img = rqd.attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
+    img.paste(attr_img, (1, 0), attr_img)
+    # 左下角绘制稀有度
+    hoffset, voffset = 6, 6 if not pcard else 24
+    scale = 0.17 if not pcard else 0.15
+    rare_img = rare_img.resize((int(img_w * scale), int(img_h * scale)))
+    rare_w, rare_h = rare_img.size
+    for i in range(rare_num):
+        img.paste(rare_img, (hoffset + rare_w * i, img_h - rare_h - voffset), rare_img)
+    mask = Image.new("L", (img_w, img_h), 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle((0, 0, img_w, img_h), radius=10, fill=255)
+    img.putalpha(mask)
+
+    return img
 
 # 获取头像框图片，失败返回None
 async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
