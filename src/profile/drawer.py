@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from PIL import Image, ImageDraw
 from typing import Optional
 from src.base.configs import ASSETS_BASE_DIR
-from src.base.utils import get_readable_datetime, truncate, get_img_from_path
+from src.base.utils import get_img_from_path
+from src.base.utils import get_readable_datetime, truncate
 from src.base.painter import(
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
@@ -37,29 +38,29 @@ class DetailedProfileCardRequest(BaseModel):
     frame_path: Optional[str] = None
 
 class CardFullThumbnailRequest(BaseModel):
-    cid: int
-    card_thumbnail: Image.Image
-    frame_img: Image.Image
-    attr_img: Image.Image
-    rare_star_img: Image.Image
-    train_rank_img: Optional[Image.Image] = None
-    attr: str
+    id: int
+    card_thumbnail_path: str
     rare: str
+    frame_img_path: str
+    attr_img_path: str
+    rare_img_path: str
+    train_rank: Optional[int]
+    train_rank_img_path: Optional[str] = None
     level: Optional[int] = None
     birthday_icon_path: Optional[str] = None
     after_training: bool = None
     custom_text: Optional[str] = None
-    user_card_info: Optional[dict] = None
+    card_level: Optional[dict] = None
     is_pcard: bool = False
 
 async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
-    img = rqd.card_thumbnail
-    img = img.copy()
+    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
+    rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rare_img_path)
     if rqd.rare == "rarity_birthday":
-        rare_img = rqd.birthday_icon
+        rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.birthday_icon_path)
         rare_num = 1
     else:
-        rare_num = int(rqd.rare.split("_")[1])
+        rare_num = int(rqd.rare)
 
     img_w, img_h = img.size
     custom_text = rqd.custom_text
@@ -77,18 +78,20 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
             draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
     # 绘制边框
-    frame_img = rqd.frame_img.resize((img_w, img_h))
+    frame_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+    frame_img = frame_img.resize((img_w, img_h))
     img.paste(frame_img, (0, 0), frame_img)
     # 绘制特训等级
     if pcard:
-        rank = pcard["masterRank"]
+        rank = rqd.train_rank
         if rank:
-            rank_img = rqd.train_rank_img
+            rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rare_img_path)
             rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
             rank_img_w, rank_img_h = rank_img.size
             img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
     # 左上角绘制属性
-    attr_img = rqd.attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
+    attr_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
+    attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
     img.paste(attr_img, (1, 0), attr_img)
     # 左下角绘制稀有度
     hoffset, voffset = 6, 6 if not pcard else 24

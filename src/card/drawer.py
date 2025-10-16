@@ -15,7 +15,6 @@ from src.base.draw import (
 )
 from src.base.card_utils import (
     apply_rounded_corners,
-    get_card_full_thumbnail,
     has_after_training,
     only_has_after_training
 )
@@ -615,7 +614,6 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
             if user_info:
                 user_profile = await get_detailed_profile_card(user_info)
-                user_profile
 
             # 卡牌网格
             with HSplit().set_bg(roundrect_bg()).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(4):

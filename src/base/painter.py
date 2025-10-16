@@ -176,7 +176,7 @@ SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
 
-FONT_DIR = "D:/pjskdata/data/fonts"
+FONT_DIR = "/Users/deseer/PycharmProjects/Haruki-Drawing-API/data"
 DEFAULT_FONT = "SourceHanSansSC-Regular"
 DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
 DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
