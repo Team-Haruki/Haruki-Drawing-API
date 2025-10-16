@@ -531,7 +531,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
             total += max_height * width
             space += max_height * width - len(cards)
         # value = max(total_width, max_height) * total / (total - space)
-        value = max(total_width, max_height * 0.5) if total_width > 9 else max_height
+        value = max(total_width, max_height * 0.5) if total_width > 9 else max(total_width * 0.5, max_height)
         if value < best_value:
             best_height, best_value = i, value
 
@@ -601,7 +601,6 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            # 如果有用户信息，显示完整的用户信息卡片
             if user_info:
                 user_profile = await get_detailed_profile_card(user_info)
                 user_profile
@@ -619,8 +618,8 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
 
                         Spacer(w=sz, h=8)
 
-                        # 卡牌列表 - 同一角色的卡牌垂直排列，使用原作者的布局优化算法
-                        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
+                        # 卡牌列表
+                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
                             for i in range(0, len(cards), best_height):
                                 with VSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
                                     for card_data in cards[i:i + best_height]:
