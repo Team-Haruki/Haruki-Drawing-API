@@ -1,7 +1,8 @@
 from datetime import datetime
 from pydantic import BaseModel
 from PIL import Image
-from typing import Optional
+from pathlib import Path
+from typing import Optional, List, Dict
 from src.base.configs import ASSETS_BASE_DIR
 from src.base.utils import get_readable_datetime, truncate, get_img_from_path
 from src.base.painter import(
@@ -21,6 +22,8 @@ from src.base.plot import (
     ImageBox,
 )
 from src.base.draw import roundrect_bg
+from src.base.card_utils import get_card_full_thumbnail
+
 class DetailedProfileCardRequest(BaseModel):
     id: str
     region: str
@@ -32,6 +35,7 @@ class DetailedProfileCardRequest(BaseModel):
     leader_image_path: str
     has_frame: bool = False
     frame_path: Optional[str] = None
+    user_cards: Optional[List[Dict]] = None  # 用户拥有的卡牌列表（用于box功能）
 
 # 获取头像框图片，失败返回None
 async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
@@ -108,6 +112,28 @@ def process_hide_uid(is_hide_uid: bool, uid: str, keep: int=0) -> str:
             return "*" * (16 - keep) + str(uid)[-keep:]
         return "*" * 16
     return uid
+
+
+def get_user_card_ids(user_info: DetailedProfileCardRequest) -> list[int]:
+    """
+    从用户信息中提取卡牌ID列表
+
+    Args:
+        user_info: 用户信息请求对象，如果包含user_cards字段则从中提取卡牌ID
+
+    Returns:
+        list[int]: 用户拥有的卡牌ID列表
+    """
+    if not user_info or not hasattr(user_info, 'user_cards') or not user_info.user_cards:
+        return []
+
+    card_ids = []
+    for card in user_info.user_cards:
+        if isinstance(card, dict) and 'cardId' in card:
+            card_ids.append(card['cardId'])
+        elif isinstance(card, int):
+            card_ids.append(card)
+    return card_ids
 
 async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
     profile = rqd
