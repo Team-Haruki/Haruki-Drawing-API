@@ -85,7 +85,7 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
     if pcard:
         rank = rqd.train_rank
         if rank:
-            rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rare_img_path)
+            rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
             rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
             rank_img_w, rank_img_h = rank_img.size
             img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
