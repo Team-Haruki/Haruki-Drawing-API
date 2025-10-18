@@ -888,7 +888,7 @@ class Painter:
             gradient_img = gradient.get_img(overlay_size, overlay)
             overlay = gradient_img
 
-        overlay = overlay.resize((size[0], size[1]), Image.Resampling.BICUBIC)
+        overlay = overlay.resize((size[0] + 1, size[1] + 1), Image.Resampling.BICUBIC)
         self.img.alpha_composite(overlay, (pos[0], pos[1]))
 
         return self
@@ -1118,7 +1118,7 @@ class Painter:
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
         preset_tris = [
-            Image.open(f"D:/pjskdata/data/tri/tri{i+1}.png")
+            Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
             .convert("RGBA")
             .resize((128, 128), Image.Resampling.BILINEAR)
             for i in range(3)
