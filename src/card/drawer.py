@@ -2,8 +2,25 @@ import math
 from PIL import Image
 from datetime import datetime
 from pydantic import BaseModel, field_validator
-from src.base import painter
-from src.base.plot import Canvas, HSplit, VSplit, ImageBox, TextBox, Grid, Frame, Spacer, TextStyle, ImageBg, RoundRectBg
+from src.base.painter import (
+    color_code_to_rgb,
+    DEFAULT_FONT,
+    DEFAULT_BOLD_FONT,
+)
+from src.base.plot import (
+    Canvas,
+    HSplit,
+    VSplit,
+    ImageBox,
+    TextBox,
+    Grid,
+    Frame,
+    Spacer,
+    TextStyle,
+    ImageBg,
+    RoundRectBg,
+    FillBg
+)
 from typing import List, Optional, Union
 
 from src.base.utils import get_img_from_path
@@ -13,6 +30,7 @@ from src.base.draw import (
     SEKAI_BLUE_BG,
     roundrect_bg,
     add_watermark,
+    CHARACTER_COLOR_CODE
 )
 from src.profile.drawer import (
     DetailedProfileCardRequest,
@@ -125,7 +143,6 @@ class CardBoxRequest(BaseModel):
     user_info: Optional[DetailedProfileCardRequest] = None
     show_id: bool = False
     show_box: bool = False
-    use_after_training: bool = True
     background_image_path: Optional[str] = None  # 背景图片路径
     character_icon_paths: dict[int, str]  # 角色ID到图标路径的映射
     term_limited_icon_path: Optional[str] = None  # 期间限定图标路径
@@ -173,11 +190,11 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     release_time = datetime.fromtimestamp(card_info.release_at / 1000)
 
     # 样式定义
-    title_style_def = TextStyle(font=painter.DEFAULT_BOLD_FONT, size=24, color=(0, 0, 0))
-    label_style = TextStyle(font=painter.DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
-    text_style = TextStyle(font=painter.DEFAULT_FONT, size=24, color=(70, 70, 70))
-    small_style = TextStyle(font=painter.DEFAULT_FONT, size=18, color=(70, 70, 70))
-    tip_style = TextStyle(font=painter.DEFAULT_FONT, size=18, color=(0, 0, 0))
+    title_style_def = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(0, 0, 0))
+    label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
+    text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
+    small_style = TextStyle(font=DEFAULT_FONT, size=18, color=(70, 70, 70))
+    tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))
 
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     if rqd.background_image_path:
@@ -338,9 +355,9 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].id), reverse=True)
 
     # 样式定义
-    name_style = TextStyle(font=painter.DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0))
-    id_style = TextStyle(font=painter.DEFAULT_FONT, size=20, color=(0, 0, 0))
-    leak_style = TextStyle(font=painter.DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0))
+    name_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0))
+    id_style = TextStyle(font=DEFAULT_FONT, size=20, color=(0, 0, 0))
+    leak_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0))
 
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_image_path:
@@ -411,12 +428,11 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     user_info = rqd.user_info
     show_id = rqd.show_id
     show_box = rqd.show_box
-    use_after_training = rqd.use_after_training
 
     thumbs = []
     for card in cards:
         # 根据use_after_training决定使用哪张缩略图
-        if use_after_training:
+        if card.card.after_training:
             thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[1]))
         else:
             thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[0]))
@@ -426,7 +442,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     for card, img in zip(cards, thumbs):
         if not img:
             continue
-        chara_id = card.card.id
+        chara_id = card.card.character_id
         if chara_id not in chara_cards:
             chara_cards[chara_id] = []
 
@@ -495,7 +511,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
             ImageBox(card_data['img'], size=(sz, sz))
 
             # 限定类型图标
-            supply_name = card_data.get('supply_type', '')
+            supply_name = card_data['card'].get('supply_type', '')
             if supply_name in ['期间限定', 'WL限定', '联动限定']:
                 if term_img:
                     ImageBox(term_img, size=(int(sz*0.75), None))
@@ -508,7 +524,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                 Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0,0,0,120), radius=2))
 
         if show_id:
-            TextBox(f"{card_data['card']['id']}", TextStyle(font=painter.DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
+            TextBox(f"{card_data['card']['id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
 
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_image_path:
@@ -532,7 +548,9 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                         # 角色图标
                         chara_icon = chara_icons.get(chara_id)
                         ImageBox(chara_icon, size=(sz, sz))
-
+                        chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE[chara_id])
+                        col_num = max(1, len(range(0, len(cards), best_height)))
+                        Spacer(w=sz * col_num + 4 * (col_num - 1), h=4).set_bg(FillBg(chara_color))
                         # 卡牌列表
                         with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
                             for i in range(0, len(cards), best_height):
