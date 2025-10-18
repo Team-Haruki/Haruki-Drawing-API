@@ -1,3 +1,4 @@
+import math
 from PIL import Image
 from datetime import datetime
 from pydantic import BaseModel, field_validator
@@ -13,28 +14,15 @@ from src.base.draw import (
     roundrect_bg,
     add_watermark,
 )
-from src.base.card_utils import (
-    apply_rounded_corners,
-    has_after_training,
-    only_has_after_training
+from src.profile.drawer import (
+    DetailedProfileCardRequest,
+    get_detailed_profile_card,
+    get_card_full_thumbnail,
+    CardFullThumbnailRequest
 )
-from src.profile.drawer import DetailedProfileCardRequest, process_hide_uid, get_detailed_profile_card, get_user_card_ids
 
 
 # ========== 数据模型定义 ==========
-
-class CardBasicInfo(BaseModel):
-    id: int #卡片ID
-    character_id: int #角色ID
-    character_name: str #角色名
-    unit: str #所属组合
-    release_at: int #发布时间
-    supply_type: str  # 类型
-    card_rarity_type: str  # 稀有度
-    attr: str  # 属性
-    prefix: str  #卡名
-    assetbundle_name: str #资源名
-    skill_type: Optional[str] = None  # 技能类型
 
 class CardPowerInfo(BaseModel):
     power_total: int #综合力，以下所有数据皆为0破未读剧情的数值
@@ -89,6 +77,21 @@ class GachaInfo(BaseModel):
                 raise ValueError(f"无效的时间戳: {v}")
         return v
 
+class CardBasicInfo(BaseModel):
+    id: int #卡片ID
+    character_id: int #角色ID
+    character_name: str #角色名
+    unit: str #所属组合
+    release_at: int #发布时间
+    supply_type: str  # 类型
+    card_rarity_type: str  # 稀有度
+    attr: str  # 属性
+    prefix: str  #卡名
+    asset_bundle_name: str #资源名
+    skill: SkillInfo
+    thumbnail_info: List[CardFullThumbnailRequest]
+    after_training: Optional[bool] = False #是否特训后
+
 class CardDetailRequest(BaseModel):
     card_info: CardBasicInfo
     region: str #服务器地区
@@ -97,9 +100,8 @@ class CardDetailRequest(BaseModel):
     special_skill_info: Optional[SkillInfo] = None
     event_info: Optional[EventInfo] = None
     gacha_info: Optional[GachaInfo] = None
-    card_images: List[str]  # 卡面图片路径
-    thumbnail_images: List[str]  # 卡面缩略图路径
-    costume_images: List[str]  # 服装图片路径
+    card_images_path: List[str]  # 卡面图片路径
+    costume_images_path: List[str]  # 服装图片路径
     character_icon_path: str #角色图标路径
     unit_logo_path: str #团队图标路径
     background_image_path: Optional[str] = None  # 背景图片路径
@@ -113,20 +115,21 @@ class CardListRequest(BaseModel):
     user_info: Optional[DetailedProfileCardRequest] = None
     background_image_path: Optional[str] = None  # 背景图片路径
 
+class UserCardInfo(BaseModel):
+    card: CardBasicInfo
+    has_card: bool
+
 class CardBoxRequest(BaseModel):
-    cards: List[CardBasicInfo]
+    cards: List[UserCardInfo]
     region: str
     user_info: Optional[DetailedProfileCardRequest] = None
     show_id: bool = False
     show_box: bool = False
     use_after_training: bool = True
     background_image_path: Optional[str] = None  # 背景图片路径
-    card_image_paths: List[str]  # 每张卡牌的图片路径
     character_icon_paths: dict[int, str]  # 角色ID到图标路径的映射
     term_limited_icon_path: Optional[str] = None  # 期间限定图标路径
     fes_limited_icon_path: Optional[str] = None  # FES限定图标路径
-
-
 
 # ========== 主要函数 ==========
 
@@ -138,67 +141,23 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     region = rqd.region
     power_info = rqd.power_info
     skill_info = rqd.skill_info
-
     # 获取图片
 
-    card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images]
-    costume_images = [apply_rounded_corners(await get_img_from_path(ASSETS_BASE_DIR, path)) for path in rqd.costume_images]
+    card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path]
+    costume_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path]
 
 
     # 构建完整缩略图（带框体、属性、星级）- 使用card_utils中的函数
     thumbnail_images = []
-    for path in rqd.thumbnail_images:
-        # 提取after_training状态
-        after_training = "after_training" in path
-        # 使用card_utils中的函数获取完整缩略图
-        full_thumbnail = await get_card_full_thumbnail(card_info, after_training)
-        if full_thumbnail:
-            thumbnail_images.append(full_thumbnail)
+    for thumbnail in rqd.card_info.thumbnail_info:
+        thumb_img = await get_card_full_thumbnail(thumbnail)
+        thumbnail_images.append(thumb_img)
 
     character_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
     unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
 
-
-    # 技能图标：优先使用JSON中的路径，否则根据skill_type自动生成
-    if skill_info.skill_type_icon_path:
-        try:
-
-            skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
-
-        except FileNotFoundError:
-            skill_type_icon = None
-    elif skill_info.skill_type:
-        try:
-            skill_icon_path = f"skill/skill_{skill_info.skill_type}.png"
-
-            skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
-
-        except FileNotFoundError:
-            skill_type_icon = None
-    else:
-        skill_type_icon = None
-
-    # 特训技能图标：优先使用JSON中的路径，否则根据skill_type自动生成
-    if rqd.special_skill_info:
-        if rqd.special_skill_info.skill_type_icon_path:
-            try:
-
-                sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
-
-            except FileNotFoundError:
-                sp_skill_type_icon = None
-        elif rqd.special_skill_info.skill_type:
-            try:
-                sp_skill_icon_path = f"skill/skill_{rqd.special_skill_info.skill_type}.png"
-
-                sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, sp_skill_icon_path)
-
-            except FileNotFoundError:
-                sp_skill_type_icon = None
-        else:
-            sp_skill_type_icon = None
-    else:
-        sp_skill_type_icon = None
+    skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
+    sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
 
     # 处理事件横幅
     event_detail = None
@@ -233,7 +192,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with HSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
             # 左侧: 卡面+关联活动+关联卡池+提示
-            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg()):
+            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg(alpha=80)):
                 # 卡面
                 with VSplit().set_padding(16).set_sep(8).set_content_align('lt').set_item_align('lt'):
                     for img in card_images:
@@ -274,7 +233,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
 
             # 右侧: 标题+限定类型+综合力+技能+发布时间+缩略图+衣装
             w = 600
-            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg()):
+            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg(alpha=80)):
                 # 标题
                 with HSplit().set_padding(16).set_sep(32).set_content_align('c').set_item_align('c').set_w(w):
                     ImageBox(unit_logo, size=(None, 64))
@@ -284,7 +243,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                             ImageBox(character_icon, size=(None, 32))
                             TextBox(card_info.character_name, title_style_def)
 
-                with VSplit().set_padding(16).set_sep(8).set_item_bg(roundrect_bg()).set_content_align('l').set_item_align('l'):
+                with VSplit().set_padding(16).set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_content_align('l').set_item_align('l'):
                     # 卡牌ID 限定类型
                     with HSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
                         TextBox("ID", label_style)
@@ -355,15 +314,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     cards = rqd.cards
     region = rqd.region
     user_info = rqd.user_info
-
-    # 检查卡牌数量
-    assert len(cards) > 0, "找不到符合条件的卡牌"
-    assert len(cards) < 90, f"卡牌数量过多({len(cards)})，请缩小查询范围"
-
     # 如果只有一张卡，调用详情函数
-    if len(cards) == 1:
-        # 这里可以扩展为调用详情函数，但暂时返回一个简单的图片
-        pass
 
     # 创建用户卡牌ID到卡牌信息的映射
     user_card_map = {}
@@ -372,21 +323,16 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
             if isinstance(user_card, dict) and 'cardId' in user_card:
                 user_card_map[user_card['cardId']] = user_card
 
-    # 获取缩略图
-    async def get_thumb_nothrow(card, index):
-        try:
-            # 普通卡牌（不显示等级和大师等级）
-            normal_img = await get_card_full_thumbnail(card, False, None)
-            after_img = await get_card_full_thumbnail(card, True, None)
-            return normal_img, after_img
-        except Exception as e:
-            print(f"获取卡牌{card.id}完整缩略图失败: {e}")
-            return None, None
+    thumbs = []
+    for card in rqd.cards:
+        if card.after_training:
+            thumb_img = await get_card_full_thumbnail(card.thumbnail_info[1])
+        else:
+            thumb_img = await get_card_full_thumbnail(card.thumbnail_info[0])
+        thumbs.append(thumb_img)
 
     # 并行获取所有缩略图
-    import asyncio
-    thumbs = await asyncio.gather(*[get_thumb_nothrow(card, i) for i, card in enumerate(cards)])
-    card_and_thumbs = [(card, thumb) for card, thumb in zip(cards, thumbs) if thumb[0] is not None]
+    card_and_thumbs = [(card, thumb) for card, thumb in zip(cards, thumbs) if thumb is not None]
 
     # 按发布时间和ID排序
     card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].id), reverse=True)
@@ -409,15 +355,15 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
             # 卡牌网格
-            with Grid(col_count=3).set_bg(roundrect_bg()).set_padding(16):
-                for i, (card, (normal, after)) in enumerate(card_and_thumbs):
+            with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
+                for i, (card, thumb) in enumerate(card_and_thumbs):
                     # 背景设置 - 确保毛玻璃效果启用
                     if card.supply_type not in ["非限定", "normal"]:
                         # 限定卡牌：使用淡黄色背景，确保有足够的透明度
                         bg = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True)
                     else:
                         # 普通卡牌：使用默认的半透明白色背景
-                        bg = roundrect_bg()  # 默认已经是半透明+毛玻璃效果
+                        bg = roundrect_bg(alpha=80)  # 默认已经是半透明+毛玻璃效果
 
                     with Frame().set_content_align('lb').set_bg(bg):
                         # 检查是否为未来卡牌
@@ -428,8 +374,8 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                         # 技能图标区域
                         with Frame().set_content_align('rb'):
                             # 根据skill_type自动匹配技能图标
-                            if card.skill_type:
-                                skill_icon_path = f"skill/skill_{card.skill_type}.png"
+                            if card.skill.skill_type:
+                                skill_icon_path = card.skill.skill_type_icon_path
                                 try:
                                     skill_img = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
                                     ImageBox(skill_img, image_size_mode='fit').set_w(32).set_margin(8)
@@ -441,10 +387,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(5).set_padding(8):
                                 GW = 300
                                 with HSplit().set_content_align('c').set_w(GW).set_padding(8).set_sep(16):
-                                    if normal is not None:
-                                        ImageBox(normal, size=(100, 100), image_size_mode='fill')
-                                    if after is not None:
-                                        ImageBox(after, size=(100, 100), image_size_mode='fill')
+                                        ImageBox(thumb, size=(100, 100), image_size_mode='fill')
 
                                 # 卡牌名称
                                 name_text = card.prefix
@@ -459,7 +402,6 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     add_watermark(canvas)
     return await canvas.get_img()
 
-
 async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style: TextStyle = None, title_shadow: bool = False):
     """
     合成卡牌一览图片（按角色分类的卡牌收集册）
@@ -471,38 +413,20 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     show_box = rqd.show_box
     use_after_training = rqd.use_after_training
 
-    # 获取用户卡牌ID列表
-    pcards = get_user_card_ids(user_info) if user_info else []
-
-    # 创建用户卡牌ID到卡牌信息的映射
-    user_card_map = {}
-    if user_info and user_info.user_cards:
-        for user_card in user_info.user_cards:
-            if isinstance(user_card, dict) and 'cardId' in user_card:
-                user_card_map[user_card['cardId']] = user_card
-
-    # 收集卡牌图片
-    async def get_card_full_thumbnail_nothrow(card):
-        if card.id in pcards:
-            # 用户拥有的卡牌，显示特训后版本
-            user_card_info = user_card_map.get(card.id)
-            return await get_card_full_thumbnail(card, True, user_card_info)
+    thumbs = []
+    for card in cards:
+        # 根据use_after_training决定使用哪张缩略图
+        if use_after_training:
+            thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[1]))
         else:
-            # 普通卡牌
-            after_training = has_after_training(card) and use_after_training
-            if only_has_after_training(card):
-                after_training = True
-            return await get_card_full_thumbnail(card, after_training)
-
-    import asyncio
-    card_imgs = await asyncio.gather(*[get_card_full_thumbnail_nothrow(card) for card in cards])
+            thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[0]))
 
     # 按角色收集卡牌
     chara_cards = {}
-    for card, img in zip(cards, card_imgs):
+    for card, img in zip(cards, thumbs):
         if not img:
             continue
-        chara_id = card.character_id
+        chara_id = card.card.id
         if chara_id not in chara_cards:
             chara_cards[chara_id] = []
 
@@ -510,7 +434,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
         card_data = {
             **card.model_dump(),
             'img': img,
-            'has': card.id in pcards  # 恢复拥有状态判断
+            'has': card.has_card  # 恢复拥有状态判断
         }
 
         # 如果只显示拥有卡牌且用户没有此卡，跳过
@@ -523,10 +447,9 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     chara_cards = list(chara_cards.items())
     chara_cards.sort(key=lambda x: x[0])
     for i in range(len(chara_cards)):
-        chara_cards[i][1].sort(key=lambda x: (x['card_rarity_type'], x['release_at'], x['id']))
+        chara_cards[i][1].sort(key=lambda x: (x['card']['card_rarity_type'], x['card']['release_at'], x['card']['id']))
 
     # 计算最佳高度限制以优化布局
-    import math
     max_card_num = max([len(cards) for _, cards in chara_cards]) if chara_cards else 0
     best_height, best_value = 10000, 1e9
     for i in range(1, max_card_num + 1):
@@ -564,20 +487,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     chara_icons = {}
     if rqd.character_icon_paths:
         for chara_id, path in rqd.character_icon_paths.items():
-            try:
-                chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
-            except FileNotFoundError:
-                try:
-                    chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
-                except FileNotFoundError:
-                    chara_icons[chara_id] = None
-
-    unknown_icon = None
-    try:
-        unknown_icon = await get_img_from_path(ASSETS_BASE_DIR, "unknown.png")
-    except FileNotFoundError:
-        pass
-
+            chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
     # 绘制单张卡
     sz = 48
     def draw_card(card_data):
@@ -598,7 +508,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                 Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0,0,0,120), radius=2))
 
         if show_id:
-            TextBox(f"{card_data['id']}", TextStyle(font=painter.DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
+            TextBox(f"{card_data['card']['id']}", TextStyle(font=painter.DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
 
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_image_path:
@@ -616,17 +526,12 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                 user_profile = await get_detailed_profile_card(user_info)
 
             # 卡牌网格
-            with HSplit().set_bg(roundrect_bg()).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(4):
+            with HSplit().set_bg(roundrect_bg(alpha=80)).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(4):
                 for chara_id, cards in chara_cards:
                     with VSplit().set_content_align('t').set_item_align('t').set_sep(4):
                         # 角色图标
-                        chara_icon = chara_icons.get(chara_id, unknown_icon)
-                        if chara_icon:
-                            ImageBox(chara_icon, size=(sz, sz))
-                        else:
-                            Spacer(w=sz, h=sz)
-
-                        Spacer(w=sz, h=8)
+                        chara_icon = chara_icons.get(chara_id)
+                        ImageBox(chara_icon, size=(sz, sz))
 
                         # 卡牌列表
                         with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
