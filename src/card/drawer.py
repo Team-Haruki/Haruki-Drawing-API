@@ -174,7 +174,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
 
     skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
-    sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
+    if rqd.special_skill_info:
+        sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
 
     # 处理事件横幅
     event_detail = None
