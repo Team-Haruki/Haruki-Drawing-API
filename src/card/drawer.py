@@ -107,6 +107,7 @@ class CardBasicInfo(BaseModel):
     prefix: str  #卡名
     asset_bundle_name: str #资源名
     skill: SkillInfo
+    special_skill_info: Optional[SkillInfo] = None
     thumbnail_info: List[CardFullThumbnailRequest]
     after_training: Optional[bool] = False #是否特训后
 
@@ -114,8 +115,6 @@ class CardDetailRequest(BaseModel):
     card_info: CardBasicInfo
     region: str #服务器地区
     power_info: CardPowerInfo
-    skill_info: SkillInfo
-    special_skill_info: Optional[SkillInfo] = None
     event_info: Optional[EventInfo] = None
     gacha_info: Optional[GachaInfo] = None
     card_images_path: List[str]  # 卡面图片路径
@@ -157,7 +156,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     card_info = rqd.card_info
     region = rqd.region
     power_info = rqd.power_info
-    skill_info = rqd.skill_info
+    skill_info = rqd.card_info.skill
+    sp_skill_info = rqd.card_info.special_skill_info
     # 获取图片
 
     card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path]
@@ -174,8 +174,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
 
     skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
-    if rqd.special_skill_info:
-        sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.special_skill_info.skill_type_icon_path)
+    if sp_skill_info:
+        sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path)
 
     # 处理事件横幅
     event_detail = None
@@ -287,16 +287,16 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                             TextBox(skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True).set_w(w)
 
                     # 特训技能
-                    if rqd.special_skill_info:
+                    if sp_skill_info:
                         with VSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
                             with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
                                 TextBox("特训后技能", label_style)
                                 if sp_skill_type_icon:
                                     ImageBox(sp_skill_type_icon, size=(32, 32))
-                                TextBox(rqd.special_skill_info.skill_name, text_style).set_w(w - 24 * 5 - 32 - 16)
-                            TextBox(rqd.special_skill_info.skill_detail, text_style, use_real_line_count=True).set_w(w)
-                            if rqd.special_skill_info.skill_detail_cn:
-                                TextBox(rqd.special_skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True).set_w(w)
+                                TextBox(sp_skill_info.skill_name, text_style).set_w(w - 24 * 5 - 32 - 16)
+                            TextBox(sp_skill_info.skill_detail, text_style, use_real_line_count=True).set_w(w)
+                            if sp_skill_info.skill_detail_cn:
+                                TextBox(sp_skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True).set_w(w)
 
                     # 发布时间
                     with HSplit().set_padding(16).set_sep(8).set_content_align('lb').set_item_align('lb'):
