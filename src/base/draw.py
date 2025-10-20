@@ -18,7 +18,6 @@ SEKAI_RED_BG = RandomTriangleBg(False, main_hue=0.05)
 BG_PADDING = 20
 WIDGET_BG_COLOR = (255, 255, 255, 150)
 WIDGET_BG_RADIUS = 10
-
 DIFF_COLORS = {
     "easy": (102, 221, 17, 255),
     "normal": (51,187, 238, 255),
