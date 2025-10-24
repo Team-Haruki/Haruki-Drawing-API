@@ -63,6 +63,7 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
         rare_num = int(rqd.rare)
 
     img_w, img_h = img.size
+    custom_text = None
     if rqd.custom_text:
         custom_text = rqd.custom_text
     pcard= rqd.is_pcard

@@ -90,3 +90,45 @@ def truncate(s: str, limit: int) -> str:
             return s[:i] + "..."
         l += 1 if ord(c) < 128 else 2
     return s
+
+
+def get_float_str(value: float, precision: int = 2) -> str:
+    """格式化浮点数"""
+    format_str = f"{{0:.{precision}f}}".format(value)
+    if '.' in format_str:
+        format_str = format_str.rstrip('0').rstrip('.')
+    return format_str
+
+
+async def concat_images(images, direction='h'):
+    """水平或垂直拼接图片"""
+    if not images:
+        return None
+
+    # 过滤掉None值
+    images = [img for img in images if img is not None]
+    if not images:
+        return None
+
+    if direction == 'h':
+        # 水平拼接
+        total_width = sum(img.width for img in images)
+        max_height = max(img.height for img in images)
+
+        result = Image.new('RGBA', (total_width, max_height), (0, 0, 0, 0))
+        x_offset = 0
+        for img in images:
+            result.paste(img, (x_offset, 0))
+            x_offset += img.width
+    else:
+        # 垂直拼接
+        max_width = max(img.width for img in images)
+        total_height = sum(img.height for img in images)
+
+        result = Image.new('RGBA', (max_width, total_height), (0, 0, 0, 0))
+        y_offset = 0
+        for img in images:
+            result.paste(img, (0, y_offset))
+            y_offset += img.height
+
+    return result
