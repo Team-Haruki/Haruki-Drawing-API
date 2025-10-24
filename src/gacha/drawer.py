@@ -1,11 +1,9 @@
-from datetime import datetime, timezone, timedelta
-from typing import Any, List, Dict, Optional, Union
-from dataclasses import dataclass, field
+from datetime import datetime
+from typing import List, Dict, Optional
 from PIL import Image
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel
 
 from src.base.configs import ASSETS_BASE_DIR
-# from src.base.img_utils import UNKNOWN_IMG  # 使用本地创建的占位图片
 from src.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -17,28 +15,10 @@ from src.base.painter import (
     DEFAULT_HEAVY_FONT,
     DEFAULT_FONT,
     BLACK,
-    WHITE,
 )
-from src.base.plot import Canvas, Grid, HSplit, ImageBox, ImageBg, Spacer, TextBox, TextStyle, VSplit
-from src.base.utils import get_img_from_path, get_readable_timedelta
+from src.base.plot import Canvas, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
+from src.base.utils import get_img_from_path, get_readable_timedelta, get_float_str, concat_images
 from src.profile.drawer import get_card_full_thumbnail, CardFullThumbnailRequest
-
-
-# ======================= Utility Functions ======================= #
-
-def to_beijing_time(dt: datetime) -> datetime:
-    """
-    将UTC时间转换为北京时间 (UTC+8)
-    """
-    if dt.tzinfo is None:
-        # 如果没有时区信息，假设为UTC时间
-        dt = dt.replace(tzinfo=timezone.utc)
-    # 转换为北京时间 (UTC+8)
-    beijing_tz = timezone(timedelta(hours=8))
-    return dt.astimezone(beijing_tz)
-
-
-# ======================= Data Models ======================= #
 
 class GachaBehavior(BaseModel):
     type: str
@@ -49,27 +29,16 @@ class GachaBehavior(BaseModel):
     execute_limit: Optional[int] = None
     colorful_pass: bool = False
 
-class GachaCard(BaseModel):
-    id: int
-    rarity: str                    # 直接包含稀有度信息，避免内部查询
-    is_wish: bool = False
-    is_pickup: bool = False
-
-class GachaCardRarityRate(BaseModel):
-    rarity: str
-    rate: int
-    lottery_type: str
-
 class GachaInfo(BaseModel):
     id: int
     name: str
     gachaType: str  # 直接使用原版字段名
     summary: str = ""
     desc: str = ""
-    startAt: datetime  # 直接使用原版字段名，datetime支持多种格式包括时间戳字符串
-    endAt: datetime      # 直接使用原版字段名，datetime支持多种格式包括时间戳字符串
+    startAt: int
+    endAt: int
     asset_name: str
-    ceilitem_img: Optional[str] = None   # 天井交换物品图片路径
+    ceil_item_img_path: Optional[str] = None   # 天井交换物品图片路径
     behaviors: List[GachaBehavior] = []
 
     # 直接传入的稀有度统计信息
@@ -88,43 +57,23 @@ class GachaListInfo(BaseModel):
     endAt: datetime
     asset_name: str  # 资源名称标识
 
-class GachaFilter(BaseModel):
-    page: Optional[int] = None
-    year: Optional[int] = None
-    card_id: Optional[int] = None
-    is_rerelease: bool = False #复刻
-    is_recall: bool = False #回响
-    is_current: bool = False
-    is_leak: bool = False #理科
-
-class GachaCardThumbnailRequest(BaseModel):
-    card_thumbnail_path: str      # 卡片基础图片路径
-    rare: str                     # 稀有度
-    frame_img_path: str           # 边框图片路径
-    attr_img_path: str            # 属性图片路径
-    rare_img_path: str            # 稀有度星星图片路径
-    birthday_icon_path: Optional[str] = None  # 生日卡图标路径
-
 class GachaCardWeightInfo(BaseModel):
     id: int
     rarity: str
     rate: float = 0.0                    # 直接传入的概率值 (0-1)
-    thumbnail_request: GachaCardThumbnailRequest  # 缩略图生成参数 (必需)
+    thumbnail_request: CardFullThumbnailRequest
 
 class GachaWeightInfo(BaseModel):
     # 各稀有度最终显示概率 (必需，外部计算后的总概率)
-    rarity_1_rate: float = 0.0                # 1星总概率 (0-1)
-    rarity_2_rate: float = 0.0                # 2星总概率 (0-1)
-    rarity_3_rate: float = 0.0                # 3星总概率 (0-1)
-    rarity_4_rate: float = 0.0                # 4星总概率 (0-1)
-    rarity_birthday_rate: float = 0.0         # 生日卡总概率 (0-1)
-
-    # 保底系统相关 (外部传入)
+    rarity_1_rate: Optional[float] = 0.0                # 1星总概率 (0-1)
+    rarity_2_rate: Optional[float] = 0.0                # 2星总概率 (0-1)
+    rarity_3_rate: Optional[float] = 0.0                # 3星总概率 (0-1)
+    rarity_4_rate: Optional[float] = 0.0                # 4星总概率 (0-1)
+    rarity_birthday_rate: Optional[float] = 0.0         # 生日卡总概率 (0-1)
     guaranteed_rates: Dict[str, float] = {}   # 各稀有度的保底概率
 
 class GachaListRequest(BaseModel):
     gachas: List[GachaListInfo]   # 简化的卡池数据（仅列表显示所需）
-    filter: GachaFilter = GachaFilter()  # 过滤条件
     page_size: int = 20            # 每页显示数量
     region: str = "jp"             # 服务器地区
     gacha_logos: Dict[int, str] = {} # 卡池ID对应的logo图片路径
@@ -133,85 +82,24 @@ class GachaDetailRequest(BaseModel):
     gacha: GachaInfo
     weight_info: GachaWeightInfo
     pickup_cards: List[GachaCardWeightInfo] = []
-    logo_img: Optional[str] = None      # logo图片路径
-    banner_img: Optional[str] = None   # banner图片路径
-    bg_img: Optional[str] = None       # 背景图片路径
+    logo_img_path: Optional[str] = None      # logo图片路径
+    banner_img_path: Optional[str] = None   # banner图片路径
+    bg_img_path: Optional[str] = None       # 背景图片路径
     region: str = "jp"
 
 
-
-# ======================= Utility Functions ======================= #
-
-def get_float_str(value: float, precision: int = 2) -> str:
-    """格式化浮点数"""
-    format_str = f"{{0:.{precision}f}}".format(value)
-    if '.' in format_str:
-        format_str = format_str.rstrip('0').rstrip('.')
-    return format_str
-
-async def run_in_pool(func, *args, **kwargs):
-    """在线程池中运行函数的简化版本"""
-    import asyncio
-    import concurrent.futures
-
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        return await loop.run_in_executor(executor, func, *args, **kwargs)
-
-async def concat_images(images, direction='h'):
-    """水平或垂直拼接图片"""
-    if not images:
-        return None
-
-    # 过滤掉None值
-    images = [img for img in images if img is not None]
-    if not images:
-        return None
-
-    if direction == 'h':
-        # 水平拼接
-        total_width = sum(img.width for img in images)
-        max_height = max(img.height for img in images)
-
-        result = Image.new('RGBA', (total_width, max_height), (0, 0, 0, 0))
-        x_offset = 0
-        for img in images:
-            result.paste(img, (x_offset, 0))
-            x_offset += img.width
-    else:
-        # 垂直拼接
-        max_width = max(img.width for img in images)
-        total_height = sum(img.height for img in images)
-
-        result = Image.new('RGBA', (max_width, total_height), (0, 0, 0, 0))
-        y_offset = 0
-        for img in images:
-            result.paste(img, (0, y_offset))
-            y_offset += img.height
-
-    return result
-
-
-async def get_rarity_img(rarity: str, static_imgs: Dict[str, Image.Image] = None) -> Optional[Image.Image]:
+async def get_rarity_img(rarity: str, rarity_img_path: str, birthday_img_path: Optional[str]) -> Optional[Image.Image]:
     """获取稀有度图片"""
-    if static_imgs is None:
-        static_imgs = {}
-
     if rarity == "rarity_birthday":
-        rare_img = static_imgs.get(f"card/rare_birthday.png")
-        if rare_img is None:
-            rare_img = await get_img_from_path(ASSETS_BASE_DIR, "card/rare_birthday.png")
+        rare_img = await get_img_from_path(ASSETS_BASE_DIR, birthday_img_path)
         rare_num = 1
     else:
-        rare_img = static_imgs.get(f"card/rare_star_normal.png")
-        if rare_img is None:
-            rare_img = await get_img_from_path(ASSETS_BASE_DIR, "card/rare_star_normal.png")
+        rare_img = await get_img_from_path(ASSETS_BASE_DIR, rarity_img_path)
         rare_num = int(rarity.split("_")[1])
 
     if rare_img:
         return await concat_images([rare_img] * rare_num, 'h')
     return None
-
 # ======================= Constants ======================= #
 
 GACHA_TYPE_NAMES = {
@@ -221,7 +109,7 @@ GACHA_TYPE_NAMES = {
     'gift': '礼物',
 }
 
-# 保底行为类型映射 (基于lunabot实现)
+# 保底行为类型映射
 GACHA_BEHAVIOR_NAMES = {
     'normal': '普通',
     'over_rarity_3_once': '保底3星',
@@ -239,32 +127,11 @@ GACHA_RARE_NAMES = {
     'pickup': '当期',
 }
 
-RERELEASE_KEYWORDS = ("[It's Back]", "[재등장]", "[复刻]", "[復刻]")
-ECHO_KEYWORDS = ("[回响]",)
-
-
 # ======================= Drawing Functions ======================= #
 
 async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     """合成卡池一览图片"""
     gachas = []
-    for gacha in rqd.gachas:
-        g = gacha
-        if rqd.filter.year and g.startAt.year != rqd.filter.year:
-            continue
-        if rqd.filter.is_rerelease and not g.name.startswith(RERELEASE_KEYWORDS):
-            continue
-        if rqd.filter.is_recall and not g.name.startswith(ECHO_KEYWORDS):
-            continue
-        if rqd.filter.is_current and not (g.startAt <= datetime.now(timezone.utc) <= g.endAt):
-            continue
-        if rqd.filter.is_leak:
-            if g.startAt <= datetime.now(timezone.utc):
-                continue
-            else:
-                if g.startAt > datetime.now(timezone.utc):
-                    continue
-        gachas.append(g)
 
     gachas.sort(key=lambda g: g.startAt)
 
@@ -289,7 +156,7 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(8, 2).set_item_align('c').set_content_align('c'):
                 for g in gachas:
-                    now = datetime.now(timezone.utc)
+                    now = datetime.now()
                     bg_color = (255, 255, 255, 200)
                     if g.startAt <= now <= g.endAt:
                         bg_color = (255, 250, 220, 200)
@@ -309,8 +176,8 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
 
                             ImageBox(logo_img, size=(None, 60))
                             TextBox(f"【{g.id}】{g.name}", style1, line_count=2, use_real_line_count=False).set_w(130)
-                            TextBox(f"S {to_beijing_time(g.startAt).strftime('%Y-%m-%d %H:%M')}", style2)
-                            TextBox(f"T {to_beijing_time(g.endAt).strftime('%Y-%m-%d %H:%M')}", style2)
+                            TextBox(f"S {g.startAt.strftime('%Y-%m-%d %H:%M')}", style2)
+                            TextBox(f"T {g.endAt.strftime('%Y-%m-%d %H:%M')}", style2)
 
     add_watermark(canvas)
     return await canvas.get_img()
@@ -323,11 +190,12 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
     small_style = TextStyle(font=DEFAULT_FONT, size=12, color=(70, 70, 70))
-    tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))
+    start_time = datetime.fromtimestamp(rqd.gacha.startAt / 1000)
+    end_time = datetime.fromtimestamp(rqd.gacha.endAt / 1000)
 
     bg = SEKAI_BLUE_BG
-    if rqd.bg_img:
-        bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.bg_img)
+    if rqd.bg_img_path:
+        bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.bg_img_path)
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with HSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
@@ -335,11 +203,11 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
             with VSplit().set_padding(8).set_sep(8).set_content_align('c').set_item_align('c').set_item_bg(roundrect_bg(alpha=80)).set_bg(roundrect_bg(alpha=80)):
                 # 标题
                 with HSplit().set_padding(8).set_sep(32).set_content_align('c').set_item_align('c').set_omit_parent_bg(True):
-                    if rqd.logo_img:
-                        logo_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.logo_img)
+                    if rqd.logo_img_path:
+                        logo_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.logo_img_path)
                         ImageBox(logo_img, size=(None, 100))
-                    if rqd.banner_img:
-                        banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img)
+                    if rqd.banner_img_path:
+                        banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
                         ImageBox(banner_img, size=(None, 100))
 
                 # 基本信息
@@ -350,26 +218,26 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                     Spacer(w=24)
                     TextBox("类型", label_style)
                     TextBox(GACHA_TYPE_NAMES.get(rqd.gacha.gachaType, rqd.gacha.gachaType), text_style)
-                    if rqd.gacha.ceilitem_img:
+                    if rqd.gacha.ceil_item_img_path:
                         Spacer(w=24)
                         TextBox("交换物品", label_style)
-                        ceilitem_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.gacha.ceilitem_img)
+                        ceilitem_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.gacha.ceil_item_img_path)
                         ImageBox(ceilitem_img, size=(None, 30))
 
                 with VSplit().set_padding(16).set_sep(8).set_content_align('c').set_item_align('c'):
                     with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
                         TextBox("开始时间", label_style)
-                        TextBox(to_beijing_time(rqd.gacha.startAt).strftime("%Y-%m-%d %H:%M"), text_style)
+                        TextBox(start_time.strftime("%Y-%m-%d %H:%M"), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
                         TextBox("结束时间", label_style)
-                        TextBox(to_beijing_time(rqd.gacha.endAt).strftime("%Y-%m-%d %H:%M"), text_style)
+                        TextBox(end_time.strftime("%Y-%m-%d %H:%M"), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
-                        if rqd.gacha.startAt >= datetime.now(timezone.utc):
+                        if start_time >= datetime.now():
                             TextBox("距离开始还有", label_style)
-                            TextBox(get_readable_timedelta(rqd.gacha.startAt - datetime.now(timezone.utc)), text_style)
-                        elif rqd.gacha.endAt >= datetime.now(timezone.utc):
+                            TextBox(get_readable_timedelta(end_time - datetime.now()), text_style)
+                        elif end_time >= datetime.now():
                             TextBox("距离结束还有", label_style)
-                            TextBox(get_readable_timedelta(rqd.gacha.endAt - datetime.now(timezone.utc)), text_style)
+                            TextBox(get_readable_timedelta(end_time - datetime.now()), text_style)
                         else:
                             TextBox("卡池已结束", label_style)
 
@@ -414,23 +282,7 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                             card_size = 80  
                             for card in rqd.pickup_cards:
                                 with VSplit().set_padding(0).set_sep(1).set_content_align('c').set_item_align('c'):
-                                    profile_request = CardFullThumbnailRequest(
-                                        id=card.id,
-                                        card_thumbnail_path=card.thumbnail_request.card_thumbnail_path,
-                                        rare=card.thumbnail_request.rare,
-                                        frame_img_path=card.thumbnail_request.frame_img_path,
-                                        attr_img_path=card.thumbnail_request.attr_img_path,
-                                        rare_img_path=card.thumbnail_request.rare_img_path,
-                                        birthday_icon_path=card.thumbnail_request.birthday_icon_path,
-                                        train_rank=None,
-                                        train_rank_img_path=None,
-                                        level=None,
-                                        after_training=False,
-                                        custom_text=None,
-                                        card_level=None,
-                                        is_pcard=False
-                                    )
-                                    full_thumb = await get_card_full_thumbnail(profile_request)
+                                    full_thumb = await get_card_full_thumbnail(card.thumbnail_request)
 
                                     ImageBox(full_thumb, size=(card_size, card_size))
                                     TextBox(f"{card.id} ({get_float_str(card.rate * 100, 4)}%)", small_style)
