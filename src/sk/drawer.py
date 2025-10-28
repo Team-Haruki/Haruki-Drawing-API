@@ -1,7 +1,14 @@
-from PIL import Image
-from typing import Optional, Tuple
-from pydantic import BaseModel
 from datetime import datetime, timedelta
+import math
+from typing import Optional, List
+
+from matplotlib import font_manager
+from matplotlib import pyplot as plt
+import matplotlib.dates as mdates
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel
+
 from src.base.configs import ASSETS_BASE_DIR
 from src.base.draw import (
     BG_PADDING,
@@ -9,11 +16,7 @@ from src.base.draw import (
     add_watermark,
     roundrect_bg,
 )
-from src.base.painter import (
-    BLACK,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-)
+from src.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
 from src.base.plot import (
     Canvas,
     FillBg,
@@ -24,7 +27,7 @@ from src.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.base.utils import get_img_from_path, get_readable_datetime, get_readable_timedelta, truncate
+from src.base.utils import get_img_from_path, get_readable_datetime, get_readable_timedelta, plt_fig_to_image, truncate
 
 
 class RankInfo(BaseModel):
@@ -36,7 +39,7 @@ class RankInfo(BaseModel):
     average_pt: int | None
     latest_pt: int | None
     speed: int | None
-    min20_times_3_speed: Optional[int] = None
+    min20_times_3_speed: int | None = None
     hour_round: int | None
     record_startAt: datetime | None
 
@@ -89,8 +92,56 @@ class SpeedRequest(BaseModel):
     is_wl_event: bool
     request_type: str
     period: timedelta
-    banner_img_path: Optional[str]
-    wl_chara_icon_path: Optional[str] = None
+    banner_img_path: str | None
+    wl_chara_icon_path: str | None = None
+
+class PlayerTraceRequest(BaseModel):
+    event_id: int
+    region: str
+    wl_chara_icon_path: str | None = None
+    ranks: list[RankInfo]
+    ranks2: list[RankInfo] | None= None
+
+class RankTraceRequest(BaseModel):
+    event_id: int
+    region: str
+    wl_chara_icon_path: str | None= None
+    target_rank: int
+    ranks: list[RankInfo]
+    predict_ranks: RankInfo | None = None
+
+class TeamInfo(BaseModel):
+    team_id: int
+    team_name: str
+    win_rate: float
+    is_recruiting: bool
+    team_cn_name: Optional[str] = None
+    team_icon_path: str | None= None
+
+class WinRateRequest(BaseModel):
+    event_id: int
+    event_name: str
+    region: str
+    wl_chara_icon_path: str | None= None
+    updated_at: datetime
+    event_startAt: int
+    event_aggregateAt: int
+    banner_img_path: Optional[str] = None
+    team_info: List[TeamInfo]
+
+#matplotlib字体
+font_path = []
+font_path.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".otf"))
+font_path.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".ttf"))
+for font_path in font_path:
+    try:
+        font_manager.fontManager.addfont(font_path)
+        prop = font_manager.FontProperties(fname=font_path)
+        font_name = prop.get_name()
+        plt.rcParams["font.family"] = [font_name]
+        plt.rcParams["axes.unicode_minus"] = False
+    except:
+        continue
 
 SKL_QUERY_RANKS = [
     *range(10, 51, 10),
@@ -108,7 +159,6 @@ ALL_RANKS = [
     *range(100000, 500001, 100000),
 ]
 
-
 def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> str:
     if event_id < 1000:
         return f"【{region.upper()}-{event_id}】{event_name}"
@@ -121,6 +171,24 @@ def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> s
 def get_board_rank_str(rank: int) -> str:
     # 每3位加一个逗号
     return f"{rank:,}"
+
+def draw_day_night_bg(ax, start_time: datetime, end_time: datetime):
+    def get_time_bg_color(time: datetime) -> str:
+        night_color = (200, 200, 230)    # 0:00
+        day_color = (245, 245, 250)     # 12:00
+        ratio = math.sin(time.hour / 24 * math.pi * 2 - math.pi / 2)
+        color = lerp_color(night_color, day_color, (ratio + 1) / 2)
+        return rgb_to_color_code(color)
+    interval = timedelta(hours=1)
+    start_time = start_time.replace(minute=0, second=0, microsecond=0)
+    bg_times = [start_time]
+    while bg_times[-1] < end_time:
+        bg_times.append(bg_times[-1] + interval)
+    bg_colors = [get_time_bg_color(t) for t in bg_times]
+    for i in range(len(bg_times)):
+        start = bg_times[i]
+        end = bg_times[i] + interval
+        ax.axvspan(start, end, facecolor=bg_colors[i], edgecolor=None, zorder=0)
 
 # 获取榜线分数字符串
 def get_board_score_str(score: int, width: int = None) -> str:
@@ -322,7 +390,7 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
     query_ranks = SKL_QUERY_RANKS
     period = rqd.period
     ranks = rqd.ranks
-    speeds: list[Tuple[int, int, int, datetime]] = []
+    speeds: list[tuple[int, int, int, datetime]] = []
     for rank in ranks:
         if rank.rank in query_ranks:
             speeds.append((rank.rank, rank.score, rank.speed, rank.record_time))
@@ -378,3 +446,254 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
     add_watermark(canvas)
     return await canvas.get_img()
 
+async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
+    eid = rqd.event_id
+    wl_chara_icon = None
+    if rqd.wl_chara_icon_path:
+        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+
+    ranks = rqd.ranks
+    ranks2 = rqd.ranks2
+
+    ranks = [r for r in ranks if r.rank <= 100]
+    if ranks2 is not None:
+        ranks2 = [r for r in ranks2 if r.rank <= 100]
+
+    ranks.sort(key=lambda x: x.time)
+    name = truncate(ranks[-1].name, 40)
+    times = [rank.time for rank in ranks]
+    scores = [rank.score for rank in ranks]
+    rs = [rank.rank for rank in ranks]
+    if ranks2 is not None:
+        ranks2.sort(key=lambda x: x.time)
+        name2 = truncate(ranks2[-1].name, 40)
+        times2 = [rank.time for rank in ranks2]
+        scores2 = [rank.score for rank in ranks2]
+        rs2 = [rank.rank for rank in ranks2]
+    fig, ax = plt.subplots()
+    fig.set_size_inches(12, 8)
+    fig.subplots_adjust(wspace=0, hspace=0)
+
+    draw_day_night_bg(ax, times[0], times[-1])
+
+    min_score = min(scores)
+    max_score = max(scores)
+    if ranks2 is not None:
+        min_score = min(min_score, min(scores2))
+        max_score = max(max_score, max(scores2))
+
+    lines = []
+
+    color_p1 = ("royalblue", "cornflowerblue")
+    color_p2 = ("orangered", "coral")
+
+    # 绘制分数
+    line_score, = ax.plot(times, scores, "o", label=f"{name}分数", color=color_p1[0], markersize=1, linewidth=0.5)
+    lines.append(line_score)
+    plt.annotate(f"{get_board_score_str(scores[-1])}", xy=(times[-1], scores[-1]), xytext=(times[-1], scores[-1]),
+                 color=color_p1[0], fontsize=12, ha="right")
+    if ranks2 is not None:
+        line_score2, = ax.plot(times2, scores2, "o", label=f"{name2}分数", color=color_p2[0], markersize=1, linewidth=0.5)
+        lines.append(line_score2)
+        plt.annotate(f"{get_board_score_str(scores2[-1])}", xy=(times2[-1], scores2[-1]), xytext=(times2[-1], scores2[-1]),
+                     color=color_p2[0], fontsize=12, ha="right")
+
+    ax.set_ylim(min_score * 0.95, max_score * 1.05)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(x)))
+    ax.grid(True, linestyle="-", alpha=0.3, color="gray")
+    # 绘制排名
+    ax2 = ax.twinx()
+
+    line_rank, = ax2.plot(times, rs, "o", label=f"{name}排名", color=color_p1[1], markersize=0.7, linewidth=0.5)
+    lines.append(line_rank)
+    plt.annotate(f"{int(rs[-1])}", xy=(times[-1], rs[-1] * 1.02), xytext=(times[-1], rs[-1] * 1.02),
+                 color=color_p1[1], fontsize=12, ha="right")
+    if ranks2 is not None:
+        line_rank2, = ax2.plot(times2, rs2, "o", label=f"{name2}排名", color=color_p2[1], markersize=0.7, linewidth=0.5)
+        lines.append(line_rank2)
+        plt.annotate(f"{int(rs2[-1])}", xy=(times2[-1], rs2[-1] * 1.02), xytext=(times2[-1], rs2[-1] * 1.02),
+                     color=color_p2[1], fontsize=12, ha="right")
+
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
+    ax2.set_ylim(110, -10)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    fig.autofmt_xdate()
+
+    if ranks2 is None:
+        plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
+    else:
+        plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
+
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, loc="upper left")
+
+    img = plt_fig_to_image(fig)
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
+        if wl_chara_icon is not None:
+            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_bg(roundrect_bg(alpha=80)).set_padding(8):
+                ImageBox(wl_chara_icon, size=(None, 50))
+                TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
+    add_watermark(canvas)
+    return await canvas.get_img()
+
+# 合成排名追踪图片
+async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
+    eid = rqd.event_id
+    ranks = rqd.ranks
+    ranks.sort(key=lambda x: x.time)
+    times = [rank.time for rank in ranks]
+    scores = [rank.score for rank in ranks]
+    pred_scores = []
+    original_names = [rank.name for rank in ranks]
+    unique_names = list(dict.fromkeys(original_names))
+    wl_chara_icon = None
+    if rqd.wl_chara_icon_path:
+        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+
+    # 时速计算
+    speeds = []
+    min_period = timedelta(minutes=50)
+    max_period = timedelta(minutes=60)
+    left = 0
+    for right in range(0, len(ranks)):
+        while ranks[right].time - ranks[left].time > max_period:
+            left += 1
+        if min_period <= ranks[right].time - ranks[left].time <= max_period:
+            speed = (ranks[right].score - ranks[left].score) / (ranks[right].time - ranks[left].time).total_seconds() * 3600
+            speeds.append(speed)
+        else:
+            speeds.append(-1)
+
+    # 附加排名预测
+    final_score = rqd.predict_ranks.score
+
+    max_score = max(scores + pred_scores)
+    min_score = min(scores + pred_scores)
+    if final_score:
+        max_score = max(max_score, final_score)
+        min_score = min(min_score, final_score)
+
+    fig, ax = plt.subplots()
+    fig.set_size_inches(12, 8)
+    fig.subplots_adjust(wspace=0, hspace=0)
+
+    draw_day_night_bg(ax, times[0], times[-1])
+
+    num_unique_names = len(unique_names)
+    if num_unique_names > 10:
+        # 数量太多，直接使用同一个颜色
+        point_colors = ["blue" for _ in ranks]
+    else: # 否则为每个玩家分配不同颜色
+        num_part1 = num_unique_names // 2
+        num_part2 = num_unique_names - num_part1
+
+        cmap = plt.get_cmap("coolwarm")
+        colors1 = cmap(np.linspace(start=0.0, stop=0.4, num=num_part1))
+        colors2 = cmap(np.linspace(start=0.6, stop=1.0, num=num_part2))
+
+        if num_unique_names > 0:
+            combined_colors = np.vstack((colors1, colors2))
+            np.random.shuffle(combined_colors)
+        else:
+            combined_colors = []
+
+        # 创建从 name 到 color 的映射字典
+        name_to_color = {name: color for name, color in zip(unique_names, combined_colors)}
+
+        # 根据原始的、带重复的 name 列表来生成颜色列表
+        point_colors = [name_to_color.get(name) for name in original_names]
+
+    # 绘制分数，为不同uid的数据点使用不同颜色
+    ax.scatter(times, scores, c=point_colors, s=2)
+    if scores:
+        plt.annotate(f"{get_board_score_str(scores[-1])}", xy=(times[-1], scores[-1]), xytext=(times[-1], scores[-1]),
+                     color=point_colors[-1], fontsize=12, ha="right")
+
+    # 绘制预测线
+    if final_score:
+        ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
+        ax.text(times[-1], final_score * 1.02, f"预测最终: {get_board_score_str(final_score)}", color="red", fontsize=12, ha="right")
+
+    # 绘制时速
+    ax2 = ax.twinx()
+    line_speeds, = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
+    ax2.set_ylim(0, max(speeds) * 1.2)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    fig.autofmt_xdate()
+    plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
+
+    lines = [line_speeds]
+    labels = [l.get_label() for l in lines]
+    ax.legend(lines, labels, loc="upper left")
+
+    img = plt_fig_to_image(fig)
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
+        if rqd.wl_chara_icon_path is not None:
+            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_bg(roundrect_bg()).set_padding(8):
+                ImageBox(wl_chara_icon, size=(None, 50))
+                TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
+    add_watermark(canvas)
+    return await canvas.get_img()
+
+async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
+    eid = rqd.event_id
+    banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
+
+    event_name = rqd.event_name
+    event_start = datetime.fromtimestamp(rqd.event_startAt / 1000)
+    event_end = datetime.fromtimestamp(rqd.event_aggregateAt / 1000 + 1)
+
+    teams = rqd.team_info
+    teams.sort(key=lambda x: x.team_id)
+    tids = [team.team_id for team in teams]
+    for team in teams:
+        if team.team_cn_name:
+            team.team_name = f"{team.team_name} ({team.team_cn_name})"
+    tnames = [team.team_name for team in teams]
+    ticons = [
+        await get_img_from_path(ASSETS_BASE_DIR, team.team_icon_path) for team in teams
+    ]
+
+    win_tid = tids[0] if teams[0].win_rate >= teams[1].win_rate else tids[1]
+
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
+            with HSplit().set_content_align("rt").set_item_align("rt").set_padding(16).set_sep(7):
+                with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
+                    TextBox(f"【{rqd.region.upper()}-{eid}】{truncate(event_name, 20)}", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox(f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
+                            TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
+                    time_to_end = event_end - datetime.now()
+                    if time_to_end.total_seconds() <= 0:
+                        time_to_end = "活动已结束"
+                    else:
+                        time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
+                    TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox(f"预测更新时间: {rqd.updated_at.strftime('%m-%d %H:%M:%S')} ({get_readable_datetime(rqd.updated_at, show_original_time=False)})",
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox("数据来源: 3-3.dev", TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50, 255)))
+                if banner_img:
+                    ImageBox(banner_img, size=(140, None))
+
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_padding(16).set_item_bg(roundrect_bg(alpha=80)):
+                for i in range(2):
+                    with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16):
+                        ImageBox(ticons[i], size=(None, 100))
+                        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
+                            TextBox(tnames[i], TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=BLACK), use_real_line_count=True).set_w(400)
+                            with HSplit().set_content_align("lb").set_item_align("lb").set_sep(8).set_padding(0):
+                                TextBox("预测胜率: ", TextStyle(font=DEFAULT_FONT, size=28, color=(75, 75, 75, 255)))
+                                TextBox(f"{teams[i].win_rate * 100.0:.1f}%",
+                                        TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=(25, 100, 25, 255) if win_tid == tids[i] else (100, 25, 25, 255)))
+                                TextBox("（急募中）" if teams[i].is_recruiting else "",
+                                        TextStyle(font=DEFAULT_FONT, size=28, color=(100, 25, 75, 255)))
+
+    add_watermark(canvas)
+    return await canvas.get_img(2.)

@@ -5,7 +5,7 @@ from copy import deepcopy
 from datetime import datetime
 from types import TracebackType
 from dataclasses import dataclass
-from typing import Union, Type, Callable, TypedDict, Self
+from typing import Union, Type, Callable, TypedDict, Self, Optional
 from PIL import Image, ImageFilter, ImageFont, ImageEnhance
 
 
@@ -259,7 +259,7 @@ class Widget:
             self.v_padding = padding[1]
         return self
 
-    def set_size(self, size: tuple[int, int])-> Self:
+    def set_size(self, size: tuple[Optional[int], Optional[int]])-> Self:
         if not size:
             size = (None, None)
         self.w = size[0]
@@ -801,7 +801,7 @@ class Grid(Widget):
 class TextStyle:
     font: str = DEFAULT_FONT
     size: int = 16
-    color: tuple[int, int, int, int] = BLACK
+    color: tuple[int, int, int] | tuple[int, int, int, int] = BLACK
     use_shadow: bool = False
     shadow_offset: tuple[int, int] | int = 1
     shadow_color: tuple[int, int, int, int] = SHADOW
@@ -957,7 +957,7 @@ class ImageBox(Widget):
         self,
         image: Union[str, Image.Image],
         image_size_mode: str = None,
-        size: tuple[int, int] = None,
+        size: tuple[Optional[int], Optional[int]] = None,
         use_alpha_blend: bool = False,
         alpha_adjust: float = 1.0,
     ) -> None:
