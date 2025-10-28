@@ -17,6 +17,7 @@ from pilmoji.source import GoogleEmojiSource
 from dataclasses import dataclass, is_dataclass, fields
 from PIL import Image, ImageFont, ImageDraw, ImageFilter, ImageChops
 
+from .configs import FONT_DIR, DEFAULT_HEAVY_FONT, DEFAULT_FONT, DEFAULT_EMOJI_FONT, DEFAULT_BOLD_FONT
 from .img_utils import mix_image_by_color, adjust_image_alpha_inplace
 
 DEBUG = True
@@ -175,13 +176,6 @@ TRANSPARENT = (0, 0, 0, 0)
 SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
-
-FONT_DIR = "/Users/deseer/PycharmProjects/Haruki-Drawing-API/data"
-DEFAULT_FONT = "SourceHanSansSC-Regular"
-DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
-DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
-DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
-
 
 ALIGN_MAP = {
     "c": ("c", "c"),

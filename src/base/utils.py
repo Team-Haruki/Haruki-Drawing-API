@@ -1,3 +1,4 @@
+import io
 from PIL import Image
 from pathlib import Path
 from datetime import timedelta, datetime
@@ -132,3 +133,14 @@ async def concat_images(images, direction='h'):
             y_offset += img.height
 
     return result
+
+def plt_fig_to_image(fig, transparent=True) -> Image.Image:
+    """
+    matplot图像转换为PIL.Image对象
+    """
+    buf = io.BytesIO()
+    fig.savefig(buf, transparent=transparent, format='png')
+    buf.seek(0)
+    img = Image.open(buf)
+    img.load()
+    return img
