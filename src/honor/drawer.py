@@ -23,12 +23,49 @@ class HonorRequest(BaseModel):
     word_img_path: Optional[str] = None
     chara_icon_path: Optional[str] = None
     chara_icon_path2: Optional[str] = None
+    chara_id: Optional[str] = None
+    chara_id2: Optional[str] = None
     bonds_bg_path: Optional[str] = None
     bonds_bg_path2: Optional[str] = None
     mask_img_path: Optional[str] = None
     frame_img_path: Optional[str] = None
-
     frame_degree_level_img_path: Optional[str] = None
+
+face_pos = {
+            1: 48,
+            2: 58,
+            3: 47,
+            4: 53,
+            5: 38,
+            6: 50,
+            7: 56,
+            8: 64,
+            9: 65,
+            10: 39,
+            11: 55,
+            12: 42,
+            13: 44,
+            14: 52,
+            15: 56,
+            16: 58,
+            17: 41,
+            18: 39,
+            19: 47,
+            20: 43,
+            21: 63,
+            22: 45,
+            24: 48,
+            25: 45,
+            28: 58,
+            34: 42,
+            35: 51,
+            36: 63,
+            39: 61,
+            45: 40,
+            46: 57,
+            55: 43,
+            56: 52,
+        }
 
 async def compose_full_honor_image(rqd: HonorRequest):
     if rqd.is_empty:
@@ -120,27 +157,34 @@ async def compose_full_honor_image(rqd: HonorRequest):
         c1_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path)
         c2_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path2)
 
+        c1_face = face_pos.get(rqd.chara_id, c1_img.size[0] // 2)
+        c2_face = face_pos.get(rqd.chara_id2, c2_img.size[0] // 2)
+
+
         w, h = img.size
         scale = 0.8
         c1_img = resize_keep_ratio(c1_img, scale, mode="scale")
         c2_img = resize_keep_ratio(c2_img, scale, mode="scale")
         c1w, c1h = c1_img.size
         c2w, c2h = c2_img.size
+        c1_face = int(c1_face * scale)
+        c2_face = int(c2_face * scale)
 
-        if not is_main:
-            offset = 20
-            # 非主honor需要裁剪
-            mid = w // 2
-            target_w = mid - offset
-            c1_img = c1_img.crop((0, 0, target_w, c1h))
-            c2_img = c2_img.crop((c2w - target_w, 0, c2w, c2h))
-            c1w, c2w = target_w, target_w
-            img.paste(c1_img, (offset,           h - c1h), c1_img)
-            img.paste(c2_img, (w - c2w - offset, h - c2h), c2_img)
-        else:
-            offset = 25
-            img.paste(c1_img, (offset,           h - c1h), c1_img)
-            img.paste(c2_img, (w - c2w - offset, h - c2h), c2_img)
+        offset_to_mid = 120 if is_main else 30
+        mid = w // 2
+        c1_face_x = mid - offset_to_mid
+        c2_face_x = mid + offset_to_mid
+
+        overlap1 = (c1_face_x - c1_face + c1w) - mid
+        if overlap1 > 0:
+            c1_img = c1_img.crop((0, 0, c1w - overlap1, c1h))
+        overlap2 = mid - (c2_face_x - c2_face)
+        if overlap2 > 0:
+            c2_img = c2_img.crop((overlap2, 0, c2w, c2h))
+            c2_face -= overlap2
+
+        img.paste(c1_img, (c1_face_x - c1_face, h - c1h), c1_img)
+        img.paste(c2_img, (c2_face_x - c2_face, h - c2h), c2_img)
         _ ,_ ,_ , mask = (await get_img_from_path(ASSETS_BASE_DIR, rqd.mask_img_path)).split()
         img.putalpha(mask)
 

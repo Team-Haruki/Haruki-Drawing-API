@@ -44,8 +44,8 @@ class EventInfo(BaseModel):
     banner_cid: int
     banner_index: int
     bonus_attr: str
-    bonus_chara_id: list[int] | None
-    wl_time_list: Optional[list[dict[str, Any]]] | None
+    bonus_chara_id: Optional[List[int]] = None
+    wl_time_list: Optional[list[dict[str, Any]]] = None
 
 class EventHistoryInfo(BaseModel):
     event_id: str
@@ -65,7 +65,7 @@ class EventAssets(BaseModel):
     event_attr_image_path: str
     event_ban_chara_img: str
     ban_chara_icon_path: str
-    bonus_chara_path: list[str] | None
+    bonus_chara_path: Optional[List[str]] = None
 
 class EventDetailRequest(BaseModel):
     region: str
@@ -86,9 +86,9 @@ class EventBriefInfo(BaseModel):
     event_end_at: int
     event_banner_path: str
     event_cards: Optional[List[CardFullThumbnailRequest]]
-    event_attr_path: Optional[str]
-    event_chara_path: Optional[str]
-    event_unit_path: Optional[str]
+    event_attr_path: Optional[str] = None
+    event_chara_path: Optional[str] = None
+    event_unit_path: Optional[str] = None
 
 class EventListRequest(BaseModel):
     event_info: List[EventBriefInfo]
@@ -203,7 +203,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                             for card, thumb in zip(event_cards, card_thumbs):
                                 with VSplit().set_padding(0).set_sep(2).set_item_align("c").set_content_align("c"):
                                     ImageBox(thumb, size=(80, 80))
-                                    TextBox(f"ID:{card.id}", TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)), overflow="clip")
+                                    TextBox(f"ID:{card.card_id}", TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)), overflow="clip")
 
                 # 加成
                 if detail.bonus_attr or detail.bonus_chara_id:

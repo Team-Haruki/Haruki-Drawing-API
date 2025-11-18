@@ -38,7 +38,7 @@ class DetailedProfileCardRequest(BaseModel):
     frame_path: Optional[str] = None
 
 class CardFullThumbnailRequest(BaseModel):
-    id: int
+    card_id: int
     card_thumbnail_path: str
     rare: str
     frame_img_path: str
@@ -48,7 +48,7 @@ class CardFullThumbnailRequest(BaseModel):
     train_rank_img_path: Optional[str] = None
     level: Optional[int] = None
     birthday_icon_path: Optional[str] = None
-    after_training: bool = None
+    is_after_training: bool = None
     custom_text: Optional[str] = None
     card_level: Optional[dict] = None
     is_pcard: bool = False

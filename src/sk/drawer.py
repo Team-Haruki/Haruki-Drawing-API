@@ -33,20 +33,20 @@ from src.base.utils import get_img_from_path, get_readable_datetime, get_readabl
 class RankInfo(BaseModel):
     rank: int
     name: str
-    score: int | None = None
+    score: Optional[int] = None
     time: datetime
-    average_round: int | None
-    average_pt: int | None
-    latest_pt: int | None
-    speed: int | None
-    min20_times_3_speed: int | None = None
-    hour_round: int | None
-    record_startAt: datetime | None
+    average_round: Optional[int] = None
+    average_pt: Optional[int] = None
+    latest_pt: Optional[int] = None
+    speed: Optional[int] = None
+    min20_times_3_speed: Optional[int] = None
+    hour_round: Optional[int] = None
+    record_startAt: Optional[datetime] = None
 
 class SpeedInfo(BaseModel):
     rank: int
     score: int
-    speed: int | None
+    speed: Optional[int] = None
     record_time: datetime
 
 class SklRequest(BaseModel):
@@ -56,8 +56,8 @@ class SklRequest(BaseModel):
     aggregateAt: int
     name: str
     banner_img_path: str
-    wl_cid: int | None = None
-    chara_icon_path: str | None = None
+    wl_cid: Optional[int] = None
+    chara_icon_path: Optional[str] = None
     ranks: list[RankInfo]
 
 class SKRequest(BaseModel):
@@ -66,21 +66,21 @@ class SKRequest(BaseModel):
     name: str
     aggregateAt: int
     ranks: list[RankInfo]
-    wl_chara_icon_path: str | None = None
-    chara_icon_path: str | None = None
-    prev_ranks: RankInfo | None = None
-    next_ranks: RankInfo | None = None
+    wl_chara_icon_path: Optional[str] = None
+    chara_icon_path: Optional[str] = None
+    prev_ranks: Optional[RankInfo] = None
+    next_ranks: Optional[RankInfo] = None
 
 class CFRequest(BaseModel):
     eid: int
     event_name: str
     region: str
     ranks: list[RankInfo]
-    prev_rank: RankInfo | None = None
-    next_rank: RankInfo | None = None
+    prev_rank: Optional[RankInfo] = None
+    next_rank: Optional[RankInfo] = None
     aggregateAt: int
     updateAt: datetime
-    wl_chara_icon_path: str | None = None
+    wl_chara_icon_path: Optional[str] = None
 
 class SpeedRequest(BaseModel):
     event_id: int
@@ -92,23 +92,23 @@ class SpeedRequest(BaseModel):
     is_wl_event: bool
     request_type: str
     period: timedelta
-    banner_img_path: str | None
-    wl_chara_icon_path: str | None = None
+    banner_img_path: Optional[str] = None
+    wl_chara_icon_path: Optional[str] = None
 
 class PlayerTraceRequest(BaseModel):
     event_id: int
     region: str
-    wl_chara_icon_path: str | None = None
-    ranks: list[RankInfo]
-    ranks2: list[RankInfo] | None= None
+    wl_chara_icon_path: Optional[str] = None
+    ranks: List[RankInfo]
+    ranks2: Optional[List[RankInfo]] = None
 
 class RankTraceRequest(BaseModel):
     event_id: int
     region: str
-    wl_chara_icon_path: str | None= None
+    wl_chara_icon_path: Optional[str] = None
     target_rank: int
-    ranks: list[RankInfo]
-    predict_ranks: RankInfo | None = None
+    ranks: List[RankInfo]
+    predict_ranks: Optional[RankInfo] = None
 
 class TeamInfo(BaseModel):
     team_id: int
@@ -116,13 +116,13 @@ class TeamInfo(BaseModel):
     win_rate: float
     is_recruiting: bool
     team_cn_name: Optional[str] = None
-    team_icon_path: str | None= None
+    team_icon_path: Optional[str] = None
 
 class WinRateRequest(BaseModel):
     event_id: int
     event_name: str
     region: str
-    wl_chara_icon_path: str | None= None
+    wl_chara_icon_path: Optional[str] = None
     updated_at: datetime
     event_startAt: int
     event_aggregateAt: int
