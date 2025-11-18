@@ -673,19 +673,25 @@ class Painter:
         sub_img: Image.Image,
         pos: Position,
         size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
         exclude_on_hash: bool = False,
     ) -> Self:
-        return self.add_operation("_impl_paste", exclude_on_hash, (sub_img, pos, size))
+        return self.add_operation("_impl_paste", exclude_on_hash, (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha))
 
-    def paste_with_alphablend(
+    def paste_with_alpha_blend(
         self,
         sub_img: Image.Image,
         pos: Position,
         size: Size = None,
         alpha: float = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
         exclude_on_hash: bool = False,
     ) -> Self:
-        return self.add_operation("_impl_paste_with_alphablend", exclude_on_hash, (sub_img, pos, size, alpha))
+        return self.add_operation("_impl_paste_with_alpha_blend", exclude_on_hash, (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha))
 
     def rect(
         self,
@@ -787,19 +793,52 @@ class Painter:
             self.img.alpha_composite(overlay, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
-    def _impl_paste(self, sub_img: Image.Image, pos: Position, size: Size = None) -> Self:
+    def _impl_paste(
+        self,
+        sub_img: Image.Image,
+        pos: Position,
+        size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.6,
+    ) -> Self:
         if size and size != sub_img.size:
             sub_img = sub_img.resize(size)
         if sub_img.mode not in ("RGB", "RGBA"):
             sub_img = sub_img.convert("RGBA")
+
+        if use_shadow:
+            w, h = sub_img.size
+            sw = shadow_width
+            lw, lh = w + sw * 2, h + sw * 2
+            # 获取和图像相同形状的阴影mask
+            shadow_mask = Image.new("L", (lw, lh), 0)
+            shadow_mask.paste(Image.new("L", sub_img.size, int(255 * shadow_alpha)), (sw, sw), sub_img)
+            # 模糊获取阴影
+            blurred_shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+            # 删除内部阴影
+            inner_mask = ImageChops.invert(shadow_mask)
+            blurred_shadow_mask = ImageChops.multiply(blurred_shadow_mask, inner_mask)
+            # 贴入原图
+            shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+            shadow.putalpha(blurred_shadow_mask)
+            self.img.alpha_composite(shadow, (pos[0] + self.offset[0] - sw, pos[1] + self.offset[1] - sw))
+
         if sub_img.mode == "RGBA":
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]), sub_img)
         else:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
-    def _impl_paste_with_alphablend(
-        self, sub_img: Image.Image, pos: Position, size: Size = None, alpha: float = None
+    def _impl_paste_with_alpha_blend(
+        self,
+        sub_img: Image.Image,
+        pos: Position,
+        size: Size = None,
+        alpha: float = None,
+        use_shadow: bool = False,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.6,
     ) -> Self:
         if size and size != sub_img.size:
             sub_img = sub_img.resize(size)
@@ -810,6 +849,24 @@ class Painter:
             overlay_alpha = overlay.split()[3]
             overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * alpha))
             overlay.putalpha(overlay_alpha)
+
+        if use_shadow:
+            w, h = overlay.size
+            sw = shadow_width
+            lw, lh = w + sw * 2, h + sw * 2
+            # 获取和图像相同形状的阴影mask
+            shadow_mask = Image.new("L", (lw, lh), 0)
+            shadow_mask.paste(Image.new("L", overlay.size, int(255 * shadow_alpha)), (sw, sw), overlay)
+            # 模糊获取阴影
+            blurred_shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+            # 删除内部阴影
+            inner_mask = ImageChops.invert(shadow_mask)
+            blurred_shadow_mask = ImageChops.multiply(blurred_shadow_mask, inner_mask)
+            # 贴入原图
+            shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+            shadow.putalpha(blurred_shadow_mask)
+            self.img.alpha_composite(shadow, (pos[0] - sw, pos[1] - sw))
+
         self.img.alpha_composite(overlay, pos)
         return self
 

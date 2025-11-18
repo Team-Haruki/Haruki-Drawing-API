@@ -96,19 +96,19 @@ class GachaInfo(BaseModel):
         return v
 
 class CardBasicInfo(BaseModel):
-    id: int #卡片ID
-    character_id: int #角色ID
-    character_name: str #角色名
-    unit: str #所属组合
-    release_at: int #发布时间
-    supply_type: str  # 类型
-    card_rarity_type: str  # 稀有度
-    attr: str  # 属性
-    prefix: str  #卡名
-    asset_bundle_name: str #资源名
-    skill: SkillInfo
+    card_id: int #卡片ID
+    character_id: Optional[int] #角色ID
+    character_name: Optional[str] = None
+    unit: Optional[str] = None#所属组合
+    release_at: Optional[int] = None#发布时间
+    supply_type: Optional[str] = None # 类型
+    card_rarity_type: Optional[str] = None # 稀有度
+    attr: Optional[str] = None # 属性
+    prefix: Optional[str] = None #卡名
+    asset_bundle_name: Optional[str] = None#资源名
+    skill: Optional[SkillInfo] = None
     special_skill_info: Optional[SkillInfo] = None
-    thumbnail_info: List[CardFullThumbnailRequest]
+    thumbnail_info: Optional[List[CardFullThumbnailRequest]] = None
     after_training: Optional[bool] = False #是否特训后
 
 class CardDetailRequest(BaseModel):
@@ -265,7 +265,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                     # 卡牌ID 限定类型
                     with HSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
                         TextBox("ID", label_style)
-                        TextBox(f"{card_info.id} ({region.upper()})", text_style)
+                        TextBox(f"{card_info.card_id} ({region.upper()})", text_style)
                         Spacer(w=32)
                         TextBox("限定类型", label_style)
                         TextBox(card_info.supply_type, text_style)
@@ -317,10 +317,6 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                                 for img in costume_images:
                                     ImageBox(img, size=(80, None))
 
-                    # 提示
-                    with VSplit().set_padding(12).set_sep(6).set_content_align('l').set_item_align('l'):
-                        TextBox(f"发送\"/查卡面 {card_info.id}\"获取卡面原图, 发送\"/卡面剧情 {card_info.id}\"获取AI剧情总结", tip_style)
-
     add_watermark(canvas)
     return await canvas.get_img()
 
@@ -353,7 +349,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     card_and_thumbs = [(card, thumb) for card, thumb in zip(cards, thumbs) if thumb is not None]
 
     # 按发布时间和ID排序
-    card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].id), reverse=True)
+    card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].card_id), reverse=True)
 
     # 样式定义
     name_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0))
@@ -405,14 +401,14 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(5).set_padding(8):
                                 GW = 300
                                 with HSplit().set_content_align('c').set_w(GW).set_padding(8).set_sep(16):
-                                        ImageBox(thumb, size=(100, 100), image_size_mode='fill')
+                                        ImageBox(thumb, size=(100, 100), image_size_mode='fill', shadow=True)
 
                                 # 卡牌名称
                                 name_text = card.prefix
                                 TextBox(name_text, name_style).set_w(GW).set_content_align('c')
 
                                 # ID和限定类型
-                                id_text = f"ID:{card.id}"
+                                id_text = f"ID:{card.card_id}"
                                 if card.supply_type not in ["非限定", "normal"]:
                                     id_text += f"【{card.supply_type}】"
                                 TextBox(id_text, id_style).set_w(GW).set_content_align('c')

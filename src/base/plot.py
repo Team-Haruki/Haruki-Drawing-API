@@ -956,10 +956,13 @@ class ImageBox(Widget):
     def __init__(
         self,
         image: Union[str, Image.Image],
-        image_size_mode: str = None,
-        size: tuple[Optional[int], Optional[int]] = None,
-        use_alpha_blend: bool = False,
-        alpha_adjust: float = 1.0,
+        image_size_mode=None,
+        size=None,
+        use_alpha_blend=False,
+        alpha_adjust=1.0,
+        shadow=False,
+        shadow_width=6,
+        shadow_alpha=0.6,
     ) -> None:
         """
         image_size_mode: 'fit', 'fill', 'original'
@@ -989,6 +992,7 @@ class ImageBox(Widget):
 
         self.set_use_alpha_blend(use_alpha_blend)
         self.set_alpha_adjust(alpha_adjust)
+        self.set_shadow(shadow, shadow_width, shadow_alpha)
 
     def set_alpha_adjust(self, alpha_adjust: float) -> Self:
         self.alpha_adjust = alpha_adjust
@@ -996,6 +1000,12 @@ class ImageBox(Widget):
 
     def set_use_alpha_blend(self, use_alpha_blend) -> Self:
         self.use_alpha_blend = use_alpha_blend
+        return self
+
+    def set_shadow(self, shadow: bool, shadow_width=6, shadow_alpha=0.3):
+        self.shadow = shadow
+        self.shadow_width = shadow_width
+        self.shadow_alpha = shadow_alpha
         return self
 
     def set_image(self, image: Union[str, Image.Image]) -> Self:
@@ -1031,12 +1041,27 @@ class ImageBox(Widget):
                 return int(w * scale), int(h * scale)
         return None
 
-    def _draw_content(self, p: Painter) -> None:
+    def _draw_content(self, p: Painter):
         w, h = self._get_content_size()
         if self.use_alpha_blend:
-            p.paste_with_alphablend(self.image, (0, 0), (w, h), self.alpha_adjust)
+            p.paste_with_alpha_blend(
+                self.image,
+                (0, 0),
+                (w, h),
+                self.alpha_adjust,
+                use_shadow=self.shadow,
+                shadow_width=self.shadow_width,
+                shadow_alpha=self.shadow_alpha,
+            )
         else:
-            p.paste(self.image, (0, 0), (w, h))
+            p.paste(
+                self.image,
+                (0, 0),
+                (w, h),
+                use_shadow=self.shadow,
+                shadow_width=self.shadow_width,
+                shadow_alpha=self.shadow_alpha,
+            )
 
 
 class Spacer(Widget):
