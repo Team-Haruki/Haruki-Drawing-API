@@ -1169,7 +1169,7 @@ class Painter:
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
         preset_tris = [
-            Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
+            Image.open(f"/home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/sekai/assets/static_images/random_triangle_bg_images/classic/{i+1}.png")
             .convert("RGBA")
             .resize((128, 128), Image.Resampling.BILINEAR)
             for i in range(3)
