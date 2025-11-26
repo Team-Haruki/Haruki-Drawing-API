@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from typing import Union, Type, Callable, TypedDict, Self, Optional
 from PIL import Image, ImageFilter, ImageFont, ImageEnhance
 
-
 from .painter import (
     Color,
     Painter,
@@ -808,6 +807,13 @@ class TextStyle:
 
 
 class TextBox(Widget):
+    r"""TextBox
+
+    绘制文字
+
+    TODO:
+        shadow 还未实现
+    """
     def __init__(
         self,
         text: str = "",
