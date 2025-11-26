@@ -12,6 +12,7 @@ from src.base.draw import (
     SEKAI_BLUE_BG,
     add_watermark,
     roundrect_bg,
+    PLAY_RESULT_COLORS,
 )
 from src.base.painter import (
     DEFAULT_BOLD_FONT,
@@ -84,6 +85,51 @@ class MusicListRequest(BaseModel):
     required_difficulties: str
     profile_info: DetailedProfileCardRequest
 
+class PlayProgressCount(BaseModel):
+    r"""打歌进度计数类
+        
+        记录玩家在该定数下的歌曲总数、未通数、已通数、全连数、全P数
+
+        Attributes
+        ----------
+        level : int
+            定数，
+        total : int
+            记录的歌曲总数
+        not_clear : int
+            未通歌曲数量
+        clear : int
+            已通歌曲数量
+        fc : int
+            已全连歌曲数量
+        ap : int
+            已全P歌曲数量
+    """
+    level: int = 0
+    total: int = 0
+    not_clear: int = 0
+    clear: int = 0
+    fc: int = 0
+    ap: int = 0
+
+class PlayProgressRequest(BaseModel):
+    r"""PlayProgressRequest
+
+        合成打歌进度图片所必须的数据
+    
+        Attributes
+        ----------
+        counts : list[ PlayProgressCount ]
+            玩家在每个定数的打歌进度
+        difficulty : str
+            指定难度，这里只用来指定颜色
+        profile_info : DetailedProfileCardRequest
+            用于获取玩家详细信息的简单卡片控件
+    """
+    counts: list[PlayProgressCount]
+    difficulty: str
+    profile_info: DetailedProfileCardRequest
+
 async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, title_style: TextStyle=None, title_shadow=False):
     # 数据准备
     mid = rqd.music_info.id
@@ -102,11 +148,11 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     vocal_info = rqd.vocal.vocal_info
     vocal_logos_raw = rqd.vocal.vocal_assets
     caption_vocals = {}
-    has_append = rqd.difficulty.has_append
+    # has_append = rqd.difficulty.has_append
     event_banner = await get_img_from_path(ASSETS_BASE_DIR,rqd.event_banner)
 
-    if not has_append:
-        DIFF_COLORS.pop("append")
+    # if not has_append:
+    #     DIFF_COLORS.pop("append")
 
     vocal_logos = {}
     for char_name, logo_path in vocal_logos_raw.items():
@@ -376,6 +422,74 @@ async def compose_music_list_image(
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset((64 - 10, 64 - 10))
                                     if show_id:
                                         TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(64)
+
+    add_watermark(canvas)
+    return await canvas.get_img()
+
+async def compose_play_progress_image(
+    rqd: PlayProgressRequest
+) -> Image.Image:
+    r"""compose_play_progress_image
+
+    合成打歌进度图片
+    
+    TODO:
+        TextBox shadow 还未实现
+    """
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+            if rqd.profile_info:
+                await get_detailed_profile_card(rqd.profile_info)
+
+            bar_h, item_h, w = 200, 48, 48
+            font_sz = 24
+
+            with HSplit().set_content_align('c').set_item_align('c').set_bg(roundrect_bg()) \
+                .set_padding(64).set_sep(8):
+
+                async def draw_icon(path):
+                    path = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+f"/{path}")
+                    with Frame().set_size((w, item_h)).set_content_align('c'):
+                        ImageBox(path, size=(w // 2, w // 2))
+                
+                # 第一列：进度条的占位 难度占位 not_clear clear fc ap 图标
+                with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                    Spacer(w=w, h=bar_h)
+                    Spacer(w=w, h=item_h)
+                    await draw_icon("icon_not_clear.png")
+                    await draw_icon("icon_clear.png")
+                    await draw_icon("icon_fc.png")
+                    await draw_icon("icon_ap.png")
+
+                # 之后的几列：进度条 难度 各个类型的数量
+                for c in rqd.counts:
+                    with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                        # 进度条
+                        def draw_bar(color, h, blur_glass=False):
+                            return Frame().set_size((w, h)).set_bg(roundrect_bg(fill=color, radius=4, blur_glass=blur_glass))
+                        with draw_bar(PLAY_RESULT_COLORS['not_clear'], bar_h, blur_glass=True).set_content_align('b') as f:
+                            if c.clear: draw_bar(PLAY_RESULT_COLORS['clear'], int(bar_h * c.clear / c.total))
+                            if c.fc:    draw_bar(PLAY_RESULT_COLORS['fc'],    int(bar_h * c.fc / c.total))
+                            if c.ap:    draw_bar(PLAY_RESULT_COLORS['ap'],    int(bar_h * c.ap / c.total))
+
+                        # 难度
+                        TextBox(f"{c.level}", TextStyle(font=DEFAULT_BOLD_FONT, size=font_sz, color=WHITE), overflow='clip') \
+                            .set_bg(roundrect_bg(fill=DIFF_COLORS[rqd.difficulty], radius=16)) \
+                            .set_size((w, item_h)).set_content_align('c')
+                        # 数量 (第一行虽然图标是not_clear但是实际上是total)
+                        color = PLAY_RESULT_COLORS['not_clear']
+                        ap      = c.ap
+                        fc      = c.fc - c.ap
+                        clear   = c.clear - c.fc
+                        total   = c.total - c.clear
+                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=False)
+                        TextBox(f"{total}", style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg())
+                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['clear'], shadow_offset=2)
+                        TextBox(f"{clear}", style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg())
+                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['fc'], shadow_offset=2)
+                        TextBox(f"{fc}",    style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg())
+                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['ap'], shadow_offset=2)
+                        TextBox(f"{ap}",    style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg())
 
     add_watermark(canvas)
     return await canvas.get_img()
