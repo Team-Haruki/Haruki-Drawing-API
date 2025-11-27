@@ -37,6 +37,16 @@ class DetailedProfileCardRequest(BaseModel):
     has_frame: bool = False
     frame_path: Optional[str] = None
 
+class BasicProfileCardRequest(BaseModel):
+    id: str
+    region: str
+    nickname: str
+    update_time: int
+    is_hide_uid: bool = False
+    leader_image_path: str
+    has_frame: bool = False
+    frame_path: Optional[str] = None
+
 class CardFullThumbnailRequest(BaseModel):
     card_id: int
     card_thumbnail_path: str
@@ -213,4 +223,29 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
                     TextBox(f"{rqd.region.upper()}: {user_id} Suite数据", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     TextBox(f"数据来源: {source}  获取模式: {mode}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+    return f
+# 获取玩家基本信息的简单卡片控件，返回Frame
+async def get_basic_profile_card(profile: BasicProfileCardRequest) -> Frame:
+    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
+        with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
+            frame_path = profile.frame_path
+            has_frame = profile.has_frame
+            avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
+            avatar_widget = await get_avatar_widget_with_frame(
+                is_frame=bool(has_frame),
+                frame_path=frame_path,
+                avatar_img=avatar_img,
+                avatar_w=80,
+                frame_data=[]
+            )
+            with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
+                update_time = datetime.fromtimestamp(profile.update_time / 1000)
+                update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
+                user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
+                colored_text_box(
+                    truncate(profile.nickname, 64),
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
+                )
+                TextBox(f"{profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
     return f
