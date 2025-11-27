@@ -9,7 +9,7 @@ import colorsys
 import numpy as np
 
 from pilmoji import Pilmoji
-from typing import Union, Any, Self
+from typing import Union, Any, Self, Literal
 from datetime import datetime, timedelta
 from PIL.ImageFont import ImageFont as Font
 from pilmoji import getsize as getsize_emoji
@@ -192,7 +192,23 @@ ALIGN_MAP = {
     "rt": ("r", "t"),
     "rb": ("r", "b"),
 }
+ALIGN_TYPE = Literal[
+    "c",
+    "l",
+    "r",
+    "t",
+    "b",
+    "tl",
+    "tr",
+    "bl",
+    "br",
+    "lt",
+    "lb",
+    "rt",
+    "rb",
+]
 
+ITEM_SIZE_MODE_TYPE = Literal["expand", "fixed"]
 
 # =========================== 工具函数 =========================== #
 
