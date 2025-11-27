@@ -35,6 +35,51 @@ from .mode import *
 
 # =========================== 绘图函数 =========================== #
 
+class PlayProgressCount(BaseModel):
+    r"""打歌进度计数类
+        
+        记录玩家在该定数下的歌曲总数、未通数、已通数、全连数、全P数
+
+        Attributes
+        ----------
+        level : int
+            定数，
+        total : int
+            记录的歌曲总数
+        not_clear : int
+            未通歌曲数量
+        clear : int
+            已通歌曲数量
+        fc : int
+            已全连歌曲数量
+        ap : int
+            已全P歌曲数量
+    """
+    level: int = 0
+    total: int = 0
+    not_clear: int = 0
+    clear: int = 0
+    fc: int = 0
+    ap: int = 0
+
+class PlayProgressRequest(BaseModel):
+    r"""PlayProgressRequest
+
+        合成打歌进度图片所必须的数据
+    
+        Attributes
+        ----------
+        counts : list[ PlayProgressCount ]
+            玩家在每个定数的打歌进度
+        difficulty : str
+            指定难度，这里只用来指定颜色
+        profile_info : DetailedProfileCardRequest
+            用于获取玩家详细信息的简单卡片控件
+    """
+    counts: list[PlayProgressCount]
+    difficulty: str
+    profile_info: DetailedProfileCardRequest
+
 async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, title_style: TextStyle=None, title_shadow=False):
     # 数据准备
     mid = rqd.music_info.id
@@ -330,7 +375,6 @@ async def compose_music_list_image(
 
     add_watermark(canvas)
     return await canvas.get_img()
-
 
 async def compose_play_progress_image(
     rqd: PlayProgressRequest

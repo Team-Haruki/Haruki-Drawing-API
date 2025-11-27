@@ -26,6 +26,7 @@ DIFF_COLORS = {
     "master": (187, 51, 238, 255),
     "append": LinearGradient((182, 144, 247, 255), (243, 132, 220, 255), (0, 0), (1, 1)),
 }
+
 PLAY_RESULT_COLORS = {
     'not_clear': (69, 67, 104, 255),
     'clear': (255, 226, 118, 255),

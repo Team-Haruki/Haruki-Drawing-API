@@ -193,5 +193,6 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# 测试文件
 test/
 test*
