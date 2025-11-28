@@ -29,9 +29,9 @@ from src.base.plot import Canvas, FillBg, Frame, Grid, HSplit, ImageBox, Spacer,
 from src.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
 
 
-# =========================== 从.mode导入常量和数据类型 =========================== #
+# =========================== 从.model导入常量和数据类型 =========================== #
 
-from .mode import *
+from .model import *
 
 # =========================== 绘图函数 =========================== #
 
@@ -471,7 +471,7 @@ def draw_text_icon(
     with HSplit().set_content_align('c').set_item_align('c').set_sep(4) as hs:
         if text is not None:
             TextBox(str(text), style, overflow='clip')
-        ImageBox(icon, size=(None, COMPOSE_MUSIC_REWARDS_IMAGE_GH))
+        ImageBox(icon, size=(None, 40))
     return hs
 
 
@@ -492,6 +492,11 @@ async def compose_detail_music_rewards_image(
     ------
     PIL.Image.Image
     """
+    # 网格宽度和高度
+    gw, gh = 80, 40
+    # 样式
+    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
+    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
     # 奖励的icon
     jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/jewel.png")
     shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/shard.png")
@@ -502,40 +507,40 @@ async def compose_detail_music_rewards_image(
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 乐曲评级奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
-                    TextBox("歌曲评级奖励(S)", COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_HEAD_STYLE). \
-                        set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                    TextBox("歌曲评级奖励(S)", style1). \
+                        set_size((None, gh)). \
                         set_content_align('c')
-                    draw_text_icon(rqd.rank_rewards, jewel_icon, COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE). \
-                        set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH))
+                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2). \
+                        set_size((None, gh))
                 # 连击奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
                     for diff in rqd.combo_rewards:
                         with HSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16):
                             # 难度
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
-                                Spacer(w=COMPOSE_MUSIC_REWARDS_IMAGE_GW, h=COMPOSE_MUSIC_REWARDS_IMAGE_GH)
+                                Spacer(w=gw, h=gh)
                                 for lv in sorted(rqd.combo_rewards[diff].keys()):
                                     TextBox(str(lv), TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
-                                        set_size((COMPOSE_MUSIC_REWARDS_IMAGE_GH, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                                        set_size((gh, gh)). \
                                         set_content_align('c').set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=8))
                             # 奖励
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
-                                ImageBox(jewel_icon if diff != 'append' else shard_icon, size=(None, COMPOSE_MUSIC_REWARDS_IMAGE_GH))
+                                ImageBox(jewel_icon if diff != 'append' else shard_icon, size=(None, gh))
                                 for lv in sorted(rqd.combo_rewards[diff].keys()):
                                     reward = rqd.combo_rewards[diff][lv]
-                                    TextBox(str(reward), COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE, overflow='clip'). \
-                                        set_size((COMPOSE_MUSIC_REWARDS_IMAGE_GW, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                                    TextBox(str(reward), style2, overflow='clip'). \
+                                        set_size((gw, gh)). \
                                         set_content_align('l')
                             # 累计奖励
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
-                                TextBox("累计", COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_HEAD_STYLE). \
-                                    set_size((COMPOSE_MUSIC_REWARDS_IMAGE_GW, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                                TextBox("累计", style1). \
+                                    set_size((gw, gh)). \
                                     set_content_align('l') 
                                 acc = 0
                                 for lv in sorted(rqd.combo_rewards[diff].keys()):
                                     acc += rqd.combo_rewards[diff][lv]
-                                    TextBox(str(acc), COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE, overflow='clip'). \
-                                        set_size((COMPOSE_MUSIC_REWARDS_IMAGE_GW, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                                    TextBox(str(acc), style2, overflow='clip'). \
+                                        set_size((gw, gh)). \
                                         set_content_align('l')
 
     add_watermark(canvas)
@@ -557,10 +562,14 @@ async def compose_basic_music_rewards_image(
     ------
     PIL.Image.Image
     """
+    # 网格宽度和高度
+    gw, gh = 80, 40
+    # 样式
+    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
+    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
     # 奖励的icon
     jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/jewel.png")
     shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/shard.png")
-    # 返回奖励数字字符串
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
@@ -571,23 +580,23 @@ async def compose_basic_music_rewards_image(
                         TextStyle(DEFAULT_FONT, 20, (200, 75, 75)), use_real_line_count=True).set_w(480)
                 # 乐曲评级奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
-                    TextBox("歌曲评级奖励(S)", COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_HEAD_STYLE). \
-                        set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                    TextBox("歌曲评级奖励(S)", style1). \
+                        set_size((None, gh)). \
                         set_content_align('c')
-                    draw_text_icon(rqd.rank_rewards, jewel_icon, COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE). \
-                        set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH))
+                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2). \
+                        set_size((None, gh))
                 # 连击奖励
                 with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                     for diff in rqd.combo_rewards:
                         with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24):
                             TextBox(f"{diff.upper()}", TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
                                 set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=8)). \
-                                set_size((120, COMPOSE_MUSIC_REWARDS_IMAGE_GH)).set_content_align('c')
-                            TextBox("连击奖励", COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_HEAD_STYLE). \
-                                set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH)). \
+                                set_size((120, gh)).set_content_align('c')
+                            TextBox("连击奖励", style1). \
+                                set_size((None, gh)). \
                                 set_content_align('l')
-                            draw_text_icon(rqd.combo_rewards[diff], jewel_icon if diff != 'append' else shard_icon, COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE) \
-                                .set_size((None, COMPOSE_MUSIC_REWARDS_IMAGE_GH))
+                            draw_text_icon(rqd.combo_rewards[diff], jewel_icon if diff != 'append' else shard_icon, style2) \
+                                .set_size((None, gh))
 
     add_watermark(canvas)
     return await canvas.get_img()

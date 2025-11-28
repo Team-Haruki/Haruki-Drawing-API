@@ -3,19 +3,6 @@ from pydantic import BaseModel
 from typing import Any, List, Dict, Literal, Tuple
 from src.profile.drawer import DetailedProfileCardRequest, BasicProfileCardRequest
 
-from src.base.plot import TextStyle
-from src.base.painter import DEFAULT_BOLD_FONT
-
-# =========================== 全局变量/常量 =========================== #
-
-COMPOSE_MUSIC_REWARDS_IMAGE_GW, COMPOSE_MUSIC_REWARDS_IMAGE_GH = 80, 40
-r"""合成歌曲奖励图片的网格宽度和高度"""
-COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_HEAD_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
-r"""合成歌曲奖励图片的表头样式"""
-COMPOSE_MUSIC_REWARDS_IMAGE_TABLE_ITEM_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
-r"""合成歌曲奖励图片的表项样式"""
-
-
 # =========================== 数据类的定义 =========================== #
 
 class MusicMD(BaseModel):
