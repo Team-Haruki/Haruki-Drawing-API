@@ -4,7 +4,7 @@ from typing import List
 class ScoreData(BaseModel):
     r"""ScoreData
 
-    分数数据，控分图表中的一行
+    控分数据，控分图表中的一行
 
     Attributes
     ----------
