@@ -1,9 +1,7 @@
 from PIL import Image
-from pydantic import BaseModel
-from typing import Optional, List
+from typing import  List
 
 from src.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
-from src.base.painter import WHITE
 from src.base.utils import get_img_from_path
 from src.base.draw import (
     TextBox,
@@ -12,16 +10,10 @@ from src.base.draw import (
     BG_PADDING,
     roundrect_bg,
     add_watermark,
-    DIFF_COLORS
 )
 from src.base.plot import (
     VSplit,
-    HSplit,
-    Frame,
-    Spacer,
     ImageBox,
-    FillBg,
-    RoundRectBg,
     TextStyle,
     Grid,
 )
