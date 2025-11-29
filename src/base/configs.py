@@ -37,5 +37,6 @@ DEFAULT_FONT = "SourceHanSansSC-Regular"
 DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
 DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
 DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
+
 # 直接调用来覆盖
 load_configs("/home/xmlq/codes/pycodes/Haruki-Drawing-API/configs.yaml")
