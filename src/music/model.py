@@ -108,6 +108,21 @@ class PlayProgressRequest(BaseModel):
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = 'master'
     profile: DetailedProfileCardRequest
 
+class MusicComboReward(BaseModel):
+    r"""MusicComboRewards
+
+    歌曲连击奖励，某个难度某个等级下的可获得的连击奖励（水晶或碎片）
+
+    Attributes
+    ----------
+    level : int
+        歌曲等级，定数
+    reward : int = 0
+        剩余可获得的奖励数量(水晶或碎片)
+    """
+    level: int
+    reward: int = 0
+
 class DetailMusicRewardsRequest(BaseModel):
     r"""DetailMusicRewardsRequest
 
@@ -117,18 +132,18 @@ class DetailMusicRewardsRequest(BaseModel):
     ----------
     rank_rewards : int
         乐曲评级奖励，还未达成的乐曲评级(S)可获得的水晶奖励总数
-    combo_rewards : Dict[ str, Dict[ int, int ]]
+    combo_rewards : Dict[ Literal[ 'hard', 'expert', 'master', 'append' ], List[ MusicComboRewards ] ]
         乐曲连击奖励，不同难度下不同等级的歌曲可获得的连击奖励（水晶或碎片）
     profile : DetailedProfileCardRequest
         用于获取玩家详细信息的简单卡片控件
     """
 
     rank_rewards: int = 0
-    combo_rewards: Dict[str, Dict[int, int]] = {
-        'hard': {}, 
-        'expert': {}, 
-        'master': {}, 
-        'append': {}
+    combo_rewards: Dict[Literal['hard', 'expert', 'master', 'append'], List[MusicComboReward]] = {
+        'hard': [], 
+        'expert': [], 
+        'master': [], 
+        'append': []
     }
     profile: DetailedProfileCardRequest
 
