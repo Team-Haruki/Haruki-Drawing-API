@@ -59,7 +59,7 @@ class MusicListRequest(BaseModel):
     music_list: List[Dict[str, Any]] # [{"id": int, "difficulty": str}]
     jackets_path_list: Dict[int, str] # {musicId: jacket_path}
     required_difficulties: str
-    profile_info: DetailedProfileCardRequest
+    profile: DetailedProfileCardRequest
 
 class PlayProgressCount(BaseModel):
     r"""打歌进度计数类
@@ -100,13 +100,13 @@ class PlayProgressRequest(BaseModel):
             玩家在每个定数的打歌进度
         difficulty : Literal[ "easy", "normal", "hard", "expert", "master", "append" ]
             指定难度，这里只用来指定颜色
-        profile_info : DetailedProfileCardRequest
+        profile : DetailedProfileCardRequest
             用于获取玩家详细信息的简单卡片控件
     """
 
     counts: list[PlayProgressCount]
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = 'master'
-    profile_info: DetailedProfileCardRequest
+    profile: DetailedProfileCardRequest
 
 class DetailMusicRewardsRequest(BaseModel):
     r"""DetailMusicRewardsRequest
@@ -119,7 +119,7 @@ class DetailMusicRewardsRequest(BaseModel):
         乐曲评级奖励，还未达成的乐曲评级(S)可获得的水晶奖励总数
     combo_rewards : Dict[ str, Dict[ int, int ]]
         乐曲连击奖励，不同难度下不同等级的歌曲可获得的连击奖励（水晶或碎片）
-    profile_info : DetailedProfileCardRequest
+    profile : DetailedProfileCardRequest
         用于获取玩家详细信息的简单卡片控件
     """
 
@@ -130,7 +130,7 @@ class DetailMusicRewardsRequest(BaseModel):
         'master': {}, 
         'append': {}
     }
-    profile_info: DetailedProfileCardRequest
+    profile: DetailedProfileCardRequest
 
 
 class BasicMusicRewardsRequest(BaseModel):
@@ -154,7 +154,7 @@ class BasicMusicRewardsRequest(BaseModel):
             'append': '1785(15X119首)'
         }
         ```
-    profile_info : BasicProfileCardRequest
+    profile : BasicProfileCardRequest
         用于获取玩家基本信息的简单卡片控件
     """
 
@@ -165,5 +165,5 @@ class BasicMusicRewardsRequest(BaseModel):
         'master': '0', 
         'append': '0'
     }
-    profile_info: BasicProfileCardRequest
+    profile: BasicProfileCardRequest
 
