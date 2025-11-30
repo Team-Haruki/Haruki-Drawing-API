@@ -1,8 +1,6 @@
 from datetime import datetime
-from typing import Any, List, Dict
 import asyncio
 from PIL import Image
-from pydantic import BaseModel
 
 from src.profile.drawer import get_detailed_profile_card, get_basic_profile_card
 from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
@@ -34,51 +32,6 @@ from src.base.utils import get_img_from_path, get_readable_timedelta, get_str_di
 from .model import *
 
 # =========================== 绘图函数 =========================== #
-
-class PlayProgressCount(BaseModel):
-    r"""打歌进度计数类
-        
-        记录玩家在该定数下的歌曲总数、未通数、已通数、全连数、全P数
-
-        Attributes
-        ----------
-        level : int
-            定数，
-        total : int
-            记录的歌曲总数
-        not_clear : int
-            未通歌曲数量
-        clear : int
-            已通歌曲数量
-        fc : int
-            已全连歌曲数量
-        ap : int
-            已全P歌曲数量
-    """
-    level: int = 0
-    total: int = 0
-    not_clear: int = 0
-    clear: int = 0
-    fc: int = 0
-    ap: int = 0
-
-class PlayProgressRequest(BaseModel):
-    r"""PlayProgressRequest
-
-        合成打歌进度图片所必须的数据
-    
-        Attributes
-        ----------
-        counts : list[ PlayProgressCount ]
-            玩家在每个定数的打歌进度
-        difficulty : str
-            指定难度，这里只用来指定颜色
-        profile_info : DetailedProfileCardRequest
-            用于获取玩家详细信息的简单卡片控件
-    """
-    counts: list[PlayProgressCount]
-    difficulty: str
-    profile_info: DetailedProfileCardRequest
 
 async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, title_style: TextStyle=None, title_shadow=False):
     # 数据准备
@@ -316,7 +269,7 @@ async def compose_music_list_image(
     for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
         jackets[music_id] = img
 
-    profile = rqd.profile_info
+    profile = rqd.profile
     if play_result_filter is None:
         play_result_filter = ["clear", "not_clear", "fc", "ap"]
     lv_musics_map = {}
@@ -384,12 +337,12 @@ async def compose_play_progress_image(
     合成打歌进度图片
     
     TODO:
-        TextBox shadow 还未实现
+        TextBox shadow 暂未实现
     """
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            if rqd.profile_info:
-                await get_detailed_profile_card(rqd.profile_info)
+            if rqd.profile:
+                await get_detailed_profile_card(rqd.profile)
 
             bar_h, item_h, w = 200, 48, 48
             font_sz = 24
@@ -503,7 +456,7 @@ async def compose_detail_music_rewards_image(
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            await get_detailed_profile_card(rqd.profile_info)
+            await get_detailed_profile_card(rqd.profile)
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 乐曲评级奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
@@ -568,12 +521,12 @@ async def compose_basic_music_rewards_image(
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
     style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
     # 奖励的icon
-    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/jewel.png")
-    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/shard.png")
+    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/jewel.png")
+    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/shard.png")
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            await get_basic_profile_card(rqd.profile_info)
+            await get_basic_profile_card(rqd.profile)
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 说明
                 TextBox("仅显示简略估计数据（假设Clear的歌曲都是S评级，未FC的歌曲都没拿到连击奖励）",
