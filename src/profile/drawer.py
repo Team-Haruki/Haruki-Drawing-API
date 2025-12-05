@@ -194,14 +194,14 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
                 )
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
                     source = profile.source or "?"
-                    update_time = datetime.fromtimestamp(rqd.update_time / 1000)
+                    update_time = datetime.fromtimestamp(profile.update_time / 1000)
                     update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                    user_id = process_hide_uid(profile.is_hide_uid,rqd.id, keep=6)
+                    user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
                     colored_text_box(
                         truncate(profile.nickname, 64),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
                     )
-                    TextBox(f"{rqd.region.upper()}: {user_id} Suite数据", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                    TextBox(f"{profile.region.upper()}: {user_id} Suite数据", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     TextBox(f"数据来源: {source}  获取模式: {mode}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
     return f
