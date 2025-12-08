@@ -4,7 +4,8 @@ from src.base.configs import (
     ASSETS_BASE_DIR,
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
-    RESULT_ASSET_PATH
+    RESULT_ASSET_PATH,
+    DEFAULT_HEAVY_FONT
 )
 from src.base.draw import(
     BG_PADDING,
@@ -30,13 +31,15 @@ from src.base.plot import(
     TextStyle,
     TextBox,
     Spacer,
-    Grid
+    Grid,
+    RoundRectBg
 )
 from src.base.painter import(
     SHADOW,
     RED,
     BLACK,
-    WHITE
+    WHITE,
+    
 )
 from src.profile.drawer import (
     get_avatar_widget_with_frame,
@@ -178,7 +181,7 @@ async def compose_mysekai_resource_image(
                 for site_res_num in site_res_nums:
                     res_nums = site_res_num.resource_numbers
                     if not res_nums: continue
-                    with HSplit().set_bg(roundrect_bg()).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(16):
+                    with HSplit().set_bg(roundrect_bg(alpha=80)).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(16):
                         site_img = await get_img_from_path(ASSETS_BASE_DIR, site_res_num.image_path)
                         ImageBox(site_img, size=(None, 85))
                         
@@ -208,4 +211,101 @@ async def compose_mysekai_resource_image(
                                         overflow='clip'
                                     ).set_w(80).set_content_align('l')
     add_watermark(canvas)
+    return await canvas.get_img()
+
+
+# 合成mysekai家具列表图片
+async def compose_mysekai_fixture_list_image(
+    rqd: MysekaiFixtureListRequest
+) -> Image.Image:
+    # 
+    mysekai_info = rqd.mysekai_info
+    error_message = rqd.error_message
+    # 收集进度
+    progress_message = rqd.progress_message
+    # 是否显示家具id
+    show_id = rqd.show_id
+    # 家具列表
+    main_genres = rqd.main_genres
+    # 获取玩家已获得的蓝图对应的家具ID
+    text_color = (75, 75, 75)
+
+    # 绘制
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16) as vs:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+                if mysekai_info:
+                    await get_mysekai_info_card(mysekai_info, error_message)
+
+            if progress_message:
+                TextBox(progress_message, 
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color)) \
+                        .set_padding(16).set_bg(roundrect_bg(alpha=80))
+
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
+                # 一级分类
+                for main_genre in main_genres:
+                    if len(main_genre.sub_genres) == 0: continue
+                    with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_padding(8):
+                        # 标签
+                        image = await get_img_from_path(ASSETS_BASE_DIR, main_genre.image_path)    
+                        with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
+                            ImageBox(image, size=(None, 30), use_alpha_blend=True).set_bg(RoundRectBg(fill=(100,100,100,255), radius=2))
+                            TextBox(main_genre.title, TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=text_color))
+                            if main_genre.progress_message:
+                                TextBox(main_genre.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
+                        # 二级分类
+                        for sub_genre in main_genre.sub_genres:
+                            if len(sub_genre.fixtures) == 0: continue
+                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_padding(8):
+                                # 标签
+                                if sub_genre.title and sub_genre.image_path and len(main_genre.sub_genres) > 1: # 无二级分类或只有一个二级分类的不加标签
+                                    image = await get_img_from_path(ASSETS_BASE_DIR, sub_genre.image_path)    
+                                    with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
+                                        ImageBox(image, size=(None, 23), use_alpha_blend=True).set_bg(RoundRectBg(fill=(100,100,100,255), radius=2))
+                                        TextBox(sub_genre.title, TextStyle(font=DEFAULT_HEAVY_FONT, size=15, color=text_color))
+                                        if sub_genre.progress_message:
+                                            TextBox(sub_genre.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
+                                
+                                # 通过角色id获取角色图标 TODO: 或许这里可以有更好的方法
+                                async def get_chara_icon_by_chara_id(cid:int)->Image.Image:
+                                    nickname = {
+                                        1:"ick", 2:"saki", 3:"hnm", 4:"shiho",
+                                        5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
+                                        9:"khn", 10:"an", 11:"akt", 12:"toya",
+                                        13:"tks", 14:"emu", 15:"nene", 16:"rui",
+                                        17:"knd", 18:"mfy", 19:"ena", 20:"mzk",
+                                        21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito"
+                                    }.get(cid)
+                                    return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
+                                # 绘制单个家具
+                                async def draw_single_fixture(fixture: MysekaiSingleFixture):
+                                    f_sz = 30
+                                    image = await get_img_from_path(ASSETS_BASE_DIR, fixture.image_path)
+                                    with VSplit().set_content_align('c').set_item_align('c').set_sep(0):
+                                        with Frame().set_content_align('rt'):
+                                            ImageBox(image, size=(f_sz, f_sz), use_alpha_blend=True)
+                                            if fixture.character_id is not None:
+                                                chara_icon = await get_chara_icon_by_chara_id(fixture.character_id)
+                                                ImageBox(chara_icon, size=(12, 12), use_alpha_blend=False)
+                                            if not fixture.obtained:
+                                                Spacer(w=f_sz, h=f_sz).set_bg(RoundRectBg(fill=(0,0,0,80), radius=2))
+                                        if show_id:
+                                            TextBox(f"{fixture.id}", TextStyle(font=DEFAULT_FONT, size=10, color=(50, 50, 50)))
+                                COL_COUNT = 20 # 一行20个
+                                sep = 3
+                                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
+                                    for cur_y in range(0, len(sub_genre.fixtures), COL_COUNT):
+                                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
+                                            for single_fixture in sub_genre.fixtures[cur_y:cur_y+COL_COUNT]:
+                                                await draw_single_fixture(single_fixture)
+                                    
+        pass# 到这里绘制完毕
+    add_watermark(canvas)
+
+    # # 缓存非玩家查询的msf
+    # cache_key = None
+    # if not qid and show_id and not only_craftable:
+    #     cache_key = f"{ctx.region}_msf"
+
     return await canvas.get_img()
