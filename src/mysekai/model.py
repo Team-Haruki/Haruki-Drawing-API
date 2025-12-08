@@ -110,7 +110,7 @@ class MysekaiResourceRequest(BaseModel):
     Attributes
     ----------
     mysekai_info : MysekaiInfoCardRequest
-        烤森基础信息
+        我的世界基础信息
     background_image_path : Optional[ str ] = None
         背景图片路径
     phenoms : List[ MysekaPhenomRequest ]
@@ -133,6 +133,93 @@ class MysekaiResourceRequest(BaseModel):
     gate_level: int
     visit_characters: List[MysekaiVisitCharacter]
     site_resource_numbers: Optional[List[MysekaiSiteResourceNumber]] = None
+    error_message: Optional[str] = None
+
+class MysekaiSingleFixture(BaseModel):
+    r"""MysekaiSingleFixture
+
+    我的世界单个家具信息
+
+    Attributes
+    ----------
+    id : int
+        家具的id
+    image_path : str
+        家具的图片
+    character_id : Optional[ int ] = None
+        角色id，如果是生日家具，在上面绘制对应的角色图片
+    obtained : bool = True
+        是否已拥有家具，未拥有的家具将显示为灰色
+    """
+    id: int
+    image_path: str
+    character_id: Optional[int] = None
+    obtained: bool = True
+
+class MysekaiFixtureSubGenre(BaseModel):
+    r"""MysekaiFixtureSubGenre
+
+    我的世界家具子分类信息
+
+    Attributes
+    ----------
+    title : Optional[ str ] = None
+        分类标题，标签
+    image_path : Optional[ str ] = None
+        分类图片
+    progress_message : Optional[ str ] = None
+        分类收集进度信息
+    fixtures : List[ MysekaiSingleFixture ] = [ ]
+        分类中的家具列表
+    """
+    title: Optional[str] = None
+    image_path: Optional[str] = None
+    progress_message: Optional[str] = None
+    fixtures: List[MysekaiSingleFixture] = []
+class MysekaiFixtureMainGenre(BaseModel):
+    r"""MysekaiFixtureMainGenre
+
+    我的世界家具主分类信息
+
+    Attributes
+    ----------
+    ----------
+    title : str
+        分类标题，标签
+    image_path : str
+        分类图片
+    progress_message : Optional[ str ] = None
+        分类收集进度信息
+    sub_genres : List[ MysekaiFixtureSubGenre ] = [ ]
+        分类中的子分类列表
+    """
+    title: str
+    image_path: str
+    progress_message: Optional[str] = None
+    sub_genres: List[MysekaiFixtureSubGenre] = []
+
+class MysekaiFixtureListRequest(BaseModel):
+    r"""MysekaiFixtureListRequest
+
+    绘制我的世界家具列表图片所必需的数据
+
+    Attributes
+    ----------
+    mysekai_info : Optional[ MysekaiInfoCardRequest ] = None
+        我的世界基础信息
+    progress_message : Optinal[ str ] = None
+        收集进度信息
+    show_id : bool = False
+        是否绘制家具的id
+    main_genres : List[ MysekaiFixtureMainGenre ] = [ ]
+        家具分类列表
+    error_message : Optional[ str ] = None
+        错误信息
+    """
+    mysekai_info: Optional[MysekaiInfoCardRequest] = None
+    progress_message: Optional[str] = None
+    show_id: bool = False
+    main_genres: List[MysekaiFixtureMainGenre] = []
     error_message: Optional[str] = None
 
 # 各团代表色，没有VS团！
