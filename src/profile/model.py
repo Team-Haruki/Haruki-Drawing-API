@@ -2,6 +2,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Literal
 from src.honor.drawer import HonorRequest
 
+
 class DetailedProfileCardRequest(BaseModel):
     id: str
     region: str
@@ -13,6 +14,76 @@ class DetailedProfileCardRequest(BaseModel):
     leader_image_path: str
     has_frame: bool = False
     frame_path: Optional[str] = None
+
+class BasicProfile(BaseModel):
+    r"""BasicProfile
+
+    玩家基本信息
+
+    Attributes
+    ----------
+    id : str
+        玩家id
+    region : str
+        服务器
+    nickname : str
+        昵称
+    is_hide_uid : bool = False
+        是否隐藏id
+    leader_image_path : str
+        队长头像图片路径
+    has_frame : bool = False
+        是否有框
+    frame_path : Optional[ str ] = None
+        框的路径
+    """
+    id: str
+    region: str
+    nickname: str
+    is_hide_uid: bool = False
+    leader_image_path: str
+    has_frame: bool = False
+    frame_path: Optional[str] = None
+
+class ProfileDataSource(BaseModel):
+    r"""ProfileDataSource
+
+    玩家个人信息数据源
+
+    Attributes
+    ----------
+    name : str
+        数据名称
+    source : str
+        数据来源
+    update_time : int
+        数据更新时间
+    mode : Optional[ str ] = None
+        数据获取模式
+    """
+    name: str
+    source: str
+    update_time: int
+    mode: Optional[str] = None
+
+class ProfileCardRequest(BaseModel):
+    r"""ProfileCardRequest
+
+    用于合成玩家个人信息的简单卡片控件
+
+    Attributes
+    ----------
+    profile : Optional[ BasicProfile ] = None
+        玩家个人信息
+    data_sources: Optional[ List[ ProfileDataSource ] ] = None
+        数据源信息
+    error_message : Optional[str] = None
+        错误或警告
+    """
+    profile: Optional[BasicProfile] = None
+    data_sources: Optional[List[ProfileDataSource]] = None
+    error_message: Optional[str] = None
+
 
 class CardFullThumbnailRequest(BaseModel):
     card_id: int
@@ -29,40 +100,6 @@ class CardFullThumbnailRequest(BaseModel):
     custom_text: Optional[str] = None
     card_level: Optional[dict] = None
     is_pcard: bool = False
-
-class BasicProfileCardRequest(BaseModel):
-    r"""BasicProfileCardRequest
-
-    用于获取玩家基本信息的简单卡片控件，
-    其实和详细信息的差不多
-
-    Attributes
-    ----------
-    id : str
-        玩家id
-    region : str
-        服务器
-    nickname : str
-        昵称
-    update_time : Optional[ int ] = None
-        更新时间
-    is_hide_uid : bool = False
-        是否隐藏id
-    leader_image_path : str
-        队长头像图片路径
-    has_frame : bool = False
-        是否有框
-    frame_path : Optional[ str ] = None
-        框的路径
-    """
-    id: str
-    region: str
-    nickname: str
-    update_time: Optional[int] = None
-    is_hide_uid: bool = False
-    leader_image_path: str
-    has_frame: bool = False
-    frame_path: Optional[str] = None
 
 class ProfileBgSettings(BaseModel):
     r"""ProfileBgSettings
@@ -146,7 +183,7 @@ class ProfileRequest(BaseModel):
 
     Attributes
     ----------
-    profile : BasicProfileCardRequest
+    profile : ProfileCardRequest
         基本个人信息
     rank : int
         玩家等级
@@ -166,8 +203,10 @@ class ProfileRequest(BaseModel):
         角色等级信息
     solo_live : Optional[ SoloLiveRank ] = None
         挑战live等级
+    update_time : Optional[ int ] = None
+        更新时间
     """
-    profile: BasicProfileCardRequest
+    profile: BasicProfile
     rank: int
     twitter_id: str = ''
     word: str = ''
@@ -177,3 +216,4 @@ class ProfileRequest(BaseModel):
     music_difficulty_count: List[MusicClearCount] = []
     character_rank: List[CharacterRank] = []
     solo_live: Optional[SoloLiveRank] = None
+    update_time: Optional[int] = None
