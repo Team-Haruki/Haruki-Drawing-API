@@ -32,65 +32,27 @@ from src.base.plot import(
     TextBox,
     Spacer,
     Grid,
-    RoundRectBg
+    RoundRectBg,
+    Widget
 )
 from src.base.painter import(
     SHADOW,
     RED,
     BLACK,
     WHITE,
-    
+    color_code_to_rgb,
+    lerp_color,
+    ADAPTIVE_SHADOW
 )
 from src.profile.drawer import (
     get_avatar_widget_with_frame,
     process_hide_uid,
+    ProfileCardRequest,
+    get_profile_card
 )
 
 
 from .model import *
-
-
-# 获取玩家mysekai抓包数据的简单卡片 返回 Frame
-async def get_mysekai_info_card(mysekai_info: MysekaiInfoCardRequest, err_msg: str) -> Frame:
-    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
-        with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
-            if mysekai_info:
-                frame_path = mysekai_info.frame_path
-                has_frame = mysekai_info.has_frame
-                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, mysekai_info.leader_image_path)
-                avatar_widget = await get_avatar_widget_with_frame(
-                    is_frame=bool(has_frame),
-                    frame_path=frame_path,
-                    avatar_img=avatar_img,
-                    avatar_w=80,
-                    frame_data=[]
-                )
-                with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
-                    source = mysekai_info.source                    
-                    update_time = datetime.fromtimestamp(mysekai_info.update_time)
-                    update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                    mode = mysekai_info.mode                    
-                    user_id = process_hide_uid(mysekai_info.is_hide_uid, mysekai_info.id, keep=6)
-                    
-                    with HSplit().set_content_align('lb').set_item_align('lb').set_sep(5):
-                        hs = colored_text_box(
-                            truncate(mysekai_info.nickname, 64),
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2, shadow_color=SHADOW), # TODO: shadow_color=ADAPTIVE_SHADOW 自适应颜色暂未实现
-                        )
-                        name_length = 0
-                        for item in hs.items:
-                            if isinstance(item, TextBox):
-                                name_length += get_str_display_length(item.text)
-                        ms_lv = mysekai_info.mysekai_rank
-                        ms_lv_text = f"MySekai Lv.{ms_lv}" if name_length <= 12 else f"MSLv.{ms_lv}"
-                        TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
-
-                    TextBox(f"{mysekai_info.region.upper()}: {user_id} Mysekai数据", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                    TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                    TextBox(f"数据来源: {source}  获取模式: {mode}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-            if err_msg:
-                TextBox(f"获取数据失败:{err_msg}", TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(240)
-    return f
 
 # 绘制数量图
 async def compose_mysekai_resource_image(
@@ -119,8 +81,7 @@ async def compose_mysekai_resource_image(
     else:
         bg = SEKAI_BLUE_BG
     # 基本信息
-    mysekai_info = rqd.mysekai_info
-    error_message = rqd.error_message
+    profile = rqd.profile
     # 天气
     phenoms = rqd.phenoms
     # 到访角色列表
@@ -132,7 +93,7 @@ async def compose_mysekai_resource_image(
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16) as vs:
 
             with HSplit().set_sep(28).set_content_align('lb'):
-                await get_mysekai_info_card(mysekai_info, error_message)
+                await get_profile_card(profile)
 
                 # 天气预报
                 with HSplit().set_sep(8).set_content_align('lb').set_bg(roundrect_bg(alpha=80)).set_padding(10):
@@ -162,7 +123,7 @@ async def compose_mysekai_resource_image(
                         ImageBox(gate_icon, size=(64, 64), use_alpha_blend=True, shadow=True).set_offset((0, -4))
                         TextBox(
                             f"Lv.{gate_level}", 
-                            TextStyle(DEFAULT_FONT, 16, UNIT_COLORS[gate_id-1], use_shadow=True, shadow_color=SHADOW), # TODO: shadow_color=ADAPTIVE_SHADOW 暂未实现
+                            TextStyle(DEFAULT_FONT, 16, UNIT_COLORS[gate_id-1], use_shadow=True, shadow_color=ADAPTIVE_SHADOW),
                         ).set_content_align('c').set_offset((4, 2))
 
                     for character in visit_characters:
@@ -218,9 +179,21 @@ async def compose_mysekai_resource_image(
 async def compose_mysekai_fixture_list_image(
     rqd: MysekaiFixtureListRequest
 ) -> Image.Image:
-    # 
-    mysekai_info = rqd.mysekai_info
-    error_message = rqd.error_message
+    r"""compose_mysekai_fixture_list_image
+
+    合成我的世界家具列表图片
+
+    Args
+    ----
+    rqd : MysekaiFixtureListRequest
+        合成我的世界家具列表图片所必须的数据
+    
+    Returns
+    -------
+    PIL.Image.Image
+    """
+    # 个人信息
+    profile = rqd.profile
     # 收集进度
     progress_message = rqd.progress_message
     # 是否显示家具id
@@ -234,8 +207,8 @@ async def compose_mysekai_fixture_list_image(
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16) as vs:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-                if mysekai_info:
-                    await get_mysekai_info_card(mysekai_info, error_message)
+                if profile:
+                    await get_profile_card(profile)
 
             if progress_message:
                 TextBox(progress_message, 
@@ -303,9 +276,210 @@ async def compose_mysekai_fixture_list_image(
         pass# 到这里绘制完毕
     add_watermark(canvas)
 
-    # # 缓存非玩家查询的msf
-    # cache_key = None
-    # if not qid and show_id and not only_craftable:
-    #     cache_key = f"{ctx.region}_msf"
+    return await canvas.get_img()
 
+
+# 获取mysekai家具详情卡片控件 返回Widget
+async def get_mysekai_fixture_detail_image_card(
+        rqd: MysekaiFixtureDetailRequest
+) -> Widget:
+    r"""get_mysekai_fixture_detail_image_card
+
+    获取我的世界家具详情卡片控件
+
+    Args
+    ----
+    rqd : MysekaiFixtureDetailRequest
+        获取我的世界家具详情卡片控件所必须的数据
+    
+    Returns
+    -------
+    Widget
+    """
+    # 标题
+    title_text = rqd.title
+    # 家具
+    color_images = rqd.images
+    basic_info = rqd.basic_info
+    cost_materials = rqd.cost_materials
+    recycle_materials = rqd.recycle_materials
+    reaction_character_groups = rqd.reaction_character_groups
+    tags = rqd.tags
+    friendcodes = rqd.friendcodes
+    friendcode_source = rqd.friendcode_source
+    w = 600
+    with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16) as vs:
+        # 标题
+        TextBox(title_text, TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(20, 20, 20)), use_real_line_count=True).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16)
+        # 缩略图列表
+        with Grid(col_count=5).set_content_align('c').set_item_align('c').set_sep(8, 4).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+            for color_img in color_images:
+                img = await get_img_from_path(ASSETS_BASE_DIR, color_img.image_path)
+                with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                    ImageBox(img, size=(None, 100), use_alpha_blend=True, shadow=True)
+                    if color_img.color_code:
+                        Frame().set_size((100, 20)).set_bg(RoundRectBg(
+                            fill=color_code_to_rgb(color_img.color_code), 
+                            radius=4,
+                            stroke=(150, 150, 150, 255), stroke_width=3,
+                        ))
+        if basic_info:
+            # 基本信息
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+                font_size, text_color = 18, (100, 100, 100)
+                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
+                for tag_row in basic_info.rows:
+                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                        for tag in tag_row:
+                            if tag.icon_path:
+                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
+                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                            TextBox(tag.text, style)
+                
+
+        # 制作材料
+        if cost_materials:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
+                TextBox("制作材料", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                with Grid(col_count=8).set_content_align('lt').set_sep(6, 6):
+                    for material in cost_materials:
+                        img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
+                        with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                            ImageBox(img, size=(50, 50), use_alpha_blend=True)
+                            TextBox(material.text, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
+
+        # 回收材料
+        if recycle_materials:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
+                TextBox("回收材料", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                with Grid(col_count=8).set_content_align('lt').set_sep(6, 6):
+                    for material in recycle_materials:
+                        img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
+                        with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                            ImageBox(img, size=(50, 50), use_alpha_blend=True)
+                            TextBox(material.text, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
+        # TODO: 或许可以用别的方法
+        async def get_chara_icon_by_chara_unit_id(cuid: int)->Image.Image:
+            r"""get_chara_icon_by_chara_unit_id 用cuid获取角色图标"""
+            nickname = {
+                1:"ick", 2:"saki", 3:"hnm", 4:"shiho", 5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
+                9:"khn", 10:"an", 11:"akt", 12:"toya", 13:"tks", 14:"emu", 15:"nene", 16:"rui", 
+                17:"knd", 18:"mfy", 19:"ena", 20:"mzk", 21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito",
+                27:"miku_light_sound", 28: "miku_idol", 29:"miku_street", 30: "miku_theme_park", 31:"miku_school_refusal",
+                32:"rin", 33:"rin", 34:"rin", 35:"rin", 36:"rin", 37:"len", 38:"len", 39:"len", 40:"len", 41:"len",
+                42:"luka", 43:"luka", 44:"luka", 45:"luka", 46:"luka", 47:"meiko", 48:"meiko", 49:"meiko", 50:"meiko", 51:"meiko",
+                52:"kaito", 53:"kaito", 54:"kaito", 55:"kaito", 56:"kaito"}.get(cuid)
+            return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
+        # 交互角色
+        if reaction_character_groups:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
+                TextBox("角色互动", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
+                    for chara_groups in reaction_character_groups:
+                        if not chara_groups.number: continue
+                        col_num_dict = { 1: 10, 2: 5, 3: 4, 4: 2 }
+                        col_num = col_num_dict[chara_groups.number]
+                        with Grid(col_count=col_num).set_content_align('c').set_sep(6, 4):
+                            for character_uint_ids in chara_groups.character_uint_id_groups:
+                                with HSplit().set_content_align('c').set_item_align('c').set_sep(4).set_padding(4).set_bg(roundrect_bg(alpha=80, radius=8)):
+                                    for cuid in character_uint_ids:
+                                        img = await get_chara_icon_by_chara_unit_id(cuid)
+                                        ImageBox(img, size=(40, 40), use_alpha_blend=True)
+
+        # 标签
+        if tags:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+                TextBox("标签", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                font_size, text_color = 18, (100, 100, 100)
+                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
+                for tag_row in tags.rows:
+                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                        for tag in tag_row:
+                            if tag.icon_path:
+                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
+                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                            TextBox(tag.text, style)
+
+        # 抄写好友码
+        if friendcodes:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+                with HSplit().set_content_align('lb').set_item_align('lb').set_sep(8).set_w(w):
+                    TextBox("抄写蓝图可前往", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50)))
+                    TextBox(friendcode_source, TextStyle(font=DEFAULT_FONT, size=14, color=(75, 75, 75)))
+                font_size, text_color = 18, (100, 100, 100)
+                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
+                for tag_row in friendcodes.rows:
+                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                        for tag in tag_row:
+                            if tag.icon_path:
+                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
+                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                            TextBox(tag.text, style)
+    return vs
+
+# 获取mysekai家具详情
+async def compose_mysekai_fixture_detail_image(rqds: List[MysekaiFixtureDetailRequest]) -> Image.Image:
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
+            for rqd in rqds:
+                await get_mysekai_fixture_detail_image_card(rqd)
+    add_watermark(canvas)
+    return await canvas.get_img()
+
+
+# 合成mysekai门升级材料图片
+async def compose_mysekai_door_upgrade_image(
+        rqd: MysekaiDoorUpgradeRequest
+) -> Image.Image:
+    r"""compose_mysekai_door_upgrade_image
+
+    合成我的世界大门升级材料图
+
+    Args
+    ----
+    rqd : MysekaiDoorUpgradeRequest
+        必需的数据
+    
+    Returns
+    -------
+    PIL.Image.Image
+    """
+    # 个人信息
+    profile = rqd.profile
+    # 大门升级材料
+    gate_materials = rqd.gate_materials
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+            # 个人信息
+            if profile:
+                await get_profile_card(profile)
+            with HSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_bg(roundrect_bg(alpha=80)).set_padding(8):
+                # 每个门
+                for gate_level_materials in gate_materials:
+                    gid = gate_level_materials.id
+                    gate_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/mysekai/gate_icon/gate_{gid}.png")
+                    with VSplit().set_content_align('c').set_item_align('c').set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_padding(8):
+                        spec_lv = gate_level_materials.level
+                        with HSplit().set_content_align('c').set_item_align('c').set_omit_parent_bg(True):
+                            ImageBox(gate_icon, size=(None, 40))
+                            if spec_lv:
+                                color = lerp_color(UNIT_COLORS[gid - 1], BLACK, 0.2)
+                                TextBox(f"Lv.{spec_lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=color, use_shadow=True, shadow_color=ADAPTIVE_SHADOW))
+                        # 每个等级
+                        for level_items in gate_level_materials.level_materials:
+
+                            with HSplit().set_content_align('l').set_item_align('l').set_sep(8).set_padding(8):
+                                TextBox(f"{level_items.level}", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=level_items.color), overflow='clip').set_w(32)
+                                # 每个材料
+                                for item in level_items.items:
+                                    with VSplit().set_content_align('c').set_item_align('c').set_sep(4):
+                                        img = await get_img_from_path(ASSETS_BASE_DIR, item.image_path)
+                                        with Frame():
+                                            sz = 64
+                                            ImageBox(img, size=(sz, sz))
+                                            TextBox(f"x{item.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(50, 50, 50))) \
+                                                .set_offset((sz, sz)).set_offset_anchor('rb')
+                                        TextBox(item.sum_quantity, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=item.color))
+    add_watermark(canvas)
+    
     return await canvas.get_img()

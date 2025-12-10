@@ -12,6 +12,7 @@ from src.base.painter import(
     get_font,
     WHITE,
     ADAPTIVE_WB,
+    RED
 )
 from src.base.plot import (
     Frame,
@@ -206,7 +207,7 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
                     TextBox(f"数据来源: {source}  获取模式: {mode}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
     return f
 # 获取玩家基本信息的简单卡片控件，返回Frame
-async def get_basic_profile_card(profile: BasicProfileCardRequest) -> Frame:
+async def get_basic_profile_card(profile: BasicProfile) -> Frame:
     with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             frame_path = profile.frame_path
@@ -226,11 +227,9 @@ async def get_basic_profile_card(profile: BasicProfileCardRequest) -> Frame:
                     TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
                 )
                 TextBox(f"{profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                if profile.update_time:
-                    update_time = datetime.fromtimestamp(profile.update_time / 1000)
-                    update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                    TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
     return f
+
+# 统一的合成玩家
 
 async def compose_profile_image(
     rqd: ProfileRequest
@@ -305,9 +304,9 @@ async def compose_profile_image(
                 with VSplit().set_content_align('c').set_item_align('l').set_sep(16):
                     colored_text_box(
                         truncate(rqd.profile.nickname, 64),
-                        TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=BLACK, use_shadow=True, shadow_offset=2),
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=ADAPTIVE_WB, use_shadow=True, shadow_offset=2),
                     )
-                    TextBox(f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}", TextStyle(font=DEFAULT_FONT, size=20, color=BLACK))
+                    TextBox(f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB))
                     with Frame():
                         lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/lv_rank_bg.png")
                         ImageBox(lv_rank_bg, size=(180, None))
@@ -316,7 +315,7 @@ async def compose_profile_image(
             # 推特
             with Frame().set_content_align('l').set_w(450):
                 tw_id = rqd.twitter_id
-                tw_id_box = TextBox('        @ ' + tw_id, TextStyle(font=DEFAULT_FONT, size=20, color=BLACK), line_count=1)
+                tw_id_box = TextBox('        @ ' + tw_id, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=1)
                 tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align('l')
                 x_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/x_icon.png")
                 x_icon = x_icon.resize((24, 24)).convert('RGBA')
@@ -325,7 +324,7 @@ async def compose_profile_image(
             # 留言
             user_word = rqd.word
             user_word = re.sub(r'<#.*?>', '', user_word)
-            user_word_box = TextBox(user_word, TextStyle(font=DEFAULT_FONT, size=20, color=BLACK), line_count=3)
+            user_word_box = TextBox(user_word, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=3)
             user_word_box.set_wrap(True).set_bg(ui_bg).set_line_sep(2).set_padding((18, 16)).set_w(450)
 
             # 头衔
@@ -438,7 +437,7 @@ async def compose_profile_image(
                 (await draw_play()).set_bg(None)
                 (await draw_chara()).set_bg(None)
 
-    if profile.update_time:
+    if rqd.update_time:
         update_time = datetime.fromtimestamp(profile.update_time / 1000).strftime('%Y-%m-%d %H:%M:%S')
     else:
         update_time = "?"
@@ -447,3 +446,62 @@ async def compose_profile_image(
         text = text + f"  This background is user-uploaded."
     add_watermark(canvas, text)
     return await canvas.get_img(1.5)
+
+
+# 获取玩家个人信息的简单卡片控件
+async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
+    r"""get_profile_card
+
+    获取玩家个人信息的简单卡片控件
+    
+    Args
+    ----
+        rqd : ProfileCardRequest
+    
+    Returns
+    -------
+    Frame
+    """
+    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
+        with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
+            # 个人信息
+            if rqd.profile:
+                # 框
+                frame_path = rqd.profile.frame_path
+                has_frame = rqd.profile.has_frame
+                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
+                # 头像
+                avatar_widget = await get_avatar_widget_with_frame(
+                    is_frame=bool(has_frame),
+                    frame_path=frame_path,
+                    avatar_img=avatar_img,
+                    avatar_w=80,
+                    frame_data=[]
+                )
+                with VSplit().set_content_align('c').set_item_align('l').set_sep(5):
+                    # 昵称、id和区服
+                    colored_text_box(
+                        truncate(rqd.profile.nickname, 64),
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
+                    )
+                    user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
+                    TextBox(f"{rqd.profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                    # 数据源信息
+                    if rqd.data_sources:
+                        for data_source in rqd.data_sources:
+                            # 数据名称
+                            TextBox(f"{data_source.name}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                            # 数据更新时间
+                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                            update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
+                            TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                            # 数据来源
+                            source = data_source.source or "?"
+                            source_mode = f"数据来源: {source}"
+                            # 数据获取模式
+                            if data_source.mode:
+                                source_mode += f"  获取模式: {data_source.mode}"
+                            TextBox(source_mode, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+            # 错误/警告
+            if rqd.error_message:
+                TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(240)

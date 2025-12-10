@@ -1,7 +1,7 @@
 # 绘图所需的数据类型
 from pydantic import BaseModel
 from typing import Any, List, Dict, Literal, Tuple
-from src.profile.drawer import DetailedProfileCardRequest, BasicProfileCardRequest
+from src.profile.drawer import DetailedProfileCardRequest, BasicProfile
 
 # =========================== 数据类的定义 =========================== #
 
@@ -169,7 +169,7 @@ class BasicMusicRewardsRequest(BaseModel):
             'append': '1785(15X119首)'
         }
         ```
-    profile : BasicProfileCardRequest
+    profile : BasicProfile
         用于获取玩家基本信息的简单卡片控件
     """
 
@@ -180,5 +180,5 @@ class BasicMusicRewardsRequest(BaseModel):
         'master': '0', 
         'append': '0'
     }
-    profile: BasicProfileCardRequest
+    profile: BasicProfile
 
