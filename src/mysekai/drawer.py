@@ -33,7 +33,8 @@ from src.base.plot import(
     Spacer,
     Grid,
     RoundRectBg,
-    Widget
+    Widget,
+    FillBg
 )
 from src.base.painter import(
     SHADOW,
@@ -100,6 +101,7 @@ async def compose_mysekai_resource_image(
                     for phenom in phenoms:
                         if phenom.refresh_reason == 'natural':
                             phenom_img = await get_img_from_path(ASSETS_BASE_DIR, phenom.image_path)
+                            
                         else:
                             bd_status = phenom.refresh_reason.split('_')[0]
                             phenom_img = await get_img_from_path(ASSETS_BASE_DIR, phenom.image_path)    # 露滴道具
@@ -300,6 +302,7 @@ async def get_mysekai_fixture_detail_image_card(
     title_text = rqd.title
     # 家具
     color_images = rqd.images
+    fsize = rqd.size
     basic_info = rqd.basic_info
     cost_materials = rqd.cost_materials
     recycle_materials = rqd.recycle_materials
@@ -323,18 +326,27 @@ async def get_mysekai_fixture_detail_image_card(
                             radius=4,
                             stroke=(150, 150, 150, 255), stroke_width=3,
                         ))
-        if basic_info:
-            # 基本信息
-            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
-                font_size, text_color = 18, (100, 100, 100)
-                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
-                for tag_row in basic_info.rows:
+        # 基本信息
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+            font_size, text_color = 18, (100, 100, 100)
+            style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
+            with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
+                TextBox(f"【类型】", style)
+                main_genre_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.main_genre_image_path)
+                ImageBox(main_genre_image, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                TextBox(rqd.main_genre_name, style)
+                if rqd.sub_genre_name:
+                    TextBox(f" > ", TextStyle(font=DEFAULT_HEAVY_FONT, size=font_size, color=text_color))
+                    if rqd.sub_genre_image_path:
+                        sub_genre_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.sub_genre_image_path)
+                        ImageBox(sub_genre_image, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                    TextBox(rqd.sub_genre_name, style)
+                TextBox(f"【大小】长x宽x高={fsize['width']}x{fsize['depth']}x{fsize['height']}", style)
+            if basic_info:
+                for row in basic_info:
                     with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
-                        for tag in tag_row:
-                            if tag.icon_path:
-                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
-                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
-                            TextBox(tag.text, style)
+                        for tag in row:
+                            TextBox(tag, style)
                 
 
         # 制作材料
@@ -358,7 +370,7 @@ async def get_mysekai_fixture_detail_image_card(
                         with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
                             ImageBox(img, size=(50, 50), use_alpha_blend=True)
                             TextBox(material.text, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
-        # TODO: 或许可以用别的方法
+
         async def get_chara_icon_by_chara_unit_id(cuid: int)->Image.Image:
             r"""get_chara_icon_by_chara_unit_id 用cuid获取角色图标"""
             nickname = {
@@ -390,15 +402,10 @@ async def get_mysekai_fixture_detail_image_card(
         if tags:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
                 TextBox("标签", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
-                font_size, text_color = 18, (100, 100, 100)
-                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
-                for tag_row in tags.rows:
-                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
-                        for tag in tag_row:
-                            if tag.icon_path:
-                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
-                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
-                            TextBox(tag.text, style)
+                for row in tags:
+                    tag_text = ""
+                    for tag in row: tag_text += f"【{tag}】"
+                    TextBox(tag_text, TextStyle(font=DEFAULT_FONT, size=18, color=(100, 100, 100)), line_count=10, use_real_line_count=True).set_w(w)
 
         # 抄写好友码
         if friendcodes:
@@ -406,15 +413,9 @@ async def get_mysekai_fixture_detail_image_card(
                 with HSplit().set_content_align('lb').set_item_align('lb').set_sep(8).set_w(w):
                     TextBox("抄写蓝图可前往", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50)))
                     TextBox(friendcode_source, TextStyle(font=DEFAULT_FONT, size=14, color=(75, 75, 75)))
-                font_size, text_color = 18, (100, 100, 100)
-                style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
-                for tag_row in friendcodes.rows:
-                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
-                        for tag in tag_row:
-                            if tag.icon_path:
-                                img = await get_img_from_path(ASSETS_BASE_DIR, tag.icon_path)
-                                ImageBox(img, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
-                            TextBox(tag.text, style)
+                for row in friendcodes:
+                    code_text = "      ".join(row)
+                    TextBox(code_text, TextStyle(font=DEFAULT_FONT, size=18, color=(100, 100, 100)), line_count=10, use_real_line_count=True).set_w(w)
     return vs
 
 # 获取mysekai家具详情
@@ -481,5 +482,63 @@ async def compose_mysekai_door_upgrade_image(
                                                 .set_offset((sz, sz)).set_offset_anchor('rb')
                                         TextBox(item.sum_quantity, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=item.color))
     add_watermark(canvas)
-    
+    return await canvas.get_img()
+
+
+# 合成mysekai唱片列表
+async def compose_mysekai_musicrecord_image(
+        rqd: MysekaiMusicrecordRequest
+) -> Image.Image:
+    r"""compose_mysekai_musicrecord_image
+
+    合成我的世界唱片列表
+
+    Args
+    ----
+    rqd : MysekaiMusicrecordRequest
+        绘制我的世界唱片收集图所必需的数据
+
+    Returns
+    -------
+    PIL.Image.Image
+    """        
+    profile = rqd.profile
+    category_musicrecords = rqd.category_musicrecords
+
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16) as vs:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+                await get_profile_card(profile)
+                if rqd.progress_message:
+                    TextBox(rqd.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(100, 100, 100))) \
+                        .set_padding(16).set_bg(roundrect_bg(alpha=80))
+
+                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg()):
+                   for category_music in category_musicrecords:
+                        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(5).set_item_bg(roundrect_bg()).set_padding(8):
+                            # 标签
+                            tag = category_music.tag
+                            with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
+                                if (unit:= MUSIC_TAG_UNIT_MAP[tag]):
+                                    tag_icon = await get_img_from_path(ASSETS_BASE_DIR,f"{RESULT_ASSET_PATH}/icon_{unit}.png")
+                                    ImageBox(tag_icon, size=(None, 30))
+                                else:
+                                    TextBox("其他", TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=(100, 100, 100)))
+                                if category_music.progress_message:
+                                    TextBox(category_music.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(100, 100, 100)))
+
+                            # 歌曲列表
+                            sz = 30
+                            with Grid(col_count=20).set_content_align('lt').set_item_align('lt').set_sep(3, 3).set_padding(8):
+                                for musicrecord in category_music.musicrecords:
+                                    with VSplit().set_content_align('c').set_item_align('c').set_sep(3):
+                                        with Frame():
+                                            img = await get_img_from_path(ASSETS_BASE_DIR, musicrecord.image_path)
+                                            ImageBox(img, size=(sz, sz))
+                                            if not musicrecord.obtained:
+                                                Spacer(w=sz, h=sz).set_bg(FillBg((0,0,0,120)))
+                                        if musicrecord.id:
+                                            TextBox(f"{musicrecord.id}", TextStyle(font=DEFAULT_FONT, size=10, color=(50, 50, 50)))
+
+    add_watermark(canvas)
     return await canvas.get_img()
