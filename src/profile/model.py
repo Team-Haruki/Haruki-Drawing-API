@@ -54,16 +54,16 @@ class ProfileDataSource(BaseModel):
     ----------
     name : str
         数据名称
-    source : str
+    source : Optional[ str ] = None
         数据来源
-    update_time : int
+    update_time : Optional[ int ] = None
         数据更新时间
     mode : Optional[ str ] = None
         数据获取模式
     """
     name: str
-    source: str
-    update_time: int
+    source: Optional[str] = None
+    update_time: Optional[int] = None
     mode: Optional[str] = None
 
 class ProfileCardRequest(BaseModel):

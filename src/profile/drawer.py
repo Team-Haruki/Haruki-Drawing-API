@@ -490,18 +490,17 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     if rqd.data_sources:
                         for data_source in rqd.data_sources:
                             # 数据名称
-                            TextBox(f"{data_source.name}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                            # 数据更新时间
-                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
-                            update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                            TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                            # 数据来源
-                            source = data_source.source or "?"
-                            source_mode = f"数据来源: {source}"
-                            # 数据获取模式
+                            source_text = data_source.name
+                            if data_source.source:
+                                source_text += f" 数据来源: {data_source.source}"
                             if data_source.mode:
-                                source_mode += f"  获取模式: {data_source.mode}"
-                            TextBox(source_mode, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                                source_text += f" 获取模式: {data_source.mode}"
+                            TextBox(f"{source_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                            # 数据更新时间
+                            if data_source.update_time:
+                                update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                                update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
+                                TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
             # 错误/警告
             if rqd.error_message:
                 TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(240)
