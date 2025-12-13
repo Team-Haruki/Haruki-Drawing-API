@@ -8,6 +8,8 @@ from typing import (
 from src.base.painter import Color
 from src.profile.model import ProfileCardRequest
 
+# =========================== 绘制资源数量=========================== #
+
 class MysekaiPhenomRequest(BaseModel):
     r"""MysekaiPhenomRequest
 
@@ -109,8 +111,6 @@ class MysekaiResourceRequest(BaseModel):
         到访的角色列表
     site_resource_numbers: Optional[ List[ MysekaiSiteResourceNumber ] ] = None
         每个地区的资源数量列表
-    error_message : Optional[ str ] = None
-        错误信息
     """
     profile: ProfileCardRequest
     background_image_path: Optional[str] = None 
@@ -119,10 +119,11 @@ class MysekaiResourceRequest(BaseModel):
     gate_level: int
     visit_characters: List[MysekaiVisitCharacter]
     site_resource_numbers: Optional[List[MysekaiSiteResourceNumber]] = None
-    error_message: Optional[str] = None
 
-class MysekaiSingleFixture(BaseModel):
-    r"""MysekaiSingleFixture
+# =========================== 绘制家具列表 =========================== #
+
+class MysekaiFixture(BaseModel):
+    r"""MysekaiFixture
 
     我的世界单个家具信息
 
@@ -134,13 +135,13 @@ class MysekaiSingleFixture(BaseModel):
         家具的图片
     character_id : Optional[ int ] = None
         角色id，如果是生日家具，在上面绘制对应的角色图片
-    obtained : bool = True
+    obtained : bool
         是否已拥有家具，未拥有的家具将显示为灰色
     """
     id: int
     image_path: str
     character_id: Optional[int] = None
-    obtained: bool = True
+    obtained: bool
 
 class MysekaiFixtureSubGenre(BaseModel):
     r"""MysekaiFixtureSubGenre
@@ -149,19 +150,19 @@ class MysekaiFixtureSubGenre(BaseModel):
 
     Attributes
     ----------
-    title : Optional[ str ] = None
-        分类标题，标签
+    name : Optional[ str ] = None
+        分类名，标签
     image_path : Optional[ str ] = None
         分类图片
     progress_message : Optional[ str ] = None
         分类收集进度信息
-    fixtures : List[ MysekaiSingleFixture ] = [ ]
+    fixtures : List[ MysekaiFixture ] = [ ]
         分类中的家具列表
     """
-    title: Optional[str] = None
+    name: Optional[str] = None
     image_path: Optional[str] = None
     progress_message: Optional[str] = None
-    fixtures: List[MysekaiSingleFixture] = []
+    fixtures: List[MysekaiFixture] = []
 
 class MysekaiFixtureMainGenre(BaseModel):
     r"""MysekaiFixtureMainGenre
@@ -170,8 +171,8 @@ class MysekaiFixtureMainGenre(BaseModel):
 
     Attributes
     ----------
-    title : str
-        分类标题，标签
+    name : str
+        分类名，标签
     image_path : str
         分类图片
     progress_message : Optional[ str ] = None
@@ -179,7 +180,7 @@ class MysekaiFixtureMainGenre(BaseModel):
     sub_genres : List[ MysekaiFixtureSubGenre ] = [ ]
         分类中的子分类列表
     """
-    title: str
+    name: str
     image_path: str
     progress_message: Optional[str] = None
     sub_genres: List[MysekaiFixtureSubGenre] = []
@@ -199,14 +200,13 @@ class MysekaiFixtureListRequest(BaseModel):
         是否绘制家具的id
     main_genres : List[ MysekaiFixtureMainGenre ] = [ ]
         家具分类列表
-    error_message : Optional[ str ] = None
-        错误信息
     """
     profile: Optional[ProfileCardRequest] = None
     progress_message: Optional[str] = None
     show_id: bool = False
     main_genres: List[MysekaiFixtureMainGenre] = []
-    error_message: Optional[str] = None
+
+# =========================== 绘制家具详情 =========================== #
 
 class MysekaiFixtureColorImage(BaseModel):
     r"""MysekaiFixtureColorImage
@@ -232,11 +232,11 @@ class MysekaiFixtureMaterial(BaseModel):
     ----------
     image_path : str
         图标路径
-    text : str
-        文本内容
+    quantity : int
+        制作所需或回收所得的材料数量
     """
     image_path: str
-    text: str
+    quantity: int
 
 class MysekaiReactionCharacterGroups(BaseModel):
     r"""MysekaiReactionCharacterGroups
@@ -305,6 +305,8 @@ class MysekaiFixtureDetailRequest(BaseModel):
     tags: Optional[List[List[str]]] = None
     friendcodes: Optional[List[List[str]]] = None
     friendcode_source: Optional[str] = None
+
+# =========================== 绘制大门升级 =========================== #
 
 class MysekaiGateMaterialItem(BaseModel):
     r"""MysekaiGateMaterialItem
@@ -379,6 +381,8 @@ class MysekaiDoorUpgradeRequest(BaseModel):
     profile: Optional[ProfileCardRequest] = None
     gate_materials: List[MysekaiGateMaterials]
 
+# =========================== 绘制唱片列表 =========================== #
+
 class MysekaiMusicrecord(BaseModel):
     r"""MysekaiMusicrecord
 
@@ -433,6 +437,78 @@ class MysekaiMusicrecordRequest(BaseModel):
     profile: ProfileCardRequest
     progress_message: Optional[str] = None
     category_musicrecords: List[MysekaiCategoryMusicrecord]
+
+# =========================== 绘制角色对话列表 =========================== #
+
+class MysekaiTalkFixtures(BaseModel):
+    r"""MysekaiTalkFixtures
+
+    我的世界家具组合，未读数量
+
+    Attributes
+    ----------
+    fixtures : List[ MysekaiFixture ] = []
+        家具组合，一个对话可以由多个家具触发
+    noread_num : int
+        未读的对话数量
+    character_ids: Optional[ List[ List[ int ] ] ] = None
+        参与对话的角色（当多人对话时需要）
+    """
+    fixtures: List[MysekaiFixture] = []
+    noread_num: int
+    character_ids: Optional[List[List[int]]] = None
+
+
+class MysekaiSingleTalkMainGenre(BaseModel):
+    r"""MysekaiSingleTalkMainGenre
+
+    我的世界单人对话家具一级分类
+
+    Attributes
+    ----------
+    name : str
+        主分类名
+    image_path : str
+        主分类图标路径
+    sub_genres: List[ List[ MysekaiTalkFixtures ] ] = []
+        单人对话家具组合和未读情况，按子分类分组，每个子分类下是多个家具组合
+    """
+    name: str 
+    image_path: str
+    sub_genres: List[List[MysekaiTalkFixtures]] = []
+
+
+class MysekaiTalkListRequest(BaseModel):
+    r"""MysekaiTalkListRequest
+
+    绘制我的世界对话列表所必需的数据
+
+    Attributes
+    ----------
+    profile : Optional[ ProfileCardRequest ] = None
+        个人信息（烤森数据来源，suite数据来源）
+    sd_image_path : str
+        角色的小人图片路径
+    progress_message : Optional[ str ] = None
+        收集进度信息
+    prompt_message : Optional[str] = None
+        提示信息，如：
+        *仅展示未读对话家具，灰色表示未获得蓝图
+    show_id : bool = False
+        是否显示家具id
+    single_main_genres : List[ MysekaiSingleTalkMainGenre ] = []
+        单人对话，按一级分类分组
+    multi_reads : List[ MysekaiTalkFixtures ] = []
+        多人对话，按家具组合分组
+    """
+    profile: Optional[ProfileCardRequest] = None
+    sd_image_path: str
+    progress_message: Optional[str] = None
+    prompt_message: Optional[str] = None
+    show_id: bool = False
+    single_main_genres: List[MysekaiSingleTalkMainGenre] = []
+    multi_reads: List[MysekaiTalkFixtures] = []
+
 
 # 各团代表色，没有VS团！
 UNIT_COLORS = [

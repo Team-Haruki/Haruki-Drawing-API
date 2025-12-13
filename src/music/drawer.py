@@ -2,7 +2,7 @@ from datetime import datetime
 import asyncio
 from PIL import Image
 
-from src.profile.drawer import get_detailed_profile_card, get_basic_profile_card
+from src.profile.drawer import get_detailed_profile_card, get_basic_profile_card, get_profile_card
 from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 from src.base.draw import (
     BG_PADDING,
@@ -342,7 +342,7 @@ async def compose_play_progress_image(
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
             if rqd.profile:
-                await get_detailed_profile_card(rqd.profile)
+                await get_profile_card(rqd.profile)
 
             bar_h, item_h, w = 200, 48, 48
             font_sz = 24
@@ -453,18 +453,11 @@ async def compose_detail_music_rewards_image(
     # 奖励的icon
     jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/jewel.png")
     shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/shard.png")
-    # 连击奖励
-    combo_rewards = {}
-    for diff in ['hard', 'expert', 'master', 'append']:
-        combo_rewards[diff] = {
-            combo_reward.level: combo_reward.reward \
-            for combo_reward in rqd.combo_rewards[diff]
-        }
     
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            await get_detailed_profile_card(rqd.profile)
+            await get_profile_card(rqd.profile)
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 乐曲评级奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
@@ -475,21 +468,20 @@ async def compose_detail_music_rewards_image(
                         set_size((None, gh))
                 # 连击奖励
                 with HSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
-                    for diff in combo_rewards:
+                    for diff in ('hard', 'expert', 'master', 'append'): # 因为go的map是无序的，用这个保证顺序
                         with HSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16):
                             # 难度
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
                                 Spacer(w=gw, h=gh)
-                                for lv in sorted(combo_rewards[diff].keys()):
-                                    TextBox(str(lv), TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
+                                for combo_reward in rqd.combo_rewards[diff]: # slice是有序的，所以不用再排序
+                                    TextBox(str(combo_reward.level), TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
                                         set_size((gh, gh)). \
                                         set_content_align('c').set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=8))
                             # 奖励
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
                                 ImageBox(jewel_icon if diff != 'append' else shard_icon, size=(None, gh))
-                                for lv in sorted(combo_rewards[diff].keys()):
-                                    reward = combo_rewards[diff][lv]
-                                    TextBox(str(reward), style2, overflow='clip'). \
+                                for combo_reward in rqd.combo_rewards[diff]:
+                                    TextBox(str(combo_reward.reward), style2, overflow='clip'). \
                                         set_size((gw, gh)). \
                                         set_content_align('l')
                             # 累计奖励
@@ -498,8 +490,8 @@ async def compose_detail_music_rewards_image(
                                     set_size((gw, gh)). \
                                     set_content_align('l') 
                                 acc = 0
-                                for lv in sorted(combo_rewards[diff].keys()):
-                                    acc += combo_rewards[diff][lv]
+                                for combo_reward in rqd.combo_rewards[diff]:
+                                    acc += combo_reward.reward
                                     TextBox(str(acc), style2, overflow='clip'). \
                                         set_size((gw, gh)). \
                                         set_content_align('l')
@@ -534,7 +526,7 @@ async def compose_basic_music_rewards_image(
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
-            await get_basic_profile_card(rqd.profile)
+            await get_profile_card(rqd.profile)
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 说明
                 TextBox("仅显示简略估计数据（假设Clear的歌曲都是S评级，未FC的歌曲都没拿到连击奖励）",
