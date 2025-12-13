@@ -1,7 +1,7 @@
 # 绘图所需的数据类型
 from pydantic import BaseModel
 from typing import Any, List, Dict, Literal, Tuple
-from src.profile.drawer import DetailedProfileCardRequest, BasicProfile
+from src.profile.drawer import DetailedProfileCardRequest, BasicProfile, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
 
@@ -106,7 +106,7 @@ class PlayProgressRequest(BaseModel):
 
     counts: list[PlayProgressCount]
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = 'master'
-    profile: DetailedProfileCardRequest
+    profile: ProfileCardRequest
 
 class MusicComboReward(BaseModel):
     r"""MusicComboRewards
@@ -145,7 +145,7 @@ class DetailMusicRewardsRequest(BaseModel):
         'master': [], 
         'append': []
     }
-    profile: DetailedProfileCardRequest
+    profile: ProfileCardRequest
 
 
 class BasicMusicRewardsRequest(BaseModel):
@@ -180,5 +180,5 @@ class BasicMusicRewardsRequest(BaseModel):
         'master': '0', 
         'append': '0'
     }
-    profile: BasicProfile
+    profile: ProfileCardRequest
 

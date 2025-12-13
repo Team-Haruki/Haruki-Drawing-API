@@ -438,7 +438,7 @@ async def compose_profile_image(
                 (await draw_chara()).set_bg(None)
 
     if rqd.update_time:
-        update_time = datetime.fromtimestamp(profile.update_time / 1000).strftime('%Y-%m-%d %H:%M:%S')
+        update_time = datetime.fromtimestamp(rqd.update_time / 1000).strftime('%Y-%m-%d %H:%M:%S')
     else:
         update_time = "?"
     text = f"DT: {update_time}  " + DEFAULT_WATERMARK

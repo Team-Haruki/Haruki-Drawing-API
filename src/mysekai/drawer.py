@@ -226,7 +226,7 @@ async def compose_mysekai_fixture_list_image(
                         image = await get_img_from_path(ASSETS_BASE_DIR, main_genre.image_path)    
                         with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
                             ImageBox(image, size=(None, 30), use_alpha_blend=True).set_bg(RoundRectBg(fill=(100,100,100,255), radius=2))
-                            TextBox(main_genre.title, TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=text_color))
+                            TextBox(main_genre.name, TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=text_color))
                             if main_genre.progress_message:
                                 TextBox(main_genre.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
                         # 二级分类
@@ -234,11 +234,11 @@ async def compose_mysekai_fixture_list_image(
                             if len(sub_genre.fixtures) == 0: continue
                             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_padding(8):
                                 # 标签
-                                if sub_genre.title and sub_genre.image_path and len(main_genre.sub_genres) > 1: # 无二级分类或只有一个二级分类的不加标签
+                                if sub_genre.name and sub_genre.image_path and len(main_genre.sub_genres) > 1: # 无二级分类或只有一个二级分类的不加标签
                                     image = await get_img_from_path(ASSETS_BASE_DIR, sub_genre.image_path)    
                                     with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
                                         ImageBox(image, size=(None, 23), use_alpha_blend=True).set_bg(RoundRectBg(fill=(100,100,100,255), radius=2))
-                                        TextBox(sub_genre.title, TextStyle(font=DEFAULT_HEAVY_FONT, size=15, color=text_color))
+                                        TextBox(sub_genre.name, TextStyle(font=DEFAULT_HEAVY_FONT, size=15, color=text_color))
                                         if sub_genre.progress_message:
                                             TextBox(sub_genre.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
                                 
@@ -254,7 +254,7 @@ async def compose_mysekai_fixture_list_image(
                                     }.get(cid)
                                     return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
                                 # 绘制单个家具
-                                async def draw_single_fixture(fixture: MysekaiSingleFixture):
+                                async def draw_single_fixture(fixture: MysekaiFixture):
                                     f_sz = 30
                                     image = await get_img_from_path(ASSETS_BASE_DIR, fixture.image_path)
                                     with VSplit().set_content_align('c').set_item_align('c').set_sep(0):
@@ -280,6 +280,29 @@ async def compose_mysekai_fixture_list_image(
 
     return await canvas.get_img()
 
+async def get_chara_icon_by_chara_unit_id(cuid: int)->Image.Image:
+    r"""get_chara_icon_by_chara_unit_id 
+    
+    用cuid获取角色图标
+
+    Args
+    ----
+    cuid : int
+        角色队伍id
+
+    Returns
+    -------
+    PIL.Image.Image
+    """
+    nickname = {
+        1:"ick", 2:"saki", 3:"hnm", 4:"shiho", 5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
+        9:"khn", 10:"an", 11:"akt", 12:"toya", 13:"tks", 14:"emu", 15:"nene", 16:"rui", 
+        17:"knd", 18:"mfy", 19:"ena", 20:"mzk", 21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito",
+        27:"miku_light_sound", 28: "miku_idol", 29:"miku_street", 30: "miku_theme_park", 31:"miku_school_refusal",
+        32:"rin", 33:"rin", 34:"rin", 35:"rin", 36:"rin", 37:"len", 38:"len", 39:"len", 40:"len", 41:"len",
+        42:"luka", 43:"luka", 44:"luka", 45:"luka", 46:"luka", 47:"meiko", 48:"meiko", 49:"meiko", 50:"meiko", 51:"meiko",
+        52:"kaito", 53:"kaito", 54:"kaito", 55:"kaito", 56:"kaito"}.get(cuid)
+    return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
 
 # 获取mysekai家具详情卡片控件 返回Widget
 async def get_mysekai_fixture_detail_image_card(
@@ -358,7 +381,7 @@ async def get_mysekai_fixture_detail_image_card(
                         img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
                         with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
                             ImageBox(img, size=(50, 50), use_alpha_blend=True)
-                            TextBox(material.text, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
+                            TextBox(f"x{material.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
 
         # 回收材料
         if recycle_materials:
@@ -369,19 +392,8 @@ async def get_mysekai_fixture_detail_image_card(
                         img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
                         with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
                             ImageBox(img, size=(50, 50), use_alpha_blend=True)
-                            TextBox(material.text, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
+                            TextBox(f"x{material.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
 
-        async def get_chara_icon_by_chara_unit_id(cuid: int)->Image.Image:
-            r"""get_chara_icon_by_chara_unit_id 用cuid获取角色图标"""
-            nickname = {
-                1:"ick", 2:"saki", 3:"hnm", 4:"shiho", 5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
-                9:"khn", 10:"an", 11:"akt", 12:"toya", 13:"tks", 14:"emu", 15:"nene", 16:"rui", 
-                17:"knd", 18:"mfy", 19:"ena", 20:"mzk", 21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito",
-                27:"miku_light_sound", 28: "miku_idol", 29:"miku_street", 30: "miku_theme_park", 31:"miku_school_refusal",
-                32:"rin", 33:"rin", 34:"rin", 35:"rin", 36:"rin", 37:"len", 38:"len", 39:"len", 40:"len", 41:"len",
-                42:"luka", 43:"luka", 44:"luka", 45:"luka", 46:"luka", 47:"meiko", 48:"meiko", 49:"meiko", 50:"meiko", 51:"meiko",
-                52:"kaito", 53:"kaito", 54:"kaito", 55:"kaito", 56:"kaito"}.get(cuid)
-            return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
         # 交互角色
         if reaction_character_groups:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
@@ -539,6 +551,133 @@ async def compose_mysekai_musicrecord_image(
                                                 Spacer(w=sz, h=sz).set_bg(FillBg((0,0,0,120)))
                                         if musicrecord.id:
                                             TextBox(f"{musicrecord.id}", TextStyle(font=DEFAULT_FONT, size=10, color=(50, 50, 50)))
+
+    add_watermark(canvas)
+    return await canvas.get_img()
+
+
+# 合成mysekai对话列表图片
+async def compose_mysekai_talk_list_image(
+        rqd: MysekaiTalkListRequest
+) -> Image.Image:
+    r"""compose_mysekai_talk_list_image
+
+    合成我的世界对话列表图片
+
+    Args
+    ----
+    rqd : MysekaiTalkListRequest
+        绘制我的世界对话列表所必需的数据
+
+    Returns
+    -------
+    PIL.Image.Image
+    """
+    profile = rqd.profile # 个人信息
+    sd_image_path = rqd.sd_image_path
+    progress_message = rqd.progress_message
+    prompt_message = rqd.prompt_message
+    show_id = rqd.show_id
+    single_main_genres = rqd.single_main_genres
+    multi_reads = rqd.multi_reads
+    
+    # 绘制单个家具
+    async def draw_single_fid(fixture: MysekaiFixture):
+        f_sz = 30
+        image = await get_img_from_path(ASSETS_BASE_DIR, fixture.image_path)
+        with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
+            with Frame():
+                ImageBox(image, size=(None, f_sz), use_alpha_blend=True)
+                if not fixture.obtained:
+                    Spacer(w=f_sz, h=f_sz).set_bg(RoundRectBg(fill=(0,0,0,80), radius=2))
+            if show_id:
+                TextBox(f"{fixture.id}", TextStyle(font=DEFAULT_FONT, size=10, color=(50, 50, 50)))
+
+    # 绘制包含多个家具组合以及未读情况
+    async def draw_fids(fixture_talk_read: MysekaiTalkFixtures):
+        with Frame().set_content_align('rb'):
+            with HSplit().set_content_align('c').set_item_align('c').set_sep(2).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4):
+                for fixture in fixture_talk_read.fixtures:
+                    await draw_single_fid(fixture)
+            if fixture_talk_read.noread_num > 1:
+                TextBox(f"x{fixture_talk_read.noread_num}", TextStyle(font=DEFAULT_FONT, size=12, color=(255, 0, 0))).set_offset((5, 5))
+
+    text_color = (75, 75, 75)
+                                        
+    # 绘制
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16) as vs:
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+                if profile:
+                    await get_profile_card(profile)
+
+            # 进度
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+                with HSplit().set_content_align('l').set_item_align('l').set_sep(5):
+                    chara_icon = await get_img_from_path(ASSETS_BASE_DIR, sd_image_path)
+                    ImageBox(chara_icon, size=(None, 60))
+                    if progress_message:
+                        TextBox(progress_message, 
+                                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color))
+                if prompt_message:
+                    TextBox(prompt_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
+            
+            # 单人家具
+            TextBox(f"单人对话家具", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color)) \
+                .set_padding(12).set_bg(roundrect_bg(alpha=80))
+
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
+                has_single = False
+                # 一级分类
+                for main_genre in single_main_genres:
+                    if len(main_genre.sub_genres) == 0: continue
+                    has_single = True
+
+                    with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8):
+                        # 标签
+                        main_genre_name = main_genre.name
+                        main_genre_image = await get_img_from_path(ASSETS_BASE_DIR, main_genre.image_path)
+                        with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
+                            ImageBox(main_genre_image, size=(None, 30), use_alpha_blend=True).set_bg(RoundRectBg(fill=(100,100,100,255), radius=2))
+                            TextBox(main_genre_name, TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=text_color))
+
+                        # 家具列表
+                        for sub_genre in main_genre.sub_genres:
+                            if len(sub_genre) == 0: continue
+                            COL_COUNT, cur_idx = 15, 0
+                            sep = 5 # if cid else 3， 这个永远为True
+                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
+                                while cur_idx < len(sub_genre):
+                                    cur_x = 0
+                                    with HSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
+                                        while cur_x < COL_COUNT:
+                                            fixtures = sub_genre[cur_idx]
+                                            await draw_fids(fixtures)
+                                            cur_x += len(fixtures.fixtures)
+                                            cur_idx += 1
+                                            if cur_idx >= len(sub_genre):
+                                                break
+                if not has_single:
+                    TextBox("全部已读", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 150, 50))).set_padding(16)
+
+            # 多人家具
+            TextBox(f"多人对话家具", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color)) \
+                .set_padding(12).set_bg(roundrect_bg(alpha=80))    
+
+            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)):
+                has_multi = False
+                for multi_read in multi_reads:
+                    if not multi_read.fixtures or multi_read.noread_num <= 0:
+                        continue
+                    has_multi = True
+                    with HSplit().set_content_align('lt').set_item_align('l').set_sep(6):
+                        await draw_fids(multi_read)
+                        for cuids in multi_read.character_ids:
+                            with HSplit().set_content_align('lt').set_item_align('lt').set_sep(5).set_padding(4).set_bg(roundrect_bg(alpha=80)):
+                                for cuid in cuids:
+                                    ImageBox(await get_chara_icon_by_chara_unit_id(cuid), size=(None, 36))
+                if not has_multi:
+                    TextBox("全部已读", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 150, 50))).set_padding(8)
 
     add_watermark(canvas)
     return await canvas.get_img()
