@@ -483,24 +483,23 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     colored_text_box(
                         truncate(rqd.profile.nickname, 64),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
-                    )
+                    )                    
                     user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
                     TextBox(f"{rqd.profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     # 数据源信息
-                    if rqd.data_sources:
-                        for data_source in rqd.data_sources:
-                            # 数据名称
-                            source_text = data_source.name
-                            if data_source.source:
-                                source_text += f" 数据来源: {data_source.source}"
-                            if data_source.mode:
-                                source_text += f" 获取模式: {data_source.mode}"
-                            TextBox(f"{source_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                            # 数据更新时间
-                            if data_source.update_time:
-                                update_time = datetime.fromtimestamp(data_source.update_time / 1000)
-                                update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                                TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                    for data_source in rqd.data_sources:
+                        # 数据名称
+                        source_text = data_source.name
+                        if data_source.source:
+                            source_text += f" 数据来源: {data_source.source}"
+                        if data_source.mode:
+                            source_text += f" 获取模式: {data_source.mode}"
+                        TextBox(f"{source_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                        # 数据更新时间
+                        if data_source.update_time:
+                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                            update_time_text = update_time.strftime('%m-%d %H:%M:%S') + f" ({get_readable_datetime(update_time, show_original_time=False)})"
+                            TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
             # 错误/警告
             if rqd.error_message:
                 TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(240)
