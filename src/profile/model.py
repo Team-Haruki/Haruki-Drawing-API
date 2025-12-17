@@ -75,13 +75,13 @@ class ProfileCardRequest(BaseModel):
     ----------
     profile : Optional[ BasicProfile ] = None
         玩家个人信息
-    data_sources: Optional[ List[ ProfileDataSource ] ] = None
+    data_sources: List[ ProfileDataSource ] = []
         数据源信息
     error_message : Optional[str] = None
         错误或警告
     """
     profile: Optional[BasicProfile] = None
-    data_sources: Optional[List[ProfileDataSource]] = None
+    data_sources: List[ProfileDataSource] = []
     error_message: Optional[str] = None
 
 
