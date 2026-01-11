@@ -1,0 +1,11 @@
+assets:
+  base_dir: /home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/sekai/assets
+  result_asset_path: static_images
+font:
+  dir: /home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/utils/fonts
+  default: 
+    default: SourceHanSansSC-Regular
+    bold: SourceHanSansSC-Bold
+    heavy: SourceHanSansSC-Heavy
+    emoji: EmojiOneColor-SVGinOT
+  

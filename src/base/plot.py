@@ -5,9 +5,8 @@ from copy import deepcopy
 from datetime import datetime
 from types import TracebackType
 from dataclasses import dataclass
-from typing import Union, Type, Callable, TypedDict, Self, Optional
+from typing import Union, Type, Callable, TypedDict, Self, Optional, Literal
 from PIL import Image, ImageFilter, ImageFont, ImageEnhance
-
 
 from .painter import (
     Color,
@@ -19,6 +18,8 @@ from .painter import (
     SHADOW,
     LinearGradient,
     ALIGN_MAP,
+    ALIGN_TYPE,
+    ITEM_SIZE_MODE_TYPE,
     TRANSPARENT,
     DEFAULT_FONT,
     BLACK,
@@ -86,7 +87,12 @@ class RoundRectBg(WidgetBg):
 
 class ImageBg(WidgetBg):
     def __init__(
-        self, img: Union[str, Image.Image], align: str = "c", mode: str = "fit", blur: bool = False, fade: float = 0.1
+        self, 
+        img: Union[str, Image.Image], 
+        align: ALIGN_TYPE = "c", 
+        mode: Literal["fit", "fill", "fixed", "repeat"] = "fit", 
+        blur: bool = False, 
+        fade: float = 0.1
     ) -> None:
         super().__init__()
         if isinstance(img, str):
@@ -235,7 +241,7 @@ class Widget:
         self.parent = parent
         return self
 
-    def set_content_align(self, align: str)-> Self:
+    def set_content_align(self, align: ALIGN_TYPE)-> Self:
         if align not in ALIGN_MAP:
             raise ValueError("Invalid align")
         self.content_h_align, self.content_v_align = ALIGN_MAP[align]
@@ -278,7 +284,7 @@ class Widget:
         self.offset = offset
         return self
 
-    def set_offset_anchor(self, anchor: str)-> Self:
+    def set_offset_anchor(self, anchor: ALIGN_TYPE)-> Self:
         if anchor not in ALIGN_MAP:
             raise ValueError("Invalid anchor")
         self.offset_x_anchor, self.offset_y_anchor = ALIGN_MAP[anchor]
@@ -449,8 +455,8 @@ class HSplit(Widget):
         items: list[Widget] = None,
         ratios: list[float] = None,
         sep: int = DEFAULT_SEP,
-        item_size_mode: str = "fixed",
-        item_align: str = "c",
+        item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
+        item_align: ALIGN_TYPE = "c",
     ) -> None:
         super().__init__()
         self.items = items or []
@@ -478,7 +484,7 @@ class HSplit(Widget):
         self.items.append(item)
         return self
 
-    def set_item_align(self, align: str) -> Self:
+    def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
             raise ValueError("Invalid align")
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
@@ -492,7 +498,7 @@ class HSplit(Widget):
         self.ratios = ratios
         return self
 
-    def set_item_size_mode(self, mode: str) -> Self:
+    def set_item_size_mode(self, mode: ITEM_SIZE_MODE_TYPE) -> Self:
         assert mode in ("expand", "fixed")
         self.item_size_mode = mode
         return self
@@ -560,8 +566,8 @@ class VSplit(Widget):
         items: list[Widget] = None,
         ratios: list[float] = None,
         sep: int = DEFAULT_SEP,
-        item_size_mode: str = "fixed",
-        item_align: str = "c",
+        item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
+        item_align: ALIGN_TYPE = "c",
     ) -> None:
         super().__init__()
         self.items = items or []
@@ -589,7 +595,7 @@ class VSplit(Widget):
         self.items.append(item)
         return self
 
-    def set_item_align(self, align: str) -> Self:
+    def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
             raise ValueError("Invalid align")
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
@@ -603,7 +609,7 @@ class VSplit(Widget):
         self.ratios = ratios
         return self
 
-    def set_item_size_mode(self, mode: str) -> Self:
+    def set_item_size_mode(self, mode: ITEM_SIZE_MODE_TYPE) -> Self:
         assert mode in ("expand", "fixed")
         self.item_size_mode = mode
         return self
@@ -671,8 +677,8 @@ class Grid(Widget):
         items: list[Widget] = None,
         row_count: int = None,
         col_count: int = None,
-        item_size_mode: str = "fixed",
-        item_align: str = "c",
+        item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
+        item_align: ALIGN_TYPE = "c",
         h_sep: int = DEFAULT_SEP,
         v_sep: int = DEFAULT_SEP,
         vertical: bool = False,
@@ -711,7 +717,7 @@ class Grid(Widget):
         self.items.append(item)
         return self
 
-    def set_item_align(self, align: str) -> Self:
+    def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
             raise ValueError("Invalid align")
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
@@ -734,7 +740,7 @@ class Grid(Widget):
         self.row_count = None
         return self
 
-    def set_item_size_mode(self, mode: str) -> Self:
+    def set_item_size_mode(self, mode: ITEM_SIZE_MODE_TYPE) -> Self:
         assert mode in ("expand", "fixed")
         self.item_size_mode = mode
         return self
@@ -808,6 +814,13 @@ class TextStyle:
 
 
 class TextBox(Widget):
+    r"""TextBox
+
+    绘制文字
+
+    TODO:
+        shadow 还未实现
+    """
     def __init__(
         self,
         text: str = "",
@@ -815,7 +828,7 @@ class TextBox(Widget):
         line_count: int = None,
         line_sep: int = 2,
         wrap: bool = True,
-        overflow: str = "shrink",
+        overflow: Literal["shrink", "clip"] = "shrink",
         use_real_line_count: bool = False,
     ) -> None:
         """
