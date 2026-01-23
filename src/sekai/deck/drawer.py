@@ -1,11 +1,10 @@
 from PIL import Image
-from pydantic import BaseModel
 from typing import Optional, List
 
-from src.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
-from src.base.painter import WHITE
-from src.base.utils import get_img_from_path
-from src.base.draw import (
+from src.sekai.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
+from src.sekai.base.painter import WHITE
+from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.draw import (
     TextBox,
     Canvas,
     SEKAI_BLUE_BG,
@@ -14,7 +13,7 @@ from src.base.draw import (
     add_watermark,
     DIFF_COLORS
 )
-from src.base.plot import (
+from src.sekai.base.plot import (
     VSplit,
     HSplit,
     Frame,
@@ -27,70 +26,20 @@ from src.base.plot import (
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_detailed_profile_card,
+)
+from src.sekai.profile.model import (
     DetailedProfileCardRequest,
-    CardFullThumbnailRequest
+    CardFullThumbnailRequest,
 )
 
-class CardData(BaseModel):
-    card_thumbnail: CardFullThumbnailRequest
-    chara_id: int
-    skill_level: str
-    is_after_training: bool = False
-    skill_rate: float
-    event_bonus_rate: float
-    is_before_story: bool = False
-    is_after_story: bool = False
-    has_canvas_bonus: bool = False
-
-class DeckData(BaseModel):
-    card_data: List[CardData]
-    pt: Optional[int] = None
-    event_bonus_rate: Optional[float] = None
-    score_up: Optional[float] = None
-    total_power: Optional[int] = None
-    challenge_score_delta: Optional[int] = None
-    score: Optional[int] = None
-    live_score: Optional[int] = None
-    mysekai_event_point: Optional[int] = None
-    support_deck_bonus_rate: Optional[float] = None
-    multi_live_score_up: Optional[float] = None
-
-class DeckRequest(BaseModel):
-    region: str
-    profile: DetailedProfileCardRequest
-    deck_data: List[DeckData]
-    event_name: Optional[str] = None
-    music_title: Optional[str] = None
-    music_id: Optional[int] = None
-    music_diff: Optional[str] = None
-    event_banner_path: Optional[str] = None
-    music_cover_path: Optional[str] = None
-    is_max_deck: bool = False
-    recommend_type: str = ""
-    wl_chara_name: Optional[str] = None
-    wl_chara_icon_path: Optional[str] = None
-    event_id: Optional[int] = None
-    live_type: Optional[str] = None
-    live_name: Optional[str] = None
-    chara_icon_path: Optional[str] = None
-    chara_name: Optional[str] = None
-    unit_logo_path: Optional[str] = None
-    attr_icon_path: Optional[str] = None
-    is_wl: bool = False
-    multi_live_teammate_power: Optional[int] = None
-    multi_live_teammate_score_up: Optional[float] = None
-    target: Optional[str] = None
-    unit_filter: Optional[str] = None
-    attr_filter: Optional[str] = None
-    excluded_cards: Optional[List[int]] = None
-    multi_live_score_up_lower_bound: Optional[float] = None
-    keep_after_training_state: bool = False
-    model_name: Optional[List] = None
-    canvas_thumbnail_path: Optional[str] = None
-    fixed_cards_id: Optional[List[int]] = None
-    fixed_characters_id: Optional[List[int]] = None
-    cost_times: Optional[dict] = None
-    wait_times: Optional[dict] = None
+# 从 model.py 导入数据模型
+from .model import (
+    DeckCardData,
+    DeckData,
+    DeckRequest,
+    # 兼容性别名
+    CardData,
+)
 
 OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
@@ -242,10 +191,12 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                             with Frame().set_size((50, 50)):
                                 if rqd.music_id != OMAKASE_MUSIC_ID:
                                     Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset((6, 6))
-                                    ImageBox(music_cover, size=(50, 50))
+                                    if music_cover:
+                                        ImageBox(music_cover, size=(50, 50))
                                 else:
-                                    ImageBox(music_cover, size=(50, 50), shadow=True)
-                            TextBox(rqd.music_title, TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70)))
+                                    if music_cover:
+                                        ImageBox(music_cover, size=(50, 50), shadow=True)
+                            TextBox(rqd.music_title or "", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70)))
 
                     info_text = ""
 

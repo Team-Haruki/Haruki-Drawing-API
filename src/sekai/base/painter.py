@@ -388,7 +388,11 @@ class Gradient:
         raise NotImplementedError()
 
     def get_img(self, size: Size, mask: Image.Image = None) -> Image.Image:
-        img = Image.fromarray(self.get_colors(size), "RGBA")
+        colors = self.get_colors(size)
+        mode = "RGBA" if colors.shape[-1] == 4 else "RGB"
+        img = Image.fromarray(colors, mode)
+        if mode == "RGB":
+            img = img.convert("RGBA")
         if mask:
             assert mask.size == size, "Mask size must match image size"
             if mask.mode == "RGBA":
@@ -400,7 +404,7 @@ class Gradient:
 
 
 class LinearGradient(Gradient):
-    def __init__(self, c1: Color, c2: Color, p1: Position, p2: Position, method: str = "separate") -> None:
+    def __init__(self, c1: Color, c2: Color, p1: Position, p2: Position, method: str = "combine") -> None:
         self.c1 = c1
         self.c2 = c2
         self.p1 = p1
@@ -425,7 +429,11 @@ class LinearGradient(Gradient):
         elif self.method == "separate":
             vector_pixel_to_p1 = coords - pixel_p1
             vector_p2_to_p1 = pixel_p2 - pixel_p1
-            t = np.average(vector_pixel_to_p1 / vector_p2_to_p1, axis=-1)
+            # 避免除以0
+            denom = np.where(vector_p2_to_p1 == 0, 1e-9, vector_p2_to_p1)
+            t_dims = vector_pixel_to_p1 / denom
+            # 如果某维度位移为0，则该维度的比例不应参与平均（或者设为0）
+            t = np.sum(np.where(vector_p2_to_p1 == 0, 0, t_dims), axis=-1) / np.sum(vector_p2_to_p1 != 0)
         assert t is not None
         t_clamped = np.clip(t, 0, 1)
         colors = (1 - t_clamped[:, :, np.newaxis]) * self.c1 + t_clamped[:, :, np.newaxis] * self.c2
@@ -537,18 +545,11 @@ class Painter:
         p = Painter(img, size)
         for op in operations:
             op.id_to_image(image_dict)
-            # debug_print(f"Executing: {op}")
             p.offset = op.offset
             p.size = op.size
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
-            # kwargs = {}
-            # for key, value in get_type_hints(func).items():
-            #     if value == Painter:
-            #         kwargs[key] = p
-            # func(*op.args, **kwargs)
             func(*op.args)
-            # debug_print(f"Method {op.name} executed, current memory usage: {get_memo_usage()} MB")
         debug_print(f"Sub process use time: {datetime.now() - t}")
         return p.img
 

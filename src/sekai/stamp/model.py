@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import List, Optional
-from src.base.painter import Color
+from src.sekai.base.painter import Color
 
 class StampData(BaseModel):
     r"""StampData

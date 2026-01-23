@@ -2,10 +2,9 @@ from datetime import datetime
 from typing import Any, List, Optional
 import math
 from PIL import Image
-from pydantic import BaseModel
 
-from src.base.configs import ASSETS_BASE_DIR
-from src.base.draw import (
+from src.sekai.base.configs import ASSETS_BASE_DIR
+from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
     SEKAI_BLUE_BG,
@@ -13,8 +12,8 @@ from src.base.draw import (
     roundrect_bg,
     WIDGET_BG_COLOR,
 )
-from src.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, color_code_to_rgb, DEFAULT_HEAVY_FONT
-from src.base.plot import (
+from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, color_code_to_rgb, DEFAULT_HEAVY_FONT
+from src.sekai.base.plot import (
     Canvas,
     Frame,
     Grid,
@@ -27,71 +26,29 @@ from src.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.base.utils import get_img_from_path, get_readable_timedelta
+from src.sekai.base.utils import get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import (
-    CardFullThumbnailRequest,
     get_card_full_thumbnail,
     get_detailed_profile_card,
-    DetailedProfileCardRequest
+)
+from src.sekai.profile.model import (
+    CardFullThumbnailRequest,
+    DetailedProfileCardRequest,
 )
 
-class EventInfo(BaseModel):
-    eid: str
-    event_type: str
-    start_time: Any
-    end_time: Any
-    is_wl_event: bool
-    banner_cid: int
-    banner_index: int
-    bonus_attr: str
-    bonus_chara_id: Optional[List[int]] = None
-    wl_time_list: Optional[list[dict[str, Any]]] = None
-
-class EventHistoryInfo(BaseModel):
-    event_id: str
-    event_name: str
-    event_start_at: int
-    event_end_at: int
-    rank: Optional[int] = None
-    event_point: int
-    is_wl_event: bool = False
-    banner_path: str
-    wl_chara_icon_path: Optional[str] = None
-
-class EventAssets(BaseModel):
-    event_bg_path: str
-    event_logo_path: str
-    event_story_bg_path: str
-    event_attr_image_path: str
-    event_ban_chara_img: str
-    ban_chara_icon_path: str
-    bonus_chara_path: Optional[List[str]] = None
-
-class EventDetailRequest(BaseModel):
-    region: str
-    event_info: EventInfo
-    event_assets: EventAssets
-    event_cards: list[CardFullThumbnailRequest]
-
-class EventRecordRequest(BaseModel):
-    event_info: List[EventHistoryInfo]
-    wl_event_info: List[EventHistoryInfo]
-    user_info: DetailedProfileCardRequest
-
-class EventBriefInfo(BaseModel):
-    event_id: int
-    event_name: str
-    event_type: str
-    event_start_at: int
-    event_end_at: int
-    event_banner_path: str
-    event_cards: Optional[List[CardFullThumbnailRequest]]
-    event_attr_path: Optional[str] = None
-    event_chara_path: Optional[str] = None
-    event_unit_path: Optional[str] = None
-
-class EventListRequest(BaseModel):
-    event_info: List[EventBriefInfo]
+# 从 model.py 导入数据模型
+from .model import (
+    EventInfo,
+    EventHistory,
+    EventAssets,
+    EventBrief,
+    EventDetailRequest,
+    EventRecordRequest,
+    EventListRequest,
+    # 兼容性别名
+    EventHistoryInfo,
+    EventBriefInfo,
+)
 
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     detail = rqd.event_info
@@ -103,8 +60,8 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
 
     if detail:
         banner_index = rqd.event_info.banner_index
-    detail.start_time = datetime.fromtimestamp(rqd.event_info.start_time / 1000)
-    detail.end_time = datetime.fromtimestamp(rqd.event_info.end_time / 1000 + 1)
+    start_time = rqd.event_info.start_at
+    end_time = rqd.event_info.end_at
 
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
@@ -112,8 +69,8 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     wl_chapters = rqd.event_info.wl_time_list
     if rqd.event_info.is_wl_event:
         for chapter in wl_chapters:
-            chapter["start_time"] = datetime.fromtimestamp(chapter["startAt"] / 1000)
-            chapter["end_time"] = datetime.fromtimestamp(chapter["aggregateAt"] / 1000 + 1)
+            chapter["start_time"] = datetime.fromtimestamp(chapter["start_at"] / 1000)
+            chapter["end_time"] = datetime.fromtimestamp(chapter["aggregate_at"] / 1000 + 1)
     use_story_bg = detail.event_type != "world_bloom"
     event_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path) if use_story_bg else await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
     event_chara_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img) if detail.banner_cid else None
@@ -135,7 +92,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                 with VSplit().set_padding(16).set_sep(12).set_item_align("l").set_content_align("l"):
                     with HSplit().set_padding(0).set_sep(8).set_item_align("l").set_content_align("l"):
                         TextBox(rqd.region.upper(), label_style)
-                        TextBox(f"{detail.eid}", text_style)
+                        TextBox(f"{detail.id}", text_style)
                         Spacer(w=8)
                         TextBox("类型", label_style)
                         TextBox(f"{detail.event_type}", text_style)
@@ -149,18 +106,18 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                 with VSplit().set_padding(16).set_sep(12).set_item_align("c").set_content_align("c"):
                     with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
                         TextBox("开始时间", label_style)
-                        TextBox(detail.start_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
+                        TextBox(start_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
                         TextBox("结束时间", label_style)
-                        TextBox(detail.end_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
+                        TextBox(end_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
 
                     with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
-                        if detail.start_time <= now <= detail.end_time:
-                            TextBox(f"距结束还有{get_readable_timedelta(detail.end_time - now)}", text_style)
-                        elif now > detail.end_time:
+                        if start_time <= now <= end_time:
+                            TextBox(f"距结束还有{get_readable_timedelta(end_time - now)}", text_style)
+                        elif now > end_time:
                             TextBox("活动已结束", text_style)
                         else:
-                            TextBox(f"距开始还有{get_readable_timedelta(detail.start_time - now)}", text_style)
+                            TextBox(f"距开始还有{get_readable_timedelta(start_time - now)}", text_style)
 
                     if detail.event_type == "world_bloom":
                         cur_chapter = None
@@ -172,15 +129,15 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                             TextBox(f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style)
 
                     # 进度条
-                    progress = (datetime.now() - detail.start_time) / (detail.end_time - detail.start_time)
+                    progress = (datetime.now() - start_time) / (end_time - start_time)
                     progress = min(max(progress, 0), 1)
                     progress_w, progress_h, border = 320, 8, 1
                     if detail.event_type == "world_bloom" and len(wl_chapters) > 1:
                         with Frame().set_padding(8).set_content_align("lt"):
                             Spacer(w=progress_w+border*2, h=progress_h+border*2).set_bg(RoundRectBg((75, 75, 75, 255), 4))
                             for cid, chapter in enumerate(wl_chapters):
-                                cprogress_start = (chapter["start_time"] - detail.start_time) / (detail.end_time - detail.start_time)
-                                cprogress_end = (chapter["end_time"] - detail.start_time) / (detail.end_time - detail.start_time)
+                                cprogress_start = (chapter["start_time"] - start_time) / (end_time - start_time)
+                                cprogress_end = (chapter["end_time"] - start_time) / (end_time - start_time)
                                 chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE.get(cid))
                                 Spacer(w=int(progress_w * (cprogress_end - cprogress_start)), h=progress_h).set_bg(RoundRectBg(chara_color, 4)) \
                                     .set_offset((border + int(progress_w * cprogress_start), border))
@@ -258,14 +215,14 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                 with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
                     TextBox("活动", style1).set_h(th).set_content_align("c")
                     for item in user_events:
-                        event_start_at = datetime.fromtimestamp(item.event_start_at / 1000)
-                        event_end_at = datetime.fromtimestamp(item.event_end_at / 1000)
+                        event_start_at = item.start_at
+                        event_end_at = item.end_at
                         with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(gh):
                             if "charaIcon" in item:
                                 ImageBox(await get_img_from_path(ASSETS_BASE_DIR, item.wl_chara_icon_path), size=(None, gh))
                             ImageBox(await get_img_from_path(ASSETS_BASE_DIR, item.banner_path), size=(None, gh))
                             with VSplit().set_padding(0).set_sep(2).set_item_align("l").set_content_align("l"):
-                                TextBox(f"【{item.event_id}】{item.event_name}", style2).set_w(150)
+                                TextBox(f"【{item.id}】{item.event_name}", style2).set_w(150)
                                 TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                                 TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                 # 排名
@@ -310,8 +267,8 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align('lt').set_content_align('lt'):
                 for d in event_list:
                     now = datetime.now()
-                    event_start_at = datetime.fromtimestamp(d.event_start_at / 1000)
-                    event_end_at = datetime.fromtimestamp(d.event_end_at / 1000)
+                    event_start_at = d.start_at
+                    event_end_at = d.end_at
                     bg_color = WIDGET_BG_COLOR
                     if event_start_at <= now <= event_end_at:
                         bg_color = (255, 250, 220, 200)
@@ -333,7 +290,7 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                                     Spacer(h=29)
                         with VSplit().set_padding(0).set_sep(2).set_item_align('lt').set_content_align('lt'):
                             TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
-                            TextBox(f"ID: {d.event_id} {d.event_type}", style2)
+                            TextBox(f"ID: {d.id} {d.event_type}", style2)
                             TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             with HSplit().set_padding(0).set_sep(4):

@@ -1,8 +1,8 @@
 from PIL import Image
-from src.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
-from src.base.painter import BLACK
-from src.base.utils import get_img_from_path
-from src.base.draw import (
+from src.sekai.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
+from src.sekai.base.painter import BLACK
+from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.draw import (
     TextBox,
     Canvas,
     SEKAI_BLUE_BG,
@@ -10,7 +10,7 @@ from src.base.draw import (
     roundrect_bg,
     add_watermark,
 )
-from src.base.plot import (
+from src.sekai.base.plot import (
     VSplit,
     HSplit,
     ImageBox,

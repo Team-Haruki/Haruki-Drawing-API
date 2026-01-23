@@ -846,7 +846,7 @@ class TextBox(Widget):
         line_count: int = None,
         line_sep: int = 2,
         wrap: bool = True,
-        overflow: Literal["shrink", "clip"] = "shrink",
+        overflow: Literal["shrink", "clip"] = "clip",
         use_real_line_count: bool = False,
     ) -> None:
         """
@@ -936,9 +936,11 @@ class TextBox(Widget):
                         if clip_idx is None:
                             clipped_lines.append(line)
                             break
+                        if clip_idx == 0:
+                            clip_idx = 1
                         clipped_lines.append(line[:clip_idx] + line_suffix)
                         line = line[clip_idx:]
-                        if len(clipped_lines) == self.line_count:
+                        if len(clipped_lines) >= self.line_count:
                             break
                 else:
                     clip_idx = self._get_clip_text_to_width_idx(line, w, suffix)

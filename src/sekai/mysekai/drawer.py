@@ -1,21 +1,21 @@
 from PIL import Image, ImageDraw
-from src.base.configs import (
+from src.sekai.base.configs import (
     ASSETS_BASE_DIR,
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
     RESULT_ASSET_PATH,
     DEFAULT_HEAVY_FONT
 )
-from src.base.draw import(
+from src.sekai.base.draw import(
     BG_PADDING,
     roundrect_bg,
     SEKAI_BLUE_BG,
     add_watermark
 )
-from src.base.utils import (
+from src.sekai.base.utils import (
     get_img_from_path,
 )
-from src.base.plot import(
+from src.sekai.base.plot import(
     Canvas,
     VSplit,
     HSplit,
@@ -30,7 +30,7 @@ from src.base.plot import(
     Widget,
     FillBg
 )
-from src.base.painter import(
+from src.sekai.base.painter import(
     BLACK,
     WHITE,
     color_code_to_rgb,
@@ -99,16 +99,22 @@ async def compose_mysekai_resource_image(
                                 draw = ImageDraw.Draw(phenom_img)
                                 draw.line((0, 0, phenom_img.width, phenom_img.height), fill=(150, 150, 150, 255), width=5)
                                 draw.line((0, phenom_img.height, phenom_img.width, 0), fill=(150, 150, 150, 255), width=5)
+                        
+                        # 确保背景颜色是元组
+                        bg_fill = tuple(phenom.background_fill) if isinstance(phenom.background_fill, (list, tuple)) else phenom.background_fill
+                        txt_fill = tuple(phenom.text_fill) if isinstance(phenom.text_fill, (list, tuple)) else phenom.text_fill
+                        
                         with Frame():
-                            with VSplit().set_content_align('c').set_item_align('c').set_sep(5).set_bg(roundrect_bg(fill=phenom.background_fill)).set_padding(8):
-                                TextBox(phenom.text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=phenom.text_fill)).set_w(60).set_content_align('c')
+                            with VSplit().set_content_align('c').set_item_align('c').set_sep(5).set_bg(roundrect_bg(fill=bg_fill)).set_padding(8):
+                                TextBox(phenom.text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=txt_fill)).set_w(60).set_content_align('c')
                                 ImageBox(phenom_img, size=(None, 50), use_alpha_blend=True) 
             
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
                 # 到访角色列表
                 with HSplit().set_bg(roundrect_bg(alpha=80)).set_content_align('c').set_item_align('c').set_padding(16).set_sep(16):
                     gate_id = rqd.gate_id
-                    gate_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/mysekai/gate_icon/gate_{gate_id}.png")
+                    gate_icon_path = rqd.gate_icon_path or f"{RESULT_ASSET_PATH}/mysekai/gate_icon/gate_{gate_id}.png"
+                    gate_icon = await get_img_from_path(ASSETS_BASE_DIR, gate_icon_path)
                     gate_level = rqd.gate_level
                     with Frame().set_size((64, 64)).set_margin((16, 0)).set_content_align('rb'):
                         ImageBox(gate_icon, size=(64, 64), use_alpha_blend=True, shadow=True).set_offset((0, -4))
@@ -125,7 +131,8 @@ async def compose_mysekai_resource_image(
                                 chara_item_icon = await get_img_from_path(ASSETS_BASE_DIR, character.memoria_image_path)
                                 ImageBox(chara_item_icon, size=(40, None), use_alpha_blend=True, shadow=True).set_offset((80 - 40, 80 - 40))
                             if character.is_reservation:
-                                invitation_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/mysekai/invitationcard.png")
+                                invitation_icon_path = character.reservation_icon_path or f"{RESULT_ASSET_PATH}/mysekai/invitationcard.png"
+                                invitation_icon = await get_img_from_path(ASSETS_BASE_DIR, invitation_icon_path)
                                 ImageBox(invitation_icon, size=(25, None), use_alpha_blend=True, shadow=True).set_offset((10, 80 - 30))
                     Spacer(w=16, h=1)
 
@@ -152,13 +159,17 @@ async def compose_mysekai_resource_image(
                                     if has_music_record:
                                         with Frame().set_content_align('rb'):
                                             ImageBox(res_img, size=(40, 40), use_alpha_blend=True)
-                                            music_record_icon = await get_img_from_path(ASSETS_BASE_DIR, f'{RESULT_ASSET_PATH}/mysekai/music_record.png')
+                                            music_record_icon_path = res_num.music_record_icon_path or f'{RESULT_ASSET_PATH}/mysekai/music_record.png'
+                                            music_record_icon = await get_img_from_path(ASSETS_BASE_DIR, music_record_icon_path)
                                             ImageBox(music_record_icon, size=(25, 25), use_alpha_blend=True, shadow=True).set_offset((5, 5))
                                     else:
                                         ImageBox(res_img, size=(40, 40), use_alpha_blend=True)
+                                    
+                                    # 确保文字颜色是元组
+                                    t_color = tuple(text_color) if isinstance(text_color, (list, tuple)) else text_color
                                     TextBox(
                                         f"{res_quantity}", 
-                                        TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=text_color,
+                                        TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=t_color,
                                                     use_shadow=True, shadow_color=WHITE),
                                         overflow='clip'
                                     ).set_w(80).set_content_align('l')
@@ -241,7 +252,8 @@ async def compose_mysekai_fixture_list_image(
                                         17:"knd", 18:"mfy", 19:"ena", 20:"mzk",
                                         21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito"
                                     }.get(cid)
-                                    return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png")
+                                    icon_path = fixture.chara_icon_path or f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png"
+                                    return await get_img_from_path(ASSETS_BASE_DIR, icon_path)
                                 # 绘制单个家具
                                 async def draw_single_fixture(fixture: MysekaiFixture):
                                     f_sz = 30
@@ -393,10 +405,13 @@ async def get_mysekai_fixture_detail_image_card(
                         col_num_dict = { 1: 10, 2: 5, 3: 4, 4: 2 }
                         col_num = col_num_dict[chara_groups.number]
                         with Grid(col_count=col_num).set_content_align('c').set_sep(6, 4):
-                            for character_uint_ids in chara_groups.character_uint_id_groups:
-                                with HSplit().set_content_align('c').set_item_align('c').set_sep(4).set_padding(4).set_bg(roundrect_bg(alpha=80, radius=8)):
-                                    for cuid in character_uint_ids:
-                                        img = await get_chara_icon_by_chara_unit_id(cuid)
+                                    for group_idx, cuid in enumerate(character_uint_ids):
+                                        c_icon_path = None
+                                        if rqd.chara_icon_path_groups and len(rqd.chara_icon_path_groups) > chara_groups_idx:
+                                            if len(rqd.chara_icon_path_groups[chara_groups_idx]) > group_idx:
+                                                c_icon_path = rqd.chara_icon_path_groups[chara_groups_idx][group_idx]
+                                        
+                                        img = await get_chara_icon_by_chara_unit_id(cuid) if not c_icon_path else await get_img_from_path(ASSETS_BASE_DIR, c_icon_path)
                                         ImageBox(img, size=(40, 40), use_alpha_blend=True)
 
         # 标签
@@ -459,7 +474,10 @@ async def compose_mysekai_door_upgrade_image(
                 # 每个门
                 for gate_level_materials in gate_materials:
                     gid = gate_level_materials.id
-                    gate_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/mysekai/gate_icon/gate_{gid}.png")
+                    gate_icon_path = f"{RESULT_ASSET_PATH}/mysekai/gate_icon/gate_{gid}.png" # Default
+                    # Note: MysekaiGateMaterials doesn't have gate_icon_path in model yet, but rqd does in some places.
+                    # Looking at the model, MysekaiGateMaterials doesn't have it.
+                    gate_icon = await get_img_from_path(ASSETS_BASE_DIR, gate_icon_path)
                     with VSplit().set_content_align('c').set_item_align('c').set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_padding(8):
                         spec_lv = gate_level_materials.level
                         with HSplit().set_content_align('c').set_item_align('c').set_omit_parent_bg(True):
@@ -479,9 +497,11 @@ async def compose_mysekai_door_upgrade_image(
                                         with Frame():
                                             sz = 64
                                             ImageBox(img, size=(sz, sz))
+                                            # 确保颜色是元组
+                                            txt_color = tuple(item.color) if isinstance(item.color, (list, tuple)) else item.color
                                             TextBox(f"x{item.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(50, 50, 50))) \
                                                 .set_offset((sz, sz)).set_offset_anchor('rb')
-                                        TextBox(item.sum_quantity, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=item.color))
+                                        TextBox(item.sum_quantity, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=txt_color))
     add_watermark(canvas)
     return await canvas.get_img()
 
@@ -521,7 +541,8 @@ async def compose_mysekai_musicrecord_image(
                             tag = category_music.tag
                             with HSplit().set_content_align('c').set_item_align('c').set_sep(5).set_omit_parent_bg(True):
                                 if (unit:= MUSIC_TAG_UNIT_MAP[tag]):
-                                    tag_icon = await get_img_from_path(ASSETS_BASE_DIR,f"{RESULT_ASSET_PATH}/icon_{unit}.png")
+                                    tag_icon_path = category_music.tag_icon_path or f"{RESULT_ASSET_PATH}/icon_{unit}.png"
+                                    tag_icon = await get_img_from_path(ASSETS_BASE_DIR, tag_icon_path)
                                     ImageBox(tag_icon, size=(None, 30))
                                 else:
                                     TextBox("其他", TextStyle(font=DEFAULT_HEAVY_FONT, size=20, color=(100, 100, 100)))
@@ -661,10 +682,16 @@ async def compose_mysekai_talk_list_image(
                     has_multi = True
                     with HSplit().set_content_align('lt').set_item_align('l').set_sep(6):
                         await draw_fids(multi_read)
-                        for cuids in multi_read.character_ids:
+                        for group_idx, cuids in enumerate(multi_read.character_ids):
                             with HSplit().set_content_align('lt').set_item_align('lt').set_sep(5).set_padding(4).set_bg(roundrect_bg(alpha=80)):
-                                for cuid in cuids:
-                                    ImageBox(await get_chara_icon_by_chara_unit_id(cuid), size=(None, 36))
+                                for cuid_idx, cuid in enumerate(cuids):
+                                    c_icon_path = None
+                                    if multi_read.chara_icon_path_groups and len(multi_read.chara_icon_path_groups) > group_idx:
+                                        if len(multi_read.chara_icon_path_groups[group_idx]) > cuid_idx:
+                                            c_icon_path = multi_read.chara_icon_path_groups[group_idx][cuid_idx]
+                                    
+                                    img = await get_chara_icon_by_chara_unit_id(cuid) if not c_icon_path else await get_img_from_path(ASSETS_BASE_DIR, c_icon_path)
+                                    ImageBox(img, size=(None, 36))
                 if not has_multi:
                     TextBox("全部已读", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 150, 50))).set_padding(8)
 

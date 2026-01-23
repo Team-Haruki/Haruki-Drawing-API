@@ -1,8 +1,8 @@
 assets:
-  base_dir: /home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/sekai/assets
-  result_asset_path: static_images
+  base_dir: /Users/deseer/PycharmProjects/Haruki-Drawing-API/data
+  result_asset_path: lunabot_static_images
 font:
-  dir: /home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/utils/fonts
+  dir: /Users/deseer/PycharmProjects/Haruki-Drawing-API/data
   default: 
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold

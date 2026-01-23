@@ -2,7 +2,6 @@ from pydantic import BaseModel
 from typing import Optional, List, Literal
 from src.sekai.honor.drawer import HonorRequest
 
-
 class DetailedProfileCardRequest(BaseModel):
     id: str
     region: str
@@ -14,6 +13,7 @@ class DetailedProfileCardRequest(BaseModel):
     leader_image_path: str
     has_frame: bool = False
     frame_path: Optional[str] = None
+    user_cards: Optional[List[dict]] = None
 
 class BasicProfile(BaseModel):
     r"""BasicProfile
@@ -205,6 +205,12 @@ class ProfileRequest(BaseModel):
         挑战live等级
     update_time : Optional[ int ] = None
         更新时间
+    lv_rank_bg_path: Optional[str] = None
+    x_icon_path: Optional[str] = None
+    icon_clear_path: Optional[str] = None
+    icon_fc_path: Optional[str] = None
+    icon_ap_path: Optional[str] = None
+    chara_rank_icon_path_map: Optional[dict] = None
     """
     profile: BasicProfile
     rank: int
@@ -217,3 +223,9 @@ class ProfileRequest(BaseModel):
     character_rank: List[CharacterRank] = []
     solo_live: Optional[SoloLiveRank] = None
     update_time: Optional[int] = None
+    lv_rank_bg_path: Optional[str] = None
+    x_icon_path: Optional[str] = None
+    icon_clear_path: Optional[str] = None
+    icon_fc_path: Optional[str] = None
+    icon_ap_path: Optional[str] = None
+    chara_rank_icon_path_map: Optional[dict] = None

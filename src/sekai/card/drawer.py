@@ -1,12 +1,12 @@
 import math
 from datetime import datetime
-from pydantic import BaseModel, field_validator
-from src.base.painter import (
+
+from src.sekai.base import (
     color_code_to_rgb,
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
 )
-from src.base.plot import (
+from src.sekai.base.plot import (
     Canvas,
     HSplit,
     VSplit,
@@ -22,9 +22,9 @@ from src.base.plot import (
 )
 from typing import List, Optional, Union
 
-from src.base.utils import get_img_from_path
-from src.base.configs import ASSETS_BASE_DIR
-from src.base.draw import (
+from src.sekai.base import get_img_from_path
+from src.sekai.base import ASSETS_BASE_DIR
+from src.sekai.base import (
     BG_PADDING,
     SEKAI_BLUE_BG,
     roundrect_bg,
@@ -32,119 +32,33 @@ from src.base.draw import (
     CHARACTER_COLOR_CODE
 )
 from src.sekai.profile.drawer import (
-    DetailedProfileCardRequest,
     get_detailed_profile_card,
     get_card_full_thumbnail,
-    CardFullThumbnailRequest
+)
+from src.sekai.profile.model import (
+    DetailedProfileCardRequest,
+    CardFullThumbnailRequest,
 )
 
-
-# ========== 数据模型定义 ==========
-
-class CardPowerInfo(BaseModel):
-    power_total: int #综合力，以下所有数据皆为0破未读剧情的数值
-    power1: int #表现力
-    power2: int #技术力
-    power3: int #活力
-
-class SkillInfo(BaseModel):
-    skill_id: int #技能ID
-    skill_name: str #技能名
-    skill_type: str #技能类型
-    skill_detail: str #技能详情
-    skill_type_icon_path: Optional[str] = None #技能类型图片路径
-    skill_detail_cn: Optional[str] = None #技能详情中文
-
-class EventInfo(BaseModel):
-    event_id: int #活动ID
-    event_name: str #活动名
-    start_time: Union[datetime, int, str] #活动开始时间
-    end_time: Union[datetime, int, str]  #活动结束时间
-    event_banner_path: str #活动横幅图片路径
-    bonus_attr: Optional[str] = None #活动增幅属性
-    unit: Optional[str] = None #活动增幅组合
-    banner_cid: Optional[int] = None #横幅角色ID
-
-    @field_validator('start_time', 'end_time', mode='before')
-    @classmethod
-    def parse_timestamp(cls, v):
-        if isinstance(v, (int, str)):
-            try:
-                timestamp = int(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                raise ValueError(f"无效的时间戳: {v}")
-        return v
-
-class GachaInfo(BaseModel):
-    gacha_id: int #招募ID
-    gacha_name: str #招募名
-    start_time: Union[datetime, int, str]  #开始时间
-    end_time: Union[datetime, int, str]  #结束时间
-    gacha_banner_path: str #招募横幅图片路径
-
-    @field_validator('start_time', 'end_time', mode='before')
-    @classmethod
-    def parse_timestamp(cls, v):
-        if isinstance(v, (int, str)):
-            try:
-                timestamp = int(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                raise ValueError(f"无效的时间戳: {v}")
-        return v
-
-class CardBasicInfo(BaseModel):
-    card_id: int #卡片ID
-    character_id: Optional[int] #角色ID
-    character_name: Optional[str] = None
-    unit: Optional[str] = None#所属组合
-    release_at: Optional[int] = None#发布时间
-    supply_type: Optional[str] = None # 类型
-    card_rarity_type: Optional[str] = None # 稀有度
-    attr: Optional[str] = None # 属性
-    prefix: Optional[str] = None #卡名
-    asset_bundle_name: Optional[str] = None#资源名
-    skill: Optional[SkillInfo] = None
-    special_skill_info: Optional[SkillInfo] = None
-    thumbnail_info: Optional[List[CardFullThumbnailRequest]] = None
-    after_training: Optional[bool] = False #是否特训后
-
-class CardDetailRequest(BaseModel):
-    card_info: CardBasicInfo
-    region: str #服务器地区
-    power_info: CardPowerInfo
-    event_info: Optional[EventInfo] = None
-    gacha_info: Optional[GachaInfo] = None
-    card_images_path: List[str]  # 卡面图片路径
-    costume_images_path: List[str]  # 服装图片路径
-    character_icon_path: str #角色图标路径
-    unit_logo_path: str #团队图标路径
-    background_image_path: Optional[str] = None  # 背景图片路径
-    event_attr_icon_path: Optional[str] = None  # 活动增幅属性图标路径
-    event_unit_icon_path: Optional[str] = None  # 活动增幅组合图标路径
-    event_chara_icon_path: Optional[str] = None  # 活动横幅角色图标路径
-
-class CardListRequest(BaseModel):
-    cards: List[CardBasicInfo]
-    region: str
-    user_info: Optional[DetailedProfileCardRequest] = None
-    background_image_path: Optional[str] = None  # 背景图片路径
-
-class UserCardInfo(BaseModel):
-    card: CardBasicInfo
-    has_card: bool
-
-class CardBoxRequest(BaseModel):
-    cards: List[UserCardInfo]
-    region: str
-    user_info: Optional[DetailedProfileCardRequest] = None
-    show_id: bool = False
-    show_box: bool = False
-    background_image_path: Optional[str] = None  # 背景图片路径
-    character_icon_paths: dict[int, str]  # 角色ID到图标路径的映射
-    term_limited_icon_path: Optional[str] = None  # 期间限定图标路径
-    fes_limited_icon_path: Optional[str] = None  # FES限定图标路径
+# 从 model.py 导入数据模型
+from .model import (
+    CardPower,
+    CardSkill,
+    CardEventInfo,
+    CardGachaInfo,
+    CardBasic,
+    UserCard,
+    CardDetailRequest,
+    CardListRequest,
+    CardBoxRequest,
+    # 兼容性别名
+    CardPowerInfo,
+    SkillInfo,
+    EventInfo,
+    GachaInfo,
+    CardBasicInfo,
+    UserCardInfo,
+)
 
 # ========== 主要函数 ==========
 
@@ -154,7 +68,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     """
     card_info = rqd.card_info
     region = rqd.region
-    power_info = rqd.power_info
+    power_info = rqd.card_info.power
     skill_info = rqd.card_info.skill
     sp_skill_info = rqd.card_info.special_skill_info
     # 获取图片
@@ -224,8 +138,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                         with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
                             ImageBox(await get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path), size=(250, None))
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
-                                TextBox(f"开始时间: {event_detail.start_time.strftime('%Y-%m-%d %H:%M')}", small_style)
-                                TextBox(f"结束时间: {event_detail.end_time.strftime('%Y-%m-%d %H:%M')}", small_style)
+                                TextBox(f"开始时间: {event_detail.start_at.strftime('%Y-%m-%d %H:%M')}", small_style)
+                                TextBox(f"结束时间: {event_detail.end_at.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 Spacer(h=4)
                                 with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
                                     # 属性、团队、角色图标
@@ -245,8 +159,8 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                         with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
                             ImageBox(await get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path), size=(250, None))
                             with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
-                                TextBox(f"开始时间: {gacha_detail.start_time.strftime('%Y-%m-%d %H:%M')}", small_style)
-                                TextBox(f"结束时间: {gacha_detail.end_time.strftime('%Y-%m-%d %H:%M')}", small_style)
+                                TextBox(f"开始时间: {gacha_detail.start_at.strftime('%Y-%m-%d %H:%M')}", small_style)
+                                TextBox(f"结束时间: {gacha_detail.end_at.strftime('%Y-%m-%d %H:%M')}", small_style)
 
             # 右侧: 标题+限定类型+综合力+技能+发布时间+缩略图+衣装
             w = 600
@@ -338,7 +252,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
 
     thumbs = []
     for card in rqd.cards:
-        if card.after_training:
+        if card.is_after_training:
             thumb_img = await get_card_full_thumbnail(card.thumbnail_info[1])
         else:
             thumb_img = await get_card_full_thumbnail(card.thumbnail_info[0])
@@ -356,9 +270,9 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     leak_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0))
 
     # 使用传入的背景图片，如果没有则使用默认背景
-    if rqd.background_image_path:
+    if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path)
             bg = ImageBg(bg_img)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
@@ -387,7 +301,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                         # 技能图标区域
                         with Frame().set_content_align('rb'):
                             # 根据skill_type自动匹配技能图标
-                            if card.skill.skill_type:
+                            if card.skill and card.skill.skill_type:
                                 skill_icon_path = card.skill.skill_type_icon_path
                                 try:
                                     skill_img = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
@@ -428,7 +342,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     thumbs = []
     for card in cards:
         # 根据use_after_training决定使用哪张缩略图
-        if card.card.after_training:
+        if card.card.is_after_training:
             thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[1]))
         else:
             thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[0]))
@@ -459,7 +373,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     chara_cards = list(chara_cards.items())
     chara_cards.sort(key=lambda x: x[0])
     for i in range(len(chara_cards)):
-        chara_cards[i][1].sort(key=lambda x: (x['card']['card_rarity_type'], x['card']['release_at'], x['card']['id']))
+        chara_cards[i][1].sort(key=lambda x: (x['card']['rare'], x['card']['release_at'], x['card']['card_id']))
 
     # 计算最佳高度限制以优化布局
     max_card_num = max([len(cards) for _, cards in chara_cards]) if chara_cards else 0
@@ -520,12 +434,12 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                 Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0,0,0,120), radius=2))
 
         if show_id:
-            TextBox(f"{card_data['card']['id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
+            TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
 
     # 使用传入的背景图片，如果没有则使用默认背景
-    if rqd.background_image_path:
+    if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path)
             bg = ImageBg(bg_img)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
