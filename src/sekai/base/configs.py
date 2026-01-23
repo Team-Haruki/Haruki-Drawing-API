@@ -39,4 +39,4 @@ DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
 DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
 
 # 直接调用来覆盖
-load_configs("/home/xmlq/codes/pycodes/Haruki-Drawing-API/configs.yaml")
+load_configs("/Users/deseer/PycharmProjects/Haruki-Drawing-API/configs.yaml")

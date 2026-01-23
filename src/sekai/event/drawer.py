@@ -28,7 +28,7 @@ from src.base.plot import (
     VSplit,
 )
 from src.base.utils import get_img_from_path, get_readable_timedelta
-from src.profile.drawer import (
+from src.sekai.profile.drawer import (
     CardFullThumbnailRequest,
     get_card_full_thumbnail,
     get_detailed_profile_card,

@@ -1,5 +1,4 @@
 import math
-from PIL import Image
 from datetime import datetime
 from pydantic import BaseModel, field_validator
 from src.base.painter import (
@@ -32,7 +31,7 @@ from src.base.draw import (
     add_watermark,
     CHARACTER_COLOR_CODE
 )
-from src.profile.drawer import (
+from src.sekai.profile.drawer import (
     DetailedProfileCardRequest,
     get_detailed_profile_card,
     get_card_full_thumbnail,

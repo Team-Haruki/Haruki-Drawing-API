@@ -1,5 +1,4 @@
 from PIL import Image, ImageDraw
-from datetime import datetime
 from src.base.configs import (
     ASSETS_BASE_DIR,
     DEFAULT_FONT,
@@ -15,17 +14,12 @@ from src.base.draw import(
 )
 from src.base.utils import (
     get_img_from_path,
-    truncate,
-    get_readable_datetime,
-    get_str_display_length,
-    
 )
 from src.base.plot import(
     Canvas,
     VSplit,
     HSplit,
     Frame,
-    colored_text_box,
     ImageBg,
     ImageBox,
     TextStyle,
@@ -37,18 +31,13 @@ from src.base.plot import(
     FillBg
 )
 from src.base.painter import(
-    SHADOW,
-    RED,
     BLACK,
     WHITE,
     color_code_to_rgb,
     lerp_color,
     ADAPTIVE_SHADOW
 )
-from src.profile.drawer import (
-    get_avatar_widget_with_frame,
-    process_hide_uid,
-    ProfileCardRequest,
+from src.sekai.profile.drawer import (
     get_profile_card
 )
 

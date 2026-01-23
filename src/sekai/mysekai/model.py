@@ -6,7 +6,7 @@ from typing import (
     Literal
 )
 from src.base.painter import Color
-from src.profile.model import ProfileCardRequest
+from src.sekai.profile.model import ProfileCardRequest
 
 # =========================== 绘制资源数量=========================== #
 

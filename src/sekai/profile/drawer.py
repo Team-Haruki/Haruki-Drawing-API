@@ -38,7 +38,7 @@ from src.base.draw import (
     SEKAI_BLUE_BG
 )
 import re
-from src.honor.drawer import compose_full_honor_image
+from src.sekai.honor.drawer import compose_full_honor_image
 import asyncio
 
 # =========================== 从.model导入数据类型 =========================== #
