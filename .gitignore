@@ -196,3 +196,9 @@ cython_debug/
 # 测试文件
 test/
 test*
+data/
+.idea/
+*.png
+*.json
+*_test.py
+.DS_Store

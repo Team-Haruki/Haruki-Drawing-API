@@ -2,6 +2,8 @@ from datetime import datetime, timedelta
 import math
 from typing import Optional, List
 
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import font_manager
 from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
@@ -9,15 +11,15 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
-from src.base.configs import ASSETS_BASE_DIR
-from src.base.draw import (
+from src.sekai.base.configs import ASSETS_BASE_DIR
+from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
     add_watermark,
     roundrect_bg,
 )
-from src.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
-from src.base.plot import (
+from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
+from src.sekai.base.plot import (
     Canvas,
     FillBg,
     Frame,
@@ -27,8 +29,13 @@ from src.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.base.utils import get_img_from_path, get_readable_datetime, get_readable_timedelta, plt_fig_to_image, truncate
-
+from src.sekai.base.utils import (
+    get_img_from_path,
+    get_readable_datetime,
+    get_readable_timedelta,
+    plt_fig_to_image,
+    truncate
+)
 
 class RankInfo(BaseModel):
     rank: int
@@ -41,7 +48,7 @@ class RankInfo(BaseModel):
     speed: Optional[int] = None
     min20_times_3_speed: Optional[int] = None
     hour_round: Optional[int] = None
-    record_startAt: Optional[datetime] = None
+    record_start_at: Optional[datetime] = None
 
 class SpeedInfo(BaseModel):
     rank: int
@@ -52,8 +59,8 @@ class SpeedInfo(BaseModel):
 class SklRequest(BaseModel):
     id: int
     region: str
-    startAt: int
-    aggregateAt: int
+    start_at: int
+    aggregate_at: int
     name: str
     banner_img_path: str
     wl_cid: Optional[int] = None
@@ -64,7 +71,7 @@ class SKRequest(BaseModel):
     id: int
     region: str
     name: str
-    aggregateAt: int
+    aggregate_at: int
     ranks: list[RankInfo]
     wl_chara_icon_path: Optional[str] = None
     chara_icon_path: Optional[str] = None
@@ -78,16 +85,16 @@ class CFRequest(BaseModel):
     ranks: list[RankInfo]
     prev_rank: Optional[RankInfo] = None
     next_rank: Optional[RankInfo] = None
-    aggregateAt: int
-    updateAt: datetime
+    aggregate_at: int
+    update_at: datetime
     wl_chara_icon_path: Optional[str] = None
 
 class SpeedRequest(BaseModel):
     event_id: int
     region: str
     event_name: str
-    event_startAt: int
-    event_aggregateAt: int
+    event_start_at: int
+    event_aggregate_at: int
     ranks: list[SpeedInfo]
     is_wl_event: bool
     request_type: str
@@ -124,19 +131,19 @@ class WinRateRequest(BaseModel):
     region: str
     wl_chara_icon_path: Optional[str] = None
     updated_at: datetime
-    event_startAt: int
-    event_aggregateAt: int
+    event_start_at: int
+    event_aggregate_at: int
     banner_img_path: Optional[str] = None
     team_info: List[TeamInfo]
 
 #matplotlib字体
-font_path = []
-font_path.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".otf"))
-font_path.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".ttf"))
-for font_path in font_path:
+font_paths = []
+font_paths.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".otf"))
+font_paths.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".ttf"))
+for path in font_paths:
     try:
-        font_manager.fontManager.addfont(font_path)
-        prop = font_manager.FontProperties(fname=font_path)
+        font_manager.fontManager.addfont(path)
+        prop = font_manager.FontProperties(fname=path)
         font_name = prop.get_name()
         plt.rcParams["font.family"] = [font_name]
         plt.rcParams["axes.unicode_minus"] = False
@@ -204,8 +211,8 @@ def get_board_score_str(score: int, width: int = None) -> str:
 
 async def compose_skl_image(rqd: SklRequest, full: bool = False) -> Image.Image:
     eid = rqd.id
-    event_start = datetime.fromtimestamp(rqd.startAt / 1000)
-    event_end = datetime.fromtimestamp(rqd.aggregateAt / 1000 + 1)
+    event_start = datetime.fromtimestamp(rqd.start_at / 1000)
+    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
     title = rqd.name
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
     wl_cid = rqd.wl_cid
@@ -266,7 +273,7 @@ async def compose_skl_image(rqd: SklRequest, full: bool = False) -> Image.Image:
 async def compose_sk_image(rqd: SKRequest) -> Image.Image:
     eid = rqd.id
     title = rqd.name
-    event_end = datetime.fromtimestamp(rqd.aggregateAt / 1000 + 1)
+    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
     if rqd.wl_chara_icon_path:
         wl_chara_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
@@ -322,7 +329,7 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
 async def compose_cf_image(rqd: CFRequest) -> Image.Image:
     eid = rqd.eid
     title = rqd.event_name
-    event_end = datetime.fromtimestamp(rqd.aggregateAt / 1000 + 1)
+    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
     wl_chara_img_path = rqd.wl_chara_icon_path
 
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
@@ -347,8 +354,8 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
         if rank.min20_times_3_speed:
             texts.append((f"20min×3时速: {get_board_score_str(rank.min20_times_3_speed)}", style2))
         texts.append((f"本小时周回数: {rank.hour_round}", style2))
-        texts.append((f"数据开始于: {get_readable_datetime(rank.record_startAt, show_original_time=False)}", style2))
-        texts.append((f"数据更新于: {get_readable_datetime(rqd.updateAt, show_original_time=False)}", style2))
+        texts.append((f"数据开始于: {get_readable_datetime(rank.record_start_at, show_original_time=False)}", style2))
+        texts.append((f"数据更新于: {get_readable_datetime(rqd.update_at, show_original_time=False)}", style2))
     else:
         # 多个
         for rank in ranks:
@@ -356,7 +363,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
             texts.append((f"当前排名 {get_board_rank_str(rank.rank)} - 当前分数 {get_board_score_str(rank.score)}", style2))
             texts.append((f"时速: {get_board_score_str(rank.speed)} - 近{rank.average_round}次平均Pt: {rank.average_pt:.1f}", style2))
             texts.append((f"本小时周回数: {rank.hour_round}", style2))
-            texts.append((f"RT: {get_readable_datetime(rank.record_startAt, show_original_time=False)} ~ {get_readable_datetime(rqd.updateAt, show_original_time=False)}", style2))
+            texts.append((f"RT: {get_readable_datetime(rank.record_start_at, show_original_time=False)} ~ {get_readable_datetime(rqd.update_at if hasattr(rqd, 'update_at') else rqd.updated_at, show_original_time=False)}", style2))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
@@ -383,8 +390,8 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
     unit_text = rqd.request_type
     eid = rqd.event_id
     title = rqd.event_name
-    event_start = datetime.fromtimestamp(rqd.event_startAt / 1000)
-    event_end = datetime.fromtimestamp(rqd.event_aggregateAt / 1000 + 1)
+    event_start = datetime.fromtimestamp(rqd.event_start_at / 1000)
+    event_end = datetime.fromtimestamp(rqd.event_aggregate_at / 1000 + 1)
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
     is_wl_event = rqd.is_wl_event
     query_ranks = SKL_QUERY_RANKS
@@ -647,8 +654,8 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
 
     event_name = rqd.event_name
-    event_start = datetime.fromtimestamp(rqd.event_startAt / 1000)
-    event_end = datetime.fromtimestamp(rqd.event_aggregateAt / 1000 + 1)
+    event_start = datetime.fromtimestamp(rqd.event_start_at / 1000)
+    event_end = datetime.fromtimestamp(rqd.event_aggregate_at / 1000 + 1)
 
     teams = rqd.team_info
     teams.sort(key=lambda x: x.team_id)

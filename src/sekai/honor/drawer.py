@@ -1,35 +1,12 @@
 from PIL import Image
 from PIL import ImageDraw
-from pydantic import BaseModel
 from typing import Optional
-from src.base.utils import get_img_from_path
-from src.base.configs import DEFAULT_BOLD_FONT, ASSETS_BASE_DIR
-from src.base.painter import get_font, get_text_size, WHITE, resize_keep_ratio
+from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.configs import DEFAULT_BOLD_FONT, ASSETS_BASE_DIR
+from src.sekai.base.painter import get_font, get_text_size, WHITE, resize_keep_ratio
 
-class HonorRequest(BaseModel):
-    honor_type: Optional[str] = None
-    group_type: Optional[str] = None
-    honor_rarity: Optional[str] = None
-    honor_level: Optional[int] = 0
-    fc_or_ap_level: Optional[str] = None
-    is_empty: bool = False
-    is_main_honor: bool = False
-    honor_img_path: Optional[str] = None
-    rank_img_path: Optional[str] = None
-    lv_img_path: Optional[str] = None
-    lv6_img_path: Optional[str] = None
-    empty_honor_path: Optional[str] = None
-    scroll_img_path: Optional[str] = None
-    word_img_path: Optional[str] = None
-    chara_icon_path: Optional[str] = None
-    chara_icon_path2: Optional[str] = None
-    chara_id: Optional[str] = None
-    chara_id2: Optional[str] = None
-    bonds_bg_path: Optional[str] = None
-    bonds_bg_path2: Optional[str] = None
-    mask_img_path: Optional[str] = None
-    frame_img_path: Optional[str] = None
-    frame_degree_level_img_path: Optional[str] = None
+# 从 model.py 导入数据模型
+from .model import HonorRequest
 
 face_pos = {
             1: 48,

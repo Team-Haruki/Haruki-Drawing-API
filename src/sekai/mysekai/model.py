@@ -5,7 +5,7 @@ from typing import (
     Dict,
     Literal
 )
-from src.base.painter import Color
+from src.sekai.base.painter import Color
 from src.sekai.profile.model import ProfileCardRequest
 
 # =========================== 绘制资源数量=========================== #
@@ -54,6 +54,7 @@ class MysekaiVisitCharacter(BaseModel):
     memoria_image_path: Optional[str] = None
     is_read: bool = False
     is_reservation: bool = False
+    reservation_icon_path: Optional[str] = None
 
 class MysekaiResourceNumber(BaseModel):
     r"""MysekaiResourceNumber
@@ -75,6 +76,7 @@ class MysekaiResourceNumber(BaseModel):
     number: int = 0
     text_color: Color = (100, 100, 100)
     has_music_record: bool = False
+    music_record_icon_path: Optional[str] = None
 
 class MysekaiSiteResourceNumber(BaseModel):
     r"""MysekaiSiteResourceNumber
@@ -101,7 +103,7 @@ class MysekaiResourceRequest(BaseModel):
         用户个人信息
     background_image_path : Optional[ str ] = None
         背景图片路径
-    phenoms : List[ MysekaPhenomRequest ]
+    phenoms : List[ MysekaiPhenomRequest ]
         天气表，绘制天气预报
     gate_id : int
         大门id
@@ -117,6 +119,7 @@ class MysekaiResourceRequest(BaseModel):
     phenoms: List[MysekaiPhenomRequest]
     gate_id: int
     gate_level: int
+    gate_icon_path: Optional[str] = None
     visit_characters: List[MysekaiVisitCharacter]
     site_resource_numbers: Optional[List[MysekaiSiteResourceNumber]] = None
 
@@ -141,6 +144,7 @@ class MysekaiFixture(BaseModel):
     id: int
     image_path: str
     character_id: Optional[int] = None
+    chara_icon_path: Optional[str] = None
     obtained: bool
 
 class MysekaiFixtureSubGenre(BaseModel):
@@ -254,6 +258,7 @@ class MysekaiReactionCharacterGroups(BaseModel):
     """
     number: int
     character_uint_id_groups: List[List[int]]
+    chara_icon_path_groups: Optional[List[List[str]]] = None
 
 class MysekaiFixtureDetailRequest(BaseModel):
     r"""MysekaiFixtureDetailRequest
@@ -417,6 +422,7 @@ class MysekaiCategoryMusicrecord(BaseModel):
         唱片列表
     """
     tag: str
+    tag_icon_path: Optional[str] = None
     progress_message: Optional[str] = None
     musicrecords: List[MysekaiMusicrecord]
 
@@ -457,6 +463,7 @@ class MysekaiTalkFixtures(BaseModel):
     fixtures: List[MysekaiFixture] = []
     noread_num: int
     character_ids: Optional[List[List[int]]] = None
+    chara_icon_path_groups: Optional[List[List[str]]] = None
 
 
 class MysekaiSingleTalkMainGenre(BaseModel):

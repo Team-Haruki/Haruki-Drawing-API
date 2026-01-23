@@ -3,8 +3,8 @@ import asyncio
 from PIL import Image
 
 from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
-from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
-from src.base.draw import (
+from src.sekai.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
+from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
     SEKAI_BLUE_BG,
@@ -12,7 +12,7 @@ from src.base.draw import (
     roundrect_bg,
     PLAY_RESULT_COLORS,
 )
-from src.base.painter import (
+from src.sekai.base.painter import (
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     DEFAULT_HEAVY_FONT,
@@ -23,8 +23,19 @@ from src.base.painter import (
     BLACK,
     RED
 )
-from src.base.plot import Canvas, FillBg, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
-from src.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
+from src.sekai.base.plot import (
+    Canvas,
+    FillBg,
+    Frame,
+    Grid,
+    HSplit,
+    ImageBox,
+    Spacer,
+    TextBox,
+    TextStyle,
+    VSplit
+)
+from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
 
 
 # =========================== 从.model导入常量和数据类型 =========================== #
@@ -41,10 +52,10 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     lyricist = rqd.music_info.lyricist
     arranger = rqd.music_info.arranger
     mv_info = rqd.music_info.mv_info
-    publish_time = datetime.fromtimestamp(rqd.music_info.publishedAt / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    publish_time = datetime.fromtimestamp(rqd.music_info.release_at / 1000).strftime("%Y-%m-%d %H:%M:%S")
     bpm = rqd.bpm
-    is_full_length = rqd.music_info.isFullLength
-    cover_img = await get_img_from_path(ASSETS_BASE_DIR,rqd.music_jacket)
+    is_full_length = rqd.music_info.is_full_length
+    cover_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_jacket_path)
     length = rqd.length
     cn_name = rqd.cn_name
     region = rqd.region
@@ -52,7 +63,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     vocal_logos_raw = rqd.vocal.vocal_assets
     caption_vocals = {}
     # has_append = rqd.difficulty.has_append
-    event_banner = await get_img_from_path(ASSETS_BASE_DIR,rqd.event_banner)
+    event_banner = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path) if rqd.event_banner_path else None
 
     # if not has_append:
     #     DIFF_COLORS.pop("append")
@@ -73,7 +84,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     diff_counts = rqd.difficulty.note_count
     has_append  = rqd.difficulty.has_append
 
-    event_id = rqd.eventId
+    event_id = rqd.event_id
 
     caption_vocals = {}
     if vocal_info and "caption" in vocal_info and "characters" in vocal_info:
@@ -129,10 +140,11 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                             TextBox(lyricist, style2)
                             TextBox(arranger, style2)
                             mv_text = ""
-                            for item in mv_info:
-                                if item == "original": mv_text += "原版MV & "
-                                if item == "mv": mv_text += "3DMV & "
-                                if item == "mv_2d": mv_text += "2DMV & "
+                            if mv_info:
+                                for item in mv_info:
+                                    if item == "original": mv_text += "原版MV & "
+                                    if item == "mv": mv_text += "3DMV & "
+                                    if item == "mv_2d": mv_text += "2DMV & "
                             mv_text = mv_text[:-3]
                             if not mv_text: mv_text = "无"
                             TextBox(mv_text, style2)
@@ -147,7 +159,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                         # 难度等级
                         light_diff_color = []
                         for i, (diff, color) in enumerate(DIFF_COLORS.items()):
-                            if diff_lvs[i] is not None:
+                            if i < len(diff_lvs) and diff_lvs[i] is not None:
                                 t = TextBox(f"{diff.upper()} {diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=WHITE))
                                 t.set_bg(roundrect_bg(fill=color, radius=6)).set_size((gw, 40)).set_content_align("c").set_overflow("clip")
                             if not isinstance(color, LinearGradient):
@@ -227,7 +239,7 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str =
 
             for m in musics_list:
                 mid, music_name = m.music_info.id, m.music_info.title
-                publish_time = datetime.fromtimestamp(m.music_info.publishedAt / 1000)
+                publish_time = datetime.fromtimestamp(m.music_info.release_at / 1000)
                 publish_dlt = get_readable_timedelta(publish_time - datetime.now(), precision="d")
                 diffs = ["easy", "normal", "hard", "expert", "master", "append"]
                 diff_lvs = m.difficulty.level
@@ -237,7 +249,7 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str =
                 style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=WHITE)
 
                 with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16):
-                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR,m.music_jacket), size=(80, 80))
+                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path), size=(80, 80))
                     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
                         TextBox(f"【{region.upper()}-{mid}】{music_name}", style1).set_w(250)
                         if publish_dlt <= "0秒":
@@ -288,13 +300,13 @@ async def compose_music_list_image(
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 lv_musics.sort(key=lambda x: x[0], reverse=False)
                 for lv, musics in lv_musics:
-                    musics.sort(key=lambda x: x["publishedAt"], reverse=False)
+                    musics.sort(key=lambda x: x["release_at"], reverse=False)
 
                     # 获取游玩结果并过滤
                     filtered_musics = []
                     for music in musics:
                         # 过滤剧透
-                        is_leak = datetime.fromtimestamp(music["publishedAt"] / 1000) > datetime.now()
+                        is_leak = datetime.fromtimestamp(music["release_at"] / 1000) > datetime.now()
                         music["is_leak"] = is_leak
                         if is_leak and not show_leak:
                             continue
@@ -321,7 +333,11 @@ async def compose_music_list_image(
                                             TextBox("LEAK", TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=RED)) \
                                                 .set_bg(roundrect_bg(radius=4)).set_offset((64, 64)).set_offset_anchor("rb")
                                         if music["play_result"]:
-                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+f"/icon_{music['play_result']}.png")
+                                            if rqd.play_result_icon_path_map and music['play_result'] in rqd.play_result_icon_path_map:
+                                                result_img_path = rqd.play_result_icon_path_map[music['play_result']]
+                                            else:
+                                                result_img_path = RESULT_ASSET_PATH+f"/icon_{music['play_result']}.png"
+                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset((64 - 10, 64 - 10))
                                     if show_id:
                                         TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(64)
@@ -451,8 +467,10 @@ async def compose_detail_music_rewards_image(
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
     style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
     # 奖励的icon
-    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/jewel.png")
-    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+"/shard.png")
+    j_path = rqd.jewel_icon_path or RESULT_ASSET_PATH+"/jewel.png"
+    s_path = rqd.shard_icon_path or RESULT_ASSET_PATH+"/shard.png"
+    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, j_path)
+    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
     
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -521,8 +539,10 @@ async def compose_basic_music_rewards_image(
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
     style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
     # 奖励的icon
-    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/jewel.png")
-    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/shard.png")
+    j_path = rqd.jewel_icon_path or f"{RESULT_ASSET_PATH}/jewel.png"
+    s_path = rqd.shard_icon_path or f"{RESULT_ASSET_PATH}/shard.png"
+    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, j_path)
+    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):

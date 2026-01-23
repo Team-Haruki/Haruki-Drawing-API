@@ -1,6 +1,6 @@
 # 绘图所需的数据类型
 from pydantic import BaseModel
-from typing import Any, List, Dict, Literal
+from typing import Any, List, Dict, Literal, Optional
 from src.sekai.profile.drawer import DetailedProfileCardRequest, BasicProfile, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
@@ -13,8 +13,8 @@ class MusicMD(BaseModel):
     arranger: str
     mv_info: list[str] | None = None
     categories: list[str]
-    publishedAt: int
-    isFullLength: bool
+    release_at: int
+    is_full_length: bool
 
 class DifficultyInfo(BaseModel):
     level: list[int]
@@ -40,15 +40,15 @@ class MusicDetailRequest(BaseModel):
     alias: list[str] | None
     length: str | None = None
     difficulty: DifficultyInfo
-    eventId: int | None = None
+    event_id: int | None = None
     cn_name: str | None = None
-    music_jacket: str
-    event_banner: str | None = None
+    music_jacket_path: str
+    event_banner_path: str | None = None
 
 class MusicBriefList(BaseModel):
     difficulty: DifficultyInfo
     music_info: MusicMD
-    music_jacket: str
+    music_jacket_path: str
 
 class MusicBriefListRequest(BaseModel):
     music_list: list[MusicBriefList]
@@ -60,6 +60,7 @@ class MusicListRequest(BaseModel):
     jackets_path_list: Dict[int, str] # {musicId: jacket_path}
     required_difficulties: str
     profile: DetailedProfileCardRequest
+    play_result_icon_path_map: Optional[Dict[str, str]] = None
 
 class PlayProgressCount(BaseModel):
     r"""打歌进度计数类
@@ -146,6 +147,8 @@ class DetailMusicRewardsRequest(BaseModel):
         'append': []
     }
     profile: ProfileCardRequest
+    jewel_icon_path: Optional[str] = None
+    shard_icon_path: Optional[str] = None
 
 
 class BasicMusicRewardsRequest(BaseModel):
@@ -181,4 +184,6 @@ class BasicMusicRewardsRequest(BaseModel):
         'append': '0'
     }
     profile: ProfileCardRequest
+    jewel_icon_path: Optional[str] = None
+    shard_icon_path: Optional[str] = None
 

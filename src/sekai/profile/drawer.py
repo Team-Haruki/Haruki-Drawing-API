@@ -1,9 +1,8 @@
 from datetime import datetime
 from PIL import Image, ImageDraw
-from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
-from src.base.utils import get_img_from_path
-from src.base.utils import get_readable_datetime, truncate
-from src.base.painter import(
+from src.sekai.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
+from src.sekai.base.utils import get_img_from_path, get_readable_datetime, truncate
+from src.sekai.base.painter import(
     DEFAULT_FONT,
     DEFAULT_BOLD_FONT,
     BLACK,
@@ -14,7 +13,7 @@ from src.base.painter import(
     ADAPTIVE_WB,
     RED
 )
-from src.base.plot import (
+from src.sekai.base.plot import (
     Frame,
     HSplit,
     VSplit,
@@ -28,7 +27,7 @@ from src.base.plot import (
     Canvas,
     ImageBg,
 )
-from src.base.draw import (
+from src.sekai.base.draw import (
     roundrect_bg, 
     DIFF_COLORS, 
     PLAY_RESULT_COLORS,
@@ -41,6 +40,26 @@ import re
 from src.sekai.honor.drawer import compose_full_honor_image
 import asyncio
 
+# =========================== 常量定义 =========================== #
+
+CHARA_LIST = [
+    ("miku", 21), ("rin", 22), ("len", 23), ("luka", 24), ("meiko", 25), ("kaito", 26), 
+    ("ick", 1), ("saki", 2), ("hnm", 3), ("shiho", 4), (None, None), (None, None),
+    ("mnr", 5), ("hrk", 6), ("airi", 7), ("szk", 8), (None, None), (None, None),
+    ("khn", 9), ("an", 10), ("akt", 11), ("toya", 12), (None, None), (None, None),
+    ("tks", 13), ("emu", 14), ("nene", 15), ("rui", 16), (None, None), (None, None),
+    ("knd", 17), ("mfy", 18), ("ena", 19), ("mzk", 20), (None, None), (None, None),
+]
+
+CHARA_ID2NICKNAME = {
+    21:"miku", 22:"rin", 23: "len", 24: "luka", 25: "meiko", 26: "kaito", 
+    1: "ick", 2: "saki", 3: "hnm", 4: "shiho", 
+    5: "mnr", 6: "hrk", 7: "airi", 8: "szk",
+    9: "khn", 10: "an", 11: "akt", 12: "toya",
+    13: "tks", 14: "emu", 15: "nene", 16: "rui",
+    17: "knd", 18: "mfy", 19: "ena", 20: "mzk",
+}
+
 # =========================== 从.model导入数据类型 =========================== #
 
 from .model import *
@@ -52,7 +71,13 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
         rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.birthday_icon_path)
         rare_num = 1
     else:
-        rare_num = int(rqd.rare.split("_")[1])
+        # 兼容 "rarity_4", "4_star", "4" 等格式
+        import re
+        match = re.search(r'(\d+)', rqd.rare)
+        if match:
+            rare_num = int(match.group(1))
+        else:
+            rare_num = 0
 
     img_w, img_h = img.size
     custom_text = None
@@ -237,12 +262,6 @@ async def compose_profile_image(
     r"""compose_profile_image
 
     合成个人信息图片
-
-    TODO:
-    -----
-    TextBox shadow 暂未实现，
-    AdaptiveTextColor 自适应文字颜色暂未实现
-
     Args
     ----
     rqd : ProfileRequest
@@ -263,7 +282,7 @@ async def compose_profile_image(
     bg_settings = rqd.bg_settings if rqd.bg_settings is not None else ProfileBgSettings()
     if bg_settings.img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, bg_settings.img_path)
             bg = ImageBg(bg_img, blur=False,fade=0)
         except FileNotFoundError:
             bg = SEKAI_BLUE_BG
@@ -273,15 +292,16 @@ async def compose_profile_image(
     # 称号
     honors = rqd.honors
     # 歌曲完成情况
-    diff_count = {}
+    diff_count = {diff: {"clear": 0, "fc": 0, "ap": 0} for diff in DIFF_COLORS.keys()}
     for count in rqd.music_difficulty_count:
-        diff_count[count.difficulty] = {
-            "clear": count.clear,
-            "fc": count.fc,
-            "ap": count.ap
-        }
+        if count.difficulty in diff_count:
+            diff_count[count.difficulty] = {
+                "clear": count.clear,
+                "fc": count.fc,
+                "ap": count.ap
+            }
     # 角色等级
-    character_rank = {}
+    character_rank = {cid: 1 for _, cid in CHARA_LIST if cid is not None}
     for crank in rqd.character_rank:
         character_rank[crank.character_id] = crank.rank
         
@@ -308,7 +328,8 @@ async def compose_profile_image(
                     )
                     TextBox(f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB))
                     with Frame():
-                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/lv_rank_bg.png")
+                        lv_bg_path = rqd.lv_rank_bg_path or f"{RESULT_ASSET_PATH}/lv_rank_bg.png"
+                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, lv_bg_path)
                         ImageBox(lv_rank_bg, size=(180, None))
                         TextBox(f"{rqd.rank}", TextStyle(font=DEFAULT_FONT, size=30, color=WHITE)).set_offset((110, 0))
 
@@ -317,7 +338,8 @@ async def compose_profile_image(
                 tw_id = rqd.twitter_id
                 tw_id_box = TextBox('        @ ' + tw_id, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=1)
                 tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align('l')
-                x_icon = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/x_icon.png")
+                x_path = rqd.x_icon_path or f"{RESULT_ASSET_PATH}/x_icon.png"
+                x_icon = await get_img_from_path(ASSETS_BASE_DIR, x_path)
                 x_icon = x_icon.resize((24, 24)).convert('RGBA')
                 ImageBox(x_icon, image_size_mode='original').set_offset((16, 0))
 
@@ -351,9 +373,12 @@ async def compose_profile_image(
             hs, vs, gw, gh = 8, 12, 90, 25
             with VSplit().set_sep(vs):
                 Spacer(gh, gh)
-                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/icon_clear.png")
-                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/icon_fc.png")
-                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/icon_ap.png")
+                path_clear = rqd.icon_clear_path or f"{RESULT_ASSET_PATH}/icon_clear.png"
+                path_fc = rqd.icon_fc_path or f"{RESULT_ASSET_PATH}/icon_fc.png"
+                path_ap = rqd.icon_ap_path or f"{RESULT_ASSET_PATH}/icon_ap.png"
+                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, path_clear)
+                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, path_fc)
+                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, path_ap)
                 ImageBox(icon_clear, size=(gh, gh))
                 ImageBox(icon_fc, size=(gh, gh))
                 ImageBox(icon_ap, size=(gh, gh))
@@ -380,41 +405,33 @@ async def compose_profile_image(
             hs, vs, gw, gh = 8, 7, 96, 48
             # 角色等级
             with Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs).set_padding(32):
-                chara_list = [
-                    ("miku", 21), ("rin", 22), ("len", 23), ("luka", 24), ("meiko", 25), ("kaito", 26), 
-                    ("ick", 1), ("saki", 2), ("hnm", 3), ("shiho", 4), (None, None), (None, None),
-                    ("mnr", 5), ("hrk", 6), ("airi", 7), ("szk", 8), (None, None), (None, None),
-                    ("khn", 9), ("an", 10), ("akt", 11), ("toya", 12), (None, None), (None, None),
-                    ("tks", 13), ("emu", 14), ("nene", 15), ("rui", 16), (None, None), (None, None),
-                    ("knd", 17), ("mfy", 18), ("ena", 19), ("mzk", 20), (None, None), (None, None),
-                ]
-
-                for chara, cid in chara_list:
+                for chara, cid in CHARA_LIST:
                     if chara is None:
                         Spacer(gw, gh)
                         continue
                     rank = character_rank[cid]
                     with Frame().set_size((gw, gh)):
-                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_rank_icon/{chara}.png")
+                        if rqd.chara_rank_icon_path_map and cid in rqd.chara_rank_icon_path_map:
+                            c_rank_path = rqd.chara_rank_icon_path_map[cid]
+                        else:
+                            c_rank_path = f"{RESULT_ASSET_PATH}/chara_rank_icon/{chara}.png"
+                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
                         ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align('c').set_offset((36, 4))
             
             # 挑战Live等级
             if solo_live is not None:
-                chara_id2nickname = {
-                    21:"miku", 22:"rin", 23: "len", 24: "luka", 25: "meiko", 26: "kaito", 
-                    1: "ick", 2: "saki", 3: "hnm", 4: "shiho", 
-                    5: "mnr", 6: "hrk", 7: "airi", 8: "szk",
-                    9: "khn", 10: "an", 11: "akt", 12: "toya",
-                    13: "tks", 14: "emu", 15: "nene", 16: "rui",
-                    17: "knd", 18: "mfy", 19: "ena", 20: "mzk",
-                }
                 with VSplit().set_content_align('c').set_item_align('c').set_padding((32, 64)).set_sep(12):
                     t = TextBox(f"CHANLLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
-                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/chara_rank_icon/{chara_id2nickname[solo_live.character_id]}.png")
+                        scid = solo_live.character_id
+                        if rqd.chara_rank_icon_path_map and scid in rqd.chara_rank_icon_path_map:
+                            c_rank_path = rqd.chara_rank_icon_path_map[scid]
+                        else:
+                            c_rank_path = f"{RESULT_ASSET_PATH}/chara_rank_icon/{CHARA_ID2NICKNAME[scid]}.png"
+                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
                         ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
                         t = TextBox(str(solo_live.rank), TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)), overflow='clip')
                         t.set_size((50, 50)).set_content_align('c').set_offset((40, 5))
