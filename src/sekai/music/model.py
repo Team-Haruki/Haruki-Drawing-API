@@ -1,7 +1,7 @@
 # 绘图所需的数据类型
 from pydantic import BaseModel
-from typing import Any, List, Dict, Literal, Tuple
-from src.profile.drawer import DetailedProfileCardRequest, BasicProfile, ProfileCardRequest
+from typing import Any, List, Dict, Literal
+from src.sekai.profile.drawer import DetailedProfileCardRequest, BasicProfile, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
 
@@ -11,7 +11,7 @@ class MusicMD(BaseModel):
     composer: str
     lyricist: str
     arranger: str
-    mv: list[str] | None = None
+    mv_info: list[str] | None = None
     categories: list[str]
     publishedAt: int
     isFullLength: bool

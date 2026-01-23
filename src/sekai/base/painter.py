@@ -450,7 +450,6 @@ class RadialGradient(Gradient):
         colors = dist[:, :, np.newaxis] * np.array(self.c1) + (1 - dist)[:, :, np.newaxis] * np.array(self.c2)
         return colors.astype(np.uint8)
 
-# TODO: 自适应颜色暂未实现
 @dataclass
 class AdaptiveTextColor:
     pixelwise: bool = False
@@ -1255,7 +1254,7 @@ class Painter:
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
         preset_tris = [
-            Image.open(f"/home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data/sekai/assets/static_images/random_triangle_bg_images/classic/{i+1}.png")
+            Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
             .convert("RGBA")
             .resize((128, 128), Image.Resampling.BILINEAR)
             for i in range(3)

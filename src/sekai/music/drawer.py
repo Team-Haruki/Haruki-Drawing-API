@@ -2,7 +2,7 @@ from datetime import datetime
 import asyncio
 from PIL import Image
 
-from src.profile.drawer import get_detailed_profile_card, get_basic_profile_card, get_profile_card
+from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
 from src.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 from src.base.draw import (
     BG_PADDING,
@@ -40,7 +40,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     composer = rqd.music_info.composer
     lyricist = rqd.music_info.lyricist
     arranger = rqd.music_info.arranger
-    mv_info = rqd.music_info.mv
+    mv_info = rqd.music_info.mv_info
     publish_time = datetime.fromtimestamp(rqd.music_info.publishedAt / 1000).strftime("%Y-%m-%d %H:%M:%S")
     bpm = rqd.bpm
     is_full_length = rqd.music_info.isFullLength

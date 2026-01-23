@@ -1,6 +1,6 @@
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Literal
-from src.honor.drawer import HonorRequest
+from typing import Optional, List, Literal
+from src.sekai.honor.drawer import HonorRequest
 
 
 class DetailedProfileCardRequest(BaseModel):

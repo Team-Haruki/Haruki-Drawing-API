@@ -24,7 +24,7 @@ from src.base.plot import (
     RoundRectBg,
     TextStyle,
 )
-from src.profile.drawer import (
+from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_detailed_profile_card,
     DetailedProfileCardRequest,

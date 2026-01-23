@@ -5,7 +5,7 @@ from copy import deepcopy
 from datetime import datetime
 from types import TracebackType
 from dataclasses import dataclass
-from typing import Union, Type, Callable, TypedDict, Self, Optional, Literal
+from typing import Union, Type, Callable, TypedDict, Self, Optional, Literal, Tuple
 from PIL import Image, ImageFilter, ImageFont, ImageEnhance
 
 from .painter import (
@@ -812,6 +812,24 @@ class TextStyle:
     shadow_offset: tuple[int, int] | int = 1
     shadow_color: tuple[int, int, int, int] = SHADOW
 
+    def replace(
+        self,
+        font: str = None,
+        size: int = None,
+        color: Tuple[int, int, int, int] = None,
+        use_shadow: bool = None,
+        shadow_offset: Tuple[int, int] | int = None,
+        shadow_color: Tuple[int, int, int, int] = None,
+    ):
+        return TextStyle(
+            font = font if font is not None else self.font,
+            size = size if size is not None else self.size,
+            color = color if color is not None else self.color,
+            use_shadow = use_shadow if use_shadow is not None else self.use_shadow,
+            shadow_offset = shadow_offset if shadow_offset is not None else self.shadow_offset,
+            shadow_color = shadow_color if shadow_color is not None else self.shadow_color,
+        )
+
 
 class TextBox(Widget):
     r"""TextBox
@@ -843,6 +861,8 @@ class TextBox(Widget):
         assert overflow in ("shrink", "clip")
         self.overflow = overflow
         self.use_real_line_count = use_real_line_count
+        self.text_offset_x = 0
+        self.text_offset_y = 0
 
         if line_count is None:
             self.line_count = 99999 if use_real_line_count else 1
@@ -873,6 +893,11 @@ class TextBox(Widget):
     def set_overflow(self, overflow: str) -> None:
         assert overflow in ("shrink", "clip")
         self.overflow = overflow
+
+    def set_text_offset(self, offset: Tuple[int, int]):
+        self.text_offset_x = offset[0]
+        self.text_offset_y = offset[1]
+        return self
 
     def _get_pil_font(self) -> ImageFont:
         return get_font(self.style.font, self.style.size)
