@@ -98,6 +98,24 @@ class UserProfileInfo(BaseModel):
     data_source: str
     update_time: int
 
+class LeaderboardInfo(BaseModel):
+    r"""LeaderboardInfo
+
+    排行榜单项信息
+
+    Attributes
+    ----------
+    rank : int
+        排名
+    diff : str
+        难度类型 (easy/normal/hard/expert/master/append)
+    value : str
+        排行榜数值 (如分数百分比、PT数等)
+    """
+    rank: int
+    diff: str
+    value: str
+
 class MusicDetailRequest(BaseModel):
     r"""MusicDetailRequest
     
@@ -127,6 +145,16 @@ class MusicDetailRequest(BaseModel):
         歌曲封面路径
     event_banner_path : str | None
         活动Banner路径
+    limited_times : list[tuple[str, str]] | None
+        限定时间列表，每项为 (开始时间, 结束时间) 格式化字符串
+    leaderboard_matrix : list[list[LeaderboardInfo | None]] | None
+        排行榜矩阵，行为live_type，列为target
+    leaderboard_music_num : int | None
+        参与排行榜的歌曲总数
+    leaderboard_live_types : list[str] | None
+        排行榜live_type名称列表
+    leaderboard_targets : list[str] | None
+        排行榜target名称列表
     """
     region: str
     music_info: MusicMD
@@ -139,6 +167,11 @@ class MusicDetailRequest(BaseModel):
     cn_name: str | None = None
     music_jacket_path: str
     event_banner_path: str | None = None
+    limited_times: list[tuple[str, str]] | None = None
+    leaderboard_matrix: list[list[LeaderboardInfo | None]] | None = None
+    leaderboard_music_num: int | None = None
+    leaderboard_live_types: dict[str, str] | None = None
+    leaderboard_targets: dict[str, str] | None = None
 
 class MusicBriefList(BaseModel):
     r"""MusicBriefList

@@ -26,6 +26,7 @@ from src.sekai.base.painter import (
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
+    Flow,
     Frame,
     Grid,
     HSplit,
@@ -152,27 +153,88 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                             TextBox(publish_time, style2)
                             TextBox(bpm_main, style2)
 
-                # 难度等级/物量
-                hs, vs, gw = 8, 12, 180 if not has_append else 150
-                with HSplit().set_content_align("c").set_item_align("c").set_sep(vs).set_padding(32):
-                    with Grid(col_count=(6 if has_append else 5), item_size_mode="fixed").set_sep(h_sep=hs, v_sep=vs):
-                        # 难度等级
-                        light_diff_color = []
-                        for i, (diff, color) in enumerate(DIFF_COLORS.items()):
-                            if i < len(diff_lvs) and diff_lvs[i] is not None:
-                                t = TextBox(f"{diff.upper()} {diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=WHITE))
-                                t.set_bg(roundrect_bg(fill=color, radius=6)).set_size((gw, 40)).set_content_align("c").set_overflow("clip")
-                            if not isinstance(color, LinearGradient):
-                                light_diff_color.append(adjust_color(lerp_color(color, WHITE, 0.5), a=100))
-                            else:
-                                light_diff_color.append(adjust_color(lerp_color(color.c2, WHITE, 0.5), a=100))
-                                # 物量
-                        for i, count in enumerate(diff_counts):
-                            if count is None: continue
-                            t = TextBox(f"{count} combo", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(80, 80, 80, 255)), line_count=1)
-                            t.set_size((gw, 40)).set_content_align("c").set_bg(roundrect_bg(fill=light_diff_color[i], radius=6))
+                # 限定时间
+                if rqd.limited_times:
+                    with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
+                        TextBox("限定时间", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
+                        with VSplit().set_content_align("l").set_item_align("l").set_sep(4):
+                            for start, end in rqd.limited_times:
+                                TextBox(f"{start} ~ {end}", TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
 
-                            # 别名
+                # 计算难度区域宽度
+                diff_col_count = 6 if has_append else 5
+                diff_cell_size = 64
+                diff_hs = 8 if has_append else 20
+                diff_padding = 32
+                diff_section_w = diff_col_count * diff_cell_size + (diff_col_count - 1) * diff_hs + diff_padding * 2
+                total_w = 964
+                hsplit_gap = 8
+                leaderboard_w = total_w - diff_section_w - hsplit_gap
+                
+                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsplit_gap).set_omit_parent_bg(True).set_item_bg(roundrect_bg()).set_w(total_w):
+                    # 难度等级/物量
+                    vs = 4
+                    hs = diff_hs
+                    with HSplit().set_content_align("c").set_item_align("c").set_sep(vs).set_padding(diff_padding).set_h(196):
+                        with Grid(col_count=diff_col_count, item_size_mode="fixed").set_sep(h_sep=hs, v_sep=vs):
+                            # 难度等级
+                            for i, (diff, color) in enumerate(DIFF_COLORS.items()):
+                                if i < len(diff_lvs) and diff_lvs[i] is not None:
+                                    t = TextBox(f"{diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=WHITE))
+                                    t.set_bg(roundrect_bg(fill=color, radius=12)).set_size((64, 64)).set_content_align("c").set_overflow("clip")
+                            # 物量
+                            for i, count in enumerate(diff_counts):
+                                if count is None: continue
+                                color = DIFF_COLORS.get(list(DIFF_COLORS.keys())[i], (80, 80, 80))
+                                style = TextStyle(DEFAULT_BOLD_FONT, 18, (80, 80, 80, 255), use_shadow=True, 
+                                                shadow_offset=1, shadow_color=color.c1 if isinstance(color, LinearGradient) else color)
+                                with VSplit().set_content_align("c").set_item_align("c").set_sep(1):
+                                    TextBox(f"{count}", style).set_size((64, None)).set_content_align("c").set_overflow("clip")
+                                    TextBox("combo", style.replace(size=14)).set_size((64, None)).set_content_align("c").set_overflow("clip")
+
+                    # 排行榜
+                    if rqd.leaderboard_matrix and rqd.leaderboard_live_types and rqd.leaderboard_targets:
+                        live_type_keys = list(rqd.leaderboard_live_types.keys())
+                        target_keys = list(rqd.leaderboard_targets.keys())
+                        leaderboard_music_num = rqd.leaderboard_music_num or 1
+                        
+                        th_w, th_h = 60, 36
+                        tr_w, tr_h = 120, 36
+                        gap = 4
+                        
+                        with VSplit().set_sep(gap).set_padding(16).set_content_align('l').set_item_align('l').set_w(leaderboard_w).set_h(196):
+                            # 表头行
+                            with HSplit().set_sep(gap).set_content_align('l').set_item_align('c'):
+                                Spacer(w=th_w, h=th_h).set_bg(FillBg((255, 255, 255, 100)))
+                                for target in target_keys:
+                                    TextBox(rqd.leaderboard_targets[target], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))) \
+                                        .set_bg(FillBg((255, 255, 255, 100))).set_size((tr_w, th_h)).set_content_align('c')
+                            # 数据行
+                            for i, live_type in enumerate(live_type_keys):
+                                with HSplit().set_sep(gap).set_content_align('l').set_item_align('c'):
+                                    TextBox(rqd.leaderboard_live_types[live_type], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))) \
+                                        .set_bg(FillBg((255, 255, 255, 50))).set_size((th_w, th_h)).set_content_align('c')
+                                    for j, target in enumerate(target_keys):
+                                        info = rqd.leaderboard_matrix[i][j] if i < len(rqd.leaderboard_matrix) and j < len(rqd.leaderboard_matrix[i]) else None
+                                        if info:
+                                            rank_ratio = (info.rank - 1) / max(1, leaderboard_music_num - 1)
+                                            text1, text2 = f"#{info.rank}", info.value
+                                            text_color = DIFF_COLORS.get(info.diff, (50, 50, 50))
+                                        else:
+                                            rank_ratio = 0.5
+                                            text1, text2 = "-", None
+                                            text_color = (50, 50, 50)
+
+                                        green, yellow, red = (200, 255, 200, 75), (255, 200, 150, 75), (255, 150, 150, 50)
+                                        bg_color = lerp_color(green, yellow, rank_ratio) if rank_ratio <= 0.5 else lerp_color(yellow, red, rank_ratio - 0.5)
+
+                                        with Frame().set_bg(FillBg(bg_color)).set_size((tr_w, tr_h)).set_content_align('c'):
+                                            with HSplit().set_content_align('b').set_item_align('b').set_sep(2):
+                                                TextBox(text1, TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True))
+                                                if text2:
+                                                    TextBox(text2, TextStyle(DEFAULT_FONT, 12, (50, 50, 50))).set_offset((0, -1))
+
+                # 别名
                 aliases = rqd.alias
                 if aliases:
                     alias_text = "，". join(aliases)
@@ -182,35 +244,43 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                         aw = 800
                         TextBox(alias_text, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)), use_real_line_count=True).set_w(aw)
 
-                def draw_vocal():
+                def draw_vocal(width: int = None):
                     # 歌手
-                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
+                    with Flow().set_content_align("lt").set_item_align("lt").set_sep(8, 8).set_padding(16) as flow:
+                        if width:
+                            flow.set_w(width)
                         for caption, vocals in sorted(caption_vocals.items(), key=lambda x: len(x[1])):
                             with HSplit().set_padding(0).set_sep(4).set_content_align("c").set_item_align("c"):
                                 TextBox(caption + "  ver.", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
-                                Spacer(w=16)
+                                Spacer(w=8)
                                 for vocal in vocals:
-                                    with HSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(4).set_bg(roundrect_bg(fill=(255, 255, 255, 150), radius=8)):
-                                        if vocal["vocal_names"]:
-                                            TextBox(vocal["vocal_names"], TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
+                                    with HSplit().set_content_align("c").set_item_align("c").set_sep(2).set_padding(4) \
+                                        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8)):
+                                        if vocal_name := vocal.get("vocal_name"):
+                                            font_size = int(24 * min(1.0, 50 / get_str_display_length(vocal_name)))
+                                            TextBox(vocal_name, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)))
+                                        elif vocal["vocal_names"]:
+                                            for vn in vocal["vocal_names"]:
+                                                font_size = int(24 * min(1.0, 50 / get_str_display_length(vn)))
+                                                TextBox(vn, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)))
                                         else:
                                             for img in vocal["chara_imgs"]:
                                                 ImageBox(img, size=(32, 32), use_alpha_blend=True)
-                                    Spacer(w=8)
+
                 def draw_event():
                     # 活动
-                    with HSplit().set_sep(8):
-                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16):
+                    with HSplit().set_sep(8).set_content_align("c").set_item_align("c").set_padding(16):
+                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
                             TextBox("关联活动", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
                             TextBox(f"ID: {event_id}", TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
-                        ImageBox(event_banner, size=(None, 100)).set_padding(16)
+                        ImageBox(event_banner, size=(None, 100))
 
                 if event_id is not None:
-                    with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16):
-                        draw_vocal()
+                    with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg()).set_padding(0).set_sep(16):
+                        draw_vocal(600)
                         draw_event()
                 else:
-                    draw_vocal()
+                    draw_vocal(964)
 
     add_watermark(canvas)
     return await canvas.get_img()
