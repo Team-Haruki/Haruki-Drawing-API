@@ -82,6 +82,11 @@ from src.sekai.score.model import ScoreControlRequest
 from src.sekai.stamp.drawer import compose_stamp_list_image
 from src.sekai.stamp.model import StampListRequest
 
+# Misc module
+from src.sekai.misc.drawer import compose_chara_birthday_image
+from src.sekai.misc.model import CharaBirthdayRequest
+
+
 # Education module
 from src.sekai.education.drawer import (
     compose_challenge_live_detail_image,
@@ -482,7 +487,22 @@ async def stamp_list(request: StampListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ======================= Education Endpoints =======================
+# ======================= Misc Endpoints =======================
+
+@app.post("/api/misc/chara-birthday", tags=["Misc"], summary="Generate character birthday image")
+async def chara_birthday(request: CharaBirthdayRequest):
+    """
+    Generate a character birthday info image.
+    
+    Shows character birthday info, upcoming dates, and birthday cards.
+    """
+    try:
+        image = await compose_chara_birthday_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 @app.post("/api/education/challenge-live", tags=["Education"], summary="Generate challenge live detail image")
 async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
@@ -643,9 +663,9 @@ async def sk_line(request: SklRequest, full: bool = False):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/sk/query", tags=["SK"], summary="Generate ranking query image")
+@app.post("/api/sk/query", tags=["SK"], summary="Generate sk image")
 async def sk_query(request: SKRequest):
-    """Generate event ranking query result image."""
+    """Generate sk image."""
     try:
         image = await compose_sk_image(request)
         return image_to_response(image)
@@ -653,8 +673,8 @@ async def sk_query(request: SKRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/sk/record", tags=["SK"], summary="Generate room record image")
-async def sk_record(request: CFRequest):
+@app.post("/api/sk/check-room", tags=["SK"], summary="Generate check room image")
+async def sk_check_room(request: CFRequest):
     """Generate 'Check Room' participation record image."""
     try:
         image = await compose_cf_image(request)

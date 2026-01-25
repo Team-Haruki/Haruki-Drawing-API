@@ -17,7 +17,7 @@ from pilmoji.source import GoogleEmojiSource
 from dataclasses import dataclass, is_dataclass, fields
 from PIL import Image, ImageFont, ImageDraw, ImageFilter, ImageChops
 
-from .configs import FONT_DIR, DEFAULT_HEAVY_FONT, DEFAULT_FONT, DEFAULT_EMOJI_FONT, DEFAULT_BOLD_FONT
+from .configs import FONT_DIR, DEFAULT_HEAVY_FONT, DEFAULT_FONT, DEFAULT_EMOJI_FONT, DEFAULT_BOLD_FONT, TRI_PATHS
 from .img_utils import mix_image_by_color, adjust_image_alpha_inplace
 
 DEBUG = True
@@ -1254,11 +1254,17 @@ class Painter:
         bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
+        # preset_tris = [
+        #     Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
+        #     .convert("RGBA")
+        #     .resize((128, 128), Image.Resampling.BILINEAR)
+        #     for i in range(3)
+        # ]
         preset_tris = [
-            Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")
+            Image.open(tri_path)
             .convert("RGBA")
             .resize((128, 128), Image.Resampling.BILINEAR)
-            for i in range(3)
+            for tri_path in TRI_PATHS
         ]
         preset_colors = [
             # (255, 255, 255),

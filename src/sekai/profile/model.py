@@ -45,6 +45,33 @@ class BasicProfile(BaseModel):
     has_frame: bool = False
     frame_path: Optional[str] = None
 
+class PlayerFramePaths(BaseModel):
+    r"""PlayerFramePaths
+
+    玩家头像框各部件路径
+
+    Attributes
+    ----------
+    base : str
+        frame_base.png 路径
+    centertop : str
+        frame_centertop.png 路径
+    leftbottom : str
+        frame_leftbottom.png 路径
+    lefttop : str
+        frame_lefttop.png 路径
+    rightbottom : str
+        frame_rightbottom.png 路径
+    righttop : str
+        frame_righttop.png 路径
+    """
+    base: str
+    centertop: str
+    leftbottom: str
+    lefttop: str
+    rightbottom: str
+    righttop: str
+
 class ProfileDataSource(BaseModel):
     r"""ProfileDataSource
 
@@ -223,9 +250,10 @@ class ProfileRequest(BaseModel):
     character_rank: List[CharacterRank] = []
     solo_live: Optional[SoloLiveRank] = None
     update_time: Optional[int] = None
-    lv_rank_bg_path: Optional[str] = None
-    x_icon_path: Optional[str] = None
-    icon_clear_path: Optional[str] = None
-    icon_fc_path: Optional[str] = None
-    icon_ap_path: Optional[str] = None
-    chara_rank_icon_path_map: Optional[dict] = None
+    lv_rank_bg_path: str
+    x_icon_path: str
+    icon_clear_path: str
+    icon_fc_path: str
+    icon_ap_path: str
+    chara_rank_icon_path_map: dict
+    frame_paths: Optional[PlayerFramePaths] = None

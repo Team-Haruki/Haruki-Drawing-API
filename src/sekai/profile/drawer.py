@@ -127,8 +127,18 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
     return img
 
 # 获取头像框图片，失败返回None
-async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image | None:
-    frame_base_path = ASSETS_BASE_DIR.joinpath(frame_path)
+async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | None:
+    r"""get_player_frame_image
+
+    获取头像框图片
+
+    Args
+    ----
+    frame_paths : PlayerFramePaths
+        头像框各部件路径
+    frame_w : int
+        头像框宽度
+    """
     scale = 1.5
     corner = 20
     corner2 = 50
@@ -137,12 +147,12 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     border2 = 80
     inner_w = w - 2 * border
 
-    base = await get_img_from_path(frame_base_path, "horizontal/frame_base.png")
-    ct = await get_img_from_path(frame_base_path,"vertical/frame_centertop.png")
-    lb = await get_img_from_path(frame_base_path,"vertical/frame_leftbottom.png")
-    lt = await get_img_from_path(frame_base_path, "vertical/frame_lefttop.png")
-    rb = await get_img_from_path(frame_base_path, "vertical/frame_rightbottom.png")
-    rt = await get_img_from_path(frame_base_path, "vertical/frame_righttop.png")
+    base = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.base)
+    ct = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop)
+    lb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom)
+    lt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop)
+    rb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom)
+    rt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop)
 
     ct = resize_keep_ratio(ct, scale, mode="scale")
     lt = resize_keep_ratio(lt, scale, mode="scale")
@@ -184,10 +194,10 @@ async def get_player_frame_image(frame_path: str, frame_w: int) -> Image.Image |
     return img
 
 # 获取带框头像控件
-async def get_avatar_widget_with_frame(is_frame: bool, frame_path: str, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
+async def get_avatar_widget_with_frame(is_frame: bool, frame_paths, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]) -> Frame:
     frame_img = None
-    if is_frame:
-        frame_img = await get_player_frame_image(frame_path ,avatar_w + 5)
+    if is_frame and frame_paths:
+        frame_img = await get_player_frame_image(frame_paths, avatar_w + 5)
 
     with Frame().set_size((avatar_w, avatar_w)).set_content_align('c').set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
@@ -208,12 +218,11 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
             if profile:
                 mode = profile.mode
-                frame_path = profile.frame_path
                 has_frame = profile.has_frame
                 avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
                 avatar_widget = await get_avatar_widget_with_frame(
                     is_frame=bool(has_frame),
-                    frame_path=frame_path,
+                    frame_paths=None,  # DetailedProfileCardRequest 不支持 frame_paths
                     avatar_img=avatar_img,
                     avatar_w=80,
                     frame_data=[]
@@ -235,12 +244,11 @@ async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
 async def get_basic_profile_card(profile: BasicProfile) -> Frame:
     with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
         with HSplit().set_content_align('c').set_item_align('c').set_sep(14):
-            frame_path = profile.frame_path
             has_frame = profile.has_frame
             avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
             avatar_widget = await get_avatar_widget_with_frame(
                 is_frame=bool(has_frame),
-                frame_path=frame_path,
+                frame_paths=None,  # BasicProfile 不支持 frame_paths
                 avatar_img=avatar_img,
                 avatar_w=80,
                 frame_data=[]
@@ -312,11 +320,10 @@ async def compose_profile_image(
         with VSplit().set_bg(ui_bg).set_content_align('c').set_item_align('c').set_sep(32).set_padding((32, 35)) as ret:
             # 名片
             with HSplit().set_content_align('c').set_item_align('c').set_sep(32).set_padding((32, 0)):
-                frame_path = rqd.profile.frame_path
                 has_frame = rqd.profile.has_frame
                 avatar_widget = await get_avatar_widget_with_frame(
                     is_frame=bool(has_frame),
-                    frame_path=frame_path,
+                    frame_paths=rqd.frame_paths,
                     avatar_img=avatar_img,
                     avatar_w=128,
                     frame_data=[]
@@ -328,8 +335,7 @@ async def compose_profile_image(
                     )
                     TextBox(f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB))
                     with Frame():
-                        lv_bg_path = rqd.lv_rank_bg_path or f"{RESULT_ASSET_PATH}/lv_rank_bg.png"
-                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, lv_bg_path)
+                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
                         ImageBox(lv_rank_bg, size=(180, None))
                         TextBox(f"{rqd.rank}", TextStyle(font=DEFAULT_FONT, size=30, color=WHITE)).set_offset((110, 0))
 
@@ -338,8 +344,7 @@ async def compose_profile_image(
                 tw_id = rqd.twitter_id
                 tw_id_box = TextBox('        @ ' + tw_id, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=1)
                 tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align('l')
-                x_path = rqd.x_icon_path or f"{RESULT_ASSET_PATH}/x_icon.png"
-                x_icon = await get_img_from_path(ASSETS_BASE_DIR, x_path)
+                x_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.x_icon_path)
                 x_icon = x_icon.resize((24, 24)).convert('RGBA')
                 ImageBox(x_icon, image_size_mode='original').set_offset((16, 0))
 
@@ -373,12 +378,9 @@ async def compose_profile_image(
             hs, vs, gw, gh = 8, 12, 90, 25
             with VSplit().set_sep(vs):
                 Spacer(gh, gh)
-                path_clear = rqd.icon_clear_path or f"{RESULT_ASSET_PATH}/icon_clear.png"
-                path_fc = rqd.icon_fc_path or f"{RESULT_ASSET_PATH}/icon_fc.png"
-                path_ap = rqd.icon_ap_path or f"{RESULT_ASSET_PATH}/icon_ap.png"
-                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, path_clear)
-                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, path_fc)
-                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, path_ap)
+                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path)
+                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path)
+                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path)
                 ImageBox(icon_clear, size=(gh, gh))
                 ImageBox(icon_fc, size=(gh, gh))
                 ImageBox(icon_ap, size=(gh, gh))
@@ -411,10 +413,7 @@ async def compose_profile_image(
                         continue
                     rank = character_rank[cid]
                     with Frame().set_size((gw, gh)):
-                        if rqd.chara_rank_icon_path_map and cid in rqd.chara_rank_icon_path_map:
-                            c_rank_path = rqd.chara_rank_icon_path_map[cid]
-                        else:
-                            c_rank_path = f"{RESULT_ASSET_PATH}/chara_rank_icon/{chara}.png"
+                        c_rank_path = rqd.chara_rank_icon_path_map[cid]
                         chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
                         ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
@@ -427,10 +426,7 @@ async def compose_profile_image(
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
-                        if rqd.chara_rank_icon_path_map and scid in rqd.chara_rank_icon_path_map:
-                            c_rank_path = rqd.chara_rank_icon_path_map[scid]
-                        else:
-                            c_rank_path = f"{RESULT_ASSET_PATH}/chara_rank_icon/{CHARA_ID2NICKNAME[scid]}.png"
+                        c_rank_path = rqd.chara_rank_icon_path_map[scid]
                         chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
                         ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
                         t = TextBox(str(solo_live.rank), TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)), overflow='clip')
@@ -484,13 +480,12 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
             # 个人信息
             if rqd.profile:
                 # 框
-                frame_path = rqd.profile.frame_path
                 has_frame = rqd.profile.has_frame
                 avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
                 # 头像
                 avatar_widget = await get_avatar_widget_with_frame(
                     is_frame=bool(has_frame),
-                    frame_path=frame_path,
+                    frame_paths=None,  # ProfileCardRequest 不支持 frame_paths
                     avatar_img=avatar_img,
                     avatar_w=80,
                     frame_data=[]

@@ -49,6 +49,6 @@ async def compose_stamp_list_image(
                     img = await get_img_from_path(ASSETS_BASE_DIR, stamp.image_path)
                     with VSplit().set_padding(4).set_sep(4):
                         ImageBox(img, size=(None, 100), use_alpha_blend=True, shadow=True)
-                        TextBox(str(stamp.id), style=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=stamp.text_color))
+                        TextBox(str(stamp.id), style=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=tuple(stamp.text_color)))
     add_watermark(canvas)
     return await canvas.get_img()
