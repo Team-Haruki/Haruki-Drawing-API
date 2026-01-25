@@ -190,6 +190,10 @@ class Widget:
 
         self.draw_funcs = []
 
+        self.userdata = {}
+
+        self.drawn = False
+
         if Widget.get_current_widget():
             Widget.get_current_widget().add_item(self)
 
@@ -216,11 +220,14 @@ class Widget:
     def __enter__(self)-> Self:
         local = self._thread_local.get()
         if local is None:
-            local = threading.local()
-            local.w_stack = []
+            class _WidgetLocal:
+                def __init__(self):
+                    self.w_stack = []
+            local = _WidgetLocal()
         local.w_stack.append(self)
         self._thread_local.set(local)
         return self
+
 
     def __exit__(
         self,
@@ -236,6 +243,15 @@ class Widget:
 
     def add_item(self, item: Self) -> None:
         raise NotImplementedError()
+
+    # def add_item(self, item: 'Widget', index: int = None):
+    #     item.set_parent(self)
+    #     if index is None:
+    #         self.items.append(item)
+    #     else:
+    #         self.items.insert(index, item)
+    #     return self
+    
 
     def set_parent(self, parent: Self | None)-> Self:
         self.parent = parent
@@ -373,6 +389,9 @@ class Widget:
         return self
 
     def draw(self, p: Painter) -> None:
+        assert not self.drawn, 'Only support draw once for each widget'
+        self.drawn = True
+
         assert p.size == self._get_self_size()
 
         if self.offset_x_anchor == "l":
@@ -802,6 +821,314 @@ class Grid(Widget):
             item.draw(p)
             p.restore_region(2)
 
+
+class Flow(Widget):
+    def __init__(
+        self, 
+        items: list[Widget] = None, 
+        row_count: int = None, 
+        col_count: int = None, 
+        aspect_ratio: float = None,
+        item_align: ALIGN_TYPE = 'lt', 
+        h_sep: int = DEFAULT_SEP, 
+        v_sep: int = DEFAULT_SEP, 
+        vertical: bool = False,
+        keep_empty_row_or_col: bool = False
+    ):
+        """
+        Flow布局，逐行或逐列排列子组件，自动换行或换列。需要至少指定以下一个参数用于计算布局：
+        - row_count: 总行数 (仅horizontal模式)
+        - col_count: 总列数 (仅vertical模式)
+        - width: 每行宽度限制 (仅horizontal模式)
+        - height: 每列高度限制 (仅vertical模式)
+        - aspect_ratio: 期望宽高比
+        """
+        super().__init__()
+        self.items = items or []
+        for item in self.items:
+            item.set_parent(self)
+        self.row_count = row_count
+        self.col_count = col_count
+        self.aspect_ratio = aspect_ratio
+        self.h_sep = h_sep
+        self.v_sep = v_sep
+        self.vertical = vertical
+        self.keep_empty_row_or_col = keep_empty_row_or_col
+        self.set_item_align(item_align)
+
+        self.layout: list[list[int]] = None
+        self.total_size: tuple[int, int] = None
+        self.item_positions: list[tuple[int, int]] = None
+
+    def set_item_align(self, align: ALIGN_TYPE):
+        if align not in ALIGN_MAP:
+            raise ValueError('Invalid align')
+        self.item_halign, self.item_valign = ALIGN_MAP[align]
+        return self
+
+    def set_vertical(self, vertical: bool):
+        self.vertical = vertical
+        return self
+    
+    def set_sep(self, h_sep=None, v_sep=None):
+        if h_sep is not None:
+            self.h_sep = h_sep
+        if v_sep is not None:
+            self.v_sep = v_sep
+        return self
+    
+    def set_row_or_col_count(self, row_count: int = None, col_count: int = None):
+        assert not (row_count and col_count), 'Either row_count or col_count should be None'
+        self.row_count = row_count
+        self.col_count = col_count
+        return self
+    
+    def set_aspect_ratio(self, aspect_ratio: float):
+        self.aspect_ratio = aspect_ratio
+        return self
+    
+    def set_keep_empty_row_or_col(self, keep: bool):
+        self.keep_empty_row_or_col = keep
+        return self
+
+    def add_item(self, item: Widget) -> Self:
+        item.set_parent(self)
+        self.items.append(item)
+        return self
+
+
+    def _calc_total_size_by_layout_fast(self, layout: list[list[int]]) -> tuple[int, int]:
+        if len(layout) == 0:
+            return (0, 0)
+        total_w, total_h = 0, 0
+        if not self.vertical:
+            for i, row in enumerate(layout):
+                cur_w, row_h = 0, 0
+                for j, index in enumerate(row):
+                    iw, ih = self.items[index]._get_self_size()
+                    cur_w += iw
+                    if j < len(row) - 1: cur_w += self.h_sep
+                    row_h = max(row_h, ih)
+                total_w = max(total_w, cur_w)
+                total_h += row_h
+                if i < len(layout) - 1: total_h += self.v_sep
+        else:
+            for j, col in enumerate(layout):
+                cur_h, col_w = 0, 0
+                for i, index in enumerate(col):
+                    iw, ih = self.items[index]._get_self_size()
+                    cur_h += ih
+                    if i < len(col) - 1: cur_h += self.v_sep
+                    col_w = max(col_w, iw)
+                total_h = max(total_h, cur_h)
+                total_w += col_w
+                if j < len(layout) - 1: total_w += self.h_sep
+        return (total_w, total_h)
+
+    def _calc_total_size_and_item_pos_by_layout(self, layout: list[list[int]]) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+        if len(layout) == 0:
+            return (0, 0), []
+        total_w, total_h = 0, 0
+        item_pos = [(0, 0) for _ in range(len(self.items))]
+        if not self.vertical:
+            row_ws, row_hs = [], []
+            for i, row in enumerate(layout):
+                cur_w, row_h = 0, 0
+                for j, index in enumerate(row):
+                    iw, ih = self.items[index]._get_self_size()
+                    item_pos[index] = (cur_w, total_h)
+                    cur_w += iw
+                    if j < len(row) - 1: cur_w += self.h_sep
+                    row_h = max(row_h, ih)
+                row_ws.append(cur_w)
+                row_hs.append(row_h)
+                total_w = max(total_w, cur_w)
+                total_h += row_h
+                if i < len(layout) - 1: total_h += self.v_sep
+            # 根据对齐方式调整item位置
+            for i, row in enumerate(layout):
+                match self.item_halign:
+                    case 'l': x_offset = 0
+                    case 'r': x_offset = total_w - row_ws[i]
+                    case 'c': x_offset = (total_w - row_ws[i]) // 2
+                for j, index in enumerate(row):
+                    x, y = item_pos[index]
+                    iw, ih = self.items[index]._get_self_size()
+                    match self.item_valign:
+                        case 't': y_offset = 0
+                        case 'b': y_offset = row_hs[i] - ih
+                        case 'c': y_offset = (row_hs[i] - ih) // 2
+                    item_pos[index] = (x + x_offset, y + y_offset) 
+        else:
+            col_ws, col_hs = [], []
+            for j, col in enumerate(layout):
+                cur_h, col_w = 0, 0
+                for i, index in enumerate(col):
+                    iw, ih = self.items[index]._get_self_size()
+                    item_pos[index] = (total_w, cur_h)
+                    cur_h += ih
+                    if i < len(col) - 1: cur_h += self.v_sep
+                    col_w = max(col_w, iw)
+                col_ws.append(col_w)
+                col_hs.append(cur_h)
+                total_h = max(total_h, cur_h)
+                total_w += col_w
+                if j < len(layout) - 1: total_w += self.h_sep
+            # 根据对齐方式调整item位置
+            for j, col in enumerate(layout):
+                match self.item_valign:
+                    case 't': y_offset = 0
+                    case 'b': y_offset = total_h - col_hs[j]
+                    case 'c': y_offset = (total_h - col_hs[j]) // 2
+                for i, index in enumerate(col):
+                    x, y = item_pos[index]
+                    iw, ih = self.items[index]._get_self_size()
+                    match self.item_halign:
+                        case 'l': x_offset = 0
+                        case 'r': x_offset = col_ws[j] - iw
+                        case 'c': x_offset = (col_ws[j] - iw) // 2
+                    item_pos[index] = (x + x_offset, y + y_offset)
+        return (total_w, total_h), item_pos
+
+    def _calc_item_layout(
+        self, 
+        row_count: int = None, 
+        col_count: int = None, 
+        aspect_ratio: float = None
+    ) -> list[list[int]]:
+        if len(self.items) == 0:
+            if row_count or col_count:
+                layout = [[] for _ in range(row_count or col_count)]
+            else:
+                layout = []
+        else:
+            # 计算item的布局
+            if row_count:
+                assert not self.vertical, 'Row count only works in horizontal mode'
+                assert not col_count, 'Cannot specify both row_count and col_count'
+                assert not aspect_ratio, 'Cannot specify both row_count and aspect_ratio'
+                # 在保证行数为row_count的前提下，将items依照高度均匀分布到各列
+                item_ws = [item._get_self_size()[0] for item in self.items]
+                total_w = sum(item_ws)
+                cur_index = 0
+                layout: list[list[int]] = []
+                for _ in range(row_count):
+                    layout.append([])
+                    row_w = 0
+                    while cur_index < len(self.items):
+                        layout[-1].append(cur_index)
+                        row_w += item_ws[cur_index]
+                        cur_index += 1
+                        if row_w >= total_w // row_count:
+                            break
+                # 将剩余的item强制归入最后一行
+                if layout:
+                    while cur_index < len(self.items):
+                        layout[-1].append(cur_index)
+                        cur_index += 1
+            elif col_count:
+                assert self.vertical, 'Column count only works in vertical mode'
+                assert not row_count, 'Cannot specify both row_count and col_count'
+                assert not aspect_ratio, 'Cannot specify both col_count and aspect_ratio'
+                # 在保证列数为col_count的前提下，将items依照宽度均匀分布到各行
+                item_hs = [item._get_self_size()[1] for item in self.items]
+                total_h = sum(item_hs)
+                cur_index = 0
+                layout: list[list[int]] = []
+                for _ in range(col_count):
+                    layout.append([])
+                    col_h = 0
+                    while cur_index < len(self.items):
+                        layout[-1].append(cur_index)
+                        col_h += item_hs[cur_index]
+                        cur_index += 1
+                        if col_h >= total_h // col_count:
+                            break
+                # 将剩余的item强制归入最后一列
+                if layout:
+                    while cur_index < len(self.items):
+                        layout[-1].append(cur_index)
+                        cur_index += 1
+            elif aspect_ratio:
+                assert not row_count and not col_count, 'Cannot specify both aspect_ratio and row_count/col_count'
+                # 计算最终大小最接近aspect_ratio的行列数，尝试不同的行列数，选择最优解
+                best_diff, best_layout = None, None
+                n = len(self.items)
+                if not self.vertical:
+                    for r in range(1, n + 1):
+                        layout = self._calc_item_layout(row_count=r)
+                        w, h = self._calc_total_size_by_layout_fast(layout)
+                        ratio = w / h if h > 0 else 1.0
+                        diff = abs(ratio - (aspect_ratio or 1.0))
+                        if best_diff is None or diff < best_diff:
+                            best_diff, best_layout = diff, layout
+                else:
+                    for c in range(1, n + 1):
+                        layout = self._calc_item_layout(col_count=c)
+                        w, h = self._calc_total_size_by_layout_fast(layout)
+                        ratio = w / h if h > 0 else 1.0
+                        diff = abs(ratio - (aspect_ratio or 1.0))
+                        if best_diff is None or diff < best_diff:
+                            best_diff, best_layout = diff, layout
+                layout = best_layout
+            elif not self.vertical and self.w:
+                # 每行不超过self.w
+                layout = []
+                cur_row, cur_w = [], 0
+                for idx, item in enumerate(self.items):
+                    iw, ih = item._get_self_size()
+                    if cur_w + iw + (len(cur_row) * self.h_sep) + self.h_padding * 2 <= self.w or not cur_row:
+                        cur_row.append(idx)
+                        cur_w += iw
+                    else:
+                        layout.append(cur_row)
+                        cur_row = [idx]
+                        cur_w = iw
+                if cur_row:
+                    layout.append(cur_row)
+            elif self.vertical and self.h:
+                # 每列不超过self.h
+                layout = []
+                cur_col, cur_h = [], 0
+                for idx, item in enumerate(self.items):
+                    iw, ih = item._get_self_size()
+                    if cur_h + ih + (len(cur_col) * self.v_sep) + self.vpadding * 2 <= self.h or not cur_col:
+                        cur_col.append(idx)
+                        cur_h += ih
+                    else:
+                        layout.append(cur_col)
+                        cur_col = [idx]
+                        cur_h = ih
+                if cur_col:
+                    layout.append(cur_col)
+            else:
+                raise ValueError('Either row_count, col_count, aspect_ratio, width (for horizontal) or height (for vertical) must be specified to calculate flow layout')
+        if not self.keep_empty_row_or_col:
+            layout = [row for row in layout if row]
+        return layout
+
+    def _get_total_size_and_item_pos(self) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+        if self.layout is None or self.total_size is None or self.item_positions is None:
+            layout = self._calc_item_layout(self.row_count, self.col_count, self.aspect_ratio)
+            total_size, item_pos = self._calc_total_size_and_item_pos_by_layout(layout)
+            self.layout = layout
+            self.total_size = total_size
+            self.item_positions = item_pos
+        return self.total_size, self.item_positions
+
+    def _get_content_size(self):
+        total_size, _ = self._get_total_size_and_item_pos()
+        return total_size
+    
+    def _draw_content(self, p: Painter):
+        _, item_pos = self._get_total_size_and_item_pos()
+        for idx, item in enumerate(self.items):
+            x, y = item_pos[idx]
+            iw, ih = item._get_self_size()
+            p.move_region((x, y), (iw, ih))
+            item.draw(p)
+            p.restore_region()
+    
 
 @dataclass
 class TextStyle:

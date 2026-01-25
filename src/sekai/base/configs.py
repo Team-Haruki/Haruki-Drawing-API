@@ -16,6 +16,7 @@ def load_configs(path: str = None) -> None:
     config_data: Dict[str, Any] = {}
     global ASSETS_BASE_DIR, \
         RESULT_ASSET_PATH, \
+        TRI_PATHS, \
         FONT_DIR, \
         DEFAULT_FONT, \
         DEFAULT_BOLD_FONT, \
@@ -43,6 +44,8 @@ def load_configs(path: str = None) -> None:
         ASSETS_BASE_DIR = Path(assets_config.get("base_dir"))
     if assets_config.get('result_asset_path'):
         RESULT_ASSET_PATH = assets_config.get('result_asset_path')
+    if assets_config.get('tri_paths'):
+        TRI_PATHS = assets_config.get('tri_paths')
     # 字体的配置
     font_config: Dict[str, Any] = config_data.get('font', {})
     if font_config.get('dir'):
@@ -62,6 +65,12 @@ ASSETS_BASE_DIR = Path('/data')
 
 # music.drawer
 RESULT_ASSET_PATH = 'lunabot_static_images'
+
+TRI_PATHS = [
+    '/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri1.png',
+    '/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri2.png',
+    '/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri3.png',
+]
 
 FONT_DIR = "/data"
 DEFAULT_FONT = "SourceHanSansSC-Regular"

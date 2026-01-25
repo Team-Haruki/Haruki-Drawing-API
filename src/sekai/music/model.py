@@ -6,6 +6,31 @@ from src.sekai.profile.drawer import DetailedProfileCardRequest, BasicProfile, P
 # =========================== 数据类的定义 =========================== #
 
 class MusicMD(BaseModel):
+    r"""MusicMD
+
+    歌曲元数据信息
+
+    Attributes
+    ----------
+    id : int
+        歌曲ID
+    title : str
+        歌曲标题
+    composer : str
+        作曲家
+    lyricist : str
+        作词家
+    arranger : str
+        编曲家
+    mv_info : list[str] | None
+        MV信息列表
+    categories : list[str]
+        歌曲分类
+    release_at : int
+        发布时间戳
+    is_full_length : bool
+        是否完整版
+    """
     id: int
     title: str
     composer: str
@@ -17,15 +42,56 @@ class MusicMD(BaseModel):
     is_full_length: bool
 
 class DifficultyInfo(BaseModel):
+    r"""DifficultyInfo
+
+    歌曲难度信息
+
+    Attributes
+    ----------
+    level : list[int]
+        各难度等级列表
+    note_count : list[int]
+        各难度Note数量列表
+    has_append : bool
+        是否有APPEND难度
+    """
     level: list[int]
     note_count: list[int]
     has_append: bool
 
 class MusicVocalInfo(BaseModel):
+    r"""MusicVocalInfo
+
+    歌曲Vocal信息
+
+    Attributes
+    ----------
+    vocal_info : dict[str, Any]
+        Vocal详细信息，结构如：{"caption": str, "characters": [{"characterName": str}]}
+    vocal_assets : dict[str, str]
+        Vocal资源路径映射，结构如：{"asset_name": "path/to/asset"}
+    """
     vocal_info: dict[str, Any] # {"caption": str, "characters": [{"characterName": str}]}
     vocal_assets: dict[str, str] # {"xxx": path}
 
 class UserProfileInfo(BaseModel):
+    r"""UserProfileInfo
+
+    用户基本概要信息
+
+    Attributes
+    ----------
+    uid : str
+        用户ID
+    region : str
+        服务器区域
+    nickname : str
+        用户昵称
+    data_source : str
+        数据来源
+    update_time : int
+        更新时间戳
+    """
     uid: str
     region: str
     nickname: str
@@ -33,6 +99,35 @@ class UserProfileInfo(BaseModel):
     update_time: int
 
 class MusicDetailRequest(BaseModel):
+    r"""MusicDetailRequest
+    
+    绘制歌曲详情图片所必需的数据
+
+    Attributes
+    ----------
+    region : str
+        服务器区域
+    music_info : MusicMD
+        歌曲元数据
+    bpm : int | None
+        BPM信息
+    vocal : MusicVocalInfo
+        Vocal信息
+    alias : list[str] | None
+        歌曲别名
+    length : str | None
+        歌曲时长字符串
+    difficulty : DifficultyInfo
+        难度信息
+    event_id : int | None
+        关联活动ID
+    cn_name : str | None
+        中文名称
+    music_jacket_path : str
+        歌曲封面路径
+    event_banner_path : str | None
+        活动Banner路径
+    """
     region: str
     music_info: MusicMD
     bpm: int | None = None
@@ -46,15 +141,58 @@ class MusicDetailRequest(BaseModel):
     event_banner_path: str | None = None
 
 class MusicBriefList(BaseModel):
+    r"""MusicBriefList
+
+    简略歌曲列表项数据
+
+    Attributes
+    ----------
+    difficulty : DifficultyInfo
+        难度信息
+    music_info : MusicMD
+        歌曲元数据
+    music_jacket_path : str
+        歌曲封面路径
+    """
     difficulty: DifficultyInfo
     music_info: MusicMD
     music_jacket_path: str
 
 class MusicBriefListRequest(BaseModel):
+    r"""MusicBriefListRequest
+
+    绘制简略歌曲列表图片所必需的数据
+
+    Attributes
+    ----------
+    music_list : list[MusicBriefList]
+        歌曲列表
+    region : str
+        服务器区域
+    """
     music_list: list[MusicBriefList]
     region: str
 
 class MusicListRequest(BaseModel):
+    r"""MusicListRequest
+
+    绘制歌曲查询列表图片所必需的数据
+
+    Attributes
+    ----------
+    user_results : Dict[int, Any]
+        用户打歌结果，key为musicId
+    music_list : List[Dict[str, Any]]
+        查询到的歌曲列表
+    jackets_path_list : Dict[int, str]
+        封面路径映射
+    required_difficulties : str
+        查询的难度类型
+    profile : DetailedProfileCardRequest
+        用户个人信息
+    play_result_icon_path_map : Optional[Dict[str, str]]
+        打歌结果图标路径映射
+    """
     user_results: Dict[int, Any] # {"musicId": int, "musicDifficultyType": str, "musicDifficulty": str, "playResult": str}
     music_list: List[Dict[str, Any]] # [{"id": int, "difficulty": str}]
     jackets_path_list: Dict[int, str] # {musicId: jacket_path}

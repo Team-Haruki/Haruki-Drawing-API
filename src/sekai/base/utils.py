@@ -144,3 +144,14 @@ def plt_fig_to_image(fig, transparent=True) -> Image.Image:
     img = Image.open(buf)
     img.load()
     return img
+
+
+def get_chara_nickname(cid: int) -> str:
+    return {
+        1:"ick", 2:"saki", 3:"hnm", 4:"shiho", 5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
+        9:"khn", 10:"an", 11:"akt", 12:"toya", 13:"tks", 14:"emu", 15:"nene", 16:"rui", 
+        17:"knd", 18:"mfy", 19:"ena", 20:"mzk", 21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito",
+        27:"miku_light_sound", 28: "miku_idol", 29:"miku_street", 30: "miku_theme_park", 31:"miku_school_refusal",
+        32:"rin", 33:"rin", 34:"rin", 35:"rin", 36:"rin", 37:"len", 38:"len", 39:"len", 40:"len", 41:"len",
+        42:"luka", 43:"luka", 44:"luka", 45:"luka", 46:"luka", 47:"meiko", 48:"meiko", 49:"meiko", 50:"meiko", 51:"meiko",
+        52:"kaito", 53:"kaito", 54:"kaito", 55:"kaito", 56:"kaito"}.get(cid)
