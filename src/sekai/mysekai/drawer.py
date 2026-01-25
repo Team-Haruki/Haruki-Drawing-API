@@ -28,7 +28,8 @@ from src.sekai.base.plot import(
     Grid,
     RoundRectBg,
     Widget,
-    FillBg
+    FillBg,
+    Flow
 )
 from src.sekai.base.painter import(
     BLACK,
@@ -242,8 +243,8 @@ async def compose_mysekai_fixture_list_image(
                                         if sub_genre.progress_message:
                                             TextBox(sub_genre.progress_message, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=text_color))
                                 
-                                # 通过角色id获取角色图标 TODO: 或许这里可以有更好的方法
-                                async def get_chara_icon_by_chara_id(cid:int)->Image.Image:
+                                
+                                async def get_fixture_chara_icon(fixture: MysekaiFixture)->Image.Image:
                                     nickname = {
                                         1:"ick", 2:"saki", 3:"hnm", 4:"shiho",
                                         5:"mnr", 6:"hrk", 7:"airi", 8:"szk",
@@ -251,7 +252,7 @@ async def compose_mysekai_fixture_list_image(
                                         13:"tks", 14:"emu", 15:"nene", 16:"rui",
                                         17:"knd", 18:"mfy", 19:"ena", 20:"mzk",
                                         21:"miku", 22:"rin", 23:"len", 24:"luka", 25:"meiko", 26:"kaito"
-                                    }.get(cid)
+                                    }.get(fixture.character_id)
                                     icon_path = fixture.chara_icon_path or f"{RESULT_ASSET_PATH}/chara_icon/{nickname}.png"
                                     return await get_img_from_path(ASSETS_BASE_DIR, icon_path)
                                 # 绘制单个家具
@@ -261,8 +262,8 @@ async def compose_mysekai_fixture_list_image(
                                     with VSplit().set_content_align('c').set_item_align('c').set_sep(0):
                                         with Frame().set_content_align('rt'):
                                             ImageBox(image, size=(f_sz, f_sz), use_alpha_blend=True)
-                                            if fixture.character_id is not None:
-                                                chara_icon = await get_chara_icon_by_chara_id(fixture.character_id)
+                                            if fixture.character_id or fixture.chara_icon_path:
+                                                chara_icon = await get_fixture_chara_icon(fixture)
                                                 ImageBox(chara_icon, size=(12, 12), use_alpha_blend=False)
                                             if not fixture.obtained:
                                                 Spacer(w=f_sz, h=f_sz).set_bg(RoundRectBg(fill=(0,0,0,80), radius=2))
@@ -327,6 +328,8 @@ async def get_mysekai_fixture_detail_image_card(
     # 家具
     color_images = rqd.images
     fsize = rqd.size
+    first_put_cost = rqd.first_put_cost
+    second_put_cost = rqd.second_put_cost
     basic_info = rqd.basic_info
     cost_materials = rqd.cost_materials
     recycle_materials = rqd.recycle_materials
@@ -334,12 +337,16 @@ async def get_mysekai_fixture_detail_image_card(
     tags = rqd.tags
     friendcodes = rqd.friendcodes
     friendcode_source = rqd.friendcode_source
+
+    title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(25, 25, 25))
+    text_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50))
+
     w = 600
     with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16) as vs:
         # 标题
-        TextBox(title_text, TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(20, 20, 20)), use_real_line_count=True).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16)
+        TextBox(title_text, TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(0, 0, 0)), use_real_line_count=True).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16)
         # 缩略图列表
-        with Grid(col_count=5).set_content_align('c').set_item_align('c').set_sep(8, 4).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
+        with Grid(col_count=min(5, len(color_images))).set_content_align('c').set_item_align('c').set_sep(8, 4).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
             for color_img in color_images:
                 img = await get_img_from_path(ASSETS_BASE_DIR, color_img.image_path)
                 with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
@@ -352,31 +359,32 @@ async def get_mysekai_fixture_detail_image_card(
                         ))
         # 基本信息
         with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
-            font_size, text_color = 18, (100, 100, 100)
-            style = TextStyle(font=DEFAULT_FONT, size=font_size, color=text_color)
             with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
-                TextBox(f"【类型】", style)
+                TextBox(f"【类型】", text_style)
                 main_genre_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.main_genre_image_path)
-                ImageBox(main_genre_image, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
-                TextBox(rqd.main_genre_name, style)
+                ImageBox(main_genre_image, size=(None, text_style.size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                TextBox(rqd.main_genre_name, text_style)
                 if rqd.sub_genre_name:
-                    TextBox(f" > ", TextStyle(font=DEFAULT_HEAVY_FONT, size=font_size, color=text_color))
+                    TextBox(f" > ", text_style)
                     if rqd.sub_genre_image_path:
                         sub_genre_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.sub_genre_image_path)
-                        ImageBox(sub_genre_image, size=(None, font_size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
-                    TextBox(rqd.sub_genre_name, style)
-                TextBox(f"【大小】长x宽x高={fsize['width']}x{fsize['depth']}x{fsize['height']}", style)
+                        ImageBox(sub_genre_image, size=(None, text_style.size+2), use_alpha_blend=True).set_bg(RoundRectBg(fill=(150,150,150,255), radius=2))
+                    TextBox(rqd.sub_genre_name, text_style)
+                    
+            with HSplit().set_content_align('c').set_item_align('c').set_sep(8):    
+                TextBox(f"【大小】长x宽x高={fsize['width']}x{fsize['depth']}x{fsize['height']}", text_style)
+                TextBox(f"【放置消耗】{first_put_cost} (首次) / {second_put_cost} (重复)", text_style)
+            
             if basic_info:
-                for row in basic_info:
-                    with HSplit().set_content_align('c').set_item_align('c').set_sep(2):
-                        for tag in row:
-                            TextBox(tag, style)
+                with Flow().set_content_align('l').set_item_align('l').set_sep(6, 6).set_w(w):
+                    for tag in basic_info:
+                        TextBox(tag, text_style)
                 
 
         # 制作材料
         if cost_materials:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
-                TextBox("制作材料", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                TextBox("制作材料", title_style).set_w(w)
                 with Grid(col_count=8).set_content_align('lt').set_sep(6, 6):
                     for material in cost_materials:
                         img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
@@ -387,41 +395,44 @@ async def get_mysekai_fixture_detail_image_card(
         # 回收材料
         if recycle_materials:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
-                TextBox("回收材料", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
+                TextBox("回收材料", title_style).set_w(w)
                 with Grid(col_count=8).set_content_align('lt').set_sep(6, 6):
                     for material in recycle_materials:
                         img = await get_img_from_path(ASSETS_BASE_DIR, material.image_path)
                         with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
                             ImageBox(img, size=(50, 50), use_alpha_blend=True)
-                            TextBox(f"x{material.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(100, 100, 100)))
+                            TextBox(f"x{material.quantity}", TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(25, 25, 25)))
 
         # 交互角色
         if reaction_character_groups:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(12).set_bg(roundrect_bg(alpha=80)):
-                TextBox("角色互动", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
-                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
+                TextBox("角色互动", title_style).set_w(w)
+                with Flow().set_content_align('lt').set_item_align('lt').set_sep(6, 6).set_w(w):
                     for chara_groups in reaction_character_groups:
-                        if not chara_groups.number: continue
-                        col_num_dict = { 1: 10, 2: 5, 3: 4, 4: 2 }
-                        col_num = col_num_dict[chara_groups.number]
-                        with Grid(col_count=col_num).set_content_align('c').set_sep(6, 4):
-                                    for group_idx, cuid in enumerate(character_uint_ids):
-                                        c_icon_path = None
-                                        if rqd.chara_icon_path_groups and len(rqd.chara_icon_path_groups) > chara_groups_idx:
-                                            if len(rqd.chara_icon_path_groups[chara_groups_idx]) > group_idx:
-                                                c_icon_path = rqd.chara_icon_path_groups[chara_groups_idx][group_idx]
-                                        
-                                        img = await get_chara_icon_by_chara_unit_id(cuid) if not c_icon_path else await get_img_from_path(ASSETS_BASE_DIR, c_icon_path)
+                        # 没有数量，或者既没有角色id，又没有角色图标路径
+                        if not chara_groups.number or (not chara_groups.character_uint_id_groups and not chara_groups.chara_icon_path_groups): continue
+                        # 优先角色图标路径
+                        if chara_groups.chara_icon_path_groups:
+                            for group_chara_icon_path in chara_groups.chara_icon_path_groups:
+                                with HSplit().set_content_align('c').set_item_align('c').set_sep(4).set_padding(4).set_bg(roundrect_bg(radius=8)):
+                                    for c_icon_path in group_chara_icon_path:
+                                        img = await get_img_from_path(ASSETS_BASE_DIR, c_icon_path)
+                                        ImageBox(img, size=(40, 40), use_alpha_blend=True)
+                        elif chara_groups.character_uint_id_groups:
+                            for character_uint_ids in chara_groups.character_uint_id_groups:
+                                with HSplit().set_content_align('c').set_item_align('c').set_sep(4).set_padding(4).set_bg(roundrect_bg(radius=8)):
+                                    for cuid in character_uint_ids:
+                                        img = await get_chara_icon_by_chara_unit_id(cuid)
                                         ImageBox(img, size=(40, 40), use_alpha_blend=True)
 
         # 标签
         if tags:
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)).set_w(w+16):
-                TextBox("标签", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))).set_w(w)
-                for row in tags:
-                    tag_text = ""
-                    for tag in row: tag_text += f"【{tag}】"
-                    TextBox(tag_text, TextStyle(font=DEFAULT_FONT, size=18, color=(100, 100, 100)), line_count=10, use_real_line_count=True).set_w(w)
+                TextBox("标签", text_style).set_w(w)
+                
+                with Flow().set_content_align('lt').set_item_align('lt').set_sep(2, 4).set_w(w):
+                    for tag in tags:
+                        TextBox(f"【{tag}】", text_style)
 
         # 抄写好友码
         if friendcodes:
@@ -429,9 +440,9 @@ async def get_mysekai_fixture_detail_image_card(
                 with HSplit().set_content_align('lb').set_item_align('lb').set_sep(8).set_w(w):
                     TextBox("抄写蓝图可前往", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50)))
                     TextBox(friendcode_source, TextStyle(font=DEFAULT_FONT, size=14, color=(75, 75, 75)))
-                for row in friendcodes:
-                    code_text = "      ".join(row)
-                    TextBox(code_text, TextStyle(font=DEFAULT_FONT, size=18, color=(100, 100, 100)), line_count=10, use_real_line_count=True).set_w(w)
+                with Flow().set_content_align('lt').set_item_align('lt').set_sep(24, 4).set_w(w):
+                    for code in friendcodes:
+                        TextBox(code, text_style)
     return vs
 
 # 获取mysekai家具详情
@@ -592,8 +603,8 @@ async def compose_mysekai_talk_list_image(
     multi_reads = rqd.multi_reads
     
     # 绘制单个家具
+    f_sz = 40
     async def draw_single_fid(fixture: MysekaiFixture):
-        f_sz = 30
         image = await get_img_from_path(ASSETS_BASE_DIR, fixture.image_path)
         with VSplit().set_content_align('c').set_item_align('c').set_sep(2):
             with Frame():
@@ -636,6 +647,9 @@ async def compose_mysekai_talk_list_image(
             TextBox(f"单人对话家具", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color)) \
                 .set_padding(12).set_bg(roundrect_bg(alpha=80))
 
+            sep = 5
+            row_w = 15 * (f_sz + 8 + sep)
+
             with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
                 has_single = False
                 # 一级分类
@@ -654,19 +668,11 @@ async def compose_mysekai_talk_list_image(
                         # 家具列表
                         for sub_genre in main_genre.sub_genres:
                             if len(sub_genre) == 0: continue
-                            COL_COUNT, cur_idx = 15, 0
-                            sep = 5 # if cid else 3， 这个永远为True
-                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
-                                while cur_idx < len(sub_genre):
-                                    cur_x = 0
-                                    with HSplit().set_content_align('lt').set_item_align('lt').set_sep(sep):
-                                        while cur_x < COL_COUNT:
-                                            fixtures = sub_genre[cur_idx]
-                                            await draw_fids(fixtures)
-                                            cur_x += len(fixtures.fixtures)
-                                            cur_idx += 1
-                                            if cur_idx >= len(sub_genre):
-                                                break
+                            
+                            with Flow().set_item_align('lt').set_content_align('lt').set_sep(sep, sep).set_w(row_w):
+                                for fixtures in sub_genre:
+                                    await draw_fids(fixtures)
+
                 if not has_single:
                     TextBox("全部已读", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 150, 50))).set_padding(16)
 
@@ -674,7 +680,8 @@ async def compose_mysekai_talk_list_image(
             TextBox(f"多人对话家具", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=text_color)) \
                 .set_padding(12).set_bg(roundrect_bg(alpha=80))    
 
-            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(8).set_bg(roundrect_bg(alpha=80)):
+            
+            with Flow().set_item_align('lt').set_content_align('lt').set_sep(16, 8).set_w(row_w).set_padding(8).set_bg(roundrect_bg(alpha=80)):
                 has_multi = False
                 for multi_read in multi_reads:
                     if not multi_read.fixtures or multi_read.noread_num <= 0:

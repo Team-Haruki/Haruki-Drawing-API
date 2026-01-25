@@ -253,11 +253,13 @@ class MysekaiReactionCharacterGroups(BaseModel):
     ----------
     number : int
         每组的角色数量
-    character_uint_id_groups : List[ List[ int ] ]
+    character_uint_id_groups : Optional[ List[ List[ int ] ] ] = None
         角色id列表，按组分
+    chara_icon_path_groups : Optional[ List[ List[ str ] ] ] = None
+        角色图片路径列表，按组分
     """
     number: int
-    character_uint_id_groups: List[List[int]]
+    character_uint_id_groups: Optional[List[List[int]]] = None
     chara_icon_path_groups: Optional[List[List[str]]] = None
 
 class MysekaiFixtureDetailRequest(BaseModel):
@@ -281,18 +283,22 @@ class MysekaiFixtureDetailRequest(BaseModel):
         子分类图标路径
     size : Dict[ Literal[ 'width', 'depth', 'height' ] ]
         大小
-    basic_info: Optional[ List[ List[ str ] ] ] = None
-        其它基本信息，可写多行，每行一个字符串，每行可写多个
+    first_put_cost : int = 0
+        首次放置消耗
+    second_put_cost : int = 0
+        重复放置消耗
+    basic_info: Optional[ List[ str ] ] = None
+        其它基本信息，使用Flow布局
     cost_materials : Optional[ List[ MysekaiFixtureMaterial ] ] = None
         制造家具所需的素材
     recycle_materials : Optional[ List[ MysekaiFixtureMaterial ] ] = None
         回收家具返还的素材
     reaction_character_groups : Optional[ List[ MysekaiReactionCharacterGroups ] ] = None
         互动角色组，与家具互动的角色们
-    tags : Optional[ List[ List[ str ] ] ] = None
-        家具标签，可写多行，每行一个字符串，每行可写多个标签
-    friendcodes: Optional[ List[ List[ str ] ] ] = None
-        可抄写家具的好友码，可写多行，每行一个字符串，每行可写多个
+    tags : Optional[ List[ str ] ] = None
+        家具标签，使用Flow布局
+    friendcodes: Optional[ List[ str ] ] = None
+        可抄写家具的好友码，使用Flow布局
     friendcode_source: Optional[ str ] = None
         好友码来源
     """
@@ -303,13 +309,15 @@ class MysekaiFixtureDetailRequest(BaseModel):
     sub_genre_name: Optional[str] = None
     sub_genre_image_path: Optional[str] = None
     size: Dict[Literal['width', 'depth', 'height'], int]
-    basic_info: Optional[List[List[str]]] = None
+    first_put_cost: int = 0
+    second_put_cost: int = 0
+    basic_info: Optional[List[str]] = None
     cost_materials: Optional[List[MysekaiFixtureMaterial]] = None
     recycle_materials: Optional[List[MysekaiFixtureMaterial]] = None
     reaction_character_groups: Optional[List[MysekaiReactionCharacterGroups]] = None
-    tags: Optional[List[List[str]]] = None
-    friendcodes: Optional[List[List[str]]] = None
-    friendcode_source: Optional[str] = None
+    tags: Optional[List[str]] = None
+    friendcodes: Optional[List[str]] = None
+    friendcode_source: str = ""
 
 # =========================== 绘制大门升级 =========================== #
 
