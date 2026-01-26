@@ -2,6 +2,13 @@ import io
 from PIL import Image
 from pathlib import Path
 from datetime import timedelta, datetime
+from .configs import ASSETS_BASE_DIR, TMP_PATH, DEFAULT_THREAD_POOL_SIZE, SCREENSHOT_API_PATH
+from typing import Tuple, Literal, Optional
+import os
+from os.path import join as pjoin
+from uuid import uuid4
+import asyncio
+import aiohttp
 
 def get_readable_timedelta(delta: timedelta, precision: str = 'm', use_en_unit=False) -> str:
     """
@@ -155,3 +162,133 @@ def get_chara_nickname(cid: int) -> str:
         32:"rin", 33:"rin", 34:"rin", 35:"rin", 36:"rin", 37:"len", 38:"len", 39:"len", 40:"len", 41:"len",
         42:"luka", 43:"luka", 44:"luka", 45:"luka", 46:"luka", 47:"meiko", 48:"meiko", 49:"meiko", 50:"meiko", 51:"meiko",
         52:"kaito", 53:"kaito", 54:"kaito", 55:"kaito", 56:"kaito"}.get(cid)
+
+# ======================= 临时文件 ======================= #
+
+# generate music chart 使用，用于保存临时的svg图片使用浏览器截图生成png图片
+# 这个路径和存放所需资源（note host和jacket）的路径都必须与那个浏览器微服务设置同一个volumes
+TEMP_FILE_DIR = ASSETS_BASE_DIR / TMP_PATH
+# 暂时保存的临时文件，当达到设定的时间时会将其中的文件删除
+# TODO: 由于music chart 生成的svg图片不需要设置删除时间，因此还没有实现这个超时删除功能
+_tmp_files_to_remove: list[Tuple[str, datetime]] = []
+# TODO: 如果一个临时文件已经生成了，而这时程序被关闭导致内存中的这个list丢失，
+# 或者TempFilePath上下文没来得及退出，这样都会导致临时文件被保留，需要一个定时清理的程序
+# 这样的定时程序之后再做
+
+def rand_filename(ext: str) -> str:
+    """
+    rand_filename
+    
+    生成随机的文件名
+    
+    :param ext: 文件扩展名
+    :type ext: str
+    :return: 随机文件名
+    :rtype: str
+    """
+    if ext.startswith('.'):
+        ext = ext[1:]
+    return f'{uuid4()}.{ext}'
+
+def create_folder(folder_path) -> str:
+    """
+    创建文件夹，返回文件夹路径
+    """
+    folder_path = str(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
+    return folder_path
+
+def create_parent_folder(file_path) -> str:
+    """
+    创建文件所在的文件夹，返回文件路径
+    """
+    parent_folder = os.path.dirname(file_path)
+    create_folder(parent_folder)
+    return file_path
+
+def remove_file(file_path):
+    """
+    remove_file
+    
+    删除file_path指定的文件
+    
+    :param file_path: 说明
+    """
+    if os.path.exists(file_path):
+        os.remove(file_path)
+
+class TempFilePath:
+    """
+    临时文件路径
+    remove_after为None表示使用后立即删除，否则延时删除
+    """
+    def __init__(self, ext: str, remove_after: timedelta = None):
+        self.ext = ext
+        self.path = os.path.abspath(pjoin(TEMP_FILE_DIR, rand_filename(ext)))
+        self.remove_after = remove_after
+        create_parent_folder(self.path)
+
+    def __enter__(self) -> str:
+        return self.path
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.remove_after is None:
+            remove_file(self.path)
+        else:
+            _tmp_files_to_remove.append((self.path, datetime.now() + self.remove_after))
+
+
+# ============================ 异步和任务 ============================ #
+
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except:
+    print("uvloop not installed, using default asyncio event loop")
+
+from concurrent.futures import ThreadPoolExecutor
+_default_pool_executor = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_SIZE)
+
+async def run_in_pool(func, *args, pool=None):
+    if pool is None:
+        global _default_pool_executor
+        pool = _default_pool_executor
+    return await asyncio.get_event_loop().run_in_executor(pool, func, *args)
+
+# ============================ chromedp截图 ============================ #
+
+async def screenshot(
+        url: str, 
+        *,
+        width: int = 1920,
+        height: int = 1080,
+        format: Literal['png', 'jpeg', 'webp'] = 'png',
+        quanlity: int = 90,
+        wait_time: int = 0,
+        wait_for: Optional[str] = None,
+        full_page: bool = False,
+        headers: Optional[dict] = None,
+        user_agent: Optional[str] = None,
+        device_scale: float = 1.0,
+        mobile: bool = False,
+        landscape: bool = False,
+        timeout: int = 30,
+        clip: Optional[dict[Literal['x','y','width','height'],int]] = None
+)->Image.Image:
+    # locals() 获取当前所有的局部变量，在函数开头调用，获取所有的参数
+    params = {k: v for k, v in locals().items() if v is not None }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.request('post', SCREENSHOT_API_PATH, json=params) as resp:
+                if resp.status != 200:
+                    try:
+                        error = await resp.json()
+                        error = error['error']
+                    except Exception:
+                        error = await resp.text
+                    raise Exception(error)
+                if resp.content_type not in ('image/jpeg', 'image/webp', 'image/png'):
+                    raise Exception(f"未知的响应体类型{resp.content_type}")
+                return Image.open(io.BytesIO(await resp.read()))
+    except aiohttp.ClientConnectionError as e:
+        raise Exception("连接截图API失败")
