@@ -75,8 +75,18 @@ from src.sekai.honor.drawer import compose_full_honor_image
 from src.sekai.honor.model import HonorRequest
 
 # Score module
-from src.sekai.score.drawer import compose_score_control_image
-from src.sekai.score.model import ScoreControlRequest
+from src.sekai.score.drawer import (
+    compose_score_control_image,
+    compose_custom_room_score_control_image,
+    compose_music_meta_image,
+    compose_music_board_image,
+)
+from src.sekai.score.model import (
+    ScoreControlRequest,
+    CustomRoomScoreRequest,
+    MusicMetaRequest,
+    MusicBoardRequest,
+)
 
 # Stamp module
 from src.sekai.stamp.drawer import compose_stamp_list_image
@@ -466,6 +476,48 @@ async def score_control(request: ScoreControlRequest):
     """
     try:
         image = await compose_score_control_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/score/custom-room", tags=["Score"], summary="Generate custom room score control image")
+async def custom_room_score_control(request: CustomRoomScoreRequest):
+    """
+    Generate a custom room score control image.
+    
+    Shows valid event bonus and song combinations for small PT targets.
+    """
+    try:
+        image = await compose_custom_room_score_control_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/score/music-meta", tags=["Score"], summary="Generate music meta image")
+async def music_meta(request: list[MusicMetaRequest]):
+    """
+    Generate a music meta info image.
+    
+    Shows detailed stats (diff, time, efficiency) for one or more songs.
+    """
+    try:
+        image = await compose_music_meta_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/score/music-board", tags=["Score"], summary="Generate music board image")
+async def music_board(request: MusicBoardRequest):
+    """
+    Generate a music leaderboard image.
+    
+    Shows ranking of songs based on score, efficiency, time etc.
+    """
+    try:
+        image = await compose_music_board_image(request)
         return image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
