@@ -16,12 +16,15 @@ def load_configs(path: str = None) -> None:
     config_data: Dict[str, Any] = {}
     global ASSETS_BASE_DIR, \
         RESULT_ASSET_PATH, \
+        TMP_PATH, \
         TRI_PATHS, \
         FONT_DIR, \
         DEFAULT_FONT, \
         DEFAULT_BOLD_FONT, \
         DEFAULT_HEAVY_FONT, \
-        DEFAULT_EMOJI_FONT
+        DEFAULT_EMOJI_FONT, \
+        DEFAULT_THREAD_POOL_SIZE, \
+        SCREENSHOT_API_PATH
     
     # Resolve config path
     if path is None:
@@ -44,6 +47,7 @@ def load_configs(path: str = None) -> None:
         ASSETS_BASE_DIR = Path(assets_config.get("base_dir"))
     if assets_config.get('result_asset_path'):
         RESULT_ASSET_PATH = assets_config.get('result_asset_path')
+    TMP_PATH = assets_config.get('tmp_path', TMP_PATH)
     if assets_config.get('tri_paths'):
         TRI_PATHS = assets_config.get('tri_paths')
     # 字体的配置
@@ -59,12 +63,19 @@ def load_configs(path: str = None) -> None:
         DEFAULT_HEAVY_FONT = default_fonts.get('heavy')
     if default_fonts.get('emoji'):
         DEFAULT_EMOJI_FONT = default_fonts.get('emoji')
+    # 默认线程池大小
+    DEFAULT_THREAD_POOL_SIZE = int(config_data.get("default_thread_pool_size", DEFAULT_THREAD_POOL_SIZE))
+    # 截图微服务地址
+    SCREENSHOT_API_PATH = config_data.get('screenshot_api_path', SCREENSHOT_API_PATH)
 
 # Default values
 ASSETS_BASE_DIR = Path('/data')
 
 # music.drawer
 RESULT_ASSET_PATH = 'lunabot_static_images'
+
+# musci chart
+TMP_PATH = 'tmp'
 
 TRI_PATHS = [
     '/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri1.png',
@@ -77,6 +88,10 @@ DEFAULT_FONT = "SourceHanSansSC-Regular"
 DEFAULT_BOLD_FONT = "SourceHanSansSC-Bold"
 DEFAULT_HEAVY_FONT = "SourceHanSansSC-Heavy"
 DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
+
+DEFAULT_THREAD_POOL_SIZE = 8
+
+SCREENSHOT_API_PATH = "http://localhost:18080/screenshot"
 
 # Try to load configs (won't fail if file doesn't exist)
 load_configs()

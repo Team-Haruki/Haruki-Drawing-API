@@ -1,6 +1,7 @@
 assets:
   base_dir: /Users/deseer/PycharmProjects/Haruki-Drawing-API/data
   result_asset_path: lunabot_static_images
+  tmp_path: tmp
   tri_paths:
     - /Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri1.png
     - /Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri2.png
