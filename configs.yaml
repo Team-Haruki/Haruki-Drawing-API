@@ -14,3 +14,5 @@ font:
     heavy: SourceHanSansSC-Heavy
     emoji: EmojiOneColor-SVGinOT
   
+default_thread_pool_size: 8
+screenshot_api_path: http://localhost:18080/screenshot
