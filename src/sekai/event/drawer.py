@@ -138,7 +138,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                             for cid, chapter in enumerate(wl_chapters):
                                 cprogress_start = (chapter["start_time"] - start_time) / (end_time - start_time)
                                 cprogress_end = (chapter["end_time"] - start_time) / (end_time - start_time)
-                                chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE.get(cid))
+                                chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE.get(cid + 1))
                                 Spacer(w=int(progress_w * (cprogress_end - cprogress_start)), h=progress_h).set_bg(RoundRectBg(chara_color, 4)) \
                                     .set_offset((border + int(progress_w * cprogress_start), border))
                             Spacer(w=int(progress_w * progress), h=progress_h).set_bg(RoundRectBg((255, 255, 255, 200), 4)).set_offset((border, border))

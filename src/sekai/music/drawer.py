@@ -109,9 +109,9 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                 # 附加标题
                 if title and title_style:
                     if title_shadow:
-                        TextBox(title,TextStyle(title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2),).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg())
+                        TextBox(title,TextStyle(title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2),).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
                     else:
-                        TextBox(title, title_style).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg())
+                        TextBox(title, title_style).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
 
                 # 歌曲标题
                 name_text = f"【{region.upper()}-{mid}】{name}"
@@ -171,7 +171,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                 hsplit_gap = 8
                 leaderboard_w = total_w - diff_section_w - hsplit_gap
                 
-                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsplit_gap).set_omit_parent_bg(True).set_item_bg(roundrect_bg()).set_w(total_w):
+                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsplit_gap).set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_w(total_w):
                     # 难度等级/物量
                     vs = 4
                     hs = diff_hs
@@ -276,7 +276,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                         ImageBox(event_banner, size=(None, 100))
 
                 if event_id is not None:
-                    with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg()).set_padding(0).set_sep(16):
+                    with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16):
                         draw_vocal(600)
                         draw_event()
                 else:
