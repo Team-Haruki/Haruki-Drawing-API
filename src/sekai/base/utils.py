@@ -273,8 +273,45 @@ async def screenshot(
         mobile: bool = False,
         landscape: bool = False,
         timeout: int = 30,
-        clip: Optional[dict[Literal['x','y','width','height'],int]] = None
+        clip: Optional[dict[Literal['x','y','width','height'],float]] = None
 )->Image.Image:
+    r"""screenshot
+
+    调用chromedp截图微服务
+
+    Args
+    ----
+    url : str
+        资源连接，如果是本地资源，请使用file://+绝对路径，并且保证该路径被挂载到微服务的volumes下
+    width : int = 1920
+        窗口宽度
+    height : int = 1080
+        窗口高度
+    format : Literal[ 'png', 'jpeg', 'webp' ] = 'png'
+        返回的截图格式
+    quanlity : int = 90
+        压缩质量(1 - 100)
+    wait_time : int = 0
+        额外等待时间(毫秒)
+    wait_for : Optional[ str ] = None
+        等待元素出现(CSS选择器)
+    full_page : bool = False
+        全页面截图
+    headers : Optional[ dict ] = None
+        自定义请求头
+    user_agent : Optional[ str ] = None
+        自定义User-Agent
+    device_scale : float = 1.0
+        设备像素比
+    mobile : bool = false
+        移动端模拟
+    landscape : bool = false
+        横屏模式
+    timeout : int = 30
+        超时时间(秒, 最大120)
+    clip : Optional[ dict[ Literal[ 'x', 'y', 'width', 'height' ], float ] ] = None
+        裁剪区域
+    """
     # locals() 获取当前所有的局部变量，在函数开头调用，获取所有的参数
     params = {k: v for k, v in locals().items() if v is not None }
     try:

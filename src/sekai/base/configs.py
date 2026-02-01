@@ -47,7 +47,7 @@ def load_configs(path: str = None) -> None:
         ASSETS_BASE_DIR = Path(assets_config.get("base_dir"))
     if assets_config.get('result_asset_path'):
         RESULT_ASSET_PATH = assets_config.get('result_asset_path')
-    TMP_PATH = assets_config.get('tmp_path', TMP_PATH)
+    TMP_PATH = assets_config.get('tmp_path') or TMP_PATH
     if assets_config.get('tri_paths'):
         TRI_PATHS = assets_config.get('tri_paths')
     # 字体的配置
@@ -64,9 +64,9 @@ def load_configs(path: str = None) -> None:
     if default_fonts.get('emoji'):
         DEFAULT_EMOJI_FONT = default_fonts.get('emoji')
     # 默认线程池大小
-    DEFAULT_THREAD_POOL_SIZE = int(config_data.get("default_thread_pool_size", DEFAULT_THREAD_POOL_SIZE))
+    DEFAULT_THREAD_POOL_SIZE = int(config_data.get("default_thread_pool_size") or DEFAULT_THREAD_POOL_SIZE)
     # 截图微服务地址
-    SCREENSHOT_API_PATH = config_data.get('screenshot_api_path', SCREENSHOT_API_PATH)
+    SCREENSHOT_API_PATH = config_data.get('screenshot_api_path') or SCREENSHOT_API_PATH
 
 # Default values
 ASSETS_BASE_DIR = Path('/data')

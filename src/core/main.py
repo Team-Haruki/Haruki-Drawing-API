@@ -155,6 +155,11 @@ from src.sekai.sk.drawer import (
     WinRateRequest,
 )
 
+from src.sekai.chart.drawer import (
+    generate_music_chart,
+    GenerateMusicChartRequest
+)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -774,6 +779,14 @@ async def sk_winrate(request: WinRateRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+@app.post("/api/chart", tags=["Chart"], summary="Generate music chart image")
+async def music_chart(request: GenerateMusicChartRequest):
+    try:
+        image = await generate_music_chart(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

@@ -1,0 +1,18 @@
+assets:
+  base_dir: /app/haruki_drawing_api/data
+  result_asset_path: static_images
+  tmp_path: tmp
+  tri_paths:
+    - /app/haruki_drawing_api/data/static_images/triangle/tri1.png
+    - /app/haruki_drawing_api/data/static_images/triangle/tri2.png
+    - /app/haruki_drawing_api/data/static_images/triangle/tri3.png
+font:
+  dir: /app/haruki_drawing_api/data/fonts
+  default: 
+    default: SourceHanSansSC-Regular
+    bold: SourceHanSansSC-Bold
+    heavy: SourceHanSansSC-Heavy
+    emoji: EmojiOneColor-SVGinOT
+  
+default_thread_pool_size: 8
+screenshot_api_path: http://screenshot-service:8080/screenshot
