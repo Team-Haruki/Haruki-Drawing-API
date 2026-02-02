@@ -1,6 +1,5 @@
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -21,6 +20,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.utils import get_img_from_path, truncate
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
 from .model import (

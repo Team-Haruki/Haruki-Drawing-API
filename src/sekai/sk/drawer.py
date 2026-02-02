@@ -9,7 +9,6 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
-from src.sekai.base.configs import ASSETS_BASE_DIR
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -34,6 +33,7 @@ from src.sekai.base.utils import (
     plt_fig_to_image,
     truncate,
 )
+from src.settings import ASSETS_BASE_DIR
 
 matplotlib.use("Agg")
 

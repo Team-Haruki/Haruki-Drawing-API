@@ -1,8 +1,6 @@
 # Base module exports
 
-# From painter.py
-# From configs.py
-from .configs import (
+from src.settings import (
     ASSETS_BASE_DIR,
     DEFAULT_BOLD_FONT,
     DEFAULT_EMOJI_FONT,

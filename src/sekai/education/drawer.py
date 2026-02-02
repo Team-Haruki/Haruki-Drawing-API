@@ -6,7 +6,6 @@ Education 模块绘图函数
 
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -29,6 +28,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.utils import get_img_from_path
 from src.sekai.profile.drawer import get_detailed_profile_card
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # 从 model.py 导入数据模型
 from .model import (

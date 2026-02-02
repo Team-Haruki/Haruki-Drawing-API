@@ -1,42 +1,39 @@
-import os
+from dataclasses import dataclass
 import math
+import os
 
 import svgwrite
 import svgwrite.base
-import svgwrite.path
+import svgwrite.container
+import svgwrite.gradients
 import svgwrite.image
+import svgwrite.masking
+import svgwrite.path
 import svgwrite.shapes
 import svgwrite.text
-import svgwrite.gradients
-import svgwrite.masking
-import svgwrite.container
 
-from .types import *
-from .notes import *
-
-from .score import *
 from .lyric import *
-
-from dataclasses import dataclass
-from typing import Optional
+from .notes import *
+from .score import *
+from .types import *
 
 __all__ = ["Drawing", "DrawingSentence"]
 
 
 @dataclass
 class CoverObject:
-    bar_from: Optional[Fraction] = None
-    css_class: Optional[str] = None
+    bar_from: Fraction | None = None
+    css_class: str | None = None
 
 
 @dataclass
 class CoverRect(CoverObject):
-    bar_to: Optional[Fraction] = None
+    bar_to: Fraction | None = None
 
 
 @dataclass
 class CoverText(CoverObject):
-    text: Optional[str] = None
+    text: str | None = None
 
 
 class Drawing:
@@ -47,8 +44,8 @@ class Drawing:
         style_sheet: str = "",
         note_host: str = "https://asset3.pjsekai.moe/live/note/custom01",
         skill: bool = False,
-        music_meta: Optional[dict] = None,
-        target_segment_seconds: Optional[float] = None,
+        music_meta: dict | None = None,
+        target_segment_seconds: float | None = None,
         **kwargs,
     ):
         self.score = score
@@ -729,8 +726,8 @@ class DrawingSentence(Drawing):
             or next is note
             or next.bar == note.bar
             or next.bar - note.bar > 1
-            or next.bar - note.bar > 0.5
-            and int(next.bar) != int(note.bar)
+            or (next.bar - note.bar > 0.5
+            and int(next.bar) != int(note.bar))
         ):
             interval = math.floor(note.bar + 1) - note.bar
         else:
@@ -932,7 +929,7 @@ class DrawingSentence(Drawing):
                 drawing.line(
                     start=(
                         round(self.lane_width * lane + self.lane_padding),
-                        round(0),
+                        (0),
                     ),
                     end=(
                         round(self.lane_width * lane + self.lane_padding),

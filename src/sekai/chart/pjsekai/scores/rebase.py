@@ -1,11 +1,10 @@
-import json
 import dataclasses
+import json
 
-from .notes import *
-from .types import *
-
-from .score import *
 from .meta import *
+from .notes import *
+from .score import *
+from .types import *
 
 __all__ = ["Rebase"]
 
@@ -51,14 +50,7 @@ class Rebase:
             return dataclasses.replace(
                 note_0,
                 bar=score.get_bar_by_time(self.get_time(note_0.bar) - rebase.offset),
-                **{
-                    key: None
-                    for key in {
-                        Tap: [],
-                        Directional: ["tap"],
-                        Slide: ["tap", "directional", "next", "head"],
-                    }[type(note_0)]
-                },
+                **dict.fromkeys({Tap: [], Directional: ["tap"], Slide: ["tap", "directional", "next", "head"]}[type(note_0)]),
             )
 
         for note_0 in self.notes:

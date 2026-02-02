@@ -1,5 +1,4 @@
 import fractions
-import operator
 
 
 class Fraction(fractions.Fraction):

@@ -6,6 +6,7 @@ assets:
     - ./data/lunabot_static_images/triangle/tri1.png
     - ./data/lunabot_static_images/triangle/tri2.png
     - ./data/lunabot_static_images/triangle/tri3.png
+
 font:
   dir: ./data
   default: 
@@ -13,9 +14,13 @@ font:
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
     emoji: EmojiOneColor-SVGinOT
-  
-default_thread_pool_size: 8
-screenshot_api_path: http://localhost:28080/screenshot
+
+drawing:
+  thread_pool_size: 8
+  use_process_pool: false
+  process_pool_workers: 4
+  process_pool_threshold: 2000000  # 约 2000x1000 像素
+  screenshot_api_path: http://localhost:28080/screenshot
 
 server:
   host: 0.0.0.0

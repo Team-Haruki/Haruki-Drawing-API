@@ -2,8 +2,8 @@ import os
 
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR
 from src.sekai.base.utils import TempFilePath, run_in_pool, screenshot
+from src.settings import ASSETS_BASE_DIR
 
 from .model import GenerateMusicChartRequest
 from .pjsekai.scores import Drawing, Score

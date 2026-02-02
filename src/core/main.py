@@ -17,13 +17,13 @@ from fastapi import FastAPI
 import uvicorn
 
 from src.core import health
-from src.core.configs import (
+from src.core.pjsk import router as pjsk_router
+from src.settings import (
     FIELD_STYLE,
     LOG_FORMAT,
     SERVER_HOST,
     SERVER_PORT,
 )
-from src.core.pjsk import router as pjsk_router
 
 logger = logging.getLogger(__name__)
 _description = """
