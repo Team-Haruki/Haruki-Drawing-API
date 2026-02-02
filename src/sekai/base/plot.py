@@ -1,30 +1,30 @@
-import threading
+from collections.abc import Callable
 import contextvars
-
 from copy import deepcopy
-from datetime import datetime
-from types import TracebackType
 from dataclasses import dataclass
-from typing import Union, Type, Callable, TypedDict, Self, Optional, Literal, Tuple
-from PIL import Image, ImageFilter, ImageFont, ImageEnhance
+from datetime import datetime
+import logging
+from types import TracebackType
+from typing import Literal, Self, TypedDict
+
+from PIL import Image, ImageEnhance, ImageFilter, ImageFont
 
 from .painter import (
-    Color,
-    Painter,
-    get_font_desc,
-    get_font,
-    FontDesc,
-    get_text_size,
-    SHADOW,
-    LinearGradient,
     ALIGN_MAP,
     ALIGN_TYPE,
-    ITEM_SIZE_MODE_TYPE,
-    TRANSPARENT,
-    DEFAULT_FONT,
     BLACK,
+    DEFAULT_FONT,
+    ITEM_SIZE_MODE_TYPE,
+    SHADOW,
+    TRANSPARENT,
+    Color,
+    FontDesc,
+    LinearGradient,
+    Painter,
+    get_font,
+    get_font_desc,
+    get_text_size,
 )
-
 
 DEBUG = False
 CANVAS_SIZE_LIMIT = [4096, 4096]
@@ -46,7 +46,7 @@ class WidgetBg:
 
 
 class FillBg(WidgetBg):
-    def __init__(self, fill: Color, stroke: Color = None, stroke_width: int = 1) -> None:
+    def __init__(self, fill: Color, stroke: Color | None = None, stroke_width: int = 1) -> None:
         super().__init__()
         self.fill = fill
         self.stroke = stroke
@@ -61,11 +61,11 @@ class RoundRectBg(WidgetBg):
         self,
         fill: Color,
         radius: int,
-        stroke: Color = None,
+        stroke: Color | None = None,
         stroke_width: int = 1,
         corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
         blur_glass: bool = False,
-        blur_glass_kwargs: dict = None,
+        blur_glass_kwargs: dict | None = None,
     ) -> None:
         super().__init__()
         self.fill = fill
@@ -87,12 +87,12 @@ class RoundRectBg(WidgetBg):
 
 class ImageBg(WidgetBg):
     def __init__(
-        self, 
-        img: Union[str, Image.Image], 
-        align: ALIGN_TYPE = "c", 
-        mode: Literal["fit", "fill", "fixed", "repeat"] = "fit", 
-        blur: bool = False, 
-        fade: float = 0.1
+        self,
+        img: str | Image.Image,
+        align: ALIGN_TYPE = "c",
+        mode: Literal["fit", "fill", "fixed", "repeat"] = "fit",
+        blur: bool = False,
+        fade: float = 0.1,
     ) -> None:
         super().__init__()
         if isinstance(img, str):
@@ -151,7 +151,7 @@ class ImageBg(WidgetBg):
 
 
 class RandomTriangleBg(WidgetBg):
-    def __init__(self, time_color: bool, main_hue: float = None, size_fixed_rate: float = 0.0) -> None:
+    def __init__(self, time_color: bool, main_hue: float | None = None, size_fixed_rate: float = 0.0) -> None:
         super().__init__()
         self.time_color = time_color
         self.main_hue = main_hue
@@ -217,26 +217,28 @@ class Widget:
             return None
         return stk[-1]
 
-    def __enter__(self)-> Self:
+    def __enter__(self) -> Self:
         local = self._thread_local.get()
         if local is None:
+
             class _WidgetLocal:
                 def __init__(self):
                     self.w_stack = []
+
             local = _WidgetLocal()
         local.w_stack.append(self)
         self._thread_local.set(local)
         return self
 
-
     def __exit__(
         self,
-        exc_type: Type[BaseException] | None,
+        exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> bool | None:
         local = self._thread_local.get()
-        assert local is not None and local.w_stack[-1] == self
+        assert local is not None, "Local variable not found"
+        assert local.w_stack[-1] == self, "Widget stack mismatch"
         local.w_stack.pop()
         if not local.w_stack:
             self._thread_local.set(None)
@@ -251,19 +253,18 @@ class Widget:
     #     else:
     #         self.items.insert(index, item)
     #     return self
-    
 
-    def set_parent(self, parent: Self | None)-> Self:
+    def set_parent(self, parent: Self | None) -> Self:
         self.parent = parent
         return self
 
-    def set_content_align(self, align: ALIGN_TYPE)-> Self:
+    def set_content_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
             raise ValueError("Invalid align")
         self.content_h_align, self.content_v_align = ALIGN_MAP[align]
         return self
 
-    def set_margin(self, margin: Union[int, tuple[int, int]])-> Self:
+    def set_margin(self, margin: int | tuple[int, int]) -> Self:
         if isinstance(margin, int):
             self.v_margin = margin
             self.h_margin = margin
@@ -272,7 +273,7 @@ class Widget:
             self.v_margin = margin[1]
         return self
 
-    def set_padding(self, padding: Union[int, tuple[int, int]])-> Self:
+    def set_padding(self, padding: int | tuple[int, int]) -> Self:
         if isinstance(padding, int):
             self.v_padding = padding
             self.h_padding = padding
@@ -281,36 +282,36 @@ class Widget:
             self.v_padding = padding[1]
         return self
 
-    def set_size(self, size: tuple[Optional[int], Optional[int]])-> Self:
+    def set_size(self, size: tuple[int | None, int | None]) -> Self:
         if not size:
             size = (None, None)
         self.w = size[0]
         self.h = size[1]
         return self
 
-    def set_w(self, w: int)-> Self:
+    def set_w(self, w: int) -> Self:
         self.w = w
         return self
 
-    def set_h(self, h: int)-> Self:
+    def set_h(self, h: int) -> Self:
         self.h = h
         return self
 
-    def set_offset(self, offset: tuple[int, int])-> Self:
+    def set_offset(self, offset: tuple[int, int]) -> Self:
         self.offset = offset
         return self
 
-    def set_offset_anchor(self, anchor: ALIGN_TYPE)-> Self:
+    def set_offset_anchor(self, anchor: ALIGN_TYPE) -> Self:
         if anchor not in ALIGN_MAP:
             raise ValueError("Invalid anchor")
         self.offset_x_anchor, self.offset_y_anchor = ALIGN_MAP[anchor]
         return self
 
-    def set_bg(self, bg: WidgetBg)-> Self:
+    def set_bg(self, bg: WidgetBg) -> Self:
         self.bg = bg
         return self
 
-    def set_omit_parent_bg(self, omit: bool)-> Self:
+    def set_omit_parent_bg(self, omit: bool) -> Self:
         self.omit_parent_bg = omit
         return self
 
@@ -329,7 +330,8 @@ class Widget:
             if content_w > content_w_limit or content_h > content_h_limit:
                 if not self.allow_draw_outside:
                     raise ValueError(
-                        f"Content size is too large with ({content_w}, {content_h}) > ({content_w_limit}, {content_h_limit})"
+                        f"Content size is too large with ({content_w}, {content_h}) > "
+                        f"({content_w_limit}, {content_h_limit})"
                     )
                 else:
                     content_w = min(content_w, content_w_limit)
@@ -356,7 +358,8 @@ class Widget:
             cy = h - ch
         elif self.content_v_align == "c":
             cy = (h - ch) // 2
-        assert cx is not None and cy is not None
+        assert cx is not None, "cx must not be None"
+        assert cy is not None, "cy must not be None"
         return cx, cy
 
     def _draw_self(self, p: Painter) -> None:
@@ -369,7 +372,8 @@ class Widget:
             s += f"self={self._get_self_size()}"
             s += f"content={self._get_content_size()}"
             p.text(s, (3, 3), font=get_font_desc(DEFAULT_FONT, 16), fill=color)
-            print(f"Draw {self.__class__.__name__} at {p.offset} size={p.size}")
+            logging.debug(f"Draw {self.__class__.__name__} at {p.offset} size={p.size}")
+            pass
 
         if self.bg:
             self.bg.draw(p)
@@ -380,16 +384,16 @@ class Widget:
     def _draw_content(self, p: Painter) -> None:
         pass
 
-    def add_draw_func(self, draw_func: Callable[[Self, Painter], None])-> Self:
+    def add_draw_func(self, draw_func: Callable[[Self, Painter], None]) -> Self:
         self.draw_funcs.append(draw_func)
         return self
 
-    def clear_draw_funcs(self)-> Self:
+    def clear_draw_funcs(self) -> Self:
         self.draw_funcs.clear()
         return self
 
     def draw(self, p: Painter) -> None:
-        assert not self.drawn, 'Only support draw once for each widget'
+        assert not self.drawn, "Only support draw once for each widget"
         self.drawn = True
 
         assert p.size == self._get_self_size()
@@ -420,7 +424,7 @@ class Widget:
 
 
 class Frame(Widget):
-    def __init__(self, items: list[Widget] = None) -> None:
+    def __init__(self, items: list[Widget] | None = None) -> None:
         super().__init__()
         self.items = items or []
         for item in self.items:
@@ -471,8 +475,8 @@ class Frame(Widget):
 class HSplit(Widget):
     def __init__(
         self,
-        items: list[Widget] = None,
-        ratios: list[float] = None,
+        items: list[Widget] | None = None,
+        ratios: list[float] | None = None,
         sep: int = DEFAULT_SEP,
         item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
         item_align: ALIGN_TYPE = "c",
@@ -582,8 +586,8 @@ class HSplit(Widget):
 class VSplit(Widget):
     def __init__(
         self,
-        items: list[Widget] = None,
-        ratios: list[float] = None,
+        items: list[Widget] | None = None,
+        ratios: list[float] | None = None,
         sep: int = DEFAULT_SEP,
         item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
         item_align: ALIGN_TYPE = "c",
@@ -693,9 +697,9 @@ class VSplit(Widget):
 class Grid(Widget):
     def __init__(
         self,
-        items: list[Widget] = None,
-        row_count: int = None,
-        col_count: int = None,
+        items: list[Widget] | None = None,
+        row_count: int | None = None,
+        col_count: int | None = None,
         item_size_mode: ITEM_SIZE_MODE_TYPE = "fixed",
         item_align: ALIGN_TYPE = "c",
         h_sep: int = DEFAULT_SEP,
@@ -742,7 +746,7 @@ class Grid(Widget):
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
         return self
 
-    def set_sep(self, h_sep: int = None, v_sep: int = None) -> Self:
+    def set_sep(self, h_sep: int | None = None, v_sep: int | None = None) -> Self:
         if h_sep is not None:
             self.h_sep = h_sep
         if v_sep is not None:
@@ -770,13 +774,14 @@ class Grid(Widget):
 
     def _get_grid_rc_and_size(self) -> tuple[tuple[int, int], tuple[int, int]]:
         r, c = self.row_count, self.col_count
-        assert r and not c or c and not r, "Either row_count or col_count should be None"
+        assert (r and not c) or (c and not r), "Either row_count or col_count should be None"
         if not r:
             r = (len(self.items) + c - 1) // c
         if not c:
             c = (len(self.items) + r - 1) // r
         if self.item_size_mode == "expand":
-            assert self.w is not None and self.h is not None, "Expand mode requires width and height"
+            assert self.w is not None, "Expand mode requires width"
+            assert self.h is not None, "Expand mode requires height"
             gw = (self.w - self.h_sep * (c - 1) - self.h_padding * 2) / c
             gh = (self.h - self.v_sep * (r - 1) - self.v_padding * 2) / r
         else:
@@ -824,16 +829,18 @@ class Grid(Widget):
 
 class Flow(Widget):
     def __init__(
-        self, 
-        items: list[Widget] = None, 
-        row_count: int = None, 
-        col_count: int = None, 
-        aspect_ratio: float = None,
-        item_align: ALIGN_TYPE = 'lt', 
-        h_sep: int = DEFAULT_SEP, 
-        v_sep: int = DEFAULT_SEP, 
+        self,
+        items: list[Widget] | None = None,
+        row_count: int | None = None,
+        col_count: int | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        aspect_ratio: float | None = None,
+        item_align: ALIGN_TYPE = "lt",
+        h_sep: int = DEFAULT_SEP,
+        v_sep: int = DEFAULT_SEP,
         vertical: bool = False,
-        keep_empty_row_or_col: bool = False
+        keep_empty_row_or_col: bool = False,
     ):
         """
         Flow布局，逐行或逐列排列子组件，自动换行或换列。需要至少指定以下一个参数用于计算布局：
@@ -862,31 +869,31 @@ class Flow(Widget):
 
     def set_item_align(self, align: ALIGN_TYPE):
         if align not in ALIGN_MAP:
-            raise ValueError('Invalid align')
+            raise ValueError("Invalid align")
         self.item_halign, self.item_valign = ALIGN_MAP[align]
         return self
 
     def set_vertical(self, vertical: bool):
         self.vertical = vertical
         return self
-    
+
     def set_sep(self, h_sep=None, v_sep=None):
         if h_sep is not None:
             self.h_sep = h_sep
         if v_sep is not None:
             self.v_sep = v_sep
         return self
-    
-    def set_row_or_col_count(self, row_count: int = None, col_count: int = None):
-        assert not (row_count and col_count), 'Either row_count or col_count should be None'
+
+    def set_row_or_col_count(self, row_count: int | None = None, col_count: int | None = None):
+        assert not (row_count and col_count), "Either row_count or col_count should be None"
         self.row_count = row_count
         self.col_count = col_count
         return self
-    
+
     def set_aspect_ratio(self, aspect_ratio: float):
         self.aspect_ratio = aspect_ratio
         return self
-    
+
     def set_keep_empty_row_or_col(self, keep: bool):
         self.keep_empty_row_or_col = keep
         return self
@@ -895,7 +902,6 @@ class Flow(Widget):
         item.set_parent(self)
         self.items.append(item)
         return self
-
 
     def _calc_total_size_by_layout_fast(self, layout: list[list[int]]) -> tuple[int, int]:
         if len(layout) == 0:
@@ -907,25 +913,31 @@ class Flow(Widget):
                 for j, index in enumerate(row):
                     iw, ih = self.items[index]._get_self_size()
                     cur_w += iw
-                    if j < len(row) - 1: cur_w += self.h_sep
+                    if j < len(row) - 1:
+                        cur_w += self.h_sep
                     row_h = max(row_h, ih)
                 total_w = max(total_w, cur_w)
                 total_h += row_h
-                if i < len(layout) - 1: total_h += self.v_sep
+                if i < len(layout) - 1:
+                    total_h += self.v_sep
         else:
             for j, col in enumerate(layout):
                 cur_h, col_w = 0, 0
                 for i, index in enumerate(col):
                     iw, ih = self.items[index]._get_self_size()
                     cur_h += ih
-                    if i < len(col) - 1: cur_h += self.v_sep
+                    if i < len(col) - 1:
+                        cur_h += self.v_sep
                     col_w = max(col_w, iw)
                 total_h = max(total_h, cur_h)
                 total_w += col_w
-                if j < len(layout) - 1: total_w += self.h_sep
+                if j < len(layout) - 1:
+                    total_w += self.h_sep
         return (total_w, total_h)
 
-    def _calc_total_size_and_item_pos_by_layout(self, layout: list[list[int]]) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+    def _calc_total_size_and_item_pos_by_layout(
+        self, layout: list[list[int]]
+    ) -> tuple[tuple[int, int], list[tuple[int, int]]]:
         if len(layout) == 0:
             return (0, 0), []
         total_w, total_h = 0, 0
@@ -938,27 +950,35 @@ class Flow(Widget):
                     iw, ih = self.items[index]._get_self_size()
                     item_pos[index] = (cur_w, total_h)
                     cur_w += iw
-                    if j < len(row) - 1: cur_w += self.h_sep
+                    if j < len(row) - 1:
+                        cur_w += self.h_sep
                     row_h = max(row_h, ih)
                 row_ws.append(cur_w)
                 row_hs.append(row_h)
                 total_w = max(total_w, cur_w)
                 total_h += row_h
-                if i < len(layout) - 1: total_h += self.v_sep
+                if i < len(layout) - 1:
+                    total_h += self.v_sep
             # 根据对齐方式调整item位置
             for i, row in enumerate(layout):
                 match self.item_halign:
-                    case 'l': x_offset = 0
-                    case 'r': x_offset = total_w - row_ws[i]
-                    case 'c': x_offset = (total_w - row_ws[i]) // 2
+                    case "l":
+                        x_offset = 0
+                    case "r":
+                        x_offset = total_w - row_ws[i]
+                    case "c":
+                        x_offset = (total_w - row_ws[i]) // 2
                 for j, index in enumerate(row):
                     x, y = item_pos[index]
                     iw, ih = self.items[index]._get_self_size()
                     match self.item_valign:
-                        case 't': y_offset = 0
-                        case 'b': y_offset = row_hs[i] - ih
-                        case 'c': y_offset = (row_hs[i] - ih) // 2
-                    item_pos[index] = (x + x_offset, y + y_offset) 
+                        case "t":
+                            y_offset = 0
+                        case "b":
+                            y_offset = row_hs[i] - ih
+                        case "c":
+                            y_offset = (row_hs[i] - ih) // 2
+                    item_pos[index] = (x + x_offset, y + y_offset)
         else:
             col_ws, col_hs = [], []
             for j, col in enumerate(layout):
@@ -967,34 +987,39 @@ class Flow(Widget):
                     iw, ih = self.items[index]._get_self_size()
                     item_pos[index] = (total_w, cur_h)
                     cur_h += ih
-                    if i < len(col) - 1: cur_h += self.v_sep
+                    if i < len(col) - 1:
+                        cur_h += self.v_sep
                     col_w = max(col_w, iw)
                 col_ws.append(col_w)
                 col_hs.append(cur_h)
                 total_h = max(total_h, cur_h)
                 total_w += col_w
-                if j < len(layout) - 1: total_w += self.h_sep
+                if j < len(layout) - 1:
+                    total_w += self.h_sep
             # 根据对齐方式调整item位置
             for j, col in enumerate(layout):
                 match self.item_valign:
-                    case 't': y_offset = 0
-                    case 'b': y_offset = total_h - col_hs[j]
-                    case 'c': y_offset = (total_h - col_hs[j]) // 2
+                    case "t":
+                        y_offset = 0
+                    case "b":
+                        y_offset = total_h - col_hs[j]
+                    case "c":
+                        y_offset = (total_h - col_hs[j]) // 2
                 for i, index in enumerate(col):
                     x, y = item_pos[index]
                     iw, ih = self.items[index]._get_self_size()
                     match self.item_halign:
-                        case 'l': x_offset = 0
-                        case 'r': x_offset = col_ws[j] - iw
-                        case 'c': x_offset = (col_ws[j] - iw) // 2
+                        case "l":
+                            x_offset = 0
+                        case "r":
+                            x_offset = col_ws[j] - iw
+                        case "c":
+                            x_offset = (col_ws[j] - iw) // 2
                     item_pos[index] = (x + x_offset, y + y_offset)
         return (total_w, total_h), item_pos
 
     def _calc_item_layout(
-        self, 
-        row_count: int = None, 
-        col_count: int = None, 
-        aspect_ratio: float = None
+        self, row_count: int | None = None, col_count: int | None = None, aspect_ratio: float | None = None
     ) -> list[list[int]]:
         if len(self.items) == 0:
             if row_count or col_count:
@@ -1004,9 +1029,9 @@ class Flow(Widget):
         else:
             # 计算item的布局
             if row_count:
-                assert not self.vertical, 'Row count only works in horizontal mode'
-                assert not col_count, 'Cannot specify both row_count and col_count'
-                assert not aspect_ratio, 'Cannot specify both row_count and aspect_ratio'
+                assert not self.vertical, "Row count only works in horizontal mode"
+                assert not col_count, "Cannot specify both row_count and col_count"
+                assert not aspect_ratio, "Cannot specify both row_count and aspect_ratio"
                 # 在保证行数为row_count的前提下，将items依照高度均匀分布到各列
                 item_ws = [item._get_self_size()[0] for item in self.items]
                 total_w = sum(item_ws)
@@ -1027,9 +1052,9 @@ class Flow(Widget):
                         layout[-1].append(cur_index)
                         cur_index += 1
             elif col_count:
-                assert self.vertical, 'Column count only works in vertical mode'
-                assert not row_count, 'Cannot specify both row_count and col_count'
-                assert not aspect_ratio, 'Cannot specify both col_count and aspect_ratio'
+                assert self.vertical, "Column count only works in vertical mode"
+                assert not row_count, "Cannot specify both row_count and col_count"
+                assert not aspect_ratio, "Cannot specify both col_count and aspect_ratio"
                 # 在保证列数为col_count的前提下，将items依照宽度均匀分布到各行
                 item_hs = [item._get_self_size()[1] for item in self.items]
                 total_h = sum(item_hs)
@@ -1050,7 +1075,8 @@ class Flow(Widget):
                         layout[-1].append(cur_index)
                         cur_index += 1
             elif aspect_ratio:
-                assert not row_count and not col_count, 'Cannot specify both aspect_ratio and row_count/col_count'
+                assert not row_count, "Cannot specify both aspect_ratio and row_count"
+                assert not col_count, "Cannot specify both aspect_ratio and col_count"
                 # 计算最终大小最接近aspect_ratio的行列数，尝试不同的行列数，选择最优解
                 best_diff, best_layout = None, None
                 n = len(self.items)
@@ -1102,7 +1128,10 @@ class Flow(Widget):
                 if cur_col:
                     layout.append(cur_col)
             else:
-                raise ValueError('Either row_count, col_count, aspect_ratio, width (for horizontal) or height (for vertical) must be specified to calculate flow layout')
+                raise ValueError(
+                    "Either row_count, col_count, aspect_ratio, width (for horizontal) or height (for vertical)"
+                    " must be specified to calculate flow layout"
+                )
         if not self.keep_empty_row_or_col:
             layout = [row for row in layout if row]
         return layout
@@ -1119,7 +1148,7 @@ class Flow(Widget):
     def _get_content_size(self):
         total_size, _ = self._get_total_size_and_item_pos()
         return total_size
-    
+
     def _draw_content(self, p: Painter):
         _, item_pos = self._get_total_size_and_item_pos()
         for idx, item in enumerate(self.items):
@@ -1128,7 +1157,7 @@ class Flow(Widget):
             p.move_region((x, y), (iw, ih))
             item.draw(p)
             p.restore_region()
-    
+
 
 @dataclass
 class TextStyle:
@@ -1141,20 +1170,20 @@ class TextStyle:
 
     def replace(
         self,
-        font: str = None,
-        size: int = None,
-        color: Tuple[int, int, int, int] = None,
-        use_shadow: bool = None,
-        shadow_offset: Tuple[int, int] | int = None,
-        shadow_color: Tuple[int, int, int, int] = None,
+        font: str | None = None,
+        size: int | None = None,
+        color: tuple[int, int, int, int] | None = None,
+        use_shadow: bool | None = None,
+        shadow_offset: tuple[int, int] | int | None = None,
+        shadow_color: tuple[int, int, int, int] | None = None,
     ):
         return TextStyle(
-            font = font if font is not None else self.font,
-            size = size if size is not None else self.size,
-            color = color if color is not None else self.color,
-            use_shadow = use_shadow if use_shadow is not None else self.use_shadow,
-            shadow_offset = shadow_offset if shadow_offset is not None else self.shadow_offset,
-            shadow_color = shadow_color if shadow_color is not None else self.shadow_color,
+            font=font if font is not None else self.font,
+            size=size if size is not None else self.size,
+            color=color if color is not None else self.color,
+            use_shadow=use_shadow if use_shadow is not None else self.use_shadow,
+            shadow_offset=shadow_offset if shadow_offset is not None else self.shadow_offset,
+            shadow_color=shadow_color if shadow_color is not None else self.shadow_color,
         )
 
 
@@ -1166,11 +1195,12 @@ class TextBox(Widget):
     TODO:
         shadow 还未实现
     """
+
     def __init__(
         self,
         text: str = "",
         style: TextStyle = None,
-        line_count: int = None,
+        line_count: int | None = None,
         line_sep: int = 2,
         wrap: bool = True,
         overflow: Literal["shrink", "clip"] = "clip",
@@ -1221,7 +1251,7 @@ class TextBox(Widget):
         assert overflow in ("shrink", "clip")
         self.overflow = overflow
 
-    def set_text_offset(self, offset: Tuple[int, int]):
+    def set_text_offset(self, offset: tuple[int, int]):
         self.text_offset_x = offset[0]
         self.text_offset_y = offset[1]
         return self
@@ -1237,17 +1267,17 @@ class TextBox(Widget):
         w, _ = get_text_size(font, text + suffix)
         if w <= width:
             return None
-        l, r = 0, len(text)
-        while l <= r:
-            m = (l + r) // 2
-            w, _ = get_text_size(font, text[:m] + suffix)
+        left_idx, right_idx = 0, len(text)
+        while left_idx <= right_idx:
+            mid_idx = (left_idx + right_idx) // 2
+            w, _ = get_text_size(font, text[:mid_idx] + suffix)
             if w < width:
-                l = m + 1
+                left_idx = mid_idx + 1
             elif w > width:
-                r = m - 1
+                right_idx = mid_idx - 1
             else:
-                return m
-        return r
+                return mid_idx
+        return right_idx
 
     def _get_lines(self) -> list[str]:
         lines = self.text.split("\n")
@@ -1322,7 +1352,7 @@ class TextBox(Widget):
 class ImageBox(Widget):
     def __init__(
         self,
-        image: Union[str, Image.Image],
+        image: str | Image.Image,
         image_size_mode=None,
         size=None,
         use_alpha_blend=False,
@@ -1375,7 +1405,7 @@ class ImageBox(Widget):
         self.shadow_alpha = shadow_alpha
         return self
 
-    def set_image(self, image: Union[str, Image.Image]) -> Self:
+    def set_image(self, image: str | Image.Image) -> Self:
         if isinstance(image, str):
             self.image = Image.open(image)
         else:
@@ -1450,7 +1480,7 @@ class Canvas(Frame):
         self.set_bg(bg)
         self.set_margin(0)
 
-    async def get_img(self, scale: float = None, cache_key: str = None) -> Image.Image:
+    async def get_img(self, scale: float | None = None, cache_key: str | None = None) -> Image.Image:
         t = datetime.now()
         size = self._get_self_size()
         size_limit = CANVAS_SIZE_LIMIT
@@ -1461,7 +1491,8 @@ class Canvas(Frame):
         if scale:
             img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
         if DEBUG:
-            print(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
+            logging.debug(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
+            pass
         return img
 
 
@@ -1493,7 +1524,7 @@ def colored_text_box(
                 raise ValueError(f"颜色代码格式错误: {code}")
             segs.append({"text": None, "color": (r, g, b)})
             s = s[j + 1 :]
-    except Exception as e:
+    except Exception:
         segs = [{"text": s, "color": None}]
 
     with HSplit().set_padding(padding).set_sep(0) as hs:
@@ -1522,9 +1553,9 @@ def draw_shadowed_text(
     font_size: int,
     c1: Color,
     c2: Color = SHADOW,
-    offset: Union[int, tuple[int, int]] = 2,
-    w: int = None,
-    h: int = None,
+    offset: int | tuple[int, int] = 2,
+    w: int | None = None,
+    h: int | None = None,
     content_align: str = "c",
     padding: int = 2,
     **textbox_kwargs,

@@ -1,56 +1,40 @@
 from PIL import Image
-from typing import Optional, List
 
-from src.sekai.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
+from src.sekai.base.configs import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
+from src.sekai.base.draw import BG_PADDING, DIFF_COLORS, SEKAI_BLUE_BG, Canvas, TextBox, add_watermark, roundrect_bg
 from src.sekai.base.painter import WHITE
-from src.sekai.base.utils import get_img_from_path
-from src.sekai.base.draw import (
-    TextBox,
-    Canvas,
-    SEKAI_BLUE_BG,
-    BG_PADDING,
-    roundrect_bg,
-    add_watermark,
-    DIFF_COLORS
-)
 from src.sekai.base.plot import (
-    VSplit,
-    HSplit,
-    Frame,
-    Spacer,
-    ImageBox,
     FillBg,
+    Frame,
+    HSplit,
+    ImageBox,
     RoundRectBg,
+    Spacer,
     TextStyle,
+    VSplit,
 )
+from src.sekai.base.utils import get_img_from_path
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_detailed_profile_card,
 )
-from src.sekai.profile.model import (
-    DetailedProfileCardRequest,
-    CardFullThumbnailRequest,
-)
 
 # 从 model.py 导入数据模型
 from .model import (
-    DeckCardData,
-    DeckData,
     DeckRequest,
-    # 兼容性别名
-    CardData,
 )
 
 OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
 RECOMMEND_ALG_NAMES = {
-    'dfs': '暴力搜索',
-    'sa': '模拟退火',
-    'ga': '遗传算法',
+    "dfs": "暴力搜索",
+    "sa": "模拟退火",
+    "ga": "遗传算法",
 }
 
+
 async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
-    #数据准备区
+    # 数据准备区
     use_max_profile = rqd.is_max_deck
     recommend_type = rqd.recommend_type
     event_id = rqd.event_id
@@ -89,7 +73,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
             card_img = await get_card_full_thumbnail(card.card_thumbnail)
             card_imgs.append(card_img)
             card_keys.append(card.card_thumbnail.card_id)
-    card_imgs = { key : img for key, img in zip(card_keys, card_imgs) }
+    card_imgs = dict(zip(card_keys, card_imgs))
 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -97,9 +81,23 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
             if not use_max_profile:
                 await get_detailed_profile_card(rqd.profile)
 
-            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(16)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题
-                with VSplit().set_content_align("lb").set_item_align("lb").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+                with (
+                    VSplit()
+                    .set_content_align("lb")
+                    .set_item_align("lb")
+                    .set_sep(16)
+                    .set_padding(16)
+                    .set_bg(roundrect_bg(alpha=80))
+                ):
                     title = ""
 
                     if recommend_type == "mysekai":
@@ -146,34 +144,51 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                             else:
                                 title = rqd.event_name + " " + title
 
-                        TextBox(title, TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)), use_real_line_count=True)
+                        TextBox(
+                            title,
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)),
+                            use_real_line_count=True,
+                        )
 
                         if recommend_type == "challenge":
                             ImageBox(chara_icon, size=(None, 50))
                             TextBox(f"{chara_name}", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
                         if recommend_type in ["wl"] and wl_chara_name:
                             ImageBox(wl_chara_icon, size=(None, 50))
-                            TextBox(f"{wl_chara_name} 章节", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
+                            TextBox(
+                                f"{wl_chara_name} 章节", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70))
+                            )
                         if unit_logo and attr_icon:
                             ImageBox(unit_logo, size=(None, 60))
                             ImageBox(attr_icon, size=(None, 50))
 
                         if use_max_profile:
-                            TextBox(f"({rqd.region}顶配)", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)))
+                            TextBox(
+                                f"({rqd.region}顶配)", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50))
+                            )
 
-                    if any([
-                        unit_filter, attr_filter,
-                        excluded_cards,
-                        rqd.multi_live_score_up_lower_bound,
-                        rqd.keep_after_training_state,
-                    ]):
+                    if any(
+                        [
+                            unit_filter,
+                            attr_filter,
+                            excluded_cards,
+                            rqd.multi_live_score_up_lower_bound,
+                            rqd.keep_after_training_state,
+                        ]
+                    ):
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                             setting_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
                             TextBox("卡组设置:", setting_style)
                             if unit_filter or attr_filter:
                                 TextBox("仅", setting_style)
-                                if unit_filter: ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path), size=(None, 40))
-                                if attr_filter: ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path), size=(None, 35))
+                                if unit_filter:
+                                    ImageBox(
+                                        await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path), size=(None, 40)
+                                    )
+                                if attr_filter:
+                                    ImageBox(
+                                        await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path), size=(None, 35)
+                                    )
                                 TextBox("上场", setting_style)
                             if excluded_cards:
                                 TextBox(f"排除 {','.join(map(str, excluded_cards))}", setting_style)
@@ -183,20 +198,30 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                 TextBox("禁用双技能自动切换", setting_style)
 
                     if recommend_type in ["bonus", "wl_bonus"]:
-                        TextBox("友情提醒：控分前请核对加成和体力设置", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
+                        TextBox(
+                            "友情提醒：控分前请核对加成和体力设置",
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)),
+                        )
                         if recommend_type == "wl_bonus":
-                            TextBox("WL仅支持自动组主队，支援队请自行配置", TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)))
+                            TextBox(
+                                "WL仅支持自动组主队，支援队请自行配置",
+                                TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
+                            )
                     elif recommend_type != "mysekai":
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                             with Frame().set_size((50, 50)):
                                 if rqd.music_id != OMAKASE_MUSIC_ID:
-                                    Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset((6, 6))
+                                    Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset(
+                                        (6, 6)
+                                    )
                                     if music_cover:
                                         ImageBox(music_cover, size=(50, 50))
                                 else:
                                     if music_cover:
                                         ImageBox(music_cover, size=(50, 50), shadow=True)
-                            TextBox(rqd.music_title or "", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70)))
+                            TextBox(
+                                rqd.music_title or "", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70))
+                            )
 
                     info_text = ""
 
@@ -204,11 +229,22 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                         info_text += "“顶配”为该服截止当前的全卡满养成配置(并非基于你的卡组计算)\n"
 
                     if info_text:
-                        TextBox(info_text.strip(), TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(200, 75, 75)), use_real_line_count=True)
+                        TextBox(
+                            info_text.strip(),
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(200, 75, 75)),
+                            use_real_line_count=True,
+                        )
 
                 # 表格
                 gh, vsp, voffset = 120, 12, 18
-                with VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+                with (
+                    VSplit()
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_sep(16)
+                    .set_padding(16)
+                    .set_bg(roundrect_bg(alpha=80))
+                ):
                     if len(rqd.deck_data) > 0:
                         with HSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(0):
                             th_style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(0, 0, 0))
@@ -232,9 +268,14 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 alg_offset = 20
                                                 dlt = rqd.deck_data[i].challenge_score_delta or 0
                                                 color = (50, 150, 50) if dlt > 0 else (150, 50, 50)
-                                                TextBox(f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)).set_offset((0, -8-voffset*2))
+                                                TextBox(
+                                                    f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)
+                                                ).set_offset((0, -8 - voffset * 2))
                                             # 算法
-                                            TextBox(alg.upper(), TextStyle(font=DEFAULT_FONT, size=12, color=(125, 125, 125))).set_offset((0, -8-voffset*2+alg_offset))
+                                            TextBox(
+                                                alg.upper(),
+                                                TextStyle(font=DEFAULT_FONT, size=12, color=(125, 125, 125)),
+                                            ).set_offset((0, -8 - voffset * 2 + alg_offset))
                                             # 分数
                                             score = deck.score
                                             if recommend_type == "no_event":
@@ -242,7 +283,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             elif recommend_type == "mysekai":
                                                 score = deck.mysekai_event_point
                                             with Frame().set_content_align("c"):
-                                                TextBox(str(score), tb_style).set_h(gh).set_content_align("c").set_offset((0, -voffset))
+                                                TextBox(str(score), tb_style).set_h(gh).set_content_align(
+                                                    "c"
+                                                ).set_offset((0, -voffset))
 
                             # 卡片
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
@@ -257,40 +300,101 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             ep1_read, ep2_read = card.is_before_story, card.is_after_story
                                             slv, sup = card.skill_level, int(card.skill_rate)
 
-                                            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0).set_h(gh):
+                                            with (
+                                                VSplit()
+                                                .set_content_align("c")
+                                                .set_item_align("c")
+                                                .set_sep(4)
+                                                .set_padding(0)
+                                                .set_h(gh)
+                                            ):
                                                 with Frame().set_content_align("rt"):
                                                     card_key = card_id
                                                     ImageBox(card_imgs[card_key], size=(None, 80))
-                                                    if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) \
-                                                            or (rqd.fixed_characters_id and character_id in rqd.fixed_characters_id):
-                                                        TextBox(str(card_id), TextStyle(font=DEFAULT_FONT, size=10, color=WHITE)) \
-                                                            .set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset((-2, 0))
+                                                    if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
+                                                        rqd.fixed_characters_id
+                                                        and character_id in rqd.fixed_characters_id
+                                                    ):
+                                                        TextBox(
+                                                            str(card_id),
+                                                            TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
+                                                        ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset((-2, 0))
                                                     else:
-                                                        TextBox(str(card_id), TextStyle(font=DEFAULT_FONT, size=10, color=(75, 75, 75))) \
-                                                            .set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset((-2, 0))
+                                                        TextBox(
+                                                            str(card_id),
+                                                            TextStyle(font=DEFAULT_FONT, size=10, color=(75, 75, 75)),
+                                                        ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
+                                                            (-2, 0)
+                                                        )
                                                     if card.has_canvas_bonus:
-                                                        ImageBox(canvas_thumbnail, size=(11, 11)) \
-                                                            .set_offset((-32, 65))
+                                                        ImageBox(canvas_thumbnail, size=(11, 11)).set_offset((-32, 65))
 
                                                 info_bg = RoundRectBg((255, 255, 255, 150), 2)
-                                                with HSplit().set_content_align("c").set_item_align("c").set_sep(3).set_padding(0):
-                                                    TextBox(f"SLv.{slv}", TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50))).set_bg(info_bg)
-                                                    TextBox(f"↑{sup}%", TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50))).set_bg(info_bg)
+                                                with (
+                                                    HSplit()
+                                                    .set_content_align("c")
+                                                    .set_item_align("c")
+                                                    .set_sep(3)
+                                                    .set_padding(0)
+                                                ):
+                                                    TextBox(
+                                                        f"SLv.{slv}",
+                                                        TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+                                                    ).set_bg(info_bg)
+                                                    TextBox(
+                                                        f"↑{sup}%",
+                                                        TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+                                                    ).set_bg(info_bg)
 
-                                                with HSplit().set_content_align("c").set_item_align("c").set_sep(3).set_padding(0):
+                                                with (
+                                                    HSplit()
+                                                    .set_content_align("c")
+                                                    .set_item_align("c")
+                                                    .set_sep(3)
+                                                    .set_padding(0)
+                                                ):
                                                     show_event_bonus = event_bonus > 0
                                                     if show_event_bonus:
-                                                        event_bonus_str = f"+{event_bonus:.1f}%" if int(event_bonus) != event_bonus else f"+{int(event_bonus)}%"
-                                                        TextBox(event_bonus_str, TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50))).set_bg(info_bg)
+                                                        event_bonus_str = (
+                                                            f"+{event_bonus:.1f}%"
+                                                            if int(event_bonus) != event_bonus
+                                                            else f"+{int(event_bonus)}%"
+                                                        )
+                                                        TextBox(
+                                                            event_bonus_str,
+                                                            TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+                                                        ).set_bg(info_bg)
                                                     read_fg, read_bg = (50, 150, 50, 255), (255, 255, 255, 255)
                                                     noread_fg, noread_bg = (150, 50, 50, 255), (255, 255, 255, 255)
                                                     none_fg, none_bg = (255, 255, 255, 255), (255, 255, 255, 255)
-                                                    ep1_fg = none_fg if ep1_read is None else (read_fg if ep1_read else noread_fg)
-                                                    ep1_bg = none_bg if ep1_read is None else (read_bg if ep1_read else noread_bg)
-                                                    ep2_fg = none_fg if ep2_read is None else (read_fg if ep2_read else noread_fg)
-                                                    ep2_bg = none_bg if ep2_read is None else (read_bg if ep2_read else noread_bg)
-                                                    TextBox("前" if show_event_bonus else "前篇", TextStyle(font=DEFAULT_FONT, size=12, color=ep1_fg)).set_bg(info_bg)
-                                                    TextBox("后" if show_event_bonus else "后篇", TextStyle(font=DEFAULT_FONT, size=12, color=ep2_fg)).set_bg(info_bg)
+                                                    ep1_fg = (
+                                                        none_fg
+                                                        if ep1_read is None
+                                                        else (read_fg if ep1_read else noread_fg)
+                                                    )
+                                                    ep1_bg = (
+                                                        none_bg
+                                                        if ep1_read is None
+                                                        else (read_bg if ep1_read else noread_bg)
+                                                    )
+                                                    ep2_fg = (
+                                                        none_fg
+                                                        if ep2_read is None
+                                                        else (read_fg if ep2_read else noread_fg)
+                                                    )
+                                                    ep2_bg = (
+                                                        none_bg
+                                                        if ep2_read is None
+                                                        else (read_bg if ep2_read else noread_bg)
+                                                    )
+                                                    TextBox(
+                                                        "前" if show_event_bonus else "前篇",
+                                                        TextStyle(font=DEFAULT_FONT, size=12, color=ep1_fg),
+                                                    ).set_bg(info_bg)
+                                                    TextBox(
+                                                        "后" if show_event_bonus else "后篇",
+                                                        TextStyle(font=DEFAULT_FONT, size=12, color=ep2_fg),
+                                                    ).set_bg(info_bg)
 
                             # 加成
                             if recommend_type not in ["challenge", "challenge_all", "no_event"]:
@@ -300,15 +404,19 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     for deck in result_decks:
                                         if rqd.is_wl:
                                             bonus = f"{deck.event_bonus_rate:.1f}+{deck.support_deck_bonus_rate:.1f}%"
-                                            total = f"{deck.event_bonus_rate+deck.support_deck_bonus_rate:.1f}%"
+                                            total = f"{deck.event_bonus_rate + deck.support_deck_bonus_rate:.1f}%"
                                         else:
                                             bonus = None
                                             total = f"{deck.event_bonus_rate:.1f}%"
                                         with Frame().set_content_align("rb"):
                                             if bonus is not None:
-                                                TextBox(bonus, TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150))).set_offset((0, -6-voffset*2))
+                                                TextBox(
+                                                    bonus, TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150))
+                                                ).set_offset((0, -6 - voffset * 2))
                                             with Frame().set_content_align("c"):
-                                                TextBox(total, tb_style).set_h(gh).set_content_align("c").set_offset((0, -voffset))
+                                                TextBox(total, tb_style).set_h(gh).set_content_align("c").set_offset(
+                                                    (0, -voffset)
+                                                )
 
                             # 实效
                             if rqd.live_type in ["multi", "cheerful"]:
@@ -322,9 +430,14 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                         with Frame().set_content_align("rb"):
                                             if rqd.multi_live_teammate_score_up is not None:
                                                 teammate_text = f"队友 {int(rqd.multi_live_teammate_score_up)}"
-                                                TextBox(teammate_text, TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125))).set_offset((0, -8-voffset*2))
+                                                TextBox(
+                                                    teammate_text,
+                                                    TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
+                                                ).set_offset((0, -8 - voffset * 2))
                                             with Frame().set_content_align("c"):
-                                                TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_h(gh).set_content_align("c").set_offset((0, -voffset))
+                                                TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_h(
+                                                    gh
+                                                ).set_content_align("c").set_offset((0, -voffset))
 
                             # 综合力和算法
                             if recommend_type not in ["bonus", "wl_bonus"]:
@@ -338,9 +451,14 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                         with Frame().set_content_align("rb"):
                                             if rqd.multi_live_teammate_power is not None:
                                                 teammate_text = f"队友 {int(rqd.multi_live_teammate_power)}"
-                                                TextBox(teammate_text, TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125))).set_offset((0, -8-voffset*2))
+                                                TextBox(
+                                                    teammate_text,
+                                                    TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
+                                                ).set_offset((0, -8 - voffset * 2))
                                             with Frame().set_content_align("c"):
-                                                TextBox(str(deck.total_power), tb_style).set_h(gh).set_content_align("c").set_offset((0, -voffset))
+                                                TextBox(str(deck.total_power), tb_style).set_h(gh).set_content_align(
+                                                    "c"
+                                                ).set_offset((0, -voffset))
                     # 找不到结果
                     else:
                         TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
@@ -349,7 +467,10 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                 with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
                     tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
                     if recommend_type not in ["bonus", "wl_bonus"]:
-                        TextBox("12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值", tip_style)
+                        TextBox(
+                            "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",
+                            tip_style,
+                        )
                     TextBox("功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责", tip_style)
                     alg_and_cost_text = "本次组卡使用算法: "
                     for alg, cost in rqd.cost_times.items():

@@ -7,11 +7,10 @@ from .types import *
 from .meta import *
 from .line import *
 
-__all__ = ['Score']
+__all__ = ["Score"]
 
 
 class Score:
-
     def __init__(self):
         self.meta = Meta()
         self.notes: list[Note] = []
@@ -69,10 +68,12 @@ class Score:
         for i, note in enumerate(self.notes):
             if not 0 <= note.lane - 2 < 12:
                 note_deleted[i] = True
-                self.events.append(Event(
-                    bar=note.bar,
-                    text='SKILL' if note.lane == 0 else 'FEVER CHANCE!' if note.type == 1 else 'SUPER FEVER!!',
-                ))
+                self.events.append(
+                    Event(
+                        bar=note.bar,
+                        text="SKILL" if note.lane == 0 else "FEVER CHANCE!" if note.type == 1 else "SUPER FEVER!!",
+                    )
+                )
                 continue
 
             if note.bar not in note_indexes:
@@ -121,9 +122,14 @@ class Score:
                         slide.tap = directional.tap
 
             if slide.type != SlideType.END:
-                for j in range(i+1, len(self.notes)):
+                for j in range(i + 1, len(self.notes)):
                     next = self.notes[j]
-                    if note_deleted[j] or not isinstance(next, Slide) or next.channel != slide.channel or next.decoration != slide.decoration:
+                    if (
+                        note_deleted[j]
+                        or not isinstance(next, Slide)
+                        or next.channel != slide.channel
+                        or next.decoration != slide.decoration
+                    ):
                         continue
 
                     slide.next = next
@@ -189,10 +195,10 @@ class Score:
 
         for i in range(len(self.events)):
             event = event | self.events[i]
-            if i+1 == len(self.events):
+            if i + 1 == len(self.events):
                 break
 
-            event_time = event.bar_length * 60 / event.bpm * (self.events[i+1].bar - event.bar)
+            event_time = event.bar_length * 60 / event.bpm * (self.events[i + 1].bar - event.bar)
             if t + event_time > time:
                 break
             else:
@@ -205,10 +211,10 @@ class Score:
     def print(self, bar_from: int, bar_to: int):
         for note in self.notes:
             if bar_from <= note.bar < bar_to:
-                print(note, f'{note.is_trend() = }')
-                if hasattr(note, 'tap') and note.tap:
-                    print('    tap:', note.tap, f'{note.tap.is_trend() = }')
-                if hasattr(note, 'directional') and note.directional:
-                    print('    directional:', note.directional, f'{note.directional.is_trend() = }')
+                print(note, f"{note.is_trend() = }")
+                if hasattr(note, "tap") and note.tap:
+                    print("    tap:", note.tap, f"{note.tap.is_trend() = }")
+                if hasattr(note, "directional") and note.directional:
+                    print("    directional:", note.directional, f"{note.directional.is_trend() = }")
 
                 print()

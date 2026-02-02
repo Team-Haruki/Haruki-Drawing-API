@@ -6,7 +6,6 @@ from .note import Note
 
 @dataclasses.dataclass
 class Tap(Note):
-
     def __hash__(self) -> int:
         return hash(str(self))
 

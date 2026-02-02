@@ -1,5 +1,8 @@
+from typing import Literal
+
 from pydantic import BaseModel
-from typing import Union, Optional, Literal
+
+
 class GenerateMusicChartRequest(BaseModel):
     r"""GenerateMusicChartRequest
 
@@ -32,16 +35,17 @@ class GenerateMusicChartRequest(BaseModel):
     target_segment_seconds : Optional[ float ] = None
         谱面切分时长，影响高度
     """
-    music_id: Union[str, int]
+
+    music_id: str | int
     title: str
     artist: str
-    difficulty: Literal['easy', 'normal', 'hard', 'expert', 'master', 'append']
-    play_level: Union[str, int]
+    difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"]
+    play_level: str | int
     skill: bool = False
     jacket_path: str
     sus_path: str
-    style_path: Optional[str] = None
+    style_path: str | None = None
     note_host: str
-    music_meta: Optional[dict] = None
-    target_segment_seconds: Optional[float] = None
+    music_meta: dict | None = None
+    target_segment_seconds: float | None = None
     pass

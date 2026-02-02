@@ -4,18 +4,16 @@ Deck 模块数据模型
 定义组卡推荐相关的 Pydantic 模型，用于组卡推荐图片的绘制请求。
 """
 
-from typing import Optional, List
-
 from pydantic import BaseModel
 
-from src.sekai.profile.model import DetailedProfileCardRequest, CardFullThumbnailRequest
-
+from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
 
+
 class DeckCardData(BaseModel):
     """卡组中的卡牌数据
-    
+
     Attributes
     ----------
     card_thumbnail : CardFullThumbnailRequest
@@ -37,6 +35,7 @@ class DeckCardData(BaseModel):
     has_canvas_bonus : bool
         是否有烤森加成
     """
+
     card_thumbnail: CardFullThumbnailRequest
     chara_id: int
     skill_level: str
@@ -50,7 +49,7 @@ class DeckCardData(BaseModel):
 
 class DeckData(BaseModel):
     """卡组数据
-    
+
     Attributes
     ----------
     card_data : List[DeckCardData]
@@ -76,22 +75,23 @@ class DeckData(BaseModel):
     multi_live_score_up : Optional[float]
         多人Live分数提升率
     """
-    card_data: List[DeckCardData]
-    pt: Optional[int] = None
-    event_bonus_rate: Optional[float] = None
-    score_up: Optional[float] = None
-    total_power: Optional[int] = None
-    challenge_score_delta: Optional[int] = None
-    score: Optional[int] = None
-    live_score: Optional[int] = None
-    mysekai_event_point: Optional[int] = None
-    support_deck_bonus_rate: Optional[float] = None
-    multi_live_score_up: Optional[float] = None
+
+    card_data: list[DeckCardData]
+    pt: int | None = None
+    event_bonus_rate: float | None = None
+    score_up: float | None = None
+    total_power: int | None = None
+    challenge_score_delta: int | None = None
+    score: int | None = None
+    live_score: int | None = None
+    mysekai_event_point: int | None = None
+    support_deck_bonus_rate: float | None = None
+    multi_live_score_up: float | None = None
 
 
 class DeckRequest(BaseModel):
     """组卡推荐绘制请求
-    
+
     Attributes
     ----------
     region : str
@@ -165,41 +165,42 @@ class DeckRequest(BaseModel):
     wait_times : Optional[dict]
         等待时间
     """
+
     region: str
     profile: DetailedProfileCardRequest
-    deck_data: List[DeckData]
-    event_name: Optional[str] = None
-    music_title: Optional[str] = None
-    music_id: Optional[int] = None
-    music_diff: Optional[str] = None
-    event_banner_path: Optional[str] = None
-    music_cover_path: Optional[str] = None
+    deck_data: list[DeckData]
+    event_name: str | None = None
+    music_title: str | None = None
+    music_id: int | None = None
+    music_diff: str | None = None
+    event_banner_path: str | None = None
+    music_cover_path: str | None = None
     is_max_deck: bool = False
     recommend_type: str = ""
-    wl_chara_name: Optional[str] = None
-    wl_chara_icon_path: Optional[str] = None
-    event_id: Optional[int] = None
-    live_type: Optional[str] = None
-    live_name: Optional[str] = None
-    chara_icon_path: Optional[str] = None
-    chara_name: Optional[str] = None
-    unit_logo_path: Optional[str] = None
-    attr_icon_path: Optional[str] = None
+    wl_chara_name: str | None = None
+    wl_chara_icon_path: str | None = None
+    event_id: int | None = None
+    live_type: str | None = None
+    live_name: str | None = None
+    chara_icon_path: str | None = None
+    chara_name: str | None = None
+    unit_logo_path: str | None = None
+    attr_icon_path: str | None = None
     is_wl: bool = False
-    multi_live_teammate_power: Optional[int] = None
-    multi_live_teammate_score_up: Optional[float] = None
-    target: Optional[str] = None
-    unit_filter: Optional[str] = None
-    attr_filter: Optional[str] = None
-    excluded_cards: Optional[List[int]] = None
-    multi_live_score_up_lower_bound: Optional[float] = None
+    multi_live_teammate_power: int | None = None
+    multi_live_teammate_score_up: float | None = None
+    target: str | None = None
+    unit_filter: str | None = None
+    attr_filter: str | None = None
+    excluded_cards: list[int] | None = None
+    multi_live_score_up_lower_bound: float | None = None
     keep_after_training_state: bool = False
-    model_name: Optional[List] = None
-    canvas_thumbnail_path: Optional[str] = None
-    fixed_cards_id: Optional[List[int]] = None
-    fixed_characters_id: Optional[List[int]] = None
-    cost_times: Optional[dict] = None
-    wait_times: Optional[dict] = None
+    model_name: list | None = None
+    canvas_thumbnail_path: str | None = None
+    fixed_cards_id: list[int] | None = None
+    fixed_characters_id: list[int] | None = None
+    cost_times: dict | None = None
+    wait_times: dict | None = None
 
 
 # 兼容性别名

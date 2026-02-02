@@ -21,7 +21,7 @@ class Meta:
     basebpm: typing.Optional[float] = None
     # requests: list = dataclasses.field(default_factory=list)
 
-    def __or__(self, other: 'Meta') -> 'Meta':
+    def __or__(self, other: "Meta") -> "Meta":
         return Meta(
             title=self.title or other.title,
             subtitle=self.subtitle or other.subtitle,

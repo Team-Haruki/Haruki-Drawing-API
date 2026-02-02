@@ -1,68 +1,50 @@
-import math
 from datetime import datetime
+import math
 
 from src.sekai.base import (
-    color_code_to_rgb,
-    DEFAULT_FONT,
+    ASSETS_BASE_DIR,
+    BG_PADDING,
+    CHARACTER_COLOR_CODE,
     DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    SEKAI_BLUE_BG,
+    add_watermark,
+    color_code_to_rgb,
+    get_img_from_path,
+    roundrect_bg,
 )
 from src.sekai.base.plot import (
     Canvas,
-    HSplit,
-    VSplit,
-    ImageBox,
-    TextBox,
-    Grid,
+    FillBg,
     Frame,
-    Spacer,
-    TextStyle,
+    Grid,
+    HSplit,
     ImageBg,
+    ImageBox,
     RoundRectBg,
-    FillBg
-)
-from typing import List, Optional, Union
-
-from src.sekai.base import get_img_from_path
-from src.sekai.base import ASSETS_BASE_DIR
-from src.sekai.base import (
-    BG_PADDING,
-    SEKAI_BLUE_BG,
-    roundrect_bg,
-    add_watermark,
-    CHARACTER_COLOR_CODE
+    Spacer,
+    TextBox,
+    TextStyle,
+    VSplit,
 )
 from src.sekai.profile.drawer import (
-    get_detailed_profile_card,
     get_card_full_thumbnail,
-)
-from src.sekai.profile.model import (
-    DetailedProfileCardRequest,
-    CardFullThumbnailRequest,
+    get_detailed_profile_card,
 )
 
 # 从 model.py 导入数据模型
 from .model import (
-    CardPower,
-    CardSkill,
-    CardEventInfo,
-    CardGachaInfo,
-    CardBasic,
-    UserCard,
+    CardBoxRequest,
     CardDetailRequest,
     CardListRequest,
-    CardBoxRequest,
-    # 兼容性别名
-    CardPowerInfo,
-    SkillInfo,
-    EventInfo,
-    GachaInfo,
-    CardBasicInfo,
-    UserCardInfo,
 )
 
 # ========== 主要函数 ==========
 
-async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, title_style: TextStyle = None, title_shadow: bool = False):
+
+async def compose_card_detail_image(
+    rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+):
     """
     合成卡牌详情图片
     """
@@ -75,7 +57,6 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
 
     card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path]
     costume_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path]
-
 
     # 构建完整缩略图（带框体、属性、星级）- 使用card_utils中的函数
     thumbnail_images = []
@@ -108,7 +89,7 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
     small_style = TextStyle(font=DEFAULT_FONT, size=18, color=(70, 70, 70))
-    tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))
+    tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))  # noqa: F841
 
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     if rqd.background_image_path:
@@ -121,62 +102,98 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
         bg = SEKAI_BLUE_BG
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
-        with HSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
+        with HSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             # 左侧: 卡面+关联活动+关联卡池+提示
-            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_padding(0)
+                .set_sep(16)
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_item_bg(roundrect_bg(alpha=80))
+            ):
                 # 卡面
-                with VSplit().set_padding(16).set_sep(8).set_content_align('lt').set_item_align('lt'):
+                with VSplit().set_padding(16).set_sep(8).set_content_align("lt").set_item_align("lt"):
                     for img in card_images:
                         ImageBox(img, size=(500, None))
 
                 # 关联活动
                 if event_detail:
-                    with VSplit().set_padding(16).set_sep(12).set_content_align('lt').set_item_align('lt'):
-                        with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                    with VSplit().set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt"):
+                        with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                             TextBox("当期活动", label_style)
                             TextBox(f"【{event_detail.event_id}】{event_detail.event_name}", small_style).set_w(360)
-                        with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
-                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path), size=(250, None))
-                            with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
+                        with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
+                            ImageBox(
+                                await get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path),
+                                size=(250, None),
+                            )
+                            with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
                                 TextBox(f"开始时间: {event_detail.start_at.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 TextBox(f"结束时间: {event_detail.end_at.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 Spacer(h=4)
-                                with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                                with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     # 属性、团队、角色图标
                                     if event_detail.bonus_attr and rqd.event_attr_icon_path:
-                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path), size=(32, None))
+                                        ImageBox(
+                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path),
+                                            size=(32, None),
+                                        )
                                     if event_detail.unit and rqd.event_unit_icon_path:
-                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path), size=(32, None))
+                                        ImageBox(
+                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path),
+                                            size=(32, None),
+                                        )
                                     if event_detail.banner_cid and rqd.event_chara_icon_path:
-                                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path), size=(32, None))
+                                        ImageBox(
+                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path),
+                                            size=(32, None),
+                                        )
 
                 # 关联卡池
                 if gacha_detail:
-                    with VSplit().set_padding(16).set_sep(12).set_content_align('lt').set_item_align('lt'):
-                        with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                    with VSplit().set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt"):
+                        with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                             TextBox("当期卡池", label_style)
                             TextBox(f"【{gacha_detail.gacha_id}】{gacha_detail.gacha_name}", small_style).set_w(360)
-                        with HSplit().set_padding(0).set_sep(8).set_content_align('lt').set_item_align('lt'):
-                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path), size=(250, None))
-                            with VSplit().set_content_align('c').set_item_align('c').set_sep(6):
+                        with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
+                            ImageBox(
+                                await get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path),
+                                size=(250, None),
+                            )
+                            with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
                                 TextBox(f"开始时间: {gacha_detail.start_at.strftime('%Y-%m-%d %H:%M')}", small_style)
                                 TextBox(f"结束时间: {gacha_detail.end_at.strftime('%Y-%m-%d %H:%M')}", small_style)
 
             # 右侧: 标题+限定类型+综合力+技能+发布时间+缩略图+衣装
             w = 600
-            with VSplit().set_padding(0).set_sep(16).set_content_align('lt').set_item_align('lt').set_item_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_padding(0)
+                .set_sep(16)
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_item_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题
-                with HSplit().set_padding(16).set_sep(32).set_content_align('c').set_item_align('c').set_w(w):
+                with HSplit().set_padding(16).set_sep(32).set_content_align("c").set_item_align("c").set_w(w):
                     ImageBox(unit_logo, size=(None, 64))
-                    with VSplit().set_content_align('c').set_item_align('c').set_sep(12):
-                        TextBox(card_info.prefix, title_style_def).set_w(w - 260).set_content_align('c')
-                        with HSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                    with VSplit().set_content_align("c").set_item_align("c").set_sep(12):
+                        TextBox(card_info.prefix, title_style_def).set_w(w - 260).set_content_align("c")
+                        with HSplit().set_content_align("c").set_item_align("c").set_sep(8):
                             ImageBox(character_icon, size=(None, 32))
                             TextBox(card_info.character_name, title_style_def)
 
-                with VSplit().set_padding(16).set_sep(8).set_item_bg(roundrect_bg(alpha=80)).set_content_align('l').set_item_align('l'):
+                with (
+                    VSplit()
+                    .set_padding(16)
+                    .set_sep(8)
+                    .set_item_bg(roundrect_bg(alpha=80))
+                    .set_content_align("l")
+                    .set_item_align("l")
+                ):
                     # 卡牌ID 限定类型
-                    with HSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
+                    with HSplit().set_padding(16).set_sep(8).set_content_align("l").set_item_align("l"):
                         TextBox("ID", label_style)
                         TextBox(f"{card_info.card_id} ({region.upper()})", text_style)
                         Spacer(w=32)
@@ -184,47 +201,56 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
                         TextBox(card_info.supply_type, text_style)
 
                     # 综合力
-                    with HSplit().set_padding(16).set_sep(8).set_content_align('lb').set_item_align('lb'):
+                    with HSplit().set_padding(16).set_sep(8).set_content_align("lb").set_item_align("lb"):
                         TextBox("综合力", label_style)
-                        TextBox(f"{power_info.power_total} ({power_info.power1}/{power_info.power2}/{power_info.power3}) (满级0破无剧情)", text_style)
+                        TextBox(
+                            f"{power_info.power_total} ({power_info.power1}/{power_info.power2}/{power_info.power3}) (满级0破无剧情)",
+                            text_style,
+                        )
 
                     # 技能
-                    with VSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
-                        with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                    with VSplit().set_padding(16).set_sep(8).set_content_align("l").set_item_align("l"):
+                        with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                             TextBox("技能", label_style)
                             if skill_type_icon:
                                 ImageBox(skill_type_icon, size=(32, 32))
                             TextBox(skill_info.skill_name, text_style).set_w(w - 24 * 2 - 32 - 16)
                         TextBox(skill_info.skill_detail, text_style, use_real_line_count=True).set_w(w)
                         if skill_info.skill_detail_cn:
-                            TextBox(skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True).set_w(w)
+                            TextBox(
+                                skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True
+                            ).set_w(w)
 
                     # 特训技能
                     if sp_skill_info:
-                        with VSplit().set_padding(16).set_sep(8).set_content_align('l').set_item_align('l'):
-                            with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                        with VSplit().set_padding(16).set_sep(8).set_content_align("l").set_item_align("l"):
+                            with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                 TextBox("特训后技能", label_style)
                                 if sp_skill_type_icon:
                                     ImageBox(sp_skill_type_icon, size=(32, 32))
                                 TextBox(sp_skill_info.skill_name, text_style).set_w(w - 24 * 5 - 32 - 16)
                             TextBox(sp_skill_info.skill_detail, text_style, use_real_line_count=True).set_w(w)
                             if sp_skill_info.skill_detail_cn:
-                                TextBox(sp_skill_info.skill_detail_cn.removesuffix("。"), text_style, use_real_line_count=True).set_w(w)
+                                TextBox(
+                                    sp_skill_info.skill_detail_cn.removesuffix("。"),
+                                    text_style,
+                                    use_real_line_count=True,
+                                ).set_w(w)
 
                     # 发布时间
-                    with HSplit().set_padding(16).set_sep(8).set_content_align('lb').set_item_align('lb'):
+                    with HSplit().set_padding(16).set_sep(8).set_content_align("lb").set_item_align("lb"):
                         TextBox("发布时间", label_style)
                         TextBox(release_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
 
                     # 缩略图
-                    with HSplit().set_padding(16).set_sep(16).set_content_align('l').set_item_align('l'):
+                    with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
                         TextBox("缩略图", label_style)
                         for img in thumbnail_images:
                             ImageBox(img, size=(100, None))
 
                     # 衣装
                     if len(costume_images) > 0:
-                        with HSplit().set_padding(16).set_sep(16).set_content_align('l').set_item_align('l'):
+                        with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
                             TextBox("衣装", label_style)
                             with Grid(col_count=5).set_sep(8, 8):
                                 for img in costume_images:
@@ -234,12 +260,14 @@ async def compose_card_detail_image(rqd: CardDetailRequest, title: str = None, t
     return await canvas.get_img()
 
 
-async def compose_card_list_image(rqd: CardListRequest, title: str = None, title_style: TextStyle = None, title_shadow: bool = False):
+async def compose_card_list_image(
+    rqd: CardListRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+):
     """
     合成卡牌列表图片
     """
     cards = rqd.cards
-    region = rqd.region
+    region = rqd.region  # noqa: F841
     user_info = rqd.user_info
     # 如果只有一张卡，调用详情函数
 
@@ -247,8 +275,8 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
     user_card_map = {}
     if user_info and user_info.user_cards:
         for user_card in user_info.user_cards:
-            if isinstance(user_card, dict) and 'cardId' in user_card:
-                user_card_map[user_card['cardId']] = user_card
+            if isinstance(user_card, dict) and "cardId" in user_card:
+                user_card_map[user_card["cardId"]] = user_card
 
     thumbs = []
     for card in rqd.cards:
@@ -280,7 +308,7 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
         bg = SEKAI_BLUE_BG
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
+        with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             # 卡牌网格
             with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
                 for i, (card, thumb) in enumerate(card_and_thumbs):
@@ -292,49 +320,52 @@ async def compose_card_list_image(rqd: CardListRequest, title: str = None, title
                         # 普通卡牌：使用默认的半透明白色背景
                         bg = roundrect_bg(alpha=80)  # 默认已经是半透明+毛玻璃效果
 
-                    with Frame().set_content_align('lb').set_bg(bg):
+                    with Frame().set_content_align("lb").set_bg(bg):
                         # 检查是否为未来卡牌
                         release_time = datetime.fromtimestamp(card.release_at / 1000)
                         if release_time > datetime.now():
                             TextBox("LEAK", leak_style).set_offset((4, -4))
 
                         # 技能图标区域
-                        with Frame().set_content_align('rb'):
+                        with Frame().set_content_align("rb"):
                             # 根据skill_type自动匹配技能图标
                             if card.skill and card.skill.skill_type:
                                 skill_icon_path = card.skill.skill_type_icon_path
                                 try:
                                     skill_img = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
-                                    ImageBox(skill_img, image_size_mode='fit').set_w(32).set_margin(8)
+                                    ImageBox(skill_img, image_size_mode="fit").set_w(32).set_margin(8)
                                 except FileNotFoundError:
                                     # 如果找不到对应的技能图标，静默跳过
                                     pass
 
                             # 卡牌信息区域
-                            with VSplit().set_content_align('c').set_item_align('c').set_sep(5).set_padding(8):
+                            with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
                                 GW = 300
-                                with HSplit().set_content_align('c').set_w(GW).set_padding(8).set_sep(16):
-                                        ImageBox(thumb, size=(100, 100), image_size_mode='fill', shadow=True)
+                                with HSplit().set_content_align("c").set_w(GW).set_padding(8).set_sep(16):
+                                    ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
 
                                 # 卡牌名称
                                 name_text = card.prefix
-                                TextBox(name_text, name_style).set_w(GW).set_content_align('c')
+                                TextBox(name_text, name_style).set_w(GW).set_content_align("c")
 
                                 # ID和限定类型
                                 id_text = f"ID:{card.card_id}"
                                 if card.supply_type not in ["非限定", "normal"]:
                                     id_text += f"【{card.supply_type}】"
-                                TextBox(id_text, id_style).set_w(GW).set_content_align('c')
+                                TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
     add_watermark(canvas)
     return await canvas.get_img()
 
-async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style: TextStyle = None, title_shadow: bool = False):
+
+async def compose_box_image(
+    rqd: CardBoxRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+):
     """
     合成卡牌一览图片（按角色分类的卡牌收集册）
     """
     cards = rqd.cards
-    region = rqd.region
+    region = rqd.region  # noqa: F841
     user_info = rqd.user_info
     show_id = rqd.show_id
     show_box = rqd.show_box
@@ -359,12 +390,12 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
         # 添加卡牌图片和拥有状态
         card_data = {
             **card.model_dump(),
-            'img': img,
-            'has': card.has_card  # 恢复拥有状态判断
+            "img": img,
+            "has": card.has_card,  # 恢复拥有状态判断
         }
 
         # 如果只显示拥有卡牌且用户没有此卡，跳过
-        if show_box and not card_data['has']:
+        if show_box and not card_data["has"]:
             continue
 
         chara_cards[chara_id].append(card_data)
@@ -373,7 +404,7 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
     chara_cards = list(chara_cards.items())
     chara_cards.sort(key=lambda x: x[0])
     for i in range(len(chara_cards)):
-        chara_cards[i][1].sort(key=lambda x: (x['card']['rare'], x['card']['release_at'], x['card']['card_id']))
+        chara_cards[i][1].sort(key=lambda x: (x["card"]["rare"], x["card"]["release_at"], x["card"]["card_id"]))
 
     # 计算最佳高度限制以优化布局
     max_card_num = max([len(cards) for _, cards in chara_cards]) if chara_cards else 0
@@ -416,22 +447,23 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
             chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
     # 绘制单张卡
     sz = 48
+
     def draw_card(card_data):
-        with Frame().set_content_align('rt'):
-            ImageBox(card_data['img'], size=(sz, sz))
+        with Frame().set_content_align("rt"):
+            ImageBox(card_data["img"], size=(sz, sz))
 
             # 限定类型图标
-            supply_name = card_data['card'].get('supply_type', '')
-            if supply_name in ['期间限定', 'WL限定', '联动限定']:
+            supply_name = card_data["card"].get("supply_type", "")
+            if supply_name in ["期间限定", "WL限定", "联动限定"]:
                 if term_img:
-                    ImageBox(term_img, size=(int(sz*0.75), None))
-            elif supply_name in ['Fes限定', 'BFes限定']:
+                    ImageBox(term_img, size=(int(sz * 0.75), None))
+            elif supply_name in ["Fes限定", "BFes限定"]:
                 if fes_img:
-                    ImageBox(fes_img, size=(int(sz*0.75), None))
+                    ImageBox(fes_img, size=(int(sz * 0.75), None))
 
             # 如果用户没有此卡牌，添加遮罩
-            if not card_data['has'] and user_info:
-                Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0,0,0,120), radius=2))
+            if not card_data["has"] and user_info:
+                Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
 
         if show_id:
             TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
@@ -447,14 +479,21 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
         bg = SEKAI_BLUE_BG
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if user_info:
-                user_profile = await get_detailed_profile_card(user_info)
+                user_profile = await get_detailed_profile_card(user_info)  # noqa: F841
 
             # 卡牌网格
-            with HSplit().set_bg(roundrect_bg(alpha=80)).set_content_align('lt').set_item_align('lt').set_padding(16).set_sep(4):
+            with (
+                HSplit()
+                .set_bg(roundrect_bg(alpha=80))
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_padding(16)
+                .set_sep(4)
+            ):
                 for chara_id, cards in chara_cards:
-                    with VSplit().set_content_align('t').set_item_align('t').set_sep(4):
+                    with VSplit().set_content_align("t").set_item_align("t").set_sep(4):
                         # 角色图标
                         chara_icon = chara_icons.get(chara_id)
                         ImageBox(chara_icon, size=(sz, sz))
@@ -462,13 +501,11 @@ async def compose_box_image(rqd: CardBoxRequest, title: str = None, title_style:
                         col_num = max(1, len(range(0, len(cards), best_height)))
                         Spacer(w=sz * col_num + 4 * (col_num - 1), h=4).set_bg(FillBg(chara_color))
                         # 卡牌列表
-                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
+                        with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
                             for i in range(0, len(cards), best_height):
-                                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(4):
-                                    for card_data in cards[i:i + best_height]:
+                                with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+                                    for card_data in cards[i : i + best_height]:
                                         draw_card(card_data)
 
     add_watermark(canvas)
     return await canvas.get_img()
-
-

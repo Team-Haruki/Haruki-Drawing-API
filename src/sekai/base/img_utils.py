@@ -1,12 +1,11 @@
-import numpy as np
-
-from pathlib import Path
-from itertools import chain
-from random import randrange
 from collections import defaultdict
-from PIL import Image, ImageSequence
-from typing import Tuple, List, Union
+from itertools import chain
+from pathlib import Path
+from random import randrange
+from typing import ClassVar
 
+import numpy as np
+from PIL import Image, ImageSequence
 
 # ============================ 透明GIF处理 ============================ #
 # This code adapted from https://github.com/python-pillow/Pillow/issues/4644 to resolve an issue
@@ -21,8 +20,8 @@ _DITHER = Image.Dither(0)
 _OPTIMIZED = False
 
 
-class TransparentAnimatedGifConverter(object):
-    _PALETTE_SLOTSET = set(range(256))
+class TransparentAnimatedGifConverter:
+    _PALETTE_SLOTSET: ClassVar[set[int]] = set(range(256))
 
     def __init__(self, img_rgba: Image.Image, alpha_threshold: int = 0) -> None:
         self._palette_replaces = None
@@ -33,21 +32,21 @@ class TransparentAnimatedGifConverter(object):
 
     def _process_pixels(self) -> None:
         """Set the transparent pixels to the color 0."""
-        self._transparent_pixels = set(
+        self._transparent_pixels = {
             idx
             for idx, alpha in enumerate(self._img_rgba.getchannel(channel="A").getdata())  # type: ignore
             if alpha <= self._alpha_threshold
-        )
+        }
 
     def _set_parsed_palette(self) -> None:
         """Parse the RGB palette color `tuple`s from the palette."""
         palette = self._img_p.getpalette()
-        self._img_p_used_palette_idxs = set(
+        self._img_p_used_palette_idxs = {
             idx for pal_idx, idx in enumerate(self._img_p_data) if pal_idx not in self._transparent_pixels
-        )
-        self._img_p_parsedpalette = dict(
-            (idx, tuple(palette[idx * 3 : idx * 3 + 3])) for idx in self._img_p_used_palette_idxs
-        )
+        }
+        self._img_p_parsedpalette = {
+            idx: tuple(palette[idx * 3 : idx * 3 + 3]) for idx in self._img_p_used_palette_idxs
+        }
 
     def _get_similar_color_idx(self) -> int:
         """Return a palette index with the closest similar color."""
@@ -77,7 +76,7 @@ class TransparentAnimatedGifConverter(object):
         self._img_p_parsedpalette[new_idx] = self._img_p_parsedpalette[0]
         del self._img_p_parsedpalette[0]
 
-    def _get_unused_color(self) -> Tuple[int, ...]:
+    def _get_unused_color(self) -> tuple[int, ...]:
         """Return a color for the palette that does not collide with any other already in the palette."""
         used_colors = set(self._img_p_parsedpalette.values())
         while True:
@@ -116,7 +115,7 @@ class TransparentAnimatedGifConverter(object):
         pal_img = rgb_img.quantize(256)
         self._img_p = rgb_img.quantize(palette=pal_img, method=_QUANTIZE_METHOD, dither=_DITHER)
         self._img_p_data = bytearray(self._img_p.tobytes())
-        self._palette_replaces = dict(idx_from=list(), idx_to=list())
+        self._palette_replaces = {"idx_from": [], "idx_to": []}
         self._process_pixels()
         self._process_palette()
         self._adjust_pixels()
@@ -127,11 +126,11 @@ class TransparentAnimatedGifConverter(object):
 
 
 def _create_animated_gif(
-    images: List[Image.Image], durations: Union[int, List[int]], alpha_threshold: int = 0
-) -> Tuple[Image.Image, dict]:
+    images: list[Image.Image], durations: int | list[int], alpha_threshold: int = 0
+) -> tuple[Image.Image, dict]:
     """If the image is a GIF, create an thumbnail here."""
-    save_kwargs = dict()
-    new_images: List[Image.Image] = []
+    save_kwargs = {}
+    new_images: list[Image.Image] = []
 
     for frame in images:
         thumbnail = frame.copy()  # type: Image
@@ -155,7 +154,7 @@ def _create_animated_gif(
 
 
 def _save_transparent_gif(
-    images: List[Image.Image], durations: Union[int, List[int]], save_file: Union[str, Path], alpha_threshold: int = 0
+    images: list[Image.Image], durations: int | list[int], save_file: str | Path, alpha_threshold: int = 0
 ) -> None:
     """Creates a transparent GIF, adjusting to avoid transparency issues that are present in the PIL library
 
@@ -176,7 +175,7 @@ def _save_transparent_gif(
 # ============================ 工具函数 ============================ #
 
 
-def open_image(file_path: Union[str, Path], load: bool = True) -> Image.Image:
+def open_image(file_path: str | Path, load: bool = True) -> Image.Image:
     """
     打开图片文件并返回PIL Image对象，默认直接load
     """
@@ -186,7 +185,7 @@ def open_image(file_path: Union[str, Path], load: bool = True) -> Image.Image:
     return img
 
 
-def is_gif(image: Union[str, Image.Image]) -> bool:
+def is_gif(image: str | Image.Image) -> bool:
     """
     检查图片是否为动图
     """
@@ -204,7 +203,7 @@ def get_gif_duration(img: Image.Image) -> int:
     return img.info.get("duration", 50)
 
 
-def gif_to_frames(img: Image.Image) -> List[Image.Image]:
+def gif_to_frames(img: Image.Image) -> list[Image.Image]:
     """
     从GIF图像中提取所有帧
     """
@@ -212,7 +211,7 @@ def gif_to_frames(img: Image.Image) -> List[Image.Image]:
 
 
 def save_transparent_gif(
-    frames: Union[Image.Image, List[Image.Image]], duration: int, save_path: str, alpha_threshold: float = 0.5
+    frames: Image.Image | list[Image.Image], duration: int, save_path: str, alpha_threshold: float = 0.5
 ) -> None:
     """
     从帧序列保存透明GIF
@@ -281,7 +280,7 @@ def save_transparent_static_gif(img: Image, save_path: str, alpha_threshold: flo
     """
 
 
-def save_apng(images: List[Image.Image], save_path: Union[str, Path], duration: int = 50, loop: int = 0) -> None:
+def save_apng(images: list[Image.Image], save_path: str | Path, duration: int = 50, loop: int = 0) -> None:
     """
     将RGBA图像列表保存为APNG文件
     Args:
@@ -301,7 +300,7 @@ def save_apng(images: List[Image.Image], save_path: Union[str, Path], duration: 
     )
 
 
-def multiply_image_by_color(img: Image.Image, color: Tuple[int, ...]) -> Image.Image:
+def multiply_image_by_color(img: Image.Image, color: tuple[int, ...]) -> Image.Image:
     """
     将图像的每个像素乘以指定颜色的RGB值，A通道保持不变
     """
@@ -317,7 +316,7 @@ def multiply_image_by_color(img: Image.Image, color: Tuple[int, ...]) -> Image.I
     return Image.fromarray(img_np, mode=img.mode)
 
 
-def mix_image_by_color(img: Image.Image, color: Tuple[int, ...]) -> Image.Image:
+def mix_image_by_color(img: Image.Image, color: tuple[int, ...]) -> Image.Image:
     """
     将图像与指定颜色混合，使用颜色的A通道作为混合因子
     """
@@ -333,7 +332,7 @@ def mix_image_by_color(img: Image.Image, color: Tuple[int, ...]) -> Image.Image:
     return Image.fromarray(img_np, mode=img.mode)
 
 
-def adjust_image_alpha_inplace(img: Image.Image, value: Union[int, float], method: str) -> None:
+def adjust_image_alpha_inplace(img: Image.Image, value: float, method: str) -> None:
     """
     调整图像的透明度（原地修改）
     """

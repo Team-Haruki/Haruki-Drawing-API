@@ -3,7 +3,7 @@ import re
 
 from .types import *
 
-__all__ = ['Word', 'Lyric']
+__all__ = ["Word", "Lyric"]
 
 
 @dataclasses.dataclass
@@ -23,14 +23,11 @@ class Lyric:
 
         for line in lines:
             line = line.strip()
-            if match := re.match(r'^(\d+): (.*)$', line):
+            if match := re.match(r"^(\d+): (.*)$", line):
                 bar = int(match.group(1))
-                texts = match.group(2).split('/')
+                texts = match.group(2).split("/")
                 for i, text in enumerate(texts):
                     if text:
-                        self.words.append(Word(
-                            bar=bar + Fraction(i, len(texts)),
-                            text=text
-                        ))
+                        self.words.append(Word(bar=bar + Fraction(i, len(texts)), text=text))
 
         return self
