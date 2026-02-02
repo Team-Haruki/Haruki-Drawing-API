@@ -5,18 +5,17 @@ Card 模块数据模型
 """
 
 from datetime import datetime
-from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field, field_validator
 
-from src.sekai.profile.model import DetailedProfileCardRequest, CardFullThumbnailRequest
-
+from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
 
+
 class CardPower(BaseModel):
     """卡牌综合力信息
-    
+
     Attributes
     ----------
     power_total : int
@@ -28,6 +27,7 @@ class CardPower(BaseModel):
     power3 : int
         活力
     """
+
     power_total: int
     power1: int
     power2: int
@@ -36,7 +36,7 @@ class CardPower(BaseModel):
 
 class CardSkill(BaseModel):
     """卡牌技能信息
-    
+
     Attributes
     ----------
     skill_id : int
@@ -52,19 +52,20 @@ class CardSkill(BaseModel):
     skill_detail_cn : Optional[str]
         技能详情中文翻译
     """
+
     skill_id: int
     skill_name: str
     skill_type: str
     skill_detail: str
-    skill_type_icon_path: Optional[str] = None
-    skill_detail_cn: Optional[str] = None
+    skill_type_icon_path: str | None = None
+    skill_detail_cn: str | None = None
 
 
 class CardEventInfo(BaseModel):
     """卡牌关联活动信息
-    
+
     用于卡牌详情中显示关联的活动信息。
-    
+
     Attributes
     ----------
     event_id : int
@@ -84,20 +85,21 @@ class CardEventInfo(BaseModel):
     banner_cid : Optional[int]
         横幅角色ID
     """
+
     event_id: int
     event_name: str
-    start_at: Union[datetime, int, str]
-    end_at: Union[datetime, int, str]
+    start_at: datetime | int | str
+    end_at: datetime | int | str
     event_banner_path: str
-    bonus_attr: Optional[str] = None
-    unit: Optional[str] = None
-    banner_cid: Optional[int] = None
+    bonus_attr: str | None = None
+    unit: str | None = None
+    banner_cid: int | None = None
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, str)):
+        if isinstance(v, int | str):
             try:
                 timestamp = int(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -108,9 +110,9 @@ class CardEventInfo(BaseModel):
 
 class CardGachaInfo(BaseModel):
     """卡牌关联招募信息
-    
+
     用于卡牌详情中显示关联的卡池信息。
-    
+
     Attributes
     ----------
     gacha_id : int
@@ -124,17 +126,18 @@ class CardGachaInfo(BaseModel):
     gacha_banner_path : str
         招募横幅图片路径
     """
+
     gacha_id: int
     gacha_name: str
-    start_at: Union[datetime, int, str]
-    end_at: Union[datetime, int, str]
+    start_at: datetime | int | str
+    end_at: datetime | int | str
     gacha_banner_path: str
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, str)):
+        if isinstance(v, int | str):
             try:
                 timestamp = int(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -145,7 +148,7 @@ class CardGachaInfo(BaseModel):
 
 class CardBasic(BaseModel):
     """卡牌基础信息
-    
+
     Attributes
     ----------
     card_id : int
@@ -177,28 +180,29 @@ class CardBasic(BaseModel):
     is_after_training : Optional[bool]
         是否为特训后状态
     """
+
     card_id: int
-    character_id: Optional[int]
-    character_name: Optional[str] = None
-    unit: Optional[str] = None
-    release_at: Optional[int] = None
-    supply_type: Optional[str] = None
-    rare: Optional[str] = None
-    attr: Optional[str] = None
-    prefix: Optional[str] = None
-    asset_bundle_name: Optional[str] = None
-    skill: Optional[CardSkill] = None
-    special_skill_info: Optional[CardSkill] = None
-    thumbnail_info: Optional[List[CardFullThumbnailRequest]] = None
-    is_after_training: Optional[bool] = False
-    power: Optional[CardPower] = None
+    character_id: int | None
+    character_name: str | None = None
+    unit: str | None = None
+    release_at: int | None = None
+    supply_type: str | None = None
+    rare: str | None = None
+    attr: str | None = None
+    prefix: str | None = None
+    asset_bundle_name: str | None = None
+    skill: CardSkill | None = None
+    special_skill_info: CardSkill | None = None
+    thumbnail_info: list[CardFullThumbnailRequest] | None = None
+    is_after_training: bool | None = False
+    power: CardPower | None = None
 
 
 class UserCard(BaseModel):
     """用户卡牌信息
-    
+
     用于表示用户是否拥有某张卡牌。
-    
+
     Attributes
     ----------
     card : CardBasic
@@ -206,17 +210,19 @@ class UserCard(BaseModel):
     has_card : bool
         用户是否拥有此卡牌
     """
+
     card: CardBasic
     has_card: bool
 
 
 # ========== 请求模型 ==========
 
+
 class CardDetailRequest(BaseModel):
     """卡牌详情绘制请求
-    
+
     用于生成卡牌详情图片。
-    
+
     Attributes
     ----------
     card_info : CardBasic
@@ -246,25 +252,26 @@ class CardDetailRequest(BaseModel):
     event_chara_icon_path : Optional[str]
         活动横幅角色图标路径
     """
+
     card_info: CardBasic
     region: str
-    event_info: Optional[CardEventInfo] = None
-    gacha_info: Optional[CardGachaInfo] = None
-    card_images_path: List[str] = Field(default_factory=list)
-    costume_images_path: List[str] = Field(default_factory=list)
+    event_info: CardEventInfo | None = None
+    gacha_info: CardGachaInfo | None = None
+    card_images_path: list[str] = Field(default_factory=list)
+    costume_images_path: list[str] = Field(default_factory=list)
     character_icon_path: str
     unit_logo_path: str
-    background_image_path: Optional[str] = None
-    event_attr_icon_path: Optional[str] = None
-    event_unit_icon_path: Optional[str] = None
-    event_chara_icon_path: Optional[str] = None
+    background_image_path: str | None = None
+    event_attr_icon_path: str | None = None
+    event_unit_icon_path: str | None = None
+    event_chara_icon_path: str | None = None
 
 
 class CardListRequest(BaseModel):
     """卡牌列表绘制请求
-    
+
     用于生成卡牌列表图片。
-    
+
     Attributes
     ----------
     cards : List[CardBasic]
@@ -276,17 +283,18 @@ class CardListRequest(BaseModel):
     background_img_path : Optional[str]
         背景图片路径
     """
-    cards: List[CardBasic]
+
+    cards: list[CardBasic]
     region: str
-    user_info: Optional[DetailedProfileCardRequest] = None
-    background_img_path: Optional[str] = None
+    user_info: DetailedProfileCardRequest | None = None
+    background_img_path: str | None = None
 
 
 class CardBoxRequest(BaseModel):
     """卡牌收集册绘制请求
-    
+
     用于生成按角色分类的卡牌收集册图片。
-    
+
     Attributes
     ----------
     cards : List[UserCard]
@@ -308,15 +316,16 @@ class CardBoxRequest(BaseModel):
     fes_limited_icon_path : Optional[str]
         Fes限定图标路径
     """
-    cards: List[UserCard]
+
+    cards: list[UserCard]
     region: str
-    user_info: Optional[DetailedProfileCardRequest] = None
+    user_info: DetailedProfileCardRequest | None = None
     show_id: bool = False
     show_box: bool = False
-    background_img_path: Optional[str] = None
+    background_img_path: str | None = None
     character_icon_paths: dict[int, str]
-    term_limited_icon_path: Optional[str] = None
-    fes_limited_icon_path: Optional[str] = None
+    term_limited_icon_path: str | None = None
+    fes_limited_icon_path: str | None = None
 
 
 # 兼容性别名（逐步废弃）

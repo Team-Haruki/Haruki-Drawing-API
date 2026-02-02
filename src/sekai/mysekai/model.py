@@ -1,14 +1,12 @@
+from typing import Literal
+
 from pydantic import BaseModel
-from typing import (
-    Optional,
-    List,
-    Dict,
-    Literal
-)
+
 from src.sekai.base.painter import Color
 from src.sekai.profile.model import ProfileCardRequest
 
 # =========================== 绘制资源数量=========================== #
+
 
 class MysekaiPhenomRequest(BaseModel):
     r"""MysekaiPhenomRequest
@@ -28,11 +26,13 @@ class MysekaiPhenomRequest(BaseModel):
     text_fill: Color = (125, 125, 125, 255)
         文字颜色
     """
+
     refresh_reason: str
     image_path: str
     background_fill: Color = (255, 255, 255, 75)
     text: str
     text_fill: Color = (125, 125, 125, 255)
+
 
 class MysekaiVisitCharacter(BaseModel):
     r"""MysekaiVisitCharacter
@@ -50,11 +50,13 @@ class MysekaiVisitCharacter(BaseModel):
     is_reservation : bool = False
         邀请的角色
     """
+
     sd_image_path: str
-    memoria_image_path: Optional[str] = None
+    memoria_image_path: str | None = None
     is_read: bool = False
     is_reservation: bool = False
-    reservation_icon_path: Optional[str] = None
+    reservation_icon_path: str | None = None
+
 
 class MysekaiResourceNumber(BaseModel):
     r"""MysekaiResourceNumber
@@ -72,11 +74,13 @@ class MysekaiResourceNumber(BaseModel):
     has_music_record : bool = False
         已拥有的唱片
     """
+
     image_path: str
     number: int = 0
     text_color: Color = (100, 100, 100)
     has_music_record: bool = False
-    music_record_icon_path: Optional[str] = None
+    music_record_icon_path: str | None = None
+
 
 class MysekaiSiteResourceNumber(BaseModel):
     r"""MysekaiSiteResourceNumber
@@ -89,8 +93,10 @@ class MysekaiSiteResourceNumber(BaseModel):
     resource_numbers : List[ MysekaiResourceNumber ]
         地区中的资源数量列表
     """
+
     image_path: str
-    resource_numbers: List[MysekaiResourceNumber]
+    resource_numbers: list[MysekaiResourceNumber]
+
 
 class MysekaiResourceRequest(BaseModel):
     r"""MysekaiResourceRequest
@@ -114,16 +120,19 @@ class MysekaiResourceRequest(BaseModel):
     site_resource_numbers: Optional[ List[ MysekaiSiteResourceNumber ] ] = None
         每个地区的资源数量列表
     """
+
     profile: ProfileCardRequest
-    background_image_path: Optional[str] = None 
-    phenoms: List[MysekaiPhenomRequest]
+    background_image_path: str | None = None
+    phenoms: list[MysekaiPhenomRequest]
     gate_id: int
     gate_level: int
     gate_icon_path: str
-    visit_characters: List[MysekaiVisitCharacter]
-    site_resource_numbers: Optional[List[MysekaiSiteResourceNumber]] = None
+    visit_characters: list[MysekaiVisitCharacter]
+    site_resource_numbers: list[MysekaiSiteResourceNumber] | None = None
+
 
 # =========================== 绘制家具列表 =========================== #
+
 
 class MysekaiFixture(BaseModel):
     r"""MysekaiFixture
@@ -141,11 +150,13 @@ class MysekaiFixture(BaseModel):
     obtained : bool
         是否已拥有家具，未拥有的家具将显示为灰色
     """
+
     id: int
     image_path: str
-    character_id: Optional[int] = None
-    chara_icon_path: Optional[str] = None
+    character_id: int | None = None
+    chara_icon_path: str | None = None
     obtained: bool
+
 
 class MysekaiFixtureSubGenre(BaseModel):
     r"""MysekaiFixtureSubGenre
@@ -163,10 +174,12 @@ class MysekaiFixtureSubGenre(BaseModel):
     fixtures : List[ MysekaiFixture ] = [ ]
         分类中的家具列表
     """
-    name: Optional[str] = None
-    image_path: Optional[str] = None
-    progress_message: Optional[str] = None
-    fixtures: List[MysekaiFixture] = []
+
+    name: str | None = None
+    image_path: str | None = None
+    progress_message: str | None = None
+    fixtures: list[MysekaiFixture] = []
+
 
 class MysekaiFixtureMainGenre(BaseModel):
     r"""MysekaiFixtureMainGenre
@@ -184,10 +197,12 @@ class MysekaiFixtureMainGenre(BaseModel):
     sub_genres : List[ MysekaiFixtureSubGenre ] = [ ]
         分类中的子分类列表
     """
+
     name: str
     image_path: str
-    progress_message: Optional[str] = None
-    sub_genres: List[MysekaiFixtureSubGenre] = []
+    progress_message: str | None = None
+    sub_genres: list[MysekaiFixtureSubGenre] = []
+
 
 class MysekaiFixtureListRequest(BaseModel):
     r"""MysekaiFixtureListRequest
@@ -205,16 +220,19 @@ class MysekaiFixtureListRequest(BaseModel):
     main_genres : List[ MysekaiFixtureMainGenre ] = [ ]
         家具分类列表
     """
-    profile: Optional[ProfileCardRequest] = None
-    progress_message: Optional[str] = None
+
+    profile: ProfileCardRequest | None = None
+    progress_message: str | None = None
     show_id: bool = False
-    main_genres: List[MysekaiFixtureMainGenre] = []
+    main_genres: list[MysekaiFixtureMainGenre] = []
+
 
 # =========================== 绘制家具详情 =========================== #
 
+
 class MysekaiFixtureColorImage(BaseModel):
     r"""MysekaiFixtureColorImage
-    
+
     我的世界家具不同配色的图片
 
     Attributes
@@ -224,8 +242,10 @@ class MysekaiFixtureColorImage(BaseModel):
     color_code : Optional[ str ] = None
         颜色代码
     """
+
     image_path: str
-    color_code: Optional[str] = None
+    color_code: str | None = None
+
 
 class MysekaiFixtureMaterial(BaseModel):
     r"""MysekaiFixtureMaterial
@@ -239,14 +259,16 @@ class MysekaiFixtureMaterial(BaseModel):
     quantity : int
         制作所需或回收所得的材料数量
     """
+
     image_path: str
     quantity: int
+
 
 class MysekaiReactionCharacterGroups(BaseModel):
     r"""MysekaiReactionCharacterGroups
 
     我的世界互动角色组，和某个家具互动的角色们
-    
+
     与家具互动
 
     Attributes
@@ -258,9 +280,11 @@ class MysekaiReactionCharacterGroups(BaseModel):
     chara_icon_path_groups : Optional[ List[ List[ str ] ] ] = None
         角色图片路径列表，按组分
     """
+
     number: int
-    character_uint_id_groups: Optional[List[List[int]]] = None
-    chara_icon_path_groups: Optional[List[List[str]]] = None
+    character_uint_id_groups: list[list[int]] | None = None
+    chara_icon_path_groups: list[list[str]] | None = None
+
 
 class MysekaiFixtureDetailRequest(BaseModel):
     r"""MysekaiFixtureDetailRequest
@@ -302,24 +326,27 @@ class MysekaiFixtureDetailRequest(BaseModel):
     friendcode_source: Optional[ str ] = None
         好友码来源
     """
+
     title: str
-    images: List[MysekaiFixtureColorImage]
+    images: list[MysekaiFixtureColorImage]
     main_genre_name: str
     main_genre_image_path: str
-    sub_genre_name: Optional[str] = None
-    sub_genre_image_path: Optional[str] = None
-    size: Dict[Literal['width', 'depth', 'height'], int]
+    sub_genre_name: str | None = None
+    sub_genre_image_path: str | None = None
+    size: dict[Literal["width", "depth", "height"], int]
     first_put_cost: int = 0
     second_put_cost: int = 0
-    basic_info: Optional[List[str]] = None
-    cost_materials: Optional[List[MysekaiFixtureMaterial]] = None
-    recycle_materials: Optional[List[MysekaiFixtureMaterial]] = None
-    reaction_character_groups: Optional[List[MysekaiReactionCharacterGroups]] = None
-    tags: Optional[List[str]] = None
-    friendcodes: Optional[List[str]] = None
+    basic_info: list[str] | None = None
+    cost_materials: list[MysekaiFixtureMaterial] | None = None
+    recycle_materials: list[MysekaiFixtureMaterial] | None = None
+    reaction_character_groups: list[MysekaiReactionCharacterGroups] | None = None
+    tags: list[str] | None = None
+    friendcodes: list[str] | None = None
     friendcode_source: str = ""
 
+
 # =========================== 绘制大门升级 =========================== #
+
 
 class MysekaiGateMaterialItem(BaseModel):
     r"""MysekaiGateMaterialItem
@@ -337,10 +364,12 @@ class MysekaiGateMaterialItem(BaseModel):
     sum_quantity : str
         所需的总数（字符串，原始的所需总数或者与用户已有材料比较后的内容）
     """
+
     image_path: str
     quantity: int
     color: Color = (50, 50, 50)
     sum_quantity: str
+
 
 class MysekaiGateLevelMaterials(BaseModel):
     r"""MysekaiGateLevelMaterials
@@ -356,9 +385,11 @@ class MysekaiGateLevelMaterials(BaseModel):
     items: List[ MysekaiGateMaterialItem ]
         当前等级所需的材料
     """
+
     level: int
     color: Color = (50, 50, 50)
-    items: List[MysekaiGateMaterialItem]
+    items: list[MysekaiGateMaterialItem]
+
 
 class MysekaiGateMaterials(BaseModel):
     r"""MysekaiGateMaterials
@@ -374,9 +405,10 @@ class MysekaiGateMaterials(BaseModel):
     level_materials : List[ MysekaiGateLevelMaterials ]
         大门各个等级所需的材料
     """
+
     id: int
-    level: Optional[int] = None
-    level_materials: List[MysekaiGateLevelMaterials]
+    level: int | None = None
+    level_materials: list[MysekaiGateLevelMaterials]
 
 
 class MysekaiDoorUpgradeRequest(BaseModel):
@@ -391,10 +423,13 @@ class MysekaiDoorUpgradeRequest(BaseModel):
     gate_materials : List[ MysekaiGateMaterials ]
         各个大门升级所需的材料
     """
-    profile: Optional[ProfileCardRequest] = None
-    gate_materials: List[MysekaiGateMaterials]
+
+    profile: ProfileCardRequest | None = None
+    gate_materials: list[MysekaiGateMaterials]
+
 
 # =========================== 绘制唱片列表 =========================== #
+
 
 class MysekaiMusicrecord(BaseModel):
     r"""MysekaiMusicrecord
@@ -410,7 +445,8 @@ class MysekaiMusicrecord(BaseModel):
     obtained : bool
         是否已收集，（未收集将显示为灰色）
     """
-    id: Optional[int] = None
+
+    id: int | None = None
     image_path: str
     obtained: bool
 
@@ -429,16 +465,18 @@ class MysekaiCategoryMusicrecord(BaseModel):
     musicrecords : List[ MysekaiMusicrecord ]
         唱片列表
     """
+
     tag: str
     tag_icon_path: str
-    progress_message: Optional[str] = None
-    musicrecords: List[MysekaiMusicrecord]
+    progress_message: str | None = None
+    musicrecords: list[MysekaiMusicrecord]
+
 
 class MysekaiMusicrecordRequest(BaseModel):
     r"""MysekaiMusicrecordRequest
 
     绘制我的世界唱片收集图所必需的数据
-    
+
     Attributes
     ----------
     profile : ProfileCardRequest
@@ -448,11 +486,14 @@ class MysekaiMusicrecordRequest(BaseModel):
     category_musicrecords : List[ MysekaiCategoryMusicrecord ]
         按tag分类的唱片列表
     """
+
     profile: ProfileCardRequest
-    progress_message: Optional[str] = None
-    category_musicrecords: List[MysekaiCategoryMusicrecord]
+    progress_message: str | None = None
+    category_musicrecords: list[MysekaiCategoryMusicrecord]
+
 
 # =========================== 绘制角色对话列表 =========================== #
+
 
 class MysekaiTalkFixtures(BaseModel):
     r"""MysekaiTalkFixtures
@@ -468,10 +509,11 @@ class MysekaiTalkFixtures(BaseModel):
     character_ids: Optional[ List[ List[ int ] ] ] = None
         参与对话的角色（当多人对话时需要）
     """
-    fixtures: List[MysekaiFixture] = []
+
+    fixtures: list[MysekaiFixture] = []
     noread_num: int
-    character_ids: Optional[List[List[int]]] = None
-    chara_icon_path_groups: Optional[List[List[str]]] = None
+    character_ids: list[list[int]] | None = None
+    chara_icon_path_groups: list[list[str]] | None = None
 
 
 class MysekaiSingleTalkMainGenre(BaseModel):
@@ -488,9 +530,10 @@ class MysekaiSingleTalkMainGenre(BaseModel):
     sub_genres: List[ List[ MysekaiTalkFixtures ] ] = []
         单人对话家具组合和未读情况，按子分类分组，每个子分类下是多个家具组合
     """
-    name: str 
+
+    name: str
     image_path: str
-    sub_genres: List[List[MysekaiTalkFixtures]] = []
+    sub_genres: list[list[MysekaiTalkFixtures]] = []
 
 
 class MysekaiTalkListRequest(BaseModel):
@@ -516,31 +559,32 @@ class MysekaiTalkListRequest(BaseModel):
     multi_reads : List[ MysekaiTalkFixtures ] = []
         多人对话，按家具组合分组
     """
-    profile: Optional[ProfileCardRequest] = None
+
+    profile: ProfileCardRequest | None = None
     sd_image_path: str
-    progress_message: Optional[str] = None
-    prompt_message: Optional[str] = None
+    progress_message: str | None = None
+    prompt_message: str | None = None
     show_id: bool = False
-    single_main_genres: List[MysekaiSingleTalkMainGenre] = []
-    multi_reads: List[MysekaiTalkFixtures] = []
+    single_main_genres: list[MysekaiSingleTalkMainGenre] = []
+    multi_reads: list[MysekaiTalkFixtures] = []
 
 
 # 各团代表色，没有VS团！
 UNIT_COLORS = [
-    (68,85,221,255),
-    (136,221,68,255),
-    (238,17,102,255),
-    (255,153,0,255),
-    (136,68,153,255),
+    (68, 85, 221, 255),
+    (136, 221, 68, 255),
+    (238, 17, 102, 255),
+    (255, 153, 0, 255),
+    (136, 68, 153, 255),
 ]
 
 # 唱片tag到团名映射
 MUSIC_TAG_UNIT_MAP = {
-    'light_music_club': 'light_sound',
-    'street': 'street',
-    'idol': 'idol',
-    'theme_park': 'theme_park',
-    'school_refusal': 'school_refusal',
-    'vocaloid': 'piapro',
-    'other': None,
+    "light_music_club": "light_sound",
+    "street": "street",
+    "idol": "idol",
+    "theme_park": "theme_park",
+    "school_refusal": "school_refusal",
+    "vocaloid": "piapro",
+    "other": None,
 }

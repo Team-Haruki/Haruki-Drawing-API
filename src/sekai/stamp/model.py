@@ -1,6 +1,7 @@
 from pydantic import BaseModel
-from typing import List, Optional
+
 from src.sekai.base.painter import Color
+
 
 class StampData(BaseModel):
     r"""StampData
@@ -18,9 +19,11 @@ class StampData(BaseModel):
         这个颜色用来指示表情是否有可以用来制作的底图。
         默认为没有 (200, 0, 0, 255) 红色
     """
+
     id: int
     image_path: str
     text_color: Color = (200, 0, 0, 255)
+
 
 class StampListRequest(BaseModel):
     r"""StampListRequest
@@ -34,5 +37,6 @@ class StampListRequest(BaseModel):
     stamps : List[ StampData ] = []
         表情列表
     """
-    prompt_message: Optional[str] = None
-    stamps: List[StampData] = []
+
+    prompt_message: str | None = None
+    stamps: list[StampData] = []

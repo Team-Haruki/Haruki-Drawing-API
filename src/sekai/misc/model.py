@@ -1,6 +1,4 @@
 from pydantic import BaseModel
-from typing import List, Optional
-from src.sekai.base.painter import Color
 
 
 class CharaBirthdayCard(BaseModel):
@@ -15,6 +13,7 @@ class CharaBirthdayCard(BaseModel):
     thumbnail_path : str
         卡牌缩略图路径
     """
+
     id: int
     thumbnail_path: str
 
@@ -31,6 +30,7 @@ class BirthdayEventTime(BaseModel):
     end_text : str
         结束时间文本（已格式化）
     """
+
     start_text: str
     end_text: str
 
@@ -51,6 +51,7 @@ class CharaBirthdayData(BaseModel):
     icon_path : str
         角色图标路径
     """
+
     cid: int
     month: int
     day: int
@@ -84,10 +85,10 @@ class CharaBirthdayRequest(BaseModel):
         背景卡牌图片路径
     cards : List[CharaBirthdayCard]
         生日卡牌列表
-    
+
     is_fifth_anniv : bool
         是否是五周年（决定是否包含露滴、浇水、派对时间）
-    
+
     gacha_time : BirthdayEventTime
         卡池开放时间
     live_time : BirthdayEventTime
@@ -98,10 +99,11 @@ class CharaBirthdayRequest(BaseModel):
         浇水开放时间
     party_time : Optional[BirthdayEventTime] = None
         派对开放时间
-    
+
     all_characters : List[CharaBirthdayData]
         所有角色生日信息（用于底部日历显示）
     """
+
     cid: int
     month: int
     day: int
@@ -111,14 +113,14 @@ class CharaBirthdayRequest(BaseModel):
     sd_image_path: str
     title_image_path: str
     card_image_path: str
-    cards: List[CharaBirthdayCard]
-    
+    cards: list[CharaBirthdayCard]
+
     is_fifth_anniv: bool
-    
+
     gacha_time: BirthdayEventTime
     live_time: BirthdayEventTime
-    drop_time: Optional[BirthdayEventTime] = None
-    flower_time: Optional[BirthdayEventTime] = None
-    party_time: Optional[BirthdayEventTime] = None
-    
-    all_characters: List[CharaBirthdayData]
+    drop_time: BirthdayEventTime | None = None
+    flower_time: BirthdayEventTime | None = None
+    party_time: BirthdayEventTime | None = None
+
+    all_characters: list[CharaBirthdayData]

@@ -35,8 +35,7 @@ class SpeedControl:
     id: int | None
 
 
-class TicksPerBeat(int):
-    ...
+class TicksPerBeat(int): ...
 
 
 class Line:
@@ -47,23 +46,26 @@ class Line:
     def __init__(self, line: str):
         line = line.strip()
 
-        if match := re.match(r'^#(\w+)\s+(.*)$', line):
-            self.type = 'meta'
+        if match := re.match(r"^#(\w+)\s+(.*)$", line):
+            self.type = "meta"
             self.header, self.data = match.groups()
 
-        elif match := re.match(r'^#(\w+):\s*(.*)$', line):
-            self.type = 'score'
+        elif match := re.match(r"^#(\w+):\s*(.*)$", line):
+            self.type = "score"
             self.header, self.data = match.groups()
 
         else:
-            self.type = 'comment'
-            self.header, self.data = 'comment', line
+            self.type = "comment"
+            self.header, self.data = "comment", line
 
     def parse(self):
         match self.type:
-            case 'meta': return self.parse_meta()
-            case 'score': return self.parse_score()
-            case _: return []
+            case "meta":
+                return self.parse_meta()
+            case "score":
+                return self.parse_score()
+            case _:
+                return []
 
     def parse_meta(self):
         meta = Meta()
@@ -75,34 +77,34 @@ class Line:
             setattr(meta, self.header.lower(), data)
             yield meta
 
-        elif self.header == 'REQUEST':
+        elif self.header == "REQUEST":
             if match := re.match(r'^"ticks_per_beat\s+(\d+)"$', self.data):
                 yield TicksPerBeat(int(match.group(1)))
 
-        elif self.header == 'HISPEED':
+        elif self.header == "HISPEED":
             yield SpeedControl(int(self.data, 36))
 
-        elif self.header == 'NOSPEED':
+        elif self.header == "NOSPEED":
             yield SpeedControl(None)
 
     def parse_score(self):
-        if match := re.match(r'^(\d\d\d)02$', self.header):
+        if match := re.match(r"^(\d\d\d)02$", self.header):
             yield Event(bar=int(match.group(1)), bar_length=int(self.data))
 
-        elif match := re.match(r'^BPM(..)$', self.header):
+        elif match := re.match(r"^BPM(..)$", self.header):
             yield BpmDefinition(id=int(match.group(1), 36), bpm=Fraction(self.data))
 
-        elif match := re.match(r'^(\d\d\d)08$', self.header):
+        elif match := re.match(r"^(\d\d\d)08$", self.header):
             for beat, data in self.parse_score_data():
                 yield BpmReference(bar=int(match.group(1)) + beat, id=int(data, 36))
 
-        elif match := re.match(r'^TIL(..)$', self.header):
+        elif match := re.match(r"^TIL(..)$", self.header):
             id = int(match.group(1), 36)
             data: str = eval(self.data)
             items = []
             if data:
-                for item in data.split(','):
-                    match = re.match(r'(\d+)\'(\d+):(\S+)', item.strip())
+                for item in data.split(","):
+                    match = re.match(r"(\d+)\'(\d+):(\S+)", item.strip())
                     item = SpeedDefinitionItem(
                         bar=int(match.group(1)),
                         tick=int(match.group(2)),
@@ -112,7 +114,7 @@ class Line:
 
             yield SpeedDefinition(id=id, items=sorted(items, key=lambda item: (item.bar, item.tick)))
 
-        elif match := re.match(r'^(\d\d\d)1(.)$', self.header):
+        elif match := re.match(r"^(\d\d\d)1(.)$", self.header):
             for beat, data in self.parse_score_data():
                 yield Tap(
                     bar=int(match.group(1)) + beat,
@@ -121,7 +123,7 @@ class Line:
                     type=int(data[0], 36),
                 )
 
-        elif match := re.match(r'^(\d\d\d)3(.)(.)$', self.header):
+        elif match := re.match(r"^(\d\d\d)3(.)(.)$", self.header):
             for beat, data in self.parse_score_data():
                 yield Slide(
                     bar=int(match.group(1)) + beat,
@@ -132,7 +134,7 @@ class Line:
                     decoration=False,
                 )
 
-        elif match := re.match(r'^(\d\d\d)5(.)$', self.header):
+        elif match := re.match(r"^(\d\d\d)5(.)$", self.header):
             for beat, data in self.parse_score_data():
                 yield Directional(
                     bar=int(match.group(1)) + beat,
@@ -141,7 +143,7 @@ class Line:
                     type=int(data[0], 36),
                 )
 
-        elif match := re.match(r'^(\d\d\d)9(.)(.)$', self.header):
+        elif match := re.match(r"^(\d\d\d)9(.)(.)$", self.header):
             for beat, data in self.parse_score_data():
                 yield Slide(
                     bar=int(match.group(1)) + beat,
@@ -154,5 +156,5 @@ class Line:
 
     def parse_score_data(self):
         for i in range(0, len(self.data), 2):
-            if self.data[i: i+2] != '00':
-                yield Fraction(i, len(self.data)), self.data[i: i+2]
+            if self.data[i : i + 2] != "00":
+                yield Fraction(i, len(self.data)), self.data[i : i + 2]

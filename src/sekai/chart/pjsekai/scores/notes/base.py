@@ -10,19 +10,19 @@ class BaseNote:
     def __hash__(self) -> int:
         return hash(str(self))
 
-    def __gt__(self, other: 'BaseNote') -> bool:
+    def __gt__(self, other: "BaseNote") -> bool:
         return self.bar > other.bar
 
-    def __lt__(self, other: 'BaseNote') -> bool:
+    def __lt__(self, other: "BaseNote") -> bool:
         return self.bar < other.bar
 
-    def __ge__(self, other: 'BaseNote') -> bool:
+    def __ge__(self, other: "BaseNote") -> bool:
         return self.bar >= other.bar
 
-    def __le__(self, other: 'BaseNote') -> bool:
+    def __le__(self, other: "BaseNote") -> bool:
         return self.bar <= other.bar
 
-    def __eq__(self, other: 'BaseNote') -> bool:
+    def __eq__(self, other: "BaseNote") -> bool:
         return self.bar == other.bar
 
 

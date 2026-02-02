@@ -4,19 +4,19 @@ Event 模块数据模型
 定义活动相关的 Pydantic 模型，用于活动详情、活动记录和活动列表的绘制请求。
 """
 
-from typing import Any, List, Optional
+from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, field_validator
-from datetime import datetime
 
-from src.sekai.profile.model import DetailedProfileCardRequest, CardFullThumbnailRequest
-
+from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
 
+
 class EventInfo(BaseModel):
     """活动详细信息
-    
+
     Attributes
     ----------
     eid : str
@@ -40,6 +40,7 @@ class EventInfo(BaseModel):
     wl_time_list : Optional[list[dict[str, Any]]]
         WL章节时间列表
     """
+
     id: str | int
     event_type: str
     start_at: datetime
@@ -48,14 +49,14 @@ class EventInfo(BaseModel):
     banner_cid: int
     banner_index: int
     bonus_attr: str
-    bonus_chara_id: Optional[List[int]] = None
-    wl_time_list: Optional[list[dict[str, Any]]] = None
+    bonus_chara_id: list[int] | None = None
+    wl_time_list: list[dict[str, Any]] | None = None
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, float, str)):
+        if isinstance(v, int | float | str):
             try:
                 timestamp = float(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -66,9 +67,9 @@ class EventInfo(BaseModel):
 
 class EventHistory(BaseModel):
     """活动历史记录
-    
+
     用于活动记录图片中显示用户的活动参与历史。
-    
+
     Attributes
     ----------
     event_id : str
@@ -90,21 +91,22 @@ class EventHistory(BaseModel):
     wl_chara_icon_path : Optional[str]
         WL 角色图标路径
     """
+
     id: str | int
     event_name: str
     start_at: datetime
     end_at: datetime
-    rank: Optional[int] = None
+    rank: int | None = None
     event_point: int
     is_wl_event: bool = False
     banner_path: str
-    wl_chara_icon_path: Optional[str] = None
+    wl_chara_icon_path: str | None = None
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, float, str)):
+        if isinstance(v, int | float | str):
             try:
                 timestamp = float(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -115,7 +117,7 @@ class EventHistory(BaseModel):
 
 class EventAssets(BaseModel):
     """活动资源路径
-    
+
     Attributes
     ----------
     event_bg_path : str
@@ -133,20 +135,21 @@ class EventAssets(BaseModel):
     bonus_chara_path : Optional[List[str]]
         加成角色图标路径列表
     """
+
     event_bg_path: str
     event_logo_path: str
     event_story_bg_path: str
     event_attr_image_path: str
     event_ban_chara_img: str
     ban_chara_icon_path: str
-    bonus_chara_path: Optional[List[str]] = None
+    bonus_chara_path: list[str] | None = None
 
 
 class EventBrief(BaseModel):
     """活动简要信息
-    
+
     用于活动列表中显示。
-    
+
     Attributes
     ----------
     event_id : int
@@ -170,22 +173,23 @@ class EventBrief(BaseModel):
     event_unit_path : Optional[str]
         活动组合图标路径
     """
+
     id: int
     event_name: str
     event_type: str
     start_at: datetime
     end_at: datetime
     event_banner_path: str
-    event_cards: Optional[List[CardFullThumbnailRequest]]
-    event_attr_path: Optional[str] = None
-    event_chara_path: Optional[str] = None
-    event_unit_path: Optional[str] = None
+    event_cards: list[CardFullThumbnailRequest] | None
+    event_attr_path: str | None = None
+    event_chara_path: str | None = None
+    event_unit_path: str | None = None
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, float, str)):
+        if isinstance(v, int | float | str):
             try:
                 timestamp = float(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -196,9 +200,10 @@ class EventBrief(BaseModel):
 
 # ========== 请求模型 ==========
 
+
 class EventDetailRequest(BaseModel):
     """活动详情绘制请求
-    
+
     Attributes
     ----------
     region : str
@@ -210,6 +215,7 @@ class EventDetailRequest(BaseModel):
     event_cards : list[CardFullThumbnailRequest]
         活动卡牌缩略图信息列表
     """
+
     region: str
     event_info: EventInfo
     event_assets: EventAssets
@@ -218,7 +224,7 @@ class EventDetailRequest(BaseModel):
 
 class EventRecordRequest(BaseModel):
     """活动记录绘制请求
-    
+
     Attributes
     ----------
     event_info : List[EventHistory]
@@ -228,20 +234,22 @@ class EventRecordRequest(BaseModel):
     user_info : DetailedProfileCardRequest
         用户信息
     """
-    event_info: List[EventHistory]
-    wl_event_info: List[EventHistory]
+
+    event_info: list[EventHistory]
+    wl_event_info: list[EventHistory]
     user_info: DetailedProfileCardRequest
 
 
 class EventListRequest(BaseModel):
     """活动列表绘制请求
-    
+
     Attributes
     ----------
     event_info : List[EventBrief]
         活动简要信息列表
     """
-    event_info: List[EventBrief]
+
+    event_info: list[EventBrief]
 
 
 # 兼容性别名

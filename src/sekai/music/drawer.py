@@ -1,51 +1,47 @@
-from datetime import datetime
 import asyncio
+from datetime import datetime
+
 from PIL import Image
 
-from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
 from src.sekai.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
+    PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
     add_watermark,
     roundrect_bg,
-    PLAY_RESULT_COLORS,
 )
 from src.sekai.base.painter import (
+    BLACK,
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     DEFAULT_HEAVY_FONT,
+    RED,
     WHITE,
     LinearGradient,
-    adjust_color,
     lerp_color,
-    BLACK,
-    RED
 )
-from src.sekai.base.plot import (
-    Canvas,
-    FillBg,
-    Flow,
-    Frame,
-    Grid,
-    HSplit,
-    ImageBox,
-    Spacer,
-    TextBox,
-    TextStyle,
-    VSplit
-)
+from src.sekai.base.plot import Canvas, FillBg, Flow, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
-
+from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
 
 # =========================== 从.model导入常量和数据类型 =========================== #
-
-from .model import *
+from .model import (
+    BasicMusicRewardsRequest,
+    DetailMusicRewardsRequest,
+    MusicBriefListRequest,
+    MusicDetailRequest,
+    MusicListRequest,
+    PlayProgressRequest,
+)
 
 # =========================== 绘图函数 =========================== #
 
-async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, title_style: TextStyle=None, title_shadow=False):
+
+async def compose_music_detail_image(
+    rqd: MusicDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow=False
+):
     # 数据准备
     mid = rqd.music_info.id
     name = rqd.music_info.title
@@ -71,7 +67,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
 
     vocal_logos = {}
     for char_name, logo_path in vocal_logos_raw.items():
-        img = await get_img_from_path(ASSETS_BASE_DIR,logo_path)
+        img = await get_img_from_path(ASSETS_BASE_DIR, logo_path)
         if img:
             vocal_logos[char_name] = img
 
@@ -81,9 +77,9 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     audio_len = length
     bpm_main = f"{bpm} BPM" if bpm else "?"
 
-    diff_lvs    = rqd.difficulty.level
+    diff_lvs = rqd.difficulty.level
     diff_counts = rqd.difficulty.note_count
-    has_append  = rqd.difficulty.has_append
+    has_append = rqd.difficulty.has_append
 
     event_id = rqd.event_id
 
@@ -102,21 +98,37 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                 vocal_group["vocal_names"].append(chara_name)
         caption_vocals[caption].append(vocal_group)
 
-
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
-            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16).set_item_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(8)
+                .set_padding(16)
+                .set_item_bg(roundrect_bg(alpha=80))
+            ):
                 # 附加标题
                 if title and title_style:
                     if title_shadow:
-                        TextBox(title,TextStyle(title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2),).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
+                        TextBox(
+                            title,
+                            TextStyle(
+                                title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2
+                            ),
+                        ).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
                     else:
-                        TextBox(title, title_style).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
+                        TextBox(title, title_style).set_padding(16).set_omit_parent_bg(True).set_bg(
+                            roundrect_bg(alpha=80)
+                        )
 
                 # 歌曲标题
                 name_text = f"【{region.upper()}-{mid}】{name}"
-                if cn_name: name_text += f"  ({cn_name})"
-                TextBox(name_text, TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)), use_real_line_count=True).set_padding(16).set_w(800)
+                if cn_name:
+                    name_text += f"  ({cn_name})"
+                TextBox(
+                    name_text, TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)), use_real_line_count=True
+                ).set_padding(16).set_w(800)
 
                 with HSplit().set_content_align("c").set_item_align("c").set_sep(16):
                     # 封面
@@ -143,11 +155,15 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                             mv_text = ""
                             if mv_info:
                                 for item in mv_info:
-                                    if item == "original": mv_text += "原版MV & "
-                                    if item == "mv": mv_text += "3DMV & "
-                                    if item == "mv_2d": mv_text += "2DMV & "
+                                    if item == "original":
+                                        mv_text += "原版MV & "
+                                    if item == "mv":
+                                        mv_text += "3DMV & "
+                                    if item == "mv_2d":
+                                        mv_text += "2DMV & "
                             mv_text = mv_text[:-3]
-                            if not mv_text: mv_text = "无"
+                            if not mv_text:
+                                mv_text = "无"
                             TextBox(mv_text, style2)
                             TextBox(audio_len, style2)
                             TextBox(publish_time, style2)
@@ -170,52 +186,97 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                 total_w = 964
                 hsplit_gap = 8
                 leaderboard_w = total_w - diff_section_w - hsplit_gap
-                
-                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsplit_gap).set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_w(total_w):
+
+                with (
+                    HSplit()
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_sep(hsplit_gap)
+                    .set_omit_parent_bg(True)
+                    .set_item_bg(roundrect_bg(alpha=80))
+                    .set_w(total_w)
+                ):
                     # 难度等级/物量
                     vs = 4
                     hs = diff_hs
-                    with HSplit().set_content_align("c").set_item_align("c").set_sep(vs).set_padding(diff_padding).set_h(196):
+                    with (
+                        HSplit()
+                        .set_content_align("c")
+                        .set_item_align("c")
+                        .set_sep(vs)
+                        .set_padding(diff_padding)
+                        .set_h(196)
+                    ):
                         with Grid(col_count=diff_col_count, item_size_mode="fixed").set_sep(h_sep=hs, v_sep=vs):
                             # 难度等级
                             for i, (diff, color) in enumerate(DIFF_COLORS.items()):
                                 if i < len(diff_lvs) and diff_lvs[i] is not None:
-                                    t = TextBox(f"{diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=WHITE))
-                                    t.set_bg(roundrect_bg(fill=color, radius=12)).set_size((64, 64)).set_content_align("c").set_overflow("clip")
+                                    t = TextBox(
+                                        f"{diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=WHITE)
+                                    )
+                                    t.set_bg(roundrect_bg(fill=color, radius=12)).set_size((64, 64)).set_content_align(
+                                        "c"
+                                    ).set_overflow("clip")
                             # 物量
                             for i, count in enumerate(diff_counts):
-                                if count is None: continue
+                                if count is None:
+                                    continue
                                 color = DIFF_COLORS.get(list(DIFF_COLORS.keys())[i], (80, 80, 80))
-                                style = TextStyle(DEFAULT_BOLD_FONT, 18, (80, 80, 80, 255), use_shadow=True, 
-                                                shadow_offset=1, shadow_color=color.c1 if isinstance(color, LinearGradient) else color)
+                                style = TextStyle(
+                                    DEFAULT_BOLD_FONT,
+                                    18,
+                                    (80, 80, 80, 255),
+                                    use_shadow=True,
+                                    shadow_offset=1,
+                                    shadow_color=color.c1 if isinstance(color, LinearGradient) else color,
+                                )
                                 with VSplit().set_content_align("c").set_item_align("c").set_sep(1):
-                                    TextBox(f"{count}", style).set_size((64, None)).set_content_align("c").set_overflow("clip")
-                                    TextBox("combo", style.replace(size=14)).set_size((64, None)).set_content_align("c").set_overflow("clip")
+                                    TextBox(f"{count}", style).set_size((64, None)).set_content_align("c").set_overflow(
+                                        "clip"
+                                    )
+                                    TextBox("combo", style.replace(size=14)).set_size((64, None)).set_content_align(
+                                        "c"
+                                    ).set_overflow("clip")
 
                     # 排行榜
                     if rqd.leaderboard_matrix and rqd.leaderboard_live_types and rqd.leaderboard_targets:
                         live_type_keys = list(rqd.leaderboard_live_types.keys())
                         target_keys = list(rqd.leaderboard_targets.keys())
                         leaderboard_music_num = rqd.leaderboard_music_num or 1
-                        
+
                         th_w, th_h = 60, 36
                         tr_w, tr_h = 120, 36
                         gap = 4
-                        
-                        with VSplit().set_sep(gap).set_padding(16).set_content_align('l').set_item_align('l').set_w(leaderboard_w).set_h(196):
+
+                        with (
+                            VSplit()
+                            .set_sep(gap)
+                            .set_padding(16)
+                            .set_content_align("l")
+                            .set_item_align("l")
+                            .set_w(leaderboard_w)
+                            .set_h(196)
+                        ):
                             # 表头行
-                            with HSplit().set_sep(gap).set_content_align('l').set_item_align('c'):
+                            with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
                                 Spacer(w=th_w, h=th_h).set_bg(FillBg((255, 255, 255, 100)))
                                 for target in target_keys:
-                                    TextBox(rqd.leaderboard_targets[target], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))) \
-                                        .set_bg(FillBg((255, 255, 255, 100))).set_size((tr_w, th_h)).set_content_align('c')
+                                    TextBox(
+                                        rqd.leaderboard_targets[target], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))
+                                    ).set_bg(FillBg((255, 255, 255, 100))).set_size((tr_w, th_h)).set_content_align("c")
                             # 数据行
                             for i, live_type in enumerate(live_type_keys):
-                                with HSplit().set_sep(gap).set_content_align('l').set_item_align('c'):
-                                    TextBox(rqd.leaderboard_live_types[live_type], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))) \
-                                        .set_bg(FillBg((255, 255, 255, 50))).set_size((th_w, th_h)).set_content_align('c')
+                                with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
+                                    TextBox(
+                                        rqd.leaderboard_live_types[live_type],
+                                        TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50)),
+                                    ).set_bg(FillBg((255, 255, 255, 50))).set_size((th_w, th_h)).set_content_align("c")
                                     for j, target in enumerate(target_keys):
-                                        info = rqd.leaderboard_matrix[i][j] if i < len(rqd.leaderboard_matrix) and j < len(rqd.leaderboard_matrix[i]) else None
+                                        info = (
+                                            rqd.leaderboard_matrix[i][j]
+                                            if i < len(rqd.leaderboard_matrix) and j < len(rqd.leaderboard_matrix[i])
+                                            else None
+                                        )
                                         if info:
                                             rank_ratio = (info.rank - 1) / max(1, leaderboard_music_num - 1)
                                             text1, text2 = f"#{info.rank}", info.value
@@ -225,44 +286,78 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                                             text1, text2 = "-", None
                                             text_color = (50, 50, 50)
 
-                                        green, yellow, red = (200, 255, 200, 75), (255, 200, 150, 75), (255, 150, 150, 50)
-                                        bg_color = lerp_color(green, yellow, rank_ratio) if rank_ratio <= 0.5 else lerp_color(yellow, red, rank_ratio - 0.5)
+                                        green, yellow, red = (
+                                            (200, 255, 200, 75),
+                                            (255, 200, 150, 75),
+                                            (255, 150, 150, 50),
+                                        )
+                                        bg_color = (
+                                            lerp_color(green, yellow, rank_ratio)
+                                            if rank_ratio <= 0.5
+                                            else lerp_color(yellow, red, rank_ratio - 0.5)
+                                        )
 
-                                        with Frame().set_bg(FillBg(bg_color)).set_size((tr_w, tr_h)).set_content_align('c'):
-                                            with HSplit().set_content_align('b').set_item_align('b').set_sep(2):
-                                                TextBox(text1, TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True))
+                                        with (
+                                            Frame()
+                                            .set_bg(FillBg(bg_color))
+                                            .set_size((tr_w, tr_h))
+                                            .set_content_align("c")
+                                        ):
+                                            with HSplit().set_content_align("b").set_item_align("b").set_sep(2):
+                                                TextBox(
+                                                    text1, TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True)
+                                                )
                                                 if text2:
-                                                    TextBox(text2, TextStyle(DEFAULT_FONT, 12, (50, 50, 50))).set_offset((0, -1))
+                                                    TextBox(
+                                                        text2, TextStyle(DEFAULT_FONT, 12, (50, 50, 50))
+                                                    ).set_offset((0, -1))
 
                 # 别名
                 aliases = rqd.alias
                 if aliases:
-                    alias_text = "，". join(aliases)
+                    alias_text = "，".join(aliases)
                     font_size = max(10, 24 - get_str_display_length(alias_text) // 40 * 1)
                     with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
                         TextBox("歌曲别名", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
                         aw = 800
-                        TextBox(alias_text, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)), use_real_line_count=True).set_w(aw)
+                        TextBox(
+                            alias_text,
+                            TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)),
+                            use_real_line_count=True,
+                        ).set_w(aw)
 
-                def draw_vocal(width: int = None):
+                def draw_vocal(width: int | None = None):
                     # 歌手
                     with Flow().set_content_align("lt").set_item_align("lt").set_sep(8, 8).set_padding(16) as flow:
                         if width:
                             flow.set_w(width)
                         for caption, vocals in sorted(caption_vocals.items(), key=lambda x: len(x[1])):
                             with HSplit().set_padding(0).set_sep(4).set_content_align("c").set_item_align("c"):
-                                TextBox(caption + "  ver.", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
+                                TextBox(
+                                    caption + "  ver.", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50))
+                                )
                                 Spacer(w=8)
                                 for vocal in vocals:
-                                    with HSplit().set_content_align("c").set_item_align("c").set_sep(2).set_padding(4) \
-                                        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8)):
+                                    with (
+                                        HSplit()
+                                        .set_content_align("c")
+                                        .set_item_align("c")
+                                        .set_sep(2)
+                                        .set_padding(4)
+                                        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8))
+                                    ):
                                         if vocal_name := vocal.get("vocal_name"):
                                             font_size = int(24 * min(1.0, 50 / get_str_display_length(vocal_name)))
-                                            TextBox(vocal_name, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)))
+                                            TextBox(
+                                                vocal_name,
+                                                TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)),
+                                            )
                                         elif vocal["vocal_names"]:
                                             for vn in vocal["vocal_names"]:
                                                 font_size = int(24 * min(1.0, 50 / get_str_display_length(vn)))
-                                                TextBox(vn, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)))
+                                                TextBox(
+                                                    vn, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70))
+                                                )
                                         else:
                                             for img in vocal["chara_imgs"]:
                                                 ImageBox(img, size=(32, 32), use_alpha_blend=True)
@@ -276,7 +371,9 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
                         ImageBox(event_banner, size=(None, 100))
 
                 if event_id is not None:
-                    with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16):
+                    with (
+                        HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16)
+                    ):
                         draw_vocal(600)
                         draw_event()
                 else:
@@ -285,9 +382,13 @@ async def compose_music_detail_image(rqd: MusicDetailRequest,title: str=None, ti
     add_watermark(canvas)
     return await canvas.get_img()
 
-async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str = None,title_style: TextStyle = None,
-    title_shadow=False,) -> Image.Image:
 
+async def compose_music_brief_list_image(
+    rqd: MusicBriefListRequest,
+    title: str | None = None,
+    title_style: TextStyle = None,
+    title_shadow=False,
+) -> Image.Image:
     musics_list = rqd.music_list
     max_num = 50
     hide_num = max(0, len(musics_list) - max_num)
@@ -342,8 +443,12 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest,title: str =
     add_watermark(canvas)
     return await canvas.get_img()
 
+
 async def compose_music_list_image(
-        rqd: MusicListRequest, show_id: bool, show_leak: bool, play_result_filter: list[str] = None,
+    rqd: MusicListRequest,
+    show_id: bool,
+    show_leak: bool,
+    play_result_filter: list[str] | None = None,
 ) -> Image.Image:
     jackets = {}
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
@@ -387,11 +492,14 @@ async def compose_music_list_image(
                         music["play_result"] = result_type
                         filtered_musics.append(music)
 
-                    if not filtered_musics: continue
+                    if not filtered_musics:
+                        continue
 
                     diff = rqd.required_difficulties
                     with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
-                        lv_text = TextBox(f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE))
+                        lv_text = TextBox(
+                            f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE)
+                        )
                         lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=5))
 
                         with Grid(col_count=10).set_sep(5):
@@ -400,49 +508,66 @@ async def compose_music_list_image(
                                     with Frame():
                                         ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
                                         if music["is_leak"]:
-                                            TextBox("LEAK", TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=RED)) \
-                                                .set_bg(roundrect_bg(radius=4)).set_offset((64, 64)).set_offset_anchor("rb")
+                                            TextBox(
+                                                "LEAK", TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=RED)
+                                            ).set_bg(roundrect_bg(radius=4)).set_offset((64, 64)).set_offset_anchor(
+                                                "rb"
+                                            )
                                         if music["play_result"]:
-                                            if rqd.play_result_icon_path_map and music['play_result'] in rqd.play_result_icon_path_map:
-                                                result_img_path = rqd.play_result_icon_path_map[music['play_result']]
+                                            if (
+                                                rqd.play_result_icon_path_map
+                                                and music["play_result"] in rqd.play_result_icon_path_map
+                                            ):
+                                                result_img_path = rqd.play_result_icon_path_map[music["play_result"]]
                                             else:
-                                                result_img_path = RESULT_ASSET_PATH+f"/icon_{music['play_result']}.png"
+                                                result_img_path = (
+                                                    RESULT_ASSET_PATH + f"/icon_{music['play_result']}.png"
+                                                )
                                             result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
-                                            ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset((64 - 10, 64 - 10))
+                                            ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
+                                                (64 - 10, 64 - 10)
+                                            )
                                     if show_id:
-                                        TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(64)
+                                        TextBox(
+                                            f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)
+                                        ).set_w(64)
 
     add_watermark(canvas)
     return await canvas.get_img()
 
-async def compose_play_progress_image(
-    rqd: PlayProgressRequest
-) -> Image.Image:
+
+async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
     r"""compose_play_progress_image
 
     合成打歌进度图片
-    
+
     TODO:
         TextBox shadow 暂未实现
     """
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if rqd.profile:
                 await get_profile_card(rqd.profile)
 
             bar_h, item_h, w = 200, 48, 48
             font_sz = 24
 
-            with HSplit().set_content_align('c').set_item_align('c').set_bg(roundrect_bg(alpha=80)) \
-                .set_padding(64).set_sep(8):
+            with (
+                HSplit()
+                .set_content_align("c")
+                .set_item_align("c")
+                .set_bg(roundrect_bg(alpha=80))
+                .set_padding(64)
+                .set_sep(8)
+            ):
 
                 async def draw_icon(path):
-                    path = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH+f"/{path}")
-                    with Frame().set_size((w, item_h)).set_content_align('c'):
+                    path = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH + f"/{path}")
+                    with Frame().set_size((w, item_h)).set_content_align("c"):
                         ImageBox(path, size=(w // 2, w // 2))
-                
+
                 # 第一列：进度条的占位 难度占位 not_clear clear fc ap 图标
-                with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
                     Spacer(w=w, h=bar_h)
                     Spacer(w=w, h=item_h)
                     await draw_icon("icon_not_clear.png")
@@ -452,43 +577,80 @@ async def compose_play_progress_image(
 
                 # 之后的几列：进度条 难度 各个类型的数量
                 for c in rqd.counts:
-                    with VSplit().set_content_align('c').set_item_align('c').set_sep(8):
+                    with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
                         # 进度条
                         def draw_bar(color, h, blur_glass=False):
-                            return Frame().set_size((w, h)).set_bg(roundrect_bg(fill=color, radius=4, blur_glass=blur_glass))
-                        with draw_bar(PLAY_RESULT_COLORS['not_clear'], bar_h, blur_glass=True).set_content_align('b') as f:
-                            if c.clear: draw_bar(PLAY_RESULT_COLORS['clear'], int(bar_h * c.clear / c.total))
-                            if c.fc:    draw_bar(PLAY_RESULT_COLORS['fc'],    int(bar_h * c.fc / c.total))
-                            if c.ap:    draw_bar(PLAY_RESULT_COLORS['ap'],    int(bar_h * c.ap / c.total))
+                            return (
+                                Frame()
+                                .set_size((w, h))
+                                .set_bg(roundrect_bg(fill=color, radius=4, blur_glass=blur_glass))
+                            )
+
+                        with draw_bar(PLAY_RESULT_COLORS["not_clear"], bar_h, blur_glass=True).set_content_align(
+                            "b"
+                        ) as f:
+                            if c.clear:
+                                draw_bar(PLAY_RESULT_COLORS["clear"], int(bar_h * c.clear / c.total))
+                            if c.fc:
+                                draw_bar(PLAY_RESULT_COLORS["fc"], int(bar_h * c.fc / c.total))
+                            if c.ap:
+                                draw_bar(PLAY_RESULT_COLORS["ap"], int(bar_h * c.ap / c.total))
 
                         # 难度
-                        TextBox(f"{c.level}", TextStyle(font=DEFAULT_BOLD_FONT, size=font_sz, color=WHITE), overflow='clip') \
-                            .set_bg(roundrect_bg(fill=DIFF_COLORS[rqd.difficulty], radius=16)) \
-                            .set_size((w, item_h)).set_content_align('c')
+                        TextBox(
+                            f"{c.level}", TextStyle(font=DEFAULT_BOLD_FONT, size=font_sz, color=WHITE), overflow="clip"
+                        ).set_bg(roundrect_bg(fill=DIFF_COLORS[rqd.difficulty], radius=16)).set_size(
+                            (w, item_h)
+                        ).set_content_align("c")
                         # 数量 (第一行虽然图标是not_clear但是实际上是total)
-                        color = PLAY_RESULT_COLORS['not_clear']
-                        ap      = c.ap
-                        fc      = c.fc - c.ap
-                        clear   = c.clear - c.fc
-                        total   = c.total - c.clear
+                        color = PLAY_RESULT_COLORS["not_clear"]
+                        ap = c.ap
+                        fc = c.fc - c.ap
+                        clear = c.clear - c.fc
+                        total = c.total - c.clear
                         style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=False)
-                        TextBox(f"{total}", style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg(alpha=80))
-                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['clear'], shadow_offset=2)
-                        TextBox(f"{clear}", style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg(alpha=80))
-                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['fc'], shadow_offset=2)
-                        TextBox(f"{fc}",    style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg(alpha=80))
-                        style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=True, shadow_color=PLAY_RESULT_COLORS['ap'], shadow_offset=2)
-                        TextBox(f"{ap}",    style, overflow='clip').set_size((w, item_h)).set_content_align('c').set_bg(roundrect_bg(alpha=80))
+                        TextBox(f"{total}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                            roundrect_bg(alpha=80)
+                        )
+                        style = TextStyle(
+                            DEFAULT_BOLD_FONT,
+                            font_sz,
+                            color,
+                            use_shadow=True,
+                            shadow_color=PLAY_RESULT_COLORS["clear"],
+                            shadow_offset=2,
+                        )
+                        TextBox(f"{clear}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                            roundrect_bg(alpha=80)
+                        )
+                        style = TextStyle(
+                            DEFAULT_BOLD_FONT,
+                            font_sz,
+                            color,
+                            use_shadow=True,
+                            shadow_color=PLAY_RESULT_COLORS["fc"],
+                            shadow_offset=2,
+                        )
+                        TextBox(f"{fc}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                            roundrect_bg(alpha=80)
+                        )
+                        style = TextStyle(
+                            DEFAULT_BOLD_FONT,
+                            font_sz,
+                            color,
+                            use_shadow=True,
+                            shadow_color=PLAY_RESULT_COLORS["ap"],
+                            shadow_offset=2,
+                        )
+                        TextBox(f"{ap}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                            roundrect_bg(alpha=80)
+                        )
 
     add_watermark(canvas)
     return await canvas.get_img()
 
 
-def draw_text_icon(
-    text: str, 
-    icon: Image.Image, 
-    style: TextStyle
-) -> HSplit:
+def draw_text_icon(text: str, icon: Image.Image, style: TextStyle) -> HSplit:
     r"""draw_text_icon
 
     绘制文字和图标，
@@ -502,22 +664,19 @@ def draw_text_icon(
         要绘制的图标
     style : TextStyle
         绘制的文字样式
-    
+
     Return
     ------
     HSplit
     """
-    with HSplit().set_content_align('c').set_item_align('c').set_sep(4) as hs:
+    with HSplit().set_content_align("c").set_item_align("c").set_sep(4) as hs:
         if text is not None:
-            TextBox(str(text), style, overflow='clip')
+            TextBox(str(text), style, overflow="clip")
         ImageBox(icon, size=(None, 40))
     return hs
 
 
-
-async def compose_detail_music_rewards_image(
-    rqd: DetailMusicRewardsRequest
-) -> Image.Image:
+async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> Image.Image:
     r"""compose_detail_music_rewards_image
 
     在有抓包数据的情况下合成歌曲奖励图片
@@ -526,7 +685,7 @@ async def compose_detail_music_rewards_image(
     ----
     rqd : DetailMusicRewardsRequest
         在有抓包数据的情况下合成歌曲奖励图片所必需的数据
-    
+
     Return
     ------
     PIL.Image.Image
@@ -534,62 +693,78 @@ async def compose_detail_music_rewards_image(
     # 网格宽度和高度
     gw, gh = 80, 40
     # 样式
-    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
-    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
+    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
+    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75))
     # 奖励的icon
-    j_path = rqd.jewel_icon_path or RESULT_ASSET_PATH+"/jewel.png"
-    s_path = rqd.shard_icon_path or RESULT_ASSET_PATH+"/shard.png"
+    j_path = rqd.jewel_icon_path or RESULT_ASSET_PATH + "/jewel.png"
+    s_path = rqd.shard_icon_path or RESULT_ASSET_PATH + "/shard.png"
     jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, j_path)
     shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
-    
+
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(rqd.profile)
-            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(16)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 乐曲评级奖励
-                with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
-                    TextBox("歌曲评级奖励(S)", style1). \
-                        set_size((None, gh)). \
-                        set_content_align('c')
-                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2). \
-                        set_size((None, gh))
+                with (
+                    HSplit()
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_sep(24)
+                    .set_padding(16)
+                    .set_bg(roundrect_bg(alpha=80))
+                ):
+                    TextBox("歌曲评级奖励(S)", style1).set_size((None, gh)).set_content_align("c")
+                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2).set_size((None, gh))
                 # 连击奖励
-                with HSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
-                    for diff in ('hard', 'expert', 'master', 'append'): # 因为go的map是无序的，用这个保证顺序
-                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16):
+                with (
+                    HSplit()
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_sep(16)
+                    .set_item_bg(roundrect_bg(alpha=80))
+                ):
+                    for diff in ("hard", "expert", "master", "append"):  # 因为go的map是无序的，用这个保证顺序
+                        with HSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
                             # 难度
-                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
+                            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
                                 Spacer(w=gw, h=gh)
-                                for combo_reward in rqd.combo_rewards[diff]: # slice是有序的，所以不用再排序
-                                    TextBox(str(combo_reward.level), TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
-                                        set_size((gh, gh)). \
-                                        set_content_align('c').set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=8))
+                                for combo_reward in rqd.combo_rewards[diff]:  # slice是有序的，所以不用再排序
+                                    TextBox(
+                                        str(combo_reward.level),
+                                        TextStyle(DEFAULT_BOLD_FONT, 24, WHITE),
+                                        overflow="clip",
+                                    ).set_size((gh, gh)).set_content_align("c").set_bg(
+                                        roundrect_bg(fill=DIFF_COLORS[diff], radius=8)
+                                    )
                             # 奖励
-                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
-                                ImageBox(jewel_icon if diff != 'append' else shard_icon, size=(None, gh))
+                            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
+                                ImageBox(jewel_icon if diff != "append" else shard_icon, size=(None, gh))
                                 for combo_reward in rqd.combo_rewards[diff]:
-                                    TextBox(str(combo_reward.reward), style2, overflow='clip'). \
-                                        set_size((gw, gh)). \
-                                        set_content_align('l')
+                                    TextBox(str(combo_reward.reward), style2, overflow="clip").set_size(
+                                        (gw, gh)
+                                    ).set_content_align("l")
                             # 累计奖励
-                            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8):
-                                TextBox("累计", style1). \
-                                    set_size((gw, gh)). \
-                                    set_content_align('l') 
+                            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
+                                TextBox("累计", style1).set_size((gw, gh)).set_content_align("l")
                                 acc = 0
                                 for combo_reward in rqd.combo_rewards[diff]:
                                     acc += combo_reward.reward
-                                    TextBox(str(acc), style2, overflow='clip'). \
-                                        set_size((gw, gh)). \
-                                        set_content_align('l')
+                                    TextBox(str(acc), style2, overflow="clip").set_size((gw, gh)).set_content_align("l")
 
     add_watermark(canvas)
     return await canvas.get_img()
 
-async def compose_basic_music_rewards_image(
-    rqd: BasicMusicRewardsRequest
-) -> Image.Image:
+
+async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Image.Image:
     r"""compose_basic_music_rewards_image
 
     在仅基础数据的情况下合成歌曲奖励图片
@@ -598,7 +773,7 @@ async def compose_basic_music_rewards_image(
     ----
     rqd : BasicMusicRewardsRequest
         在仅基础数据的情况下合成歌曲奖励图片所必需的数据
-    
+
     Return
     ------
     PIL.Image.Image
@@ -606,8 +781,8 @@ async def compose_basic_music_rewards_image(
     # 网格宽度和高度
     gw, gh = 80, 40
     # 样式
-    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)) 
-    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75)) 
+    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
+    style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75))
     # 奖励的icon
     j_path = rqd.jewel_icon_path or f"{RESULT_ASSET_PATH}/jewel.png"
     s_path = rqd.shard_icon_path or f"{RESULT_ASSET_PATH}/shard.png"
@@ -615,31 +790,51 @@ async def compose_basic_music_rewards_image(
     shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16):
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(rqd.profile)
-            with VSplit().set_content_align('lt').set_item_align('lt').set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(16)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 说明
-                TextBox("仅显示简略估计数据（假设Clear的歌曲都是S评级，未FC的歌曲都没拿到连击奖励）",
-                        TextStyle(DEFAULT_FONT, 20, (200, 75, 75)), use_real_line_count=True).set_w(480)
+                TextBox(
+                    "仅显示简略估计数据（假设Clear的歌曲都是S评级，未FC的歌曲都没拿到连击奖励）",
+                    TextStyle(DEFAULT_FONT, 20, (200, 75, 75)),
+                    use_real_line_count=True,
+                ).set_w(480)
                 # 乐曲评级奖励
-                with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24).set_padding(16).set_bg(roundrect_bg(alpha=80)):
-                    TextBox("歌曲评级奖励(S)", style1). \
-                        set_size((None, gh)). \
-                        set_content_align('c')
-                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2). \
-                        set_size((None, gh))
+                with (
+                    HSplit()
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_sep(24)
+                    .set_padding(16)
+                    .set_bg(roundrect_bg(alpha=80))
+                ):
+                    TextBox("歌曲评级奖励(S)", style1).set_size((None, gh)).set_content_align("c")
+                    draw_text_icon(rqd.rank_rewards, jewel_icon, style2).set_size((None, gh))
                 # 连击奖励
-                with VSplit().set_content_align('lt').set_item_align('lt').set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80)):
-                    for diff in ['hard', 'expert', 'master', 'append']:
-                        with HSplit().set_content_align('lt').set_item_align('lt').set_sep(24):
-                            TextBox(f"{diff.upper()}", TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow='clip'). \
-                                set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=8)). \
-                                set_size((120, gh)).set_content_align('c')
-                            TextBox("连击奖励", style1). \
-                                set_size((None, gh)). \
-                                set_content_align('l')
-                            draw_text_icon(rqd.combo_rewards[diff], jewel_icon if diff != 'append' else shard_icon, style2) \
-                                .set_size((None, gh))
+                with (
+                    VSplit()
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_sep(8)
+                    .set_padding(16)
+                    .set_bg(roundrect_bg(alpha=80))
+                ):
+                    for diff in ["hard", "expert", "master", "append"]:
+                        with HSplit().set_content_align("lt").set_item_align("lt").set_sep(24):
+                            TextBox(f"{diff.upper()}", TextStyle(DEFAULT_BOLD_FONT, 24, WHITE), overflow="clip").set_bg(
+                                roundrect_bg(fill=DIFF_COLORS[diff], radius=8)
+                            ).set_size((120, gh)).set_content_align("c")
+                            TextBox("连击奖励", style1).set_size((None, gh)).set_content_align("l")
+                            draw_text_icon(
+                                rqd.combo_rewards[diff], jewel_icon if diff != "append" else shard_icon, style2
+                            ).set_size((None, gh))
 
     add_watermark(canvas)
     return await canvas.get_img()

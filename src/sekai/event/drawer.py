@@ -1,6 +1,6 @@
 from datetime import datetime
-from typing import Any, List, Optional
 import math
+
 from PIL import Image
 
 from src.sekai.base.configs import ASSETS_BASE_DIR
@@ -8,11 +8,11 @@ from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
     SEKAI_BLUE_BG,
+    WIDGET_BG_COLOR,
     add_watermark,
     roundrect_bg,
-    WIDGET_BG_COLOR,
 )
-from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, color_code_to_rgb, DEFAULT_HEAVY_FONT
+from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, color_code_to_rgb
 from src.sekai.base.plot import (
     Canvas,
     Frame,
@@ -31,24 +31,16 @@ from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_detailed_profile_card,
 )
-from src.sekai.profile.model import (
-    CardFullThumbnailRequest,
-    DetailedProfileCardRequest,
-)
 
 # 从 model.py 导入数据模型
 from .model import (
-    EventInfo,
-    EventHistory,
-    EventAssets,
-    EventBrief,
     EventDetailRequest,
-    EventRecordRequest,
-    EventListRequest,
     # 兼容性别名
     EventHistoryInfo,
-    EventBriefInfo,
+    EventListRequest,
+    EventRecordRequest,
 )
+
 
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     detail = rqd.event_info
@@ -72,19 +64,37 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
             chapter["start_time"] = datetime.fromtimestamp(chapter["start_at"] / 1000)
             chapter["end_time"] = datetime.fromtimestamp(chapter["aggregate_at"] / 1000 + 1)
     use_story_bg = detail.event_type != "world_bloom"
-    event_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path) if use_story_bg else await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
-    event_chara_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img) if detail.banner_cid else None
+    event_bg = (
+        await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path)
+        if use_story_bg
+        else await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
+    )
+    event_chara_img = (
+        await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img) if detail.banner_cid else None
+    )
     event_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     ban_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
     h = 1024
     w = min(int(h * 1.6), event_bg.size[0] * h // event_bg.size[1] if event_bg else int(h * 1.6))
     bg = ImageBg(event_bg, blur=False) if event_bg else SEKAI_BLUE_BG
+
     async def draw(w, h):
-        with (Canvas(bg=bg, w=w, h=h).set_padding(BG_PADDING).set_content_align("r") as canvas):
-            with Frame().set_size((w-BG_PADDING*2, h-BG_PADDING*2)).set_content_align("lb").set_padding((64, 0)):
+        with Canvas(bg=bg, w=w, h=h).set_padding(BG_PADDING).set_content_align("r") as canvas:
+            with (
+                Frame().set_size((w - BG_PADDING * 2, h - BG_PADDING * 2)).set_content_align("lb").set_padding((64, 0))
+            ):
                 if use_story_bg:
-                    ImageBox(event_chara_img, size=(None, int(h * 0.9)), use_alpha_blend=True).set_offset((0, BG_PADDING))
-            with VSplit().set_padding(16).set_sep(16).set_item_align("t").set_content_align("t").set_item_bg(roundrect_bg(alpha=80)):
+                    ImageBox(event_chara_img, size=(None, int(h * 0.9)), use_alpha_blend=True).set_offset(
+                        (0, BG_PADDING)
+                    )
+            with (
+                VSplit()
+                .set_padding(16)
+                .set_sep(16)
+                .set_item_align("t")
+                .set_content_align("t")
+                .set_item_bg(roundrect_bg(alpha=80))
+            ):
                 # logo
                 ImageBox(event_logo, size=(None, 150)).set_omit_parent_bg(True)
 
@@ -126,7 +136,9 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                 cur_chapter = chapter
                                 break
                         if cur_chapter:
-                            TextBox(f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style)
+                            TextBox(
+                                f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style
+                            )
 
                     # 进度条
                     progress = (datetime.now() - start_time) / (end_time - start_time)
@@ -134,18 +146,27 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                     progress_w, progress_h, border = 320, 8, 1
                     if detail.event_type == "world_bloom" and len(wl_chapters) > 1:
                         with Frame().set_padding(8).set_content_align("lt"):
-                            Spacer(w=progress_w+border*2, h=progress_h+border*2).set_bg(RoundRectBg((75, 75, 75, 255), 4))
+                            Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
+                                RoundRectBg((75, 75, 75, 255), 4)
+                            )
                             for cid, chapter in enumerate(wl_chapters):
                                 cprogress_start = (chapter["start_time"] - start_time) / (end_time - start_time)
                                 cprogress_end = (chapter["end_time"] - start_time) / (end_time - start_time)
                                 chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE.get(cid + 1))
-                                Spacer(w=int(progress_w * (cprogress_end - cprogress_start)), h=progress_h).set_bg(RoundRectBg(chara_color, 4)) \
-                                    .set_offset((border + int(progress_w * cprogress_start), border))
-                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(RoundRectBg((255, 255, 255, 200), 4)).set_offset((border, border))
+                                Spacer(w=int(progress_w * (cprogress_end - cprogress_start)), h=progress_h).set_bg(
+                                    RoundRectBg(chara_color, 4)
+                                ).set_offset((border + int(progress_w * cprogress_start), border))
+                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(
+                                RoundRectBg((255, 255, 255, 200), 4)
+                            ).set_offset((border, border))
                     else:
                         with Frame().set_padding(8).set_content_align("lt"):
-                            Spacer(w=progress_w+border*2, h=progress_h+border*2).set_bg(RoundRectBg((75, 75, 75, 255), 4))
-                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(RoundRectBg((255, 255, 255, 255), 4)).set_offset((border, border))
+                            Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
+                                RoundRectBg((75, 75, 75, 255), 4)
+                            )
+                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(
+                                RoundRectBg((255, 255, 255, 255), 4)
+                            ).set_offset((border, border))
                 # 活动卡片
                 event_cards = rqd.event_cards
                 if event_cards:
@@ -153,21 +174,31 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         TextBox("活动卡片", label_style)
                         event_cards = event_cards[:8]
                         card_num = len(event_cards)
-                        if card_num <= 4: col_count = card_num
-                        elif card_num <= 6: col_count = 3
-                        else: col_count = 4
+                        if card_num <= 4:
+                            col_count = card_num
+                        elif card_num <= 6:
+                            col_count = 3
+                        else:
+                            col_count = 4
                         with Grid(col_count=col_count).set_sep(4, 4):
                             for card, thumb in zip(event_cards, card_thumbs):
                                 with VSplit().set_padding(0).set_sep(2).set_item_align("c").set_content_align("c"):
                                     ImageBox(thumb, size=(80, 80))
-                                    TextBox(f"ID:{card.card_id}", TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)), overflow="clip")
+                                    TextBox(
+                                        f"ID:{card.card_id}",
+                                        TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)),
+                                        overflow="clip",
+                                    )
 
                 # 加成
                 if detail.bonus_attr or detail.bonus_chara_id:
                     with HSplit().set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
                         if detail.bonus_attr:
                             TextBox("加成属性", label_style)
-                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path), size=(None, 40))
+                            ImageBox(
+                                await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path),
+                                size=(None, 40),
+                            )
                         if detail:
                             TextBox("加成角色", label_style)
                             bonus_chara_image = []
@@ -182,6 +213,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
 
     return await draw(w, h)
 
+
 # 合成活动记录图片
 async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     profile = rqd.user_info
@@ -193,7 +225,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
     style4 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))
 
-    async def draw_events(name, user_events: List[EventHistoryInfo]):
+    async def draw_events(name, user_events: list[EventHistoryInfo]):
         topk = 30
         if any(item.rank is not None for item in user_events):
             has_rank = True
@@ -206,11 +238,25 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
 
         user_events = user_events[:topk]
 
-        with VSplit().set_padding(16).set_sep(16).set_item_align("lt").set_content_align("lt").set_bg(roundrect_bg(alpha=80)):
+        with (
+            VSplit()
+            .set_padding(16)
+            .set_sep(16)
+            .set_item_align("lt")
+            .set_content_align("lt")
+            .set_bg(roundrect_bg(alpha=80))
+        ):
             TextBox(title, style1)
 
             th, sh, gh = 28, 40, 80
-            with HSplit().set_padding(16).set_sep(16).set_item_align("lt").set_content_align("lt").set_bg(roundrect_bg(alpha=80)):
+            with (
+                HSplit()
+                .set_padding(16)
+                .set_sep(16)
+                .set_item_align("lt")
+                .set_content_align("lt")
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 活动信息
                 with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
                     TextBox("活动", style1).set_h(th).set_content_align("c")
@@ -219,7 +265,9 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                         event_end_at = item.end_at
                         with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(gh):
                             if "charaIcon" in item:
-                                ImageBox(await get_img_from_path(ASSETS_BASE_DIR, item.wl_chara_icon_path), size=(None, gh))
+                                ImageBox(
+                                    await get_img_from_path(ASSETS_BASE_DIR, item.wl_chara_icon_path), size=(None, gh)
+                                )
                             ImageBox(await get_img_from_path(ASSETS_BASE_DIR, item.banner_path), size=(None, gh))
                             with VSplit().set_padding(0).set_sep(2).set_item_align("l").set_content_align("l"):
                                 TextBox(f"【{item.id}】{item.event_name}", style2).set_w(150)
@@ -241,7 +289,9 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_detailed_profile_card(rqd.user_info)
-            TextBox("每次上传时进行增量更新，未上传过的记录将会丢失", style4).set_bg(roundrect_bg(alpha=80)).set_padding(12)
+            TextBox("每次上传时进行增量更新，未上传过的记录将会丢失", style4).set_bg(
+                roundrect_bg(alpha=80)
+            ).set_padding(12)
             with HSplit().set_sep(16).set_item_align("lt").set_content_align("lt"):
                 if user_events:
                     await draw_events("活动", user_events)
@@ -251,6 +301,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     add_watermark(canvas)
     return await canvas.get_img()
 
+
 # 合成活动列表图片
 async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
     event_list = rqd.event_info
@@ -259,12 +310,12 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_padding(0).set_sep(4).set_content_align('lt').set_item_align('lt'):
+        with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
             TextBox(
-                f"活动按时间顺序排列，黄色为当期活动，灰色为过去活动",
-                TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100))
+                "活动按时间顺序排列，黄色为当期活动，灰色为过去活动",
+                TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4)).set_padding(4)
-            with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align('lt').set_content_align('lt'):
+            with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
                 for d in event_list:
                     now = datetime.now()
                     event_start_at = d.start_at
@@ -276,8 +327,8 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                         bg_color = (220, 220, 220, 200)
                     bg = roundrect_bg(bg_color, 5, alpha=180)
 
-                    with HSplit().set_padding(4).set_sep(4).set_item_align('lt').set_content_align('lt').set_bg(bg):
-                        with VSplit().set_padding(0).set_sep(2).set_item_align('lt').set_content_align('lt'):
+                    with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
+                        with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                             ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path), size=(None, 40))
                             with Grid(col_count=3).set_padding(0).set_sep(1, 1):
                                 if d.event_cards:
@@ -288,15 +339,24 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                             if d.event_cards:
                                 if len(d.event_cards) <= 3:
                                     Spacer(h=29)
-                        with VSplit().set_padding(0).set_sep(2).set_item_align('lt').set_content_align('lt'):
+                        with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                             TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
                             TextBox(f"ID: {d.id} {d.event_type}", style2)
                             TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             with HSplit().set_padding(0).set_sep(4):
-                                if d.event_attr_path: ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path), size=(None, 24))
-                                if d.event_unit_path: ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path), size=(None, 24))
-                                if d.event_chara_path: ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path), size=(None, 24))
+                                if d.event_attr_path:
+                                    ImageBox(
+                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path), size=(None, 24)
+                                    )
+                                if d.event_unit_path:
+                                    ImageBox(
+                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path), size=(None, 24)
+                                    )
+                                if d.event_chara_path:
+                                    ImageBox(
+                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path), size=(None, 24)
+                                    )
                                 if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
                                     Spacer(w=24, h=24)
 

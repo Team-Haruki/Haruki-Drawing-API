@@ -1,5 +1,6 @@
+from typing import Any
+
 from pydantic import BaseModel
-from typing import List, Dict, Optional, Tuple, Any
 
 
 class ScoreData(BaseModel):
@@ -18,6 +19,7 @@ class ScoreData(BaseModel):
     score_max : int
         分数上限，打歌不能超过的最高分数
     """
+
     event_bonus: int
     boost: int
     score_min: int
@@ -44,12 +46,13 @@ class ScoreControlRequest(BaseModel):
     valid_scores : List[ ScoreData ]
         获取指定活动PT的所有可能分数
     """
+
     music_cover_path: str
     music_id: int
     music_title: str
     music_basic_point: int
     target_point: int
-    valid_scores: List[ScoreData] = []
+    valid_scores: list[ScoreData] = []
 
 
 class CustomRoomScoreRequest(BaseModel):
@@ -66,9 +69,10 @@ class CustomRoomScoreRequest(BaseModel):
     music_list_map : Dict[int, List[Dict[str, Any]]]
         各pt系数对应的歌曲信息列表，key为event_rate，value为包含music_id, music_title, music_cover的字典列表
     """
+
     target_point: int
-    candidate_pairs: List[Tuple[int, int]]
-    music_list_map: Dict[int, List[Dict[str, Any]]]
+    candidate_pairs: list[tuple[int, int]]
+    music_list_map: dict[int, list[dict[str, Any]]]
 
 
 class MusicMetaInfo(BaseModel):
@@ -99,15 +103,16 @@ class MusicMetaInfo(BaseModel):
     fever_score : float
         Fever分数
     """
+
     difficulty: str
     music_time: float
     tap_count: int
     event_rate: float
     base_score: float
     base_score_auto: float
-    skill_score_solo: List[float]
-    skill_score_auto: List[float]
-    skill_score_multi: List[float]
+    skill_score_solo: list[float]
+    skill_score_auto: list[float]
+    skill_score_multi: list[float]
     fever_score: float
 
 
@@ -127,10 +132,11 @@ class MusicMetaRequest(BaseModel):
     metas : List[MusicMetaInfo]
         该歌曲所有难度的Meta信息
     """
+
     music_id: int
     music_title: str
     music_cover_path: str
-    metas: List[MusicMetaInfo]
+    metas: list[MusicMetaInfo]
 
 
 class MusicBoardItem(BaseModel):
@@ -171,18 +177,19 @@ class MusicBoardItem(BaseModel):
     tps : float
         每秒点击数（TPS）
     """
+
     rank: int
     music_id: int
     difficulty: str
     level: int
     music_title: str
     music_cover_path: str
-    live_type_pt: Optional[float] = None
-    live_type_real_score: Optional[float] = None
-    live_type_score: Optional[float] = None
-    live_type_skill_account: Optional[float] = None
-    live_type_pt_per_hour: Optional[float] = None
-    play_count_per_hour: Optional[float] = None
+    live_type_pt: float | None = None
+    live_type_real_score: float | None = None
+    live_type_score: float | None = None
+    live_type_skill_account: float | None = None
+    live_type_pt_per_hour: float | None = None
+    play_count_per_hour: float | None = None
     event_rate: float
     music_time: float
     tps: float
@@ -214,12 +221,13 @@ class MusicBoardRequest(BaseModel):
     description : str
         底部描述文本，如技能顺序等
     """
+
     live_type: str
     target: str
     ascend: bool
     page: int
     total_page: int
     title_text: str
-    items: List[MusicBoardItem]
-    spec_mid_diffs: List[Tuple[int, str]] = []
+    items: list[MusicBoardItem]
+    spec_mid_diffs: list[tuple[int, str]] = []
     description: str = ""

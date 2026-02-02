@@ -4,18 +4,16 @@ Education 模块数据模型
 定义挑战Live、加成详情、区域道具、羁绊等级、队长次数相关的 Pydantic 模型。
 """
 
-from typing import List, Dict, Optional
-
 from pydantic import BaseModel
 
 from src.sekai.profile.model import DetailedProfileCardRequest
 
-
 # ========== 挑战Live详情 ==========
+
 
 class CharacterChallengeInfo(BaseModel):
     """角色挑战信息
-    
+
     Attributes
     ----------
     chara_id : int
@@ -31,6 +29,7 @@ class CharacterChallengeInfo(BaseModel):
     chara_icon_path : str
         角色图标路径
     """
+
     chara_id: int
     rank: int
     score: int
@@ -41,7 +40,7 @@ class CharacterChallengeInfo(BaseModel):
 
 class ChallengeLiveDetailsRequest(BaseModel):
     """挑战Live详情绘制请求
-    
+
     Attributes
     ----------
     profile : DetailedProfileCardRequest
@@ -55,18 +54,20 @@ class ChallengeLiveDetailsRequest(BaseModel):
     shard_icon_path : Optional[str]
         碎片图标路径
     """
+
     profile: DetailedProfileCardRequest
-    character_challenges: List[CharacterChallengeInfo]
+    character_challenges: list[CharacterChallengeInfo]
     max_score: int
-    jewel_icon_path: Optional[str] = None
-    shard_icon_path: Optional[str] = None
+    jewel_icon_path: str | None = None
+    shard_icon_path: str | None = None
 
 
 # ========== 加成详情 ==========
 
+
 class CharacterBonus(BaseModel):
     """角色加成信息
-    
+
     Attributes
     ----------
     chara_id : int
@@ -82,6 +83,7 @@ class CharacterBonus(BaseModel):
     total : float
         总加成
     """
+
     chara_id: int
     chara_icon_path: str
     area_item: float
@@ -92,7 +94,7 @@ class CharacterBonus(BaseModel):
 
 class UnitBonus(BaseModel):
     """组合加成信息
-    
+
     Attributes
     ----------
     unit : str
@@ -106,6 +108,7 @@ class UnitBonus(BaseModel):
     total : float
         总加成
     """
+
     unit: str
     unit_icon_path: str
     area_item: float
@@ -115,7 +118,7 @@ class UnitBonus(BaseModel):
 
 class AttrBonus(BaseModel):
     """属性加成信息
-    
+
     Attributes
     ----------
     attr : str
@@ -127,6 +130,7 @@ class AttrBonus(BaseModel):
     total : float
         总加成
     """
+
     attr: str
     attr_icon_path: str
     area_item: float
@@ -135,7 +139,7 @@ class AttrBonus(BaseModel):
 
 class PowerBonusDetailRequest(BaseModel):
     """加成详情绘制请求
-    
+
     Attributes
     ----------
     profile : DetailedProfileCardRequest
@@ -147,17 +151,19 @@ class PowerBonusDetailRequest(BaseModel):
     attr_bonuses : List[AttrBonus]
         属性加成列表
     """
+
     profile: DetailedProfileCardRequest
-    chara_bonuses: List[CharacterBonus]
-    unit_bonuses: List[UnitBonus]
-    attr_bonuses: List[AttrBonus]
+    chara_bonuses: list[CharacterBonus]
+    unit_bonuses: list[UnitBonus]
+    attr_bonuses: list[AttrBonus]
 
 
 # ========== 区域道具升级材料 ==========
 
+
 class AreaItemMaterial(BaseModel):
     """区域道具升级材料
-    
+
     Attributes
     ----------
     material_id : int
@@ -173,6 +179,7 @@ class AreaItemMaterial(BaseModel):
     is_enough : bool
         是否足够
     """
+
     material_id: int
     material_icon_path: str
     quantity: int
@@ -183,7 +190,7 @@ class AreaItemMaterial(BaseModel):
 
 class AreaItemLevel(BaseModel):
     """区域道具等级信息
-    
+
     Attributes
     ----------
     level : int
@@ -195,15 +202,16 @@ class AreaItemLevel(BaseModel):
     materials : List[AreaItemMaterial]
         升级材料列表
     """
+
     level: int
     bonus: float
     can_upgrade: bool
-    materials: List[AreaItemMaterial]
+    materials: list[AreaItemMaterial]
 
 
 class AreaItemInfo(BaseModel):
     """区域道具信息
-    
+
     Attributes
     ----------
     item_id : int
@@ -217,16 +225,17 @@ class AreaItemInfo(BaseModel):
     levels : List[AreaItemLevel]
         等级信息列表
     """
+
     item_id: int
     current_level: int
     item_icon_path: str
-    target_icon_path: Optional[str] = None
-    levels: List[AreaItemLevel]
+    target_icon_path: str | None = None
+    levels: list[AreaItemLevel]
 
 
 class AreaItemUpgradeMaterialsRequest(BaseModel):
     """区域道具升级材料绘制请求
-    
+
     Attributes
     ----------
     profile : Optional[DetailedProfileCardRequest]
@@ -236,16 +245,18 @@ class AreaItemUpgradeMaterialsRequest(BaseModel):
     has_profile : bool
         是否有用户信息
     """
-    profile: Optional[DetailedProfileCardRequest] = None
-    area_items: List[AreaItemInfo]
+
+    profile: DetailedProfileCardRequest | None = None
+    area_items: list[AreaItemInfo]
     has_profile: bool = False
 
 
 # ========== 羁绊等级 ==========
 
+
 class BondInfo(BaseModel):
     """羁绊信息
-    
+
     Attributes
     ----------
     chara_id1 : int
@@ -271,6 +282,7 @@ class BondInfo(BaseModel):
     color2 : tuple
         角色2颜色 RGB
     """
+
     chara_id1: int
     chara_id2: int
     chara_icon_path1: str
@@ -278,7 +290,7 @@ class BondInfo(BaseModel):
     chara_rank1: int
     chara_rank2: int
     bond_level: int
-    need_exp: Optional[int] = None
+    need_exp: int | None = None
     has_bond: bool = True
     color1: tuple = (100, 100, 100)
     color2: tuple = (100, 100, 100)
@@ -286,7 +298,7 @@ class BondInfo(BaseModel):
 
 class BondsRequest(BaseModel):
     """羁绊等级绘制请求
-    
+
     Attributes
     ----------
     profile : DetailedProfileCardRequest
@@ -296,16 +308,18 @@ class BondsRequest(BaseModel):
     max_level : int
         最大羁绊等级
     """
+
     profile: DetailedProfileCardRequest
-    bonds: List[BondInfo]
+    bonds: list[BondInfo]
     max_level: int
 
 
 # ========== 队长次数 ==========
 
+
 class LeaderCountInfo(BaseModel):
     """队长次数信息
-    
+
     Attributes
     ----------
     chara_id : int
@@ -319,6 +333,7 @@ class LeaderCountInfo(BaseModel):
     ex_count : int
         EX次数
     """
+
     chara_id: int
     chara_icon_path: str
     play_count: int
@@ -328,7 +343,7 @@ class LeaderCountInfo(BaseModel):
 
 class LeaderCountRequest(BaseModel):
     """队长次数绘制请求
-    
+
     Attributes
     ----------
     profile : DetailedProfileCardRequest
@@ -338,6 +353,7 @@ class LeaderCountRequest(BaseModel):
     max_play_count : int
         最大队长次数
     """
+
     profile: DetailedProfileCardRequest
-    leader_counts: List[LeaderCountInfo]
+    leader_counts: list[LeaderCountInfo]
     max_play_count: int

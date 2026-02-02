@@ -30,7 +30,7 @@ services:
       - GIN_MODE=release
     volumes:
       # 必须和haruki-drawing-api挂载到同一位置
-      - /home/xmlq/codes/pycodes/nonebot/lunabot-sekai/data:/app/haruki_drawing_api/data
+      - ./data:/app/haruki_drawing_api/data
     deploy:
       resources:
         limits:
@@ -45,7 +45,7 @@ services:
       - SYS_ADMIN
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health" ]
       interval: 30s
       timeout: 10s
       retries: 3

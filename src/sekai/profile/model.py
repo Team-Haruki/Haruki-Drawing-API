@@ -1,6 +1,9 @@
+from typing import Literal
+
 from pydantic import BaseModel
-from typing import Optional, List, Literal
+
 from src.sekai.honor.drawer import HonorRequest
+
 
 class DetailedProfileCardRequest(BaseModel):
     id: str
@@ -12,8 +15,9 @@ class DetailedProfileCardRequest(BaseModel):
     is_hide_uid: bool = False
     leader_image_path: str
     has_frame: bool = False
-    frame_path: Optional[str] = None
-    user_cards: Optional[List[dict]] = None
+    frame_path: str | None = None
+    user_cards: list[dict] | None = None
+
 
 class BasicProfile(BaseModel):
     r"""BasicProfile
@@ -37,13 +41,15 @@ class BasicProfile(BaseModel):
     frame_path : Optional[ str ] = None
         框的路径
     """
+
     id: str
     region: str
     nickname: str
     is_hide_uid: bool = False
     leader_image_path: str
     has_frame: bool = False
-    frame_path: Optional[str] = None
+    frame_path: str | None = None
+
 
 class PlayerFramePaths(BaseModel):
     r"""PlayerFramePaths
@@ -65,12 +71,14 @@ class PlayerFramePaths(BaseModel):
     righttop : str
         frame_righttop.png 路径
     """
+
     base: str
     centertop: str
     leftbottom: str
     lefttop: str
     rightbottom: str
     righttop: str
+
 
 class ProfileDataSource(BaseModel):
     r"""ProfileDataSource
@@ -88,10 +96,12 @@ class ProfileDataSource(BaseModel):
     mode : Optional[ str ] = None
         数据获取模式
     """
+
     name: str
-    source: Optional[str] = None
-    update_time: Optional[int] = None
-    mode: Optional[str] = None
+    source: str | None = None
+    update_time: int | None = None
+    mode: str | None = None
+
 
 class ProfileCardRequest(BaseModel):
     r"""ProfileCardRequest
@@ -107,9 +117,10 @@ class ProfileCardRequest(BaseModel):
     error_message : Optional[str] = None
         错误或警告
     """
-    profile: Optional[BasicProfile] = None
-    data_sources: List[ProfileDataSource] = []
-    error_message: Optional[str] = None
+
+    profile: BasicProfile | None = None
+    data_sources: list[ProfileDataSource] = []
+    error_message: str | None = None
 
 
 class CardFullThumbnailRequest(BaseModel):
@@ -119,14 +130,15 @@ class CardFullThumbnailRequest(BaseModel):
     frame_img_path: str
     attr_img_path: str
     rare_img_path: str
-    train_rank: Optional[int]
-    train_rank_img_path: Optional[str] = None
-    level: Optional[int] = None
-    birthday_icon_path: Optional[str] = None
+    train_rank: int | None
+    train_rank_img_path: str | None = None
+    level: int | None = None
+    birthday_icon_path: str | None = None
     is_after_training: bool = None
-    custom_text: Optional[str] = None
-    card_level: Optional[dict] = None
+    custom_text: str | None = None
+    card_level: dict | None = None
     is_pcard: bool = False
+
 
 class ProfileBgSettings(BaseModel):
     r"""ProfileBgSettings
@@ -144,10 +156,12 @@ class ProfileBgSettings(BaseModel):
     vertical : bool = False
         是否是竖屏
     """
-    img_path: Optional[str] = None
-    blur: int =  4
+
+    img_path: str | None = None
+    blur: int = 4
     alpha: int = 100
     vertical: bool = False
+
 
 class MusicClearCount(BaseModel):
     r"""MusicClearCount
@@ -165,10 +179,12 @@ class MusicClearCount(BaseModel):
     ap : int = 0
         全P歌曲数量
     """
+
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"]
     clear: int = 0
     fc: int = 0
     ap: int = 0
+
 
 class CharacterRank(BaseModel):
     r"""CharacterRank
@@ -182,8 +198,10 @@ class CharacterRank(BaseModel):
     rank : int = 0
         角色等级
     """
-    character_id: int 
+
+    character_id: int
     rank: int = 0
+
 
 class SoloLiveRank(BaseModel):
     r"""SoloLiveRank
@@ -199,9 +217,11 @@ class SoloLiveRank(BaseModel):
     rank : int = 0
         挑战Live的等级
     """
-    character_id: int 
+
+    character_id: int
     score: int = 0
     rank: int = 0
+
 
 class ProfileRequest(BaseModel):
     r"""ProfileRequest
@@ -239,21 +259,22 @@ class ProfileRequest(BaseModel):
     icon_ap_path: Optional[str] = None
     chara_rank_icon_path_map: Optional[dict] = None
     """
+
     profile: BasicProfile
     rank: int
-    twitter_id: str = ''
-    word: str = ''
-    pcards: List[CardFullThumbnailRequest]
-    bg_settings: Optional[ProfileBgSettings] = None
-    honors: List[HonorRequest] = []
-    music_difficulty_count: List[MusicClearCount] = []
-    character_rank: List[CharacterRank] = []
-    solo_live: Optional[SoloLiveRank] = None
-    update_time: Optional[int] = None
+    twitter_id: str = ""
+    word: str = ""
+    pcards: list[CardFullThumbnailRequest]
+    bg_settings: ProfileBgSettings | None = None
+    honors: list[HonorRequest] = []
+    music_difficulty_count: list[MusicClearCount] = []
+    character_rank: list[CharacterRank] = []
+    solo_live: SoloLiveRank | None = None
+    update_time: int | None = None
     lv_rank_bg_path: str
     x_icon_path: str
     icon_clear_path: str
     icon_fc_path: str
     icon_ap_path: str
     chara_rank_icon_path_map: dict
-    frame_paths: Optional[PlayerFramePaths] = None
+    frame_paths: PlayerFramePaths | None = None

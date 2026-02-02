@@ -1,32 +1,29 @@
 from PIL import Image
 
-from src.sekai.base.configs import DEFAULT_BOLD_FONT, DEFAULT_FONT, ASSETS_BASE_DIR
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.configs import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 from src.sekai.base.draw import (
-    TextBox,
-    Canvas,
-    SEKAI_BLUE_BG,
     BG_PADDING,
-    roundrect_bg,
+    SEKAI_BLUE_BG,
+    Canvas,
+    TextBox,
     add_watermark,
+    roundrect_bg,
 )
 from src.sekai.base.plot import (
-    VSplit,
+    Grid,
     ImageBox,
     TextStyle,
-    Grid,
+    VSplit,
 )
-
+from src.sekai.base.utils import get_img_from_path
 
 # =========================== 从.model导入数据类型 =========================== #
+from .model import StampListRequest
 
-from .model import *
 
-async def compose_stamp_list_image(
-    rqd: StampListRequest
-) -> Image.Image:
+async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
     r"""compose_stamp_list_image\
-    
+
     合成表情列表图片
 
     Args
@@ -40,15 +37,20 @@ async def compose_stamp_list_image(
     """
     stamps = rqd.stamps
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_sep(8).set_item_align('l').set_bg(roundrect_bg(alpha=80)).set_padding(8):
-            TextBox(rqd.prompt_message,
-                style=TextStyle(font=DEFAULT_FONT, size=24, color=(0, 0, 0, 255)), use_real_line_count=True) \
-                .set_padding(16).set_bg(roundrect_bg(alpha=80))
+        with VSplit().set_sep(8).set_item_align("l").set_bg(roundrect_bg(alpha=80)).set_padding(8):
+            TextBox(
+                rqd.prompt_message,
+                style=TextStyle(font=DEFAULT_FONT, size=24, color=(0, 0, 0, 255)),
+                use_real_line_count=True,
+            ).set_padding(16).set_bg(roundrect_bg(alpha=80))
             with Grid(col_count=5).set_sep(4, 4).set_item_bg(roundrect_bg(alpha=80)):
                 for stamp in stamps:
                     img = await get_img_from_path(ASSETS_BASE_DIR, stamp.image_path)
                     with VSplit().set_padding(4).set_sep(4):
                         ImageBox(img, size=(None, 100), use_alpha_blend=True, shadow=True)
-                        TextBox(str(stamp.id), style=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=tuple(stamp.text_color)))
+                        TextBox(
+                            str(stamp.id),
+                            style=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=tuple(stamp.text_color)),
+                        )
     add_watermark(canvas)
     return await canvas.get_img()

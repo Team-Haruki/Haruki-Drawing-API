@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Dict, Optional
+
 from PIL import Image
 
 from src.sekai.base.configs import ASSETS_BASE_DIR
@@ -10,33 +10,28 @@ from src.sekai.base.draw import (
     roundrect_bg,
 )
 from src.sekai.base.painter import (
-    DEFAULT_BOLD_FONT,
-    DEFAULT_HEAVY_FONT,
-    DEFAULT_FONT,
     BLACK,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
 )
-from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit, ImageBg
-from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_float_str, concat_images
+from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import get_card_full_thumbnail
-from src.sekai.profile.model import CardFullThumbnailRequest
 
 # 从 model.py 导入数据模型
 from .model import (
     GachaBehavior,
-    GachaInfo,
-    GachaBrief,
-    GachaCardWeight,
-    GachaWeight,
-    GachaListRequest,
     GachaDetailRequest,
-    # 兼容性别名
-    GachaListInfo,
-    GachaCardWeightInfo,
-    GachaWeightInfo,
+    GachaListRequest,
 )
 
 
-async def get_rarity_img(rarity: str, rarity_img_path: str = "lunabot_static_images/card/rare_star_normal.png", birthday_img_path: Optional[str] = "lunabot_static_images/card/rare_star_birthday.png") -> Optional[Image.Image]:
+async def get_rarity_img(
+    rarity: str,
+    rarity_img_path: str = "lunabot_static_images/card/rare_star_normal.png",
+    birthday_img_path: str | None = "lunabot_static_images/card/rare_star_birthday.png",
+) -> Image.Image | None:
     """获取稀有度图片"""
     if rarity == "rarity_birthday":
         rare_img = await get_img_from_path(ASSETS_BASE_DIR, birthday_img_path)
@@ -46,36 +41,39 @@ async def get_rarity_img(rarity: str, rarity_img_path: str = "lunabot_static_ima
         rare_num = int(rarity.split("_")[-1])
 
     if rare_img:
-        return await concat_images([rare_img] * rare_num, 'h')
+        return await concat_images([rare_img] * rare_num, "h")
     return None
+
+
 # ======================= Constants ======================= #
 
 GACHA_TYPE_NAMES = {
-    'beginner': '新手',
-    'normal': '一般',
-    'ceil': '天井',
-    'gift': '礼物',
+    "beginner": "新手",
+    "normal": "一般",
+    "ceil": "天井",
+    "gift": "礼物",
 }
 
 # 保底行为类型映射
 GACHA_BEHAVIOR_NAMES = {
-    'normal': '普通',
-    'over_rarity_3_once': '保底3星',
-    'over_rarity_4_once': '保底4星',
+    "normal": "普通",
+    "over_rarity_3_once": "保底3星",
+    "over_rarity_4_once": "保底4星",
 }
 
-GACHA_RATE_RARITIES = ['rarity_1', 'rarity_2', 'rarity_3', 'rarity_4', 'rarity_birthday']
+GACHA_RATE_RARITIES = ["rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday"]
 
 GACHA_RARE_NAMES = {
-    'rarity_1': '1星',
-    'rarity_2': '2星',
-    'rarity_3': '3星',
-    'rarity_4': '4星',
-    'rarity_birthday': '生日',
-    'pickup': '当期',
+    "rarity_1": "1星",
+    "rarity_2": "2星",
+    "rarity_3": "3星",
+    "rarity_4": "4星",
+    "rarity_birthday": "生日",
+    "pickup": "当期",
 }
 
 # ======================= Drawing Functions ======================= #
+
 
 async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     """合成卡池一览图片"""
@@ -90,19 +88,19 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
 
     page = max(1, min(rqd.filter.page, total_pages)) if rqd.filter.page else total_pages
     start_index = (page - 1) * page_size
-    gachas = gachas[start_index:start_index + page_size]
+    gachas = gachas[start_index : start_index + page_size]
 
     row_count = (len(gachas) + 2) // 2  # 2 columns
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_padding(0).set_sep(4).set_content_align('lt').set_item_align('lt'):
+        with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
             TextBox(
                 f"卡池按时间顺序排列，黄色为开放中卡池，当前为第 {page}/{total_pages} 页",
-                TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100))
+                TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
-            with Grid(row_count=row_count, vertical=True).set_sep(8, 2).set_item_align('c').set_content_align('c'):
+            with Grid(row_count=row_count, vertical=True).set_sep(8, 2).set_item_align("c").set_content_align("c"):
                 for g in gachas:
                     now = datetime.now()
                     bg_color = (255, 255, 255, 200)
@@ -111,8 +109,8 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                     elif now > g.end_at:
                         bg_color = (220, 220, 220, 200)
                     bg = roundrect_bg(bg_color, 5)
-                    with HSplit().set_padding(4).set_sep(4).set_item_align('lt').set_content_align('lt').set_bg(bg):
-                        with VSplit().set_padding(0).set_sep(2).set_item_align('lt').set_content_align('lt'):
+                    with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
+                        with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                             # 处理logo图片
                             logo_data = rqd.gacha_logos.get(g.id)
                             if isinstance(logo_data, str):
@@ -147,11 +145,26 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
         bg = ImageBg(bg_img) if bg_img else SEKAI_BLUE_BG
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
-        with HSplit().set_sep(16).set_content_align('lt').set_item_align('lt'):
+        with HSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             w = 600
-            with VSplit().set_padding(8).set_sep(8).set_content_align('c').set_item_align('c').set_item_bg(roundrect_bg(alpha=80)).set_bg(roundrect_bg(alpha=80)):
+            with (
+                VSplit()
+                .set_padding(8)
+                .set_sep(8)
+                .set_content_align("c")
+                .set_item_align("c")
+                .set_item_bg(roundrect_bg(alpha=80))
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题
-                with HSplit().set_padding(8).set_sep(32).set_content_align('c').set_item_align('c').set_omit_parent_bg(True):
+                with (
+                    HSplit()
+                    .set_padding(8)
+                    .set_sep(32)
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_omit_parent_bg(True)
+                ):
                     if rqd.logo_img_path:
                         logo_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.logo_img_path)
                         ImageBox(logo_img, size=(None, 100))
@@ -160,8 +173,10 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                         ImageBox(banner_img, size=(None, 100))
 
                 # 基本信息
-                TextBox(rqd.gacha.name, title_style, use_real_line_count=True).set_w(w).set_padding(16).set_content_align('c')
-                with HSplit().set_padding(16).set_sep(8).set_content_align('c').set_item_align('c'):
+                TextBox(rqd.gacha.name, title_style, use_real_line_count=True).set_w(w).set_padding(
+                    16
+                ).set_content_align("c")
+                with HSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
                     TextBox("ID", label_style)
                     TextBox(f"{rqd.gacha.id} ({rqd.region.upper()})", text_style)
                     Spacer(w=24)
@@ -173,14 +188,14 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                         ceilitem_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.gacha.ceil_item_img_path)
                         ImageBox(ceilitem_img, size=(None, 30))
 
-                with VSplit().set_padding(16).set_sep(8).set_content_align('c').set_item_align('c'):
-                    with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
+                with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
+                    with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         TextBox("开始时间", label_style)
                         TextBox(start_time.strftime("%Y-%m-%d %H:%M"), text_style)
-                    with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
+                    with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         TextBox("结束时间", label_style)
                         TextBox(end_time.strftime("%Y-%m-%d %H:%M"), text_style)
-                    with HSplit().set_padding(0).set_sep(8).set_content_align('c').set_item_align('c'):
+                    with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         if start_time >= datetime.now():
                             TextBox("距离开始还有", label_style)
                             TextBox(get_readable_timedelta(end_time - datetime.now()), text_style)
@@ -191,30 +206,37 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                             TextBox("卡池已结束", label_style)
 
                 # 抽卡消耗
-                with VSplit().set_padding(16).set_sep(16).set_content_align('c').set_item_align('c'):
+                with VSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
                     # 合并相同类型不同消耗
-                    behaviors: Dict[str, List[GachaBehavior]] = {}
+                    behaviors: dict[str, list[GachaBehavior]] = {}
                     for behavior in rqd.gacha.behaviors:
                         text = GACHA_BEHAVIOR_NAMES.get(behavior.type, "未知")
                         match behavior.type:
-                            case 'once_a_day': text = "每日"
-                            case 'once_a_week': text = "每周"
-                        if behavior.spin_count == 1:    text += "/单抽"
-                        elif behavior.spin_count == 10: text += "/十连"
-                        if behavior.colorful_pass:  text = "月卡" + text
+                            case "once_a_day":
+                                text = "每日"
+                            case "once_a_week":
+                                text = "每周"
+                        if behavior.spin_count == 1:
+                            text += "/单抽"
+                        elif behavior.spin_count == 10:
+                            text += "/十连"
+                        if behavior.colorful_pass:
+                            text = "月卡" + text
                         if behavior.execute_limit:
                             text += f"(限{behavior.execute_limit}次)"
                         behaviors.setdefault(text, []).append(behavior)
-                    with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align('l').set_item_align('l'):
+                    with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align("l").set_item_align("l"):
                         for text, behavior_list in behaviors.items():
                             TextBox(text, label_style)
-                            with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                            with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                 for i, behavior in enumerate(behavior_list):
                                     if i > 0:
                                         TextBox(" / ", text_style)
                                     if behavior.cost_type:
                                         if behavior.cost_icon_path:
-                                            cost_icon = await get_img_from_path(ASSETS_BASE_DIR, behavior.cost_icon_path)
+                                            cost_icon = await get_img_from_path(
+                                                ASSETS_BASE_DIR, behavior.cost_icon_path
+                                            )
                                             ImageBox(cost_icon, size=(None, 48))
                                         if "paid" in behavior.cost_type:
                                             TextBox("(付费)", text_style)
@@ -225,22 +247,28 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
                 # 当期卡牌
                 if rqd.pickup_cards:
-                    with HSplit().set_padding(16).set_sep(16).set_content_align('c').set_item_align('c'):
+                    with HSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
                         TextBox("当期卡片", label_style)
-                        with Grid(col_count=min(5, len(rqd.pickup_cards))).set_padding(0).set_sep(8, 8).set_content_align('c').set_item_align('c'):
-                            card_size = 80  
+                        with (
+                            Grid(col_count=min(5, len(rqd.pickup_cards)))
+                            .set_padding(0)
+                            .set_sep(8, 8)
+                            .set_content_align("c")
+                            .set_item_align("c")
+                        ):
+                            card_size = 80
                             for card in rqd.pickup_cards:
-                                with VSplit().set_padding(0).set_sep(1).set_content_align('c').set_item_align('c'):
+                                with VSplit().set_padding(0).set_sep(1).set_content_align("c").set_item_align("c"):
                                     full_thumb = await get_card_full_thumbnail(card.thumbnail_request)
 
                                     ImageBox(full_thumb, size=(card_size, card_size), shadow=True)
                                     TextBox(f"{card.id} ({get_float_str(card.rate * 100, 4)}%)", small_style)
 
                 # 抽卡概率
-                with VSplit().set_padding(16).set_sep(8).set_content_align('c').set_item_align('c'):
-                    with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align('l').set_item_align('l'):
+                with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
+                    with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align("l").set_item_align("l"):
                         if rqd.pickup_cards:
-                            with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                            with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                 TextBox("当期", label_style)
                                 TextBox(f"({len(rqd.pickup_cards)})", text_style)
 
@@ -254,7 +282,9 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                                 # 按比例计算UP卡在保底中的概率
                                 normal_4star_rate = rqd.weight_info.rarity_4_rate
                                 if normal_4star_rate > 0:
-                                    pickup_guaranteed_rate = guaranteed_4star_rate * (pickup_total_rate / normal_4star_rate)
+                                    pickup_guaranteed_rate = guaranteed_4star_rate * (
+                                        pickup_total_rate / normal_4star_rate
+                                    )
                                     pickup_guaranteed_text = f"{get_float_str(pickup_guaranteed_rate * 100, 4)}%"
                                     pickup_rate_text = f"{pickup_rate_text} / {pickup_guaranteed_text} (保底)"
 
@@ -263,15 +293,16 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                         # 显示各稀有度概率
                         for rarity in GACHA_RATE_RARITIES:
                             rate = getattr(rqd.weight_info, f"{rarity}_rate", 0.0)
-                            if rate == 0.0: continue
+                            if rate == 0.0:
+                                continue
 
                             # 获取该稀有度的卡牌数量
                             count = getattr(rqd.gacha, f"{rarity}_count", 0)
-                            rarity_name = GACHA_RARE_NAMES.get(rarity, rarity.replace('rarity_', ''))
+                            rarity_name = GACHA_RARE_NAMES.get(rarity, rarity.replace("rarity_", ""))
 
                             if count > 0:
                                 # 显示稀有度名称和数量
-                                with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                                with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     # 获取稀有度图片
                                     rarity_img = await get_rarity_img(rarity)
                                     if rarity_img:
@@ -293,7 +324,7 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
                                 TextBox(rate_text, text_style)
                             else:
-                                with HSplit().set_padding(0).set_sep(8).set_content_align('l').set_item_align('l'):
+                                with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     rarity_img = await get_rarity_img(rarity)
                                     if rarity_img:
                                         ImageBox(rarity_img, size=(None, 24))
@@ -317,7 +348,3 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
     add_watermark(canvas)
     return await canvas.get_img()
-
-
-
-

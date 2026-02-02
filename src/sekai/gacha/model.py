@@ -5,25 +5,25 @@ Gacha 模块数据模型
 """
 
 from datetime import datetime
-from typing import List, Dict, Optional
 
-from pydantic import BaseModel
-
-from src.sekai.profile.model import CardFullThumbnailRequest
 from pydantic import BaseModel, Field, field_validator
 
+from src.sekai.profile.model import CardFullThumbnailRequest
 
 # ========== 基础数据模型 ==========
 
+
 class GachaFilter(BaseModel):
     """卡池列表筛选器"""
+
     page: int = 1
+
 
 class GachaBehavior(BaseModel):
     """卡池抽卡行为
-    
+
     描述一种抽卡方式的消耗和限制。
-    
+
     Attributes
     ----------
     type : str
@@ -41,18 +41,19 @@ class GachaBehavior(BaseModel):
     colorful_pass : bool
         是否需要月卡
     """
+
     type: str
     spin_count: int
-    cost_type: Optional[str] = None
-    cost_icon_path: Optional[str] = None
-    cost_quantity: Optional[int] = None
-    execute_limit: Optional[int] = None
+    cost_type: str | None = None
+    cost_icon_path: str | None = None
+    cost_quantity: int | None = None
+    execute_limit: int | None = None
     colorful_pass: bool = False
 
 
 class GachaInfo(BaseModel):
     """卡池详细信息
-    
+
     Attributes
     ----------
     id : int
@@ -88,6 +89,7 @@ class GachaInfo(BaseModel):
     pickup_count : int
         UP卡数量
     """
+
     id: int
     name: str
     gacha_type: str
@@ -96,8 +98,8 @@ class GachaInfo(BaseModel):
     start_at: int
     end_at: int
     asset_name: str
-    ceil_item_img_path: Optional[str] = None
-    behaviors: List[GachaBehavior] = []
+    ceil_item_img_path: str | None = None
+    behaviors: list[GachaBehavior] = []
     rarity_1_count: int = 0
     rarity_2_count: int = 0
     rarity_3_count: int = 0
@@ -108,9 +110,9 @@ class GachaInfo(BaseModel):
 
 class GachaBrief(BaseModel):
     """卡池简要信息
-    
+
     用于卡池列表显示。
-    
+
     Attributes
     ----------
     id : int
@@ -127,6 +129,7 @@ class GachaBrief(BaseModel):
     asset_name : str
         资源名称标识
     """
+
     id: int
     name: str
     gacha_type: str
@@ -134,11 +137,11 @@ class GachaBrief(BaseModel):
     end_at: datetime
     asset_name: str
 
-    @field_validator('start_at', 'end_at', mode='before')
+    @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
         """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, (int, float, str)):
+        if isinstance(v, int | float | str):
             try:
                 timestamp = float(v)
                 return datetime.fromtimestamp(timestamp / 1000)
@@ -149,7 +152,7 @@ class GachaBrief(BaseModel):
 
 class GachaCardWeight(BaseModel):
     """卡池卡牌权重信息
-    
+
     Attributes
     ----------
     id : int
@@ -161,6 +164,7 @@ class GachaCardWeight(BaseModel):
     thumbnail_request : CardFullThumbnailRequest
         卡牌缩略图请求信息
     """
+
     id: int
     rarity: str
     rate: float = 0.0
@@ -169,7 +173,7 @@ class GachaCardWeight(BaseModel):
 
 class GachaWeight(BaseModel):
     """卡池概率信息
-    
+
     Attributes
     ----------
     rarity_1_rate : Optional[float]
@@ -185,19 +189,21 @@ class GachaWeight(BaseModel):
     guaranteed_rates : Dict[str, float]
         各稀有度的保底概率
     """
-    rarity_1_rate: Optional[float] = 0.0
-    rarity_2_rate: Optional[float] = 0.0
-    rarity_3_rate: Optional[float] = 0.0
-    rarity_4_rate: Optional[float] = 0.0
-    rarity_birthday_rate: Optional[float] = 0.0
-    guaranteed_rates: Dict[str, float] = {}
+
+    rarity_1_rate: float | None = 0.0
+    rarity_2_rate: float | None = 0.0
+    rarity_3_rate: float | None = 0.0
+    rarity_4_rate: float | None = 0.0
+    rarity_birthday_rate: float | None = 0.0
+    guaranteed_rates: dict[str, float] = {}
 
 
 # ========== 请求模型 ==========
 
+
 class GachaListRequest(BaseModel):
     """卡池列表绘制请求
-    
+
     Attributes
     ----------
     gachas : List[GachaBrief]
@@ -211,16 +217,17 @@ class GachaListRequest(BaseModel):
     filter : GachaFilter
         筛选条件
     """
-    gachas: List[GachaBrief]
+
+    gachas: list[GachaBrief]
     page_size: int = 20
     region: str = "jp"
-    gacha_logos: Dict[int, str] = {}
+    gacha_logos: dict[int, str] = {}
     filter: GachaFilter = Field(default_factory=GachaFilter)
 
 
 class GachaDetailRequest(BaseModel):
     """卡池详情绘制请求
-    
+
     Attributes
     ----------
     gacha : GachaInfo
@@ -238,12 +245,13 @@ class GachaDetailRequest(BaseModel):
     region : str
         服务器地区
     """
+
     gacha: GachaInfo
     weight_info: GachaWeight
-    pickup_cards: List[GachaCardWeight] = []
-    logo_img_path: Optional[str] = None
-    banner_img_path: Optional[str] = None
-    bg_img_path: Optional[str] = None
+    pickup_cards: list[GachaCardWeight] = []
+    logo_img_path: str | None = None
+    banner_img_path: str | None = None
+    bg_img_path: str | None = None
     region: str = "jp"
 
 

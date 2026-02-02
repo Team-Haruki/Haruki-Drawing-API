@@ -1,9 +1,12 @@
 # 绘图所需的数据类型
+from typing import Any, Literal
+
 from pydantic import BaseModel
-from typing import Any, List, Dict, Literal, Optional
-from src.sekai.profile.drawer import DetailedProfileCardRequest, BasicProfile, ProfileCardRequest
+
+from src.sekai.profile.drawer import DetailedProfileCardRequest, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
+
 
 class MusicMD(BaseModel):
     r"""MusicMD
@@ -31,6 +34,7 @@ class MusicMD(BaseModel):
     is_full_length : bool
         是否完整版
     """
+
     id: int
     title: str
     composer: str
@@ -40,6 +44,7 @@ class MusicMD(BaseModel):
     categories: list[str]
     release_at: int
     is_full_length: bool
+
 
 class DifficultyInfo(BaseModel):
     r"""DifficultyInfo
@@ -55,9 +60,11 @@ class DifficultyInfo(BaseModel):
     has_append : bool
         是否有APPEND难度
     """
+
     level: list[int]
     note_count: list[int]
     has_append: bool
+
 
 class MusicVocalInfo(BaseModel):
     r"""MusicVocalInfo
@@ -71,8 +78,10 @@ class MusicVocalInfo(BaseModel):
     vocal_assets : dict[str, str]
         Vocal资源路径映射，结构如：{"asset_name": "path/to/asset"}
     """
-    vocal_info: dict[str, Any] # {"caption": str, "characters": [{"characterName": str}]}
-    vocal_assets: dict[str, str] # {"xxx": path}
+
+    vocal_info: dict[str, Any]  # {"caption": str, "characters": [{"characterName": str}]}
+    vocal_assets: dict[str, str]  # {"xxx": path}
+
 
 class UserProfileInfo(BaseModel):
     r"""UserProfileInfo
@@ -92,11 +101,13 @@ class UserProfileInfo(BaseModel):
     update_time : int
         更新时间戳
     """
+
     uid: str
     region: str
     nickname: str
     data_source: str
     update_time: int
+
 
 class LeaderboardInfo(BaseModel):
     r"""LeaderboardInfo
@@ -112,13 +123,15 @@ class LeaderboardInfo(BaseModel):
     value : str
         排行榜数值 (如分数百分比、PT数等)
     """
+
     rank: int
     diff: str
     value: str
 
+
 class MusicDetailRequest(BaseModel):
     r"""MusicDetailRequest
-    
+
     绘制歌曲详情图片所必需的数据
 
     Attributes
@@ -156,6 +169,7 @@ class MusicDetailRequest(BaseModel):
     leaderboard_targets : list[str] | None
         排行榜target名称列表
     """
+
     region: str
     music_info: MusicMD
     bpm: int | None = None
@@ -173,6 +187,7 @@ class MusicDetailRequest(BaseModel):
     leaderboard_live_types: dict[str, str] | None = None
     leaderboard_targets: dict[str, str] | None = None
 
+
 class MusicBriefList(BaseModel):
     r"""MusicBriefList
 
@@ -187,9 +202,11 @@ class MusicBriefList(BaseModel):
     music_jacket_path : str
         歌曲封面路径
     """
+
     difficulty: DifficultyInfo
     music_info: MusicMD
     music_jacket_path: str
+
 
 class MusicBriefListRequest(BaseModel):
     r"""MusicBriefListRequest
@@ -203,8 +220,10 @@ class MusicBriefListRequest(BaseModel):
     region : str
         服务器区域
     """
+
     music_list: list[MusicBriefList]
     region: str
+
 
 class MusicListRequest(BaseModel):
     r"""MusicListRequest
@@ -226,32 +245,36 @@ class MusicListRequest(BaseModel):
     play_result_icon_path_map : Optional[Dict[str, str]]
         打歌结果图标路径映射
     """
-    user_results: Dict[int, Any] # {"musicId": int, "musicDifficultyType": str, "musicDifficulty": str, "playResult": str}
-    music_list: List[Dict[str, Any]] # [{"id": int, "difficulty": str}]
-    jackets_path_list: Dict[int, str] # {musicId: jacket_path}
+
+    user_results: dict[
+        int, Any
+    ]  # {"musicId": int, "musicDifficultyType": str, "musicDifficulty": str, "playResult": str}
+    music_list: list[dict[str, Any]]  # [{"id": int, "difficulty": str}]
+    jackets_path_list: dict[int, str]  # {musicId: jacket_path}
     required_difficulties: str
     profile: DetailedProfileCardRequest
-    play_result_icon_path_map: Optional[Dict[str, str]] = None
+    play_result_icon_path_map: dict[str, str] | None = None
+
 
 class PlayProgressCount(BaseModel):
     r"""打歌进度计数类
-        
-        记录玩家在该定数下的歌曲总数、未通数、已通数、全连数、全P数
 
-        Attributes
-        ----------
-        level : int
-            定数，歌曲等级
-        total : int
-            记录的歌曲总数
-        not_clear : int
-            未通歌曲数量
-        clear : int
-            已通歌曲数量
-        fc : int
-            全连歌曲数量
-        ap : int
-            全P歌曲数量
+    记录玩家在该定数下的歌曲总数、未通数、已通数、全连数、全P数
+
+    Attributes
+    ----------
+    level : int
+        定数，歌曲等级
+    total : int
+        记录的歌曲总数
+    not_clear : int
+        未通歌曲数量
+    clear : int
+        已通歌曲数量
+    fc : int
+        全连歌曲数量
+    ap : int
+        全P歌曲数量
     """
 
     level: int
@@ -261,24 +284,26 @@ class PlayProgressCount(BaseModel):
     fc: int = 0
     ap: int = 0
 
+
 class PlayProgressRequest(BaseModel):
     r"""PlayProgressRequest
 
-        合成打歌进度图片所必须的数据
-    
-        Attributes
-        ----------
-        counts : list[ PlayProgressCount ]
-            玩家在每个定数的打歌进度
-        difficulty : Literal[ "easy", "normal", "hard", "expert", "master", "append" ]
-            指定难度，这里只用来指定颜色
-        profile : DetailedProfileCardRequest
-            用于获取玩家详细信息的简单卡片控件
+    合成打歌进度图片所必须的数据
+
+    Attributes
+    ----------
+    counts : list[ PlayProgressCount ]
+        玩家在每个定数的打歌进度
+    difficulty : Literal[ "easy", "normal", "hard", "expert", "master", "append" ]
+        指定难度，这里只用来指定颜色
+    profile : DetailedProfileCardRequest
+        用于获取玩家详细信息的简单卡片控件
     """
 
     counts: list[PlayProgressCount]
-    difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = 'master'
+    difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = "master"
     profile: ProfileCardRequest
+
 
 class MusicComboReward(BaseModel):
     r"""MusicComboRewards
@@ -292,14 +317,16 @@ class MusicComboReward(BaseModel):
     reward : int = 0
         剩余可获得的奖励数量(水晶或碎片)
     """
+
     level: int
     reward: int = 0
+
 
 class DetailMusicRewardsRequest(BaseModel):
     r"""DetailMusicRewardsRequest
 
     在有抓包数据的情况下合成歌曲奖励图片所必需的数据
-    
+
     Attributes
     ----------
     rank_rewards : int
@@ -311,22 +338,22 @@ class DetailMusicRewardsRequest(BaseModel):
     """
 
     rank_rewards: int = 0
-    combo_rewards: Dict[Literal['hard', 'expert', 'master', 'append'], List[MusicComboReward]] = {
-        'hard': [], 
-        'expert': [], 
-        'master': [], 
-        'append': []
+    combo_rewards: dict[Literal["hard", "expert", "master", "append"], list[MusicComboReward]] = {
+        "hard": [],
+        "expert": [],
+        "master": [],
+        "append": [],
     }
     profile: ProfileCardRequest
-    jewel_icon_path: Optional[str] = None
-    shard_icon_path: Optional[str] = None
+    jewel_icon_path: str | None = None
+    shard_icon_path: str | None = None
 
 
 class BasicMusicRewardsRequest(BaseModel):
     r"""BasicMusicRewardsRequest
 
     在无抓包数据的情况下合成歌曲奖励图片所必需的数据
-    
+
     Attributes
     ----------
     rank_rewards : str
@@ -337,9 +364,9 @@ class BasicMusicRewardsRequest(BaseModel):
         示例：
         ```
         {
-            'hard': '11150(50X223首)', 
-            'expert': '18130(70X259首)', 
-            'master': '41160(70X588首)', 
+            'hard': '11150(50X223首)',
+            'expert': '18130(70X259首)',
+            'master': '41160(70X588首)',
             'append': '1785(15X119首)'
         }
         ```
@@ -347,14 +374,8 @@ class BasicMusicRewardsRequest(BaseModel):
         用于获取玩家基本信息的简单卡片控件
     """
 
-    rank_rewards: str = '0'
-    combo_rewards: Dict[str, str] = {
-        'hard': '0', 
-        'expert': '0', 
-        'master': '0', 
-        'append': '0'
-    }
+    rank_rewards: str = "0"
+    combo_rewards: dict[str, str] = {"hard": "0", "expert": "0", "master": "0", "append": "0"}
     profile: ProfileCardRequest
-    jewel_icon_path: Optional[str] = None
-    shard_icon_path: Optional[str] = None
-
+    jewel_icon_path: str | None = None
+    shard_icon_path: str | None = None
