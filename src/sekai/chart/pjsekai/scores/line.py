@@ -1,9 +1,8 @@
 import re
 
+from .meta import *
 from .notes import *
 from .types import *
-
-from .meta import *
 
 
 @dataclasses.dataclass

@@ -3,7 +3,6 @@ from datetime import datetime
 
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -25,6 +24,7 @@ from src.sekai.base.painter import (
 from src.sekai.base.plot import Canvas, FillBg, Flow, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
 from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
+from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # =========================== 从.model导入常量和数据类型 =========================== #
 from .model import (

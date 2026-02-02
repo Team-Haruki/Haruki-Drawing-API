@@ -1,24 +1,23 @@
-import typing
 import dataclasses
 
 
 @dataclasses.dataclass
 class Meta:
-    title: typing.Optional[str] = None
-    subtitle: typing.Optional[str] = None
-    artist: typing.Optional[str] = None
-    genre: typing.Optional[str] = None
-    designer: typing.Optional[str] = None
-    difficulty: typing.Optional[str] = None
-    playlevel: typing.Optional[str] = None
-    songid: typing.Optional[str] = None
-    wave: typing.Optional[str] = None
-    waveoffset: typing.Optional[str] = None
-    jacket: typing.Optional[str] = None
-    background: typing.Optional[str] = None
-    movie: typing.Optional[str] = None
-    movieoffset: typing.Optional[float] = None
-    basebpm: typing.Optional[float] = None
+    title: str | None = None
+    subtitle: str | None = None
+    artist: str | None = None
+    genre: str | None = None
+    designer: str | None = None
+    difficulty: str | None = None
+    playlevel: str | None = None
+    songid: str | None = None
+    wave: str | None = None
+    waveoffset: str | None = None
+    jacket: str | None = None
+    background: str | None = None
+    movie: str | None = None
+    movieoffset: float | None = None
+    basebpm: float | None = None
     # requests: list = dataclasses.field(default_factory=list)
 
     def __or__(self, other: "Meta") -> "Meta":

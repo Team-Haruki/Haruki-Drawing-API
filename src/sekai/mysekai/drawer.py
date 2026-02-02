@@ -2,13 +2,6 @@ import logging
 
 from PIL import Image, ImageDraw
 
-from src.sekai.base.configs import (
-    ASSETS_BASE_DIR,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-    DEFAULT_HEAVY_FONT,
-    RESULT_ASSET_PATH,
-)
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_watermark, roundrect_bg
 from src.sekai.base.painter import ADAPTIVE_SHADOW, BLACK, WHITE, color_code_to_rgb, lerp_color
 from src.sekai.base.plot import (
@@ -31,6 +24,13 @@ from src.sekai.base.utils import (
     get_img_from_path,
 )
 from src.sekai.profile.drawer import get_profile_card
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
+    RESULT_ASSET_PATH,
+)
 
 from .model import (
     MUSIC_TAG_UNIT_MAP,

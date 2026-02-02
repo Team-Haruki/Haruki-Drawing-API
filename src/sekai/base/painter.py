@@ -1,12 +1,14 @@
 import asyncio
 from collections.abc import Callable
 import colorsys
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timedelta
 import glob
 import hashlib
 import logging
 import math
+from multiprocessing import get_context
 import os
 import random
 from typing import Any, Literal, Self
@@ -19,15 +21,34 @@ from pilmoji import Pilmoji
 from pilmoji import getsize as getsize_emoji
 from pilmoji.source import GoogleEmojiSource
 
-from .configs import (
+from src.settings import (
     DEFAULT_BOLD_FONT,  # noqa: F401
     DEFAULT_EMOJI_FONT,  # noqa: F401
     DEFAULT_FONT,  # noqa: F401
     DEFAULT_HEAVY_FONT,  # noqa: F401
     FONT_DIR,
     TRI_PATHS,
+    settings,
 )
+
 from .img_utils import adjust_image_alpha_inplace, mix_image_by_color
+
+# Process pool for CPU-intensive drawing operations
+_process_pool_ctx = get_context("spawn")
+_painter_process_pool: ProcessPoolExecutor | None = None
+
+
+def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
+    """Get or create the painter process pool."""
+    global _painter_process_pool
+    if _painter_process_pool is None:
+        workers = max_workers or settings.drawing.process_pool_workers
+        _painter_process_pool = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=_process_pool_ctx,
+        )
+    return _painter_process_pool
+
 
 DEBUG = True
 
@@ -608,12 +629,27 @@ class Painter:
         # 执行绘图操作
         t = datetime.now()
 
-        # global _painter_pool
-        # self.img = await _painter_pool.submit(Painter._execute, self.operations, self.img, self.size, image_dict)
-        self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+        # 根据图片大小选择执行方式
+        total_pixels = self.size[0] * self.size[1]
+        use_process_pool = settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+
+        if use_process_pool:
+            loop = asyncio.get_event_loop()
+            pool = get_painter_process_pool()
+            self.img = await loop.run_in_executor(
+                pool,
+                Painter._execute,
+                self.operations,
+                self.img,
+                self.size,
+                image_dict,
+            )
+            debug_print(f"Painter executed in process pool in {datetime.now() - t}")
+        else:
+            self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+            debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
 
         self.operations = []
-        debug_print(f"Painter executed in {datetime.now() - t}")
 
         # 保存缓存
         if cache_key is not None:

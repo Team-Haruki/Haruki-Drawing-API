@@ -1,7 +1,7 @@
 import dataclasses
 
-from .base import BaseNote
 from ..types import Fraction
+from .base import BaseNote
 
 
 @dataclasses.dataclass

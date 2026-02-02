@@ -4,7 +4,6 @@ import re
 
 from PIL import Image, ImageDraw
 
-from src.sekai.base.configs import ASSETS_BASE_DIR
 from src.sekai.base.draw import (
     BG_PADDING,
     DEFAULT_WATERMARK,
@@ -41,6 +40,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.utils import get_img_from_path, get_readable_datetime, truncate
 from src.sekai.honor.drawer import compose_full_honor_image
+from src.settings import ASSETS_BASE_DIR
 
 # =========================== 常量定义 =========================== #
 

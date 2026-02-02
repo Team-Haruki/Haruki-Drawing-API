@@ -1,11 +1,10 @@
 import bisect
 import functools
 
+from .line import *
+from .meta import *
 from .notes import *
 from .types import *
-
-from .meta import *
-from .line import *
 
 __all__ = ["Score"]
 

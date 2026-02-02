@@ -1,8 +1,8 @@
 from PIL import Image, ImageDraw
 
-from src.sekai.base.configs import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 from src.sekai.base.painter import WHITE, get_font, get_text_size, resize_keep_ratio
 from src.sekai.base.utils import get_img_from_path
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 
 # 从 model.py 导入数据模型
 from .model import HonorRequest

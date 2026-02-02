@@ -3,7 +3,7 @@ import re
 
 from .types import *
 
-__all__ = ["Word", "Lyric"]
+__all__ = ["Lyric", "Word"]
 
 
 @dataclasses.dataclass

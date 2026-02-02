@@ -11,7 +11,7 @@ from uuid import uuid4
 import aiohttp
 from PIL import Image
 
-from .configs import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE, SCREENSHOT_API_PATH, TMP_PATH
+from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE, SCREENSHOT_API_PATH, TMP_PATH
 
 
 def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit=False) -> str:

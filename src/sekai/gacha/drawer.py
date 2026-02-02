@@ -2,7 +2,6 @@ from datetime import datetime
 
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -18,6 +17,7 @@ from src.sekai.base.painter import (
 from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import get_card_full_thumbnail
+from src.settings import ASSETS_BASE_DIR
 
 # 从 model.py 导入数据模型
 from .model import (

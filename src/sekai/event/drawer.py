@@ -3,7 +3,6 @@ import math
 
 from PIL import Image
 
-from src.sekai.base.configs import ASSETS_BASE_DIR
 from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
@@ -31,6 +30,7 @@ from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_detailed_profile_card,
 )
+from src.settings import ASSETS_BASE_DIR
 
 # 从 model.py 导入数据模型
 from .model import (
