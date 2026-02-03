@@ -158,21 +158,23 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
             draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
     # 绘制边框
-    frame_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
-    frame_img = frame_img.resize((img_w, img_h))
-    img.paste(frame_img, (0, 0), frame_img)
+    if rqd.frame_img_path:
+        frame_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+        frame_img = frame_img.resize((img_w, img_h))
+        img.paste(frame_img, (0, 0), frame_img)
     # 绘制特训等级
     if pcard:
         rank = rqd.train_rank
-        if rank:
+        if rank and rqd.train_rank_img_path:
             rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
             rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
             rank_img_w, rank_img_h = rank_img.size
             img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
     # 左上角绘制属性
-    attr_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
-    attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
-    img.paste(attr_img, (1, 0), attr_img)
+    if rqd.attr_img_path:
+        attr_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
+        attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
+        img.paste(attr_img, (1, 0), attr_img)
     # 左下角绘制稀有度
     hoffset, voffset = 6, 6 if not pcard else 24
     scale = 0.17 if not pcard else 0.15
@@ -495,7 +497,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         continue
                     rank = character_rank[cid]
                     with Frame().set_size((gw, gh)):
-                        c_rank_path = rqd.chara_rank_icon_path_map[cid]
+                        chara_map = rqd.chara_rank_icon_path_map
+                        c_rank_path = chara_map.get(cid) or chara_map.get(str(cid))
+                        if not c_rank_path:
+                            Spacer(gw, gh)
+                            continue
                         chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
                         ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
@@ -508,9 +514,14 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
-                        c_rank_path = rqd.chara_rank_icon_path_map[scid]
-                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
-                        ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
+                        c_rank_path = rqd.chara_rank_icon_path_map.get(scid) or rqd.chara_rank_icon_path_map.get(
+                            str(scid)
+                        )
+                        if c_rank_path:
+                            chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
+                            ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
+                        else:
+                            Spacer(100, 50)
                         t = TextBox(
                             str(solo_live.rank),
                             TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),

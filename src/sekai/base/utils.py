@@ -54,6 +54,8 @@ async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
     """
     通过路径获取图片
     """
+    if path is None:
+        raise ValueError("图片路径不能为空(None)")
     safe_path = path.lstrip("/")
 
     full_path = base_path / safe_path
