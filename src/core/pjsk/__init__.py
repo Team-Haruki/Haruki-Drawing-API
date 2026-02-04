@@ -17,7 +17,7 @@ from . import (
     stamp,
 )
 
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix="/api/pjsk")
 
 router.include_router(card.router, prefix="/card")
 router.include_router(music.router, prefix="/music")
