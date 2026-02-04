@@ -1,0 +1,42 @@
+assets:
+  base_dir: ./data
+  result_asset_path: lunabot_static_images
+  tmp_path: tmp
+  tri_paths:
+    - ./data/lunabot_static_images/triangle/tri1.png
+    - ./data/lunabot_static_images/triangle/tri2.png
+    - ./data/lunabot_static_images/triangle/tri3.png
+
+font:
+  dir: ./data
+  default: 
+    default: SourceHanSansSC-Regular
+    bold: SourceHanSansSC-Bold
+    heavy: SourceHanSansSC-Heavy
+    emoji: EmojiOneColor-SVGinOT
+
+drawing:
+  thread_pool_size: 8
+  use_process_pool: false
+  process_pool_workers: 4
+  process_pool_threshold: 2000000  # 约 2000x1000 像素
+  screenshot_api_path: http://localhost:28080/screenshot
+
+server:
+  host: 0.0.0.0
+  port: 28000
+
+logging:
+  level: INFO
+  format: "[%(asctime)s][%(levelname)s][%(name)s] %(message)s"
+  field_styles:
+    asctime:
+      color: green
+    levelname:
+      color: blue
+      bold: true
+    name:
+      color: magenta
+    message:
+      color: 144
+      bright: false
