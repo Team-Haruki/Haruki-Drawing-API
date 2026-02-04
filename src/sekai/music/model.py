@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-from src.sekai.profile.drawer import DetailedProfileCardRequest, ProfileCardRequest
+from src.sekai.profile.model import DetailedProfileCardRequest, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
 
@@ -81,32 +81,6 @@ class MusicVocalInfo(BaseModel):
 
     vocal_info: dict[str, Any]  # {"caption": str, "characters": [{"characterName": str}]}
     vocal_assets: dict[str, str]  # {"xxx": path}
-
-
-class UserProfileInfo(BaseModel):
-    r"""UserProfileInfo
-
-    用户基本概要信息
-
-    Attributes
-    ----------
-    uid : str
-        用户ID
-    region : str
-        服务器区域
-    nickname : str
-        用户昵称
-    data_source : str
-        数据来源
-    update_time : int
-        更新时间戳
-    """
-
-    uid: str
-    region: str
-    nickname: str
-    data_source: str
-    update_time: int
 
 
 class LeaderboardInfo(BaseModel):
