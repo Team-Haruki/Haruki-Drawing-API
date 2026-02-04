@@ -1,33 +1,64 @@
-import os
-import math
-import glob
-import emoji
-import random
-import hashlib
 import asyncio
+from collections.abc import Callable
 import colorsys
-import numpy as np
-
-from pilmoji import Pilmoji
-from typing import Union, Any, Self
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timedelta
+import glob
+import hashlib
+import logging
+import math
+from multiprocessing import get_context
+import os
+import random
+from typing import Any, Literal, Self
+
+import emoji
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
+from pilmoji import Pilmoji
 from pilmoji import getsize as getsize_emoji
 from pilmoji.source import GoogleEmojiSource
-from dataclasses import dataclass, is_dataclass, fields
-from PIL import Image, ImageFont, ImageDraw, ImageFilter, ImageChops
 
-from .img_utils import mix_image_by_color, adjust_image_alpha_inplace
+from src.settings import (
+    DEFAULT_BOLD_FONT,  # noqa: F401
+    DEFAULT_EMOJI_FONT,  # noqa: F401
+    DEFAULT_FONT,  # noqa: F401
+    DEFAULT_HEAVY_FONT,  # noqa: F401
+    FONT_DIR,
+    TRI_PATHS,
+    settings,
+)
+
+from .img_utils import adjust_image_alpha_inplace, mix_image_by_color
+
+# Process pool for CPU-intensive drawing operations
+_process_pool_ctx = get_context("spawn")
+_painter_process_pool: ProcessPoolExecutor | None = None
+
+
+def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
+    """Get or create the painter process pool."""
+    global _painter_process_pool
+    if _painter_process_pool is None:
+        workers = max_workers or settings.drawing.process_pool_workers
+        _painter_process_pool = ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=_process_pool_ctx,
+        )
+    return _painter_process_pool
+
 
 DEBUG = True
 
 
 def debug_print(*args, **kwargs) -> None:
     if DEBUG:
-        print(*args, **kwargs, flush=True)
+        logging.debug(*args, **kwargs)
 
 
-def get_memo_usage() -> Union[float, int]:
+def get_memo_usage() -> float | int:
     if DEBUG:
         import psutil
 
@@ -43,7 +74,7 @@ def deterministic_hash(obj: Any) -> str:
     """
     ret = hashlib.md5()
 
-    def update(s: Union[str, bytes]) -> None:
+    def update(s: str | bytes) -> None:
         if isinstance(s, str):
             s = s.encode("utf-8")
         ret.update(s)
@@ -70,7 +101,7 @@ def deterministic_hash(obj: Any) -> str:
             return None
 
         # 容器类型
-        elif isinstance(_obj, (list, tuple)):
+        elif isinstance(_obj, list | tuple):
             for item in _obj:
                 _serialize(item)
 
@@ -113,7 +144,7 @@ def deterministic_hash(obj: Any) -> str:
             return None
 
         # 其他可迭代对象
-        elif hasattr(_obj, "__iter__") and not isinstance(_obj, (str, bytes)):
+        elif hasattr(_obj, "__iter__") and not isinstance(_obj, str | bytes):
             update(f"iterable:{type(_obj).__name__}:")
             for item in _obj:
                 _serialize(item)
@@ -128,7 +159,7 @@ def deterministic_hash(obj: Any) -> str:
                     if not attr.startswith("_"):
                         value = getattr(_obj, attr)
                         _serialize(value)
-            except:
+            except Exception:
                 return f"fallback:{type(_obj).__name__}:{id(_obj)}"
 
     def _serialize_pil_image(img: Image.Image):
@@ -162,7 +193,7 @@ def deterministic_hash(obj: Any) -> str:
 
 PAINTER_CACHE_DIR = "data/utils/painter_cache/"
 
-Color = Union[tuple[int, int, int, int], tuple[int, int, int], list[int]]
+Color = tuple[int, int, int, int] | tuple[int, int, int] | list[int]
 Position = tuple[int, int]
 Size = tuple[int, int]
 
@@ -175,13 +206,6 @@ TRANSPARENT = (0, 0, 0, 0)
 SHADOW = (0, 0, 0, 150)
 
 ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
-
-FONT_DIR = "data/utils/fonts/"
-DEFAULT_FONT = "SourceHanSansCN-Regular"
-DEFAULT_BOLD_FONT = "SourceHanSansCN-Bold"
-DEFAULT_HEAVY_FONT = "SourceHanSansCN-Heavy"
-DEFAULT_EMOJI_FONT = "EmojiOneColor-SVGinOT"
-
 
 ALIGN_MAP = {
     "c": ("c", "c"),
@@ -198,7 +222,23 @@ ALIGN_MAP = {
     "rt": ("r", "t"),
     "rb": ("r", "b"),
 }
+ALIGN_TYPE = Literal[
+    "c",
+    "l",
+    "r",
+    "t",
+    "b",
+    "tl",
+    "tr",
+    "bl",
+    "br",
+    "lt",
+    "lb",
+    "rt",
+    "rb",
+]
 
+ITEM_SIZE_MODE_TYPE = Literal["expand", "fixed"]
 
 # =========================== 工具函数 =========================== #
 
@@ -222,7 +262,8 @@ font_cache: dict[str, FontCacheEntry] = {}
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
     w, h = original_size
     cw, ch = crop_size
-    assert cw <= w and ch <= h, "Crop size must be smaller than original size"
+    assert cw <= w, "Crop width must be smaller than original width"
+    assert ch <= h, "Crop height must be smaller than original height"
     x, y = 0, 0
     xa, ya = ALIGN_MAP[align]
     if xa == "l":
@@ -255,9 +296,7 @@ def rgb_to_color_code(rgb: Color) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def lerp_color(
-    c1: Union[list[int], tuple[int, ...]], c2: Union[list[int], tuple[int, ...]], t: float
-) -> tuple[int, ...]:
+def lerp_color(c1: list[int] | tuple[int, ...], c2: list[int] | tuple[int, ...], t: float) -> tuple[int, ...]:
     ret = []
     for i in range(len(c1)):
         ret.append(max(0, min(255, int(c1[i] * (1 - t) + c2[i] * t))))
@@ -265,7 +304,11 @@ def lerp_color(
 
 
 def adjust_color(
-    c: Union[list[int], tuple[int, ...]], r: int = None, g: int = None, b: int = None, a: int = None
+    c: list[int] | tuple[int, ...],
+    r: int | None = None,
+    g: int | None = None,
+    b: int | None = None,
+    a: int | None = None,
 ) -> tuple[int, int, int, int]:
     c = list(c)
     if len(c) == 3:
@@ -295,7 +338,7 @@ def get_font(path: str, size: int) -> Font:
         os.path.join(FONT_DIR, path + ".otf"),
     ]
     if key not in font_cache:
-        font: Union[ImageFont.ImageFont, ImageFont.FreeTypeFont] | None = None
+        font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
         for path in paths:
             if os.path.exists(path):
                 font = ImageFont.truetype(path, size)
@@ -323,9 +366,7 @@ def get_text_offset(font: Font, text: str) -> Position:
     return bbox[0], bbox[1]
 
 
-def resize_keep_ratio(
-    img: Image.Image, max_size: Union[int, float], mode: str = "long", scale: int = None
-) -> Image.Image:
+def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
     """
     Resize image to keep the aspect ratio, with a maximum size.
     mode in ['long', 'short', 'w', 'h', 'wxh', 'scale']
@@ -378,7 +419,11 @@ class Gradient:
         raise NotImplementedError()
 
     def get_img(self, size: Size, mask: Image.Image = None) -> Image.Image:
-        img = Image.fromarray(self.get_colors(size), "RGBA")
+        colors = self.get_colors(size)
+        mode = "RGBA" if colors.shape[-1] == 4 else "RGB"
+        img = Image.fromarray(colors, mode)
+        if mode == "RGB":
+            img = img.convert("RGBA")
         if mask:
             assert mask.size == size, "Mask size must match image size"
             if mask.mode == "RGBA":
@@ -390,7 +435,7 @@ class Gradient:
 
 
 class LinearGradient(Gradient):
-    def __init__(self, c1: Color, c2: Color, p1: Position, p2: Position, method: str = "separate") -> None:
+    def __init__(self, c1: Color, c2: Color, p1: Position, p2: Position, method: str = "combine") -> None:
         self.c1 = c1
         self.c2 = c2
         self.p1 = p1
@@ -415,7 +460,11 @@ class LinearGradient(Gradient):
         elif self.method == "separate":
             vector_pixel_to_p1 = coords - pixel_p1
             vector_p2_to_p1 = pixel_p2 - pixel_p1
-            t = np.average(vector_pixel_to_p1 / vector_p2_to_p1, axis=-1)
+            # 避免除以0
+            denom = np.where(vector_p2_to_p1 == 0, 1e-9, vector_p2_to_p1)
+            t_dims = vector_pixel_to_p1 / denom
+            # 如果某维度位移为0，则该维度的比例不应参与平均（或者设为0）
+            t = np.sum(np.where(vector_p2_to_p1 == 0, 0, t_dims), axis=-1) / np.sum(vector_p2_to_p1 != 0)
         assert t is not None
         t_clamped = np.clip(t, 0, 1)
         colors = (1 - t_clamped[:, :, np.newaxis]) * self.c1 + t_clamped[:, :, np.newaxis] * self.c2
@@ -441,6 +490,21 @@ class RadialGradient(Gradient):
         return colors.astype(np.uint8)
 
 
+@dataclass
+class AdaptiveTextColor:
+    pixelwise: bool = False
+    light: Color = WHITE
+    dark: Color = BLACK
+    threshold: float = 0.4
+
+
+ADAPTIVE_WB = AdaptiveTextColor()
+ADAPTIVE_SHADOW = AdaptiveTextColor(
+    light=(255, 255, 255, 100),
+    dark=(0, 0, 0, 100),
+)
+
+
 # =========================== 绘图类 =========================== #
 
 
@@ -448,7 +512,7 @@ class RadialGradient(Gradient):
 class PainterOperation:
     offset: Position
     size: Size
-    func: Union[str, callable]
+    func: str | Callable
     args: list
     exclude_on_hash: bool
 
@@ -461,7 +525,7 @@ class PainterOperation:
                 img_dict[img_id] = self.args[i]
                 self.args[i] = f"%%image%%{img_id}"
 
-    def id_to_image(self, img_dict: dict[Union[int, str], Image.Image]) -> None:
+    def id_to_image(self, img_dict: dict[int | str, Image.Image]) -> None:
         if isinstance(self.args, tuple):
             self.args = list(self.args)
         for i in range(len(self.args)):
@@ -471,7 +535,7 @@ class PainterOperation:
 
 
 class Painter:
-    def __init__(self, img: Image.Image = None, size: tuple[int, int] = None) -> None:
+    def __init__(self, img: Image.Image | None = None, size: tuple[int, int] | None = None) -> None:
         self.operations: list[PainterOperation] = []
         if img is not None:
             self.img = img
@@ -514,22 +578,15 @@ class Painter:
         p = Painter(img, size)
         for op in operations:
             op.id_to_image(image_dict)
-            # debug_print(f"Executing: {op}")
             p.offset = op.offset
             p.size = op.size
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
-            # kwargs = {}
-            # for key, value in get_type_hints(func).items():
-            #     if value == Painter:
-            #         kwargs[key] = p
-            # func(*op.args, **kwargs)
             func(*op.args)
-            # debug_print(f"Method {op.name} executed, current memory usage: {get_memo_usage()} MB")
         debug_print(f"Sub process use time: {datetime.now() - t}")
         return p.img
 
-    async def get(self, cache_key: str = None) -> Image.Image:
+    async def get(self, cache_key: str | None = None) -> Image.Image:
         # 使用缓存
         if cache_key is not None:
             t = datetime.now()
@@ -552,7 +609,7 @@ class Painter:
                         try:
                             os.remove(p)
                         except Exception as e:
-                            print(f"Failed to remove cache file {p}: {e}")
+                            logging.warning(f"Failed to remove cache file {p}: {e}")
                     debug_print(f"Cache mismatch, removed {len(paths)} files")
 
         debug_print(f"Main process memory usage: {get_memo_usage()} MB")
@@ -572,12 +629,27 @@ class Painter:
         # 执行绘图操作
         t = datetime.now()
 
-        # global _painter_pool
-        # self.img = await _painter_pool.submit(Painter._execute, self.operations, self.img, self.size, image_dict)
-        self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+        # 根据图片大小选择执行方式
+        total_pixels = self.size[0] * self.size[1]
+        use_process_pool = settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+
+        if use_process_pool:
+            loop = asyncio.get_event_loop()
+            pool = get_painter_process_pool()
+            self.img = await loop.run_in_executor(
+                pool,
+                Painter._execute,
+                self.operations,
+                self.img,
+                self.size,
+                image_dict,
+            )
+            debug_print(f"Painter executed in process pool in {datetime.now() - t}")
+        else:
+            self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+            debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
 
         self.operations = []
-        debug_print(f"Painter executed in {datetime.now() - t}")
 
         # 保存缓存
         if cache_key is not None:
@@ -585,12 +657,12 @@ class Painter:
                 cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
                 os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
                 self.img.save(cache_path, format="PNG")
-            except:
+            except Exception:
                 debug_print(f"Failed to save cache for {cache_key}")
 
         return self.img
 
-    def add_operation(self, func: Union[str, callable], exclude_on_hash: bool, args: Any):
+    def add_operation(self, func: str | Callable, exclude_on_hash: bool, args: Any):
         self.operations.append(
             PainterOperation(
                 offset=self.offset,
@@ -611,12 +683,12 @@ class Painter:
                 os.remove(p)
                 ok += 1
             except Exception as e:
-                print(f"Failed to remove cache file {p}: {e}")
+                logging.warning(f"Failed to remove cache file {p}: {e}")
         return ok
 
     @staticmethod
     def get_cache_key_mtimes() -> dict[str, datetime]:
-        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"*.png"))
+        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png"))
         cache_keys = {}
         for p in paths:
             mtime = os.path.getmtime(p)
@@ -625,8 +697,10 @@ class Painter:
         return cache_keys
 
     def set_region(self, pos: Position, size: Size) -> Self:
-        assert isinstance(pos[0], int) and isinstance(pos[1], int), "Position must be integer"
-        assert isinstance(size[0], int) and isinstance(size[1], int), "Size must be integer"
+        assert isinstance(pos[0], int), "Position x must be integer"
+        assert isinstance(pos[1], int), "Position y must be integer"
+        assert isinstance(size[0], int), "Size width must be integer"
+        assert isinstance(size[1], int), "Size height must be integer"
         self.region_stack.append((self.offset, self.size))
         self.offset = pos
         self.size = size
@@ -667,11 +741,22 @@ class Painter:
         self,
         text: str,
         pos: Position,
-        font: Union[FontDesc, Font],
-        fill: Union[Color, LinearGradient] = BLACK,
+        font: FontDesc | Font,
+        fill: Color | LinearGradient | AdaptiveTextColor = BLACK,
         align: str = "left",
         exclude_on_hash: bool = False,
     ) -> Self:
+        """
+        绘制文本
+
+        Parameters:
+            text: 要绘制的单行文本内容
+            pos: 文本位置 (x, y)
+            font: 字体，可以是FontDesc或PIL ImageFont对象
+            fill: 填充颜色，可以是Color/LinearGradient/AdaptiveTextColor
+            align: 对齐方式，'left', 'center', 'right'
+            exclude_on_hash: 是否在哈希计算中排除此操作
+        """
         return self.add_operation("_impl_text", exclude_on_hash, (text, pos, font, fill, align))
 
     def paste(
@@ -679,26 +764,40 @@ class Painter:
         sub_img: Image.Image,
         pos: Position,
         size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
         exclude_on_hash: bool = False,
     ) -> Self:
-        return self.add_operation("_impl_paste", exclude_on_hash, (sub_img, pos, size))
+        return self.add_operation(
+            "_impl_paste",
+            exclude_on_hash,
+            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha),
+        )
 
-    def paste_with_alphablend(
+    def paste_with_alpha_blend(
         self,
         sub_img: Image.Image,
         pos: Position,
         size: Size = None,
-        alpha: float = None,
+        alpha: float | None = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
         exclude_on_hash: bool = False,
     ) -> Self:
-        return self.add_operation("_impl_paste_with_alphablend", exclude_on_hash, (sub_img, pos, size, alpha))
+        return self.add_operation(
+            "_impl_paste_with_alpha_blend",
+            exclude_on_hash,
+            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha),
+        )
 
     def rect(
         self,
         pos: Position,
         size: Size,
-        fill: Union[Color, Gradient],
-        stroke: Color = None,
+        fill: Color | Gradient,
+        stroke: Color | None = None,
         stroke_width: int = 1,
         exclude_on_hash: bool = False,
     ) -> Self:
@@ -708,7 +807,7 @@ class Painter:
         self,
         pos: Position,
         size: Size,
-        fill: Union[Color, Gradient],
+        fill: Color | Gradient,
         radius: int,
         stroke: Color = None,
         stroke_width: int = 1,
@@ -763,19 +862,34 @@ class Painter:
         self,
         text: str,
         pos: Position,
-        font: Union[FontDesc, Font],
-        fill: Union[Color, LinearGradient] = BLACK,
+        font: FontDesc | Font,
+        fill: Color | LinearGradient | AdaptiveTextColor = BLACK,
         align: str = "left",
-    ) -> Self:
+    ):
+        def adjust_overlay_alpha_by_color(overlay: Image.Image, color: Color):
+            if len(color) < 4 or color[3] == 255:
+                return
+            overlay_alpha = overlay.getchannel("A")
+            overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * color[3] / 255))
+            overlay.putalpha(overlay_alpha)
+
         if isinstance(font, FontDesc):
             font = get_font(font.path, font.size)
+
         if isinstance(fill, LinearGradient):
             gradient = fill
+            adaptive = None
             fill = BLACK
+        elif isinstance(fill, AdaptiveTextColor):
+            gradient = None
+            adaptive = fill
+            fill = fill.light[:3]
         else:
             gradient = None
+            adaptive = None
 
-        if (len(fill) == 3 or fill[3] == 255) and not gradient:
+        if (len(fill) == 3 or fill[3] == 255) and not gradient and not adaptive:
+            # 不透明，非渐变，非高对比度颜色
             self._text(text, pos, font, fill, align)
         else:
             text_size = get_text_size(font, text)
@@ -783,29 +897,94 @@ class Painter:
             overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
             p = Painter(overlay)
             p._text(text, (0, 0), font, fill=fill, align=align)
+
             if gradient:
+                # 渐变颜色
                 gradient_img = gradient.get_img(overlay_size, overlay)
                 overlay = gradient_img
+
+            elif adaptive:
+                # 自适应颜色
+                dark_overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+                dark_p = Painter(dark_overlay)
+                dark_p._text(text, (0, 0), font, fill=adaptive.dark[:3], align=align)
+
+                adjust_overlay_alpha_by_color(overlay, adaptive.light)
+                adjust_overlay_alpha_by_color(dark_overlay, adaptive.dark)
+
+                bg_img = self.img.crop(
+                    (
+                        pos[0] + self.offset[0],
+                        pos[1] + self.offset[1],
+                        pos[0] + self.offset[0] + overlay_size[0],
+                        pos[1] + self.offset[1] + overlay_size[1],
+                    )
+                )
+
+                if adaptive.pixelwise:
+                    gray = bg_img.filter(ImageFilter.BoxBlur(radius=8)).convert("L")
+                else:
+                    avg_color = np.array(bg_img).reshape(-1, 4).mean(axis=0)
+                    gray = Image.new("RGB", bg_img.size, tuple(avg_color[:3].astype(int))).convert("L")
+
+                threshold = int(adaptive.threshold * 255)
+                mask = gray.point(lambda p: 255 if p > threshold else 0, "L")
+                overlay.paste(dark_overlay, (0, 0), mask)
+
             elif fill[3] < 255:
-                overlay_alpha = overlay.split()[3]
-                overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * fill[3] / 255))
-                overlay.putalpha(overlay_alpha)
+                # 半透明颜色
+                adjust_overlay_alpha_by_color(overlay, fill)
+
             self.img.alpha_composite(overlay, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+
         return self
 
-    def _impl_paste(self, sub_img: Image.Image, pos: Position, size: Size = None) -> Self:
+    def _impl_paste(
+        self,
+        sub_img: Image.Image,
+        pos: Position,
+        size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.6,
+    ) -> Self:
         if size and size != sub_img.size:
             sub_img = sub_img.resize(size)
         if sub_img.mode not in ("RGB", "RGBA"):
             sub_img = sub_img.convert("RGBA")
+
+        if use_shadow:
+            w, h = sub_img.size
+            sw = shadow_width
+            lw, lh = w + sw * 2, h + sw * 2
+            # 获取和图像相同形状的阴影mask
+            shadow_mask = Image.new("L", (lw, lh), 0)
+            shadow_mask.paste(Image.new("L", sub_img.size, int(255 * shadow_alpha)), (sw, sw), sub_img)
+            # 模糊获取阴影
+            blurred_shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+            # 删除内部阴影
+            inner_mask = ImageChops.invert(shadow_mask)
+            blurred_shadow_mask = ImageChops.multiply(blurred_shadow_mask, inner_mask)
+            # 贴入原图
+            shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+            shadow.putalpha(blurred_shadow_mask)
+            self.img.alpha_composite(shadow, (pos[0] + self.offset[0] - sw, pos[1] + self.offset[1] - sw))
+
         if sub_img.mode == "RGBA":
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]), sub_img)
         else:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
-    def _impl_paste_with_alphablend(
-        self, sub_img: Image.Image, pos: Position, size: Size = None, alpha: float = None
+    def _impl_paste_with_alpha_blend(
+        self,
+        sub_img: Image.Image,
+        pos: Position,
+        size: Size = None,
+        alpha: float | None = None,
+        use_shadow: bool = False,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.6,
     ) -> Self:
         if size and size != sub_img.size:
             sub_img = sub_img.resize(size)
@@ -816,6 +995,24 @@ class Painter:
             overlay_alpha = overlay.split()[3]
             overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * alpha))
             overlay.putalpha(overlay_alpha)
+
+        if use_shadow:
+            w, h = overlay.size
+            sw = shadow_width
+            lw, lh = w + sw * 2, h + sw * 2
+            # 获取和图像相同形状的阴影mask
+            shadow_mask = Image.new("L", (lw, lh), 0)
+            shadow_mask.paste(Image.new("L", overlay.size, int(255 * shadow_alpha)), (sw, sw), overlay)
+            # 模糊获取阴影
+            blurred_shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+            # 删除内部阴影
+            inner_mask = ImageChops.invert(shadow_mask)
+            blurred_shadow_mask = ImageChops.multiply(blurred_shadow_mask, inner_mask)
+            # 贴入原图
+            shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+            shadow.putalpha(blurred_shadow_mask)
+            self.img.alpha_composite(shadow, (pos[0] - sw, pos[1] - sw))
+
         self.img.alpha_composite(overlay, pos)
         return self
 
@@ -823,7 +1020,7 @@ class Painter:
         self,
         pos: Position,
         size: Size,
-        fill: Union[Color, Gradient],
+        fill: Color | Gradient,
         stroke: Color = None,
         stroke_width: int = 1,
     ) -> Self:
@@ -834,7 +1031,7 @@ class Painter:
             gradient = None
 
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
-        bbox = pos + (pos[0] + size[0], pos[1] + size[1])
+        bbox = (*pos, pos[0] + size[0], pos[1] + size[1])
 
         if fill[3] == 255 and not gradient:
             draw = ImageDraw.Draw(self.img)
@@ -855,7 +1052,7 @@ class Painter:
         self,
         pos: Position,
         size: Size,
-        fill: Union[Color, Gradient],
+        fill: Color | Gradient,
         radius: int,
         stroke: Color = None,
         stroke_width: int = 1,
@@ -910,7 +1107,7 @@ class Painter:
             gradient = None
 
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
-        bbox = pos + (pos[0] + size[0], pos[1] + size[1])
+        bbox = (*pos, pos[0] + size[0], pos[1] + size[1])
 
         if fill[3] == 255 and not gradient:
             draw = ImageDraw.Draw(self.img)
@@ -1057,26 +1254,26 @@ class Painter:
         self.img.alpha_composite(overlay, (draw_pos[0], draw_pos[1]))
         return self
 
-    def _impl_draw_random_triangle_bg(self, time_color: bool, main_hue: float, size_fixed_rate: float):
+    def _impl_draw_random_triangle_bg(self, use_time_color: bool, main_hue: float, size_fixed_rate: float):
         timecolors = [
-            (0, 0.57, 4.0, 0.1),
-            (5, 0.57, 2.0, 0.2),
+            (0, 0.57, 7.0, 0.1),
+            (5, 0.57, 3.0, 0.2),
             (9, 0.57, 1.0, 0.8),
             (12, 0.57, 1.0, 1.0),
             (15, 0.57, 1.0, 0.8),
-            (19, 0.57, 2.0, 0.2),
-            (24, 0.57, 4.0, 0.1),
+            (19, 0.57, 3.0, 0.2),
+            (24, 0.57, 7.0, 0.1),
         ]
 
-        def get_timecolor(t: datetime) -> tuple | None:
+        def get_timecolor(t: datetime):
             if t.hour < timecolors[0][0]:
                 return timecolors[0][1:]
             elif t.hour >= timecolors[-1][0]:
                 return timecolors[-1][1:]
             for i in range(0, len(timecolors) - 1):
-                if timecolors[i][0] <= t.hour < timecolors[i + 1][0]:
+                if t.hour >= timecolors[i][0] and t.hour < timecolors[i + 1][0]:
                     hour1, h1, s1, l1 = timecolors[i]
-                    hour2, h2, s2, l2 = timecolors[i + 1]
+                    hour2, h2, s2, light2 = timecolors[i + 1]
                     t1 = datetime(t.year, t.month, t.day, hour1)
                     if hour2 == 24:
                         t2 = datetime(t.year, t.month, t.day, 0) + timedelta(days=1)
@@ -1086,21 +1283,23 @@ class Painter:
                     return (
                         h1 + (h2 - h1) * x,
                         s1 + (s2 - s1) * x,
-                        l1 + (l2 - l1) * x,
+                        l1 + (light2 - l1) * x,
                     )
-            return None
+
+        now = datetime.now()
+        # now = datetime.strptime("2024-06-21 23:00", "%Y-%m-%d %H:%M")
 
         w, h = self.size
-        if time_color:
-            mh, ms, ml = get_timecolor(datetime.now())
+        if use_time_color:
+            mh, ms, ml = get_timecolor(now)
         else:
             mh = main_hue
             ms = 1.0
             ml = 1.0
 
-        def h2c(_h: float, _s: float, _l: float, a=255) -> list[int]:
-            _h = (_h + 1.0) % 1.0
-            r, g, b = colorsys.hls_to_rgb(_h, _l * ml, _s * ms)
+        def h2c(h, s, l, a=255):  # noqa: E741
+            h = (h + 1.0) % 1.0
+            r, g, b = colorsys.hls_to_rgb(h, l * ml, s * ms)
             return [int(255 * c) for c in (r, g, b)] + [a]
 
         ofs, s = 0.025, 4
@@ -1115,34 +1314,34 @@ class Painter:
         bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
-        tri1 = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(tri1)
-        draw.polygon([(0, 0), (64, 32), (32, 64)], fill=WHITE)
-
-        tri2 = Image.new("RGBA", (64, 64), (255, 255, 255, 0))
-        draw = ImageDraw.Draw(tri2)
-        draw.polygon([(0, 0), (64, 32), (32, 64)], outline=WHITE, width=4)
-
-        def draw_tri(
-            x: float, y: float, rot: float, size: int, color: float | tuple[float, ...] | str, type_: int
-        ) -> None:
-            img = tri1 if type_ == 0 else tri2
-            img = img.resize((size, size), Image.Resampling.BILINEAR)
-            img = img.rotate(rot, expand=True)
-            img = ImageChops.multiply(img, Image.new("RGBA", img.size, color))
-            bg.alpha_composite(img, (int(x) - img.width // 2, int(y) - img.height // 2))
-
+        # preset_tris = [
+        #     Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/lunabot_static_images/triangle/tri{i+1}.png")  # noqa: E501
+        #     .convert("RGBA")
+        #     .resize((128, 128), Image.Resampling.BILINEAR)
+        #     for i in range(3)
+        # ]
+        preset_tris = [
+            Image.open(tri_path).convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR) for tri_path in TRI_PATHS
+        ]
         preset_colors = [
+            # (255, 255, 255),
             (255, 189, 246),
             (183, 246, 255),
             (255, 247, 146),
         ]
 
+        def draw_tri(x, y, rot, size, color, type):
+            img = preset_tris[type]
+            img = img.resize((size, size), Image.Resampling.BILINEAR)
+            img = img.rotate(rot, expand=True)
+            img = ImageChops.multiply(img, Image.new("RGBA", img.size, color))
+            bg.alpha_composite(img, (int(x) - img.width // 2, int(y) - img.height // 2))
+
         factor = min(w, h) / 2048 * 1.5
         size_factor = 1.0 + (factor - 1.0) * (1.0 - size_fixed_rate)
         dense_factor = 1.0 + (factor * factor - 1.0) * size_fixed_rate
 
-        def rand_tri(num: int, sz: tuple[float, float]) -> None:
+        def rand_tri(num, sz):
             for i in range(num):
                 x = random.uniform(0, w)
                 y = random.uniform(0, h)
@@ -1152,20 +1351,23 @@ class Painter:
                 size = max(1, min(1000, int(random.normalvariate(sz[0], sz[1]))))
                 dist = ((x - w // 2) / w * 2) ** 2 + ((y - h // 2) / h * 2) ** 2
                 size = int(size * dist)
-                size_alpha_factor, std_size = 1.0, 32 * size_factor
-                if size < std_size:
-                    size_alpha_factor = size / std_size
-                if size > std_size:
-                    size_alpha_factor = 1.0 - (size - std_size * 1.5) / (std_size * 1.5)
-                alpha = int(random.normalvariate(50, 200) * max(0, min(1.2, size_alpha_factor) * (ml**0.5)))
-                if alpha <= 0:
-                    continue
-                color = random.choice(preset_colors + [(255, 255, 255)] * 0)
-                color = (*color, alpha)
-                type_ = i % 3 // 2
-                draw_tri(x, y, rot, size, color, type_)
 
-        rand_tri(int(80 * dense_factor), (48 * size_factor, 16 * size_factor))
-        rand_tri(int(800 * dense_factor), (16 * size_factor, 16 * size_factor))
+                size_alpha_factor, std_size_lower, std_size_upper = 1.0, 64 * size_factor, 128 * size_factor
+                if size < std_size_lower:
+                    size_alpha_factor = size / std_size_lower
+                if size > std_size_upper:
+                    size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5)
+                alpha = int(random.normalvariate(50, 200) * max(0, min(1.2, size_alpha_factor) * (ml**0.5)))
+                if random.random() < 0.05 and size > std_size_lower:
+                    alpha = 255
+                if alpha <= 10:
+                    continue
+                color = random.choice(preset_colors)
+                color = (*color, alpha)
+                type = random.choice([1, 1, 1, 1, 1, 1, 0, 2])
+                draw_tri(x, y, rot, size, color, type)
+
+        rand_tri(int(20 * dense_factor), (128 * size_factor, 16 * size_factor))
+        rand_tri(int(200 * dense_factor), (64 * size_factor, 16 * size_factor))
 
         self.img.paste(bg, self.offset)

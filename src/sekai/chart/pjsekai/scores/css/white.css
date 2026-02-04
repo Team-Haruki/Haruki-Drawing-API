@@ -1,0 +1,157 @@
+.bar-line {
+    stroke: #e2e2e2;
+    stroke-width: 4;
+}
+
+.bar-count-flag {
+    stroke: #ffffff;
+    stroke-width: 4;
+}
+
+.bar-count-text {
+    font-size: 12px;
+    font-weight: 900;
+    font-family: Avenir;
+    fill: #ffffff;
+    text-anchor: start;
+}
+
+.beat-line {
+    stroke: #e2e2e2;
+    stroke-width: 1;
+}
+
+.lane-line {
+    stroke: #e2e2e2;
+    stroke-width: 1;
+}
+
+.event-flag {
+    stroke: #fee300;
+    stroke-width: 4;
+}
+
+.event-text {
+    font-size: 12px;
+    font-weight: 900;
+    font-family: Avenir;
+    fill: #fee300;
+    text-anchor: start;
+}
+
+.speed-line {
+    stroke: #ff33ff;
+    stroke-width: 1;
+}
+
+.speed-text {
+    font-size: 12px;
+    font-family: Avenir;
+    fill: #ff33ff;
+    text-anchor: end;
+}
+
+.lyric-text {
+    font-size: 12px;
+    font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", Osaka, メイリオ, Meiryo, "ＭＳ Ｐゴシック", "MS PGothic", "ＭＳ ゴシック" , "MS Gothic", "Noto Sans CJK JP", TakaoPGothic, sans-serif;
+    fill: #ffffff;
+    text-anchor: start;
+}
+
+.slide {
+    fill: #c9fce2cc
+}
+
+.slide-critical {
+    fill: #fcf1c3cc
+}
+
+.decoration {
+    fill: url(#decoration-gradient);
+}
+
+#decoration-gradient {
+    --color-start: #c9fce299;
+    --color-stop: #c9fce233;
+}
+
+.decoration-critical {
+    fill: url(#decoration-critical-gradient);
+}
+
+#decoration-critical-gradient {
+    --color-start: #fcf1c399;
+    --color-stop: #fcf1c333;
+}
+
+.tick-text {
+    font-size: 12px;
+    font-family: Avenir;
+    fill: #e2e2e2;
+    text-anchor: end;
+}
+
+.tick-line {
+    stroke: #e2e2e2;
+    stroke-width: 1;
+}
+
+.meta-line {
+    stroke: #e2e2e2;
+    stroke-width: 2;
+}
+
+.title {
+    font-size: 96px;
+    font-weight: 900;
+    font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", Osaka, メイリオ, Meiryo, "ＭＳ Ｐゴシック", "MS PGothic", "ＭＳ ゴシック" , "MS Gothic", "Noto Sans CJK JP", TakaoPGothic, sans-serif;
+    fill: #ffffff;
+    text-anchor: start;
+}
+
+.subtitle {
+    font-size: 48px;
+    font-weight: 700;
+    font-family: "ヒラギノ角ゴ Pro W3", "Hiragino Kaku Gothic Pro", Osaka, メイリオ, Meiryo, "ＭＳ Ｐゴシック", "MS PGothic", "ＭＳ ゴシック" , "MS Gothic", "Noto Sans CJK JP", TakaoPGothic, sans-serif;
+    fill: #ffffff;
+    text-anchor: start;
+}
+
+.lane {
+    fill: #CFD8DC;
+}
+
+.background {
+    fill: #FFFFFF;
+}
+
+.meta {
+    fill: #FFFFFF;
+}
+
+/* skill */
+
+.skill-duration {
+    fill: #78909C;
+}
+
+.skill-perfect {
+    fill: #90A4AE;
+}
+
+.skill-great {
+    fill: #B0BEC5;
+}
+
+.skill-score {
+    font-size: 38px;
+    /*font-weight: 900;*/
+    font-family: Osaka;
+    fill: black;
+    text-anchor: start;
+    /*text-shadow: black 0.1em 0.1em 0.2em;*/
+}
+
+.fever-duration {
+    fill: #ECEFF1;
+}

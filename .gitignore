@@ -192,3 +192,13 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# 测试文件
+test/
+test*
+data/
+.idea/
+*.png
+*.json
+*_test.py
+.DS_Store
