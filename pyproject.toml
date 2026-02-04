@@ -8,12 +8,21 @@ dependencies = [
     "fastapi>=0.116.1",
     "greenlet>=3.2.4",
     "hypercorn>=0.17.3",
+    "matplotlib>=3.10.7",
     "numpy>=2.3.2",
+    "emoji==2.0.0",
     "pillow>=11.3.0",
-    "pilmoji>=2.0.4",
+    "pilmoji==2.0.4",
     "psutil>=7.0.0",
+    "pydantic-settings>=2.0.0",
     "redis>=6.4.0",
     "ruff>=0.12.10",
+    "pyyaml>=6.0.3",
+    "uvicorn>=0.40.0",
+    "svgwrite>=1.4.3",
+    "aiohttp>=3.13.3",
+    "uvloop>=0.22.1",
+    "coloredlogs>=15.0.1",
 ]
 
 

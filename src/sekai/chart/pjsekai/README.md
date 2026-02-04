@@ -1,0 +1,2 @@
+- Original Project: [pjsekai/scores](https://gitlab.com/pjsekai/scores)
+- Skill Information Previewer from [xfl03's fork](https://github.com/xfl03/SekaiMusicChart)
