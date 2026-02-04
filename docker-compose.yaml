@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  haruki-drawing-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: haruki-drawing-api
+    ports:
+      - "28000:8000"
+    volumes:
+      # 必须和screenshot-service同名且挂载到同一位置
+      - "./data:/app/haruki_drawing_api/data"
+      - "./configs.docker.yaml:/app/haruki_drawing_api/configs.yaml"
+    restart: always
+    depends_on:
+      screenshot-service:
+        condition: service_healthy
+
+  screenshot-service:
+    build:
+      # 注意，这个路径是在测试时使用的，实际路径按需更改
+      context: ./../screenshot-service
+      dockerfile: Dockerfile
+    container_name: screenshot-service
+    ports:
+      - "28080:8080"
+    environment:
+      - PORT=8080
+      - GIN_MODE=release
+    volumes:
+      # 必须和haruki-drawing-api挂载到同一位置
+      - ./data:/app/haruki_drawing_api/data
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
