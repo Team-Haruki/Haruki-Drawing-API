@@ -27,7 +27,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.utils import get_img_from_path
-from src.sekai.profile.drawer import get_detailed_profile_card
+from src.sekai.profile.drawer import get_profile_card
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # 从 model.py 导入数据模型
@@ -66,7 +66,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_detailed_profile_card(profile)
+            await get_profile_card(profile.to_profile_card_request())
 
             with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
                 # 标题行
@@ -190,7 +190,7 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_detailed_profile_card(profile)
+            await get_profile_card(profile.to_profile_card_request())
 
             with (
                 VSplit()
@@ -292,7 +292,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if profile:
-                await get_detailed_profile_card(profile)
+                await get_profile_card(profile.to_profile_card_request())
 
             with (
                 HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg()).set_padding(8)
@@ -400,7 +400,7 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_detailed_profile_card(profile)
+            await get_profile_card(profile.to_profile_card_request())
 
             with VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
                 # 标题
@@ -527,7 +527,7 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_detailed_profile_card(profile)
+            await get_profile_card(profile.to_profile_card_request())
 
             with VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
                 # 标题

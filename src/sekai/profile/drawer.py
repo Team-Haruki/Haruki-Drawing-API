@@ -115,9 +115,7 @@ CHARA_ID2NICKNAME = {
 # =========================== 从.model导入数据类型 =========================== #
 
 from .model import (
-    BasicProfile,
     CardFullThumbnailRequest,
-    DetailedProfileCardRequest,
     ProfileBgSettings,
     ProfileCardRequest,
     ProfileRequest,
@@ -279,68 +277,6 @@ def process_hide_uid(is_hide_uid: bool, uid: str, keep: int = 0) -> str:
             return "*" * (16 - keep) + str(uid)[-keep:]
         return "*" * 16
     return uid
-
-
-async def get_detailed_profile_card(rqd: DetailedProfileCardRequest) -> Frame:
-    profile = rqd
-    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
-        with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
-            if profile:
-                mode = profile.mode
-                has_frame = profile.has_frame
-                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
-                avatar_widget = await get_avatar_widget_with_frame(  # noqa: F841
-                    is_frame=bool(has_frame),
-                    frame_paths=None,  # DetailedProfileCardRequest 不支持 frame_paths
-                    avatar_img=avatar_img,
-                    avatar_w=80,
-                    frame_data=[],
-                )
-                with VSplit().set_content_align("c").set_item_align("l").set_sep(5):
-                    source = profile.source or "?"
-                    update_time = datetime.fromtimestamp(profile.update_time / 1000)
-                    update_time_text = (
-                        update_time.strftime("%m-%d %H:%M:%S")
-                        + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                    )
-                    user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
-                    colored_text_box(
-                        truncate(profile.nickname, 64),
-                        TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
-                    )
-                    TextBox(
-                        f"{profile.region.upper()}: {user_id} Suite数据",
-                        TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
-                    )
-                    TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                    TextBox(f"数据来源: {source}  获取模式: {mode}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-    return f
-
-
-# 获取玩家基本信息的简单卡片控件，返回Frame
-async def get_basic_profile_card(profile: BasicProfile) -> Frame:
-    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:
-        with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
-            has_frame = profile.has_frame
-            avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
-            avatar_widget = await get_avatar_widget_with_frame(  # noqa: F841
-                is_frame=bool(has_frame),
-                frame_paths=None,  # BasicProfile 不支持 frame_paths
-                avatar_img=avatar_img,
-                avatar_w=80,
-                frame_data=[],
-            )
-            with VSplit().set_content_align("c").set_item_align("l").set_sep(5):
-                user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
-                colored_text_box(
-                    truncate(profile.nickname, 64),
-                    TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
-                )
-                TextBox(f"{profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-    return f
-
-
-# 统一的合成玩家
 
 
 async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:

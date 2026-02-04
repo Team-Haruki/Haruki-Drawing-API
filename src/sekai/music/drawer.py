@@ -23,7 +23,7 @@ from src.sekai.base.painter import (
 )
 from src.sekai.base.plot import Canvas, FillBg, Flow, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
-from src.sekai.profile.drawer import get_detailed_profile_card, get_profile_card
+from src.sekai.profile.drawer import get_profile_card
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # =========================== 从.model导入常量和数据类型 =========================== #
@@ -468,9 +468,9 @@ async def compose_music_list_image(
     lv_musics = sorted(lv_musics_map.items(), key=lambda x: x[0], reverse=False)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16) as vs:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if profile:
-                await get_detailed_profile_card(profile)
+                await get_profile_card(profile.to_profile_card_request())
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 lv_musics.sort(key=lambda x: x[0], reverse=False)
@@ -586,9 +586,7 @@ async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
                                 .set_bg(roundrect_bg(fill=color, radius=4, blur_glass=blur_glass))
                             )
 
-                        with draw_bar(PLAY_RESULT_COLORS["not_clear"], bar_h, blur_glass=True).set_content_align(
-                            "b"
-                        ) as f:
+                        with draw_bar(PLAY_RESULT_COLORS["not_clear"], bar_h, blur_glass=True).set_content_align("b"):
                             if c.clear:
                                 draw_bar(PLAY_RESULT_COLORS["clear"], int(bar_h * c.clear / c.total))
                             if c.fc:
@@ -779,7 +777,7 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
     PIL.Image.Image
     """
     # 网格宽度和高度
-    gw, gh = 80, 40
+    _gw, gh = 80, 40
     # 样式
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(75, 75, 75))
