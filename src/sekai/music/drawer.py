@@ -16,13 +16,24 @@ from src.sekai.base.painter import (
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     DEFAULT_HEAVY_FONT,
-    RED,
     WHITE,
     LinearGradient,
     lerp_color,
 )
-from src.sekai.base.plot import Canvas, FillBg, Flow, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
-from src.sekai.base.utils import get_img_from_path, get_readable_timedelta, get_str_display_length
+from src.sekai.base.plot import (
+    Canvas,
+    FillBg,
+    Flow,
+    Frame,
+    Grid,
+    HSplit,
+    ImageBox,
+    Spacer,
+    TextBox,
+    TextStyle,
+    VSplit,
+)
+from src.sekai.base.utils import get_img_from_path, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
@@ -36,12 +47,31 @@ from .model import (
     PlayProgressRequest,
 )
 
+# =========================== 绘图助手 =========================== #
+
+
+def _draw_rqd_title(rqd):
+    """从 rqd 中读取并绘制附加标题"""
+    if not (rqd.title and rqd.title_style):
+        return
+
+    style = rqd.title_style
+    if isinstance(style, dict):
+        style = TextStyle(**style)
+
+    if rqd.title_shadow:
+        TextBox(
+            rqd.title,
+            TextStyle(style.font, style.size, style.color, use_shadow=True, shadow_offset=2),
+        ).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
+    else:
+        TextBox(rqd.title, style).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
+
+
 # =========================== 绘图函数 =========================== #
 
 
-async def compose_music_detail_image(
-    rqd: MusicDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow=False
-):
+async def compose_music_detail_image(rqd: MusicDetailRequest):
     # 数据准备
     mid = rqd.music_info.id
     name = rqd.music_info.title
@@ -109,18 +139,7 @@ async def compose_music_detail_image(
                 .set_item_bg(roundrect_bg(alpha=80))
             ):
                 # 附加标题
-                if title and title_style:
-                    if title_shadow:
-                        TextBox(
-                            title,
-                            TextStyle(
-                                title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2
-                            ),
-                        ).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
-                    else:
-                        TextBox(title, title_style).set_padding(16).set_omit_parent_bg(True).set_bg(
-                            roundrect_bg(alpha=80)
-                        )
+                _draw_rqd_title(rqd)
 
                 # 歌曲标题
                 name_text = f"【{region.upper()}-{mid}】{name}"
@@ -383,73 +402,60 @@ async def compose_music_detail_image(
     return await canvas.get_img()
 
 
-async def compose_music_brief_list_image(
-    rqd: MusicBriefListRequest,
-    title: str | None = None,
-    title_style: TextStyle = None,
-    title_shadow=False,
-) -> Image.Image:
-    musics_list = rqd.music_list
-    max_num = 50
-    hide_num = max(0, len(musics_list) - max_num)
-    musics_list = musics_list[:max_num]
-    region = rqd.region
+async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Image:
+    profile = rqd.profile
+    diff = rqd.required_difficulty
+
+    # 预加载封面
+    jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
+    loaded_jackets = await asyncio.gather(*jacket_tasks)
+    jackets = {m.id: img for m, img in zip(rqd.music_list, loaded_jackets)}
+
+    # 按等级分组
+    lv_musics_map = {}
+    for m in rqd.music_list:
+        if m.level not in lv_musics_map:
+            lv_musics_map[m.level] = []
+        lv_musics_map[m.level].append(m)
+    lv_musics = sorted(lv_musics_map.items(), key=lambda x: x[0])
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
-            if title and title_style:
-                if title_shadow:
-                    TextBox(
-                        title,
-                        TextStyle(
-                            title_style.font, title_style.size, title_style.color, use_shadow=True, shadow_offset=2
-                        ),
-                    ).set_padding(8)
-                else:
-                    TextBox(title, title_style).set_padding(8)
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
+            # 附加标题
+            _draw_rqd_title(rqd)
 
-            for m in musics_list:
-                mid, music_name = m.music_info.id, m.music_info.title
-                publish_time = datetime.fromtimestamp(m.music_info.release_at / 1000)
-                publish_dlt = get_readable_timedelta(publish_time - datetime.now(), precision="d")
-                diffs = ["easy", "normal", "hard", "expert", "master", "append"]
-                diff_lvs = m.difficulty.level
+            if profile:
+                await get_profile_card(profile)
 
-                style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(50, 50, 50))
-                style2 = TextStyle(font=DEFAULT_FONT, size=16, color=(70, 70, 70))
-                style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=WHITE)
+            with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
+                for lv, musics in lv_musics:
+                    # 难度标题
+                    with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
+                        lv_text = TextBox(
+                            f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE)
+                        )
+                        lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=DIFF_COLORS.get(diff, BLACK), radius=5))
 
-                with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16):
-                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path), size=(80, 80))
-                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
-                        TextBox(f"【{region.upper()}-{mid}】{music_name}", style1).set_w(250)
-                        if publish_dlt <= "0秒":
-                            TextBox(f"  {publish_time.strftime('%Y-%m-%d %H:%M:%S')}", style2)
-                        else:
-                            TextBox(f"  {publish_time.strftime('%Y-%m-%d %H:%M:%S')} ({publish_dlt}后)", style2)
-                        with HSplit().set_content_align("c").set_item_align("c").set_sep(4):
-                            Spacer(w=2)
-                            for diff, level in zip(diffs, diff_lvs):
-                                if level is not None:
-                                    TextBox(str(level), style3, overflow="clip").set_bg(
-                                        roundrect_bg(fill=DIFF_COLORS[diff], radius=8)
-                                    ).set_content_align("c").set_size((28, 28))
-
-            if hide_num:
-                TextBox(
-                    f"{hide_num}首歌曲未显示", TextStyle(font=DEFAULT_FONT, size=20, color=(20, 20, 20))
-                ).set_padding(8)
+                        # 歌曲网格
+                        with Grid(col_count=10).set_sep(5):
+                            for m in musics:
+                                with VSplit().set_sep(2):
+                                    with Frame():
+                                        ImageBox(jackets.get(m.id), size=(64, 64), image_size_mode="fill")
+                                        # 游玩结果图标
+                                        if m.play_result:
+                                            result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
+                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
+                                            if result_img:
+                                                ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
+                                                    (64 - 10, 64 - 10)
+                                                )
 
     add_watermark(canvas)
     return await canvas.get_img()
 
 
-async def compose_music_list_image(
-    rqd: MusicListRequest,
-    show_id: bool,
-    show_leak: bool,
-    play_result_filter: list[str] | None = None,
-) -> Image.Image:
+async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
     jackets = {}
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
     loaded_jackets = await asyncio.gather(*jacket_tasks)
@@ -457,8 +463,6 @@ async def compose_music_list_image(
         jackets[music_id] = img
 
     profile = rqd.profile
-    if play_result_filter is None:
-        play_result_filter = ["clear", "not_clear", "fc", "ap"]
     lv_musics_map = {}
     for music in rqd.music_list:
         lv = music["difficulty"]
@@ -469,6 +473,9 @@ async def compose_music_list_image(
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
+            # 附加标题
+            _draw_rqd_title(rqd)
+
             if profile:
                 await get_profile_card(profile.to_profile_card_request())
 
@@ -477,19 +484,11 @@ async def compose_music_list_image(
                 for lv, musics in lv_musics:
                     musics.sort(key=lambda x: x["release_at"], reverse=False)
 
-                    # 获取游玩结果并过滤
+                    # 这里的 filtered_musics 实际上就是传入的所有 musics，因为不需要过滤了
                     filtered_musics = []
                     for music in musics:
-                        # 过滤剧透
-                        is_leak = datetime.fromtimestamp(music["release_at"] / 1000) > datetime.now()
-                        music["is_leak"] = is_leak
-                        if is_leak and not show_leak:
-                            continue
                         # 获取游玩结果
-                        result_type = rqd.user_results[music["id"]]
-                        if (result_type or "not_clear") not in play_result_filter:
-                            continue
-                        music["play_result"] = result_type
+                        music["play_result"] = rqd.user_results.get(music["id"])
                         filtered_musics.append(music)
 
                     if not filtered_musics:
@@ -507,12 +506,6 @@ async def compose_music_list_image(
                                 with VSplit().set_sep(2):
                                     with Frame():
                                         ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
-                                        if music["is_leak"]:
-                                            TextBox(
-                                                "LEAK", TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=RED)
-                                            ).set_bg(roundrect_bg(radius=4)).set_offset((64, 64)).set_offset_anchor(
-                                                "rb"
-                                            )
                                         if music["play_result"]:
                                             if (
                                                 rqd.play_result_icon_path_map
@@ -527,10 +520,10 @@ async def compose_music_list_image(
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
                                                 (64 - 10, 64 - 10)
                                             )
-                                    if show_id:
-                                        TextBox(
-                                            f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)
-                                        ).set_w(64)
+                                    # 默认始终显示 ID，因为它是列表查询
+                                    TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(
+                                        64
+                                    )
 
     add_watermark(canvas)
     return await canvas.get_img()

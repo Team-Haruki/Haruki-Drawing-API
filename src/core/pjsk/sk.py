@@ -22,10 +22,10 @@ router = APIRouter(tags=["SK"])
 
 
 @router.post("/line", summary="Generate ranking line image")
-async def sk_line(request: SklRequest, full: bool = False):
+async def sk_line(request: SklRequest):
     """Generate event ranking line list image."""
     try:
-        image = await compose_skl_image(request, full)
+        image = await compose_skl_image(request)
         return image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

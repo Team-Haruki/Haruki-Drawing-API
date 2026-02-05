@@ -153,13 +153,12 @@ def get_board_score_str(score: int, width: int | None = None) -> str:
     return ret
 
 
-async def compose_skl_image(rqd: SklRequest, full: bool = False) -> Image.Image:
+async def compose_skl_image(rqd: SklRequest) -> Image.Image:
     """
     合成通过排名列表图片 (SKL)
 
     Args:
         rqd: 请求数据
-        full: 是否显示完整榜线 (True: ALL_RANKS, False: SKL_QUERY_RANKS)
     """
     eid = rqd.id
     event_start = datetime.fromtimestamp(rqd.start_at / 1000)
@@ -169,6 +168,7 @@ async def compose_skl_image(rqd: SklRequest, full: bool = False) -> Image.Image:
     wl_cid = rqd.wl_cid
     region = rqd.region
 
+    full = rqd.full
     query_ranks = ALL_RANKS if full else SKL_QUERY_RANKS
     ranks = rqd.ranks if full else [r for r in rqd.ranks if r.rank in query_ranks]
     ranks = sorted(ranks, key=lambda x: x.rank)

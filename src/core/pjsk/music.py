@@ -50,14 +50,14 @@ async def music_brief_list(request: MusicBriefListRequest):
 
 
 @router.post("/list", summary="Generate music list image")
-async def music_list(request: MusicListRequest, show_id: bool = False, show_leak: bool = False):
+async def music_list(request: MusicListRequest):
     """
     Generate a music list image with user play results.
 
     Shows songs with user's play status and results.
     """
     try:
-        image = await compose_music_list_image(request, show_id, show_leak)
+        image = await compose_music_list_image(request)
         return image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -96,6 +96,8 @@ class SklRequest(BaseModel):
         角色图标路径
     ranks : list[RankInfo]
         排名列表
+    full : bool
+        是否显示完整榜线 (True: ALL_RANKS, False: SKL_QUERY_RANKS)
     """
 
     id: int
@@ -107,6 +109,7 @@ class SklRequest(BaseModel):
     wl_cid: int | None = None
     chara_icon_path: str | None = None
     ranks: list[RankInfo]
+    full: bool = False
 
 
 class SKRequest(BaseModel):
