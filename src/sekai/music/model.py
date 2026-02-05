@@ -142,6 +142,12 @@ class MusicDetailRequest(BaseModel):
         排行榜live_type名称列表
     leaderboard_targets : list[str] | None
         排行榜target名称列表
+    title : str | None
+        附加标题
+    title_style : Any | None
+        附加标题样式 (dict 或 TextStyle)
+    title_shadow : bool
+        是否为附加标题添加阴影
     """
 
     region: str
@@ -160,6 +166,9 @@ class MusicDetailRequest(BaseModel):
     leaderboard_music_num: int | None = None
     leaderboard_live_types: dict[str, str] | None = None
     leaderboard_targets: dict[str, str] | None = None
+    title: str | None = None
+    title_style: Any | None = None
+    title_shadow: bool = False
 
 
 class MusicBriefList(BaseModel):
@@ -169,17 +178,20 @@ class MusicBriefList(BaseModel):
 
     Attributes
     ----------
-    difficulty : DifficultyInfo
-        难度信息
-    music_info : MusicMD
-        歌曲元数据
+    id : int
+        歌曲ID
+    level : int
+        歌曲等级 (定数)
     music_jacket_path : str
         歌曲封面路径
+    play_result : str | None
+        打歌结果 (ap, fc, clear, not_clear)
     """
 
-    difficulty: DifficultyInfo
-    music_info: MusicMD
+    id: int
+    level: int
     music_jacket_path: str
+    play_result: str | None = None
 
 
 class MusicBriefListRequest(BaseModel):
@@ -193,10 +205,25 @@ class MusicBriefListRequest(BaseModel):
         歌曲列表
     region : str
         服务器区域
+    required_difficulty : str
+        要求的难度类型 (easy, normal, hard, expert, master, append)
+    profile : ProfileCardRequest | None
+        用户信息卡片数据
+    title : str | None
+        附加标题
+    title_style : Any | None
+        附加标题样式 (dict 或 TextStyle)
+    title_shadow : bool
+        是否为附加标题添加阴影
     """
 
     music_list: list[MusicBriefList]
     region: str
+    required_difficulty: str = "master"
+    profile: ProfileCardRequest | None = None
+    title: str | None = None
+    title_style: Any | None = None
+    title_shadow: bool = False
 
 
 class MusicListRequest(BaseModel):
@@ -218,6 +245,12 @@ class MusicListRequest(BaseModel):
         用户个人信息
     play_result_icon_path_map : Optional[Dict[str, str]]
         打歌结果图标路径映射
+    title : str | None
+        附加标题
+    title_style : Any | None
+        附加标题样式 (dict 或 TextStyle)
+    title_shadow : bool
+        是否为附加标题添加阴影
     """
 
     user_results: dict[
@@ -228,6 +261,9 @@ class MusicListRequest(BaseModel):
     required_difficulties: str
     profile: DetailedProfileCardRequest
     play_result_icon_path_map: dict[str, str] | None = None
+    title: str | None = None
+    title_style: Any | None = None
+    title_shadow: bool = False
 
 
 class PlayProgressCount(BaseModel):
