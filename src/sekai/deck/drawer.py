@@ -15,7 +15,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.utils import get_img_from_path
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
-    get_detailed_profile_card,
+    get_profile_card,
 )
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
@@ -79,7 +79,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_padding(16):
             if not use_max_profile:
-                await get_detailed_profile_card(rqd.profile)
+                await get_profile_card(rqd.profile.to_profile_card_request())
 
             with (
                 VSplit()
@@ -364,28 +364,18 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                             event_bonus_str,
                                                             TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
                                                         ).set_bg(info_bg)
-                                                    read_fg, read_bg = (50, 150, 50, 255), (255, 255, 255, 255)
-                                                    noread_fg, noread_bg = (150, 50, 50, 255), (255, 255, 255, 255)
-                                                    none_fg, none_bg = (255, 255, 255, 255), (255, 255, 255, 255)
+                                                    read_fg, _read_bg = (50, 150, 50, 255), (255, 255, 255, 255)
+                                                    noread_fg, _noread_bg = (150, 50, 50, 255), (255, 255, 255, 255)
+                                                    none_fg, _none_bg = (255, 255, 255, 255), (255, 255, 255, 255)
                                                     ep1_fg = (
                                                         none_fg
                                                         if ep1_read is None
                                                         else (read_fg if ep1_read else noread_fg)
                                                     )
-                                                    ep1_bg = (
-                                                        none_bg
-                                                        if ep1_read is None
-                                                        else (read_bg if ep1_read else noread_bg)
-                                                    )
                                                     ep2_fg = (
                                                         none_fg
                                                         if ep2_read is None
                                                         else (read_fg if ep2_read else noread_fg)
-                                                    )
-                                                    ep2_bg = (
-                                                        none_bg
-                                                        if ep2_read is None
-                                                        else (read_bg if ep2_read else noread_bg)
                                                     )
                                                     TextBox(
                                                         "前" if show_event_bonus else "前篇",

@@ -6,6 +6,36 @@ from src.sekai.honor.drawer import HonorRequest
 
 
 class DetailedProfileCardRequest(BaseModel):
+    r"""DetailedProfileCardRequest
+
+    详细玩家信息请求（扁平结构，向后兼容）
+
+    Attributes
+    ----------
+    id : str
+        玩家id
+    region : str
+        服务器
+    nickname : str
+        昵称
+    source : str
+        数据来源
+    update_time : int
+        更新时间戳
+    mode : str
+        获取模式
+    is_hide_uid : bool
+        是否隐藏id
+    leader_image_path : str
+        队长头像图片路径
+    has_frame : bool
+        是否有框
+    frame_path : Optional[str]
+        框的路径
+    user_cards : Optional[list[dict]]
+        用户卡组
+    """
+
     id: str
     region: str
     nickname: str
@@ -17,6 +47,28 @@ class DetailedProfileCardRequest(BaseModel):
     has_frame: bool = False
     frame_path: str | None = None
     user_cards: list[dict] | None = None
+
+    def to_profile_card_request(self) -> "ProfileCardRequest":
+        """转换为 ProfileCardRequest"""
+        return ProfileCardRequest(
+            profile=BasicProfile(
+                id=self.id,
+                region=self.region,
+                nickname=self.nickname,
+                is_hide_uid=self.is_hide_uid,
+                leader_image_path=self.leader_image_path,
+                has_frame=self.has_frame,
+                frame_path=self.frame_path,
+            ),
+            data_sources=[
+                ProfileDataSource(
+                    name="Suite数据",
+                    source=self.source,
+                    update_time=self.update_time,
+                    mode=self.mode,
+                )
+            ],
+        )
 
 
 class BasicProfile(BaseModel):
