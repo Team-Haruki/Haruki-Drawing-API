@@ -28,7 +28,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.utils import get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
-    get_detailed_profile_card,
+    get_profile_card,
 )
 from src.settings import ASSETS_BASE_DIR
 
@@ -288,7 +288,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_detailed_profile_card(rqd.user_info)
+            await get_profile_card(rqd.user_info.to_profile_card_request())
             TextBox("每次上传时进行增量更新，未上传过的记录将会丢失", style4).set_bg(
                 roundrect_bg(alpha=80)
             ).set_padding(12)

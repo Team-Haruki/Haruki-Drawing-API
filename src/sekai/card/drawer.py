@@ -29,7 +29,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
-    get_detailed_profile_card,
+    get_profile_card,
 )
 
 # 从 model.py 导入数据模型
@@ -204,7 +204,9 @@ async def compose_card_detail_image(
                     with HSplit().set_padding(16).set_sep(8).set_content_align("lb").set_item_align("lb"):
                         TextBox("综合力", label_style)
                         TextBox(
-                            f"{power_info.power_total} ({power_info.power1}/{power_info.power2}/{power_info.power3}) (满级0破无剧情)",
+                            f"{power_info.power_total} "
+                            f"({power_info.power1}/{power_info.power2}/{power_info.power3}) "
+                            "(满级0破无剧情)",
                             text_style,
                         )
 
@@ -481,7 +483,7 @@ async def compose_box_image(
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if user_info:
-                user_profile = await get_detailed_profile_card(user_info)  # noqa: F841
+                user_profile = await get_profile_card(user_info.to_profile_card_request())  # noqa: F841
 
             # 卡牌网格
             with (
