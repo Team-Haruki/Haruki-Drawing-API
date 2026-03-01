@@ -1,17 +1,19 @@
 import asyncio
 from datetime import datetime, timedelta
+from functools import lru_cache
 import io
 import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
+import threading
 from typing import Literal
 from uuid import uuid4
 
 import aiohttp
 from PIL import Image
 
-from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE, SCREENSHOT_API_PATH, TMP_PATH
+from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE, IMAGE_CACHE_SIZE, SCREENSHOT_API_PATH, TMP_PATH
 
 
 def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit=False) -> str:
@@ -56,14 +58,37 @@ async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
     """
     if path is None:
         raise ValueError("图片路径不能为空(None)")
+    return await run_in_pool(_load_image_from_path_sync, base_path, path)
+
+
+def _open_image_copy(path: Path) -> Image.Image:
+    with Image.open(path) as img:
+        img.load()
+        return img.copy()
+
+
+@lru_cache(maxsize=max(IMAGE_CACHE_SIZE, 1))
+def _load_image_cached(path: str, mtime_ns: int, size: int) -> Image.Image:
+    del mtime_ns, size
+    return _open_image_copy(Path(path))
+
+
+def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
     safe_path = path.lstrip("/")
+    resolved_base = base_path.resolve()
+    full_path = (resolved_base / safe_path).resolve()
 
-    full_path = base_path / safe_path
-
-    if not full_path.exists():
+    if not full_path.is_relative_to(resolved_base):
+        raise ValueError(f"图片路径越界: {path}")
+    if not full_path.is_file():
         raise FileNotFoundError(f"图片文件不存在: {full_path}")
-    img = Image.open(full_path)
-    return img
+
+    if IMAGE_CACHE_SIZE <= 0:
+        return _open_image_copy(full_path)
+
+    stat = full_path.stat()
+    cached = _load_image_cached(str(full_path), stat.st_mtime_ns, stat.st_size)
+    return cached.copy()
 
 
 def get_str_display_length(s: str) -> int:
@@ -242,6 +267,7 @@ TEMP_FILE_DIR = ASSETS_BASE_DIR / TMP_PATH
 # 暂时保存的临时文件，当达到设定的时间时会将其中的文件删除
 # TODO: 由于music chart 生成的svg图片不需要设置删除时间，因此还没有实现这个超时删除功能
 _tmp_files_to_remove: list[tuple[str, datetime]] = []
+_tmp_files_lock = threading.Lock()
 # TODO: 如果一个临时文件已经生成了，而这时程序被关闭导致内存中的这个list丢失，
 # 或者TempFilePath上下文没来得及退出，这样都会导致临时文件被保留，需要一个定时清理的程序
 # 这样的定时程序之后再做
@@ -312,7 +338,8 @@ class TempFilePath:
         if self.remove_after is None:
             remove_file(self.path)
         else:
-            _tmp_files_to_remove.append((self.path, datetime.now() + self.remove_after))
+            with _tmp_files_lock:
+                _tmp_files_to_remove.append((self.path, datetime.now() + self.remove_after))
 
 
 # ============================ 异步和任务 ============================ #

@@ -1,18 +1,28 @@
 FROM python:3.13-slim-bookworm AS builder
 
-# 安装 uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# 构建部分三方包（例如 psutil）需要编译工具链
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# 安装 uv（避免依赖 ghcr 拉取权限）
+RUN pip install --no-cache-dir uv
 # 工作目录
 WORKDIR /app/haruki_drawing_api
 
 # 设置uv缓存目录
-ENV UV_CACHE_DIR=/root/.cache/uv
+ENV UV_CACHE_DIR=/root/.cache/uv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_PYTHON=cpython-3.14.3+freethreaded \
+    UV_PROJECT_ENVIRONMENT=/app/haruki_drawing_api/.venv
 # 复制依赖文件
 COPY pyproject.toml uv.lock ./
 
 # 安装依赖
 RUN --mount=type=cache,target=$UV_CACHE_DIR \
-    uv sync --frozen --no-install-project --no-dev
+    uv python install ${UV_PYTHON} \
+    && uv venv ${UV_PROJECT_ENVIRONMENT} --python ${UV_PYTHON} \
+    && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python
 
 # 运行阶段
 FROM python:3.13-slim-bookworm AS runtime
@@ -21,9 +31,11 @@ FROM python:3.13-slim-bookworm AS runtime
 WORKDIR /app/haruki_drawing_api
 # 复制虚拟环境
 COPY --from=builder /app/haruki_drawing_api/.venv /app/haruki_drawing_api/.venv
+COPY --from=builder /opt/uv/python /opt/uv/python
 
 # 设置时区，配置环境变量，确保优先使用虚拟环境中的 Python 和 Bin
 ENV TZ=Asia/Shanghai \
+    PYTHON_GIL=0 \
     PATH="/app/haruki_drawing_api/.venv/bin:$PATH"
 
 # 安装 opencv 所需库
@@ -55,6 +67,6 @@ EXPOSE 8000
 
 VOLUME ["/app/haruki_drawing_api/data", "/app/haruki_drawing_api/config.yaml"]
 
-# 使用uv启动
-ENTRYPOINT ["uvicorn", "src.core.main:app"]
+# 使用自由线程解释器启动
+ENTRYPOINT ["/app/haruki_drawing_api/.venv/bin/python", "-X", "gil=0", "-m", "uvicorn", "src.core.main:app"]
 CMD ["--host", "0.0.0.0", "--port", "8000"]
