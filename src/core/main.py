@@ -4,7 +4,7 @@ Haruki Drawing API - FastAPI Core Application
 This module provides RESTful API endpoints for generating various Sekai images.
 All endpoints accept JSON request bodies and return PNG images.
 
-Run with: uvicorn src.core.main:app --reload
+Run with: granian --interface asgi src.core.main:app
 Swagger UI: http://localhost:8000/docs
 ReDoc: http://localhost:8000/redoc
 """
@@ -14,7 +14,7 @@ import logging
 
 import coloredlogs
 from fastapi import FastAPI
-import uvicorn
+from granian import Granian
 
 from src.core import health
 from src.core.pjsk import router as pjsk_router
@@ -81,4 +81,4 @@ app.include_router(pjsk_router)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    Granian("src.core.main:app", interface="asgi", address=SERVER_HOST, port=SERVER_PORT).serve()
