@@ -4,9 +4,7 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
-    "aiopath>=0.7.7",
     "fastapi>=0.116.1",
-    "greenlet>=3.2.4",
     "hypercorn>=0.17.3",
     "matplotlib>=3.10.7",
     "numpy>=2.3.2",
@@ -14,7 +12,8 @@ dependencies = [
     "pillow>=11.3.0",
     "pilmoji==2.0.4",
     "psutil>=7.0.0",
-    "pydantic-settings>=2.0.0",
+    "pydantic>=2.12.0",
+    "pydantic-settings>=2.12.0",
     "redis>=6.4.0",
     "ruff>=0.12.10",
     "pyyaml>=6.0.3",

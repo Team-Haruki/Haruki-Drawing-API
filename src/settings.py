@@ -83,6 +83,7 @@ class DrawingSettings(BaseModel):
     """画图配置"""
 
     thread_pool_size: int = 8
+    image_cache_size: int = 256  # 图片解码缓存条目数，0 表示关闭
     use_process_pool: bool = False  # 是否启用进程池
     process_pool_workers: int = 4  # 进程池工作进程数
     process_pool_threshold: int = 2_000_000  # 像素阈值 (约 2000x1000)
@@ -168,6 +169,7 @@ DEFAULT_EMOJI_FONT = settings.font.emoji
 
 # Drawing
 DEFAULT_THREAD_POOL_SIZE = settings.drawing.thread_pool_size
+IMAGE_CACHE_SIZE = settings.drawing.image_cache_size
 SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 
 # Server

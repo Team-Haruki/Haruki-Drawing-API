@@ -11,6 +11,7 @@ import math
 from multiprocessing import get_context
 import os
 import random
+import threading
 from typing import Any, Literal, Self
 
 import emoji
@@ -257,6 +258,8 @@ class FontCacheEntry:
 
 FONT_CACHE_MAX_NUM = 128
 font_cache: dict[str, FontCacheEntry] = {}
+_font_cache_lock = threading.RLock()
+_painter_disk_cache_lock = threading.RLock()
 
 
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
@@ -329,7 +332,6 @@ def get_font_desc(path: str, size: int) -> FontDesc:
 
 
 def get_font(path: str, size: int) -> Font:
-    global font_cache
     key = f"{path}_{size}"
     paths = [
         path,
@@ -337,20 +339,25 @@ def get_font(path: str, size: int) -> Font:
         os.path.join(FONT_DIR, path + ".ttf"),
         os.path.join(FONT_DIR, path + ".otf"),
     ]
-    if key not in font_cache:
-        font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
-        for path in paths:
-            if os.path.exists(path):
-                font = ImageFont.truetype(path, size)
-                break
-        if font is None:
-            raise FileNotFoundError(f"Font file not found: {path}")
-        font_cache[key] = FontCacheEntry(font, datetime.now())
-        # 清理过期的字体缓存
-        while len(font_cache) > FONT_CACHE_MAX_NUM:
-            oldest_key = min(font_cache, key=lambda k: font_cache[k].last_used)
-            del font_cache[oldest_key]
-    return font_cache[key].font
+    with _font_cache_lock:
+        entry = font_cache.get(key)
+        if entry is None:
+            font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
+            for font_path in paths:
+                if os.path.exists(font_path):
+                    font = ImageFont.truetype(font_path, size)
+                    break
+            if font is None:
+                raise FileNotFoundError(f"Font file not found: {path}")
+            entry = FontCacheEntry(font, datetime.now())
+            font_cache[key] = entry
+            # 清理过期的字体缓存
+            while len(font_cache) > FONT_CACHE_MAX_NUM:
+                oldest_key = min(font_cache, key=lambda k: font_cache[k].last_used)
+                del font_cache[oldest_key]
+        else:
+            entry.last_used = datetime.now()
+        return entry.font
 
 
 def get_text_size(font: Font, text: str) -> Size:
@@ -594,23 +601,24 @@ class Painter:
             op_hash = await asyncio.to_thread(deterministic_hash, {"key": cache_key, "op": self.operations})
             debug_print(f"Cache key: {cache_key}, op_hash: {op_hash}, elapsed: {datetime.now() - t}")
 
-            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
-            if paths:
-                path = paths[0]
-                if path.endswith(f"{cache_key}__{op_hash}.png"):
-                    # 如果hash相同则直接返回缓存的图片
-                    debug_print(f"Using cached image: {path}")
-                    img = Image.open(path)
-                    img.load()
-                    return img
-                else:
-                    # 否则清空缓存并重新绘图
-                    for p in paths:
-                        try:
-                            os.remove(p)
-                        except Exception as e:
-                            logging.warning(f"Failed to remove cache file {p}: {e}")
-                    debug_print(f"Cache mismatch, removed {len(paths)} files")
+            with _painter_disk_cache_lock:
+                paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
+                if paths:
+                    path = paths[0]
+                    if path.endswith(f"{cache_key}__{op_hash}.png"):
+                        # 如果hash相同则直接返回缓存的图片
+                        debug_print(f"Using cached image: {path}")
+                        with Image.open(path) as img:
+                            img.load()
+                            return img.copy()
+                    else:
+                        # 否则清空缓存并重新绘图
+                        for p in paths:
+                            try:
+                                os.remove(p)
+                            except Exception as e:
+                                logging.warning(f"Failed to remove cache file {p}: {e}")
+                        debug_print(f"Cache mismatch, removed {len(paths)} files")
 
         debug_print(f"Main process memory usage: {get_memo_usage()} MB")
 
@@ -654,9 +662,10 @@ class Painter:
         # 保存缓存
         if cache_key is not None:
             try:
-                cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
-                os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
-                self.img.save(cache_path, format="PNG")
+                with _painter_disk_cache_lock:
+                    cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
+                    os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
+                    self.img.save(cache_path, format="PNG")
             except Exception:
                 debug_print(f"Failed to save cache for {cache_key}")
 
@@ -676,25 +685,27 @@ class Painter:
 
     @staticmethod
     def clear_cache(cache_key: str) -> int:
-        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
-        ok = 0
-        for p in paths:
-            try:
-                os.remove(p)
-                ok += 1
-            except Exception as e:
-                logging.warning(f"Failed to remove cache file {p}: {e}")
-        return ok
+        with _painter_disk_cache_lock:
+            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
+            ok = 0
+            for p in paths:
+                try:
+                    os.remove(p)
+                    ok += 1
+                except Exception as e:
+                    logging.warning(f"Failed to remove cache file {p}: {e}")
+            return ok
 
     @staticmethod
     def get_cache_key_mtimes() -> dict[str, datetime]:
-        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png"))
-        cache_keys = {}
-        for p in paths:
-            mtime = os.path.getmtime(p)
-            cache_key = os.path.basename(p).split("__")[0]
-            cache_keys[cache_key] = datetime.fromtimestamp(mtime)
-        return cache_keys
+        with _painter_disk_cache_lock:
+            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png"))
+            cache_keys = {}
+            for p in paths:
+                mtime = os.path.getmtime(p)
+                cache_key = os.path.basename(p).split("__")[0]
+                cache_keys[cache_key] = datetime.fromtimestamp(mtime)
+            return cache_keys
 
     def set_region(self, pos: Position, size: Size) -> Self:
         assert isinstance(pos[0], int), "Position x must be integer"
