@@ -68,5 +68,5 @@ EXPOSE 8000
 VOLUME ["/app/haruki_drawing_api/data", "/app/haruki_drawing_api/config.yaml"]
 
 # 使用自由线程解释器启动
-ENTRYPOINT ["/app/haruki_drawing_api/.venv/bin/python", "-X", "gil=0", "-m", "uvicorn", "src.core.main:app"]
-CMD ["--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/app/haruki_drawing_api/.venv/bin/python", "-X", "gil=0", "-m", "granian"]
+CMD ["--interface", "asgi", "--host", "0.0.0.0", "--port", "8000", "src.core.main:app"]

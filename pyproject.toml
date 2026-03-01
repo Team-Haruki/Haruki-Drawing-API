@@ -6,6 +6,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116.1",
     "hypercorn>=0.17.3",
+    "granian>=2.7.2",
     "matplotlib>=3.10.7",
     "numpy>=2.3.2",
     "emoji==2.0.0",
@@ -17,7 +18,6 @@ dependencies = [
     "redis>=6.4.0",
     "ruff>=0.12.10",
     "pyyaml>=6.0.3",
-    "uvicorn>=0.40.0",
     "svgwrite>=1.4.3",
     "aiohttp>=3.13.3",
     "uvloop>=0.22.1",
