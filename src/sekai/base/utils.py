@@ -189,12 +189,12 @@ def plt_fig_to_image(fig, transparent=True) -> Image.Image:
     """
     matplot图像转换为PIL.Image对象
     """
-    buf = io.BytesIO()
-    fig.savefig(buf, transparent=transparent, format="png")
-    buf.seek(0)
-    img = Image.open(buf)
-    img.load()
-    return img
+    with io.BytesIO() as buf:
+        fig.savefig(buf, transparent=transparent, format="png")
+        buf.seek(0)
+        with Image.open(buf) as img:
+            img.load()
+            return img.copy()
 
 
 def get_chara_nickname(cid: int) -> str:
@@ -427,6 +427,8 @@ async def screenshot(
                     raise Exception(error)
                 if resp.content_type not in ("image/jpeg", "image/webp", "image/png"):
                     raise Exception(f"未知的响应体类型{resp.content_type}")
-                return Image.open(io.BytesIO(await resp.read()))
+                with Image.open(io.BytesIO(await resp.read())) as img:
+                    img.load()
+                    return img.copy()
     except aiohttp.ClientConnectionError:
         raise Exception("连接截图API失败")

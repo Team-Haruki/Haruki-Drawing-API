@@ -3,12 +3,13 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import math
-import threading
+import os
 
 import matplotlib
 from matplotlib import font_manager
-from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 from PIL import Image
 
@@ -36,7 +37,7 @@ from src.sekai.base.utils import (
     plt_fig_to_image,
     truncate,
 )
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE
 
 from .model import (
     CFRequest,
@@ -52,18 +53,13 @@ from .model import (
 )
 
 matplotlib.use("Agg")
-_matplotlib_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sk-matplotlib")
-_matplotlib_lock = threading.RLock()
-
-
-def _run_matplotlib_serialized(func: Callable[[], Image.Image]) -> Image.Image:
-    with _matplotlib_lock:
-        return func()
+_matplotlib_workers = max(1, min(DEFAULT_THREAD_POOL_SIZE, os.cpu_count() or 1))
+_matplotlib_executor = ThreadPoolExecutor(max_workers=_matplotlib_workers, thread_name_prefix="sk-matplotlib")
 
 
 async def run_matplotlib_plot(func: Callable[[], Image.Image]) -> Image.Image:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_matplotlib_executor, _run_matplotlib_serialized, func)
+    return await loop.run_in_executor(_matplotlib_executor, func)
 
 
 # matplotlib字体
@@ -75,8 +71,8 @@ for path in font_paths:
         font_manager.fontManager.addfont(path)
         prop = font_manager.FontProperties(fname=path)
         font_name = prop.get_name()
-        plt.rcParams["font.family"] = [font_name]
-        plt.rcParams["axes.unicode_minus"] = False
+        matplotlib.rcParams["font.family"] = [font_name]
+        matplotlib.rcParams["axes.unicode_minus"] = False
     except Exception:
         continue
 
@@ -526,10 +522,11 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
         times2 = [rank.time for rank in ranks2]
         scores2 = [rank.score for rank in ranks2]
         rs2 = [rank.rank for rank in ranks2]
+
     def _render_player_trace_plot() -> Image.Image:
-        fig, ax = plt.subplots()
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
         try:
-            fig.set_size_inches(12, 8)
             fig.subplots_adjust(wspace=0, hspace=0)
 
             draw_day_night_bg(ax, times[0], times[-1])
@@ -556,7 +553,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 linewidth=0.5,
             )
             lines.append(line_score)
-            plt.annotate(
+            ax.annotate(
                 f"{get_board_score_str(scores[-1])}",
                 xy=(times[-1], scores[-1]),
                 xytext=(times[-1], scores[-1]),
@@ -569,7 +566,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     times2, scores2, "o", label=f"{name2}分数", color=color_p2[0], markersize=1, linewidth=0.5
                 )
                 lines.append(line_score2)
-                plt.annotate(
+                ax.annotate(
                     f"{get_board_score_str(scores2[-1])}",
                     xy=(times2[-1], scores2[-1]),
                     xytext=(times2[-1], scores2[-1]),
@@ -579,7 +576,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 )
 
             ax.set_ylim(min_score * 0.95, max_score * 1.05)
-            ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(x)))
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(x)))
             ax.grid(True, linestyle="-", alpha=0.3, color="gray")
             # 绘制排名
             ax2 = ax.twinx()
@@ -594,7 +591,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 linewidth=0.5,
             )
             lines.append(line_rank)
-            plt.annotate(
+            ax2.annotate(
                 f"{int(rs[-1])}",
                 xy=(times[-1], rs[-1] * 1.02),
                 xytext=(times[-1], rs[-1] * 1.02),
@@ -607,7 +604,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     times2, rs2, "o", label=f"{name2}排名", color=color_p2[1], markersize=0.7, linewidth=0.5
                 )
                 lines.append(line_rank2)
-                plt.annotate(
+                ax2.annotate(
                     f"{int(rs2[-1])}",
                     xy=(times2[-1], rs2[-1] * 1.02),
                     xytext=(times2[-1], rs2[-1] * 1.02),
@@ -616,7 +613,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     ha="right",
                 )
 
-            ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
             ax2.set_ylim(110, -10)
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
@@ -624,16 +621,16 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             fig.autofmt_xdate()
 
             if ranks2 is None:
-                plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
+                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
             else:
-                plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
+                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
 
             labels = [line.get_label() for line in lines]
             ax.legend(lines, labels, loc="upper left")
 
             return plt_fig_to_image(fig)
         finally:
-            plt.close(fig)
+            fig.clear()
 
     img = await run_matplotlib_plot(_render_player_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -698,9 +695,9 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
         min_score = min(min_score, final_score)
 
     def _render_rank_trace_plot() -> Image.Image:
-        fig, ax = plt.subplots()
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
         try:
-            fig.set_size_inches(12, 8)
             fig.subplots_adjust(wspace=0, hspace=0)
 
             draw_day_night_bg(ax, times[0], times[-1])
@@ -713,7 +710,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
                 num_part1 = num_unique_names // 2
                 num_part2 = num_unique_names - num_part1
 
-                cmap = plt.get_cmap("coolwarm")
+                cmap = matplotlib.colormaps["coolwarm"]
                 colors1 = cmap(np.linspace(start=0.0, stop=0.4, num=num_part1))
                 colors2 = cmap(np.linspace(start=0.6, stop=1.0, num=num_part2))
 
@@ -732,7 +729,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             # 绘制分数，为不同uid的数据点使用不同颜色
             ax.scatter(times, scores, c=point_colors, s=2)
             if scores:
-                plt.annotate(
+                ax.annotate(
                     f"{get_board_score_str(scores[-1])}",
                     xy=(times[-1], scores[-1]),
                     xytext=(times[-1], scores[-1]),
@@ -756,13 +753,13 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             # 绘制时速
             ax2 = ax.twinx()
             (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
-            ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
             ax2.set_ylim(0, max(speeds) * 1.2)
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             fig.autofmt_xdate()
-            plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
+            ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
 
             lines = [line_speeds]
             labels = [line.get_label() for line in lines]
@@ -770,7 +767,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
 
             return plt_fig_to_image(fig)
         finally:
-            plt.close(fig)
+            fig.clear()
 
     img = await run_matplotlib_plot(_render_rank_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:

@@ -11,6 +11,7 @@ ReDoc: http://localhost:8000/redoc
 
 from contextlib import asynccontextmanager
 import logging
+import sys
 
 import coloredlogs
 from fastapi import FastAPI
@@ -51,9 +52,17 @@ All endpoints return PNG images as binary stream.
     """
 
 
+def _ensure_nogil_runtime() -> None:
+    if not hasattr(sys, "_is_gil_enabled"):
+        raise RuntimeError("Current Python runtime does not expose GIL status; use CPython 3.14t.")
+    if sys._is_gil_enabled():
+        raise RuntimeError("GIL is enabled. Start with free-threaded runtime and -X gil=0.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
+    _ensure_nogil_runtime()
     # Configure coloredlogs
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
 

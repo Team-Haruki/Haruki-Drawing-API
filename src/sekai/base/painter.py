@@ -33,21 +33,27 @@ from src.settings import (
 )
 
 from .img_utils import adjust_image_alpha_inplace, mix_image_by_color
+from .utils import run_in_pool
 
 # Process pool for CPU-intensive drawing operations
 _process_pool_ctx = get_context("spawn")
 _painter_process_pool: ProcessPoolExecutor | None = None
+_painter_process_pool_lock = threading.Lock()
 
 
 def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
     """Get or create the painter process pool."""
     global _painter_process_pool
-    if _painter_process_pool is None:
-        workers = max_workers or settings.drawing.process_pool_workers
-        _painter_process_pool = ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=_process_pool_ctx,
-        )
+    if _painter_process_pool is not None:
+        return _painter_process_pool
+
+    with _painter_process_pool_lock:
+        if _painter_process_pool is None:
+            workers = max_workers or settings.drawing.process_pool_workers
+            _painter_process_pool = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=_process_pool_ctx,
+            )
     return _painter_process_pool
 
 
@@ -257,12 +263,16 @@ class FontCacheEntry:
 
 
 FONT_CACHE_MAX_NUM = 128
-font_cache: dict[str, FontCacheEntry] = {}
-_font_cache_lock = threading.RLock()
+_font_cache_local = threading.local()
 _painter_disk_cache_lock = threading.RLock()
-# Pillow FreeType font render is not thread-safe under no-GIL mode.
-# Protect all text measure/render paths that touch FreeType internals.
-_font_render_lock = threading.RLock()
+
+
+def _get_thread_font_cache() -> dict[str, FontCacheEntry]:
+    cache = getattr(_font_cache_local, "font_cache", None)
+    if cache is None:
+        cache = {}
+        _font_cache_local.font_cache = cache
+    return cache
 
 
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
@@ -342,40 +352,37 @@ def get_font(path: str, size: int) -> Font:
         os.path.join(FONT_DIR, path + ".ttf"),
         os.path.join(FONT_DIR, path + ".otf"),
     ]
-    with _font_cache_lock:
-        entry = font_cache.get(key)
-        if entry is None:
-            font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
-            for font_path in paths:
-                if os.path.exists(font_path):
-                    font = ImageFont.truetype(font_path, size)
-                    break
-            if font is None:
-                raise FileNotFoundError(f"Font file not found: {path}")
-            entry = FontCacheEntry(font, datetime.now())
-            font_cache[key] = entry
-            # 清理过期的字体缓存
-            while len(font_cache) > FONT_CACHE_MAX_NUM:
-                oldest_key = min(font_cache, key=lambda k: font_cache[k].last_used)
-                del font_cache[oldest_key]
-        else:
-            entry.last_used = datetime.now()
-        return entry.font
+    font_cache = _get_thread_font_cache()
+    entry = font_cache.get(key)
+    if entry is None:
+        font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
+        for font_path in paths:
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, size)
+                break
+        if font is None:
+            raise FileNotFoundError(f"Font file not found: {path}")
+        entry = FontCacheEntry(font, datetime.now())
+        font_cache[key] = entry
+        # 清理当前线程中过期的字体缓存
+        while len(font_cache) > FONT_CACHE_MAX_NUM:
+            oldest_key = min(font_cache, key=lambda k: font_cache[k].last_used)
+            del font_cache[oldest_key]
+    else:
+        entry.last_used = datetime.now()
+    return entry.font
 
 
 def get_text_size(font: Font, text: str) -> Size:
-    with _font_render_lock:
-        if emoji.emoji_count(text) > 0:
-            return getsize_emoji(text, font=font)
-        else:
-            bbox = font.getbbox(text)
-            return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    if emoji.emoji_count(text) > 0:
+        return getsize_emoji(text, font=font)
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def get_text_offset(font: Font, text: str) -> Position:
-    with _font_render_lock:
-        bbox = font.getbbox(text)
-        return bbox[0], bbox[1]
+    bbox = font.getbbox(text)
+    return bbox[0], bbox[1]
 
 
 def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
@@ -566,25 +573,23 @@ class Painter:
         std_size = get_text_size(font, "哇")
         has_emoji = emoji.emoji_count(text) > 0
         if not has_emoji:
-            with _font_render_lock:
-                draw = ImageDraw.Draw(self.img)
+            draw = ImageDraw.Draw(self.img)
+            text_offset = (0, -std_size[1])
+            pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
+            draw.text(pos, text, font=font, fill=fill, align=align, anchor="ls")
+        else:
+            with Pilmoji(self.img, source=GoogleEmojiSource) as pilmoji:
                 text_offset = (0, -std_size[1])
                 pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
-                draw.text(pos, text, font=font, fill=fill, align=align, anchor="ls")
-        else:
-            with _font_render_lock:
-                with Pilmoji(self.img, source=GoogleEmojiSource) as pilmoji:
-                    text_offset = (0, -std_size[1])
-                    pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
-                    pilmoji.text(
-                        pos,
-                        text,
-                        font=font,
-                        fill=fill,
-                        align=align,
-                        emoji_position_offset=(0, -std_size[1]),
-                        anchor="ls",
-                    )
+                pilmoji.text(
+                    pos,
+                    text,
+                    font=font,
+                    fill=fill,
+                    align=align,
+                    emoji_position_offset=(0, -std_size[1]),
+                    anchor="ls",
+                )
         return self
 
     @staticmethod
@@ -611,7 +616,7 @@ class Painter:
         if cache_key is not None:
             t = datetime.now()
             debug_print(f"Cache key: {cache_key}")
-            op_hash = await asyncio.to_thread(deterministic_hash, {"key": cache_key, "op": self.operations})
+            op_hash = await run_in_pool(deterministic_hash, {"key": cache_key, "op": self.operations})
             debug_print(f"Cache key: {cache_key}, op_hash: {op_hash}, elapsed: {datetime.now() - t}")
 
             with _painter_disk_cache_lock:
@@ -667,7 +672,7 @@ class Painter:
             )
             debug_print(f"Painter executed in process pool in {datetime.now() - t}")
         else:
-            self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+            self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
             debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
 
         self.operations = []
@@ -1344,9 +1349,13 @@ class Painter:
         #     .resize((128, 128), Image.Resampling.BILINEAR)
         #     for i in range(3)
         # ]
-        preset_tris = [
-            Image.open(tri_path).convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR) for tri_path in TRI_PATHS
-        ]
+        def _load_triangle_template(path: str) -> Image.Image:
+            with Image.open(path) as img:
+                tri = img.convert("RGBA")
+                tri.load()
+                return tri.resize((128, 128), Image.Resampling.BILINEAR)
+
+        preset_tris = [_load_triangle_template(tri_path) for tri_path in TRI_PATHS]
         preset_colors = [
             # (255, 255, 255),
             (255, 189, 246),
