@@ -6,7 +6,7 @@ from src.sekai.chart.drawer import GenerateMusicChartRequest, generate_music_cha
 router = APIRouter(tags=["Chart"])
 
 
-@router.post("/", summary="Generate music chart image")
+@router.post("", summary="Generate music chart image")
 async def music_chart(request: GenerateMusicChartRequest):
     try:
         image = await generate_music_chart(request)
