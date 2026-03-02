@@ -13,7 +13,7 @@ font:
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
-    emoji: EmojiOneColor-SVGinOT
+    emoji: TwitterColorEmoji-SVGinOT
 
 drawing:
   thread_pool_size: 8

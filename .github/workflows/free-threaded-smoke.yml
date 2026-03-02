@@ -1,0 +1,142 @@
+name: Free Threaded Smoke
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  free-threaded-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Install CPython free-threaded
+        run: uv python install cpython-3.14.3+freethreaded
+
+      - name: Create 3.14t venv and sync dependencies
+        run: |
+          uv venv .venv314t --python cpython-3.14.3+freethreaded
+          UV_PROJECT_ENVIRONMENT=.venv314t uv sync --frozen --python .venv314t/bin/python
+
+      - name: Verify free-threaded mode and imports
+        run: |
+          .venv314t/bin/python -X gil=0 - <<'PY'
+          import sys
+          assert hasattr(sys, "_is_gil_enabled"), "Python does not expose _is_gil_enabled"
+          assert sys._is_gil_enabled() is False, "GIL is still enabled"
+          import src.core.main
+          import src.sekai.sk.drawer
+          print("free-threaded import smoke passed")
+          PY
+
+      - name: Compile check
+        run: |
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python -m compileall src
+
+      - name: Generate SK trend sample payload
+        run: |
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/generate_sk_trend_sample.py --output-dir out/ci-sk-trend --points 20
+
+      - name: Nogil concurrency smoke
+        run: |
+          set -euo pipefail
+
+          .venv314t/bin/python -X gil=0 -m granian --interface asgi --host 127.0.0.1 --port 18080 src.core.main:app > /tmp/haruki_granian.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "${server_pid}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18080/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:18080/health >/dev/null
+
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/concurrent_fetch_images.py \
+            --base-url http://127.0.0.1:18080 \
+            --endpoint /api/pjsk/sk/player-trace \
+            --payload-file out/ci-sk-trend/sk_player_trace_payload.json \
+            --requests 20 \
+            --concurrency 4 \
+            --timeout 60 \
+            --output-dir out/ci-sk-load-player-trace \
+            --save-errors
+
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/concurrent_fetch_images.py \
+            --base-url http://127.0.0.1:18080 \
+            --endpoint /api/pjsk/sk/query \
+            --payload-file out/ci-sk-trend/sk_query_payload.json \
+            --requests 20 \
+            --concurrency 4 \
+            --timeout 60 \
+            --output-dir out/ci-sk-load-query \
+            --save-errors
+
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/concurrent_fetch_images.py \
+            --base-url http://127.0.0.1:18080 \
+            --endpoint /api/pjsk/honor/ \
+            --payload-file out/ci-sk-trend/honor_payload.json \
+            --requests 20 \
+            --concurrency 4 \
+            --timeout 60 \
+            --output-dir out/ci-sk-load-honor \
+            --save-errors
+
+          .venv314t/bin/python - <<'PY'
+          import json
+
+          for path in (
+              "out/ci-sk-load-player-trace/summary.json",
+              "out/ci-sk-load-query/summary.json",
+              "out/ci-sk-load-honor/summary.json",
+          ):
+              with open(path, encoding="utf-8") as f:
+                  summary = json.load(f)
+              assert summary["ok_images"] == summary["requests"], summary
+          print("nogil concurrency smoke passed")
+          PY
+
+      - name: GIL vs noGIL benchmark compare
+        run: |
+          set -euo pipefail
+
+          PYTHONPATH=. .venv314t/bin/python -X gil=1 scripts/benchmark_gil_compare.py --output out/bench-gil.json
+          PYTHONPATH=. .venv314t/bin/python -X gil=0 scripts/benchmark_gil_compare.py --output out/bench-nogil.json
+
+          .venv314t/bin/python - <<'PY'
+          import json
+
+          with open("out/bench-gil.json", encoding="utf-8") as f:
+              gil = json.load(f)
+          with open("out/bench-nogil.json", encoding="utf-8") as f:
+              nogil = json.load(f)
+
+          def get_case(report, section, name):
+              for c in report[section]:
+                  if c["name"] == name:
+                      return c
+              raise KeyError((section, name))
+
+          summary_lines = []
+          for section in ("sk", "trace"):
+              for name in ("sk_c2", "sk_c8") if section == "sk" else ("trace_c2", "trace_c4"):
+                  g = get_case(gil, section, name)
+                  n = get_case(nogil, section, name)
+                  assert g["fail"] == 0 and n["fail"] == 0, (section, name, g, n)
+                  ratio = n["throughput_rps"] / g["throughput_rps"] if g["throughput_rps"] else 0.0
+                  summary_lines.append(
+                      f"{section}/{name}: throughput {g['throughput_rps']} -> {n['throughput_rps']} ({ratio:.2f}x)"
+                  )
+
+          print("GIL benchmark summary:")
+          for line in summary_lines:
+              print(" -", line)
+          PY
