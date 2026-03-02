@@ -1,6 +1,6 @@
 from PIL import Image, ImageDraw
 
-from src.sekai.base.painter import WHITE, get_font, get_text_size, resize_keep_ratio
+from src.sekai.base.painter import WHITE, _font_render_lock, get_font, get_text_size, resize_keep_ratio
 from src.sekai.base.utils import get_img_from_path
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 
@@ -93,7 +93,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
         text_w, _ = get_text_size(font, lv)
         offset = 215 if is_main else 37
         draw = ImageDraw.Draw(img)
-        draw.text((offset + 50 - text_w // 2, 46), lv, font=font, fill=WHITE)
+        with _font_render_lock:
+            draw.text((offset + 50 - text_w // 2, 46), lv, font=font, fill=WHITE)
 
     if htype == "normal":
         # 普通牌子

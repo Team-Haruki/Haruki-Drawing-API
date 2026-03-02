@@ -21,6 +21,7 @@ from src.sekai.base.painter import (
     RED,
     WHITE,
     Painter,
+    _font_render_lock,
     get_font,
     resize_keep_ratio,
 )
@@ -148,12 +149,14 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
         if custom_text is not None:
             draw = ImageDraw.Draw(img)
             draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
-            draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+            with _font_render_lock:
+                draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
         else:
             level = rqd.level
             draw = ImageDraw.Draw(img)
             draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
-            draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+            with _font_render_lock:
+                draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
     # 绘制边框
     if rqd.frame_img_path:

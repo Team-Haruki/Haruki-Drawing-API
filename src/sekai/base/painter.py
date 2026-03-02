@@ -260,6 +260,9 @@ FONT_CACHE_MAX_NUM = 128
 font_cache: dict[str, FontCacheEntry] = {}
 _font_cache_lock = threading.RLock()
 _painter_disk_cache_lock = threading.RLock()
+# Pillow FreeType font render is not thread-safe under no-GIL mode.
+# Protect all text measure/render paths that touch FreeType internals.
+_font_render_lock = threading.RLock()
 
 
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
@@ -361,16 +364,18 @@ def get_font(path: str, size: int) -> Font:
 
 
 def get_text_size(font: Font, text: str) -> Size:
-    if emoji.emoji_count(text) > 0:
-        return getsize_emoji(text, font=font)
-    else:
-        bbox = font.getbbox(text)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    with _font_render_lock:
+        if emoji.emoji_count(text) > 0:
+            return getsize_emoji(text, font=font)
+        else:
+            bbox = font.getbbox(text)
+            return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def get_text_offset(font: Font, text: str) -> Position:
-    bbox = font.getbbox(text)
-    return bbox[0], bbox[1]
+    with _font_render_lock:
+        bbox = font.getbbox(text)
+        return bbox[0], bbox[1]
 
 
 def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
@@ -561,17 +566,25 @@ class Painter:
         std_size = get_text_size(font, "哇")
         has_emoji = emoji.emoji_count(text) > 0
         if not has_emoji:
-            draw = ImageDraw.Draw(self.img)
-            text_offset = (0, -std_size[1])
-            pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
-            draw.text(pos, text, font=font, fill=fill, align=align, anchor="ls")
-        else:
-            with Pilmoji(self.img, source=GoogleEmojiSource) as pilmoji:
+            with _font_render_lock:
+                draw = ImageDraw.Draw(self.img)
                 text_offset = (0, -std_size[1])
                 pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
-                pilmoji.text(
-                    pos, text, font=font, fill=fill, align=align, emoji_position_offset=(0, -std_size[1]), anchor="ls"
-                )
+                draw.text(pos, text, font=font, fill=fill, align=align, anchor="ls")
+        else:
+            with _font_render_lock:
+                with Pilmoji(self.img, source=GoogleEmojiSource) as pilmoji:
+                    text_offset = (0, -std_size[1])
+                    pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
+                    pilmoji.text(
+                        pos,
+                        text,
+                        font=font,
+                        fill=fill,
+                        align=align,
+                        emoji_position_offset=(0, -std_size[1]),
+                        anchor="ls",
+                    )
         return self
 
     @staticmethod
