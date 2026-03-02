@@ -2,7 +2,6 @@ import asyncio
 from datetime import datetime, timedelta
 from functools import lru_cache
 import io
-import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
@@ -344,14 +343,6 @@ class TempFilePath:
 
 # ============================ 异步和任务 ============================ #
 
-try:
-    import uvloop
-
-    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-except ImportError:
-    logging.info("uvloop not installed, using default asyncio event loop")
-    pass
-
 from concurrent.futures import ThreadPoolExecutor
 
 _default_pool_executor = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_SIZE)
@@ -361,7 +352,7 @@ async def run_in_pool(func, *args, pool=None):
     if pool is None:
         global _default_pool_executor
         pool = _default_pool_executor
-    return await asyncio.get_event_loop().run_in_executor(pool, func, *args)
+    return await asyncio.get_running_loop().run_in_executor(pool, func, *args)
 
 
 # ============================ chromedp截图 ============================ #
