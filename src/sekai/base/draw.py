@@ -101,7 +101,7 @@ def roundrect_bg(
     radius: int = WIDGET_BG_RADIUS,
     alpha: int | None = None,
     blur_glass: bool | None = None,
-    blur_glass_kwargs: dict = {},
+    blur_glass_kwargs: dict | None = None,
 ):
     """
     统一的半透明白色圆角矩形背景
@@ -110,7 +110,7 @@ def roundrect_bg(
         blur_glass = True
     if alpha is not None:
         fill = (*fill[:3], alpha)
-    return RoundRectBg(fill, radius, blur_glass=blur_glass, blur_glass_kwargs=blur_glass_kwargs)
+    return RoundRectBg(fill, radius, blur_glass=blur_glass, blur_glass_kwargs=blur_glass_kwargs or {})
 
 
 def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):

@@ -7,7 +7,7 @@ from src.sekai.profile.model import ProfileRequest
 router = APIRouter(tags=["Profile"])
 
 
-@router.post("/", summary="Generate profile image")
+@router.post("", summary="Generate profile image")
 async def profile(request: ProfileRequest):
     """
     Generate a player profile image.

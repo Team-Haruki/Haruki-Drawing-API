@@ -13,10 +13,11 @@ font:
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
-    emoji: EmojiOneColor-SVGinOT
+    emoji: TwitterColorEmoji-SVGinOT
 
 drawing:
   thread_pool_size: 8
+  image_cache_size: 256
   use_process_pool: false
   process_pool_workers: 4
   process_pool_threshold: 2000000  # 约 2000x1000 像素

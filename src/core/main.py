@@ -4,17 +4,18 @@ Haruki Drawing API - FastAPI Core Application
 This module provides RESTful API endpoints for generating various Sekai images.
 All endpoints accept JSON request bodies and return PNG images.
 
-Run with: uvicorn src.core.main:app --reload
+Run with: granian --interface asgi src.core.main:app
 Swagger UI: http://localhost:8000/docs
 ReDoc: http://localhost:8000/redoc
 """
 
 from contextlib import asynccontextmanager
 import logging
+import sys
 
 import coloredlogs
 from fastapi import FastAPI
-import uvicorn
+from granian import Granian
 
 from src.core import health
 from src.core.pjsk import router as pjsk_router
@@ -51,9 +52,17 @@ All endpoints return PNG images as binary stream.
     """
 
 
+def _ensure_nogil_runtime() -> None:
+    if not hasattr(sys, "_is_gil_enabled"):
+        raise RuntimeError("Current Python runtime does not expose GIL status; use CPython 3.14t.")
+    if sys._is_gil_enabled():
+        raise RuntimeError("GIL is enabled. Start with free-threaded runtime and -X gil=0.")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
+    _ensure_nogil_runtime()
     # Configure coloredlogs
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
 
@@ -81,4 +90,4 @@ app.include_router(pjsk_router)
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host=SERVER_HOST, port=SERVER_PORT)
+    Granian("src.core.main:app", interface="asgi", address=SERVER_HOST, port=SERVER_PORT).serve()

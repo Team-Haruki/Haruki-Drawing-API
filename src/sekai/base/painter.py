@@ -11,6 +11,7 @@ import math
 from multiprocessing import get_context
 import os
 import random
+import threading
 from typing import Any, Literal, Self
 
 import emoji
@@ -32,21 +33,27 @@ from src.settings import (
 )
 
 from .img_utils import adjust_image_alpha_inplace, mix_image_by_color
+from .utils import run_in_pool
 
 # Process pool for CPU-intensive drawing operations
 _process_pool_ctx = get_context("spawn")
 _painter_process_pool: ProcessPoolExecutor | None = None
+_painter_process_pool_lock = threading.Lock()
 
 
 def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
     """Get or create the painter process pool."""
     global _painter_process_pool
-    if _painter_process_pool is None:
-        workers = max_workers or settings.drawing.process_pool_workers
-        _painter_process_pool = ProcessPoolExecutor(
-            max_workers=workers,
-            mp_context=_process_pool_ctx,
-        )
+    if _painter_process_pool is not None:
+        return _painter_process_pool
+
+    with _painter_process_pool_lock:
+        if _painter_process_pool is None:
+            workers = max_workers or settings.drawing.process_pool_workers
+            _painter_process_pool = ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=_process_pool_ctx,
+            )
     return _painter_process_pool
 
 
@@ -256,7 +263,16 @@ class FontCacheEntry:
 
 
 FONT_CACHE_MAX_NUM = 128
-font_cache: dict[str, FontCacheEntry] = {}
+_font_cache_local = threading.local()
+_painter_disk_cache_lock = threading.RLock()
+
+
+def _get_thread_font_cache() -> dict[str, FontCacheEntry]:
+    cache = getattr(_font_cache_local, "font_cache", None)
+    if cache is None:
+        cache = {}
+        _font_cache_local.font_cache = cache
+    return cache
 
 
 def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
@@ -329,7 +345,6 @@ def get_font_desc(path: str, size: int) -> FontDesc:
 
 
 def get_font(path: str, size: int) -> Font:
-    global font_cache
     key = f"{path}_{size}"
     paths = [
         path,
@@ -337,28 +352,32 @@ def get_font(path: str, size: int) -> Font:
         os.path.join(FONT_DIR, path + ".ttf"),
         os.path.join(FONT_DIR, path + ".otf"),
     ]
-    if key not in font_cache:
+    font_cache = _get_thread_font_cache()
+    entry = font_cache.get(key)
+    if entry is None:
         font: ImageFont.ImageFont | ImageFont.FreeTypeFont | None = None
-        for path in paths:
-            if os.path.exists(path):
-                font = ImageFont.truetype(path, size)
+        for font_path in paths:
+            if os.path.exists(font_path):
+                font = ImageFont.truetype(font_path, size)
                 break
         if font is None:
             raise FileNotFoundError(f"Font file not found: {path}")
-        font_cache[key] = FontCacheEntry(font, datetime.now())
-        # 清理过期的字体缓存
+        entry = FontCacheEntry(font, datetime.now())
+        font_cache[key] = entry
+        # 清理当前线程中过期的字体缓存
         while len(font_cache) > FONT_CACHE_MAX_NUM:
             oldest_key = min(font_cache, key=lambda k: font_cache[k].last_used)
             del font_cache[oldest_key]
-    return font_cache[key].font
+    else:
+        entry.last_used = datetime.now()
+    return entry.font
 
 
 def get_text_size(font: Font, text: str) -> Size:
     if emoji.emoji_count(text) > 0:
         return getsize_emoji(text, font=font)
-    else:
-        bbox = font.getbbox(text)
-        return bbox[2] - bbox[0], bbox[3] - bbox[1]
+    bbox = font.getbbox(text)
+    return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def get_text_offset(font: Font, text: str) -> Position:
@@ -563,7 +582,13 @@ class Painter:
                 text_offset = (0, -std_size[1])
                 pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
                 pilmoji.text(
-                    pos, text, font=font, fill=fill, align=align, emoji_position_offset=(0, -std_size[1]), anchor="ls"
+                    pos,
+                    text,
+                    font=font,
+                    fill=fill,
+                    align=align,
+                    emoji_position_offset=(0, -std_size[1]),
+                    anchor="ls",
                 )
         return self
 
@@ -591,26 +616,27 @@ class Painter:
         if cache_key is not None:
             t = datetime.now()
             debug_print(f"Cache key: {cache_key}")
-            op_hash = await asyncio.to_thread(deterministic_hash, {"key": cache_key, "op": self.operations})
+            op_hash = await run_in_pool(deterministic_hash, {"key": cache_key, "op": self.operations})
             debug_print(f"Cache key: {cache_key}, op_hash: {op_hash}, elapsed: {datetime.now() - t}")
 
-            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
-            if paths:
-                path = paths[0]
-                if path.endswith(f"{cache_key}__{op_hash}.png"):
-                    # 如果hash相同则直接返回缓存的图片
-                    debug_print(f"Using cached image: {path}")
-                    img = Image.open(path)
-                    img.load()
-                    return img
-                else:
-                    # 否则清空缓存并重新绘图
-                    for p in paths:
-                        try:
-                            os.remove(p)
-                        except Exception as e:
-                            logging.warning(f"Failed to remove cache file {p}: {e}")
-                    debug_print(f"Cache mismatch, removed {len(paths)} files")
+            with _painter_disk_cache_lock:
+                paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
+                if paths:
+                    path = paths[0]
+                    if path.endswith(f"{cache_key}__{op_hash}.png"):
+                        # 如果hash相同则直接返回缓存的图片
+                        debug_print(f"Using cached image: {path}")
+                        with Image.open(path) as img:
+                            img.load()
+                            return img.copy()
+                    else:
+                        # 否则清空缓存并重新绘图
+                        for p in paths:
+                            try:
+                                os.remove(p)
+                            except Exception as e:
+                                logging.warning(f"Failed to remove cache file {p}: {e}")
+                        debug_print(f"Cache mismatch, removed {len(paths)} files")
 
         debug_print(f"Main process memory usage: {get_memo_usage()} MB")
 
@@ -646,7 +672,7 @@ class Painter:
             )
             debug_print(f"Painter executed in process pool in {datetime.now() - t}")
         else:
-            self.img = await asyncio.to_thread(Painter._execute, self.operations, self.img, self.size, image_dict)
+            self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
             debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
 
         self.operations = []
@@ -654,9 +680,10 @@ class Painter:
         # 保存缓存
         if cache_key is not None:
             try:
-                cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
-                os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
-                self.img.save(cache_path, format="PNG")
+                with _painter_disk_cache_lock:
+                    cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
+                    os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
+                    self.img.save(cache_path, format="PNG")
             except Exception:
                 debug_print(f"Failed to save cache for {cache_key}")
 
@@ -676,25 +703,27 @@ class Painter:
 
     @staticmethod
     def clear_cache(cache_key: str) -> int:
-        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
-        ok = 0
-        for p in paths:
-            try:
-                os.remove(p)
-                ok += 1
-            except Exception as e:
-                logging.warning(f"Failed to remove cache file {p}: {e}")
-        return ok
+        with _painter_disk_cache_lock:
+            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
+            ok = 0
+            for p in paths:
+                try:
+                    os.remove(p)
+                    ok += 1
+                except Exception as e:
+                    logging.warning(f"Failed to remove cache file {p}: {e}")
+            return ok
 
     @staticmethod
     def get_cache_key_mtimes() -> dict[str, datetime]:
-        paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png"))
-        cache_keys = {}
-        for p in paths:
-            mtime = os.path.getmtime(p)
-            cache_key = os.path.basename(p).split("__")[0]
-            cache_keys[cache_key] = datetime.fromtimestamp(mtime)
-        return cache_keys
+        with _painter_disk_cache_lock:
+            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png"))
+            cache_keys = {}
+            for p in paths:
+                mtime = os.path.getmtime(p)
+                cache_key = os.path.basename(p).split("__")[0]
+                cache_keys[cache_key] = datetime.fromtimestamp(mtime)
+            return cache_keys
 
     def set_region(self, pos: Position, size: Size) -> Self:
         assert isinstance(pos[0], int), "Position x must be integer"
@@ -1320,9 +1349,13 @@ class Painter:
         #     .resize((128, 128), Image.Resampling.BILINEAR)
         #     for i in range(3)
         # ]
-        preset_tris = [
-            Image.open(tri_path).convert("RGBA").resize((128, 128), Image.Resampling.BILINEAR) for tri_path in TRI_PATHS
-        ]
+        def _load_triangle_template(path: str) -> Image.Image:
+            with Image.open(path) as img:
+                tri = img.convert("RGBA")
+                tri.load()
+                return tri.resize((128, 128), Image.Resampling.BILINEAR)
+
+        preset_tris = [_load_triangle_template(tri_path) for tri_path in TRI_PATHS]
         preset_colors = [
             # (255, 255, 255),
             (255, 189, 246),
