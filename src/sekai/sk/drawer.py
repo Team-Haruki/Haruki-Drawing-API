@@ -1,10 +1,15 @@
+import asyncio
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import math
+import os
 
 import matplotlib
 from matplotlib import font_manager
-from matplotlib import pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.figure import Figure
+from matplotlib.ticker import FuncFormatter
 import numpy as np
 from PIL import Image
 
@@ -32,7 +37,7 @@ from src.sekai.base.utils import (
     plt_fig_to_image,
     truncate,
 )
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE
 
 from .model import (
     CFRequest,
@@ -48,6 +53,13 @@ from .model import (
 )
 
 matplotlib.use("Agg")
+_matplotlib_workers = max(1, min(DEFAULT_THREAD_POOL_SIZE, os.cpu_count() or 1))
+_matplotlib_executor = ThreadPoolExecutor(max_workers=_matplotlib_workers, thread_name_prefix="sk-matplotlib")
+
+
+async def run_matplotlib_plot(func: Callable[[], Image.Image]) -> Image.Image:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_matplotlib_executor, func)
 
 
 # matplotlib字体
@@ -59,8 +71,8 @@ for path in font_paths:
         font_manager.fontManager.addfont(path)
         prop = font_manager.FontProperties(fname=path)
         font_name = prop.get_name()
-        plt.rcParams["font.family"] = [font_name]
-        plt.rcParams["axes.unicode_minus"] = False
+        matplotlib.rcParams["font.family"] = [font_name]
+        matplotlib.rcParams["axes.unicode_minus"] = False
     except Exception:
         continue
 
@@ -510,94 +522,117 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
         times2 = [rank.time for rank in ranks2]
         scores2 = [rank.score for rank in ranks2]
         rs2 = [rank.rank for rank in ranks2]
-    fig, ax = plt.subplots()
-    fig.set_size_inches(12, 8)
-    fig.subplots_adjust(wspace=0, hspace=0)
 
-    draw_day_night_bg(ax, times[0], times[-1])
+    def _render_player_trace_plot() -> Image.Image:
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
+        try:
+            fig.subplots_adjust(wspace=0, hspace=0)
 
-    min_score = min(scores)
-    max_score = max(scores)
-    if ranks2 is not None:
-        min_score = min(min_score, min(scores2))
-        max_score = max(max_score, max(scores2))
+            draw_day_night_bg(ax, times[0], times[-1])
 
-    lines = []
+            min_score = min(scores)
+            max_score = max(scores)
+            if ranks2 is not None:
+                min_score = min(min_score, min(scores2))
+                max_score = max(max_score, max(scores2))
 
-    color_p1 = ("royalblue", "cornflowerblue")
-    color_p2 = ("orangered", "coral")
+            lines = []
 
-    # 绘制分数
-    (line_score,) = ax.plot(times, scores, "o", label=f"{name}分数", color=color_p1[0], markersize=1, linewidth=0.5)
-    lines.append(line_score)
-    plt.annotate(
-        f"{get_board_score_str(scores[-1])}",
-        xy=(times[-1], scores[-1]),
-        xytext=(times[-1], scores[-1]),
-        color=color_p1[0],
-        fontsize=12,
-        ha="right",
-    )
-    if ranks2 is not None:
-        (line_score2,) = ax.plot(
-            times2, scores2, "o", label=f"{name2}分数", color=color_p2[0], markersize=1, linewidth=0.5
-        )
-        lines.append(line_score2)
-        plt.annotate(
-            f"{get_board_score_str(scores2[-1])}",
-            xy=(times2[-1], scores2[-1]),
-            xytext=(times2[-1], scores2[-1]),
-            color=color_p2[0],
-            fontsize=12,
-            ha="right",
-        )
+            color_p1 = ("royalblue", "cornflowerblue")
+            color_p2 = ("orangered", "coral")
 
-    ax.set_ylim(min_score * 0.95, max_score * 1.05)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(x)))
-    ax.grid(True, linestyle="-", alpha=0.3, color="gray")
-    # 绘制排名
-    ax2 = ax.twinx()
+            # 绘制分数
+            (line_score,) = ax.plot(
+                times,
+                scores,
+                "o",
+                label=f"{name}分数",
+                color=color_p1[0],
+                markersize=1,
+                linewidth=0.5,
+            )
+            lines.append(line_score)
+            ax.annotate(
+                f"{get_board_score_str(scores[-1])}",
+                xy=(times[-1], scores[-1]),
+                xytext=(times[-1], scores[-1]),
+                color=color_p1[0],
+                fontsize=12,
+                ha="right",
+            )
+            if ranks2 is not None:
+                (line_score2,) = ax.plot(
+                    times2, scores2, "o", label=f"{name2}分数", color=color_p2[0], markersize=1, linewidth=0.5
+                )
+                lines.append(line_score2)
+                ax.annotate(
+                    f"{get_board_score_str(scores2[-1])}",
+                    xy=(times2[-1], scores2[-1]),
+                    xytext=(times2[-1], scores2[-1]),
+                    color=color_p2[0],
+                    fontsize=12,
+                    ha="right",
+                )
 
-    (line_rank,) = ax2.plot(times, rs, "o", label=f"{name}排名", color=color_p1[1], markersize=0.7, linewidth=0.5)
-    lines.append(line_rank)
-    plt.annotate(
-        f"{int(rs[-1])}",
-        xy=(times[-1], rs[-1] * 1.02),
-        xytext=(times[-1], rs[-1] * 1.02),
-        color=color_p1[1],
-        fontsize=12,
-        ha="right",
-    )
-    if ranks2 is not None:
-        (line_rank2,) = ax2.plot(
-            times2, rs2, "o", label=f"{name2}排名", color=color_p2[1], markersize=0.7, linewidth=0.5
-        )
-        lines.append(line_rank2)
-        plt.annotate(
-            f"{int(rs2[-1])}",
-            xy=(times2[-1], rs2[-1] * 1.02),
-            xytext=(times2[-1], rs2[-1] * 1.02),
-            color=color_p2[1],
-            fontsize=12,
-            ha="right",
-        )
+            ax.set_ylim(min_score * 0.95, max_score * 1.05)
+            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(x)))
+            ax.grid(True, linestyle="-", alpha=0.3, color="gray")
+            # 绘制排名
+            ax2 = ax.twinx()
 
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
-    ax2.set_ylim(110, -10)
+            (line_rank,) = ax2.plot(
+                times,
+                rs,
+                "o",
+                label=f"{name}排名",
+                color=color_p1[1],
+                markersize=0.7,
+                linewidth=0.5,
+            )
+            lines.append(line_rank)
+            ax2.annotate(
+                f"{int(rs[-1])}",
+                xy=(times[-1], rs[-1] * 1.02),
+                xytext=(times[-1], rs[-1] * 1.02),
+                color=color_p1[1],
+                fontsize=12,
+                ha="right",
+            )
+            if ranks2 is not None:
+                (line_rank2,) = ax2.plot(
+                    times2, rs2, "o", label=f"{name2}排名", color=color_p2[1], markersize=0.7, linewidth=0.5
+                )
+                lines.append(line_rank2)
+                ax2.annotate(
+                    f"{int(rs2[-1])}",
+                    xy=(times2[-1], rs2[-1] * 1.02),
+                    xytext=(times2[-1], rs2[-1] * 1.02),
+                    color=color_p2[1],
+                    fontsize=12,
+                    ha="right",
+                )
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    fig.autofmt_xdate()
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
+            ax2.set_ylim(110, -10)
 
-    if ranks2 is None:
-        plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
-    else:
-        plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate()
 
-    labels = [line.get_label() for line in lines]
-    ax.legend(lines, labels, loc="upper left")
+            if ranks2 is None:
+                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
+            else:
+                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
 
-    img = plt_fig_to_image(fig)
+            labels = [line.get_label() for line in lines]
+            ax.legend(lines, labels, loc="upper left")
+
+            return plt_fig_to_image(fig)
+        finally:
+            fig.clear()
+
+    img = await run_matplotlib_plot(_render_player_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
         if wl_chara_icon is not None:
@@ -659,76 +694,82 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
         max_score = max(max_score, final_score)
         min_score = min(min_score, final_score)
 
-    fig, ax = plt.subplots()
-    fig.set_size_inches(12, 8)
-    fig.subplots_adjust(wspace=0, hspace=0)
+    def _render_rank_trace_plot() -> Image.Image:
+        fig = Figure(figsize=(12, 8))
+        ax = fig.add_subplot(111)
+        try:
+            fig.subplots_adjust(wspace=0, hspace=0)
 
-    draw_day_night_bg(ax, times[0], times[-1])
+            draw_day_night_bg(ax, times[0], times[-1])
 
-    num_unique_names = len(unique_names)
-    if num_unique_names > 10:
-        # 数量太多，直接使用同一个颜色
-        point_colors = ["blue" for _ in ranks]
-    else:  # 否则为每个玩家分配不同颜色
-        num_part1 = num_unique_names // 2
-        num_part2 = num_unique_names - num_part1
+            num_unique_names = len(unique_names)
+            if num_unique_names > 10:
+                # 数量太多，直接使用同一个颜色
+                point_colors = ["blue" for _ in ranks]
+            else:  # 否则为每个玩家分配不同颜色
+                num_part1 = num_unique_names // 2
+                num_part2 = num_unique_names - num_part1
 
-        cmap = plt.get_cmap("coolwarm")
-        colors1 = cmap(np.linspace(start=0.0, stop=0.4, num=num_part1))
-        colors2 = cmap(np.linspace(start=0.6, stop=1.0, num=num_part2))
+                cmap = matplotlib.colormaps["coolwarm"]
+                colors1 = cmap(np.linspace(start=0.0, stop=0.4, num=num_part1))
+                colors2 = cmap(np.linspace(start=0.6, stop=1.0, num=num_part2))
 
-        if num_unique_names > 0:
-            combined_colors = np.vstack((colors1, colors2))
-            np.random.shuffle(combined_colors)
-        else:
-            combined_colors = []
+                if num_unique_names > 0:
+                    combined_colors = np.vstack((colors1, colors2))
+                    np.random.shuffle(combined_colors)
+                else:
+                    combined_colors = []
 
-        # 创建从 name 到 color 的映射字典
-        name_to_color = dict(zip(unique_names, combined_colors))
+                # 创建从 name 到 color 的映射字典
+                name_to_color = dict(zip(unique_names, combined_colors))
 
-        # 根据原始的、带重复的 name 列表来生成颜色列表
-        point_colors = [name_to_color.get(name) for name in original_names]
+                # 根据原始的、带重复的 name 列表来生成颜色列表
+                point_colors = [name_to_color.get(name) for name in original_names]
 
-    # 绘制分数，为不同uid的数据点使用不同颜色
-    ax.scatter(times, scores, c=point_colors, s=2)
-    if scores:
-        plt.annotate(
-            f"{get_board_score_str(scores[-1])}",
-            xy=(times[-1], scores[-1]),
-            xytext=(times[-1], scores[-1]),
-            color=point_colors[-1],
-            fontsize=12,
-            ha="right",
-        )
+            # 绘制分数，为不同uid的数据点使用不同颜色
+            ax.scatter(times, scores, c=point_colors, s=2)
+            if scores:
+                ax.annotate(
+                    f"{get_board_score_str(scores[-1])}",
+                    xy=(times[-1], scores[-1]),
+                    xytext=(times[-1], scores[-1]),
+                    color=point_colors[-1],
+                    fontsize=12,
+                    ha="right",
+                )
 
-    # 绘制预测线
-    if final_score:
-        ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
-        ax.text(
-            times[-1],
-            final_score * 1.02,
-            f"预测最终: {get_board_score_str(final_score)}",
-            color="red",
-            fontsize=12,
-            ha="right",
-        )
+            # 绘制预测线
+            if final_score:
+                ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
+                ax.text(
+                    times[-1],
+                    final_score * 1.02,
+                    f"预测最终: {get_board_score_str(final_score)}",
+                    color="red",
+                    fontsize=12,
+                    ha="right",
+                )
 
-    # 绘制时速
-    ax2 = ax.twinx()
-    (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
-    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
-    ax2.set_ylim(0, max(speeds) * 1.2)
+            # 绘制时速
+            ax2 = ax.twinx()
+            (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
+            ax2.set_ylim(0, max(speeds) * 1.2)
 
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
-    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    fig.autofmt_xdate()
-    plt.title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+            fig.autofmt_xdate()
+            ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
 
-    lines = [line_speeds]
-    labels = [line.get_label() for line in lines]
-    ax.legend(lines, labels, loc="upper left")
+            lines = [line_speeds]
+            labels = [line.get_label() for line in lines]
+            ax.legend(lines, labels, loc="upper left")
 
-    img = plt_fig_to_image(fig)
+            return plt_fig_to_image(fig)
+        finally:
+            fig.clear()
+
+    img = await run_matplotlib_plot(_render_rank_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
         if rqd.wl_chara_icon_path is not None:

@@ -34,6 +34,13 @@ DEFAULT_MARGIN = 0
 DEFAULT_SEP = 8
 
 
+def _open_image_copy(path: str) -> Image.Image:
+    """Open image file safely and detach data from file descriptor."""
+    with Image.open(path) as img:
+        img.load()
+        return img.copy()
+
+
 # =========================== 背景 =========================== #
 
 
@@ -96,7 +103,7 @@ class ImageBg(WidgetBg):
     ) -> None:
         super().__init__()
         if isinstance(img, str):
-            self.img = Image.open(img)
+            self.img = _open_image_copy(img)
         else:
             self.img = img
         assert align in ALIGN_MAP
@@ -1369,7 +1376,7 @@ class ImageBox(Widget):
         self.use_alpha_blend = None
         self.alpha_adjust = None
         if isinstance(image, str):
-            self.image = Image.open(image)
+            self.image = _open_image_copy(image)
         else:
             self.image = image
 
@@ -1407,7 +1414,7 @@ class ImageBox(Widget):
 
     def set_image(self, image: str | Image.Image) -> Self:
         if isinstance(image, str):
-            self.image = Image.open(image)
+            self.image = _open_image_copy(image)
         else:
             self.image = image
         return self

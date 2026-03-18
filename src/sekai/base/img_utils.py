@@ -177,12 +177,14 @@ def _save_transparent_gif(
 
 def open_image(file_path: str | Path, load: bool = True) -> Image.Image:
     """
-    打开图片文件并返回PIL Image对象，默认直接load
+    打开图片文件并返回脱离文件句柄的 PIL Image 对象。
+
+    参数 ``load`` 保留是为了兼容旧调用方；为保证并发安全，
+    这里总是先解码再返回副本。
     """
-    img = Image.open(file_path)
-    if load:
+    with Image.open(file_path) as img:
         img.load()
-    return img
+        return img.copy()
 
 
 def is_gif(image: str | Image.Image) -> bool:
