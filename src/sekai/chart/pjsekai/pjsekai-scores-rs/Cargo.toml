@@ -1,0 +1,31 @@
+[package]
+name = "pjsekai-scores"
+version = "0.1.0"
+edition = "2024"
+description = "Project SEKAI score (.sus) parser and SVG chart renderer"
+license = "MIT"
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+num = "0.4"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+pyo3 = { version = "0.28.2", features = ["extension-module", "generate-import-lib"], optional = true }
+
+[lints.rust]
+# Free-threaded Python requires all #[pyclass] types to be Send + Sync.
+# Our types satisfy this since they contain only owned Rust data with no Rc/RefCell.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(Py_GIL_DISABLED)'] }
+
+[lib]
+name = "pjsekai_scores"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "pjsekai-scores"
+path = "src/main.rs"
