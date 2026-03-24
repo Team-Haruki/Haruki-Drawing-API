@@ -6,7 +6,7 @@ from src.sekai.base.utils import TempFilePath, run_in_pool, screenshot
 from src.settings import ASSETS_BASE_DIR
 
 from .model import GenerateMusicChartRequest
-from pjsekai_scores import Drawing, Score
+from pjsekai_scores_rs import Drawing, Score
 
 
 async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
