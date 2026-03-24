@@ -322,13 +322,13 @@ dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pilmoji" },
+    { name = "pjsekai-scores-rs" },
     { name = "psutil" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
     { name = "pyyaml" },
     { name = "redis" },
     { name = "ruff" },
-    { name = "svgwrite" },
 ]
 
 [package.metadata]
@@ -342,13 +342,13 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pilmoji", specifier = "==2.0.4" },
+    { name = "pjsekai-scores-rs", specifier = ">=0.1.0" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "redis", specifier = ">=7.2.1" },
     { name = "ruff", specifier = ">=0.15.4" },
-    { name = "svgwrite", specifier = ">=1.4.3" },
 ]
 
 [[package]]
@@ -566,6 +566,20 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e1/04/e463218cffa0d8e145aa3c5fb409e483134df69ccfdce02bff0e05bce08e/pilmoji-2.0.4.tar.gz", hash = "sha256:3861c09999f36bb32dd559e181b63a8a9c8068b2cddcac32637581e48de2d11f", size = 9952, upload-time = "2023-08-10T02:56:10.878Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/47/7c/b7139e422e460889077d34b8e668b7b61af19e303b7a66adc736313fb71a/pilmoji-2.0.4-py3-none-any.whl", hash = "sha256:2fcb2116226ed8aa600fcf6e65d7693b5d08d60715f8c460553130081a5adc26", size = 9709, upload-time = "2023-08-10T02:56:09.123Z" },
+]
+
+[[package]]
+name = "pjsekai-scores-rs"
+version = "0.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/34/97/cc457dcdc8aa1c6ff09b7497f8097403d1a5ddc6c0f683f5028d60a3ef42/pjsekai_scores_rs-0.1.0.tar.gz", hash = "sha256:ef5cae1bdaf9bf024989a0c3b82a4d29c6a7b96c3fad26bfbf7f2c0066505ca5", size = 40041, upload-time = "2026-03-24T09:43:07.256Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/54/709f2508156980d9a1589744904c0a060b6e4884347b1b455818dc47cddd/pjsekai_scores_rs-0.1.0-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:70085efc0c3f8bf43c0fa18cfbadeb7bc251ed9fd99f275f45dfdeff86fc6e81", size = 1122259, upload-time = "2026-03-24T09:42:45.46Z" },
+    { url = "https://files.pythonhosted.org/packages/6d/b5/a0daea7d4abb8f78a0797ea61025673728e0c360c60af3a88e6310578f99/pjsekai_scores_rs-0.1.0-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:5d221741764d55bde01265dd24c444bfafa020fe65891d57ab9ebae9d392cabf", size = 1152592, upload-time = "2026-03-24T09:42:47.111Z" },
+    { url = "https://files.pythonhosted.org/packages/83/b3/1ad0fe1bed43c92be00209e3eecba38f8d1901bcbfaf0036700ead7eb35b/pjsekai_scores_rs-0.1.0-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:8ca348a513a809abd39c97b1499e8e6597f9b2fa3aeb3bef6f148e3882283db0", size = 1045487, upload-time = "2026-03-24T09:42:48.851Z" },
+    { url = "https://files.pythonhosted.org/packages/22/38/fe7f893634255ec5da637b6bf50888b2fe6c2afee7b0f30bc5bb766e6b7f/pjsekai_scores_rs-0.1.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:edab15cd669c41beb8890846d2159d7ab726227e09755bc2be99a4378020e655", size = 990129, upload-time = "2026-03-24T09:42:50.346Z" },
+    { url = "https://files.pythonhosted.org/packages/b2/cf/19a9e96706a457b57779f78a782d1c2d3c23c3421e7332012d0ee9177dd3/pjsekai_scores_rs-0.1.0-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ffc75cc65b6ff6beaf729c7f46a6e625ccce23e5b3675241db614ec15bf26be9", size = 1120942, upload-time = "2026-03-24T09:42:52.168Z" },
+    { url = "https://files.pythonhosted.org/packages/a9/54/8d15929d71b1a0dad2b92af340a60592d84c0fd6d85fd427dc3e210c40f6/pjsekai_scores_rs-0.1.0-cp314-cp314t-win_amd64.whl", hash = "sha256:2acde2c9337619b5586c56329ca75b208298c5d7ff39421fc0b99986e0c271d1", size = 899555, upload-time = "2026-03-24T09:42:54.171Z" },
 ]
 
 [[package]]
@@ -824,15 +838,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/04/57/d062573f391d062710d4088fa1369428c38d51460ab6fedff920efef932e/starlette-0.47.2.tar.gz", hash = "sha256:6ae9aa5db235e4846decc1e7b79c4f346adf41e9777aebeb49dfd09bbd7023d8", size = 2583948, upload-time = "2025-07-20T17:31:58.522Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/1f/b876b1f83aef204198a42dc101613fefccb32258e5428b5f9259677864b4/starlette-0.47.2-py3-none-any.whl", hash = "sha256:c5847e96134e5c5371ee9fac6fdf1a67336d5815e09eb2a01fdb57a351ef915b", size = 72984, upload-time = "2025-07-20T17:31:56.738Z" },
-]
-
-[[package]]
-name = "svgwrite"
-version = "1.4.3"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/16/c1/263d4e93b543390d86d8eb4fc23d9ce8a8d6efd146f9427364109004fa9b/svgwrite-1.4.3.zip", hash = "sha256:a8fbdfd4443302a6619a7f76bc937fc683daf2628d9b737c891ec08b8ce524c3", size = 189516, upload-time = "2022-07-14T14:05:26.107Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/84/15/640e399579024a6875918839454025bb1d5f850bb70d96a11eabb644d11c/svgwrite-1.4.3-py3-none-any.whl", hash = "sha256:bb6b2b5450f1edbfa597d924f9ac2dd099e625562e492021d7dd614f65f8a22d", size = 67122, upload-time = "2022-07-14T14:05:24.459Z" },
 ]
 
 [[package]]
