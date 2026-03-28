@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import APIRouter, HTTPException
 
 from src.core.utils import image_to_response
@@ -26,6 +28,7 @@ async def event_detail(request: EventDetailRequest):
         image = await compose_event_detail_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -40,6 +43,7 @@ async def event_record(request: EventRecordRequest):
         image = await compose_event_record_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -54,4 +58,5 @@ async def event_list(request: EventListRequest):
         image = await compose_event_list_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

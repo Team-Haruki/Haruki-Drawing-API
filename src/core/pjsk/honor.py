@@ -7,7 +7,7 @@ from src.sekai.honor.model import HonorRequest
 router = APIRouter(tags=["Honor"])
 
 
-@router.post("/", summary="Generate honor image")
+@router.post("", summary="Generate honor image")
 async def honor(request: HonorRequest):
     """
     Generate an honor/badge image.

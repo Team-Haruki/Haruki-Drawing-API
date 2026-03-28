@@ -55,7 +55,7 @@ async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
     """
     通过路径获取图片
     """
-    if path is None:
+    if path is None or path.strip() == "":
         raise ValueError("图片路径不能为空(None)")
     return await run_in_pool(_load_image_from_path_sync, base_path, path)
 
