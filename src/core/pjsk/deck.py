@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import APIRouter, HTTPException
 
 from src.core.utils import image_to_response
@@ -18,4 +20,5 @@ async def deck_recommend(request: DeckRequest):
         image = await compose_deck_recommend_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

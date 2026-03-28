@@ -745,7 +745,11 @@ async def compose_mysekai_door_upgrade_image(rqd: MysekaiDoorUpgradeRequest) -> 
                             with HSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(8):
                                 TextBox(
                                     f"{level_items.level}",
-                                    TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=level_items.color),
+                                    TextStyle(
+                                        font=DEFAULT_BOLD_FONT,
+                                        size=24,
+                                        color=tuple(level_items.color) if isinstance(level_items.color, list) else level_items.color,
+                                    ),
                                     overflow="clip",
                                 ).set_w(32)
                                 # 每个材料

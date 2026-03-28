@@ -151,8 +151,10 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                         )
 
                         if recommend_type == "challenge":
-                            ImageBox(chara_icon, size=(None, 50))
-                            TextBox(f"{chara_name}", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
+                            if chara_icon:
+                                ImageBox(chara_icon, size=(None, 50))
+                            if chara_name:
+                                TextBox(f"{chara_name}", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
                         if recommend_type in ["wl"] and wl_chara_name:
                             ImageBox(wl_chara_icon, size=(None, 50))
                             TextBox(
@@ -210,10 +212,11 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     elif recommend_type != "mysekai":
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                             with Frame().set_size((50, 50)):
-                                if rqd.music_id != OMAKASE_MUSIC_ID:
-                                    Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset(
-                                        (6, 6)
-                                    )
+                                if rqd.music_id is not None and rqd.music_id != OMAKASE_MUSIC_ID:
+                                    if rqd.music_diff and rqd.music_diff in DIFF_COLORS:
+                                        Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset(
+                                            (6, 6)
+                                        )
                                     if music_cover:
                                         ImageBox(music_cover, size=(50, 50))
                                 else:
@@ -277,11 +280,11 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 TextStyle(font=DEFAULT_FONT, size=12, color=(125, 125, 125)),
                                             ).set_offset((0, -8 - voffset * 2 + alg_offset))
                                             # 分数
-                                            score = deck.score
+                                            score = deck.score or 0
                                             if recommend_type == "no_event":
-                                                score = deck.live_score
+                                                score = deck.live_score or 0
                                             elif recommend_type == "mysekai":
-                                                score = deck.mysekai_event_point
+                                                score = deck.mysekai_event_point or 0
                                             with Frame().set_content_align("c"):
                                                 TextBox(str(score), tb_style).set_h(gh).set_content_align(
                                                     "c"

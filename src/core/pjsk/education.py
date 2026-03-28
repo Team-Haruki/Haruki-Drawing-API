@@ -1,3 +1,5 @@
+import traceback
+
 from fastapi import APIRouter, HTTPException
 
 from src.core.utils import image_to_response
@@ -44,6 +46,7 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
         image = await compose_power_bonus_detail_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -58,6 +61,7 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
         image = await compose_area_item_upgrade_materials_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -72,6 +76,7 @@ async def bonds_level(request: BondsRequest):
         image = await compose_bonds_image(request)
         return image_to_response(image)
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 

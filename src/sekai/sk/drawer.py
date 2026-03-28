@@ -508,8 +508,12 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
     ranks2 = rqd.ranks2
 
     ranks = [r for r in ranks if r.rank <= 100]
+    if not ranks:
+        raise ValueError("player trace requires at least one rank entry within top 100")
     if ranks2 is not None:
         ranks2 = [r for r in ranks2 if r.rank <= 100]
+        if not ranks2:
+            ranks2 = None
 
     ranks.sort(key=lambda x: x.time)
     name = truncate(ranks[-1].name, 40)
