@@ -9,6 +9,7 @@ Swagger UI: http://localhost:8000/docs
 ReDoc: http://localhost:8000/redoc
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 import logging
 import sys
@@ -59,18 +60,41 @@ def _ensure_nogil_runtime() -> None:
         raise RuntimeError("GIL is enabled. Start with free-threaded runtime and -X gil=0.")
 
 
+TMP_CLEANUP_INTERVAL = 300  # 临时文件清理间隔（秒）
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
+    from src.sekai.base.painter import shutdown_painter
+    from src.sekai.base.utils import cleanup_expired_tmp_files, shutdown_utils
+    from src.sekai.sk.drawer import shutdown_sk_drawer
+
     _ensure_nogil_runtime()
     # Configure coloredlogs
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+
+    # 后台定期清理临时文件
+    async def _periodic_tmp_cleanup():
+        while True:
+            await asyncio.sleep(TMP_CLEANUP_INTERVAL)
+            try:
+                cleanup_expired_tmp_files()
+            except Exception:
+                logger.warning("Failed to cleanup tmp files", exc_info=True)
+
+    cleanup_task = asyncio.create_task(_periodic_tmp_cleanup())
 
     # Startup
     logger.info("Haruki Drawing API is starting...")
     yield
     # Shutdown
     logger.info("Haruki Drawing API is shutting down...")
+    cleanup_task.cancel()
+    shutdown_painter()
+    shutdown_sk_drawer()
+    shutdown_utils()
+    logger.info("Resources cleaned up.")
 
 
 app = FastAPI(

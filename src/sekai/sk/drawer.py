@@ -62,6 +62,11 @@ async def run_matplotlib_plot(func: Callable[[], Image.Image]) -> Image.Image:
     return await loop.run_in_executor(_matplotlib_executor, func)
 
 
+def shutdown_sk_drawer() -> None:
+    """关闭 sk drawer 模块持有的线程池"""
+    _matplotlib_executor.shutdown(wait=False)
+
+
 # matplotlib字体
 font_paths = []
 font_paths.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".otf"))
