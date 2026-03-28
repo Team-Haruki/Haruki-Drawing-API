@@ -5,6 +5,7 @@ from src.sekai.mysekai.drawer import (
     compose_mysekai_door_upgrade_image,
     compose_mysekai_fixture_detail_image,
     compose_mysekai_fixture_list_image,
+    compose_mysekai_msr_map_image,
     compose_mysekai_musicrecord_image,
     compose_mysekai_resource_image,
     compose_mysekai_talk_list_image,
@@ -13,6 +14,7 @@ from src.sekai.mysekai.model import (
     MysekaiDoorUpgradeRequest,
     MysekaiFixtureDetailRequest,
     MysekaiFixtureListRequest,
+    MysekaiMsrMapRequest,
     MysekaiMusicrecordRequest,
     MysekaiResourceRequest,
     MysekaiTalkListRequest,
@@ -26,6 +28,16 @@ async def mysekai_resource(request: MysekaiResourceRequest):
     """Generate MySekai resource list image."""
     try:
         image = await compose_mysekai_resource_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/map", summary="Generate MySekai MSR map image")
+async def mysekai_msr_map(request: MysekaiMsrMapRequest):
+    """Generate MySekai MSR harvest map image."""
+    try:
+        image = await compose_mysekai_msr_map_image(request)
         return image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

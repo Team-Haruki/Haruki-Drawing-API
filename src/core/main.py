@@ -43,7 +43,7 @@ This API provides endpoints for generating various Project Sekai images.
 - **Stamp**: Generate stamp list images
 - **Education**: Generate challenge live, power bonus, area items, bonds, and leader count images
 - **Deck**: Generate deck recommendation images
-- **MySekai**: Generate resource, fixture, gate, music record, and talk list images
+- **MySekai**: Generate resource, msr map, fixture, gate, music record, and talk list images
 - **SK**: Generate ranking lines, history, speed, and prediction images
 
 
