@@ -9,7 +9,7 @@ from src.sekai.base.draw import (
     add_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import BLACK, WHITE
+from src.sekai.base.painter import BLACK, WHITE, get_font, get_text_size
 from src.sekai.base.plot import (
     FillBg,
     HSplit,
@@ -29,6 +29,30 @@ from .model import (
     MusicMetaRequest,
     ScoreControlRequest,
 )
+
+
+def _calc_custom_room_title_width(
+    column_width: int,
+    music_count: int,
+    row_padding: int,
+    item_sep: int,
+    cover_size: int,
+    title_style: TextStyle,
+) -> int:
+    """Reserve enough room for cover icons and separators, then clip each title into the remaining width."""
+    if music_count <= 0:
+        return max(24, column_width - row_padding * 2)
+
+    separator_count = max(music_count - 1, 0)
+    item_count = music_count * 2 + separator_count
+    gap_count = max(item_count - 1, 0)
+    separator_font = get_font(title_style.font, title_style.size)
+    separator_width, _ = get_text_size(separator_font, " / ")
+    usable_width = column_width - row_padding * 2
+    usable_width -= cover_size * music_count
+    usable_width -= separator_width * separator_count
+    usable_width -= item_sep * gap_count
+    return max(24, usable_width // music_count)
 
 
 # 合成控分图片
@@ -175,7 +199,10 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
 
             # 数据
             gh, vsep, hsep = 40, 6, 6
-            w1, w2, w3 = 140, 360, 100
+            w1, w2, w3 = 140, 520, 100
+            music_row_padding = 8
+            music_item_sep = 4
+            cover_size = gh - 2
 
             def bg_fn(i: int):
                 return FillBg((255, 255, 255, 200)) if i % 2 == 0 else FillBg((255, 255, 255, 100))
@@ -198,8 +225,8 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                             HSplit()
                             .set_content_align("c")
                             .set_item_align("c")
-                            .set_sep(4)
-                            .set_padding((8, 0))
+                            .set_sep(music_item_sep)
+                            .set_padding((music_row_padding, 0))
                             .set_size((w2, gh))
                             .set_bg(bg)
                         ):
@@ -210,12 +237,20 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                             if not music_list:
                                 TextBox("-", style2)
                             else:
+                                title_width = _calc_custom_room_title_width(
+                                    w2,
+                                    len(music_list),
+                                    music_row_padding,
+                                    music_item_sep,
+                                    cover_size,
+                                    style2,
+                                )
                                 for j, music_info in enumerate(music_list):
                                     if j > 0:
                                         TextBox(" / ", style2)
                                     music_cover = await get_img_from_path(ASSETS_BASE_DIR, music_info["music_cover"])
-                                    ImageBox(music_cover, size=(gh - 2, gh - 2), use_alpha_blend=False)
-                                    TextBox(f"{truncate(music_info['music_title'], 16)}", style2)
+                                    ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
+                                    TextBox(str(music_info["music_title"]), style2, line_count=1).set_w(title_width)
                 # PT系数
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
                     TextBox("PT系数", style1).set_size((w3, gh)).set_content_align("c").set_bg(bg_fn(0))
