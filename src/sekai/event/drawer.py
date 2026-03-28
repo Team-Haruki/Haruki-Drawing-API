@@ -199,7 +199,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                 await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path),
                                 size=(None, 40),
                             )
-                        if detail:
+                        if rqd.event_assets.bonus_chara_path:
                             TextBox("加成角色", label_style)
                             bonus_chara_image = []
                             for chara in rqd.event_assets.bonus_chara_path:
