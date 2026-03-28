@@ -1,6 +1,6 @@
 import asyncio
+from collections import OrderedDict
 from datetime import datetime, timedelta
-from functools import lru_cache
 import io
 import os
 from os.path import join as pjoin
@@ -12,7 +12,14 @@ from uuid import uuid4
 import aiohttp
 from PIL import Image
 
-from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE, IMAGE_CACHE_SIZE, SCREENSHOT_API_PATH, TMP_PATH
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_THREAD_POOL_SIZE,
+    IMAGE_CACHE_MAX_BYTES,
+    IMAGE_CACHE_SIZE,
+    SCREENSHOT_API_PATH,
+    TMP_PATH,
+)
 
 
 def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit=False) -> str:
@@ -66,10 +73,63 @@ def _open_image_copy(path: Path) -> Image.Image:
         return img.copy()
 
 
-@lru_cache(maxsize=max(IMAGE_CACHE_SIZE, 1))
-def _load_image_cached(path: str, mtime_ns: int, size: int) -> Image.Image:
-    del mtime_ns, size
-    return _open_image_copy(Path(path))
+_image_cache_lock = threading.RLock()
+_image_cache: OrderedDict[tuple[str, int, int], tuple[Image.Image, int]] = OrderedDict()
+_image_cache_total_bytes = 0
+
+
+def _estimate_image_bytes(img: Image.Image) -> int:
+    bpp = {
+        "1": 1,
+        "L": 1,
+        "P": 1,
+        "LA": 2,
+        "RGB": 3,
+        "RGBA": 4,
+        "CMYK": 4,
+        "I": 4,
+        "F": 4,
+        "I;16": 2,
+    }.get(img.mode, len(img.getbands()) or 4)
+    return img.width * img.height * bpp
+
+
+def _load_image_cached(path: str, mtime_ns: int, size: int) -> Image.Image | None:
+    cache_key = (path, mtime_ns, size)
+    with _image_cache_lock:
+        entry = _image_cache.get(cache_key)
+        if entry is None:
+            return None
+        image, _ = entry
+        _image_cache.move_to_end(cache_key)
+        return image.copy()
+
+
+def _put_image_cache(path: str, mtime_ns: int, size: int, image: Image.Image) -> None:
+    global _image_cache_total_bytes
+
+    if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
+        return
+
+    cache_key = (path, mtime_ns, size)
+    cache_bytes = _estimate_image_bytes(image)
+    with _image_cache_lock:
+        old_entry = _image_cache.pop(cache_key, None)
+        if old_entry is not None:
+            old_image, old_bytes = old_entry
+            _image_cache_total_bytes -= old_bytes
+            old_image.close()
+
+        _image_cache[cache_key] = (image, cache_bytes)
+        _image_cache_total_bytes += cache_bytes
+
+        # 双阈值驱逐：条目数和总字节数都受控，防止缓存长期持有大量大图。
+        while _image_cache and (
+            len(_image_cache) > IMAGE_CACHE_SIZE or _image_cache_total_bytes > IMAGE_CACHE_MAX_BYTES
+        ):
+            _, (evict_image, evict_bytes) = _image_cache.popitem(last=False)
+            _image_cache_total_bytes -= evict_bytes
+            evict_image.close()
 
 
 def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
@@ -82,12 +142,19 @@ def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
     if not full_path.is_file():
         raise FileNotFoundError(f"图片文件不存在: {full_path}")
 
-    if IMAGE_CACHE_SIZE <= 0:
+    if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
         return _open_image_copy(full_path)
 
     stat = full_path.stat()
-    cached = _load_image_cached(str(full_path), stat.st_mtime_ns, stat.st_size)
-    return cached.copy()
+    full_path_str = str(full_path)
+    cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
+    if cached is not None:
+        return cached
+
+    loaded = _open_image_copy(full_path)
+    ret = loaded.copy()
+    _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, loaded)
+    return ret
 
 
 def get_str_display_length(s: str) -> int:
