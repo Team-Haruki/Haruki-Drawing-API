@@ -72,8 +72,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
         frame = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
         img.paste(frame, (8, 0) if rarity == "low" else (0, 0), frame)
         # 添加生日牌子的等级标志
-        if htype == "birthday" and rqd.frame_img_path:
-            icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+        if htype == "birthday" and rqd.frame_degree_level_img_path:
+            icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_degree_level_img_path)
             w, h = img.size
             sz = 18
             icon = icon.resize((sz, sz))
@@ -95,7 +95,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
         draw = ImageDraw.Draw(img)
         draw.text((offset + 50 - text_w // 2, 46), lv, font=font, fill=WHITE)
 
-    if htype == "normal":
+    if htype in ("normal", "birthday"):
         # 普通牌子
         rarity = rqd.honor_rarity
         gtype = rqd.group_type
