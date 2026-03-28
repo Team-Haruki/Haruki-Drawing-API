@@ -108,7 +108,7 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
         day_unit, hour_unit, minute_unit, second_unit = ("天", "小时", "分钟", "秒")
     else:
         day_unit, hour_unit, minute_unit, second_unit = ("d", "h", "m", "s")
-    now = datetime.now()
+    now = datetime.now(t.tzinfo) if t.tzinfo is not None else datetime.now()
     diff = t - now
     text, suffix = "", "后"
     if diff.total_seconds() < 0:
