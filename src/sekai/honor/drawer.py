@@ -1,3 +1,5 @@
+import logging
+
 from PIL import Image, ImageDraw
 
 from src.sekai.base.painter import WHITE, get_font, get_text_size, resize_keep_ratio
@@ -6,6 +8,8 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 
 # 从 model.py 导入数据模型
 from .model import HonorRequest
+
+logger = logging.getLogger(__name__)
 
 face_pos = {
     1: 48,
@@ -45,6 +49,25 @@ face_pos = {
 
 
 async def compose_full_honor_image(rqd: HonorRequest):
+    logger.info(
+        "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
+        rqd.honor_type,
+        rqd.group_type,
+        rqd.is_main_honor,
+        rqd.honor_level,
+        rqd.honor_rarity,
+        rqd.honor_img_path,
+        rqd.frame_img_path,
+        rqd.frame_degree_level_img_path,
+        rqd.rank_img_path,
+        rqd.scroll_img_path,
+        rqd.word_img_path,
+        rqd.bonds_bg_path,
+        rqd.bonds_bg_path2,
+        rqd.mask_img_path,
+        rqd.lv_img_path,
+        rqd.lv6_img_path,
+    )
     if rqd.is_empty:
         img = await get_img_from_path(ASSETS_BASE_DIR, rqd.empty_honor_path)
         padding = 3
