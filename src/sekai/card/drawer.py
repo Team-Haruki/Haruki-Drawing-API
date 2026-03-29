@@ -280,16 +280,21 @@ async def compose_card_list_image(
             if isinstance(user_card, dict) and "cardId" in user_card:
                 user_card_map[user_card["cardId"]] = user_card
 
-    thumbs = []
-    for card in rqd.cards:
-        if card.is_after_training:
-            thumb_img = await get_card_full_thumbnail(card.thumbnail_info[1])
-        else:
-            thumb_img = await get_card_full_thumbnail(card.thumbnail_info[0])
-        thumbs.append(thumb_img)
+    async def get_card_list_thumbs(card):
+        thumbnails = card.thumbnail_info or []
+        if not thumbnails:
+            return []
+        if len(thumbnails) == 1:
+            img = await get_card_full_thumbnail(thumbnails[0])
+            return [img] if img is not None else []
+        normal = await get_card_full_thumbnail(thumbnails[0])
+        after = await get_card_full_thumbnail(thumbnails[1])
+        return [img for img in (normal, after) if img is not None]
+
+    thumbs = [await get_card_list_thumbs(card) for card in rqd.cards]
 
     # 并行获取所有缩略图
-    card_and_thumbs = [(card, thumb) for card, thumb in zip(cards, thumbs) if thumb is not None]
+    card_and_thumbs = [(card, thumb_group) for card, thumb_group in zip(cards, thumbs) if thumb_group]
 
     # 按发布时间和ID排序
     card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].card_id), reverse=True)
@@ -313,7 +318,7 @@ async def compose_card_list_image(
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             # 卡牌网格
             with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
-                for i, (card, thumb) in enumerate(card_and_thumbs):
+                for i, (card, thumb_group) in enumerate(card_and_thumbs):
                     # 背景设置 - 确保毛玻璃效果启用
                     if card.supply_type not in ["非限定", "normal"]:
                         # 限定卡牌：使用淡黄色背景，确保有足够的透明度
@@ -344,7 +349,8 @@ async def compose_card_list_image(
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
                                 GW = 300
                                 with HSplit().set_content_align("c").set_w(GW).set_padding(8).set_sep(16):
-                                    ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                                    for thumb in thumb_group:
+                                        ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
 
                                 # 卡牌名称
                                 name_text = card.prefix
