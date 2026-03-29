@@ -14,6 +14,7 @@ Usage:
 """
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -89,6 +90,8 @@ class DrawingSettings(BaseModel):
     process_pool_workers: int = 4  # 进程池工作进程数
     process_pool_threshold: int = 2_000_000  # 像素阈值 (约 2000x1000)
     screenshot_api_path: str = "http://localhost:18080/screenshot"
+    export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
+    jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
 
 
 class Settings(BaseSettings):
@@ -173,6 +176,8 @@ DEFAULT_THREAD_POOL_SIZE = settings.drawing.thread_pool_size
 IMAGE_CACHE_SIZE = settings.drawing.image_cache_size
 IMAGE_CACHE_MAX_BYTES = settings.drawing.image_cache_max_mb * 1024 * 1024
 SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
+EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
+JPG_QUALITY = settings.drawing.jpg_quality
 
 # Server
 SERVER_HOST = settings.server.host

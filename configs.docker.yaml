@@ -23,6 +23,8 @@ drawing:
   process_pool_workers: 4
   process_pool_threshold: 2000000
   screenshot_api_path: http://screenshot-service:8080/screenshot
+  export_image_format: png  # png 或 jpg
+  jpg_quality: 85  # JPEG 压缩质量 (1-100)，仅在 export_image_format 为 jpg 时生效
 
 server:
   host: 0.0.0.0
