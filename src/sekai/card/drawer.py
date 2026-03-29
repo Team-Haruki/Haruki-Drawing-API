@@ -381,10 +381,16 @@ async def compose_box_image(
     thumbs = []
     for card in cards:
         # 根据use_after_training决定使用哪张缩略图
-        if card.card.is_after_training:
-            thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[1]))
+        thumbnails = card.card.thumbnail_info or []
+        if not thumbnails:
+            thumbs.append(None)
+            continue
+        if len(thumbnails) == 1:
+            thumbs.append(await get_card_full_thumbnail(thumbnails[0]))
+        elif card.card.is_after_training:
+            thumbs.append(await get_card_full_thumbnail(thumbnails[1]))
         else:
-            thumbs.append(await get_card_full_thumbnail(card.card.thumbnail_info[0]))
+            thumbs.append(await get_card_full_thumbnail(thumbnails[0]))
 
     # 按角色收集卡牌
     chara_cards = {}
@@ -505,7 +511,8 @@ async def compose_box_image(
                         # 角色图标
                         chara_icon = chara_icons.get(chara_id)
                         ImageBox(chara_icon, size=(sz, sz))
-                        chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE[chara_id])
+                        color_code = rqd.character_color_codes.get(chara_id) or CHARACTER_COLOR_CODE[chara_id]
+                        chara_color = color_code_to_rgb(color_code)
                         col_num = max(1, len(range(0, len(cards), best_height)))
                         Spacer(w=sz * col_num + 4 * (col_num - 1), h=4).set_bg(FillBg(chara_color))
                         # 卡牌列表

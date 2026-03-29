@@ -324,6 +324,7 @@ class CardBoxRequest(BaseModel):
     show_box: bool = False
     background_img_path: str | None = None
     character_icon_paths: dict[int, str]
+    character_color_codes: dict[int, str] = {}
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
 
