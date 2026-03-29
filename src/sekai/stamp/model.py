@@ -34,9 +34,12 @@ class StampListRequest(BaseModel):
     ----------
     prompt_message : Optional[ str ] = None
         提示性文字
+    page_message : Optional[ str ] = None
+        分页提示文字
     stamps : List[ StampData ] = []
         表情列表
     """
 
     prompt_message: str | None = None
+    page_message: str | None = None
     stamps: list[StampData] = []
