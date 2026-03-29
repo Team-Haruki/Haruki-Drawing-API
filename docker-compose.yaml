@@ -8,6 +8,12 @@ services:
     container_name: haruki-drawing-api
     ports:
       - "28000:8000"
+    environment:
+      - GRANIAN_WORKERS=1
+      - GRANIAN_WORKERS_LIFETIME=1200
+      - GRANIAN_WORKERS_KILL_TIMEOUT=30
+      - MALLOC_ARENA_MAX=2
+      - MALLOC_TRIM_THRESHOLD_=131072
     volumes:
       # 必须和screenshot-service同名且挂载到同一位置
       - "./data:/app/haruki_drawing_api/data"

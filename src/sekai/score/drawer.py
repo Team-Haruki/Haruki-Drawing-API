@@ -247,7 +247,9 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                                 )
                                 for j, music_info in enumerate(music_list):
                                     if j > 0:
-                                        TextBox(" / ", style2)
+                                        # Keep separator width consistent with _calc_custom_room_title_width
+                                        # (TextBox has default horizontal padding=2, which may cause overflow).
+                                        TextBox(" / ", style2).set_padding(0)
                                     music_cover = await get_img_from_path(ASSETS_BASE_DIR, music_info["music_cover"])
                                     ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
                                     TextBox(str(music_info["music_title"]), style2, line_count=1).set_w(title_width)

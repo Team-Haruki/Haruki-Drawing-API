@@ -57,6 +57,15 @@ def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecu
     return _painter_process_pool
 
 
+def shutdown_painter() -> None:
+    """关闭 painter 模块持有的全局资源（进程池、磁盘缓存清理）"""
+    global _painter_process_pool
+    if _painter_process_pool is not None:
+        _painter_process_pool.shutdown(wait=False)
+        _painter_process_pool = None
+    Painter.cleanup_old_disk_cache()
+
+
 DEBUG = True
 
 
@@ -262,7 +271,7 @@ class FontCacheEntry:
     last_used: datetime
 
 
-FONT_CACHE_MAX_NUM = 128
+FONT_CACHE_MAX_NUM = 32
 _font_cache_local = threading.local()
 _painter_disk_cache_lock = threading.RLock()
 
@@ -641,41 +650,43 @@ class Painter:
         debug_print(f"Main process memory usage: {get_memo_usage()} MB")
 
         # 收集所有图片对象到字典中
-        image_dict = {}
-        for op in self.operations:
-            op.image_to_id(image_dict)
-        total_img_size = 0
-        for img in image_dict.values():
-            total_img_size += img.size[0] * img.size[1] * 4
-        debug_print(f"image_dict len: {len(image_dict)}, total size: {total_img_size // 1024 // 1024} MB")
+        image_dict: dict[str, Image.Image] = {}
+        try:
+            for op in self.operations:
+                op.image_to_id(image_dict)
+            total_img_size = 0
+            for img in image_dict.values():
+                total_img_size += img.size[0] * img.size[1] * 4
+            debug_print(f"image_dict len: {len(image_dict)}, total size: {total_img_size // 1024 // 1024} MB")
 
-        for op in self.operations:
-            debug_print(str(op))
+            for op in self.operations:
+                debug_print(str(op))
 
-        # 执行绘图操作
-        t = datetime.now()
+            # 执行绘图操作
+            t = datetime.now()
 
-        # 根据图片大小选择执行方式
-        total_pixels = self.size[0] * self.size[1]
-        use_process_pool = settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+            # 根据图片大小选择执行方式
+            total_pixels = self.size[0] * self.size[1]
+            use_process_pool = settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
 
-        if use_process_pool:
-            loop = asyncio.get_event_loop()
-            pool = get_painter_process_pool()
-            self.img = await loop.run_in_executor(
-                pool,
-                Painter._execute,
-                self.operations,
-                self.img,
-                self.size,
-                image_dict,
-            )
-            debug_print(f"Painter executed in process pool in {datetime.now() - t}")
-        else:
-            self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
-            debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
-
-        self.operations = []
+            if use_process_pool:
+                loop = asyncio.get_event_loop()
+                pool = get_painter_process_pool()
+                self.img = await loop.run_in_executor(
+                    pool,
+                    Painter._execute,
+                    self.operations,
+                    self.img,
+                    self.size,
+                    image_dict,
+                )
+                debug_print(f"Painter executed in process pool in {datetime.now() - t}")
+            else:
+                self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
+                debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
+        finally:
+            self.operations = []
+            image_dict.clear()
 
         # 保存缓存
         if cache_key is not None:
@@ -724,6 +735,23 @@ class Painter:
                 cache_key = os.path.basename(p).split("__")[0]
                 cache_keys[cache_key] = datetime.fromtimestamp(mtime)
             return cache_keys
+
+    @staticmethod
+    def cleanup_old_disk_cache(max_age_days: int = 7) -> int:
+        """删除超过 max_age_days 天未修改的磁盘缓存文件，返回删除数量"""
+        import time
+
+        cutoff = time.time() - max_age_days * 86400
+        removed = 0
+        with _painter_disk_cache_lock:
+            for p in glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png")):
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                        removed += 1
+                except OSError:
+                    pass
+        return removed
 
     def set_region(self, pos: Position, size: Size) -> Self:
         assert isinstance(pos[0], int), "Position x must be integer"

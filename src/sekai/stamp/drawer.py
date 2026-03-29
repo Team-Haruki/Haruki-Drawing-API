@@ -52,5 +52,10 @@ async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
                             str(stamp.id),
                             style=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=tuple(stamp.text_color)),
                         )
+            if rqd.page_message:
+                TextBox(
+                    rqd.page_message,
+                    style=TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
+                ).set_padding((0, 8)).set_content_align("c").set_w(620)
     add_watermark(canvas)
     return await canvas.get_img()

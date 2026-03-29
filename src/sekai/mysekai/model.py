@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.painter import Color
 from src.sekai.profile.model import ProfileCardRequest
@@ -129,6 +129,206 @@ class MysekaiResourceRequest(BaseModel):
     gate_icon_path: str
     visit_characters: list[MysekaiVisitCharacter]
     site_resource_numbers: list[MysekaiSiteResourceNumber] | None = None
+
+
+# =========================== 绘制MSR地图 =========================== #
+class MysekaiMsrMapSiteInfo(BaseModel):
+    r"""MysekaiMsrMapSiteInfo
+
+    MSR地图站点配置
+
+    Attributes
+    ----------
+    image_path : str
+        地图背景图路径
+    grid_size : float
+        游戏坐标每格映射到画布像素的基础缩放
+    offset_x : float = 0
+        X方向偏移
+    offset_z : float = 0
+        Z方向偏移
+    dir_x : float = 1
+        X方向乘子（可用于翻转）
+    dir_z : float = 1
+        Z方向乘子（可用于翻转）
+    rev_xz : bool = False
+        是否交换X/Z坐标
+    scale : float = 1.0
+        地图整体缩放倍数
+    crop_bbox : Optional[ Tuple[ int, int, int, int ] ] = None
+        裁剪框 (x, y, w, h)
+    """
+
+    image_path: str
+    grid_size: float
+    offset_x: float = 0.0
+    offset_z: float = 0.0
+    dir_x: float = 1.0
+    dir_z: float = 1.0
+    rev_xz: bool = False
+    scale: float = 1.0
+    crop_bbox: tuple[int, int, int, int] | None = None
+
+
+class MysekaiMsrMapHarvestPoint(BaseModel):
+    r"""MysekaiMsrMapHarvestPoint
+
+    MSR地图采集点信息
+
+    Attributes
+    ----------
+    id : Optional[ int ] = None
+        采集点id
+    image_path : str
+        采集点图标路径
+    position_x : float
+        游戏坐标X
+    position_z : float
+        游戏坐标Z
+    status : str = "spawned"
+        采集点状态（可用于过滤已采集点）
+    size : Optional[ int ] = None
+        图标基础大小（会乘以site.scale）
+    offset_x : float = 0
+        额外X偏移
+    offset_z : float = 0
+        额外Z偏移
+    alpha : float = 1.0
+        图标透明度倍率
+    """
+
+    id: int | None = None
+    image_path: str
+    position_x: float
+    position_z: float
+    status: str = "spawned"
+    size: int | None = None
+    offset_x: float = 0.0
+    offset_z: float = 0.0
+    alpha: float = 1.0
+
+
+class MysekaiMsrMapResourceDrop(BaseModel):
+    r"""MysekaiMsrMapResourceDrop
+
+    MSR地图资源掉落信息
+
+    Attributes
+    ----------
+    id : int
+        资源id
+    type : str
+        资源类型，如 mysekai_material / mysekai_item
+    image_path : str
+        资源图标路径
+    position_x : float
+        游戏坐标X
+    position_z : float
+        游戏坐标Z
+    quantity : int = 1
+        数量
+    status : str = "before_drop"
+        掉落状态（用于过滤已采集）
+    small_icon : Optional[ bool ] = None
+        是否使用小图标，None 表示自动判定
+    hide : bool = False
+        是否隐藏该资源
+    rarity : int = 1
+        资源稀有度，>=2 时会有稀有效果
+    attachment_image_path : Optional[ str ] = None
+        资源附件图标路径（如唱片已收集角标）
+    outline_color : Optional[ Color ] = None
+        图标边框颜色
+    outline_width : Optional[ int ] = None
+        图标边框宽度
+    light_size : Optional[ int ] = None
+        发光特效大小（会乘以site.scale）
+    """
+
+    id: int
+    type: str
+    image_path: str
+    position_x: float
+    position_z: float
+    quantity: int = 1
+    status: str = "before_drop"
+    small_icon: bool | None = None
+    hide: bool = False
+    rarity: int = 1
+    attachment_image_path: str | None = None
+    outline_color: Color | None = None
+    outline_width: int | None = None
+    light_size: int | None = None
+
+
+class MysekaiMsrMapData(BaseModel):
+    r"""MysekaiMsrMapData
+
+    MSR单张地图数据
+
+    Attributes
+    ----------
+    map_id : int
+        地图id
+    site : MysekaiMsrMapSiteInfo
+        地图配置
+    harvest_points : List[ MysekaiMsrMapHarvestPoint ] = []
+        采集点列表
+    resource_drops : List[ MysekaiMsrMapResourceDrop ] = []
+        掉落资源列表
+    """
+
+    map_id: int
+    site: MysekaiMsrMapSiteInfo
+    harvest_points: list[MysekaiMsrMapHarvestPoint] = []
+    resource_drops: list[MysekaiMsrMapResourceDrop] = []
+
+
+class MysekaiMsrMapRequest(BaseModel):
+    r"""MysekaiMsrMapRequest
+
+    绘制MSR地图所需数据
+
+    Attributes
+    ----------
+    maps : List[ MysekaiMsrMapData ]
+        多地图数据列表（至少1张）
+    show_harvested : bool = True
+        是否显示已采集内容
+    phenomena_ground_color : Color = (255, 255, 255, 255)
+        地面染色
+    spawn_position_x : float = 0
+        出生点X坐标
+    spawn_position_z : float = 0
+        出生点Z坐标
+    spawn_image_path : Optional[ str ] = None
+        出生点图标路径（默认使用内置mark）
+    spawn_size : int = 20
+        出生点图标大小（会乘以site.scale）
+    rare_light_image_path : Optional[ str ] = None
+        稀有资源发光图标路径（默认使用内置light）
+    large_icon_size : int = 35
+        资源大图标基础大小（会乘以site.scale）
+    small_icon_size : int = 17
+        资源小图标基础大小（会乘以site.scale）
+    icon_zoffset : int = -32
+        资源图标整体Z方向偏移（会乘以site.scale）
+    draw_bg_fill : Color = (255, 255, 255, 255)
+        最底层背景色
+    """
+
+    maps: list[MysekaiMsrMapData] = Field(min_length=1)
+    show_harvested: bool = True
+    phenomena_ground_color: Color = (255, 255, 255, 255)
+    spawn_position_x: float = 0.0
+    spawn_position_z: float = 0.0
+    spawn_image_path: str | None = None
+    spawn_size: int = 20
+    rare_light_image_path: str | None = None
+    large_icon_size: int = 35
+    small_icon_size: int = 17
+    icon_zoffset: int = -32
+    draw_bg_fill: Color = (255, 255, 255, 255)
 
 
 # =========================== 绘制家具列表 =========================== #
