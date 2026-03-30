@@ -481,7 +481,7 @@ async def compose_box_image(
                     ImageBox(term_img, size=(int(sz * 0.75), None))
             elif supply_name in FES_LIMITED_SUPPLY_TYPES:
                 if fes_img:
-                    ImageBox(fes_img, size=(int(sz * 0.75), None))
+                    ImageBox(fes_img, size=(int(sz * 0.35), None))
 
             # 如果用户没有此卡牌，添加遮罩
             if not card_data["has"] and user_info:
