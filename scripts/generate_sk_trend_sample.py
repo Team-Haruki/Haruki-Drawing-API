@@ -40,7 +40,7 @@ def ensure_runtime_assets() -> None:
     base_dir = Path(ASSETS_BASE_DIR)
     base_dir.mkdir(parents=True, exist_ok=True)
 
-    tri_dir = base_dir / "lunabot_static_images" / "triangle"
+    tri_dir = base_dir / "static_images" / "triangle"
     tri_dir.mkdir(parents=True, exist_ok=True)
     tri_colors = [
         (62, 136, 208, 255),
@@ -145,7 +145,7 @@ def build_honor_payload(output_dir: Path) -> Path:
 
     request = HonorRequest(
         is_empty=True,
-        empty_honor_path="lunabot_static_images/triangle/tri1.png",
+        empty_honor_path="static_images/triangle/tri1.png",
     )
     payload_path = output_dir / "honor_payload.json"
     payload_path.write_text(json.dumps(request.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")

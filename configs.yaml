@@ -1,11 +1,11 @@
 assets:
   base_dir: ./data
-  result_asset_path: lunabot_static_images
+  result_asset_path: static_images
   tmp_path: tmp
   tri_paths:
-    - ./data/lunabot_static_images/triangle/tri1.png
-    - ./data/lunabot_static_images/triangle/tri2.png
-    - ./data/lunabot_static_images/triangle/tri3.png
+    - ./data/static_images/triangle/tri1.png
+    - ./data/static_images/triangle/tri2.png
+    - ./data/static_images/triangle/tri3.png
 
 font:
   dir: ./data

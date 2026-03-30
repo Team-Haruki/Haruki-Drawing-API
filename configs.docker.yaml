@@ -1,14 +1,14 @@
 assets:
-  base_dir: /app/haruki_drawing_api/data
+  base_dir: /pjskdata/Data
   result_asset_path: static_images
   tmp_path: tmp
   tri_paths:
-    - /app/haruki_drawing_api/data/static_images/triangle/tri1.png
-    - /app/haruki_drawing_api/data/static_images/triangle/tri2.png
-    - /app/haruki_drawing_api/data/static_images/triangle/tri3.png
+    - /pjskdata/Data/static_images/triangle/tri1.png
+    - /pjskdata/Data/static_images/triangle/tri2.png
+    - /pjskdata/Data/static_images/triangle/tri3.png
 
 font:
-  dir: /app/haruki_drawing_api/data/fonts
+  dir: /pjskdata/Data/fonts
   default: 
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold

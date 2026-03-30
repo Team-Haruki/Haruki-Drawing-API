@@ -16,7 +16,7 @@ services:
       - MALLOC_TRIM_THRESHOLD_=131072
     volumes:
       # 必须和screenshot-service同名且挂载到同一位置
-      - "./data:/app/haruki_drawing_api/data"
+      - "./data:/pjskdata/Data"
       - "./configs.docker.yaml:/app/haruki_drawing_api/configs.yaml"
     restart: always
     depends_on:
@@ -36,7 +36,7 @@ services:
       - GIN_MODE=release
     volumes:
       # 必须和haruki-drawing-api挂载到同一位置
-      - ./data:/app/haruki_drawing_api/data
+      - "./data:/pjskdata/Data"
     deploy:
       resources:
         limits:

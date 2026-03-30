@@ -17,7 +17,7 @@ from src.sekai.base.painter import (
 from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import get_card_full_thumbnail
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -29,8 +29,8 @@ from .model import (
 
 async def get_rarity_img(
     rarity: str,
-    rarity_img_path: str = "lunabot_static_images/card/rare_star_normal.png",
-    birthday_img_path: str | None = "lunabot_static_images/card/rare_star_birthday.png",
+    rarity_img_path: str = f"{RESULT_ASSET_PATH}/card/rare_star_normal.png",
+    birthday_img_path: str | None = f"{RESULT_ASSET_PATH}/card/rare_star_birthday.png",
 ) -> Image.Image | None:
     """获取稀有度图片"""
     if rarity == "rarity_birthday":

@@ -39,6 +39,14 @@ from .model import (
     CardListRequest,
 )
 
+NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
+TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
+FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
+
+
+def is_non_limited_supply_type(value: str | None) -> bool:
+    return (value or "").strip() in NON_LIMITED_SUPPLY_TYPES
+
 # ========== 主要函数 ==========
 
 
@@ -320,7 +328,7 @@ async def compose_card_list_image(
             with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
                 for i, (card, thumb_group) in enumerate(card_and_thumbs):
                     # 背景设置 - 确保毛玻璃效果启用
-                    if card.supply_type not in ["非限定", "normal"]:
+                    if not is_non_limited_supply_type(card.supply_type):
                         # 限定卡牌：使用淡黄色背景，确保有足够的透明度
                         bg = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True)
                     else:
@@ -358,7 +366,7 @@ async def compose_card_list_image(
 
                                 # ID和限定类型
                                 id_text = f"ID:{card.card_id}"
-                                if card.supply_type not in ["非限定", "normal"]:
+                                if not is_non_limited_supply_type(card.supply_type):
                                     id_text += f"【{card.supply_type}】"
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
@@ -468,10 +476,10 @@ async def compose_box_image(
 
             # 限定类型图标
             supply_name = card_data["card"].get("supply_type", "")
-            if supply_name in ["期间限定", "WL限定", "联动限定"]:
+            if supply_name in TERM_LIMITED_SUPPLY_TYPES:
                 if term_img:
                     ImageBox(term_img, size=(int(sz * 0.75), None))
-            elif supply_name in ["Fes限定", "BFes限定"]:
+            elif supply_name in FES_LIMITED_SUPPLY_TYPES:
                 if fes_img:
                     ImageBox(fes_img, size=(int(sz * 0.75), None))
 

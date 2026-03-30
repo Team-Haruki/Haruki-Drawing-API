@@ -21,13 +21,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+STATIC_IMAGE_DIR = "static_images"
 
 
 class AssetsSettings(BaseModel):
     """资产文件配置"""
 
     base_dir: Path = Path("data")
-    result_asset_path: str = "lunabot_static_images"
+    result_asset_path: str = STATIC_IMAGE_DIR
     tmp_path: str = "tmp"
     tri_paths: list[str] = []
 
@@ -159,9 +160,9 @@ ASSETS_BASE_DIR = settings.assets.base_dir
 RESULT_ASSET_PATH = settings.assets.result_asset_path
 TMP_PATH = settings.assets.tmp_path
 TRI_PATHS = settings.assets.tri_paths or [
-    str(ASSETS_BASE_DIR / "lunabot_static_images/triangle/tri1.png"),
-    str(ASSETS_BASE_DIR / "lunabot_static_images/triangle/tri2.png"),
-    str(ASSETS_BASE_DIR / "lunabot_static_images/triangle/tri3.png"),
+    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri1.png"),
+    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri2.png"),
+    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri3.png"),
 ]
 
 # Fonts
