@@ -71,6 +71,45 @@ def _draw_rqd_title(rqd):
 # =========================== 绘图函数 =========================== #
 
 
+def _iter_vocal_entries(vocal_info):
+    """Normalize music vocal payloads to a list of vocal entries."""
+    if not isinstance(vocal_info, dict) or not vocal_info:
+        return []
+
+    if "caption" in vocal_info and "characters" in vocal_info:
+        return [vocal_info]
+
+    entries = []
+    for item in vocal_info.values():
+        if isinstance(item, dict) and "caption" in item and "characters" in item:
+            entries.append(item)
+    return entries
+
+
+def _build_caption_vocals(vocal_info, vocal_logos):
+    """Group vocal entries by caption, matching lunabot's compose logic."""
+    caption_vocals = {}
+    for item in _iter_vocal_entries(vocal_info):
+        caption = str(item.get("caption", "Vocal")).replace("ver.", "").strip() or "Vocal"
+        vocal_group = {"chara_imgs": [], "vocal_names": []}
+
+        for chara_data in item.get("characters", []):
+            if not isinstance(chara_data, dict):
+                continue
+            chara_name = chara_data.get("characterName")
+            if not chara_name:
+                continue
+            if chara_name in vocal_logos:
+                vocal_group["chara_imgs"].append(vocal_logos[chara_name])
+            else:
+                vocal_group["vocal_names"].append(chara_name)
+
+        if vocal_group["chara_imgs"] or vocal_group["vocal_names"]:
+            caption_vocals.setdefault(caption, []).append(vocal_group)
+
+    return caption_vocals
+
+
 async def compose_music_detail_image(rqd: MusicDetailRequest):
     # 数据准备
     mid = rqd.music_info.id
@@ -88,7 +127,6 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     region = rqd.region
     vocal_info = rqd.vocal.vocal_info
     vocal_logos_raw = rqd.vocal.vocal_assets
-    caption_vocals = {}
     # has_append = rqd.difficulty.has_append
     event_banner = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path) if rqd.event_banner_path else None
 
@@ -113,20 +151,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
 
     event_id = rqd.event_id
 
-    caption_vocals = {}
-    if vocal_info and "caption" in vocal_info and "characters" in vocal_info:
-        caption = vocal_info.get("caption", "Vocal").replace("ver.", "")
-        if caption not in caption_vocals:
-            caption_vocals[caption] = []
-
-        vocal_group = {"chara_imgs": [], "vocal_names": []}
-        for chara_data in vocal_info["characters"]:
-            chara_name = chara_data.get("characterName")
-            if chara_name in vocal_logos:
-                vocal_group["chara_imgs"].append(vocal_logos[chara_name])
-            elif chara_name:
-                vocal_group["vocal_names"].append(chara_name)
-        caption_vocals[caption].append(vocal_group)
+    caption_vocals = _build_caption_vocals(vocal_info, vocal_logos)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
