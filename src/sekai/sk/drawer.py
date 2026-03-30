@@ -347,37 +347,68 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
     if len(ranks) == 1:
         # 单个
         rank = ranks[0]
+        rank_score_text = get_board_score_str(rank.score)
+        avg_round_text = str(rank.average_round) if rank.average_round is not None else "?"
+        avg_pt_text = f"{rank.average_pt:.1f}" if rank.average_pt is not None else "?"
+        latest_pt_text = str(rank.latest_pt) if rank.latest_pt is not None else "?"
+        hour_round_text = str(rank.hour_round) if rank.hour_round is not None else "?"
+        record_start_text = (
+            get_readable_datetime(rank.record_start_at, show_original_time=False)
+            if rank.record_start_at is not None
+            else "未知"
+        )
+
         texts.append((f"{title}", style1))
-        texts.append((f"当前排名 {rank.rank} - 当前分数 {rank.score}", style2))
+        texts.append((f"当前排名 {rank.rank} - 当前分数 {rank_score_text}", style2))
         if prev_rank := rqd.prev_rank:
-            texts.append((f"{prev_rank.rank}名分数: {prev_rank.score}  ↑{prev_rank.score - rank.score}", style3))
+            prev_score_text = get_board_score_str(prev_rank.score)
+            score_gap = (
+                get_board_score_str(prev_rank.score - rank.score)
+                if prev_rank.score is not None and rank.score is not None
+                else "?"
+            )
+            texts.append((f"{prev_rank.rank}名分数: {prev_score_text}  ↑{score_gap}", style3))
         if next_rank := rqd.next_rank:
-            texts.append((f"{next_rank.rank}名分数: {next_rank.score}  ↓{next_rank.score - rank.score}", style3))
-        texts.append((f"近{rank.average_round}次平均Pt: {rank.average_pt:.1f}", style2))
-        texts.append((f"最近一次Pt: {rank.latest_pt}", style2))
+            next_score_text = get_board_score_str(next_rank.score)
+            score_gap = (
+                get_board_score_str(next_rank.score - rank.score)
+                if next_rank.score is not None and rank.score is not None
+                else "?"
+            )
+            texts.append((f"{next_rank.rank}名分数: {next_score_text}  ↓{score_gap}", style3))
+        texts.append((f"近{avg_round_text}次平均Pt: {avg_pt_text}", style2))
+        texts.append((f"最近一次Pt: {latest_pt_text}", style2))
         texts.append((f"时速: {get_board_score_str(rank.speed)}", style2))
-        if rank.min20_times_3_speed:
+        if rank.min20_times_3_speed is not None:
             texts.append((f"20min×3时速: {get_board_score_str(rank.min20_times_3_speed)}", style2))
-        texts.append((f"本小时周回数: {rank.hour_round}", style2))
-        texts.append((f"数据开始于: {get_readable_datetime(rank.record_start_at, show_original_time=False)}", style2))
+        texts.append((f"本小时周回数: {hour_round_text}", style2))
+        texts.append((f"数据开始于: {record_start_text}", style2))
         texts.append((f"数据更新于: {get_readable_datetime(rqd.update_at, show_original_time=False)}", style2))
     else:
         # 多个
         for rank in ranks:
+            avg_round_text = str(rank.average_round) if rank.average_round is not None else "?"
+            avg_pt_text = f"{rank.average_pt:.1f}" if rank.average_pt is not None else "?"
+            hour_round_text = str(rank.hour_round) if rank.hour_round is not None else "?"
+            record_start_text = (
+                get_readable_datetime(rank.record_start_at, show_original_time=False)
+                if rank.record_start_at is not None
+                else "未知"
+            )
             texts.append((f"{rqd.event_name}", style1))
             texts.append(
                 (f"当前排名 {get_board_rank_str(rank.rank)} - 当前分数 {get_board_score_str(rank.score)}", style2)
             )
             texts.append(
                 (
-                    f"时速: {get_board_score_str(rank.speed)} - 近{rank.average_round}次平均Pt: {rank.average_pt:.1f}",
+                    f"时速: {get_board_score_str(rank.speed)} - 近{avg_round_text}次平均Pt: {avg_pt_text}",
                     style2,
                 )
             )
-            texts.append((f"本小时周回数: {rank.hour_round}", style2))
+            texts.append((f"本小时周回数: {hour_round_text}", style2))
             texts.append(
                 (
-                    f"RT: {get_readable_datetime(rank.record_start_at, show_original_time=False)} ~ "
+                    f"RT: {record_start_text} ~ "
                     f"{get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}",
                     style2,
                 )
@@ -668,6 +699,8 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
     """
     eid = rqd.event_id
     ranks = rqd.ranks
+    if not ranks:
+        raise ValueError("ranks must not be empty")
     ranks.sort(key=lambda x: x.time)
     times = [rank.time for rank in ranks]
     scores = [rank.score for rank in ranks]
@@ -695,11 +728,11 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             speeds.append(-1)
 
     # 附加排名预测
-    final_score = rqd.predict_ranks.score
+    final_score = rqd.predict_ranks.score if rqd.predict_ranks is not None else None
 
     max_score = max(scores + pred_scores)
     min_score = min(scores + pred_scores)
-    if final_score:
+    if final_score is not None:
         max_score = max(max_score, final_score)
         min_score = min(min_score, final_score)
 
@@ -748,7 +781,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
                 )
 
             # 绘制预测线
-            if final_score:
+            if final_score is not None:
                 ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
                 ax.text(
                     times[-1],
@@ -763,7 +796,9 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             ax2 = ax.twinx()
             (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
             ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
-            ax2.set_ylim(0, max(speeds) * 1.2)
+            valid_speeds = [speed for speed in speeds if speed >= 0]
+            max_speed = max(valid_speeds) if valid_speeds else 1
+            ax2.set_ylim(0, max_speed * 1.2)
 
             ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
