@@ -343,10 +343,21 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
     texts: list[str, TextStyle] = []
 
     ranks = rqd.ranks
+    request_player_name = (rqd.name or rqd.username or "").strip()
+
+    def first_non_empty(*values: str | None) -> str:
+        for value in values:
+            if value is None:
+                continue
+            stripped = value.strip()
+            if stripped:
+                return stripped
+        return rqd.event_name
 
     if len(ranks) == 1:
         # 单个
         rank = ranks[0]
+        player_title = first_non_empty(request_player_name, rank.name, rqd.event_name)
         rank_score_text = get_board_score_str(rank.score)
         avg_round_text = str(rank.average_round) if rank.average_round is not None else "?"
         avg_pt_text = f"{rank.average_pt:.1f}" if rank.average_pt is not None else "?"
@@ -358,7 +369,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
             else "未知"
         )
 
-        texts.append((f"{title}", style1))
+        texts.append((player_title, style1))
         texts.append((f"当前排名 {rank.rank} - 当前分数 {rank_score_text}", style2))
         if prev_rank := rqd.prev_rank:
             prev_score_text = get_board_score_str(prev_rank.score)
@@ -387,6 +398,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
     else:
         # 多个
         for rank in ranks:
+            player_title = first_non_empty(rank.name, request_player_name, rqd.event_name)
             avg_round_text = str(rank.average_round) if rank.average_round is not None else "?"
             avg_pt_text = f"{rank.average_pt:.1f}" if rank.average_pt is not None else "?"
             hour_round_text = str(rank.hour_round) if rank.hour_round is not None else "?"
@@ -395,7 +407,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
                 if rank.record_start_at is not None
                 else "未知"
             )
-            texts.append((f"{rqd.event_name}", style1))
+            texts.append((player_title, style1))
             texts.append(
                 (f"当前排名 {get_board_rank_str(rank.rank)} - 当前分数 {get_board_score_str(rank.score)}", style2)
             )

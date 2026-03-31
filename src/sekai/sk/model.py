@@ -161,6 +161,10 @@ class CFRequest(BaseModel):
         活动ID
     event_name : str
         活动名称
+    name : str | None
+        玩家名称（可选，优先用于正文标题）
+    username : str | None
+        玩家名称（兼容字段，效果同 name）
     region : str
         服务器区域
     ranks : list[RankInfo]
@@ -179,6 +183,8 @@ class CFRequest(BaseModel):
 
     eid: int
     event_name: str
+    name: str | None = None
+    username: str | None = None
     region: str
     ranks: list[RankInfo]
     prev_rank: RankInfo | None = None
