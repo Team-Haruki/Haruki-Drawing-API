@@ -71,6 +71,32 @@ class SpeedInfo(BaseModel):
     record_time: datetime
 
 
+class SklForecastColumn(BaseModel):
+    r"""SklForecastColumn
+
+    榜线预测来源列
+
+    Attributes
+    ----------
+    key : str
+        预测来源标识
+    name : str
+        预测来源显示名
+    ranks : list[RankInfo]
+        来源对应的排名预测
+    forecast_time : datetime | None
+        预测时间
+    update_time : datetime | None
+        获取时间
+    """
+
+    key: str
+    name: str
+    ranks: list[RankInfo]
+    forecast_time: datetime | None = None
+    update_time: datetime | None = None
+
+
 class SklRequest(BaseModel):
     r"""SklRequest
 
@@ -96,6 +122,10 @@ class SklRequest(BaseModel):
         角色图标路径
     ranks : list[RankInfo]
         排名列表
+    current_ranks : list[RankInfo] | None
+        当前榜线（预测模式下优先使用）
+    forecast_columns : list[SklForecastColumn] | None
+        多来源预测列
     full : bool
         是否显示完整榜线 (True: ALL_RANKS, False: SKL_QUERY_RANKS)
     """
@@ -109,6 +139,8 @@ class SklRequest(BaseModel):
     wl_cid: int | None = None
     chara_icon_path: str | None = None
     ranks: list[RankInfo]
+    current_ranks: list[RankInfo] | None = None
+    forecast_columns: list[SklForecastColumn] | None = None
     full: bool = False
 
 

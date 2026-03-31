@@ -24,6 +24,7 @@ from src.sekai.base.plot import (
     Canvas,
     FillBg,
     Frame,
+    Grid,
     HSplit,
     ImageBox,
     TextBox,
@@ -187,8 +188,29 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
 
     full = rqd.full
     query_ranks = ALL_RANKS if full else SKL_QUERY_RANKS
-    ranks = rqd.ranks if full else [r for r in rqd.ranks if r.rank in query_ranks]
-    ranks = sorted(ranks, key=lambda x: x.rank)
+    query_rank_set = set(query_ranks)
+    forecast_columns = list(rqd.forecast_columns or [])
+    is_predict_mode = len(forecast_columns) > 0
+    current_ranks = list(rqd.current_ranks or rqd.ranks)
+
+    if not full:
+        current_ranks = [r for r in current_ranks if r.rank in query_rank_set]
+        forecast_columns = [
+            col.model_copy(update={"ranks": [r for r in col.ranks if r.rank in query_rank_set]})
+            for col in forecast_columns
+        ]
+
+    current_by_rank = {r.rank: r for r in current_ranks}
+    forecast_by_rank = [{r.rank: r for r in col.ranks} for col in forecast_columns]
+
+    rank_set: set[int] = set()
+    if is_predict_mode:
+        rank_set.update(current_by_rank.keys())
+        for col_map in forecast_by_rank:
+            rank_set.update(col_map.keys())
+    else:
+        rank_set.update(r.rank for r in current_ranks)
+    ranks = sorted(rank_set)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
@@ -221,26 +243,97 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
                 title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK)
                 item_style = TextStyle(font=DEFAULT_FONT, size=20, color=BLACK)
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(8):
-                    with HSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(0):
-                        TextBox("排名", title_style).set_bg(bg1).set_size((140, gh)).set_content_align("c")
-                        # TextBox("名称", title_style).set_bg(bg1).set_size((160, gh)).set_content_align('c')
-                        TextBox("分数", title_style).set_bg(bg1).set_size((180, gh)).set_content_align("c")
-                        TextBox("RT", title_style).set_bg(bg1).set_size((180, gh)).set_content_align("c")
-                    for i, rank in enumerate(ranks):
+                    if is_predict_mode:
+                        gw = 180
+                        with Grid(col_count=len(forecast_columns) + 2).set_content_align("c").set_item_align(
+                            "c"
+                        ).set_sep(8, 5).set_padding(0):
+                            TextBox("排名", title_style).set_bg(bg1).set_size((gw, gh)).set_content_align("c")
+                            TextBox("当前榜线", title_style).set_bg(bg1).set_size((gw, gh)).set_content_align("c")
+                            for col in forecast_columns:
+                                TextBox(col.name, title_style).set_bg(bg1).set_size((gw, gh)).set_content_align("c")
+
+                            for i, rank in enumerate(ranks):
+                                bg = bg2 if i % 2 == 0 else bg1
+                                TextBox(get_board_rank_str(rank), item_style, overflow="clip").set_bg(bg).set_size(
+                                    (gw, gh)
+                                ).set_content_align("c")
+
+                                current = current_by_rank.get(rank)
+                                current_score = "-"
+                                if current is not None and current.score is not None:
+                                    current_score = get_board_score_str(current.score)
+                                TextBox(current_score, item_style, overflow="clip").set_bg(bg).set_size(
+                                    (gw, gh)
+                                ).set_content_align("r").set_padding((16, 0))
+
+                                for idx, col in enumerate(forecast_columns):
+                                    source_score = "-"
+                                    source_rank = forecast_by_rank[idx].get(rank)
+                                    if source_rank is not None and source_rank.score is not None:
+                                        source_score = get_board_score_str(source_rank.score)
+                                    TextBox(source_score, item_style, overflow="clip").set_bg(bg).set_size(
+                                        (gw, gh)
+                                    ).set_content_align("r").set_padding((16, 0))
+
+                            footer_bg = bg2 if len(ranks) % 2 == 0 else bg1
+                            TextBox("预测时间", title_style, overflow="clip").set_bg(footer_bg).set_size(
+                                (gw, gh)
+                            ).set_content_align("c")
+                            TextBox("-", item_style, overflow="clip").set_bg(footer_bg).set_size(
+                                (gw, gh)
+                            ).set_content_align("c")
+                            for col in forecast_columns:
+                                forecast_time_text = "-"
+                                if col.forecast_time:
+                                    forecast_time_text = get_readable_datetime(
+                                        col.forecast_time, show_original_time=False, use_en_unit=False
+                                    )
+                                TextBox(forecast_time_text, item_style, overflow="clip").set_bg(footer_bg).set_size(
+                                    (gw, gh)
+                                ).set_content_align("c")
+
+                            update_bg = bg1 if footer_bg == bg2 else bg2
+                            TextBox("获取时间", title_style, overflow="clip").set_bg(update_bg).set_size(
+                                (gw, gh)
+                            ).set_content_align("c")
+                            current_update_text = "-"
+                            if current_ranks:
+                                latest_current = max(current_ranks, key=lambda x: x.time)
+                                current_update_text = get_readable_datetime(
+                                    latest_current.time, show_original_time=False, use_en_unit=False
+                                )
+                            TextBox(current_update_text, item_style, overflow="clip").set_bg(update_bg).set_size(
+                                (gw, gh)
+                            ).set_content_align("c")
+                            for col in forecast_columns:
+                                update_time_text = "-"
+                                if col.update_time:
+                                    update_time_text = get_readable_datetime(
+                                        col.update_time, show_original_time=False, use_en_unit=False
+                                    )
+                                TextBox(update_time_text, item_style, overflow="clip").set_bg(update_bg).set_size(
+                                    (gw, gh)
+                                ).set_content_align("c")
+                    else:
                         with HSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(0):
-                            bg = bg2 if i % 2 == 0 else bg1
-                            r = get_board_rank_str(rank.rank)
-                            score = get_board_score_str(rank.score)
-                            rt = get_readable_datetime(rank.time, show_original_time=False, use_en_unit=False)
-                            TextBox(r, item_style, overflow="clip").set_bg(bg).set_size((140, gh)).set_content_align(
-                                "r"
-                            ).set_padding((16, 0))
-                            TextBox(score, item_style, overflow="clip").set_bg(bg).set_size(
-                                (180, gh)
-                            ).set_content_align("r").set_padding((16, 0))
-                            TextBox(rt, item_style, overflow="clip").set_bg(bg).set_size((180, gh)).set_content_align(
-                                "r"
-                            ).set_padding((16, 0))
+                            TextBox("排名", title_style).set_bg(bg1).set_size((140, gh)).set_content_align("c")
+                            TextBox("分数", title_style).set_bg(bg1).set_size((180, gh)).set_content_align("c")
+                            TextBox("RT", title_style).set_bg(bg1).set_size((180, gh)).set_content_align("c")
+                        for i, rank in enumerate(current_ranks):
+                            with HSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(0):
+                                bg = bg2 if i % 2 == 0 else bg1
+                                score = get_board_score_str(rank.score)
+                                rt = get_readable_datetime(rank.time, show_original_time=False, use_en_unit=False)
+                                TextBox(get_board_rank_str(rank.rank), item_style, overflow="clip").set_bg(bg).set_size(
+                                    (140, gh)
+                                ).set_content_align("r").set_padding((16, 0))
+                                TextBox(score, item_style, overflow="clip").set_bg(bg).set_size(
+                                    (180, gh)
+                                ).set_content_align("r").set_padding((16, 0))
+                                TextBox(rt, item_style, overflow="clip").set_bg(bg).set_size(
+                                    (180, gh)
+                                ).set_content_align("r").set_padding((16, 0))
             else:
                 TextBox("暂无榜线数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
