@@ -476,12 +476,13 @@ async def compose_box_image(
 
             # 限定类型图标
             supply_name = card_data["card"].get("supply_type", "")
+            limited_icon_width = int(sz * 0.75)
             if supply_name in TERM_LIMITED_SUPPLY_TYPES:
                 if term_img:
-                    ImageBox(term_img, size=(int(sz * 0.75), None))
+                    ImageBox(term_img, size=(limited_icon_width, None))
             elif supply_name in FES_LIMITED_SUPPLY_TYPES:
                 if fes_img:
-                    ImageBox(fes_img, size=(int(sz * 0.35), None))
+                    ImageBox(fes_img, size=(limited_icon_width, None))
 
             # 如果用户没有此卡牌，添加遮罩
             if not card_data["has"] and user_info:
