@@ -15,7 +15,9 @@ services:
       - MALLOC_ARENA_MAX=2
       - MALLOC_TRIM_THRESHOLD_=131072
     volumes:
-      # 必须和screenshot-service同名且挂载到同一位置
+      # 必须和 screenshot-service 同名且挂载到同一位置。
+      # 当前约定的素材根目录为 Windows 主机上的 Z:\pjskdata\Data，
+      # 容器内统一挂载为 /pjskdata/Data。
       - "./data:/pjskdata/Data"
       - "./configs.docker.yaml:/app/haruki_drawing_api/configs.yaml"
     restart: always
@@ -35,7 +37,9 @@ services:
       - PORT=8080
       - GIN_MODE=release
     volumes:
-      # 必须和haruki-drawing-api挂载到同一位置
+      # 必须和 haruki-drawing-api 挂载到同一位置。
+      # 当前约定的素材根目录为 Windows 主机上的 Z:\pjskdata\Data，
+      # 容器内统一挂载为 /pjskdata/Data。
       - "./data:/pjskdata/Data"
     deploy:
       resources:
