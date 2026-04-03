@@ -1,4 +1,5 @@
 import logging
+import os
 
 from PIL import Image, ImageDraw
 
@@ -10,6 +11,16 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 from .model import HonorRequest
 
 logger = logging.getLogger(__name__)
+
+
+def is_world_link_rank_style(group_type: str | None, rank_img_path: str | None) -> bool:
+    if group_type == "wl_event":
+        return True
+    if not rank_img_path:
+        return False
+    normalized = rank_img_path.replace("\\", "/").lower()
+    folder = os.path.basename(os.path.dirname(normalized))
+    return folder.startswith("honor_top_") and "event" in folder
 
 face_pos = {
     1: 48,
@@ -122,6 +133,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
         # 普通牌子
         rarity = rqd.honor_rarity
         gtype = rqd.group_type
+        wl_rank_style = is_world_link_rank_style(gtype, rqd.rank_img_path)
 
         if gtype == "rank_match":
             if not rqd.honor_img_path:
@@ -135,14 +147,14 @@ async def compose_full_honor_image(rqd: HonorRequest):
             if not rqd.honor_img_path:
                 return None
             img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
-            if gtype == "wl_event" and rqd.rank_img_path:
+            if wl_rank_style and rqd.rank_img_path:
                 rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rank_img_path)
             else:
                 rank_img = None
 
         await add_frame(img, rarity, hlv)
         if rank_img:
-            if gtype == "wl_event" and rank_img.size != img.size:
+            if wl_rank_style and rank_img.size != img.size:
                 logger.warning(
                     "resize wl honor rank image to fit base: rank=%s base=%s path=%s",
                     rank_img.size,
@@ -152,7 +164,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
                 rank_img = rank_img.resize(img.size, Image.Resampling.LANCZOS)
             if gtype == "rank_match":
                 img.paste(rank_img, (190, 0) if is_main else (17, 42), rank_img)
-            elif gtype == "wl_event":
+            elif wl_rank_style:
                 img.paste(rank_img, (0, 0) if is_main else (0, 0), rank_img)  # noqa: RUF034
             else:
                 img.paste(rank_img, (190, 0) if is_main else (34, 42), rank_img)
