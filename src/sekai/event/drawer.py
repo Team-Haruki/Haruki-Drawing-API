@@ -105,7 +105,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         TextBox(f"{detail.id}", text_style)
                         Spacer(w=8)
                         TextBox("类型", label_style)
-                        TextBox(f"{detail.event_type}", text_style)
+                        TextBox(f"{detail.event_type_name}", text_style)
                         if detail.banner_cid:
                             Spacer(w=8)
                             ImageBox(ban_chara_icon, size=(30, 30))
@@ -342,7 +342,7 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                                     Spacer(h=29)
                         with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                             TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
-                            TextBox(f"ID: {d.id} {d.event_type}", style2)
+                            TextBox(f"ID: {d.id} {d.event_type_name}", style2)
                             TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             with HSplit().set_padding(0).set_sep(4):

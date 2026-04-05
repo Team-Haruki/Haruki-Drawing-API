@@ -43,6 +43,7 @@ class EventInfo(BaseModel):
 
     id: str | int
     event_type: str
+    event_type_name: str
     start_at: datetime
     end_at: datetime
     is_wl_event: bool
@@ -177,6 +178,7 @@ class EventBrief(BaseModel):
     id: int
     event_name: str
     event_type: str
+    event_type_name: str
     start_at: datetime
     end_at: datetime
     event_banner_path: str | None = None
