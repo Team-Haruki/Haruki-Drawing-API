@@ -179,8 +179,8 @@ class EventBrief(BaseModel):
     event_type: str
     start_at: datetime
     end_at: datetime
-    event_banner_path: str
-    event_cards: list[CardFullThumbnailRequest] | None
+    event_banner_path: str | None = None
+    event_cards: list[CardFullThumbnailRequest] | None = None
     event_attr_path: str | None = None
     event_chara_path: str | None = None
     event_unit_path: str | None = None

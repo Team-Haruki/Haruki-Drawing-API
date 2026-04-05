@@ -329,7 +329,8 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
 
                     with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
                         with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path), size=(None, 40))
+                            if d.event_banner_path:
+                                ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path), size=(None, 40))
                             with Grid(col_count=3).set_padding(0).set_sep(1, 1):
                                 if d.event_cards:
                                     for thumb in d.event_cards:
