@@ -73,7 +73,9 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
         await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img) if detail.banner_cid else None
     )
     event_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
-    ban_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
+    ban_chara_icon = None
+    if rqd.event_assets.ban_chara_icon_path:
+        ban_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
     h = 1024
     w = min(int(h * 1.6), event_bg.size[0] * h // event_bg.size[1] if event_bg else int(h * 1.6))
     bg = ImageBg(event_bg, blur=False) if event_bg else SEKAI_BLUE_BG

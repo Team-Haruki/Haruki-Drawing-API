@@ -142,7 +142,7 @@ class EventAssets(BaseModel):
     event_story_bg_path: str
     event_attr_image_path: str
     event_ban_chara_img: str
-    ban_chara_icon_path: str
+    ban_chara_icon_path: str | None = None
     bonus_chara_path: list[str] | None = None
 
 
