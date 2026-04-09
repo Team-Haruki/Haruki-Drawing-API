@@ -216,6 +216,12 @@ class GachaListRequest(BaseModel):
         卡池ID对应的logo图片路径
     filter : GachaFilter
         筛选条件
+    current_page : Optional[int]
+        Cloud 预分页后的当前页码
+    total_page : Optional[int]
+        Cloud 预分页后的总页数
+    pre_paginated : bool
+        是否已由上游完成排序和分页
     """
 
     gachas: list[GachaBrief]
@@ -223,6 +229,9 @@ class GachaListRequest(BaseModel):
     region: str = "jp"
     gacha_logos: dict[int, str] = {}
     filter: GachaFilter = Field(default_factory=GachaFilter)
+    current_page: int | None = None
+    total_page: int | None = None
+    pre_paginated: bool = False
 
 
 class GachaDetailRequest(BaseModel):

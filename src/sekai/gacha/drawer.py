@@ -1,3 +1,4 @@
+import math
 from datetime import datetime
 
 from PIL import Image
@@ -78,19 +79,25 @@ GACHA_RARE_NAMES = {
 async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     """合成卡池一览图片"""
     gachas = list(rqd.gachas)
+    pre_paginated = rqd.pre_paginated or (rqd.current_page is not None and rqd.total_page is not None)
 
-    gachas.sort(key=lambda g: g.start_at)
+    if pre_paginated:
+        total_pages = max(1, rqd.total_page or 1)
+        page = rqd.current_page if rqd.current_page is not None else total_pages
+        page = max(1, min(page, total_pages))
+    else:
+        gachas.sort(key=lambda g: g.start_at)
 
-    total_pages = 1
-    page_size = rqd.page_size if rqd.page_size else 20
-    if len(gachas) > 0:
-        total_pages = (len(gachas) + page_size - 1) // page_size
+        total_pages = 1
+        page_size = rqd.page_size if rqd.page_size else 20
+        if len(gachas) > 0:
+            total_pages = (len(gachas) + page_size - 1) // page_size
 
-    page = max(1, min(rqd.filter.page, total_pages)) if rqd.filter.page else total_pages
-    start_index = (page - 1) * page_size
-    gachas = gachas[start_index : start_index + page_size]
+        page = max(1, min(rqd.filter.page, total_pages)) if rqd.filter.page else total_pages
+        start_index = (page - 1) * page_size
+        gachas = gachas[start_index : start_index + page_size]
 
-    row_count = (len(gachas) + 2) // 2  # 2 columns
+    row_count = max(1, math.ceil(math.sqrt(len(gachas))))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
 
