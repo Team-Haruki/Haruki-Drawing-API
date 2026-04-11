@@ -155,6 +155,10 @@ class DeckRequest(BaseModel):
         排除的卡牌ID列表
     multi_live_score_up_lower_bound : Optional[float]
         多人Live分数提升下限
+    skill_order_choose_strategy : Optional[str]
+        技能顺序选择策略
+    skill_reference_choose_strategy : Optional[str]
+        BloomFes花前吸取选择策略
     keep_after_training_state : bool
         是否保持特训状态
     model_name : Optional[List]
@@ -200,6 +204,8 @@ class DeckRequest(BaseModel):
     attr_filter: str | None = None
     excluded_cards: list[int] | None = None
     multi_live_score_up_lower_bound: float | None = None
+    skill_order_choose_strategy: str | None = None
+    skill_reference_choose_strategy: str | None = None
     keep_after_training_state: bool = False
     model_name: list | None = None
     canvas_thumbnail_path: str | None = None

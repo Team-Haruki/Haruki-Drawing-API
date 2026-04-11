@@ -33,6 +33,32 @@ RECOMMEND_ALG_NAMES = {
 }
 
 
+def format_skill_order_text(strategy: str | None) -> str:
+    match (strategy or "").strip().lower():
+        case "average":
+            return "技能顺序: 平均情况"
+        case "max":
+            return "技能顺序: 最优顺序"
+        case "min":
+            return "技能顺序: 最差顺序"
+        case "specific":
+            return "技能顺序: 指定顺序"
+        case _:
+            return ""
+
+
+def format_skill_reference_text(strategy: str | None) -> str:
+    match (strategy or "").strip().lower():
+        case "average":
+            return "BloomFes花前吸取: 平均值"
+        case "max":
+            return "BloomFes花前吸取: 最大值"
+        case "min":
+            return "BloomFes花前吸取: 最小值"
+        case _:
+            return ""
+
+
 async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
@@ -228,6 +254,18 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                         ImageBox(music_cover, size=(50, 50), shadow=True)
                             TextBox(
                                 rqd.music_title or "", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70))
+                            )
+
+                    if recommend_type not in ["bonus", "wl_bonus", "mysekai"]:
+                        skill_order_text = format_skill_order_text(rqd.skill_order_choose_strategy)
+                        skill_reference_text = format_skill_reference_text(rqd.skill_reference_choose_strategy)
+                        strategy_text = "  ".join(
+                            part for part in [skill_order_text, skill_reference_text] if part
+                        ).strip()
+                        if strategy_text:
+                            TextBox(
+                                strategy_text,
+                                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
                             )
 
                     info_text = ""

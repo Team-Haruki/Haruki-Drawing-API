@@ -448,6 +448,19 @@ async def compose_box_image(
         if value < best_value:
             best_height, best_value = i, value
 
+    # 计算总宽度并决定绘制卡牌的大小
+    total_width = 0
+    for _, cards in chara_cards:
+        width = max(1, math.ceil(len(cards) / best_height))
+        total_width += width
+    area = total_width * (best_height + 4)
+
+    start_area, start_sz, start_sep = 9 * 5, 100, 8
+    end_area, end_sz, end_sep = 26 * 50, 48, 4
+    interp = min(1.0, max(0.0, (area - start_area) / (end_area - start_area)))
+    sep = int(start_sep + (end_sep - start_sep) * interp)
+    sz = int(start_sz + (end_sz - start_sz) * interp)
+
     # 预加载所有图标
     term_img = None
     fes_img = None
@@ -468,8 +481,6 @@ async def compose_box_image(
         for chara_id, path in rqd.character_icon_paths.items():
             chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
     # 绘制单张卡
-    sz = 48
-
     def draw_card(card_data):
         with Frame().set_content_align("rt"):
             ImageBox(card_data["img"], size=(sz, sz))
@@ -523,13 +534,14 @@ async def compose_box_image(
                         color_code = rqd.character_color_codes.get(chara_id) or CHARACTER_COLOR_CODE[chara_id]
                         chara_color = color_code_to_rgb(color_code)
                         col_num = max(1, len(range(0, len(cards), best_height)))
-                        Spacer(w=sz * col_num + 4 * (col_num - 1), h=4).set_bg(FillBg(chara_color))
+                        row_num = max(1, min(best_height, len(cards)))
+                        Spacer(w=sz * col_num + sep * (col_num - 1), h=sep).set_bg(FillBg(chara_color))
                         # 卡牌列表
-                        with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-                            for i in range(0, len(cards), best_height):
-                                with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-                                    for card_data in cards[i : i + best_height]:
-                                        draw_card(card_data)
+                        with Grid(row_count=row_num, vertical=row_num > col_num).set_content_align("lt").set_item_align(
+                            "lt"
+                        ).set_sep(sep, sep):
+                            for card_data in cards:
+                                draw_card(card_data)
 
     add_watermark(canvas)
     return await canvas.get_img()
