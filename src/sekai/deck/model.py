@@ -77,6 +77,11 @@ class DeckData(BaseModel):
     """
 
     card_data: list[DeckCardData]
+    music_title: str | None = None
+    music_id: int | None = None
+    music_diff: str | None = None
+    music_cover_path: str | None = None
+    music_query: str | None = None
     pt: int | None = None
     event_bonus_rate: float | None = None
     score_up: float | None = None
@@ -169,6 +174,7 @@ class DeckRequest(BaseModel):
     region: str
     profile: DetailedProfileCardRequest
     deck_data: list[DeckData]
+    music_compare: bool = False
     event_name: str | None = None
     music_title: str | None = None
     music_id: int | None = None

@@ -36,6 +36,7 @@ RECOMMEND_ALG_NAMES = {
 async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
+    music_compare = rqd.music_compare
     recommend_type = rqd.recommend_type
     event_id = rqd.event_id
     wl_chara_name = rqd.wl_chara_name
@@ -64,11 +65,14 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     attr_filter = rqd.attr_filter
     excluded_cards = rqd.excluded_cards or []
     result_decks = rqd.deck_data
-    result_algs = rqd.model_name
+    result_algs = rqd.model_name or [""] * len(result_decks)
     # 获取卡组卡牌缩略图
     card_imgs, card_keys = [], []
+    compare_music_imgs = {}
 
     for deck in rqd.deck_data:
+        if music_compare and deck.music_cover_path and deck.music_cover_path not in compare_music_imgs:
+            compare_music_imgs[deck.music_cover_path] = await get_img_from_path(ASSETS_BASE_DIR, deck.music_cover_path)
         for card in deck.card_data:
             card_img = await get_card_full_thumbnail(card.card_thumbnail)
             card_imgs.append(card_img)
@@ -209,7 +213,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                 "WL仅支持自动组主队，支援队请自行配置",
                                 TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
                             )
-                    elif recommend_type != "mysekai":
+                    elif recommend_type != "mysekai" and not music_compare:
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                             with Frame().set_size((50, 50)):
                                 if rqd.music_id is not None and rqd.music_id != OMAKASE_MUSIC_ID:
@@ -254,6 +258,59 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                             th_style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(75, 75, 75))
                             th_main_sign = "∇"
                             tb_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
+
+                            if music_compare:
+                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
+                                    TextBox("歌曲", th_style2).set_h(gh // 2).set_content_align("c")
+                                    Spacer(h=6)
+                                    for deck in result_decks:
+                                        with (
+                                            VSplit()
+                                            .set_content_align("c")
+                                            .set_item_align("c")
+                                            .set_sep(4)
+                                            .set_padding(0)
+                                            .set_h(gh)
+                                        ):
+                                            with Frame().set_content_align("c"):
+                                                if deck.music_diff and deck.music_diff in DIFF_COLORS:
+                                                    Spacer(w=64, h=64).set_bg(
+                                                        FillBg(fill=DIFF_COLORS[deck.music_diff])
+                                                    ).set_offset((3, 3))
+                                                music_img = None
+                                                if deck.music_cover_path:
+                                                    music_img = compare_music_imgs.get(deck.music_cover_path)
+                                                if music_img:
+                                                    ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
+
+                                            title = deck.music_title or ""
+                                            if not title and deck.music_id is not None:
+                                                title = f"Music {deck.music_id}"
+                                            TextBox(
+                                                title,
+                                                TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(70, 70, 70)),
+                                                line_count=2,
+                                                use_real_line_count=True,
+                                            ).set_w(120).set_content_align("c")
+
+                                            meta_parts = []
+                                            if deck.music_id is not None:
+                                                meta_parts.append(str(deck.music_id))
+                                            if deck.music_diff:
+                                                meta_parts.append(deck.music_diff.upper())
+                                            meta_text = " / ".join(meta_parts)
+                                            if deck.music_query:
+                                                TextBox(
+                                                    deck.music_query,
+                                                    TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+                                                    line_count=1,
+                                                    use_real_line_count=True,
+                                                ).set_w(120).set_content_align("c")
+                                            if meta_text:
+                                                TextBox(
+                                                    meta_text,
+                                                    TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+                                                ).set_w(120).set_content_align("c")
 
                             # 分数
                             if recommend_type not in ["bonus", "wl_bonus"]:
