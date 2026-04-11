@@ -51,7 +51,7 @@ async def get_gacha_image_or_unknown(path: str | None, *, allow_empty: bool = Fa
 async def get_rarity_img(
     rarity: str,
     rarity_img_path: str = f"{RESULT_ASSET_PATH}/card/rare_star_normal.png",
-    birthday_img_path: str | None = f"{RESULT_ASSET_PATH}/card/rare_star_birthday.png",
+    birthday_img_path: str | None = f"{RESULT_ASSET_PATH}/card/rare_birthday.png",
 ) -> Image.Image | None:
     """获取稀有度图片"""
     if rarity == "rarity_birthday":
