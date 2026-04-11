@@ -82,7 +82,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     if rqd.attr_icon_path:
         attr_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
     music_cover = None
-    if rqd.music_cover_path:
+    if not music_compare and rqd.music_cover_path:
         music_cover = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
     canvas_thumbnail = None
     if rqd.canvas_thumbnail_path:

@@ -54,6 +54,16 @@ class DeckData(BaseModel):
     ----------
     card_data : List[DeckCardData]
         卡组中的卡牌列表
+    music_title : Optional[str]
+        compare 模式下该结果对应的歌曲标题
+    music_id : Optional[int]
+        compare 模式下该结果对应的歌曲ID
+    music_diff : Optional[str]
+        compare 模式下该结果对应的歌曲难度
+    music_cover_path : Optional[str]
+        compare 模式下该结果对应的歌曲封面路径
+    music_query : Optional[str]
+        compare 模式下该结果对应的原始查询文本
     pt : Optional[int]
         活动点数
     event_bonus_rate : Optional[float]
@@ -105,6 +115,8 @@ class DeckRequest(BaseModel):
         用户信息
     deck_data : List[DeckData]
         推荐卡组列表
+    music_compare : bool
+        是否为多歌曲 compare 模式
     event_name : Optional[str]
         活动名称
     music_title : Optional[str]
