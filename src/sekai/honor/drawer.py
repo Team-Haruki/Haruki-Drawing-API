@@ -14,8 +14,6 @@ logger = logging.getLogger(__name__)
 
 
 def is_world_link_rank_style(group_type: str | None, rank_img_path: str | None) -> bool:
-    if group_type == "wl_event":
-        return True
     if not rank_img_path:
         return False
     normalized = rank_img_path.replace("\\", "/").lower()
@@ -147,7 +145,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
             if not rqd.honor_img_path:
                 return None
             img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
-            if rqd.rank_img_path and (gtype == "event" or wl_rank_style):
+            if rqd.rank_img_path and (gtype == "event" or gtype == "wl_event" or wl_rank_style):
                 rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rank_img_path)
             else:
                 rank_img = None
