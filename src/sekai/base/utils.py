@@ -132,6 +132,65 @@ def _put_image_cache(path: str, mtime_ns: int, size: int, image: Image.Image) ->
             evict_image.close()
 
 
+def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Path | None:
+    try:
+        rel_path = full_path.relative_to(resolved_base)
+    except ValueError:
+        return None
+
+    parts = rel_path.parts
+    if len(parts) < 5 or parts[:3] != ("static_images", "mysekai", "birthday"):
+        return None
+
+    directory_name = parts[3]
+    if "_" not in directory_name:
+        return None
+
+    chara_name, year_text = directory_name.rsplit("_", 1)
+    if not chara_name or not year_text.isdigit():
+        return None
+
+    birthday_root = resolved_base / "static_images" / "mysekai" / "birthday"
+    generic_fallback = (
+        resolved_base
+        / "static_images"
+        / "mysekai"
+        / "harvest_fixture_icon"
+        / "rarity_1"
+        / "mdl_site_wood_common_fieldtree01.png"
+    )
+    if not birthday_root.is_dir():
+        return generic_fallback if generic_fallback.is_file() else None
+
+    target_year = int(year_text)
+    tail_parts = parts[4:]
+    fallback_candidates: list[tuple[int, Path]] = []
+    for entry in birthday_root.iterdir():
+        if not entry.is_dir():
+            continue
+        if not entry.name.startswith(chara_name + "_"):
+            continue
+
+        candidate_year = entry.name[len(chara_name) + 1 :]
+        if not candidate_year.isdigit():
+            continue
+
+        candidate_path = entry.joinpath(*tail_parts)
+        if candidate_path.is_file():
+            fallback_candidates.append((int(candidate_year), candidate_path))
+
+    if not fallback_candidates:
+        return generic_fallback if generic_fallback.is_file() else None
+
+    same_or_older = [item for item in fallback_candidates if item[0] <= target_year]
+    if same_or_older:
+        same_or_older.sort(key=lambda item: item[0], reverse=True)
+        return same_or_older[0][1]
+
+    fallback_candidates.sort(key=lambda item: item[0])
+    return fallback_candidates[0][1]
+
+
 def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
     safe_path = path.lstrip("/")
     resolved_base = base_path.resolve()
@@ -140,7 +199,10 @@ def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
     if not full_path.is_relative_to(resolved_base):
         raise ValueError(f"图片路径越界: {path}")
     if not full_path.is_file():
-        raise FileNotFoundError(f"图片文件不存在: {full_path}")
+        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
+        if fallback_path is None:
+            raise FileNotFoundError(f"图片文件不存在: {full_path}")
+        full_path = fallback_path
 
     if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
         return _open_image_copy(full_path)

@@ -14,6 +14,7 @@ from src.sekai.base.draw import (
     roundrect_bg,
 )
 from src.sekai.base.painter import (
+    ADAPTIVE_SHADOW,
     ADAPTIVE_WB,
     BLACK,
     DEFAULT_BOLD_FONT,
@@ -38,7 +39,7 @@ from src.sekai.base.plot import (
     VSplit,
     colored_text_box,
 )
-from src.sekai.base.utils import get_img_from_path, get_readable_datetime, truncate
+from src.sekai.base.utils import get_img_from_path, get_readable_datetime, get_str_display_length, truncate
 from src.sekai.honor.drawer import compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
 
@@ -510,7 +511,16 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     -------
     Frame
     """
-    with Frame().set_bg(roundrect_bg(alpha=80)).set_padding(16) as f:  # noqa: F841
+    bg_alpha = rqd.bg_alpha if rqd.bg_alpha is not None else 150
+
+    def data_source_label(name: str | None) -> str:
+        if not name:
+            return "数据"
+        if name.endswith("数据"):
+            return name[:-2]
+        return name
+
+    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:  # noqa: F841
         with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
             # 个人信息
             if rqd.profile:
@@ -525,33 +535,62 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     avatar_w=80,
                     frame_data=[],
                 )
+                data_sources = [item for item in rqd.data_sources if item]
+                primary_source = data_sources[0] if data_sources else None
                 with VSplit().set_content_align("c").set_item_align("l").set_sep(5):
                     # 昵称、id和区服
-                    colored_text_box(
-                        truncate(rqd.profile.nickname, 64),
-                        TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK, use_shadow=True, shadow_offset=2),
-                    )
+                    with HSplit().set_content_align("lb").set_item_align("lb").set_sep(5):
+                        hs = colored_text_box(
+                            truncate(rqd.profile.nickname, 64),
+                            TextStyle(
+                                font=DEFAULT_BOLD_FONT,
+                                size=24,
+                                color=BLACK,
+                                use_shadow=True,
+                                shadow_offset=2,
+                                shadow_color=ADAPTIVE_SHADOW,
+                            ),
+                        )
+                        if rqd.mysekai_level:
+                            name_length = 0
+                            for item in hs.items:
+                                if isinstance(item, TextBox):
+                                    name_length += get_str_display_length(item.text)
+                            ms_lv_text = (
+                                f"MySekai Lv.{rqd.mysekai_level}"
+                                if name_length <= 12
+                                else f"MSLv.{rqd.mysekai_level}"
+                            )
+                            TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
                     user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
+                    summary_line = f"{rqd.profile.region.upper()}: {user_id}"
+                    if len(data_sources) <= 1 and primary_source and primary_source.name:
+                        summary_line += f" {primary_source.name}"
                     TextBox(
-                        f"{rqd.profile.region.upper()}: {user_id}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)
+                        summary_line,
+                        TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
                     )
-                    # 数据源信息
-                    for data_source in rqd.data_sources:
-                        # 数据名称
-                        source_text = data_source.name
-                        if data_source.source:
-                            source_text += f" 数据来源: {data_source.source}"
-                        if data_source.mode:
-                            source_text += f" 获取模式: {data_source.mode}"
-                        TextBox(f"{source_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                        # 数据更新时间
-                        if data_source.update_time:
-                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                    if len(data_sources) <= 1:
+                        if primary_source and primary_source.update_time:
+                            update_time = datetime.fromtimestamp(primary_source.update_time / 1000)
                             update_time_text = (
                                 update_time.strftime("%m-%d %H:%M:%S")
                                 + f" ({get_readable_datetime(update_time, show_original_time=False)})"
                             )
                             TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+                    else:
+                        for data_source in data_sources[:2]:
+                            if not data_source.update_time:
+                                continue
+                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                            update_time_text = (
+                                update_time.strftime("%m-%d %H:%M:%S")
+                                + f" ({get_readable_datetime(update_time, show_original_time=False)})"
+                            )
+                            TextBox(
+                                f"{data_source_label(data_source.name)}更新时间: {update_time_text}",
+                                TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
+                            )
             # 错误/警告
             if rqd.error_message:
-                TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(240)
+                TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)

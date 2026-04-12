@@ -181,6 +181,8 @@ class MysekaiMsrMapHarvestPoint(BaseModel):
         采集点id
     image_path : str
         采集点图标路径
+    fallback_image_path : Optional[ str ] = None
+        主图缺失时使用的兜底图标路径
     position_x : float
         游戏坐标X
     position_z : float
@@ -199,6 +201,7 @@ class MysekaiMsrMapHarvestPoint(BaseModel):
 
     id: int | None = None
     image_path: str
+    fallback_image_path: str | None = None
     position_x: float
     position_z: float
     status: str = "spawned"

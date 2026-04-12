@@ -166,12 +166,18 @@ class ProfileCardRequest(BaseModel):
         玩家个人信息
     data_sources: List[ ProfileDataSource ] = []
         数据源信息
+    mysekai_level : Optional[int] = None
+        MySekai 等级
+    bg_alpha : Optional[int] = None
+        小卡背景透明度覆盖值
     error_message : Optional[str] = None
         错误或警告
     """
 
     profile: BasicProfile | None = None
     data_sources: list[ProfileDataSource] = []
+    mysekai_level: int | None = None
+    bg_alpha: int | None = None
     error_message: str | None = None
 
 

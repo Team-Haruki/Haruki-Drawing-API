@@ -96,6 +96,15 @@ async def compose_full_honor_image(rqd: HonorRequest):
         lv6_img = None
     lv = rqd.fc_or_ap_level
 
+    async def load_optional_image(path: str | None):
+        if not path:
+            return None
+        try:
+            return await get_img_from_path(ASSETS_BASE_DIR, path)
+        except FileNotFoundError:
+            logger.warning("optional honor asset missing: %s", path)
+            return None
+
     async def add_frame(img: Image.Image, rarity: str, level: int | None = None):
         RARE_MAP = {"low": 1, "middle": 2, "high": 3, "highest": 4}
         RARE_MAP.get(rarity, 1)
@@ -137,16 +146,13 @@ async def compose_full_honor_image(rqd: HonorRequest):
             if not rqd.honor_img_path:
                 return None
             img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
-            if not rqd.rank_img_path:
-                rank_img = None
-            else:
-                rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rank_img_path)
+            rank_img = await load_optional_image(rqd.rank_img_path)
         else:
             if not rqd.honor_img_path:
                 return None
             img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
             if rqd.rank_img_path and (gtype == "event" or gtype == "wl_event" or wl_rank_style):
-                rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rank_img_path)
+                rank_img = await load_optional_image(rqd.rank_img_path)
             else:
                 rank_img = None
 
