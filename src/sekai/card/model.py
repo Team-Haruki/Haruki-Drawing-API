@@ -282,12 +282,18 @@ class CardListRequest(BaseModel):
         用户信息
     background_img_path : Optional[str]
         背景图片路径
+    term_limited_icon_path : Optional[str]
+        期间限定图标路径
+    fes_limited_icon_path : Optional[str]
+        Fes限定图标路径
     """
 
     cards: list[CardBasic]
     region: str
     user_info: DetailedProfileCardRequest | None = None
     background_img_path: str | None = None
+    term_limited_icon_path: str | None = None
+    fes_limited_icon_path: str | None = None
 
 
 class CardBoxRequest(BaseModel):

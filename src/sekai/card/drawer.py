@@ -322,6 +322,19 @@ async def compose_card_list_image(
     else:
         bg = SEKAI_BLUE_BG
 
+    term_img = None
+    fes_img = None
+    if rqd.term_limited_icon_path:
+        try:
+            term_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        except FileNotFoundError:
+            pass
+    if rqd.fes_limited_icon_path:
+        try:
+            fes_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        except FileNotFoundError:
+            pass
+
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             # 卡牌网格
@@ -357,8 +370,17 @@ async def compose_card_list_image(
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
                                 GW = 300
                                 with HSplit().set_content_align("c").set_w(GW).set_padding(8).set_sep(16):
+                                    supply_name = card.supply_type or ""
                                     for thumb in thumb_group:
-                                        ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                                        with Frame().set_content_align("rt"):
+                                            ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                                            limited_icon_width = 75
+                                            if supply_name in TERM_LIMITED_SUPPLY_TYPES:
+                                                if term_img:
+                                                    ImageBox(term_img, size=(limited_icon_width, None))
+                                            elif supply_name in FES_LIMITED_SUPPLY_TYPES:
+                                                if fes_img:
+                                                    ImageBox(fes_img, size=(limited_icon_width, None))
 
                                 # 卡牌名称
                                 name_text = card.prefix
