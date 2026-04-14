@@ -2,6 +2,7 @@ import asyncio
 from collections import OrderedDict
 from datetime import datetime, timedelta
 import io
+import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
@@ -10,19 +11,26 @@ from typing import Literal
 from uuid import uuid4
 
 import aiohttp
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from src.settings import (
     ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_HEAVY_FONT,
     DEFAULT_THREAD_POOL_SIZE,
+    FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
     SCREENSHOT_API_PATH,
     TMP_PATH,
 )
 
+logger = logging.getLogger(__name__)
 
-def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit=False) -> str:
+MissingImageMode = Literal["raise", "placeholder"]
+
+
+def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: bool = False) -> str:
     """
     将时间段转换为可读字符串
     """
@@ -58,13 +66,27 @@ def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit=F
     return ret
 
 
-async def get_img_from_path(base_path: Path, path: str) -> Image.Image:
+async def get_img_from_path(
+    base_path: Path,
+    path: str | None,
+    on_missing: MissingImageMode = "placeholder",
+) -> Image.Image:
     """
     通过路径获取图片
     """
     if path is None or path.strip() == "":
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, "empty-path")
+            return _get_missing_placeholder_image(path)
         raise ValueError("图片路径不能为空(None)")
-    return await run_in_pool(_load_image_from_path_sync, base_path, path)
+
+    try:
+        return await run_in_pool(_load_image_from_path_sync, base_path, path)
+    except (FileNotFoundError, OSError) as exc:
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, exc)
+            return _get_missing_placeholder_image(path)
+        raise
 
 
 def _open_image_copy(path: Path) -> Image.Image:
@@ -76,6 +98,126 @@ def _open_image_copy(path: Path) -> Image.Image:
 _image_cache_lock = threading.RLock()
 _image_cache: OrderedDict[tuple[str, int, int], tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
+_missing_placeholder_lock = threading.RLock()
+_missing_placeholder_cache: dict[str, Image.Image] = {}
+_missing_placeholder_logged: set[str] = set()
+
+
+def _log_missing_image_once(path: str | None, reason: str | BaseException) -> None:
+    if isinstance(reason, BaseException):
+        reason_text = f"{reason.__class__.__name__}: {reason}"
+    else:
+        reason_text = reason
+
+    key = f"{path or '<empty>'}|{reason_text}"
+    with _missing_placeholder_lock:
+        if key in _missing_placeholder_logged:
+            return
+        _missing_placeholder_logged.add(key)
+
+    logger.warning("图片素材缺失，已使用问号占位图: %s (%s)", path or "<empty>", reason_text)
+
+
+def _guess_missing_placeholder_variant(path: str | None) -> str:
+    normalized = (path or "").replace("\\", "/").lower()
+
+    if any(token in normalized for token in ("banner", "logo", "header", "title", "word_img", "word/")):
+        return "wide"
+    if any(token in normalized for token in ("background", "story_bg", "event_bg", "/bg/", "_bg", "bg_")):
+        return "landscape"
+    if any(token in normalized for token in ("portrait", "standing", "fullbody", "full_body")):
+        return "portrait"
+    return "square"
+
+
+def _load_placeholder_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    font_dir = Path(FONT_DIR)
+    for font_name in (DEFAULT_HEAVY_FONT, DEFAULT_BOLD_FONT):
+        for candidate in (font_dir / font_name, font_dir / f"{font_name}.ttf", font_dir / f"{font_name}.otf"):
+            if not candidate.is_file():
+                continue
+            try:
+                return ImageFont.truetype(str(candidate), size=size)
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _draw_centered_text(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    center: tuple[float, float],
+    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
+    fill: tuple[int, int, int, int],
+) -> None:
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+    x = center[0] - text_w / 2 - bbox[0]
+    y = center[1] - text_h / 2 - bbox[1]
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def _build_missing_placeholder_image(variant: str) -> Image.Image:
+    sizes = {
+        "square": (512, 512),
+        "portrait": (512, 768),
+        "landscape": (768, 432),
+        "wide": (960, 320),
+    }
+    width, height = sizes.get(variant, sizes["square"])
+    short_side = min(width, height)
+
+    outer_pad = max(18, short_side // 20)
+    inner_pad = max(12, short_side // 14)
+    radius_outer = max(24, short_side // 10)
+    radius_inner = max(18, short_side // 14)
+    border_width = max(3, short_side // 96)
+    line_width = max(4, short_side // 72)
+
+    canvas = Image.new("RGBA", (width, height), (244, 247, 250, 255))
+    draw = ImageDraw.Draw(canvas)
+
+    draw.rounded_rectangle(
+        (0, 0, width - 1, height - 1),
+        radius=radius_outer,
+        fill=(236, 240, 245, 255),
+        outline=(210, 216, 224, 255),
+        width=border_width,
+    )
+    draw.rounded_rectangle(
+        (outer_pad, outer_pad, width - outer_pad - 1, height - outer_pad - 1),
+        radius=radius_inner,
+        fill=(251, 252, 253, 255),
+        outline=(190, 198, 208, 255),
+        width=border_width,
+    )
+
+    left = outer_pad + inner_pad
+    top = outer_pad + inner_pad
+    right = width - outer_pad - inner_pad
+    bottom = height - outer_pad - inner_pad
+    draw.line((left, top, right, bottom), fill=(228, 232, 238, 255), width=line_width)
+    draw.line((left, bottom, right, top), fill=(228, 232, 238, 255), width=line_width)
+
+    qmark_font = _load_placeholder_font(max(48, int(short_side * 0.56)))
+    qmark_center = (width / 2, height / 2 - short_side * 0.04)
+    _draw_centered_text(draw, "?", (qmark_center[0] + 4, qmark_center[1] + 6), qmark_font, (255, 255, 255, 220))
+    _draw_centered_text(draw, "?", qmark_center, qmark_font, (118, 128, 140, 255))
+
+    label_font = _load_placeholder_font(max(16, int(short_side * 0.08)))
+    _draw_centered_text(draw, "MISSING", (width / 2, height - outer_pad - short_side * 0.1), label_font, (142, 150, 160, 255))
+    return canvas
+
+
+def _get_missing_placeholder_image(path: str | None) -> Image.Image:
+    variant = _guess_missing_placeholder_variant(path)
+    with _missing_placeholder_lock:
+        cached = _missing_placeholder_cache.get(variant)
+        if cached is None:
+            cached = _build_missing_placeholder_image(variant)
+            _missing_placeholder_cache[variant] = cached
+        return cached.copy()
 
 
 def _estimate_image_bytes(img: Image.Image) -> int:
@@ -513,6 +655,12 @@ def shutdown_utils() -> None:
             img.close()
         _image_cache.clear()
         _image_cache_total_bytes = 0
+
+    with _missing_placeholder_lock:
+        for img in _missing_placeholder_cache.values():
+            img.close()
+        _missing_placeholder_cache.clear()
+        _missing_placeholder_logged.clear()
 
 
 # ============================ chromedp截图 ============================ #

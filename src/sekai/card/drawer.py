@@ -102,9 +102,9 @@ async def compose_card_detail_image(
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     if rqd.background_image_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path, on_missing="raise")
             bg = ImageBg(bg_img)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
     else:
         bg = SEKAI_BLUE_BG
@@ -315,9 +315,9 @@ async def compose_card_list_image(
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
             bg = ImageBg(bg_img)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
     else:
         bg = SEKAI_BLUE_BG
@@ -527,9 +527,9 @@ async def compose_box_image(
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
             bg = ImageBg(bg_img)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
     else:
         bg = SEKAI_BLUE_BG
