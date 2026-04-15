@@ -443,20 +443,11 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
 
 async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Image:
     profile = rqd.profile
-    diff = rqd.required_difficulty
 
     # 预加载封面
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
     loaded_jackets = await asyncio.gather(*jacket_tasks)
     jackets = {m.id: img for m, img in zip(rqd.music_list, loaded_jackets)}
-
-    # 按等级分组
-    lv_musics_map = {}
-    for m in rqd.music_list:
-        if m.level not in lv_musics_map:
-            lv_musics_map[m.level] = []
-        lv_musics_map[m.level].append(m)
-    lv_musics = sorted(lv_musics_map.items(), key=lambda x: x[0])
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -467,28 +458,49 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                 await get_profile_card(profile)
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
-                for lv, musics in lv_musics:
-                    # 难度标题
-                    with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
-                        lv_text = TextBox(
-                            f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE)
-                        )
-                        lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=DIFF_COLORS.get(diff, BLACK), radius=5))
+                for m in rqd.music_list:
+                    release_at = datetime.fromtimestamp(m.music_info.release_at / 1000).strftime("%Y-%m-%d")
+                    diff_levels = []
+                    for idx, diff_name in enumerate(m.difficulty.order or []):
+                        level = m.difficulty.level[idx] if idx < len(m.difficulty.level) else 0
+                        if level:
+                            diff_levels.append((diff_name, level))
 
-                        # 歌曲网格
-                        with Grid(col_count=10).set_sep(5):
-                            for m in musics:
-                                with VSplit().set_sep(2):
-                                    with Frame():
-                                        ImageBox(jackets.get(m.id), size=(64, 64), image_size_mode="fill")
-                                        # 游玩结果图标
-                                        if m.play_result:
-                                            result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
-                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
-                                            if result_img:
-                                                ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
-                                                    (64 - 10, 64 - 10)
-                                                )
+                    with (
+                        HSplit()
+                        .set_bg(roundrect_bg(alpha=80))
+                        .set_padding(12)
+                        .set_sep(12)
+                        .set_content_align("c")
+                        .set_item_align("c")
+                        .set_w(964)
+                    ):
+                        with Frame():
+                            ImageBox(jackets.get(m.id), size=(96, 96), image_size_mode="fill")
+                            if m.play_result:
+                                result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
+                                result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
+                                if result_img:
+                                    ImageBox(result_img, size=(20, 20), image_size_mode="fill").set_offset((96 - 14, 96 - 14))
+
+                        with VSplit().set_sep(8).set_content_align("lt").set_item_align("lt"):
+                            TextBox(
+                                f"【{m.id}】{m.music_info.title}",
+                                TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
+                                use_real_line_count=True,
+                            ).set_w(820)
+                            TextBox(
+                                release_at,
+                                TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
+                            )
+                            with HSplit().set_sep(8).set_content_align("c").set_item_align("c"):
+                                for diff_name, level in diff_levels:
+                                    TextBox(
+                                        str(level),
+                                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=WHITE),
+                                    ).set_padding((10, 4)).set_bg(
+                                        roundrect_bg(fill=DIFF_COLORS.get(diff_name, BLACK), radius=12)
+                                    )
 
     add_watermark(canvas)
     return await canvas.get_img()
