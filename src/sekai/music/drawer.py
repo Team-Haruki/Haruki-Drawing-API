@@ -464,7 +464,10 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                         release_at = datetime.fromtimestamp(m.music_info.release_at / 1000).strftime("%Y-%m-%d")
                     diff_levels = []
                     if m.difficulty:
-                        for idx, diff_name in enumerate(m.difficulty.order or []):
+                        diff_order = m.difficulty.order or ["easy", "normal", "hard", "expert", "master"]
+                        if m.difficulty.has_append:
+                            diff_order = [*diff_order, "append"]
+                        for idx, diff_name in enumerate(diff_order):
                             level = m.difficulty.level[idx] if idx < len(m.difficulty.level) else 0
                             if level:
                                 diff_levels.append((diff_name, level))

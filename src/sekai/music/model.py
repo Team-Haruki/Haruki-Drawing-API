@@ -59,11 +59,14 @@ class DifficultyInfo(BaseModel):
         各难度Note数量列表
     has_append : bool
         是否有APPEND难度
+    order : list[str] | None
+        难度展示顺序
     """
 
     level: list[int]
     note_count: list[int]
     has_append: bool
+    order: list[str] | None = None
 
 
 class MusicVocalInfo(BaseModel):
