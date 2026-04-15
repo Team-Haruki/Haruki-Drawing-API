@@ -52,11 +52,13 @@ from .model import (
 
 def _draw_rqd_title(rqd):
     """从 rqd 中读取并绘制附加标题"""
-    if not (rqd.title and rqd.title_style):
+    if not rqd.title:
         return
 
     style = rqd.title_style
-    if isinstance(style, dict):
+    if style is None:
+        style = TextStyle(DEFAULT_BOLD_FONT, 28, WHITE)
+    elif isinstance(style, dict):
         style = TextStyle(**style)
 
     if rqd.title_shadow:
@@ -66,6 +68,18 @@ def _draw_rqd_title(rqd):
         ).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
     else:
         TextBox(rqd.title, style).set_padding(16).set_omit_parent_bg(True).set_bg(roundrect_bg(alpha=80))
+
+
+def _music_list_group_order(diff: str, level: int) -> tuple[int, int]:
+    order = {
+        "easy": 1,
+        "normal": 2,
+        "hard": 3,
+        "expert": 4,
+        "master": 5,
+        "append": 6,
+    }
+    return (order.get(diff, 99), level)
 
 
 # =========================== 绘图函数 =========================== #
@@ -491,10 +505,12 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
     lv_musics_map = {}
     for music in rqd.music_list:
         lv = music["difficulty"]
-        if lv not in lv_musics_map:
-            lv_musics_map[lv] = []
-        lv_musics_map[lv].append(music)
-    lv_musics = sorted(lv_musics_map.items(), key=lambda x: x[0], reverse=False)
+        diff = str(music.get("difficulty_type") or rqd.required_difficulties or "").lower()
+        key = (diff, lv)
+        if key not in lv_musics_map:
+            lv_musics_map[key] = []
+        lv_musics_map[key].append(music)
+    lv_musics = sorted(lv_musics_map.items(), key=lambda x: _music_list_group_order(x[0][0], x[0][1]))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -505,9 +521,8 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
                 await get_profile_card(profile.to_profile_card_request())
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
-                lv_musics.sort(key=lambda x: x[0], reverse=False)
-                for lv, musics in lv_musics:
-                    musics.sort(key=lambda x: x["release_at"], reverse=False)
+                for (diff, lv), musics in lv_musics:
+                    musics.sort(key=lambda x: (x["release_at"], x["id"]), reverse=False)
 
                     # 这里的 filtered_musics 实际上就是传入的所有 musics，因为不需要过滤了
                     filtered_musics = []
@@ -519,12 +534,13 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
                     if not filtered_musics:
                         continue
 
-                    diff = rqd.required_difficulties
+                    diff = diff or str(rqd.required_difficulties or "").lower()
+                    diff_color = DIFF_COLORS.get(diff, DIFF_COLORS["master"])
                     with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
                         lv_text = TextBox(
                             f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE)
                         )
-                        lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=DIFF_COLORS[diff], radius=5))
+                        lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=diff_color, radius=5))
 
                         with Grid(col_count=10).set_sep(5):
                             for music in filtered_musics:

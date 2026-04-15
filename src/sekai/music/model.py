@@ -241,7 +241,7 @@ class MusicListRequest(BaseModel):
         封面路径映射
     required_difficulties : str
         查询的难度类型
-    profile : DetailedProfileCardRequest
+    profile : DetailedProfileCardRequest | None
         用户个人信息
     play_result_icon_path_map : Optional[Dict[str, str]]
         打歌结果图标路径映射
@@ -259,7 +259,7 @@ class MusicListRequest(BaseModel):
     music_list: list[dict[str, Any]]  # [{"id": int, "difficulty": str}]
     jackets_path_list: dict[int, str]  # {musicId: jacket_path}
     required_difficulties: str
-    profile: DetailedProfileCardRequest
+    profile: DetailedProfileCardRequest | None = None
     play_result_icon_path_map: dict[str, str] | None = None
     title: str | None = None
     title_style: Any | None = None
