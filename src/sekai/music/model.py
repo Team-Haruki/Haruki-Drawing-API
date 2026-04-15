@@ -182,6 +182,10 @@ class MusicBriefList(BaseModel):
         歌曲ID
     level : int
         歌曲等级 (定数)
+    difficulty : DifficultyInfo | None
+        歌曲各难度信息
+    music_info : MusicMD | None
+        歌曲基础信息
     music_jacket_path : str
         歌曲封面路径
     play_result : str | None
@@ -190,6 +194,8 @@ class MusicBriefList(BaseModel):
 
     id: int
     level: int
+    difficulty: DifficultyInfo | None = None
+    music_info: MusicMD | None = None
     music_jacket_path: str
     play_result: str | None = None
 

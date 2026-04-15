@@ -459,12 +459,17 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 for m in rqd.music_list:
-                    release_at = datetime.fromtimestamp(m.music_info.release_at / 1000).strftime("%Y-%m-%d")
+                    release_at = ""
+                    if m.music_info:
+                        release_at = datetime.fromtimestamp(m.music_info.release_at / 1000).strftime("%Y-%m-%d")
                     diff_levels = []
-                    for idx, diff_name in enumerate(m.difficulty.order or []):
-                        level = m.difficulty.level[idx] if idx < len(m.difficulty.level) else 0
-                        if level:
-                            diff_levels.append((diff_name, level))
+                    if m.difficulty:
+                        for idx, diff_name in enumerate(m.difficulty.order or []):
+                            level = m.difficulty.level[idx] if idx < len(m.difficulty.level) else 0
+                            if level:
+                                diff_levels.append((diff_name, level))
+                    elif rqd.required_difficulty and m.level:
+                        diff_levels.append((rqd.required_difficulty, m.level))
 
                     with (
                         HSplit()
@@ -485,14 +490,15 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 
                         with VSplit().set_sep(8).set_content_align("lt").set_item_align("lt"):
                             TextBox(
-                                f"【{m.id}】{m.music_info.title}",
+                                f"【{m.id}】{m.music_info.title if m.music_info else ''}",
                                 TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
                                 use_real_line_count=True,
                             ).set_w(820)
-                            TextBox(
-                                release_at,
-                                TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
-                            )
+                            if release_at:
+                                TextBox(
+                                    release_at,
+                                    TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
+                                )
                             with HSplit().set_sep(8).set_content_align("c").set_item_align("c"):
                                 for diff_name, level in diff_levels:
                                     TextBox(
