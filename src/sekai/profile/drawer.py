@@ -1,5 +1,6 @@
 import asyncio
 from datetime import datetime
+import logging
 import re
 
 from PIL import Image, ImageDraw
@@ -42,6 +43,8 @@ from src.sekai.base.plot import (
 from src.sekai.base.utils import get_img_from_path, get_readable_datetime, get_str_display_length, truncate
 from src.sekai.honor.drawer import compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
+
+logger = logging.getLogger(__name__)
 
 # =========================== 常量定义 =========================== #
 
@@ -376,8 +379,13 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
             # 头衔
             with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0)):
-                honor_imgs = await asyncio.gather(*[compose_full_honor_image(honor) for honor in honors])
+                honor_imgs = await asyncio.gather(
+                    *[compose_full_honor_image(honor) for honor in honors], return_exceptions=True
+                )
                 for img in honor_imgs:
+                    if isinstance(img, Exception):
+                        logger.warning("skip broken honor asset in profile image: %s", img)
+                        continue
                     if img:
                         ImageBox(img, size=(None, 48), shadow=True)
             # 卡组
