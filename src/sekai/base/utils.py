@@ -121,6 +121,12 @@ def _log_missing_image_once(path: str | None, reason: str | BaseException) -> No
 def _guess_missing_placeholder_variant(path: str | None) -> str:
     normalized = (path or "").replace("\\", "/").lower()
 
+    if (
+        "banner_event" in normalized
+        or "event_banner" in normalized
+        or ("/banner/" in normalized and "event" in normalized)
+    ):
+        return "event_banner"
     if any(token in normalized for token in ("banner", "logo", "header", "title", "word_img", "word/")):
         return "wide"
     if any(token in normalized for token in ("background", "story_bg", "event_bg", "/bg/", "_bg", "bg_")):
@@ -163,6 +169,7 @@ def _build_missing_placeholder_image(variant: str) -> Image.Image:
         "square": (512, 512),
         "portrait": (512, 768),
         "landscape": (768, 432),
+        "event_banner": (900, 400),
         "wide": (960, 320),
     }
     width, height = sizes.get(variant, sizes["square"])

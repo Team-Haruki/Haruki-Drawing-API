@@ -77,8 +77,11 @@ async def compose_full_honor_image(rqd: HonorRequest):
         rqd.lv_img_path,
         rqd.lv6_img_path,
     )
+    async def load_honor_image(path: str | None):
+        return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+
     if rqd.is_empty:
-        img = await get_img_from_path(ASSETS_BASE_DIR, rqd.empty_honor_path)
+        img = await load_honor_image(rqd.empty_honor_path)
         padding = 3
         bg = Image.new("RGBA", (img.size[0] + padding * 2, img.size[1] + padding * 2), (0, 0, 0, 0))
         bg.paste(img, (padding, padding), img)
@@ -87,11 +90,11 @@ async def compose_full_honor_image(rqd: HonorRequest):
     htype = rqd.honor_type
     hlv = rqd.honor_level
     if rqd.lv_img_path:
-        lv_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_img_path)
+        lv_img = await load_honor_image(rqd.lv_img_path)
     else:
         lv_img = None
     if rqd.lv6_img_path:
-        lv6_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv6_img_path)
+        lv6_img = await load_honor_image(rqd.lv6_img_path)
     else:
         lv6_img = None
     lv = rqd.fc_or_ap_level
@@ -100,8 +103,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
         if not path:
             return None
         try:
-            return await get_img_from_path(ASSETS_BASE_DIR, path)
-        except FileNotFoundError:
+            return await load_honor_image(path)
+        except (FileNotFoundError, OSError, ValueError):
             logger.warning("optional honor asset missing: %s", path)
             return None
 
@@ -110,11 +113,11 @@ async def compose_full_honor_image(rqd: HonorRequest):
         RARE_MAP.get(rarity, 1)
         if not rqd.frame_img_path:
             return
-        frame = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+        frame = await load_honor_image(rqd.frame_img_path)
         img.paste(frame, (8, 0) if rarity == "low" else (0, 0), frame)
         # 添加生日牌子的等级标志
         if htype == "birthday" and rqd.frame_degree_level_img_path:
-            icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_degree_level_img_path)
+            icon = await load_honor_image(rqd.frame_degree_level_img_path)
             w, h = img.size
             sz = 18
             icon = icon.resize((sz, sz))
@@ -145,12 +148,12 @@ async def compose_full_honor_image(rqd: HonorRequest):
         if gtype == "rank_match":
             if not rqd.honor_img_path:
                 return None
-            img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
+            img = await load_honor_image(rqd.honor_img_path)
             rank_img = await load_optional_image(rqd.rank_img_path)
         else:
             if not rqd.honor_img_path:
                 return None
-            img = await get_img_from_path(ASSETS_BASE_DIR, rqd.honor_img_path)
+            img = await load_honor_image(rqd.honor_img_path)
             if rqd.rank_img_path and (gtype == "event" or gtype == "wl_event" or wl_rank_style):
                 rank_img = await load_optional_image(rqd.rank_img_path)
             else:
@@ -167,7 +170,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
 
         if gtype == "fc_ap":
             if rqd.scroll_img_path:
-                scroll_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.scroll_img_path)
+                scroll_img = await load_honor_image(rqd.scroll_img_path)
                 if scroll_img:
                     img.paste(scroll_img, (215, 3) if is_main else (37, 3), scroll_img)
             add_fcap_lv(img)
@@ -180,8 +183,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
         rarity = rqd.honor_rarity
         if not rqd.bonds_bg_path or not rqd.bonds_bg_path2:
             return None
-        img = await get_img_from_path(ASSETS_BASE_DIR, rqd.bonds_bg_path)
-        img2 = await get_img_from_path(ASSETS_BASE_DIR, rqd.bonds_bg_path2)
+        img = await load_honor_image(rqd.bonds_bg_path)
+        img2 = await load_honor_image(rqd.bonds_bg_path2)
         x = 190 if is_main else 90
         img2 = img2.crop((x, 0, 380, 80))
         img.paste(img2, (x, 0))
@@ -189,8 +192,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
         if not rqd.chara_icon_path or not rqd.chara_icon_path2:
             return img
 
-        c1_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path)
-        c2_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path2)
+        c1_img = await load_honor_image(rqd.chara_icon_path)
+        c2_img = await load_honor_image(rqd.chara_icon_path2)
 
         c1_face = face_pos.get(rqd.chara_id, c1_img.size[0] // 2)
         c2_face = face_pos.get(rqd.chara_id2, c2_img.size[0] // 2)
@@ -220,14 +223,14 @@ async def compose_full_honor_image(rqd: HonorRequest):
         img.paste(c1_img, (c1_face_x - c1_face, h - c1h), c1_img)
         img.paste(c2_img, (c2_face_x - c2_face, h - c2h), c2_img)
         if rqd.mask_img_path:
-             _, _, _, mask = (await get_img_from_path(ASSETS_BASE_DIR, rqd.mask_img_path)).split()
-             img.putalpha(mask)
+            _, _, _, mask = (await load_honor_image(rqd.mask_img_path)).split()
+            img.putalpha(mask)
 
         await add_frame(img, rarity)
 
         if is_main:
             if rqd.word_img_path:
-                word_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.word_img_path)
+                word_img = await load_honor_image(rqd.word_img_path)
                 img.paste(word_img, (int(190 - (word_img.size[0] / 2)), int(40 - (word_img.size[1] / 2))), word_img)
 
         add_lv_star(img, hlv)
