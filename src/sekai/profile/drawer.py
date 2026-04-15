@@ -304,9 +304,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     bg_settings = rqd.bg_settings if rqd.bg_settings is not None else ProfileBgSettings()
     if bg_settings.img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, bg_settings.img_path)
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, bg_settings.img_path, on_missing="raise")
             bg = ImageBg(bg_img, blur=False, fade=0)
-        except FileNotFoundError:
+        except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
     else:
         bg = SEKAI_BLUE_BG
