@@ -57,7 +57,7 @@ def _draw_rqd_title(rqd):
 
     style = rqd.title_style
     if style is None:
-        style = TextStyle(DEFAULT_BOLD_FONT, 28, WHITE)
+        style = TextStyle(DEFAULT_BOLD_FONT, 28, BLACK)
     elif isinstance(style, dict):
         style = TextStyle(**style)
 
