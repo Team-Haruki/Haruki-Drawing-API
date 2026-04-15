@@ -32,6 +32,20 @@ RECOMMEND_ALG_NAMES = {
     "ga": "遗传算法",
 }
 
+BOOST_BONUS_DICT = {
+    0: 1,
+    1: 5,
+    2: 10,
+    3: 15,
+    4: 20,
+    5: 25,
+    6: 27,
+    7: 29,
+    8: 31,
+    9: 33,
+    10: 35,
+}
+
 
 def format_skill_order_text(strategy: str | None) -> str:
     match (strategy or "").strip().lower():
@@ -90,6 +104,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     unit_filter = rqd.unit_filter
     attr_filter = rqd.attr_filter
     excluded_cards = rqd.excluded_cards or []
+    boost = rqd.boost
+    boost_bonus = BOOST_BONUS_DICT.get(boost or 0, 1) if boost is not None else 1
     result_decks = rqd.deck_data
     result_algs = rqd.model_name or [""] * len(result_decks)
     # 获取卡组卡牌缩略图
@@ -356,7 +372,13 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     target_score = rqd.target == "score"
                                     text = score_name + th_main_sign if target_score else score_name
                                     style = th_style1 if target_score else th_style2
-                                    TextBox(text, style).set_h(gh // 2).set_content_align("c")
+                                    with Frame().set_h(gh // 2).set_content_align("c"):
+                                        TextBox(text, style)
+                                        if boost is not None and target_score:
+                                            TextBox(
+                                                f"{boost}🔥(x{boost_bonus})",
+                                                TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
+                                            ).set_content_align("c").set_offset((0, 28))
                                     Spacer(h=6)
                                     for i, (deck, alg) in enumerate(zip(result_decks, result_algs)):
                                         with Frame().set_content_align("rb"):
@@ -380,6 +402,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 score = deck.live_score or 0
                                             elif recommend_type == "mysekai":
                                                 score = deck.mysekai_event_point or 0
+                                            if boost is not None and target_score:
+                                                score = int(score * boost_bonus)
                                             with Frame().set_content_align("c"):
                                                 TextBox(str(score), tb_style).set_h(gh).set_content_align(
                                                     "c"

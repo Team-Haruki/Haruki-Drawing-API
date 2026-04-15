@@ -157,6 +157,8 @@ class DeckRequest(BaseModel):
         队友综合力
     multi_live_teammate_score_up : Optional[float]
         队友分数提升率
+    boost : Optional[int]
+        使用的体力倍率
     target : Optional[str]
         优化目标
     unit_filter : Optional[str]
@@ -211,6 +213,7 @@ class DeckRequest(BaseModel):
     is_wl: bool = False
     multi_live_teammate_power: int | None = None
     multi_live_teammate_score_up: float | None = None
+    boost: int | None = None
     target: str | None = None
     unit_filter: str | None = None
     attr_filter: str | None = None
