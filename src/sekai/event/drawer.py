@@ -266,7 +266,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                         event_start_at = item.start_at
                         event_end_at = item.end_at
                         with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(gh):
-                            if "charaIcon" in item:
+                            if item.wl_chara_icon_path:
                                 ImageBox(
                                     await get_img_from_path(ASSETS_BASE_DIR, item.wl_chara_icon_path), size=(None, gh)
                                 )
