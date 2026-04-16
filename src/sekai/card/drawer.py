@@ -47,6 +47,13 @@ FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
 def is_non_limited_supply_type(value: str | None) -> bool:
     return (value or "").strip() in NON_LIMITED_SUPPLY_TYPES
 
+
+def get_notice_dimensions(content_width: int, min_width: int = 520) -> tuple[int, int]:
+    panel_width = max(min_width, content_width)
+    text_width = max(240, panel_width - 120)
+    return panel_width, text_width
+
+
 # ========== 主要函数 ==========
 
 
@@ -337,6 +344,8 @@ async def compose_card_list_image(
         except FileNotFoundError:
             pass
 
+    list_panel_width, list_notice_text_width = get_notice_dimensions(300 * 3 + 16 * 2, min_width=300 * 3 + 16 * 2)
+
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             if rqd.title:
@@ -347,9 +356,10 @@ async def compose_card_list_image(
                     .set_sep(12)
                     .set_content_align("l")
                     .set_item_align("c")
+                    .set_w(list_panel_width)
                 ):
                     TextBox("提示", notice_label_style)
-                    TextBox(rqd.title, notice_text_style, use_real_line_count=True).set_w(1080)
+                    TextBox(rqd.title, notice_text_style, use_real_line_count=True).set_w(list_notice_text_width)
             # 卡牌网格
             with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
                 for i, (card, thumb_group) in enumerate(card_and_thumbs):
@@ -496,6 +506,15 @@ async def compose_box_image(
     sep = int(start_sep + (end_sep - start_sep) * interp)
     sz = int(start_sz + (end_sz - start_sz) * interp)
 
+    box_content_width = 16 * 2
+    if chara_cards:
+        group_widths = []
+        for _, cards in chara_cards:
+            col_num = max(1, math.ceil(len(cards) / best_height))
+            group_widths.append(sz * col_num + sep * (col_num - 1))
+        box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
+    box_notice_width, box_notice_text_width = get_notice_dimensions(box_content_width)
+
     # 预加载所有图标
     term_img = None
     fes_img = None
@@ -557,13 +576,14 @@ async def compose_box_image(
                     .set_sep(12)
                     .set_content_align("l")
                     .set_item_align("c")
+                    .set_w(box_notice_width)
                 ):
                     TextBox("提示", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0)))
                     TextBox(
                         rqd.title,
                         TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
                         use_real_line_count=True,
-                    ).set_w(1200)
+                    ).set_w(box_notice_text_width)
             if user_info:
                 user_profile = await get_profile_card(user_info.to_profile_card_request())  # noqa: F841
 
