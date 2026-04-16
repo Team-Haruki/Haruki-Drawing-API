@@ -505,7 +505,7 @@ async def compose_music_board_image(
                         ):
                             music_cover = await get_img_from_path(ASSETS_BASE_DIR, row.music_cover_path)
                             ImageBox(music_cover, size=(gh - 8, gh - 8), use_alpha_blend=False)
-                            TextBox(f"{truncate(row.music_title, 18)}", item_style)
+                            TextBox(row.music_title, item_style, overflow='shrink')
 
                 # 3. 难度 Column
                 w = int(ratios[2] * unit_w)
