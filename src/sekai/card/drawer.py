@@ -311,6 +311,8 @@ async def compose_card_list_image(
     name_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0))
     id_style = TextStyle(font=DEFAULT_FONT, size=20, color=(0, 0, 0))
     leak_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0))
+    notice_label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0))
+    notice_text_style = TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0))
 
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_img_path:
@@ -337,6 +339,17 @@ async def compose_card_list_image(
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
+            if rqd.title:
+                with (
+                    HSplit()
+                    .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
+                    .set_padding(14)
+                    .set_sep(12)
+                    .set_content_align("l")
+                    .set_item_align("c")
+                ):
+                    TextBox("提示", notice_label_style)
+                    TextBox(rqd.title, notice_text_style, use_real_line_count=True).set_w(1080)
             # 卡牌网格
             with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
                 for i, (card, thumb_group) in enumerate(card_and_thumbs):
@@ -536,6 +549,21 @@ async def compose_box_image(
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
+            if rqd.title:
+                with (
+                    HSplit()
+                    .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
+                    .set_padding(14)
+                    .set_sep(12)
+                    .set_content_align("l")
+                    .set_item_align("c")
+                ):
+                    TextBox("提示", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0)))
+                    TextBox(
+                        rqd.title,
+                        TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
+                        use_real_line_count=True,
+                    ).set_w(1200)
             if user_info:
                 user_profile = await get_profile_card(user_info.to_profile_card_request())  # noqa: F841
 

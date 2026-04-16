@@ -280,6 +280,8 @@ class CardListRequest(BaseModel):
         服务器地区
     user_info : Optional[DetailedProfileCardRequest]
         用户信息
+    title : Optional[str]
+        顶部提示标题
     background_img_path : Optional[str]
         背景图片路径
     term_limited_icon_path : Optional[str]
@@ -291,6 +293,7 @@ class CardListRequest(BaseModel):
     cards: list[CardBasic]
     region: str
     user_info: DetailedProfileCardRequest | None = None
+    title: str | None = None
     background_img_path: str | None = None
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
@@ -309,6 +312,8 @@ class CardBoxRequest(BaseModel):
         服务器地区
     user_info : Optional[DetailedProfileCardRequest]
         用户信息
+    title : Optional[str]
+        顶部提示标题
     show_id : bool
         是否显示卡牌ID
     show_box : bool
@@ -326,6 +331,7 @@ class CardBoxRequest(BaseModel):
     cards: list[UserCard]
     region: str
     user_info: DetailedProfileCardRequest | None = None
+    title: str | None = None
     show_id: bool = False
     show_box: bool = False
     background_img_path: str | None = None
