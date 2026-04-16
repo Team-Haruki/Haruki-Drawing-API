@@ -47,6 +47,10 @@ BOOST_BONUS_DICT = {
 }
 
 
+def format_skill_rate(rate: float) -> str:
+    return str(int(rate)) if int(rate) == rate else f"{rate:.1f}"
+
+
 def format_skill_order_text(strategy: str | None) -> str:
     match (strategy or "").strip().lower():
         case "average":
@@ -420,7 +424,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             character_id = card.chara_id
                                             event_bonus = card.event_bonus_rate
                                             ep1_read, ep2_read = card.is_before_story, card.is_after_story
-                                            slv, sup = card.skill_level, int(card.skill_rate)
+                                            slv, sup = card.skill_level, format_skill_rate(card.skill_rate)
 
                                             with (
                                                 VSplit()
