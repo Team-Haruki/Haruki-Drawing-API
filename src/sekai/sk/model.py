@@ -1,7 +1,9 @@
 # 绘图所需的数据类型
 from datetime import datetime, timedelta
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 
 
 class RankInfo(BaseModel):
@@ -47,6 +49,11 @@ class RankInfo(BaseModel):
     hour_round: int | None = None
     record_start_at: datetime | None = None
 
+    @field_validator("time", "record_start_at", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
+
 
 class SpeedInfo(BaseModel):
     r"""SpeedInfo
@@ -69,6 +76,11 @@ class SpeedInfo(BaseModel):
     score: int
     speed: int | None = None
     record_time: datetime
+
+    @field_validator("record_time", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
 
 
 class SklForecastColumn(BaseModel):
@@ -96,8 +108,13 @@ class SklForecastColumn(BaseModel):
     forecast_time: datetime | None = None
     update_time: datetime | None = None
 
+    @field_validator("forecast_time", "update_time", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
 
-class SklRequest(BaseModel):
+
+class SklRequest(TimeZoneRequest):
     r"""SklRequest
 
     绘制活动排名列表图片所必需的数据
@@ -143,8 +160,23 @@ class SklRequest(BaseModel):
     forecast_columns: list[SklForecastColumn] | None = None
     full: bool = False
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        for item in self.current_ranks or []:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        for column in self.forecast_columns or []:
+            column.forecast_time = localize_datetime(column.forecast_time, self.timezone)
+            column.update_time = localize_datetime(column.update_time, self.timezone)
+            for item in column.ranks:
+                item.time = localize_datetime(item.time, self.timezone)
+                item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
 
-class SKRequest(BaseModel):
+
+class SKRequest(TimeZoneRequest):
     r"""SKRequest
 
     绘制排名查询结果图片所必需的数据
@@ -181,8 +213,20 @@ class SKRequest(BaseModel):
     prev_ranks: RankInfo | None = None
     next_ranks: RankInfo | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        if self.prev_ranks is not None:
+            self.prev_ranks.time = localize_datetime(self.prev_ranks.time, self.timezone)
+            self.prev_ranks.record_start_at = localize_datetime(self.prev_ranks.record_start_at, self.timezone)
+        if self.next_ranks is not None:
+            self.next_ranks.time = localize_datetime(self.next_ranks.time, self.timezone)
+            self.next_ranks.record_start_at = localize_datetime(self.next_ranks.record_start_at, self.timezone)
 
-class CFRequest(BaseModel):
+
+class CFRequest(TimeZoneRequest):
     r"""CFRequest
 
     绘制查房结果图片所必需的数据
@@ -225,8 +269,26 @@ class CFRequest(BaseModel):
     update_at: datetime
     wl_chara_icon_path: str | None = None
 
+    @field_validator("update_at", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
 
-class SpeedRequest(BaseModel):
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        if self.prev_rank is not None:
+            self.prev_rank.time = localize_datetime(self.prev_rank.time, self.timezone)
+            self.prev_rank.record_start_at = localize_datetime(self.prev_rank.record_start_at, self.timezone)
+        if self.next_rank is not None:
+            self.next_rank.time = localize_datetime(self.next_rank.time, self.timezone)
+            self.next_rank.record_start_at = localize_datetime(self.next_rank.record_start_at, self.timezone)
+        self.update_at = localize_datetime(self.update_at, self.timezone)
+
+
+class SpeedRequest(TimeZoneRequest):
     r"""SpeedRequest
 
     绘制时速分析图片所必需的数据
@@ -269,8 +331,13 @@ class SpeedRequest(BaseModel):
     banner_img_path: str | None = None
     wl_chara_icon_path: str | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.record_time = localize_datetime(item.record_time, self.timezone)
 
-class PlayerTraceRequest(BaseModel):
+
+class PlayerTraceRequest(TimeZoneRequest):
     r"""PlayerTraceRequest
 
     绘制玩家排名追踪图片所必需的数据
@@ -295,8 +362,17 @@ class PlayerTraceRequest(BaseModel):
     ranks: list[RankInfo]
     ranks2: list[RankInfo] | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        for item in self.ranks2 or []:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
 
-class RankTraceRequest(BaseModel):
+
+class RankTraceRequest(TimeZoneRequest):
     r"""RankTraceRequest
 
     绘制排名档位追踪图片所必需的数据
@@ -323,6 +399,15 @@ class RankTraceRequest(BaseModel):
     target_rank: int
     ranks: list[RankInfo]
     predict_ranks: RankInfo | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        if self.predict_ranks is not None:
+            self.predict_ranks.time = localize_datetime(self.predict_ranks.time, self.timezone)
+            self.predict_ranks.record_start_at = localize_datetime(self.predict_ranks.record_start_at, self.timezone)
 
 
 class TeamInfo(BaseModel):
@@ -354,7 +439,7 @@ class TeamInfo(BaseModel):
     team_icon_path: str | None = None
 
 
-class WinRateRequest(BaseModel):
+class WinRateRequest(TimeZoneRequest):
     r"""WinRateRequest
 
     绘制胜率预测图片所必需的数据
@@ -390,3 +475,12 @@ class WinRateRequest(BaseModel):
     event_aggregate_at: int
     banner_img_path: str | None = None
     team_info: list[TeamInfo]
+
+    @field_validator("updated_at", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.updated_at = localize_datetime(self.updated_at, self.timezone)

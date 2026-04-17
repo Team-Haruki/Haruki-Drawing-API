@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
@@ -98,14 +99,8 @@ class CardEventInfo(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | str):
-            try:
-                timestamp = int(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                raise ValueError(f"无效的时间戳: {v}")
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 class CardGachaInfo(BaseModel):
@@ -136,14 +131,8 @@ class CardGachaInfo(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | str):
-            try:
-                timestamp = int(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                raise ValueError(f"无效的时间戳: {v}")
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 class CardBasic(BaseModel):
@@ -218,7 +207,7 @@ class UserCard(BaseModel):
 # ========== 请求模型 ==========
 
 
-class CardDetailRequest(BaseModel):
+class CardDetailRequest(TimeZoneRequest):
     """卡牌详情绘制请求
 
     用于生成卡牌详情图片。
@@ -266,8 +255,17 @@ class CardDetailRequest(BaseModel):
     event_unit_icon_path: str | None = None
     event_chara_icon_path: str | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if self.event_info is not None:
+            self.event_info.start_at = localize_datetime(self.event_info.start_at, self.timezone)
+            self.event_info.end_at = localize_datetime(self.event_info.end_at, self.timezone)
+        if self.gacha_info is not None:
+            self.gacha_info.start_at = localize_datetime(self.gacha_info.start_at, self.timezone)
+            self.gacha_info.end_at = localize_datetime(self.gacha_info.end_at, self.timezone)
 
-class CardListRequest(BaseModel):
+
+class CardListRequest(TimeZoneRequest):
     """卡牌列表绘制请求
 
     用于生成卡牌列表图片。
@@ -298,8 +296,13 @@ class CardListRequest(BaseModel):
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if self.user_info is not None:
+            self.user_info.timezone = self.timezone
 
-class CardBoxRequest(BaseModel):
+
+class CardBoxRequest(TimeZoneRequest):
     """卡牌收集册绘制请求
 
     用于生成按角色分类的卡牌收集册图片。
@@ -339,6 +342,11 @@ class CardBoxRequest(BaseModel):
     character_color_codes: dict[int, str] = {}
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if self.user_info is not None:
+            self.user_info.timezone = self.timezone
 
 
 # 兼容性别名（逐步废弃）

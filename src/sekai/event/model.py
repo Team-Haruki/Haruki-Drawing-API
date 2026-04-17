@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator
 
+from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
@@ -56,14 +57,8 @@ class EventInfo(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | float | str):
-            try:
-                timestamp = float(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                pass
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 class EventHistory(BaseModel):
@@ -106,14 +101,8 @@ class EventHistory(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | float | str):
-            try:
-                timestamp = float(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                pass
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 class EventAssets(BaseModel):
@@ -190,20 +179,14 @@ class EventBrief(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | float | str):
-            try:
-                timestamp = float(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                pass
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 # ========== 请求模型 ==========
 
 
-class EventDetailRequest(BaseModel):
+class EventDetailRequest(TimeZoneRequest):
     """活动详情绘制请求
 
     Attributes
@@ -223,8 +206,13 @@ class EventDetailRequest(BaseModel):
     event_assets: EventAssets
     event_cards: list[CardFullThumbnailRequest]
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.event_info.start_at = localize_datetime(self.event_info.start_at, self.timezone)
+        self.event_info.end_at = localize_datetime(self.event_info.end_at, self.timezone)
 
-class EventRecordRequest(BaseModel):
+
+class EventRecordRequest(TimeZoneRequest):
     """活动记录绘制请求
 
     Attributes
@@ -241,8 +229,15 @@ class EventRecordRequest(BaseModel):
     wl_event_info: list[EventHistory]
     user_info: DetailedProfileCardRequest
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in [*self.event_info, *self.wl_event_info]:
+            item.start_at = localize_datetime(item.start_at, self.timezone)
+            item.end_at = localize_datetime(item.end_at, self.timezone)
+        self.user_info.timezone = self.timezone
 
-class EventListRequest(BaseModel):
+
+class EventListRequest(TimeZoneRequest):
     """活动列表绘制请求
 
     Attributes
@@ -252,6 +247,12 @@ class EventListRequest(BaseModel):
     """
 
     event_info: list[EventBrief]
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.event_info:
+            item.start_at = localize_datetime(item.start_at, self.timezone)
+            item.end_at = localize_datetime(item.end_at, self.timezone)
 
 
 # 兼容性别名

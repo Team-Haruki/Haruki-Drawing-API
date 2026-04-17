@@ -2,10 +2,11 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
 
 
-class DetailedProfileCardRequest(BaseModel):
+class DetailedProfileCardRequest(TimeZoneRequest):
     r"""DetailedProfileCardRequest
 
     详细玩家信息请求（扁平结构，向后兼容）
@@ -51,6 +52,7 @@ class DetailedProfileCardRequest(BaseModel):
     def to_profile_card_request(self) -> "ProfileCardRequest":
         """转换为 ProfileCardRequest"""
         return ProfileCardRequest(
+            timezone=self.timezone,
             profile=BasicProfile(
                 id=self.id,
                 region=self.region,
@@ -155,7 +157,7 @@ class ProfileDataSource(BaseModel):
     mode: str | None = None
 
 
-class ProfileCardRequest(BaseModel):
+class ProfileCardRequest(TimeZoneRequest):
     r"""ProfileCardRequest
 
     用于合成玩家个人信息的简单卡片控件
@@ -281,7 +283,7 @@ class SoloLiveRank(BaseModel):
     rank: int = 0
 
 
-class ProfileRequest(BaseModel):
+class ProfileRequest(TimeZoneRequest):
     r"""ProfileRequest
 
     合成个人信息图片所必须的数据

@@ -1,5 +1,4 @@
 import math
-from datetime import datetime
 
 from PIL import Image
 
@@ -16,6 +15,7 @@ from src.sekai.base.painter import (
     DEFAULT_HEAVY_FONT,
 )
 from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import get_card_full_thumbnail
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
@@ -128,8 +128,8 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(8, 2).set_item_align("c").set_content_align("c"):
+                now = request_now(rqd.timezone)
                 for g in gachas:
-                    now = datetime.now()
                     bg_color = (255, 255, 255, 200)
                     if g.start_at <= now <= g.end_at:
                         bg_color = (255, 250, 220, 200)
@@ -163,8 +163,9 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
     small_style = TextStyle(font=DEFAULT_FONT, size=12, color=(70, 70, 70))
-    start_time = datetime.fromtimestamp(rqd.gacha.start_at / 1000)
-    end_time = datetime.fromtimestamp(rqd.gacha.end_at / 1000)
+    start_time = datetime_from_millis(rqd.gacha.start_at, rqd.timezone)
+    end_time = datetime_from_millis(rqd.gacha.end_at, rqd.timezone)
+    now = request_now(rqd.timezone)
 
     bg = SEKAI_BLUE_BG
     if rqd.bg_img_path:
@@ -223,12 +224,12 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                         TextBox("结束时间", label_style)
                         TextBox(end_time.strftime("%Y-%m-%d %H:%M"), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
-                        if start_time >= datetime.now():
+                        if start_time >= now:
                             TextBox("距离开始还有", label_style)
-                            TextBox(get_readable_timedelta(end_time - datetime.now()), text_style)
-                        elif end_time >= datetime.now():
+                            TextBox(get_readable_timedelta(end_time - now), text_style)
+                        elif end_time >= now:
                             TextBox("距离结束还有", label_style)
-                            TextBox(get_readable_timedelta(end_time - datetime.now()), text_style)
+                            TextBox(get_readable_timedelta(end_time - now), text_style)
                         else:
                             TextBox("卡池已结束", label_style)
 

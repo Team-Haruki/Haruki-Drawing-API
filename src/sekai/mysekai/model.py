@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.base.painter import Color
 from src.sekai.profile.model import ProfileCardRequest
 
@@ -21,8 +22,8 @@ class MysekaiPhenomRequest(BaseModel):
         天气缩略图地址
     background_fill : Color = (255, 255, 255, 75)
         背景颜色
-    text : str
-        文字，天气更改时间
+    start_at : int
+        天气更改时间（Unix 毫秒时间戳）
     text_fill: Color = (125, 125, 125, 255)
         文字颜色
     """
@@ -30,7 +31,7 @@ class MysekaiPhenomRequest(BaseModel):
     refresh_reason: str
     image_path: str
     background_fill: Color = (255, 255, 255, 75)
-    text: str
+    start_at: int
     text_fill: Color = (125, 125, 125, 255)
 
 
@@ -98,7 +99,7 @@ class MysekaiSiteResourceNumber(BaseModel):
     resource_numbers: list[MysekaiResourceNumber]
 
 
-class MysekaiResourceRequest(BaseModel):
+class MysekaiResourceRequest(TimeZoneRequest):
     r"""MysekaiResourceRequest
 
     绘制我的世界资源图片所必须的数据
@@ -129,6 +130,10 @@ class MysekaiResourceRequest(BaseModel):
     gate_icon_path: str
     visit_characters: list[MysekaiVisitCharacter]
     site_resource_numbers: list[MysekaiSiteResourceNumber] | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.profile.timezone = self.timezone
 
 
 # =========================== 绘制MSR地图 =========================== #

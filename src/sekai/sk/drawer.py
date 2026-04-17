@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import timedelta
 import math
 import os
 
@@ -31,6 +31,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     get_img_from_path,
     get_readable_datetime,
@@ -179,8 +180,9 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
         rqd: 请求数据
     """
     eid = rqd.id
-    event_start = datetime.fromtimestamp(rqd.start_at / 1000)
-    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
+    event_start = datetime_from_millis(rqd.start_at, rqd.timezone)
+    event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
     title = rqd.name
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
     wl_cid = rqd.wl_cid
@@ -224,7 +226,7 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
                         f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
                         TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - datetime.now()
+                    time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
                         time_to_end = "活动已结束"
                     else:
@@ -350,7 +352,8 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
     """
     eid = rqd.id
     title = rqd.name
-    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
+    event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
     if rqd.wl_chara_icon_path:
         wl_chara_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
@@ -401,7 +404,7 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
                         get_event_id_and_name_text(rqd.region, eid, truncate(title, 20)),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - datetime.now()
+                    time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
                         time_to_end = "活动已结束"
                     else:
@@ -427,7 +430,8 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
     """
     eid = rqd.eid
     title = rqd.event_name
-    event_end = datetime.fromtimestamp(rqd.aggregate_at / 1000 + 1)
+    event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
     wl_chara_img_path = rqd.wl_chara_icon_path
 
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
@@ -527,7 +531,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
                         get_event_id_and_name_text(rqd.region, eid, truncate(title, 20)),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - datetime.now()
+                    time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
                         time_to_end = "活动已结束"
                     else:
@@ -553,8 +557,9 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
     unit_text = rqd.request_type
     eid = rqd.event_id
     title = rqd.event_name
-    event_start = datetime.fromtimestamp(rqd.event_start_at / 1000)
-    event_end = datetime.fromtimestamp(rqd.event_aggregate_at / 1000 + 1)
+    event_start = datetime_from_millis(rqd.event_start_at, rqd.timezone)
+    event_end = datetime_from_millis(rqd.event_aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
     is_wl_event = rqd.is_wl_event
     query_ranks = SKL_QUERY_RANKS
@@ -577,7 +582,7 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
                         f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
                         TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - datetime.now()
+                    time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
                         time_to_end = "活动已结束"
                     else:
@@ -761,7 +766,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
             ax2.set_ylim(110, -10)
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=times[0].tzinfo))
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             fig.autofmt_xdate()
 
@@ -905,7 +910,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             max_speed = max(valid_speeds) if valid_speeds else 1
             ax2.set_ylim(0, max_speed * 1.2)
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=times[0].tzinfo))
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             fig.autofmt_xdate()
             ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
@@ -939,8 +944,9 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
 
     event_name = rqd.event_name
-    event_start = datetime.fromtimestamp(rqd.event_start_at / 1000)
-    event_end = datetime.fromtimestamp(rqd.event_aggregate_at / 1000 + 1)
+    event_start = datetime_from_millis(rqd.event_start_at, rqd.timezone)
+    event_end = datetime_from_millis(rqd.event_aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
 
     teams = rqd.team_info
     teams.sort(key=lambda x: x.team_id)
@@ -965,7 +971,7 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
                         f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
                         TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - datetime.now()
+                    time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
                         time_to_end = "活动已结束"
                     else:
