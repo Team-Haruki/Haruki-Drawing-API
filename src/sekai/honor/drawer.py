@@ -20,6 +20,18 @@ def is_world_link_rank_style(group_type: str | None, rank_img_path: str | None) 
     folder = os.path.basename(os.path.dirname(normalized))
     return folder.startswith("honor_top_") and "event" in folder
 
+
+def resolve_event_rank_position(base_img: Image.Image, rank_img: Image.Image, is_main: bool) -> tuple[int, int]:
+    base_w, base_h = base_img.size
+    rank_w, rank_h = rank_img.size
+
+    # Some special event honors provide a full-width rank overlay instead of the
+    # usual compact "TOP xxx" badge. Those assets should cover the whole honor.
+    if rank_w >= base_w - 8 and rank_h >= base_h - 8:
+        return (0, 0)
+
+    return (190, 0) if is_main else (34, 42)
+
 face_pos = {
     1: 48,
     2: 58,
@@ -59,7 +71,9 @@ face_pos = {
 
 async def compose_full_honor_image(rqd: HonorRequest):
     logger.info(
-        "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
+        "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s "
+        "honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s "
+        "bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
         rqd.honor_type,
         rqd.group_type,
         rqd.is_main_honor,
@@ -166,7 +180,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
             elif wl_rank_style:
                 img.paste(rank_img, (0, 0) if is_main else (0, 0), rank_img)  # noqa: RUF034
             else:
-                img.paste(rank_img, (190, 0) if is_main else (34, 42), rank_img)
+                img.paste(rank_img, resolve_event_rank_position(img, rank_img, is_main), rank_img)
 
         if gtype == "fc_ap":
             if rqd.scroll_img_path:
