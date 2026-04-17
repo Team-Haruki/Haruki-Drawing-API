@@ -1,3 +1,6 @@
+import logging
+import time
+
 from fastapi import APIRouter, HTTPException
 
 from src.core.utils import image_to_response
@@ -21,6 +24,7 @@ from src.sekai.mysekai.model import (
 )
 
 router = APIRouter(tags=["MySekai"])
+_perf_logger = logging.getLogger("mysekai.endpoint.perf")
 
 
 @router.post("/resource", summary="Generate MySekai resource image")
@@ -36,9 +40,20 @@ async def mysekai_resource(request: MysekaiResourceRequest):
 @router.post("/map", summary="Generate MySekai MSR map image")
 async def mysekai_msr_map(request: MysekaiMsrMapRequest):
     """Generate MySekai MSR harvest map image."""
+    _t0 = time.perf_counter()
     try:
         image = await compose_mysekai_msr_map_image(request)
-        return image_to_response(image)
+        _t1 = time.perf_counter()
+        resp = image_to_response(image)
+        _perf_logger.info(
+            "/map total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
+            time.perf_counter() - _t0,
+            _t1 - _t0,
+            time.perf_counter() - _t1,
+            image.width,
+            image.height,
+        )
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
