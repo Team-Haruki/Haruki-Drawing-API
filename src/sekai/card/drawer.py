@@ -1,4 +1,3 @@
-from datetime import datetime
 import math
 
 from src.sekai.base import (
@@ -13,6 +12,7 @@ from src.sekai.base import (
     get_img_from_path,
     roundrect_bg,
 )
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -97,7 +97,7 @@ async def compose_card_detail_image(
         gacha_detail = rqd.gacha_info
 
     # 时间格式化
-    release_time = datetime.fromtimestamp(card_info.release_at / 1000)
+    release_time = datetime_from_millis(card_info.release_at, rqd.timezone)
 
     # 样式定义
     title_style_def = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(0, 0, 0))
@@ -348,6 +348,7 @@ async def compose_card_list_image(
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
+            now = request_now(rqd.timezone)
             if rqd.title:
                 with (
                     HSplit()
@@ -373,8 +374,8 @@ async def compose_card_list_image(
 
                     with Frame().set_content_align("lb").set_bg(bg):
                         # 检查是否为未来卡牌
-                        release_time = datetime.fromtimestamp(card.release_at / 1000)
-                        if release_time > datetime.now():
+                        release_time = datetime_from_millis(card.release_at, rqd.timezone)
+                        if release_time > now:
                             TextBox("LEAK", leak_style).set_offset((4, -4))
 
                         # 技能图标区域

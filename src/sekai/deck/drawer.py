@@ -205,8 +205,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                 ImageBox(chara_icon, size=(None, 50))
                             if chara_name:
                                 TextBox(f"{chara_name}", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
-                        if recommend_type in ["wl"] and wl_chara_name:
-                            ImageBox(wl_chara_icon, size=(None, 50))
+                        if rqd.is_wl and wl_chara_name:
+                            if wl_chara_icon is not None:
+                                ImageBox(wl_chara_icon, size=(None, 50))
                             TextBox(
                                 f"{wl_chara_name} 章节", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70))
                             )

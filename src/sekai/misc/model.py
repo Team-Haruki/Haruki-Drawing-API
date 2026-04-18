@@ -1,5 +1,7 @@
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
+
 
 class CharaBirthdayCard(BaseModel):
     r"""CharaBirthdayCard
@@ -25,14 +27,14 @@ class BirthdayEventTime(BaseModel):
 
     Attributes
     ----------
-    start_text : str
-        开始时间文本（已格式化）
-    end_text : str
-        结束时间文本（已格式化）
+    start_at : int
+        开始时间（Unix 毫秒时间戳）
+    end_at : int
+        结束时间（Unix 毫秒时间戳）
     """
 
-    start_text: str
-    end_text: str
+    start_at: int
+    end_at: int
 
 
 class CharaBirthdayData(BaseModel):
@@ -58,7 +60,7 @@ class CharaBirthdayData(BaseModel):
     icon_path: str
 
 
-class CharaBirthdayRequest(BaseModel):
+class CharaBirthdayRequest(TimeZoneRequest):
     r"""CharaBirthdayRequest
 
     绘制角色生日图片所必需的数据

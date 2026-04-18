@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 
 from PIL import Image
 
@@ -33,6 +32,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import get_img_from_path, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
@@ -132,7 +132,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     lyricist = rqd.music_info.lyricist
     arranger = rqd.music_info.arranger
     mv_info = rqd.music_info.mv_info
-    publish_time = datetime.fromtimestamp(rqd.music_info.release_at / 1000).strftime("%Y-%m-%d %H:%M:%S")
+    publish_time = datetime_from_millis(rqd.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
     bpm = rqd.bpm
     is_full_length = rqd.music_info.is_full_length
     cover_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_jacket_path)
@@ -233,7 +233,12 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                         TextBox("限定时间", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
                         with VSplit().set_content_align("l").set_item_align("l").set_sep(4):
                             for start, end in rqd.limited_times:
-                                TextBox(f"{start} ~ {end}", TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
+                                start_at = datetime_from_millis(start, rqd.timezone)
+                                end_at = datetime_from_millis(end, rqd.timezone)
+                                TextBox(
+                                    f"{start_at.strftime('%Y-%m-%d %H:%M')} ~ {end_at.strftime('%Y-%m-%d %H:%M')}",
+                                    TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)),
+                                )
 
                 # 计算难度区域宽度
                 diff_col_count = 6 if has_append else 5
@@ -461,7 +466,7 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                 for m in rqd.music_list:
                     release_at = ""
                     if m.music_info:
-                        release_at = datetime.fromtimestamp(m.music_info.release_at / 1000).strftime("%Y-%m-%d")
+                        release_at = datetime_from_millis(m.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d")
                     diff_levels = []
                     if m.difficulty:
                         diff_order = m.difficulty.order or ["easy", "normal", "hard", "expert", "master"]

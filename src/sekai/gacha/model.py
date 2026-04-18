@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.profile.model import CardFullThumbnailRequest
 
 # ========== 基础数据模型 ==========
@@ -140,14 +141,8 @@ class GachaBrief(BaseModel):
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
     def parse_timestamp(cls, v):
-        """将毫秒时间戳转换为 datetime 对象"""
-        if isinstance(v, int | float | str):
-            try:
-                timestamp = float(v)
-                return datetime.fromtimestamp(timestamp / 1000)
-            except (ValueError, TypeError):
-                pass
-        return v
+        """将输入转换为 UTC datetime 对象"""
+        return parse_datetime_utc(v)
 
 
 class GachaCardWeight(BaseModel):
@@ -201,7 +196,7 @@ class GachaWeight(BaseModel):
 # ========== 请求模型 ==========
 
 
-class GachaListRequest(BaseModel):
+class GachaListRequest(TimeZoneRequest):
     """卡池列表绘制请求
 
     Attributes
@@ -233,8 +228,14 @@ class GachaListRequest(BaseModel):
     total_page: int | None = None
     pre_paginated: bool = False
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.gachas:
+            item.start_at = localize_datetime(item.start_at, self.timezone)
+            item.end_at = localize_datetime(item.end_at, self.timezone)
 
-class GachaDetailRequest(BaseModel):
+
+class GachaDetailRequest(TimeZoneRequest):
     """卡池详情绘制请求
 
     Attributes

@@ -18,7 +18,8 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.timezone import datetime_from_millis
+from src.sekai.base.utils import get_img_from_path, get_readable_datetime
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
@@ -62,12 +63,19 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     sd_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path)
     title_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path)
     card_thumbs = [await get_img_from_path(ASSETS_BASE_DIR, card.thumbnail_path) for card in cards]
-
     # 绘制时间范围的辅助函数
     def draw_time_range(label: str, tr: BirthdayEventTime):
+        start_at = datetime_from_millis(tr.start_at, rqd.timezone)
+        end_at = datetime_from_millis(tr.end_at, rqd.timezone)
         with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
             TextBox(f"{label} ", style1)
-            TextBox(f"{tr.start_text} ~ {tr.end_text}", style2)
+            TextBox(
+                (
+                    f"{start_at.strftime('%m-%d %H:%M')}({get_readable_datetime(start_at, show_original_time=False)})"
+                    f" ~ {end_at.strftime('%m-%d %H:%M')}({get_readable_datetime(end_at, show_original_time=False)})"
+                ),
+                style2,
+            )
 
     with Canvas(bg=ImageBg(card_image)).set_padding(BG_PADDING) as canvas:
         with (

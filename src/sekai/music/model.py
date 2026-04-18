@@ -3,6 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest, ProfileCardRequest
 
 # =========================== 数据类的定义 =========================== #
@@ -106,7 +107,7 @@ class LeaderboardInfo(BaseModel):
     value: str
 
 
-class MusicDetailRequest(BaseModel):
+class MusicDetailRequest(TimeZoneRequest):
     r"""MusicDetailRequest
 
     绘制歌曲详情图片所必需的数据
@@ -135,8 +136,8 @@ class MusicDetailRequest(BaseModel):
         歌曲封面路径
     event_banner_path : str | None
         活动Banner路径
-    limited_times : list[tuple[str, str]] | None
-        限定时间列表，每项为 (开始时间, 结束时间) 格式化字符串
+    limited_times : list[tuple[int, int]] | None
+        限定时间列表，每项为 (开始时间, 结束时间) Unix 毫秒时间戳
     leaderboard_matrix : list[list[LeaderboardInfo | None]] | None
         排行榜矩阵，行为live_type，列为target
     leaderboard_music_num : int | None
@@ -164,7 +165,7 @@ class MusicDetailRequest(BaseModel):
     cn_name: str | None = None
     music_jacket_path: str
     event_banner_path: str | None = None
-    limited_times: list[tuple[str, str]] | None = None
+    limited_times: list[tuple[int, int]] | None = None
     leaderboard_matrix: list[list[LeaderboardInfo | None]] | None = None
     leaderboard_music_num: int | None = None
     leaderboard_live_types: dict[str, str] | None = None
@@ -203,7 +204,7 @@ class MusicBriefList(BaseModel):
     play_result: str | None = None
 
 
-class MusicBriefListRequest(BaseModel):
+class MusicBriefListRequest(TimeZoneRequest):
     r"""MusicBriefListRequest
 
     绘制简略歌曲列表图片所必需的数据
@@ -234,8 +235,13 @@ class MusicBriefListRequest(BaseModel):
     title_style: Any | None = None
     title_shadow: bool = False
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if self.profile is not None:
+            self.profile.timezone = self.timezone
 
-class MusicListRequest(BaseModel):
+
+class MusicListRequest(TimeZoneRequest):
     r"""MusicListRequest
 
     绘制歌曲查询列表图片所必需的数据
@@ -274,6 +280,11 @@ class MusicListRequest(BaseModel):
     title_style: Any | None = None
     title_shadow: bool = False
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        if self.profile is not None:
+            self.profile.timezone = self.timezone
+
 
 class PlayProgressCount(BaseModel):
     r"""打歌进度计数类
@@ -304,7 +315,7 @@ class PlayProgressCount(BaseModel):
     ap: int = 0
 
 
-class PlayProgressRequest(BaseModel):
+class PlayProgressRequest(TimeZoneRequest):
     r"""PlayProgressRequest
 
     合成打歌进度图片所必须的数据
@@ -322,6 +333,10 @@ class PlayProgressRequest(BaseModel):
     counts: list[PlayProgressCount]
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = "master"
     profile: ProfileCardRequest
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.profile.timezone = self.timezone
 
 
 class MusicComboReward(BaseModel):
@@ -341,7 +356,7 @@ class MusicComboReward(BaseModel):
     reward: int = 0
 
 
-class DetailMusicRewardsRequest(BaseModel):
+class DetailMusicRewardsRequest(TimeZoneRequest):
     r"""DetailMusicRewardsRequest
 
     在有抓包数据的情况下合成歌曲奖励图片所必需的数据
@@ -367,8 +382,12 @@ class DetailMusicRewardsRequest(BaseModel):
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
 
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.profile.timezone = self.timezone
 
-class BasicMusicRewardsRequest(BaseModel):
+
+class BasicMusicRewardsRequest(TimeZoneRequest):
     r"""BasicMusicRewardsRequest
 
     在无抓包数据的情况下合成歌曲奖励图片所必需的数据
@@ -398,3 +417,7 @@ class BasicMusicRewardsRequest(BaseModel):
     profile: ProfileCardRequest
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.profile.timezone = self.timezone

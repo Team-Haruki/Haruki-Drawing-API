@@ -1,5 +1,4 @@
 import asyncio
-from datetime import datetime
 import logging
 
 from PIL import Image, ImageDraw
@@ -40,6 +39,7 @@ from src.sekai.base.plot import (
     VSplit,
     colored_text_box,
 )
+from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import get_img_from_path, get_readable_datetime, get_str_display_length, truncate
 from src.sekai.honor.drawer import compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
@@ -496,7 +496,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 (await draw_chara()).set_bg(None)
 
     if rqd.update_time:
-        update_time = datetime.fromtimestamp(rqd.update_time / 1000).strftime("%Y-%m-%d %H:%M:%S")
+        update_time = datetime_from_millis(rqd.update_time, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
     else:
         update_time = "?"
     text = f"DT: {update_time}  " + DEFAULT_WATERMARK
@@ -581,7 +581,7 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     )
                     if len(data_sources) <= 1:
                         if primary_source and primary_source.update_time:
-                            update_time = datetime.fromtimestamp(primary_source.update_time / 1000)
+                            update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
                             update_time_text = (
                                 update_time.strftime("%m-%d %H:%M:%S")
                                 + f" ({get_readable_datetime(update_time, show_original_time=False)})"
@@ -591,7 +591,7 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                         for data_source in data_sources[:2]:
                             if not data_source.update_time:
                                 continue
-                            update_time = datetime.fromtimestamp(data_source.update_time / 1000)
+                            update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
                             update_time_text = (
                                 update_time.strftime("%m-%d %H:%M:%S")
                                 + f" ({get_readable_datetime(update_time, show_original_time=False)})"

@@ -1,4 +1,3 @@
-from datetime import datetime
 import math
 
 from PIL import Image
@@ -25,6 +24,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
@@ -44,7 +44,7 @@ from .model import (
 
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     detail = rqd.event_info
-    now = datetime.now()
+    now = request_now(rqd.timezone)
     card_thumbs = []
     for card in rqd.event_cards:
         card_full_thumb = await get_card_full_thumbnail(card)
@@ -61,8 +61,8 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     wl_chapters = rqd.event_info.wl_time_list
     if rqd.event_info.is_wl_event:
         for chapter in wl_chapters:
-            chapter["start_time"] = datetime.fromtimestamp(chapter["start_at"] / 1000)
-            chapter["end_time"] = datetime.fromtimestamp(chapter["aggregate_at"] / 1000 + 1)
+            chapter["start_time"] = datetime_from_millis(chapter["start_at"], rqd.timezone)
+            chapter["end_time"] = datetime_from_millis(chapter["aggregate_at"] + 1000, rqd.timezone)
     use_story_bg = detail.event_type != "world_bloom"
     event_bg = (
         await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path)
@@ -143,7 +143,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                             )
 
                     # 进度条
-                    progress = (datetime.now() - start_time) / (end_time - start_time)
+                    progress = (now - start_time) / (end_time - start_time)
                     progress = min(max(progress, 0), 1)
                     progress_w, progress_h, border = 320, 8, 1
                     if detail.event_type == "world_bloom" and len(wl_chapters) > 1:
@@ -319,7 +319,7 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
             ).set_bg(roundrect_bg(radius=4)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
                 for d in event_list:
-                    now = datetime.now()
+                    now = request_now(rqd.timezone)
                     event_start_at = d.start_at
                     event_end_at = d.end_at
                     bg_color = WIDGET_BG_COLOR
