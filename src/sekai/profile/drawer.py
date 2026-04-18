@@ -1,7 +1,6 @@
 import asyncio
 from datetime import datetime
 import logging
-import re
 
 from PIL import Image, ImageDraw
 
@@ -28,6 +27,7 @@ from src.sekai.base.painter import (
 )
 from src.sekai.base.plot import (
     Canvas,
+    ColoredTextBox,
     Frame,
     Grid,
     HSplit,
@@ -373,8 +373,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
             # 留言
             user_word = rqd.word
-            user_word = re.sub(r"<#.*?>", "", user_word)
-            user_word_box = TextBox(user_word, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=3)
+            user_word_box = ColoredTextBox(
+                user_word, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=3
+            )
             user_word_box.set_wrap(True).set_bg(ui_bg).set_line_sep(2).set_padding((18, 16)).set_w(450)
 
             # 头衔

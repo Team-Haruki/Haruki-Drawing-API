@@ -1356,6 +1356,190 @@ class TextBox(Widget):
             p.restore_region()
 
 
+class ColoredTextBox(Widget):
+    def __init__(
+        self,
+        text: str = "",
+        style: TextStyle = None,
+        line_count: int | None = None,
+        line_sep: int = 2,
+        wrap: bool = True,
+        overflow: Literal["shrink", "clip"] = "clip",
+        use_real_line_count: bool = False,
+    ) -> None:
+        super().__init__()
+        self.text = str(text)
+        self.style = style or TextStyle()
+        self.line_count = line_count
+        self.line_sep = line_sep
+        self.wrap = wrap
+        assert overflow in ("shrink", "clip")
+        self.overflow = overflow
+        self.use_real_line_count = use_real_line_count
+        self.text_offset_x = 0
+        self.text_offset_y = 0
+
+        if line_count is None:
+            self.line_count = 99999 if use_real_line_count else 1
+
+        self.set_padding(2)
+        self.set_margin(0)
+
+    def set_text(self, text: str) -> Self:
+        self.text = text
+        return self
+
+    def set_style(self, style: TextStyle) -> Self:
+        self.style = style
+        return self
+
+    def set_line_count(self, count: int) -> Self:
+        self.line_count = count
+        return self
+
+    def set_line_sep(self, sep: int) -> Self:
+        self.line_sep = sep
+        return self
+
+    def set_wrap(self, wrap: bool) -> Self:
+        self.wrap = wrap
+        return self
+
+    def set_overflow(self, overflow: str) -> Self:
+        assert overflow in ("shrink", "clip")
+        self.overflow = overflow
+        return self
+
+    def set_text_offset(self, offset: tuple[int, int]) -> Self:
+        self.text_offset_x = offset[0]
+        self.text_offset_y = offset[1]
+        return self
+
+    def _get_pil_font(self) -> ImageFont:
+        return get_font(self.style.font, self.style.size)
+
+    def _get_font_desc(self) -> FontDesc:
+        return get_font_desc(self.style.font, self.style.size)
+
+    def _get_render_color(self, color: tuple[int, int, int] | None):
+        if color is None:
+            return self.style.color
+        alpha = self.style.color[3] if len(self.style.color) == 4 else 255
+        return (*color, alpha)
+
+    def _get_line_width(self, font: ImageFont, line: list[Seg]) -> int:
+        return sum(get_text_size(font, seg["text"])[0] for seg in line if seg["text"])
+
+    def _append_colored_text(self, line: list[Seg], text: str, color: tuple[int, int, int] | None) -> None:
+        if not text:
+            return
+        if line and line[-1]["color"] == color:
+            line[-1]["text"] += text
+        else:
+            line.append({"text": text, "color": color})
+
+    def _shrink_line_with_suffix(self, font: ImageFont, line: list[Seg], width: int, suffix: str = "...") -> None:
+        if width <= 0:
+            line.clear()
+            return
+
+        suffix_width, _ = get_text_size(font, suffix)
+        while line and self._get_line_width(font, line) + suffix_width > width:
+            line[-1]["text"] = line[-1]["text"][:-1]
+            if not line[-1]["text"]:
+                line.pop()
+
+        if not line and suffix_width > width:
+            return
+
+        suffix_color = line[-1]["color"] if line else None
+        self._append_colored_text(line, suffix, suffix_color)
+
+    def _get_lines(self) -> list[list[Seg]]:
+        font = self._get_pil_font()
+        max_width = self.w - self.h_padding * 2 if self.w else None
+        lines: list[list[Seg]] = [[]]
+        current_width = 0
+        truncated = False
+
+        # Wrap by visible characters so inline color changes survive line breaks.
+        for seg in parse_colored_text_segments(self.text):
+            color = seg["color"]
+            for ch in seg["text"]:
+                if ch == "\n":
+                    if len(lines) >= self.line_count:
+                        truncated = True
+                        break
+                    lines.append([])
+                    current_width = 0
+                    continue
+
+                ch_width, _ = get_text_size(font, ch)
+                if max_width is not None and current_width + ch_width > max_width and lines[-1]:
+                    if not self.wrap or len(lines) >= self.line_count:
+                        truncated = True
+                        break
+                    lines.append([])
+                    current_width = 0
+
+                self._append_colored_text(lines[-1], ch, color)
+                current_width += ch_width
+
+            if truncated:
+                break
+
+        lines = lines[: self.line_count]
+        if truncated and self.overflow == "shrink" and max_width is not None and lines:
+            self._shrink_line_with_suffix(font, lines[-1], max_width)
+        return lines
+
+    def _get_content_size(self) -> tuple[int, int]:
+        lines = self._get_lines()
+        w, h = 0, 0
+        font = self._get_pil_font()
+        for line in lines:
+            w = max(w, self._get_line_width(font, line))
+        line_count = len(lines) if self.use_real_line_count else self.line_count
+        h = line_count * (self.style.size + self.line_sep) - self.line_sep
+        if self.w:
+            w = self.w - self.h_padding * 2
+        if self.h:
+            h = self.h - self.v_padding * 2
+        return w, h
+
+    def _draw_content(self, p: Painter) -> None:
+        font = self._get_pil_font()
+        lines = self._get_lines()
+        text_h = (self.style.size + self.line_sep) * len(lines) - self.line_sep
+        start_y = None
+        if self.content_v_align == "t":
+            start_y = 0
+        elif self.content_v_align == "b":
+            start_y = p.h - text_h
+        elif self.content_v_align == "c":
+            start_y = (p.h - text_h) // 2
+        assert start_y is not None
+
+        for i, line in enumerate(lines):
+            line_width = self._get_line_width(font, line)
+            x = 0
+            if self.content_h_align == "r":
+                x += p.w - line_width
+            elif self.content_h_align == "c":
+                x += (p.w - line_width) // 2
+
+            y = start_y + i * (self.style.size + self.line_sep)
+            for seg in line:
+                text = seg["text"]
+                if not text:
+                    continue
+                seg_width, _ = get_text_size(font, text)
+                p.move_region((x, y), (seg_width, self.style.size))
+                p.text(text, (0, 0), font=self._get_font_desc(), fill=self._get_render_color(seg["color"]))
+                p.restore_region()
+                x += seg_width
+
+
 class ImageBox(Widget):
     def __init__(
         self,
@@ -1505,23 +1689,23 @@ class Canvas(Frame):
 
 # =========================== 控件函数 =========================== #
 class Seg(TypedDict):
-    text: str | None
+    text: str
     color: tuple[int, int, int] | None
 
 
-# 由带颜色代码的字符串获取彩色文本组件
-def colored_text_box(
-    s: str, style: TextStyle, padding=2, use_shadow=False, shadow_color=SHADOW, **text_box_kwargs
-) -> HSplit:
+def parse_colored_text_segments(s: str) -> list[Seg]:
+    raw_text = s
     try:
-        segs: list[Seg] = [{"text": None, "color": None}]
+        segs: list[Seg] = [{"text": "", "color": None}]
         while True:
             i = s.find("<#")
             if i == -1:
-                segs[-1]["text"] = s
+                segs[-1]["text"] += s
                 break
             j = s.find(">", i)
-            segs[-1]["text"] = s[:i]
+            if j == -1:
+                raise ValueError("颜色代码标签未闭合")
+            segs[-1]["text"] += s[:i]
             code = s[i + 2 : j]
             if len(code) == 6:
                 r, g, b = int(code[:2], 16), int(code[2:4], 16), int(code[4:], 16)
@@ -1529,10 +1713,18 @@ def colored_text_box(
                 r, g, b = int(code[0], 16) * 17, int(code[1], 16) * 17, int(code[2], 16) * 17
             else:
                 raise ValueError(f"颜色代码格式错误: {code}")
-            segs.append({"text": None, "color": (r, g, b)})
+            segs.append({"text": "", "color": (r, g, b)})
             s = s[j + 1 :]
     except Exception:
-        segs = [{"text": s, "color": None}]
+        return [{"text": raw_text, "color": None}]
+    return [seg for seg in segs if seg["text"]]
+
+
+# 由带颜色代码的字符串获取彩色文本组件
+def colored_text_box(
+    s: str, style: TextStyle, padding=2, use_shadow=False, shadow_color=SHADOW, **text_box_kwargs
+) -> HSplit:
+    segs = parse_colored_text_segments(s)
 
     with HSplit().set_padding(padding).set_sep(0) as hs:
         for seg in segs:
