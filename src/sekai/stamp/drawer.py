@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -22,6 +24,8 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 # =========================== 从.model导入数据类型 =========================== #
 from .model import StampListRequest
 
+logger = logging.getLogger(__name__)
+
 
 async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
     r"""compose_stamp_list_image\
@@ -38,7 +42,9 @@ async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
     PIL.Image.Image
     """
     stamps = rqd.stamps
+    _t0 = time.perf_counter()
     stamp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, stamp.image_path) for stamp in stamps])
+    logger.debug("[perf] compose_stamp_list_image preload %d images: %.3fs", len(stamps), time.perf_counter() - _t0)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(8).set_item_align("l").set_bg(roundrect_bg(alpha=80)).set_padding(8):
             TextBox(

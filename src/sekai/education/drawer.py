@@ -5,6 +5,8 @@ Education 模块绘图函数
 """
 
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -40,6 +42,8 @@ from .model import (
     LeaderCountRequest,
     PowerBonusDetailRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 # ========== 挑战Live详情 ==========
 
@@ -81,8 +85,13 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
         shard_icon = None
 
     # 预加载角色图标（并行）
+    _t0 = time.perf_counter()
     chara_icons = await asyncio.gather(
         *[get_img_from_path(ASSETS_BASE_DIR, ch.chara_icon_path) for ch in character_challenges]
+    )
+    logger.debug(
+        "[perf] compose_challenge_live_detail_image preload %d chara icons: %.3fs",
+        len(chara_icons), time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -210,6 +219,7 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
     text_style = TextStyle(font=DEFAULT_FONT, size=16, color=(100, 100, 100, 255))
 
     # 预加载所有图标（并行）
+    _t0 = time.perf_counter()
     _chara_icon_imgs = await asyncio.gather(
         *[get_img_from_path(ASSETS_BASE_DIR, b.chara_icon_path) for b in chara_bonuses]
     )
@@ -218,6 +228,11 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
     )
     _attr_icon_imgs = await asyncio.gather(
         *[get_img_from_path(ASSETS_BASE_DIR, b.attr_icon_path) for b in attr_bonuses]
+    )
+    logger.debug(
+        "[perf] compose_power_bonus_detail_image preload %d icons: %.3fs",
+        len(chara_bonuses) + len(unit_bonuses) + len(attr_bonuses),
+        time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -333,7 +348,12 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                 _all_icon_paths[mat.material_icon_path] = None
     _unique_paths = list(_all_icon_paths.keys())
     if _unique_paths:
+        _t0 = time.perf_counter()
         _loaded = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _unique_paths])
+        logger.debug(
+            "[perf] compose_area_item_upgrade_materials_image preload %d icons: %.3fs",
+            len(_unique_paths), time.perf_counter() - _t0,
+        )
         _icon_cache = dict(zip(_unique_paths, _loaded))
     else:
         _icon_cache = {}
@@ -444,7 +464,12 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
     for bond in bonds:
         _bond_icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path1))
         _bond_icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path2))
+    _t0 = time.perf_counter()
     _bond_icons = await asyncio.gather(*_bond_icon_tasks) if _bond_icon_tasks else []
+    logger.debug(
+        "[perf] compose_bonds_image preload %d bond icons: %.3fs",
+        len(_bond_icon_tasks), time.perf_counter() - _t0,
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -574,8 +599,13 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
     w1, w2, w3, w4, w5 = 80, 100, 100, 100, 350
 
     # 预加载所有角色图标（并行）
+    _t0 = time.perf_counter()
     _leader_icons = await asyncio.gather(
         *[get_img_from_path(ASSETS_BASE_DIR, info.chara_icon_path) for info in leader_counts]
+    )
+    logger.debug(
+        "[perf] compose_leader_count_image preload %d icons: %.3fs",
+        len(leader_counts), time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:

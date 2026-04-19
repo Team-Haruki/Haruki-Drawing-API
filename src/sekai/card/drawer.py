@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import math
+import time
 
 from src.sekai.base import (
     ASSETS_BASE_DIR,
@@ -44,6 +46,8 @@ NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
 TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
 FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
 
+logger = logging.getLogger(__name__)
+
 
 def is_non_limited_supply_type(value: str | None) -> bool:
     return (value or "").strip() in NON_LIMITED_SUPPLY_TYPES
@@ -80,7 +84,9 @@ async def compose_card_detail_image(
     ]
     if sp_skill_info:
         _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
+    _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks)
+    logger.debug("[perf] compose_card_detail_image preload %d images: %.3fs", len(_img_tasks), time.perf_counter() - _t0)
 
     _n_cards = len(rqd.card_images_path)
     _n_costumes = len(rqd.costume_images_path)

@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -28,6 +30,8 @@ from src.sekai.profile.drawer import (
     get_profile_card,
 )
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
+
+logger = logging.getLogger(__name__)
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -181,7 +185,13 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
 
     # 并行执行所有加载
     _dk = list(_deck_tasks.keys())
+    _t0 = time.perf_counter()
     _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks)
+    logger.debug(
+        "[perf] compose_deck_recommend_image preload %d items: %.3fs",
+        len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks),
+        time.perf_counter() - _t0,
+    )
     _di = dict(zip(_dk, _all_results[:len(_dk)]))
     _thumb_results = _all_results[len(_dk):len(_dk) + len(_card_thumb_tasks)]
     _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks):]

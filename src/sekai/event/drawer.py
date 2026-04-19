@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import math
+import time
 
 from PIL import Image
 
@@ -33,6 +35,8 @@ from src.sekai.profile.drawer import (
 )
 from src.settings import ASSETS_BASE_DIR
 
+logger = logging.getLogger(__name__)
+
 # 从 model.py 导入数据模型
 from .model import (
     EventDetailRequest,
@@ -46,7 +50,12 @@ from .model import (
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     detail = rqd.event_info
     now = request_now(rqd.timezone)
+    _t0 = time.perf_counter()
     card_thumbs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in rqd.event_cards])
+    logger.debug(
+        "[perf] compose_event_detail_image card thumbs %d: %.3fs",
+        len(rqd.event_cards), time.perf_counter() - _t0,
+    )
 
     if detail:
         banner_index = rqd.event_info.banner_index
@@ -78,7 +87,9 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
         for i, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
             _event_img_tasks[f"bonus_chara_{i}"] = get_img_from_path(ASSETS_BASE_DIR, chara_path)
     _ek = list(_event_img_tasks.keys())
+    _t0 = time.perf_counter()
     _ev = dict(zip(_ek, await asyncio.gather(*_event_img_tasks.values())))
+    logger.debug("[perf] compose_event_detail_image event images %d: %.3fs", len(_ek), time.perf_counter() - _t0)
     event_bg = _ev["bg"]
     event_chara_img = _ev.get("chara")
     event_logo = _ev["logo"]

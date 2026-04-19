@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -49,6 +51,8 @@ from .model import (
     MusicListRequest,
     PlayProgressRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 # =========================== 绘图助手 =========================== #
 
@@ -209,7 +213,12 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     _img_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _logo_paths]
     if rqd.event_banner_path:
         _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path))
+    _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
+    logger.debug(
+        "[perf] compose_music_detail_image preload %d images: %.3fs",
+        len(_img_tasks), time.perf_counter() - _t0,
+    )
     vocal_logos = {}
     for i, name_ in enumerate(_logo_names):
         if _img_results[i]:
@@ -517,7 +526,12 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 
     # 预加载封面
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
+    _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
+    logger.debug(
+        "[perf] compose_music_brief_list_image jackets %d: %.3fs",
+        len(jacket_tasks), time.perf_counter() - _t0,
+    )
     jackets = {m.id: img for m, img in zip(rqd.music_list, loaded_jackets)}
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -589,7 +603,9 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
     jackets = {}
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
+    _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
+    logger.debug("[perf] compose_music_list_image jackets %d: %.3fs", len(jacket_tasks), time.perf_counter() - _t0)
     for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
         jackets[music_id] = img
 

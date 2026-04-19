@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -31,6 +33,8 @@ from .model import (
     MusicMetaRequest,
     ScoreControlRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _calc_custom_room_title_width(
@@ -170,7 +174,12 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
             _cover_paths.add(m["music_cover"])
     _cover_list = list(_cover_paths)
     if _cover_list:
+        _t0 = time.perf_counter()
         _cover_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cover_list])
+        logger.debug(
+            "[perf] compose_custom_room_score_control_image preload %d covers: %.3fs",
+            len(_cover_list), time.perf_counter() - _t0,
+        )
         _cover_cache = dict(zip(_cover_list, _cover_imgs))
     else:
         _cover_cache = {}
@@ -292,7 +301,12 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
         歌曲Meta信息请求列表
     """
     # 预加载所有歌曲封面
+    _t0 = time.perf_counter()
     _meta_covers = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path) for rqd in requests])
+    logger.debug(
+        "[perf] compose_music_meta_image preload %d covers: %.3fs",
+        len(requests), time.perf_counter() - _t0,
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(8):

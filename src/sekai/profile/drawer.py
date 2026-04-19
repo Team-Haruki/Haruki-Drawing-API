@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 
 from PIL import Image, ImageDraw
 
@@ -212,6 +213,7 @@ async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | Non
     border2 = 80
     inner_w = w - 2 * border
 
+    _t0 = time.perf_counter()
     base, ct, lb, lt, rb, rt = await asyncio.gather(
         get_img_from_path(ASSETS_BASE_DIR, frame_paths.base),
         get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop),
@@ -220,6 +222,7 @@ async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | Non
         get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom),
         get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop),
     )
+    logger.debug("[perf] get_player_frame_image preload 6 parts: %.3fs", time.perf_counter() - _t0)
 
     ct = resize_keep_ratio(ct, scale, mode="scale")
     lt = resize_keep_ratio(lt, scale, mode="scale")
@@ -392,7 +395,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         ImageBox(img, size=(None, 48), shadow=True)
             # 卡组
             with HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0)):
+                _t0 = time.perf_counter()
                 card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in pcards])
+                logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(pcards), time.perf_counter() - _t0)
                 for i in range(len(card_imgs)):
                     ImageBox(card_imgs[i], size=(90, 90), image_size_mode="fill", shadow=True)
         return ret
@@ -403,11 +408,13 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             hs, vs, gw, gh = 8, 12, 90, 25
             with VSplit().set_sep(vs):
                 Spacer(gh, gh)
+                _t0 = time.perf_counter()
                 icon_clear, icon_fc, icon_ap = await asyncio.gather(
                     get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path),
                     get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path),
                     get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path),
                 )
+                logger.debug("[perf] draw_play play icons 3: %.3fs", time.perf_counter() - _t0)
                 ImageBox(icon_clear, size=(gh, gh))
                 ImageBox(icon_fc, size=(gh, gh))
                 ImageBox(icon_ap, size=(gh, gh))
@@ -451,7 +458,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             if p and p not in _chara_paths:
                 _chara_paths[p] = p
         _cp_list = list(_chara_paths.keys())
+        _t0 = time.perf_counter()
         _cp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cp_list]) if _cp_list else []
+        logger.debug("[perf] draw_chara chara icons %d: %.3fs", len(_cp_list), time.perf_counter() - _t0)
         _chara_icon_cache = dict(zip(_cp_list, _cp_imgs))
 
         with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
