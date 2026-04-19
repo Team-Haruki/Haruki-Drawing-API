@@ -1,6 +1,14 @@
 from PIL import Image
 
-from src.sekai.base.draw import BG_PADDING, DIFF_COLORS, SEKAI_BLUE_BG, Canvas, TextBox, add_request_watermark, roundrect_bg
+from src.sekai.base.draw import (
+    BG_PADDING,
+    DIFF_COLORS,
+    SEKAI_BLUE_BG,
+    Canvas,
+    TextBox,
+    add_request_watermark,
+    roundrect_bg,
+)
 from src.sekai.base.painter import WHITE
 from src.sekai.base.plot import (
     FillBg,
@@ -456,7 +464,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 color = (50, 150, 50) if dlt > 0 else (150, 50, 50)
                                                 TextBox(
                                                     f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)
-                                                ).set_w(score_col_w).set_content_align("r").set_offset(
+                                                ).set_w(score_col_w).set_content_align("c").set_offset(
                                                     (0, -8 - voffset * 2)
                                                 )
                                             # 算法
@@ -481,7 +489,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             with Frame().set_content_align("c"):
                                                 TextBox(str(score), tb_style).set_w(score_col_w).set_h(
                                                     gh
-                                                ).set_content_align("r").set_offset((0, -voffset))
+                                                ).set_content_align("c").set_offset((0, -voffset))
 
                             # 卡片
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
@@ -607,12 +615,12 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             if bonus is not None:
                                                 TextBox(
                                                     bonus, TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150))
-                                                ).set_w(bonus_col_w).set_content_align("r").set_offset(
+                                                ).set_w(bonus_col_w).set_content_align("c").set_offset(
                                                     (0, -6 - voffset * 2)
                                                 )
                                             with Frame().set_content_align("c"):
                                                 TextBox(total, tb_style).set_w(bonus_col_w).set_h(gh).set_content_align(
-                                                    "r"
+                                                    "c"
                                                 ).set_offset((0, -voffset))
 
                             # 实效
@@ -630,13 +638,13 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 TextBox(
                                                     teammate_text,
                                                     TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_w(skill_col_w).set_content_align("r").set_offset(
+                                                ).set_w(skill_col_w).set_content_align("c").set_offset(
                                                     (0, -8 - voffset * 2)
                                                 )
                                             with Frame().set_content_align("c"):
                                                 TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_w(
                                                     skill_col_w
-                                                ).set_h(gh).set_content_align("r").set_offset((0, -voffset))
+                                                ).set_h(gh).set_content_align("c").set_offset((0, -voffset))
 
                             # 综合力和算法
                             if recommend_type not in ["bonus", "wl_bonus"]:
@@ -653,13 +661,13 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 TextBox(
                                                     teammate_text,
                                                     TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_w(power_col_w).set_content_align("r").set_offset(
+                                                ).set_w(power_col_w).set_content_align("c").set_offset(
                                                     (0, -8 - voffset * 2)
                                                 )
                                             with Frame().set_content_align("c"):
                                                 TextBox(str(deck.total_power), tb_style).set_w(power_col_w).set_h(
                                                     gh
-                                                ).set_content_align("r").set_offset((0, -voffset))
+                                                ).set_content_align("c").set_offset((0, -voffset))
                     # 找不到结果
                     else:
                         TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
