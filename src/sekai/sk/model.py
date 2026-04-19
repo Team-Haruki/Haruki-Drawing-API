@@ -288,6 +288,50 @@ class CFRequest(TimeZoneRequest):
         self.update_at = localize_datetime(self.update_at, self.timezone)
 
 
+class CSBRequest(TimeZoneRequest):
+    r"""CSBRequest
+
+    绘制查水表热力图图片所必需的数据
+
+    Attributes
+    ----------
+    eid : int
+        活动ID
+    event_name : str
+        活动名称
+    region : str
+        服务器区域
+    ranks : list[RankInfo]
+        玩家轨迹数据
+    aggregate_at : int
+        活动结束时间戳
+    update_at : datetime
+        数据更新时间
+    wl_chara_icon_path : str | None
+        World Link角色图标路径
+    """
+
+    eid: int
+    event_name: str
+    region: str
+    ranks: list[RankInfo]
+    aggregate_at: int
+    update_at: datetime
+    wl_chara_icon_path: str | None = None
+
+    @field_validator("update_at", mode="before")
+    @classmethod
+    def parse_datetime_fields(cls, value):
+        return parse_datetime_utc(value)
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        for item in self.ranks:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        self.update_at = localize_datetime(self.update_at, self.timezone)
+
+
 class SpeedRequest(TimeZoneRequest):
     r"""SpeedRequest
 
