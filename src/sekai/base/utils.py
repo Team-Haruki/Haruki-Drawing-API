@@ -453,6 +453,62 @@ async def get_img_resized(
         raise
 
 
+def _contain_resize(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
+    """Resize image to fit within (max_w, max_h) keeping aspect ratio (contain mode)."""
+    w, h = img.size
+    scale = min(max_w / w, max_h / h)
+    new_w, new_h = int(w * scale), int(h * scale)
+    if (new_w, new_h) == (w, h):
+        return img
+    return img.resize((new_w, new_h))
+
+
+def _load_image_contain_resized_sync(
+    base_path: Path, path: str, max_w: int, max_h: int
+) -> Image.Image:
+    """加载图片并 contain-resize，结果缓存（key 使用负值 max 尺寸以区分 exact resize）。"""
+    full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+
+    # 使用负值区分 contain resize 与 exact resize
+    cache_tw, cache_th = -max_w, -max_h
+    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+        cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, cache_tw, cache_th)
+        if cached is not None:
+            return cached
+
+    loaded = _open_image_copy(full_path)
+    resized = _contain_resize(loaded, max_w, max_h)
+    if resized is not loaded:
+        loaded.close()
+
+    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+        ret = resized.copy()
+        _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, cache_tw, cache_th)
+        return ret
+
+    return resized
+
+
+def batch_load_and_contain_resize(
+    base_path: Path,
+    paths: list[str],
+    max_w: int,
+    max_h: int,
+) -> dict[str, Image.Image]:
+    """批量加载图片并 contain-resize 到 (max_w, max_h)，结果缓存。
+
+    同步函数，设计用于 run_in_pool 中执行。
+    """
+    result: dict[str, Image.Image] = {}
+    for path in paths:
+        try:
+            result[path] = _load_image_contain_resized_sync(base_path, path, max_w, max_h)
+        except (FileNotFoundError, OSError):
+            img = _get_missing_placeholder_image(path)
+            result[path] = _contain_resize(img, max_w, max_h)
+    return result
+
+
 def get_str_display_length(s: str) -> int:
     """
     获取字符串的显示长度，中文字符算两个字符
