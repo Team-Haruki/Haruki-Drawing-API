@@ -7,7 +7,7 @@ from src.sekai.base.draw import (
     DIFF_COLORS,
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -442,7 +442,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                 else:
                     draw_vocal(964)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -516,7 +516,7 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                                         roundrect_bg(fill=DIFF_COLORS.get(diff_name, BLACK), radius=12)
                                     )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -592,7 +592,7 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
                                         64
                                     )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -704,7 +704,7 @@ async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
                             roundrect_bg(alpha=80)
                         )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -818,7 +818,7 @@ async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> 
                                     acc += combo_reward.reward
                                     TextBox(str(acc), style2, overflow="clip").set_size((gw, gh)).set_content_align("l")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -894,5 +894,5 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
                                 rqd.combo_rewards[diff], jewel_icon if diff != "append" else shard_icon, style2
                             ).set_size((None, gh))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

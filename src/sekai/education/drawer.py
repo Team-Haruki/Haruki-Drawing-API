@@ -11,7 +11,7 @@ from src.sekai.base.draw import (
     SEKAI_BLUE_BG,
     Canvas,
     TextStyle,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.plot import (
@@ -164,7 +164,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
                         TextBox(jewel_text, text_style).set_w(w5).set_content_align("c")
                         TextBox(shard_text, text_style).set_w(w6).set_content_align("c")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -247,7 +247,7 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                                 "clip"
                             )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -373,7 +373,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                                             text = f"{have_text}/{sum_text}" if has_profile else f"{sum_text}"
                                             TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -500,7 +500,7 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
 
                         TextBox(need_exp_text, text_style).set_w(w5).set_content_align("c")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -619,5 +619,5 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
                                     RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)
                                 )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

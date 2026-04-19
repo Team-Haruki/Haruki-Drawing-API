@@ -6,8 +6,10 @@ Honor 模块数据模型
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 
-class HonorRequest(BaseModel):
+
+class HonorRequest(TimeZoneRequest):
     """称号绘制请求
 
     Attributes

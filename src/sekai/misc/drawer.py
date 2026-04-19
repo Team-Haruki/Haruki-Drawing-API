@@ -4,7 +4,7 @@ from src.sekai.base.draw import (
     BG_PADDING,
     Canvas,
     TextBox,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import ADAPTIVE_WB, color_code_to_rgb
@@ -160,5 +160,5 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
                             b.set_bg(roundrect_bg(radius=8))
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

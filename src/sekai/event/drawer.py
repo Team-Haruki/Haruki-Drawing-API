@@ -7,7 +7,7 @@ from src.sekai.base.draw import (
     CHARACTER_COLOR_CODE,
     SEKAI_BLUE_BG,
     WIDGET_BG_COLOR,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, color_code_to_rgb
@@ -210,7 +210,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                 for image in bonus_chara_image:
                                     ImageBox(image, size=(None, 40))
 
-        add_watermark(canvas)
+        add_request_watermark(canvas, rqd)
         return await canvas.get_img()
 
     return await draw(w, h)
@@ -300,7 +300,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                 if user_wl_events:
                     await draw_events("WL单榜", user_wl_events)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -363,6 +363,6 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                                 if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
                                     Spacer(w=24, h=24)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
 
     return await canvas.get_img()

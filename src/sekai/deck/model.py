@@ -6,6 +6,7 @@ Deck 模块数据模型
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
@@ -104,7 +105,7 @@ class DeckData(BaseModel):
     multi_live_score_up: float | None = None
 
 
-class DeckRequest(BaseModel):
+class DeckRequest(TimeZoneRequest):
     """组卡推荐绘制请求
 
     Attributes
@@ -228,6 +229,10 @@ class DeckRequest(BaseModel):
     fixed_characters_id: list[int] | None = None
     cost_times: dict | None = None
     wait_times: dict | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # 兼容性别名

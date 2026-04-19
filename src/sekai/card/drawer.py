@@ -7,7 +7,7 @@ from src.sekai.base import (
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     color_code_to_rgb,
     get_img_from_path,
     roundrect_bg,
@@ -273,7 +273,7 @@ async def compose_card_detail_image(
                                 for img in costume_images:
                                     ImageBox(img, size=(80, None))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -416,7 +416,7 @@ async def compose_card_list_image(
                                     id_text += f"【{card.supply_type}】"
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -614,5 +614,5 @@ async def compose_box_image(
                             for card_data in cards:
                                 draw_card(card_data)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

@@ -2,8 +2,10 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 
-class GenerateMusicChartRequest(BaseModel):
+
+class GenerateMusicChartRequest(TimeZoneRequest):
     r"""GenerateMusicChartRequest
 
     生成谱面图片所必需的数据

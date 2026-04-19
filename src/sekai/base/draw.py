@@ -1,7 +1,11 @@
+from PIL import Image, ImageDraw
+
 from .painter import (
     DEFAULT_FONT,
     Color,
     LinearGradient,
+    get_font,
+    get_text_size,
 )
 from .plot import (
     Canvas,
@@ -11,6 +15,7 @@ from .plot import (
     TextBox,
     TextStyle,
 )
+from .timezone import datetime_from_millis, request_now
 
 SEKAI_BLUE_BG = RandomTriangleBg(True)
 SEKAI_RED_BG = RandomTriangleBg(False, main_hue=0.05)
@@ -134,3 +139,51 @@ def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     frame_watermark.add_item(text2)
     frame_watermark.add_item(text1)
     canvas.add_item(frame_watermark).set_size(None)
+
+
+def build_request_watermark_text(request, extra_suffix: str | None = None) -> str:
+    timezone_name = None
+    dt_value = None
+    if isinstance(request, list | tuple):
+        for item in request:
+            timezone_name = getattr(item, "timezone", None)
+            dt_value = getattr(item, "dt", None)
+            if timezone_name is not None or dt_value is not None:
+                break
+    else:
+        timezone_name = getattr(request, "timezone", None)
+        dt_value = getattr(request, "dt", None)
+
+    text = DEFAULT_WATERMARK
+    if timezone_name is not None or dt_value is not None:
+        dt = datetime_from_millis(dt_value, timezone_name)
+        if dt is None:
+            dt = request_now(timezone_name)
+        text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')}  {text}"
+
+    suffix = (extra_suffix or "").strip()
+    if suffix:
+        text = f"{text}  {suffix}"
+    return text
+
+
+def add_request_watermark(canvas: Canvas, request, extra_suffix: str | None = None, size=12):
+    add_watermark(canvas, build_request_watermark_text(request, extra_suffix=extra_suffix), size=size)
+
+
+def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, size=12) -> Image.Image:
+    if image.mode != "RGBA":
+        image = image.convert("RGBA")
+    image = image.copy()
+    draw = ImageDraw.Draw(image)
+    font = get_font(DEFAULT_FONT, size)
+    text_w, text_h = get_text_size(font, text)
+    x = max(0, image.width - text_w - int(16 - BG_PADDING * 0.5))
+    y = max(0, image.height - text_h - 16)
+    draw.text((x + 1, y + 1), text, font=font, fill=(75, 75, 75, 255))
+    draw.text((x, y), text, font=font, fill=(255, 255, 255, 255))
+    return image
+
+
+def add_request_watermark_to_image(image: Image.Image, request, extra_suffix: str | None = None, size=12) -> Image.Image:
+    return add_watermark_to_image(image, build_request_watermark_text(request, extra_suffix=extra_suffix), size=size)

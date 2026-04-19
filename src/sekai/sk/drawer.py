@@ -16,7 +16,7 @@ from PIL import Image
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
@@ -339,7 +339,7 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
             else:
                 TextBox("暂无榜线数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -417,7 +417,7 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
                 for text, style in texts:
                     TextBox(text, style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(1.5)
 
 
@@ -544,7 +544,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
                 for text, style in texts:
                     TextBox(text, style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(1.5)
 
 
@@ -633,7 +633,7 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
             else:
                 TextBox("暂无时速数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -796,7 +796,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             ):
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -930,7 +930,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_bg(roundrect_bg()).set_padding(8):
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -1018,5 +1018,5 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
                                     TextStyle(font=DEFAULT_FONT, size=28, color=(100, 25, 75, 255)),
                                 )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(2.0)

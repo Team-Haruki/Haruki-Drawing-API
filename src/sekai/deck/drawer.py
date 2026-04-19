@@ -1,6 +1,6 @@
 from PIL import Image
 
-from src.sekai.base.draw import BG_PADDING, DIFF_COLORS, SEKAI_BLUE_BG, Canvas, TextBox, add_watermark, roundrect_bg
+from src.sekai.base.draw import BG_PADDING, DIFF_COLORS, SEKAI_BLUE_BG, Canvas, TextBox, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import WHITE
 from src.sekai.base.plot import (
     FillBg,
@@ -686,5 +686,5 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                             use_real_line_count=True,
                         ).set_w(note_text_width)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

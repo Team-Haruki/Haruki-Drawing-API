@@ -5,7 +5,7 @@ from src.sekai.base.draw import (
     SEKAI_BLUE_BG,
     Canvas,
     TextBox,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.plot import (
@@ -57,5 +57,5 @@ async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
                     rqd.page_message,
                     style=TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
                 ).set_padding((0, 8)).set_content_align("c").set_w(620)
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

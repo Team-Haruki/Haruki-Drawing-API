@@ -5,7 +5,7 @@ from PIL import Image
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -152,7 +152,7 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             TextBox(f"S {g.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -375,5 +375,5 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
                                 TextBox(rate_text, text_style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

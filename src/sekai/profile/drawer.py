@@ -5,11 +5,10 @@ from PIL import Image, ImageDraw
 
 from src.sekai.base.draw import (
     BG_PADDING,
-    DEFAULT_WATERMARK,
     DIFF_COLORS,
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -495,14 +494,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 (await draw_play()).set_bg(None)
                 (await draw_chara()).set_bg(None)
 
-    if rqd.update_time:
-        update_time = datetime_from_millis(rqd.update_time, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        update_time = "?"
-    text = f"DT: {update_time}  " + DEFAULT_WATERMARK
-    if bg_settings.img_path:
-        text = text + "  This background is user-uploaded."
-    add_watermark(canvas, text)
+    add_request_watermark(
+        canvas,
+        rqd,
+        extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
+    )
     return await canvas.get_img(1.5)
 
 

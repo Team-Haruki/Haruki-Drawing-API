@@ -6,7 +6,7 @@ from src.sekai.base.draw import (
     SEKAI_BLUE_BG,
     Canvas,
     TextBox,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import BLACK, WHITE, get_font, get_text_size
@@ -138,7 +138,7 @@ async def compose_score_control_image(
                                 TextBox(f"{score_min}", style2).set_bg(bg).set_size((gw3, gh)).set_content_align("r")
                                 TextBox(f"{score_max}", style2).set_bg(bg).set_size((gw4, gh)).set_content_align("r")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -262,7 +262,7 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                             (8, 0)
                         ).set_bg(bg)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -394,7 +394,7 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
                                     TextBox("（多人）", style1)
                                     TextBox(f" {multi_skill_account * 100:.1f}%", style2)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, requests)
     return await canvas.get_img()
 
 
@@ -555,5 +555,5 @@ async def compose_music_board_image(
                 add_text_column("时长", lambda r: f"{r.music_time:.1f}")
                 add_text_column("每秒点击", lambda r: f"{r.tps:.1f}")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

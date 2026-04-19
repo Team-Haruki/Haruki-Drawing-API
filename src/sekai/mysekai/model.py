@@ -292,7 +292,7 @@ class MysekaiMsrMapData(BaseModel):
     resource_drops: list[MysekaiMsrMapResourceDrop] = []
 
 
-class MysekaiMsrMapRequest(BaseModel):
+class MysekaiMsrMapRequest(TimeZoneRequest):
     r"""MysekaiMsrMapRequest
 
     绘制MSR地图所需数据
@@ -412,7 +412,7 @@ class MysekaiFixtureMainGenre(BaseModel):
     sub_genres: list[MysekaiFixtureSubGenre] = []
 
 
-class MysekaiFixtureListRequest(BaseModel):
+class MysekaiFixtureListRequest(TimeZoneRequest):
     r"""MysekaiFixtureListRequest
 
     绘制我的世界家具列表图片所必需的数据
@@ -433,6 +433,10 @@ class MysekaiFixtureListRequest(BaseModel):
     progress_message: str | None = None
     show_id: bool = False
     main_genres: list[MysekaiFixtureMainGenre] = []
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # =========================== 绘制家具详情 =========================== #
@@ -494,7 +498,7 @@ class MysekaiReactionCharacterGroups(BaseModel):
     chara_icon_path_groups: list[list[str]] | None = None
 
 
-class MysekaiFixtureDetailRequest(BaseModel):
+class MysekaiFixtureDetailRequest(TimeZoneRequest):
     r"""MysekaiFixtureDetailRequest
 
     绘制我的世界家具详细信息所必需的数据
@@ -619,7 +623,7 @@ class MysekaiGateMaterials(BaseModel):
     level_materials: list[MysekaiGateLevelMaterials]
 
 
-class MysekaiDoorUpgradeRequest(BaseModel):
+class MysekaiDoorUpgradeRequest(TimeZoneRequest):
     r"""MysekaiDoorUpgradeRequest
 
     绘制我的世界大门升级图所必须的数据
@@ -634,6 +638,10 @@ class MysekaiDoorUpgradeRequest(BaseModel):
 
     profile: ProfileCardRequest | None = None
     gate_materials: list[MysekaiGateMaterials]
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # =========================== 绘制唱片列表 =========================== #
@@ -680,7 +688,7 @@ class MysekaiCategoryMusicrecord(BaseModel):
     musicrecords: list[MysekaiMusicrecord]
 
 
-class MysekaiMusicrecordRequest(BaseModel):
+class MysekaiMusicrecordRequest(TimeZoneRequest):
     r"""MysekaiMusicrecordRequest
 
     绘制我的世界唱片收集图所必需的数据
@@ -698,6 +706,10 @@ class MysekaiMusicrecordRequest(BaseModel):
     profile: ProfileCardRequest
     progress_message: str | None = None
     category_musicrecords: list[MysekaiCategoryMusicrecord]
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # =========================== 绘制角色对话列表 =========================== #
@@ -744,7 +756,7 @@ class MysekaiSingleTalkMainGenre(BaseModel):
     sub_genres: list[list[MysekaiTalkFixtures]] = []
 
 
-class MysekaiTalkListRequest(BaseModel):
+class MysekaiTalkListRequest(TimeZoneRequest):
     r"""MysekaiTalkListRequest
 
     绘制我的世界对话列表所必需的数据
@@ -775,6 +787,10 @@ class MysekaiTalkListRequest(BaseModel):
     show_id: bool = False
     single_main_genres: list[MysekaiSingleTalkMainGenre] = []
     multi_reads: list[MysekaiTalkFixtures] = []
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # 各团代表色，没有VS团！
