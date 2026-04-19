@@ -28,10 +28,19 @@ OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
 RECOMMEND_ALG_NAMES = {
     "dfs": "暴力搜索",
+    "DFS": "暴力搜索",
     "sa": "模拟退火",
+    "SA": "模拟退火",
     "ga": "遗传算法",
+    "GA": "遗传算法",
     "dfs_ga": "DFS 预热遗传",
+    "dfs-ga": "DFS 预热遗传",
+    "dga": "DFS 预热遗传",
+    "DGA": "DFS 预热遗传",
     "rl": "强化学习",
+    "RL": "强化学习",
+    "all": "全部算法",
+    "ALL": "全部算法",
 }
 
 BOOST_BONUS_DICT = {
@@ -50,7 +59,38 @@ BOOST_BONUS_DICT = {
 
 
 def format_skill_rate(rate: float) -> str:
-    return str(int(rate)) if int(rate) == rate else f"{rate:.1f}"
+    normalized = round(rate, 1)
+    return str(int(normalized)) if float(int(normalized)) == normalized else f"{normalized:.1f}"
+
+
+def format_algorithm_label(alg: str | None) -> str:
+    if not alg:
+        return ""
+
+    short_names = {
+        "dfs": "DFS",
+        "sa": "SA",
+        "ga": "GA",
+        "dfs_ga": "DGA",
+        "dfs-ga": "DGA",
+        "dga": "DGA",
+        "rl": "RL",
+        "all": "ALL",
+    }
+    parts = [part.strip() for part in alg.replace("＋", "+").split("+") if part.strip()]
+    labels = [short_names.get(part.lower(), part.upper()) for part in parts]
+    return "+".join(labels)
+
+
+def algorithm_label_font_size(alg: str | None) -> int:
+    label = format_algorithm_label(alg)
+    if len(label) <= 8:
+        return 12
+    if len(label) <= 11:
+        return 11
+    if len(label) <= 14:
+        return 10
+    return 9
 
 
 def format_skill_order_text(strategy: str | None) -> str:
@@ -318,10 +358,11 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
 
                 # 表格
                 gh, vsp, voffset = 120, 12, 18
-                score_col_w = 96
+                score_col_w = 112
                 bonus_col_w = 102
                 skill_col_w = 92
                 power_col_w = 100
+                card_col_w = 96
                 note_text_width = 920 if music_compare else 760
                 with (
                     VSplit()
@@ -415,11 +456,17 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 color = (50, 150, 50) if dlt > 0 else (150, 50, 50)
                                                 TextBox(
                                                     f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)
-                                                ).set_w(score_col_w).set_content_align("r").set_offset((0, -8 - voffset * 2))
+                                                ).set_w(score_col_w).set_content_align("r").set_offset(
+                                                    (0, -8 - voffset * 2)
+                                                )
                                             # 算法
                                             TextBox(
-                                                alg.upper(),
-                                                TextStyle(font=DEFAULT_FONT, size=12, color=(125, 125, 125)),
+                                                format_algorithm_label(alg),
+                                                TextStyle(
+                                                    font=DEFAULT_FONT,
+                                                    size=algorithm_label_font_size(alg),
+                                                    color=(125, 125, 125),
+                                                ),
                                             ).set_w(score_col_w).set_content_align("c").set_offset(
                                                 (0, -8 - voffset * 2 + alg_offset)
                                             )
@@ -432,9 +479,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             if boost is not None and target_score:
                                                 score = int(score * boost_bonus)
                                             with Frame().set_content_align("c"):
-                                                TextBox(str(score), tb_style).set_w(score_col_w).set_h(gh).set_content_align(
-                                                    "r"
-                                                ).set_offset((0, -voffset))
+                                                TextBox(str(score), tb_style).set_w(score_col_w).set_h(
+                                                    gh
+                                                ).set_content_align("r").set_offset((0, -voffset))
 
                             # 卡片
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
@@ -455,9 +502,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 .set_item_align("c")
                                                 .set_sep(4)
                                                 .set_padding(0)
-                                                .set_h(gh)
+                                                .set_size((card_col_w, gh))
                                             ):
-                                                with Frame().set_content_align("rt"):
+                                                with Frame().set_w(card_col_w).set_content_align("c"):
                                                     card_key = card_id
                                                     ImageBox(card_imgs[card_key], size=(None, 80))
                                                     if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
@@ -481,6 +528,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 info_bg = RoundRectBg((255, 255, 255, 150), 2)
                                                 with (
                                                     HSplit()
+                                                    .set_w(card_col_w)
                                                     .set_content_align("c")
                                                     .set_item_align("c")
                                                     .set_sep(3)
@@ -497,6 +545,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
 
                                                 with (
                                                     HSplit()
+                                                    .set_w(card_col_w)
                                                     .set_content_align("c")
                                                     .set_item_align("c")
                                                     .set_sep(3)
