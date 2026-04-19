@@ -176,6 +176,14 @@ def _build_music_detail_leaderboard_cell(
     return Frame().set_bg(FillBg(bg_color)).set_size((width, height)).add_draw_func(_draw_text)
 
 
+def _ordered_music_detail_leaderboard_keys(label_map: dict[str, str] | None, preferred_order: tuple[str, ...]) -> list[str]:
+    if not label_map:
+        return []
+    ordered = [key for key in preferred_order if key in label_map]
+    ordered.extend(key for key in label_map if key not in preferred_order)
+    return ordered
+
+
 async def compose_music_detail_image(rqd: MusicDetailRequest):
     # 数据准备
     mid = rqd.music_info.id
@@ -355,8 +363,12 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
 
                     # 排行榜
                     if rqd.leaderboard_matrix and rqd.leaderboard_live_types and rqd.leaderboard_targets:
-                        live_type_keys = list(rqd.leaderboard_live_types.keys())
-                        target_keys = list(rqd.leaderboard_targets.keys())
+                        live_type_keys = _ordered_music_detail_leaderboard_keys(
+                            rqd.leaderboard_live_types, ("solo", "multi", "auto")
+                        )
+                        target_keys = _ordered_music_detail_leaderboard_keys(
+                            rqd.leaderboard_targets, ("score", "pt", "pt/time")
+                        )
                         leaderboard_music_num = rqd.leaderboard_music_num or 1
 
                         th_w, th_h = 60, 36
