@@ -15,14 +15,14 @@
 
 ### 问题列表
 
-| 级别 | 位置 | 描述 |
-|------|------|------|
-| HIGH | `base/utils.py` | `tmp/` 目录下的临时文件永不清理，随时间无限增长 |
-| HIGH | `base/utils.py` | `ThreadPoolExecutor` / `ProcessPoolExecutor` 在应用退出时从未 `.shutdown()` |
-| HIGH | `base/painter.py` | `Painter.get()` 里异常路径不执行 `finally`，线程本地 Painter 对象可能永久残留 |
-| MEDIUM | `base/painter.py` | 字体缓存每线程最大 128 条，而自由线程模式下线程数可达 32+，总内存占用大 |
-| MEDIUM | `base/painter.py` | `diskcache.Cache` 磁盘缓存从不清理过期条目 |
-| LOW | `sk/drawer.py` | SK 图表使用的额外资源在进程存续期间永久持有 |
+| 级别     | 位置                | 描述                                                                  |
+|--------|-------------------|---------------------------------------------------------------------|
+| HIGH   | `base/utils.py`   | `tmp/` 目录下的临时文件永不清理，随时间无限增长                                         |
+| HIGH   | `base/utils.py`   | `ThreadPoolExecutor` / `ProcessPoolExecutor` 在应用退出时从未 `.shutdown()` |
+| HIGH   | `base/painter.py` | `Painter.get()` 里异常路径不执行 `finally`，线程本地 Painter 对象可能永久残留            |
+| MEDIUM | `base/painter.py` | 字体缓存每线程最大 128 条，而自由线程模式下线程数可达 32+，总内存占用大                            |
+| MEDIUM | `base/painter.py` | `diskcache.Cache` 磁盘缓存从不清理过期条目                                      |
+| LOW    | `sk/drawer.py`    | SK 图表使用的额外资源在进程存续期间永久持有                                             |
 
 ### 修复方案
 
@@ -144,19 +144,19 @@ with Grid():
 
 ### 各文件改动摘要
 
-| 文件 | 主要改动 | 估计加速 |
-|------|---------|---------|
-| `misc/drawer.py` | 3 个独立 await + 列表推导 → 1 次 gather | ~3× |
-| `stamp/drawer.py` | 所有印章图片进树前预加载 | ~N× (N=印章数) |
-| `education/drawer.py` | 5 个函数各自预加载图标（jewel/shard/chara/unit/attr/bond/leader） | ~2–5× |
-| `music/drawer.py` | 声乐 logo + 活动 banner 并行 gather | ~2× |
-| `score/drawer.py` | 曲目封面 + Meta 封面并行预加载 | ~N× |
-| `card/drawer.py` | 卡面/服装/缩略图/图标合并为单次 gather；列表缩略图 gather | ~5–8× |
-| `event/drawer.py` | 卡牌缩略图 + 活动图片全部 gather 到字典 | ~4–6× |
-| `deck/drawer.py` | 条件图标 + 卡牌缩略图 + 对比封面合并为单次 gather | ~3–5× |
-| `profile/drawer.py` | 框架部件 / 卡牌缩略图 / 播放图标 / 角色排名图标全部 gather | ~3–6× |
-| `gacha/drawer.py` | 列表 logo 预加载；详情（logo/banner/cost icon/卡牌/稀有度图）预加载 | ~5–8× |
-| `mysekai/drawer.py` | 天气/到访角色/地区资源/家具/大门升级材料全部预加载；genre/tag/misc 图标循环并行化 | ~3–10× |
+| 文件                    | 主要改动                                                  | 估计加速        |
+|-----------------------|-------------------------------------------------------|-------------|
+| `misc/drawer.py`      | 3 个独立 await + 列表推导 → 1 次 gather                       | ~3×         |
+| `stamp/drawer.py`     | 所有印章图片进树前预加载                                          | ~N× (N=印章数) |
+| `education/drawer.py` | 5 个函数各自预加载图标（jewel/shard/chara/unit/attr/bond/leader） | ~2–5×       |
+| `music/drawer.py`     | 声乐 logo + 活动 banner 并行 gather                         | ~2×         |
+| `score/drawer.py`     | 曲目封面 + Meta 封面并行预加载                                   | ~N×         |
+| `card/drawer.py`      | 卡面/服装/缩略图/图标合并为单次 gather；列表缩略图 gather                 | ~5–8×       |
+| `event/drawer.py`     | 卡牌缩略图 + 活动图片全部 gather 到字典                             | ~4–6×       |
+| `deck/drawer.py`      | 条件图标 + 卡牌缩略图 + 对比封面合并为单次 gather                       | ~3–5×       |
+| `profile/drawer.py`   | 框架部件 / 卡牌缩略图 / 播放图标 / 角色排名图标全部 gather                 | ~3–6×       |
+| `gacha/drawer.py`     | 列表 logo 预加载；详情（logo/banner/cost icon/卡牌/稀有度图）预加载      | ~5–8×       |
+| `mysekai/drawer.py`   | 天气/到访角色/地区资源/家具/大门升级材料全部预加载；genre/tag/misc 图标循环并行化    | ~3–10×      |
 
 ### 重要注意事项
 
@@ -186,5 +186,6 @@ with Grid():
 
 ```python
 import logging
+
 logging.getLogger("src.sekai.card.drawer").setLevel(logging.DEBUG)
 ```
