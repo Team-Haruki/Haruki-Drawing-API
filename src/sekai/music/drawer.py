@@ -142,24 +142,25 @@ def _build_music_detail_leaderboard_cell(
     rank_font_size = 18
     value_font_size = 12
     rank_font = get_font(DEFAULT_BOLD_FONT, rank_font_size)
-    value_font = get_font(DEFAULT_FONT, value_font_size)
     rank_font_desc = get_font_desc(DEFAULT_BOLD_FONT, rank_font_size)
     value_font_desc = get_font_desc(DEFAULT_FONT, value_font_size)
     text_color = (50, 50, 50)
+    rank_area_x = padding
+    rank_area_w = rank_box_w
+    value_area_x = padding + rank_box_w + gap
 
     def _draw_text(_, p):
         if value_text:
-            value_w, _ = get_text_size(value_font, value_text)
-            value_x = max(width - padding - value_w, padding + rank_box_w + gap)
+            rank_w, _ = get_text_size(rank_font, rank_text)
             p.text(
                 rank_text,
-                (padding, (height - rank_font_size) // 2),
+                (rank_area_x + max(0, (rank_area_w - rank_w) // 2), (height - rank_font_size) // 2),
                 font=rank_font_desc,
                 fill=rank_color,
             )
             p.text(
                 value_text,
-                (value_x, (height - value_font_size) // 2),
+                (value_area_x, (height - value_font_size) // 2),
                 font=value_font_desc,
                 fill=text_color,
             )
