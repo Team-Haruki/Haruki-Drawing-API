@@ -310,6 +310,9 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                         th_w, th_h = 60, 36
                         tr_w, tr_h = 120, 36
                         gap = 4
+                        cell_padding = 8
+                        rank_box_w = 42
+                        value_box_w = tr_w - cell_padding * 2 - gap - rank_box_w
 
                         with (
                             VSplit()
@@ -366,14 +369,32 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                                             .set_size((tr_w, tr_h))
                                             .set_content_align("c")
                                         ):
-                                            with HSplit().set_content_align("b").set_item_align("b").set_sep(2):
-                                                TextBox(
-                                                    text1, TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True)
-                                                )
-                                                if text2:
+                                            if text2:
+                                                with (
+                                                    HSplit()
+                                                    .set_content_align("c")
+                                                    .set_item_align("b")
+                                                    .set_sep(gap)
+                                                    .set_w(tr_w - cell_padding * 2)
+                                                ):
                                                     TextBox(
-                                                        text2, TextStyle(DEFAULT_FONT, 12, (50, 50, 50))
-                                                    ).set_offset((0, -1))
+                                                        text1,
+                                                        TextStyle(
+                                                            DEFAULT_BOLD_FONT,
+                                                            18,
+                                                            text_color,
+                                                            use_shadow=True,
+                                                        ),
+                                                    ).set_w(rank_box_w).set_content_align("l")
+                                                    TextBox(
+                                                        text2,
+                                                        TextStyle(DEFAULT_FONT, 12, (50, 50, 50)),
+                                                    ).set_w(value_box_w).set_content_align("r").set_offset((0, -1))
+                                            else:
+                                                TextBox(
+                                                    text1,
+                                                    TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True),
+                                                ).set_w(tr_w - cell_padding * 2).set_content_align("c")
 
                 # 别名
                 aliases = rqd.alias
