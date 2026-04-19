@@ -40,7 +40,13 @@ from src.sekai.base.plot import (
     colored_text_box,
 )
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import get_img_from_path, get_readable_datetime, get_str_display_length, truncate
+from src.sekai.base.utils import (
+    get_img_from_path,
+    get_img_resized,
+    get_readable_datetime,
+    get_str_display_length,
+    truncate,
+)
 from src.sekai.honor.drawer import compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
 
@@ -371,8 +377,8 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align(
                     "l"
                 )
-                x_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.x_icon_path)
-                x_icon = x_icon.resize((24, 24)).convert("RGBA")
+                x_icon = await get_img_resized(ASSETS_BASE_DIR, rqd.x_icon_path, 24, 24)
+                x_icon = x_icon.convert("RGBA")
                 ImageBox(x_icon, image_size_mode="original").set_offset((16, 0))
 
             # 留言

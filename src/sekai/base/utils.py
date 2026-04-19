@@ -96,7 +96,9 @@ def _open_image_copy(path: Path) -> Image.Image:
 
 
 _image_cache_lock = threading.RLock()
-_image_cache: OrderedDict[tuple[str, int, int], tuple[Image.Image, int]] = OrderedDict()
+# cache key: (path, mtime_ns, file_size, target_w, target_h)
+# target (0, 0) means original size (no resize)
+_image_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
 _missing_placeholder_lock = threading.RLock()
 _missing_placeholder_cache: dict[str, Image.Image] = {}
@@ -243,8 +245,10 @@ def _estimate_image_bytes(img: Image.Image) -> int:
     return img.width * img.height * bpp
 
 
-def _load_image_cached(path: str, mtime_ns: int, size: int) -> Image.Image | None:
-    cache_key = (path, mtime_ns, size)
+def _load_image_cached(
+    path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0
+) -> Image.Image | None:
+    cache_key = (path, mtime_ns, size, target_w, target_h)
     with _image_cache_lock:
         entry = _image_cache.get(cache_key)
         if entry is None:
@@ -254,13 +258,15 @@ def _load_image_cached(path: str, mtime_ns: int, size: int) -> Image.Image | Non
         return image.copy()
 
 
-def _put_image_cache(path: str, mtime_ns: int, size: int, image: Image.Image) -> None:
+def _put_image_cache(
+    path: str, mtime_ns: int, size: int, image: Image.Image, target_w: int = 0, target_h: int = 0
+) -> None:
     global _image_cache_total_bytes
 
     if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
         return
 
-    cache_key = (path, mtime_ns, size)
+    cache_key = (path, mtime_ns, size, target_w, target_h)
     cache_bytes = _estimate_image_bytes(image)
     with _image_cache_lock:
         old_entry = _image_cache.pop(cache_key, None)
@@ -366,6 +372,85 @@ def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
     ret = loaded.copy()
     _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, loaded)
     return ret
+
+
+def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
+    """解析路径并获取 stat，供 resize 和原始加载共用。"""
+    safe_path = path.lstrip("/")
+    resolved_base = base_path.resolve()
+    full_path = (resolved_base / safe_path).resolve()
+
+    if not full_path.is_relative_to(resolved_base):
+        raise ValueError(f"图片路径越界: {path}")
+    if not full_path.is_file():
+        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
+        if fallback_path is None:
+            raise FileNotFoundError(f"图片文件不存在: {full_path}")
+        full_path = fallback_path
+
+    return full_path, str(full_path), full_path.stat()
+
+
+def _load_image_resized_sync(
+    base_path: Path,
+    path: str,
+    target_w: int,
+    target_h: int,
+    resample: int = Image.Resampling.BILINEAR,
+) -> Image.Image:
+    """加载图片并 resize 到目标尺寸，结果缓存在 _image_cache 中。"""
+    full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+
+    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+        cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, target_w, target_h)
+        if cached is not None:
+            return cached
+
+    loaded = _open_image_copy(full_path)
+    resized = loaded.resize((target_w, target_h), resample)
+    loaded.close()
+
+    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+        ret = resized.copy()
+        _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, target_w, target_h)
+        return ret
+
+    return resized
+
+
+async def get_img_resized(
+    base_path: Path,
+    path: str | None,
+    target_w: int,
+    target_h: int,
+    *,
+    resample: int = Image.Resampling.BILINEAR,
+    on_missing: MissingImageMode = "placeholder",
+) -> Image.Image:
+    """加载图片并 resize 到 (target_w, target_h)，利用缓存避免重复 resize。
+
+    如果 target_w 或 target_h 为 0，则退化为 get_img_from_path（不 resize）。
+    """
+    if target_w <= 0 or target_h <= 0:
+        return await get_img_from_path(base_path, path, on_missing)
+
+    if path is None or path.strip() == "":
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, "empty-path")
+            img = _get_missing_placeholder_image(path)
+            return img.resize((target_w, target_h), resample)
+        raise ValueError("图片路径不能为空(None)")
+
+    try:
+        return await run_in_pool(
+            _load_image_resized_sync, base_path, path, target_w, target_h, resample
+        )
+    except (FileNotFoundError, OSError) as exc:
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, exc)
+            img = _get_missing_placeholder_image(path)
+            return img.resize((target_w, target_h), resample)
+        raise
 
 
 def get_str_display_length(s: str) -> int:
