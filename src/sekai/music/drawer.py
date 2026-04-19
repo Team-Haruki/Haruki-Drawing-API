@@ -17,6 +17,9 @@ from src.sekai.base.painter import (
     DEFAULT_HEAVY_FONT,
     WHITE,
     LinearGradient,
+    get_font,
+    get_font_desc,
+    get_text_size,
     lerp_color,
 )
 from src.sekai.base.plot import (
@@ -122,6 +125,54 @@ def _build_caption_vocals(vocal_info, vocal_logos):
             caption_vocals.setdefault(caption, []).append(vocal_group)
 
     return caption_vocals
+
+
+def _build_music_detail_leaderboard_cell(
+    width: int,
+    height: int,
+    bg_color,
+    rank_text: str,
+    value_text: str | None,
+    rank_color,
+    *,
+    padding: int = 8,
+    gap: int = 4,
+    rank_box_w: int = 42,
+):
+    rank_font_size = 18
+    value_font_size = 12
+    rank_font = get_font(DEFAULT_BOLD_FONT, rank_font_size)
+    value_font = get_font(DEFAULT_FONT, value_font_size)
+    rank_font_desc = get_font_desc(DEFAULT_BOLD_FONT, rank_font_size)
+    value_font_desc = get_font_desc(DEFAULT_FONT, value_font_size)
+    text_color = (50, 50, 50)
+
+    def _draw_text(_, p):
+        if value_text:
+            value_w, _ = get_text_size(value_font, value_text)
+            value_x = max(width - padding - value_w, padding + rank_box_w + gap)
+            p.text(
+                rank_text,
+                (padding, (height - rank_font_size) // 2),
+                font=rank_font_desc,
+                fill=rank_color,
+            )
+            p.text(
+                value_text,
+                (value_x, (height - value_font_size) // 2),
+                font=value_font_desc,
+                fill=text_color,
+            )
+        else:
+            rank_w, _ = get_text_size(rank_font, rank_text)
+            p.text(
+                rank_text,
+                ((width - rank_w) // 2, (height - rank_font_size) // 2),
+                font=rank_font_desc,
+                fill=rank_color,
+            )
+
+    return Frame().set_bg(FillBg(bg_color)).set_size((width, height)).add_draw_func(_draw_text)
 
 
 async def compose_music_detail_image(rqd: MusicDetailRequest):
@@ -312,7 +363,6 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                         gap = 4
                         cell_padding = 8
                         rank_box_w = 42
-                        value_box_w = tr_w - cell_padding * 2 - gap - rank_box_w
 
                         with (
                             VSplit()
@@ -363,38 +413,17 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                                             else lerp_color(yellow, red, rank_ratio - 0.5)
                                         )
 
-                                        with (
-                                            Frame()
-                                            .set_bg(FillBg(bg_color))
-                                            .set_size((tr_w, tr_h))
-                                            .set_content_align("c")
-                                        ):
-                                            if text2:
-                                                with (
-                                                    HSplit()
-                                                    .set_content_align("c")
-                                                    .set_item_align("b")
-                                                    .set_sep(gap)
-                                                    .set_w(tr_w - cell_padding * 2)
-                                                ):
-                                                    TextBox(
-                                                        text1,
-                                                        TextStyle(
-                                                            DEFAULT_BOLD_FONT,
-                                                            18,
-                                                            text_color,
-                                                            use_shadow=True,
-                                                        ),
-                                                    ).set_w(rank_box_w).set_content_align("l")
-                                                    TextBox(
-                                                        text2,
-                                                        TextStyle(DEFAULT_FONT, 12, (50, 50, 50)),
-                                                    ).set_w(value_box_w).set_content_align("r").set_offset((0, -1))
-                                            else:
-                                                TextBox(
-                                                    text1,
-                                                    TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True),
-                                                ).set_w(tr_w - cell_padding * 2).set_content_align("c")
+                                        _build_music_detail_leaderboard_cell(
+                                            tr_w,
+                                            tr_h,
+                                            bg_color,
+                                            text1,
+                                            text2,
+                                            text_color,
+                                            padding=cell_padding,
+                                            gap=gap,
+                                            rank_box_w=rank_box_w,
+                                        )
 
                 # 别名
                 aliases = rqd.alias
