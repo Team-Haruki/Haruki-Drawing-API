@@ -220,10 +220,10 @@ logging.getLogger("src.sekai.card.drawer").setLevel(logging.DEBUG)
 
 ### 新增 API
 
-| 函数 | 说明 |
-|------|------|
-| `get_img_resized(base, path, w, h)` | Exact resize，结果缓存 |
-| `get_img_resized_long_edge(base, path, long_edge)` | Long-edge 等比缩放，结果缓存 |
+| 函数                                                         | 说明                                    |
+|------------------------------------------------------------|---------------------------------------|
+| `get_img_resized(base, path, w, h)`                        | Exact resize，结果缓存                     |
+| `get_img_resized_long_edge(base, path, long_edge)`         | Long-edge 等比缩放，结果缓存                   |
 | `batch_load_and_contain_resize(base, paths, max_w, max_h)` | 批量 contain-resize，同步，供 run_in_pool 使用 |
 
 ### 应用场景
@@ -253,11 +253,11 @@ harvest_points resize: 0.01–0.05s / 请求（暖缓存）
 
 ### 实测效果（/map 端点，4 地图，~160 采集点）
 
-| | 首次请求（冷） | 再次请求（暖） |
-|---|---|---|
-| harvest_points resize | ~0.38s | ~0.10s |
-| 全流程 draw | 1.563s | 0.751s |
-| 端到端 total | 1.621s | 0.792s |
+|                       | 首次请求（冷） | 再次请求（暖） |
+|-----------------------|---------|---------|
+| harvest_points resize | ~0.38s  | ~0.10s  |
+| 全流程 draw              | 1.563s  | 0.751s  |
+| 端到端 total             | 1.621s  | 0.792s  |
 
 总体约 **2× 提速**（draw 阶段），主要收益来自 resize 从 O(N·请求数) 降为
 O(N) 首次 + O(1) 后续。
