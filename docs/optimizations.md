@@ -1,6 +1,6 @@
 # Haruki Drawing API — 性能与内存优化记录
 
-本文档记录本次会话中对项目进行的三轮优化工作。
+本文档记录本次会话中对项目进行的各轮优化工作。
 
 ---
 
@@ -189,3 +189,87 @@ import logging
 
 logging.getLogger("src.sekai.card.drawer").setLevel(logging.DEBUG)
 ```
+
+---
+
+## 五、Resize 缓存（全局，跨请求）
+
+**涉及文件**
+
+- `src/sekai/base/utils.py`
+- `src/sekai/mysekai/drawer.py`
+- `src/sekai/profile/drawer.py`
+
+### 背景
+
+即使 `_image_cache` 已为原图缓存，每次请求仍会对同一张图片执行相同尺寸的
+`resize` 操作，因为 resize 结果仅保存在 per-request 的局部 dict 中，进程
+重启或新请求都无法复用。
+
+### 缓存 key 扩展
+
+`_image_cache` 的 key 从 3-tuple 扩展为 5-tuple，同时存放原图与 resized 结果：
+
+```
+(full_path_str, mtime_ns, file_size, target_w, target_h)
+```
+
+- `(target_w, target_h) = (0, 0)` — 原始尺寸（不 resize）
+- `(target_w, target_h) = (w, h)` — exact resize
+- `(target_w, target_h) = (-max_w, -max_h)` — contain-resize（负值区分）
+
+### 新增 API
+
+| 函数 | 说明 |
+|------|------|
+| `get_img_resized(base, path, w, h)` | Exact resize，结果缓存 |
+| `get_img_resized_long_edge(base, path, long_edge)` | Long-edge 等比缩放，结果缓存 |
+| `batch_load_and_contain_resize(base, paths, max_w, max_h)` | 批量 contain-resize，同步，供 run_in_pool 使用 |
+
+### 应用场景
+
+**`mysekai/drawer.py` — harvest_points（地图采集点图标）**
+
+改前：`resize_keep_ratio()` 直接调用，结果存入 per-request 局部 dict，每次请求全部重算：
+
+```
+harvest_points resize: 0.07–0.42s / 请求
+```
+
+改后：`asyncio.gather` 并行调用 `get_img_resized_long_edge()`，结果进全局缓存：
+
+```
+harvest_points resize: 0.01–0.05s / 请求（暖缓存）
+```
+
+**`mysekai/drawer.py` — 家具 / 音乐 / 对话缩略图**
+
+三份重复的 `_batch_load_and_resize` 局部函数统一替换为
+`batch_load_and_contain_resize()`，缩略图 resize 结果同样写入全局缓存。
+
+**`profile/drawer.py` — x_icon（24×24）**
+
+单张图标改用 `get_img_resized(... 24, 24)`。
+
+### 实测效果（/map 端点，4 地图，~160 采集点）
+
+| | 首次请求（冷） | 再次请求（暖） |
+|---|---|---|
+| harvest_points resize | ~0.38s | ~0.10s |
+| 全流程 draw | 1.563s | 0.751s |
+| 端到端 total | 1.621s | 0.792s |
+
+总体约 **2× 提速**（draw 阶段），主要收益来自 resize 从 O(N·请求数) 降为
+O(N) 首次 + O(1) 后续。
+
+### 配置要求
+
+Resize 缓存复用全局 `_image_cache`，需在 `configs.yaml` 中启用：
+
+```yaml
+drawing:
+  image_cache_size: 2560     # 缓存条目数上限
+  image_cache_max_mb: 2048   # 缓存总内存上限（MB）
+```
+
+两项均为 0 时缓存关闭，所有 resize 退化为每次重算。
