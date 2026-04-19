@@ -1,3 +1,5 @@
+import asyncio
+
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -161,6 +163,18 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
     style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
     style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 50, 50))
 
+    # 预加载所有歌曲封面（并行）
+    _cover_paths: set[str] = set()
+    for music_list in rqd.music_list_map.values():
+        for m in music_list:
+            _cover_paths.add(m["music_cover"])
+    _cover_list = list(_cover_paths)
+    if _cover_list:
+        _cover_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cover_list])
+        _cover_cache = dict(zip(_cover_list, _cover_imgs))
+    else:
+        _cover_cache = {}
+
     # 合成图片
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with (
@@ -250,7 +264,7 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                                         # Keep separator width consistent with _calc_custom_room_title_width
                                         # (TextBox has default horizontal padding=2, which may cause overflow).
                                         TextBox(" / ", style2).set_padding(0)
-                                    music_cover = await get_img_from_path(ASSETS_BASE_DIR, music_info["music_cover"])
+                                    music_cover = _cover_cache[music_info["music_cover"]]
                                     ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
                                     TextBox(str(music_info["music_title"]), style2, line_count=1).set_w(title_width)
                 # PT系数
@@ -277,10 +291,12 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
     requests : List[MusicMetaRequest]
         歌曲Meta信息请求列表
     """
+    # 预加载所有歌曲封面
+    _meta_covers = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path) for rqd in requests])
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
-            for rqd in requests:
-                music_cover = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
+            for rqd, music_cover in zip(requests, _meta_covers):
 
                 style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
                 style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))

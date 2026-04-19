@@ -1,3 +1,5 @@
+import asyncio
+
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -36,6 +38,7 @@ async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
     PIL.Image.Image
     """
     stamps = rqd.stamps
+    stamp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, stamp.image_path) for stamp in stamps])
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(8).set_item_align("l").set_bg(roundrect_bg(alpha=80)).set_padding(8):
             TextBox(
@@ -44,8 +47,7 @@ async def compose_stamp_list_image(rqd: StampListRequest) -> Image.Image:
                 use_real_line_count=True,
             ).set_padding(16).set_bg(roundrect_bg(alpha=80))
             with Grid(col_count=5).set_sep(4, 4).set_item_bg(roundrect_bg(alpha=80)):
-                for stamp in stamps:
-                    img = await get_img_from_path(ASSETS_BASE_DIR, stamp.image_path)
+                for stamp, img in zip(stamps, stamp_imgs):
                     with VSplit().set_padding(4).set_sep(4):
                         ImageBox(img, size=(None, 100), use_alpha_blend=True, shadow=True)
                         TextBox(

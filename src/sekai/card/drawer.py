@@ -1,3 +1,4 @@
+import asyncio
 import math
 
 from src.sekai.base import (
@@ -12,7 +13,6 @@ from src.sekai.base import (
     get_img_from_path,
     roundrect_bg,
 )
-from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -27,6 +27,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
@@ -68,23 +69,37 @@ async def compose_card_detail_image(
     power_info = rqd.card_info.power
     skill_info = rqd.card_info.skill
     sp_skill_info = rqd.card_info.special_skill_info
-    # 获取图片
-
-    card_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path]
-    costume_images = [await get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path]
-
-    # 构建完整缩略图（带框体、属性、星级）- 使用card_utils中的函数
-    thumbnail_images = []
-    for thumbnail in rqd.card_info.thumbnail_info:
-        thumb_img = await get_card_full_thumbnail(thumbnail)
-        thumbnail_images.append(thumb_img)
-
-    character_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
-    unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
-
-    skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path)
+    # 获取图片（并行）
+    _img_tasks = [
+        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path],
+        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path],
+        *[get_card_full_thumbnail(thumbnail) for thumbnail in rqd.card_info.thumbnail_info],
+        get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path),
+        get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path),
+        get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path),
+    ]
     if sp_skill_info:
-        sp_skill_type_icon = await get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path)
+        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
+    _img_results = await asyncio.gather(*_img_tasks)
+
+    _n_cards = len(rqd.card_images_path)
+    _n_costumes = len(rqd.costume_images_path)
+    _n_thumbs = len(rqd.card_info.thumbnail_info)
+    _offset = 0
+    card_images = list(_img_results[_offset:_offset + _n_cards])
+    _offset += _n_cards
+    costume_images = list(_img_results[_offset:_offset + _n_costumes])
+    _offset += _n_costumes
+    thumbnail_images = list(_img_results[_offset:_offset + _n_thumbs])
+    _offset += _n_thumbs
+    character_icon = _img_results[_offset]
+    _offset += 1
+    unit_logo = _img_results[_offset]
+    _offset += 1
+    skill_type_icon = _img_results[_offset]
+    _offset += 1
+    if sp_skill_info:
+        sp_skill_type_icon = _img_results[_offset]
 
     # 处理事件横幅
     event_detail = None
@@ -95,6 +110,21 @@ async def compose_card_detail_image(
     gacha_detail = None
     if rqd.gacha_info:
         gacha_detail = rqd.gacha_info
+
+    # 预加载关联活动/卡池图片（并行）
+    _extra_tasks = {}
+    if event_detail:
+        _extra_tasks["event_banner"] = get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path)
+        if event_detail.bonus_attr and rqd.event_attr_icon_path:
+            _extra_tasks["event_attr"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path)
+        if event_detail.unit and rqd.event_unit_icon_path:
+            _extra_tasks["event_unit"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path)
+        if event_detail.banner_cid and rqd.event_chara_icon_path:
+            _extra_tasks["event_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path)
+    if gacha_detail:
+        _extra_tasks["gacha_banner"] = get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path)
+    _extra_keys = list(_extra_tasks.keys())
+    _extra_imgs = dict(zip(_extra_keys, await asyncio.gather(*_extra_tasks.values()))) if _extra_tasks else {}
 
     # 时间格式化
     release_time = datetime_from_millis(card_info.release_at, rqd.timezone)
@@ -140,7 +170,7 @@ async def compose_card_detail_image(
                             TextBox(f"【{event_detail.event_id}】{event_detail.event_name}", small_style).set_w(360)
                         with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
                             ImageBox(
-                                await get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path),
+                                _extra_imgs["event_banner"],
                                 size=(250, None),
                             )
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
@@ -151,17 +181,17 @@ async def compose_card_detail_image(
                                     # 属性、团队、角色图标
                                     if event_detail.bonus_attr and rqd.event_attr_icon_path:
                                         ImageBox(
-                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path),
+                                            _extra_imgs["event_attr"],
                                             size=(32, None),
                                         )
                                     if event_detail.unit and rqd.event_unit_icon_path:
                                         ImageBox(
-                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path),
+                                            _extra_imgs["event_unit"],
                                             size=(32, None),
                                         )
                                     if event_detail.banner_cid and rqd.event_chara_icon_path:
                                         ImageBox(
-                                            await get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path),
+                                            _extra_imgs["event_chara"],
                                             size=(32, None),
                                         )
 
@@ -173,7 +203,7 @@ async def compose_card_detail_image(
                             TextBox(f"【{gacha_detail.gacha_id}】{gacha_detail.gacha_name}", small_style).set_w(360)
                         with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
                             ImageBox(
-                                await get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path),
+                                _extra_imgs["gacha_banner"],
                                 size=(250, None),
                             )
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
@@ -306,7 +336,7 @@ async def compose_card_list_image(
         after = await get_card_full_thumbnail(thumbnails[1])
         return [img for img in (normal, after) if img is not None]
 
-    thumbs = [await get_card_list_thumbs(card) for card in rqd.cards]
+    thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
 
     # 并行获取所有缩略图
     card_and_thumbs = [(card, thumb_group) for card, thumb_group in zip(cards, thumbs) if thumb_group]
@@ -533,8 +563,10 @@ async def compose_box_image(
     # 预加载角色图标
     chara_icons = {}
     if rqd.character_icon_paths:
-        for chara_id, path in rqd.character_icon_paths.items():
-            chara_icons[chara_id] = await get_img_from_path(ASSETS_BASE_DIR, path)
+        _cids = list(rqd.character_icon_paths.keys())
+        _cpaths = list(rqd.character_icon_paths.values())
+        _cimgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cpaths])
+        chara_icons = dict(zip(_cids, _cimgs))
     # 绘制单张卡
     def draw_card(card_data):
         with Frame().set_content_align("rt"):

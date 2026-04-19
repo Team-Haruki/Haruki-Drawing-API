@@ -1,3 +1,5 @@
+import asyncio
+
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -153,21 +155,42 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     chara_icon = None
     if rqd.chara_icon_path:
         chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path)
-    wl_chara_icon = None
+    # 并行加载所有可选图标
+    _deck_tasks = {}
     if rqd.wl_chara_icon_path:
-        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
-    unit_logo = None
+        _deck_tasks["wl_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
     if rqd.unit_logo_path:
-        unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
-    attr_icon = None
+        _deck_tasks["unit_logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
     if rqd.attr_icon_path:
-        attr_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
-    music_cover = None
+        _deck_tasks["attr_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
     if not music_compare and rqd.music_cover_path:
-        music_cover = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
-    canvas_thumbnail = None
+        _deck_tasks["music_cover"] = get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
     if rqd.canvas_thumbnail_path:
-        canvas_thumbnail = await get_img_from_path(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
+        _deck_tasks["canvas_thumb"] = get_img_from_path(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
+    # 收集卡牌缩略图和比较封面
+    _card_thumb_tasks = []
+    _card_thumb_keys = []
+    _compare_cover_paths = []
+    for deck in rqd.deck_data:
+        if music_compare and deck.music_cover_path and deck.music_cover_path not in dict.fromkeys(_compare_cover_paths):
+            _compare_cover_paths.append(deck.music_cover_path)
+        for card in deck.card_data:
+            _card_thumb_tasks.append(get_card_full_thumbnail(card.card_thumbnail))
+            _card_thumb_keys.append(card.card_thumbnail.card_id)
+    _compare_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
+
+    # 并行执行所有加载
+    _dk = list(_deck_tasks.keys())
+    _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks)
+    _di = dict(zip(_dk, _all_results[:len(_dk)]))
+    _thumb_results = _all_results[len(_dk):len(_dk) + len(_card_thumb_tasks)]
+    _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks):]
+
+    wl_chara_icon = _di.get("wl_chara")
+    unit_logo = _di.get("unit_logo")
+    attr_icon = _di.get("attr_icon")
+    music_cover = _di.get("music_cover")
+    canvas_thumbnail = _di.get("canvas_thumb")
     unit_filter = rqd.unit_filter
     attr_filter = rqd.attr_filter
     excluded_cards = rqd.excluded_cards or []
@@ -176,17 +199,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     result_decks = rqd.deck_data
     result_algs = rqd.model_name or [""] * len(result_decks)
     # 获取卡组卡牌缩略图
-    card_imgs, card_keys = [], []
-    compare_music_imgs = {}
-
-    for deck in rqd.deck_data:
-        if music_compare and deck.music_cover_path and deck.music_cover_path not in compare_music_imgs:
-            compare_music_imgs[deck.music_cover_path] = await get_img_from_path(ASSETS_BASE_DIR, deck.music_cover_path)
-        for card in deck.card_data:
-            card_img = await get_card_full_thumbnail(card.card_thumbnail)
-            card_imgs.append(card_img)
-            card_keys.append(card.card_thumbnail.card_id)
-    card_imgs = dict(zip(card_keys, card_imgs))
+    card_imgs = dict(zip(_card_thumb_keys, _thumb_results))
+    compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:

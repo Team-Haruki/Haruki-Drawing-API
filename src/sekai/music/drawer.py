@@ -202,16 +202,19 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     vocal_info = rqd.vocal.vocal_info
     vocal_logos_raw = rqd.vocal.vocal_assets
     # has_append = rqd.difficulty.has_append
-    event_banner = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path) if rqd.event_banner_path else None
 
-    # if not has_append:
-    #     DIFF_COLORS.pop("append")
-
+    # 并行加载封面、banner和所有vocal logos
+    _logo_names = list(vocal_logos_raw.keys())
+    _logo_paths = list(vocal_logos_raw.values())
+    _img_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _logo_paths]
+    if rqd.event_banner_path:
+        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path))
+    _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
     vocal_logos = {}
-    for char_name, logo_path in vocal_logos_raw.items():
-        img = await get_img_from_path(ASSETS_BASE_DIR, logo_path)
-        if img:
-            vocal_logos[char_name] = img
+    for i, name_ in enumerate(_logo_names):
+        if _img_results[i]:
+            vocal_logos[name_] = _img_results[i]
+    event_banner = _img_results[len(_logo_names)] if rqd.event_banner_path else None
 
     if is_full_length:
         name += " [FULL]"

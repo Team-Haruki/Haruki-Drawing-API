@@ -212,12 +212,14 @@ async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | Non
     border2 = 80
     inner_w = w - 2 * border
 
-    base = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.base)
-    ct = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop)
-    lb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom)
-    lt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop)
-    rb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom)
-    rt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop)
+    base, ct, lb, lt, rb, rt = await asyncio.gather(
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.base),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop),
+    )
 
     ct = resize_keep_ratio(ct, scale, mode="scale")
     lt = resize_keep_ratio(lt, scale, mode="scale")
@@ -390,7 +392,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         ImageBox(img, size=(None, 48), shadow=True)
             # 卡组
             with HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0)):
-                card_imgs = [await get_card_full_thumbnail(card) for card in pcards]
+                card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in pcards])
                 for i in range(len(card_imgs)):
                     ImageBox(card_imgs[i], size=(90, 90), image_size_mode="fill", shadow=True)
         return ret
@@ -401,9 +403,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             hs, vs, gw, gh = 8, 12, 90, 25
             with VSplit().set_sep(vs):
                 Spacer(gh, gh)
-                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path)
-                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path)
-                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path)
+                icon_clear, icon_fc, icon_ap = await asyncio.gather(
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path),
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path),
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path),
+                )
                 ImageBox(icon_clear, size=(gh, gh))
                 ImageBox(icon_fc, size=(gh, gh))
                 ImageBox(icon_ap, size=(gh, gh))
@@ -432,6 +436,24 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
     # 养成部分
     async def draw_chara():
+        # 预加载所有角色等级图标（并行）
+        chara_map = rqd.chara_rank_icon_path_map
+        _chara_paths: dict[str, str] = {}
+        for chara, cid in CHARA_LIST:
+            if chara is None:
+                continue
+            p = chara_map.get(cid) or chara_map.get(str(cid))
+            if p and p not in _chara_paths:
+                _chara_paths[p] = p
+        if solo_live is not None:
+            scid = solo_live.character_id
+            p = chara_map.get(scid) or chara_map.get(str(scid))
+            if p and p not in _chara_paths:
+                _chara_paths[p] = p
+        _cp_list = list(_chara_paths.keys())
+        _cp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cp_list]) if _cp_list else []
+        _chara_icon_cache = dict(zip(_cp_list, _cp_imgs))
+
         with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
             hs, vs, gw, gh = 8, 7, 96, 48
             # 角色等级
@@ -442,12 +464,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         continue
                     rank = character_rank[cid]
                     with Frame().set_size((gw, gh)):
-                        chara_map = rqd.chara_rank_icon_path_map
                         c_rank_path = chara_map.get(cid) or chara_map.get(str(cid))
                         if not c_rank_path:
                             Spacer(gw, gh)
                             continue
-                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
+                        chara_img = _chara_icon_cache[c_rank_path]
                         ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
@@ -459,11 +480,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
-                        c_rank_path = rqd.chara_rank_icon_path_map.get(scid) or rqd.chara_rank_icon_path_map.get(
-                            str(scid)
-                        )
+                        c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
                         if c_rank_path:
-                            chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
+                            chara_img = _chara_icon_cache[c_rank_path]
                             ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
                         else:
                             Spacer(100, 50)
