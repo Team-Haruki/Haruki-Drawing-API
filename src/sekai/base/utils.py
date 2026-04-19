@@ -453,6 +453,38 @@ async def get_img_resized(
         raise
 
 
+async def get_img_resized_long_edge(
+    base_path: Path,
+    path: str | None,
+    long_edge: int,
+    *,
+    resample: int = Image.Resampling.BILINEAR,
+    on_missing: MissingImageMode = "placeholder",
+) -> Image.Image:
+    """加载图片并按 long-edge 等比缩放，结果缓存在 _image_cache 中。
+
+    先获取原图尺寸，计算出精确的 (target_w, target_h)，再走 get_img_resized
+    的 exact-resize 缓存路径。与直接调用 resize_keep_ratio 不同，跨请求均可命中缓存。
+    """
+    if long_edge <= 0:
+        return await get_img_from_path(base_path, path, on_missing)
+
+    # 获取原图以得到宽高（全局缓存命中后无磁盘 I/O）
+    orig = await get_img_from_path(base_path, path, on_missing=on_missing)
+    orig_w, orig_h = orig.width, orig.height
+    orig.close()
+
+    # 与 resize_keep_ratio(mode="long") 逻辑一致
+    if orig_w >= orig_h:
+        target_w = long_edge
+        target_h = max(1, int(orig_h * long_edge / orig_w))
+    else:
+        target_h = long_edge
+        target_w = max(1, int(orig_w * long_edge / orig_h))
+
+    return await get_img_resized(base_path, path, target_w, target_h, resample=resample, on_missing=on_missing)
+
+
 def _contain_resize(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     """Resize image to fit within (max_w, max_h) keeping aspect ratio (contain mode)."""
     w, h = img.size
