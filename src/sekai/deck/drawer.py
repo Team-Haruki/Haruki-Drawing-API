@@ -505,25 +505,32 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 .set_size((card_col_w, gh))
                                             ):
                                                 with Frame().set_w(card_col_w).set_content_align("c"):
-                                                    card_key = card_id
-                                                    ImageBox(card_imgs[card_key], size=(None, 80))
-                                                    if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
-                                                        rqd.fixed_characters_id
-                                                        and character_id in rqd.fixed_characters_id
-                                                    ):
-                                                        TextBox(
-                                                            str(card_id),
-                                                            TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
-                                                        ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset((-2, 0))
-                                                    else:
-                                                        TextBox(
-                                                            str(card_id),
-                                                            TextStyle(font=DEFAULT_FONT, size=10, color=(75, 75, 75)),
-                                                        ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
-                                                            (-2, 0)
-                                                        )
-                                                    if card.has_canvas_bonus:
-                                                        ImageBox(canvas_thumbnail, size=(11, 11)).set_offset((-32, 65))
+                                                    with Frame().set_content_align("rt"):
+                                                        card_key = card_id
+                                                        ImageBox(card_imgs[card_key], size=(None, 80))
+                                                        if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
+                                                            rqd.fixed_characters_id
+                                                            and character_id in rqd.fixed_characters_id
+                                                        ):
+                                                            TextBox(
+                                                                str(card_id),
+                                                                TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
+                                                            ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset(
+                                                                (-2, 0)
+                                                            )
+                                                        else:
+                                                            TextBox(
+                                                                str(card_id),
+                                                                TextStyle(
+                                                                    font=DEFAULT_FONT, size=10, color=(75, 75, 75)
+                                                                ),
+                                                            ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
+                                                                (-2, 0)
+                                                            )
+                                                        if card.has_canvas_bonus:
+                                                            ImageBox(canvas_thumbnail, size=(11, 11)).set_offset(
+                                                                (-32, 65)
+                                                            )
 
                                                 info_bg = RoundRectBg((255, 255, 255, 150), 2)
                                                 with (
