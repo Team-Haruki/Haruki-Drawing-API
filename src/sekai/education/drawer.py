@@ -45,6 +45,9 @@ from .model import (
 
 logger = logging.getLogger(__name__)
 
+BONUS_ICON_SLOT_W = 44
+BONUS_ICON_SLOT_H = 40
+
 # ========== 挑战Live详情 ==========
 
 
@@ -242,6 +245,13 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
         time.perf_counter() - _t0,
     )
 
+    def draw_bonus_icon(icon: Image.Image | None) -> None:
+        with Frame().set_size((BONUS_ICON_SLOT_W, BONUS_ICON_SLOT_H)).set_content_align("c"):
+            if icon:
+                ImageBox(icon, size=(40, 40), image_size_mode="fit")
+            else:
+                Spacer(w=BONUS_ICON_SLOT_W, h=BONUS_ICON_SLOT_H)
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(profile.to_profile_card_request())
@@ -264,9 +274,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                     with Grid(col_count=2).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
                         for bonus in bonuses_group:
                             chara_icon = _chara_icon_imgs[chara_bonuses.index(bonus)]
-                            with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
-                                if chara_icon:
-                                    ImageBox(chara_icon, size=(None, 40))
+                            with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                                draw_bonus_icon(chara_icon)
                                 TextBox(f"{bonus.total:.1f}%", header_style).set_w(100).set_content_align(
                                     "r"
                                 ).set_overflow("clip")
@@ -281,9 +290,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                 with Grid(col_count=3).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
                     for i, bonus in enumerate(unit_bonuses):
                         unit_icon = _unit_icon_imgs[i]
-                        with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
-                            if unit_icon:
-                                ImageBox(unit_icon, size=(None, 40))
+                        with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                            draw_bonus_icon(unit_icon)
                             TextBox(f"{bonus.total:.1f}%", header_style).set_w(100).set_content_align("r").set_overflow(
                                 "clip"
                             )
@@ -294,9 +302,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                 with Grid(col_count=5).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
                     for i, bonus in enumerate(attr_bonuses):
                         attr_icon = _attr_icon_imgs[i]
-                        with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
-                            if attr_icon:
-                                ImageBox(attr_icon, size=(None, 40))
+                        with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                            draw_bonus_icon(attr_icon)
                             TextBox(f"{bonus.total:.1f}%", header_style).set_w(100).set_content_align("r").set_overflow(
                                 "clip"
                             )

@@ -53,6 +53,7 @@ class DetailedProfileCardRequest(TimeZoneRequest):
         """转换为 ProfileCardRequest"""
         return ProfileCardRequest(
             timezone=self.timezone,
+            bg_alpha=80,
             profile=BasicProfile(
                 id=self.id,
                 region=self.region,
