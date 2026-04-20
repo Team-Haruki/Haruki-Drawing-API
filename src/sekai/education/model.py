@@ -6,6 +6,7 @@ Education 模块数据模型
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest
 
 # ========== 挑战Live详情 ==========
@@ -38,7 +39,7 @@ class CharacterChallengeInfo(BaseModel):
     chara_icon_path: str
 
 
-class ChallengeLiveDetailsRequest(BaseModel):
+class ChallengeLiveDetailsRequest(TimeZoneRequest):
     """挑战Live详情绘制请求
 
     Attributes
@@ -60,6 +61,10 @@ class ChallengeLiveDetailsRequest(BaseModel):
     max_score: int
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # ========== 加成详情 ==========
@@ -137,7 +142,7 @@ class AttrBonus(BaseModel):
     total: float
 
 
-class PowerBonusDetailRequest(BaseModel):
+class PowerBonusDetailRequest(TimeZoneRequest):
     """加成详情绘制请求
 
     Attributes
@@ -156,6 +161,10 @@ class PowerBonusDetailRequest(BaseModel):
     chara_bonuses: list[CharacterBonus]
     unit_bonuses: list[UnitBonus]
     attr_bonuses: list[AttrBonus]
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # ========== 区域道具升级材料 ==========
@@ -233,7 +242,7 @@ class AreaItemInfo(BaseModel):
     levels: list[AreaItemLevel]
 
 
-class AreaItemUpgradeMaterialsRequest(BaseModel):
+class AreaItemUpgradeMaterialsRequest(TimeZoneRequest):
     """区域道具升级材料绘制请求
 
     Attributes
@@ -249,6 +258,10 @@ class AreaItemUpgradeMaterialsRequest(BaseModel):
     profile: DetailedProfileCardRequest | None = None
     area_items: list[AreaItemInfo]
     has_profile: bool = False
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # ========== 羁绊等级 ==========
@@ -296,7 +309,7 @@ class BondInfo(BaseModel):
     color2: tuple = (100, 100, 100)
 
 
-class BondsRequest(BaseModel):
+class BondsRequest(TimeZoneRequest):
     """羁绊等级绘制请求
 
     Attributes
@@ -312,6 +325,10 @@ class BondsRequest(BaseModel):
     profile: DetailedProfileCardRequest
     bonds: list[BondInfo]
     max_level: int
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
 
 
 # ========== 队长次数 ==========
@@ -341,7 +358,7 @@ class LeaderCountInfo(BaseModel):
     ex_count: int
 
 
-class LeaderCountRequest(BaseModel):
+class LeaderCountRequest(TimeZoneRequest):
     """队长次数绘制请求
 
     Attributes
@@ -357,3 +374,7 @@ class LeaderCountRequest(BaseModel):
     profile: DetailedProfileCardRequest
     leader_counts: list[LeaderCountInfo]
     max_play_count: int
+
+    def model_post_init(self, __context) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)

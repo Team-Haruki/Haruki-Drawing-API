@@ -16,7 +16,7 @@ from PIL import Image
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
@@ -27,6 +27,7 @@ from src.sekai.base.plot import (
     Grid,
     HSplit,
     ImageBox,
+    Spacer,
     TextBox,
     TextStyle,
     VSplit,
@@ -43,6 +44,7 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE
 
 from .model import (
     CFRequest,
+    CSBRequest,
     PlayerTraceRequest,
     RankInfo,  # noqa: F401 - used in type annotations via Request classes
     RankTraceRequest,
@@ -99,6 +101,10 @@ ALL_RANKS = [
     *range(10000, 50001, 10000),
     *range(100000, 500001, 100000),
 ]
+
+SK_RECORD_TOLERANCE = timedelta(seconds=70)
+SK_CSB_STOP_THRESHOLD = timedelta(minutes=5)
+SK_PLAYCOUNT_MYSEKAI_THRESHOLD = 37
 
 
 def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> str:
@@ -247,9 +253,13 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(8):
                     if is_predict_mode:
                         gw = 180
-                        with Grid(col_count=len(forecast_columns) + 2).set_content_align("c").set_item_align(
-                            "c"
-                        ).set_sep(8, 5).set_padding(0):
+                        with (
+                            Grid(col_count=len(forecast_columns) + 2)
+                            .set_content_align("c")
+                            .set_item_align("c")
+                            .set_sep(8, 5)
+                            .set_padding(0)
+                        ):
                             TextBox("排名", title_style).set_bg(bg1).set_size((gw, gh)).set_content_align("c")
                             TextBox("当前榜线", title_style).set_bg(bg1).set_size((gw, gh)).set_content_align("c")
                             for col in forecast_columns:
@@ -339,7 +349,7 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
             else:
                 TextBox("暂无榜线数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -417,7 +427,7 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
                 for text, style in texts:
                     TextBox(text, style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(1.5)
 
 
@@ -544,8 +554,170 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
                 for text, style in texts:
                     TextBox(text, style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(1.5)
+
+
+async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
+    """
+    合成查水表热力图图片 (CSB)
+
+    展示玩家各小时 Pt 变化次数热力图以及停车区间
+    """
+    eid = rqd.eid
+    title = rqd.event_name
+    event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
+    now = request_now(rqd.timezone)
+    wl_chara_img_path = rqd.wl_chara_icon_path
+
+    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
+    style2 = TextStyle(font=DEFAULT_FONT, size=20, color=BLACK)
+    heat_title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=BLACK)
+    heat_hint_style = TextStyle(font=DEFAULT_FONT, size=18, color=BLACK)
+
+    ranks = sorted(rqd.ranks, key=lambda item: item.time)
+    latest_rank = ranks[-1]
+    latest_name = truncate(latest_rank.name, 40)
+
+    rankcounts: list[list[int]] = []
+    playcounts: list[list[int]] = []
+    abnormals: list[list[bool]] = []
+    start_date = ranks[0].time.date()
+
+    for i in range(len(ranks) - 1):
+        cur = ranks[i]
+        nxt = ranks[i + 1]
+        prev = ranks[i - 1] if i > 0 else None
+        day = (cur.time.date() - start_date).days
+        while len(rankcounts) <= day:
+            rankcounts.append([0] * 24)
+            playcounts.append([0] * 24)
+            abnormals.append([False] * 24)
+
+        hour = cur.time.hour
+        rankcounts[day][hour] += 1
+        cur_score = cur.score or 0
+        next_score = nxt.score or 0
+        if next_score > cur_score:
+            playcounts[day][hour] += 1
+
+        def mark_abnormal(left_time, right_time):
+            if right_time - left_time > SK_RECORD_TOLERANCE:
+                abnormals[day][hour] = True
+
+        if prev is not None and cur.time.hour != prev.time.hour:
+            mark_abnormal(prev.time, cur.time)
+        mark_abnormal(cur.time, nxt.time)
+
+    stop_segments: list[tuple[RankInfo, RankInfo]] = []
+    left = None
+    right = None
+    for rank in ranks:
+        if left is None:
+            left = rank
+        if right is None:
+            right = rank
+
+        if rank.rank > 100 or rank.time - right.time > SK_RECORD_TOLERANCE:
+            if left != right:
+                stop_segments.append((left, right))
+            left, right = rank, None
+        elif (rank.score or 0) != (right.score or 0):
+            if left != right:
+                stop_segments.append((left, right))
+            left, right = rank, None
+        else:
+            right = rank
+    if left is not None and right is not None:
+        stop_segments.append((left, right))
+
+    stop_texts: list[tuple[str, TextStyle]] = [(f'T{latest_rank.rank} "{latest_name}" 的停车区间', style1)]
+    for left_rank, right_rank in stop_segments:
+        if left_rank == right_rank:
+            continue
+        duration = right_rank.time - left_rank.time
+        if duration < SK_CSB_STOP_THRESHOLD:
+            continue
+        start_text = left_rank.time.strftime("%m-%d %H:%M")
+        end_text = right_rank.time.strftime("%m-%d %H:%M")
+        stop_texts.append((f"{start_text} ~ {end_text}（{get_readable_timedelta(duration)}）", style2))
+    if len(stop_texts) == 1:
+        stop_texts.append(("未找到停车区间", style2))
+
+    row_num = len(stop_texts) // 2 + 1
+    first_text = stop_texts[0]
+    left_texts = stop_texts[1:row_num]
+    right_texts = stop_texts[row_num:]
+
+    heat_color_min = (184, 216, 255)
+    heat_color_max = (255, 181, 181)
+    heat_color_mysekai = (204, 255, 204)
+
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
+            with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
+                with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
+                    TextBox(
+                        get_event_id_and_name_text(rqd.region, eid, truncate(title, 20)),
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
+                    )
+                    time_to_end = event_end - now
+                    if time_to_end.total_seconds() <= 0:
+                        time_to_end = "活动已结束"
+                    else:
+                        time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
+                    TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox(
+                        f"数据更新于: {get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}",
+                        TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
+                    )
+                if wl_chara_img_path:
+                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR, wl_chara_img_path), size=(None, 50))
+
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
+                TextBox(f'T{latest_rank.rank} "{latest_name}" 各小时Pt变化次数', heat_title_style)
+                TextBox("标注*号的小时有数据缺失，周回数可能不准确", heat_hint_style)
+                with Grid(col_count=24).set_sep(1, 1):
+                    for hour in range(24):
+                        TextBox(str(hour), TextStyle(font=DEFAULT_FONT, size=12, color=BLACK)).set_content_align(
+                            "c"
+                        ).set_size((30, 30))
+                    for day in range(len(rankcounts)):
+                        for hour in range(24):
+                            playcount = playcounts[day][hour]
+                            rankcount = rankcounts[day][hour]
+                            abnormal = abnormals[day][hour]
+                            if rankcount < 10:
+                                Spacer(w=30, h=30)
+                                continue
+
+                            label = str(playcount)
+                            if abnormal:
+                                label += "*"
+                            if playcount > SK_PLAYCOUNT_MYSEKAI_THRESHOLD:
+                                color = heat_color_mysekai
+                            else:
+                                color = lerp_color(
+                                    heat_color_min,
+                                    heat_color_max,
+                                    max(min((playcount - 15) / 15, 1.0), 0.0),
+                                )
+                            TextBox(label, TextStyle(font=DEFAULT_FONT, size=14, color=BLACK), overflow="clip").set_bg(
+                                roundrect_bg(fill=color, radius=4)
+                            ).set_content_align("c").set_size((30, 30)).set_offset((0, -2))
+
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(16):
+                TextBox(*first_text)
+                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(12):
+                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+                        for text in left_texts:
+                            TextBox(*text)
+                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+                        for text in right_texts:
+                            TextBox(*text)
+
+    add_request_watermark(canvas, rqd)
+    return await canvas.get_img(1.5 if len(stop_texts) < 10 else 1.0)
 
 
 async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
@@ -633,7 +805,7 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
             else:
                 TextBox("暂无时速数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -796,7 +968,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             ):
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -930,7 +1102,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_bg(roundrect_bg()).set_padding(8):
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -1018,5 +1190,5 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
                                     TextStyle(font=DEFAULT_FONT, size=28, color=(100, 25, 75, 255)),
                                 )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img(2.0)

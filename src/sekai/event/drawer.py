@@ -1,4 +1,7 @@
+import asyncio
+import logging
 import math
+import time
 
 from PIL import Image
 
@@ -7,7 +10,7 @@ from src.sekai.base.draw import (
     CHARACTER_COLOR_CODE,
     SEKAI_BLUE_BG,
     WIDGET_BG_COLOR,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, color_code_to_rgb
@@ -32,6 +35,8 @@ from src.sekai.profile.drawer import (
 )
 from src.settings import ASSETS_BASE_DIR
 
+logger = logging.getLogger(__name__)
+
 # 从 model.py 导入数据模型
 from .model import (
     EventDetailRequest,
@@ -45,10 +50,12 @@ from .model import (
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     detail = rqd.event_info
     now = request_now(rqd.timezone)
-    card_thumbs = []
-    for card in rqd.event_cards:
-        card_full_thumb = await get_card_full_thumbnail(card)
-        card_thumbs.append(card_full_thumb)
+    _t0 = time.perf_counter()
+    card_thumbs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in rqd.event_cards])
+    logger.debug(
+        "[perf] compose_event_detail_image card thumbs %d: %.3fs",
+        len(rqd.event_cards), time.perf_counter() - _t0,
+    )
 
     if detail:
         banner_index = rqd.event_info.banner_index
@@ -64,18 +71,29 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
             chapter["start_time"] = datetime_from_millis(chapter["start_at"], rqd.timezone)
             chapter["end_time"] = datetime_from_millis(chapter["aggregate_at"] + 1000, rqd.timezone)
     use_story_bg = detail.event_type != "world_bloom"
-    event_bg = (
-        await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path)
-        if use_story_bg
-        else await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
-    )
-    event_chara_img = (
-        await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img) if detail.banner_cid else None
-    )
-    event_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
-    ban_chara_icon = None
+
+    # 并行加载所有活动图片
+    _event_img_tasks = {}
+    bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
+    _event_img_tasks["bg"] = get_img_from_path(ASSETS_BASE_DIR, bg_path)
+    if detail.banner_cid:
+        _event_img_tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img)
+    _event_img_tasks["logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     if rqd.event_assets.ban_chara_icon_path:
-        ban_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
+        _event_img_tasks["ban_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
+    if rqd.event_assets.event_attr_image_path:
+        _event_img_tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
+    if rqd.event_assets.bonus_chara_path:
+        for i, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
+            _event_img_tasks[f"bonus_chara_{i}"] = get_img_from_path(ASSETS_BASE_DIR, chara_path)
+    _ek = list(_event_img_tasks.keys())
+    _t0 = time.perf_counter()
+    _ev = dict(zip(_ek, await asyncio.gather(*_event_img_tasks.values())))
+    logger.debug("[perf] compose_event_detail_image event images %d: %.3fs", len(_ek), time.perf_counter() - _t0)
+    event_bg = _ev["bg"]
+    event_chara_img = _ev.get("chara")
+    event_logo = _ev["logo"]
+    ban_chara_icon = _ev.get("ban_icon")
     h = 1024
     w = min(int(h * 1.6), event_bg.size[0] * h // event_bg.size[1] if event_bg else int(h * 1.6))
     bg = ImageBg(event_bg, blur=False) if event_bg else SEKAI_BLUE_BG
@@ -198,19 +216,20 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         if detail.bonus_attr:
                             TextBox("加成属性", label_style)
                             ImageBox(
-                                await get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path),
+                                _ev["attr"],
                                 size=(None, 40),
                             )
                         if rqd.event_assets.bonus_chara_path:
                             TextBox("加成角色", label_style)
-                            bonus_chara_image = []
-                            for chara in rqd.event_assets.bonus_chara_path:
-                                bonus_chara_image.append(await get_img_from_path(ASSETS_BASE_DIR, chara))
+                            bonus_chara_image = [
+                                _ev[f"bonus_chara_{i}"]
+                                for i in range(len(rqd.event_assets.bonus_chara_path))
+                            ]
                             with Grid(col_count=5 if len(bonus_chara_image) < 20 else 7).set_sep(4, 4):
                                 for image in bonus_chara_image:
                                     ImageBox(image, size=(None, 40))
 
-        add_watermark(canvas)
+        add_request_watermark(canvas, rqd)
         return await canvas.get_img()
 
     return await draw(w, h)
@@ -300,7 +319,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                 if user_wl_events:
                     await draw_events("WL单榜", user_wl_events)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -363,6 +382,6 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                                 if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
                                     Spacer(w=24, h=24)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
 
     return await canvas.get_img()

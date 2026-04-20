@@ -1198,9 +1198,6 @@ class TextBox(Widget):
     r"""TextBox
 
     绘制文字
-
-    TODO:
-        shadow 还未实现
     """
 
     def __init__(
@@ -1351,7 +1348,14 @@ class TextBox(Widget):
                 x += p.w - lw
             elif self.content_h_align == "c":
                 x += (p.w - lw) // 2
+            x += self.text_offset_x
+            y += self.text_offset_y
             p.move_region((x, y), (lw, self.style.size))
+            if self.style.use_shadow:
+                shadow_offset = self.style.shadow_offset
+                if isinstance(shadow_offset, int):
+                    shadow_offset = (shadow_offset, shadow_offset)
+                p.text(line, shadow_offset, font=self._get_font_desc(), fill=self.style.shadow_color)
             p.text(line, (0, 0), font=self._get_font_desc(), fill=self.style.color)
             p.restore_region()
 

@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 
 from src.sekai.base.painter import Color
+from src.sekai.base.timezone import TimeZoneRequest
 
 
 class StampData(BaseModel):
@@ -25,7 +26,7 @@ class StampData(BaseModel):
     text_color: Color = (200, 0, 0, 255)
 
 
-class StampListRequest(BaseModel):
+class StampListRequest(TimeZoneRequest):
     r"""StampListRequest
 
     绘制表情列表所必需的数据

@@ -12,6 +12,7 @@ from src.settings import (
 from .draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
+    add_request_watermark,
     add_watermark,
     roundrect_bg,
 )
@@ -59,6 +60,7 @@ __all__ = [
     "DEFAULT_FONT",
     "DEFAULT_HEAVY_FONT",
     "SEKAI_BLUE_BG",
+    "add_request_watermark",
     "add_watermark",
     "color_code_to_rgb",
     "get_img_from_path",

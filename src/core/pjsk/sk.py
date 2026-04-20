@@ -3,12 +3,14 @@ from fastapi import APIRouter, HTTPException
 from src.core.utils import image_to_response
 from src.sekai.sk.drawer import (
     CFRequest,
+    CSBRequest,
     PlayerTraceRequest,
     RankTraceRequest,
     SklRequest,
     SKRequest,
     SpeedRequest,
     WinRateRequest,
+    compose_csb_image,
     compose_cf_image,
     compose_player_trace_image,
     compose_rank_trace_image,
@@ -46,6 +48,16 @@ async def sk_check_room(request: CFRequest):
     """Generate 'Check Room' participation record image."""
     try:
         image = await compose_cf_image(request)
+        return image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/csb", summary="Generate csb image")
+async def sk_csb(request: CSBRequest):
+    """Generate 'CSB' heatmap image."""
+    try:
+        image = await compose_csb_image(request)
         return image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

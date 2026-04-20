@@ -2,6 +2,8 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from src.sekai.base.timezone import TimeZoneRequest
+
 
 class ScoreData(BaseModel):
     r"""ScoreData
@@ -26,7 +28,7 @@ class ScoreData(BaseModel):
     score_max: int
 
 
-class ScoreControlRequest(BaseModel):
+class ScoreControlRequest(TimeZoneRequest):
     r"""ScoreControlRequest
 
     绘制控分图片所必须的数据
@@ -55,7 +57,7 @@ class ScoreControlRequest(BaseModel):
     valid_scores: list[ScoreData] = []
 
 
-class CustomRoomScoreRequest(BaseModel):
+class CustomRoomScoreRequest(TimeZoneRequest):
     r"""CustomRoomScoreRequest
 
     绘制自定义房间控分图片所必须的数据
@@ -116,7 +118,7 @@ class MusicMetaInfo(BaseModel):
     fever_score: float
 
 
-class MusicMetaRequest(BaseModel):
+class MusicMetaRequest(TimeZoneRequest):
     r"""MusicMetaRequest
 
     绘制歌曲Meta图片所必须的数据（单个歌曲）
@@ -195,7 +197,7 @@ class MusicBoardItem(BaseModel):
     tps: float
 
 
-class MusicBoardRequest(BaseModel):
+class MusicBoardRequest(TimeZoneRequest):
     r"""MusicBoardRequest
 
     绘制歌曲排行图片所必须的数据

@@ -1,10 +1,14 @@
+import asyncio
+import logging
+import time
+
 from PIL import Image
 
 from src.sekai.base.draw import (
     BG_PADDING,
     Canvas,
     TextBox,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import ADAPTIVE_WB, color_code_to_rgb
@@ -24,6 +28,8 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAU
 
 # =========================== 从.model导入数据类型 =========================== #
 from .model import BirthdayEventTime, CharaBirthdayRequest
+
+logger = logging.getLogger(__name__)
 
 # =========================== 颜色常量 =========================== #
 
@@ -58,11 +64,18 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
-    # 加载图片
-    card_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path)
-    sd_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path)
-    title_image = await get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path)
-    card_thumbs = [await get_img_from_path(ASSETS_BASE_DIR, card.thumbnail_path) for card in cards]
+    # 加载图片（并行）
+    _img_tasks = [
+        get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
+        get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path),
+        get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path),
+        *[get_img_from_path(ASSETS_BASE_DIR, card.thumbnail_path) for card in cards],
+    ]
+    _t0 = time.perf_counter()
+    _img_results = await asyncio.gather(*_img_tasks)
+    logger.debug("[perf] compose_chara_birthday_image preload %d images: %.3fs", len(_img_tasks), time.perf_counter() - _t0)
+    card_image, sd_image, title_image = _img_results[0], _img_results[1], _img_results[2]
+    card_thumbs = list(_img_results[3:])
     # 绘制时间范围的辅助函数
     def draw_time_range(label: str, tr: BirthdayEventTime):
         start_at = datetime_from_millis(tr.start_at, rqd.timezone)
@@ -160,5 +173,5 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
                             b.set_bg(roundrect_bg(radius=8))
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

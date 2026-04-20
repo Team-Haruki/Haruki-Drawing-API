@@ -1,6 +1,18 @@
+import asyncio
+import logging
+import time
+
 from PIL import Image
 
-from src.sekai.base.draw import BG_PADDING, DIFF_COLORS, SEKAI_BLUE_BG, Canvas, TextBox, add_watermark, roundrect_bg
+from src.sekai.base.draw import (
+    BG_PADDING,
+    DIFF_COLORS,
+    SEKAI_BLUE_BG,
+    Canvas,
+    TextBox,
+    add_request_watermark,
+    roundrect_bg,
+)
 from src.sekai.base.painter import WHITE
 from src.sekai.base.plot import (
     FillBg,
@@ -19,6 +31,8 @@ from src.sekai.profile.drawer import (
 )
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
+logger = logging.getLogger(__name__)
+
 # 从 model.py 导入数据模型
 from .model import (
     DeckRequest,
@@ -28,8 +42,19 @@ OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
 RECOMMEND_ALG_NAMES = {
     "dfs": "暴力搜索",
+    "DFS": "暴力搜索",
     "sa": "模拟退火",
+    "SA": "模拟退火",
     "ga": "遗传算法",
+    "GA": "遗传算法",
+    "dfs_ga": "DFS 预热遗传",
+    "dfs-ga": "DFS 预热遗传",
+    "dga": "DFS 预热遗传",
+    "DGA": "DFS 预热遗传",
+    "rl": "强化学习",
+    "RL": "强化学习",
+    "all": "全部算法",
+    "ALL": "全部算法",
 }
 
 BOOST_BONUS_DICT = {
@@ -48,7 +73,38 @@ BOOST_BONUS_DICT = {
 
 
 def format_skill_rate(rate: float) -> str:
-    return str(int(rate)) if int(rate) == rate else f"{rate:.1f}"
+    normalized = round(rate, 1)
+    return str(int(normalized)) if float(int(normalized)) == normalized else f"{normalized:.1f}"
+
+
+def format_algorithm_label(alg: str | None) -> str:
+    if not alg:
+        return ""
+
+    short_names = {
+        "dfs": "DFS",
+        "sa": "SA",
+        "ga": "GA",
+        "dfs_ga": "DGA",
+        "dfs-ga": "DGA",
+        "dga": "DGA",
+        "rl": "RL",
+        "all": "ALL",
+    }
+    parts = [part.strip() for part in alg.replace("＋", "+").split("+") if part.strip()]
+    labels = [short_names.get(part.lower(), part.upper()) for part in parts]
+    return "+".join(labels)
+
+
+def algorithm_label_font_size(alg: str | None) -> int:
+    label = format_algorithm_label(alg)
+    if len(label) <= 8:
+        return 12
+    if len(label) <= 11:
+        return 11
+    if len(label) <= 14:
+        return 10
+    return 9
 
 
 def format_skill_order_text(strategy: str | None) -> str:
@@ -77,6 +133,19 @@ def format_skill_reference_text(strategy: str | None) -> str:
             return ""
 
 
+def build_algorithm_runtime_text(cost_times: dict | None, wait_times: dict | None) -> str:
+    if not cost_times:
+        return ""
+
+    wait_times = wait_times or {}
+    lines = ["本次组卡使用算法:"]
+    for index, (alg, cost) in enumerate(cost_times.items(), start=1):
+        alg_name = RECOMMEND_ALG_NAMES.get(alg, alg)
+        wait_time = wait_times.get(alg, 0.0)
+        lines.append(f"{index}. {alg_name} 等待{wait_time:.2f}s / 耗时{cost:.2f}s")
+    return "\n".join(lines)
+
+
 async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
@@ -90,21 +159,48 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     chara_icon = None
     if rqd.chara_icon_path:
         chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path)
-    wl_chara_icon = None
+    # 并行加载所有可选图标
+    _deck_tasks = {}
     if rqd.wl_chara_icon_path:
-        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
-    unit_logo = None
+        _deck_tasks["wl_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
     if rqd.unit_logo_path:
-        unit_logo = await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
-    attr_icon = None
+        _deck_tasks["unit_logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
     if rqd.attr_icon_path:
-        attr_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
-    music_cover = None
+        _deck_tasks["attr_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
     if not music_compare and rqd.music_cover_path:
-        music_cover = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
-    canvas_thumbnail = None
+        _deck_tasks["music_cover"] = get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
     if rqd.canvas_thumbnail_path:
-        canvas_thumbnail = await get_img_from_path(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
+        _deck_tasks["canvas_thumb"] = get_img_from_path(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
+    # 收集卡牌缩略图和比较封面
+    _card_thumb_tasks = []
+    _card_thumb_keys = []
+    _compare_cover_paths = []
+    for deck in rqd.deck_data:
+        if music_compare and deck.music_cover_path and deck.music_cover_path not in dict.fromkeys(_compare_cover_paths):
+            _compare_cover_paths.append(deck.music_cover_path)
+        for card in deck.card_data:
+            _card_thumb_tasks.append(get_card_full_thumbnail(card.card_thumbnail))
+            _card_thumb_keys.append(card.card_thumbnail.card_id)
+    _compare_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
+
+    # 并行执行所有加载
+    _dk = list(_deck_tasks.keys())
+    _t0 = time.perf_counter()
+    _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks)
+    logger.debug(
+        "[perf] compose_deck_recommend_image preload %d items: %.3fs",
+        len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks),
+        time.perf_counter() - _t0,
+    )
+    _di = dict(zip(_dk, _all_results[:len(_dk)]))
+    _thumb_results = _all_results[len(_dk):len(_dk) + len(_card_thumb_tasks)]
+    _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks):]
+
+    wl_chara_icon = _di.get("wl_chara")
+    unit_logo = _di.get("unit_logo")
+    attr_icon = _di.get("attr_icon")
+    music_cover = _di.get("music_cover")
+    canvas_thumbnail = _di.get("canvas_thumb")
     unit_filter = rqd.unit_filter
     attr_filter = rqd.attr_filter
     excluded_cards = rqd.excluded_cards or []
@@ -113,17 +209,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     result_decks = rqd.deck_data
     result_algs = rqd.model_name or [""] * len(result_decks)
     # 获取卡组卡牌缩略图
-    card_imgs, card_keys = [], []
-    compare_music_imgs = {}
-
-    for deck in rqd.deck_data:
-        if music_compare and deck.music_cover_path and deck.music_cover_path not in compare_music_imgs:
-            compare_music_imgs[deck.music_cover_path] = await get_img_from_path(ASSETS_BASE_DIR, deck.music_cover_path)
-        for card in deck.card_data:
-            card_img = await get_card_full_thumbnail(card.card_thumbnail)
-            card_imgs.append(card_img)
-            card_keys.append(card.card_thumbnail.card_id)
-    card_imgs = dict(zip(card_keys, card_imgs))
+    card_imgs = dict(zip(_card_thumb_keys, _thumb_results))
+    compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -303,6 +390,12 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
 
                 # 表格
                 gh, vsp, voffset = 120, 12, 18
+                score_col_w = 112
+                bonus_col_w = 102
+                skill_col_w = 92
+                power_col_w = 100
+                card_col_w = 96
+                note_text_width = 920 if music_compare else 760
                 with (
                     VSplit()
                     .set_content_align("c")
@@ -378,15 +471,15 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     text = score_name + th_main_sign if target_score else score_name
                                     style = th_style1 if target_score else th_style2
                                     with Frame().set_h(gh // 2).set_content_align("c"):
-                                        TextBox(text, style)
+                                        TextBox(text, style).set_w(score_col_w).set_content_align("c")
                                         if boost is not None and target_score:
                                             TextBox(
                                                 f"{boost}🔥(x{boost_bonus})",
                                                 TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
-                                            ).set_content_align("c").set_offset((0, 28))
+                                            ).set_w(score_col_w).set_content_align("c").set_offset((0, 28))
                                     Spacer(h=6)
                                     for i, (deck, alg) in enumerate(zip(result_decks, result_algs)):
-                                        with Frame().set_content_align("rb"):
+                                        with Frame().set_content_align("rb").set_w(score_col_w).set_h(gh):
                                             alg_offset = 0
                                             # 挑战分数差距
                                             if recommend_type in ["challenge", "challenge_all"]:
@@ -395,12 +488,20 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 color = (50, 150, 50) if dlt > 0 else (150, 50, 50)
                                                 TextBox(
                                                     f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)
-                                                ).set_offset((0, -8 - voffset * 2))
+                                                ).set_w(score_col_w).set_content_align("c").set_offset(
+                                                    (0, -8 - voffset * 2)
+                                                )
                                             # 算法
                                             TextBox(
-                                                alg.upper(),
-                                                TextStyle(font=DEFAULT_FONT, size=12, color=(125, 125, 125)),
-                                            ).set_offset((0, -8 - voffset * 2 + alg_offset))
+                                                format_algorithm_label(alg),
+                                                TextStyle(
+                                                    font=DEFAULT_FONT,
+                                                    size=algorithm_label_font_size(alg),
+                                                    color=(125, 125, 125),
+                                                ),
+                                            ).set_w(score_col_w).set_content_align("c").set_offset(
+                                                (0, -8 - voffset * 2 + alg_offset)
+                                            )
                                             # 分数
                                             score = deck.score or 0
                                             if recommend_type == "no_event":
@@ -410,9 +511,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             if boost is not None and target_score:
                                                 score = int(score * boost_bonus)
                                             with Frame().set_content_align("c"):
-                                                TextBox(str(score), tb_style).set_h(gh).set_content_align(
-                                                    "c"
-                                                ).set_offset((0, -voffset))
+                                                TextBox(str(score), tb_style).set_w(score_col_w).set_h(
+                                                    gh
+                                                ).set_content_align("c").set_offset((0, -voffset))
 
                             # 卡片
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
@@ -433,32 +534,40 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                                 .set_item_align("c")
                                                 .set_sep(4)
                                                 .set_padding(0)
-                                                .set_h(gh)
+                                                .set_size((card_col_w, gh))
                                             ):
-                                                with Frame().set_content_align("rt"):
-                                                    card_key = card_id
-                                                    ImageBox(card_imgs[card_key], size=(None, 80))
-                                                    if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
-                                                        rqd.fixed_characters_id
-                                                        and character_id in rqd.fixed_characters_id
-                                                    ):
-                                                        TextBox(
-                                                            str(card_id),
-                                                            TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
-                                                        ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset((-2, 0))
-                                                    else:
-                                                        TextBox(
-                                                            str(card_id),
-                                                            TextStyle(font=DEFAULT_FONT, size=10, color=(75, 75, 75)),
-                                                        ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
-                                                            (-2, 0)
-                                                        )
-                                                    if card.has_canvas_bonus:
-                                                        ImageBox(canvas_thumbnail, size=(11, 11)).set_offset((-32, 65))
+                                                with Frame().set_w(card_col_w).set_content_align("c"):
+                                                    with Frame().set_content_align("rt"):
+                                                        card_key = card_id
+                                                        ImageBox(card_imgs[card_key], size=(None, 80))
+                                                        if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
+                                                            rqd.fixed_characters_id
+                                                            and character_id in rqd.fixed_characters_id
+                                                        ):
+                                                            TextBox(
+                                                                str(card_id),
+                                                                TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
+                                                            ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset(
+                                                                (-2, 0)
+                                                            )
+                                                        else:
+                                                            TextBox(
+                                                                str(card_id),
+                                                                TextStyle(
+                                                                    font=DEFAULT_FONT, size=10, color=(75, 75, 75)
+                                                                ),
+                                                            ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
+                                                                (-2, 0)
+                                                            )
+                                                        if card.has_canvas_bonus:
+                                                            ImageBox(canvas_thumbnail, size=(11, 11)).set_offset(
+                                                                (-32, 65)
+                                                            )
 
                                                 info_bg = RoundRectBg((255, 255, 255, 150), 2)
                                                 with (
                                                     HSplit()
+                                                    .set_w(card_col_w)
                                                     .set_content_align("c")
                                                     .set_item_align("c")
                                                     .set_sep(3)
@@ -475,6 +584,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
 
                                                 with (
                                                     HSplit()
+                                                    .set_w(card_col_w)
                                                     .set_content_align("c")
                                                     .set_item_align("c")
                                                     .set_sep(3)
@@ -516,7 +626,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                             # 加成
                             if recommend_type not in ["challenge", "challenge_all", "no_event"]:
                                 with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    TextBox("加成", th_style2).set_h(gh // 2).set_content_align("c")
+                                    TextBox("加成", th_style2).set_w(bonus_col_w).set_h(gh // 2).set_content_align("c")
                                     Spacer(h=6)
                                     for deck in result_decks:
                                         if rqd.is_wl:
@@ -525,15 +635,17 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                         else:
                                             bonus = None
                                             total = f"{deck.event_bonus_rate:.1f}%"
-                                        with Frame().set_content_align("rb"):
+                                        with Frame().set_content_align("rb").set_w(bonus_col_w).set_h(gh):
                                             if bonus is not None:
                                                 TextBox(
                                                     bonus, TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150))
-                                                ).set_offset((0, -6 - voffset * 2))
-                                            with Frame().set_content_align("c"):
-                                                TextBox(total, tb_style).set_h(gh).set_content_align("c").set_offset(
-                                                    (0, -voffset)
+                                                ).set_w(bonus_col_w).set_content_align("c").set_offset(
+                                                    (0, -6 - voffset * 2)
                                                 )
+                                            with Frame().set_content_align("c"):
+                                                TextBox(total, tb_style).set_w(bonus_col_w).set_h(gh).set_content_align(
+                                                    "c"
+                                                ).set_offset((0, -voffset))
 
                             # 实效
                             if rqd.live_type in ["multi", "cheerful"]:
@@ -541,20 +653,22 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     target_skill = rqd.target == "skill"
                                     text = "实效" + th_main_sign if target_skill else "实效"
                                     style = th_style1 if target_skill else th_style2
-                                    TextBox(text, style).set_h(gh // 2).set_content_align("c")
+                                    TextBox(text, style).set_w(skill_col_w).set_h(gh // 2).set_content_align("c")
                                     Spacer(h=6)
                                     for deck in result_decks:
-                                        with Frame().set_content_align("rb"):
+                                        with Frame().set_content_align("rb").set_w(skill_col_w).set_h(gh):
                                             if rqd.multi_live_teammate_score_up is not None:
                                                 teammate_text = f"队友 {int(rqd.multi_live_teammate_score_up)}"
                                                 TextBox(
                                                     teammate_text,
                                                     TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_offset((0, -8 - voffset * 2))
+                                                ).set_w(skill_col_w).set_content_align("c").set_offset(
+                                                    (0, -8 - voffset * 2)
+                                                )
                                             with Frame().set_content_align("c"):
-                                                TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_h(
-                                                    gh
-                                                ).set_content_align("c").set_offset((0, -voffset))
+                                                TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_w(
+                                                    skill_col_w
+                                                ).set_h(gh).set_content_align("c").set_offset((0, -voffset))
 
                             # 综合力和算法
                             if recommend_type not in ["bonus", "wl_bonus"]:
@@ -562,20 +676,22 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     target_power = rqd.target == "total_power"
                                     text = "综合力" + th_main_sign if target_power else "综合力"
                                     style = th_style1 if target_power else th_style2
-                                    TextBox(text, style).set_h(gh // 2).set_content_align("c")
+                                    TextBox(text, style).set_w(power_col_w).set_h(gh // 2).set_content_align("c")
                                     Spacer(h=6)
                                     for deck in result_decks:
-                                        with Frame().set_content_align("rb"):
+                                        with Frame().set_content_align("rb").set_w(power_col_w).set_h(gh):
                                             if rqd.multi_live_teammate_power is not None:
                                                 teammate_text = f"队友 {int(rqd.multi_live_teammate_power)}"
                                                 TextBox(
                                                     teammate_text,
                                                     TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_offset((0, -8 - voffset * 2))
+                                                ).set_w(power_col_w).set_content_align("c").set_offset(
+                                                    (0, -8 - voffset * 2)
+                                                )
                                             with Frame().set_content_align("c"):
-                                                TextBox(str(deck.total_power), tb_style).set_h(gh).set_content_align(
-                                                    "c"
-                                                ).set_offset((0, -voffset))
+                                                TextBox(str(deck.total_power), tb_style).set_w(power_col_w).set_h(
+                                                    gh
+                                                ).set_content_align("c").set_offset((0, -voffset))
                     # 找不到结果
                     else:
                         TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
@@ -587,16 +703,20 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                         TextBox(
                             "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",
                             tip_style,
-                        )
-                    TextBox("功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责", tip_style)
-                    alg_and_cost_text = "本次组卡使用算法: "
-                    for alg, cost in rqd.cost_times.items():
-                        alg_name = RECOMMEND_ALG_NAMES[alg]
-                        cost_time = f"{cost:.2f}s"
-                        wait_time = f"{rqd.wait_times[alg]:.2f}s"
-                        alg_and_cost_text += f"{alg_name} (等待{wait_time}/耗时{cost_time}) + "
-                    alg_and_cost_text = alg_and_cost_text[:-3]
-                    TextBox(alg_and_cost_text, tip_style)
+                            use_real_line_count=True,
+                        ).set_w(note_text_width)
+                    TextBox(
+                        "功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责",
+                        tip_style,
+                        use_real_line_count=True,
+                    ).set_w(note_text_width)
+                    algorithm_runtime_text = build_algorithm_runtime_text(rqd.cost_times, rqd.wait_times)
+                    if algorithm_runtime_text:
+                        TextBox(
+                            algorithm_runtime_text,
+                            tip_style,
+                            use_real_line_count=True,
+                        ).set_w(note_text_width)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

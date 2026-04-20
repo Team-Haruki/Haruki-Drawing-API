@@ -87,6 +87,8 @@ class DrawingSettings(BaseModel):
     thread_pool_size: int = 8
     image_cache_size: int = 0  # 图片解码缓存条目数，0 表示关闭
     image_cache_max_mb: int = 0  # 图片解码缓存总内存上限（MB），0 表示关闭
+    thumbnail_cache_size: int = 0  # 缩略图专用缓存条目数，0 表示关闭
+    thumbnail_cache_max_mb: int = 0  # 缩略图专用缓存总内存上限（MB），0 表示关闭
     use_process_pool: bool = False  # 是否启用进程池
     process_pool_workers: int = 4  # 进程池工作进程数
     process_pool_threshold: int = 2_000_000  # 像素阈值 (约 2000x1000)
@@ -176,6 +178,8 @@ DEFAULT_EMOJI_FONT = settings.font.emoji
 DEFAULT_THREAD_POOL_SIZE = settings.drawing.thread_pool_size
 IMAGE_CACHE_SIZE = settings.drawing.image_cache_size
 IMAGE_CACHE_MAX_BYTES = settings.drawing.image_cache_max_mb * 1024 * 1024
+THUMB_CACHE_SIZE = settings.drawing.thumbnail_cache_size
+THUMB_CACHE_MAX_BYTES = settings.drawing.thumbnail_cache_max_mb * 1024 * 1024
 SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality

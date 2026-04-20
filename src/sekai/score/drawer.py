@@ -1,3 +1,7 @@
+import asyncio
+import logging
+import time
+
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -6,7 +10,7 @@ from src.sekai.base.draw import (
     SEKAI_BLUE_BG,
     Canvas,
     TextBox,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import BLACK, WHITE, get_font, get_text_size
@@ -19,7 +23,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.utils import get_img_from_path, truncate
+from src.sekai.base.utils import get_img_from_path
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
@@ -29,6 +33,8 @@ from .model import (
     MusicMetaRequest,
     ScoreControlRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _calc_custom_room_title_width(
@@ -138,7 +144,7 @@ async def compose_score_control_image(
                                 TextBox(f"{score_min}", style2).set_bg(bg).set_size((gw3, gh)).set_content_align("r")
                                 TextBox(f"{score_max}", style2).set_bg(bg).set_size((gw4, gh)).set_content_align("r")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -160,6 +166,23 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
     style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
     style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 50, 50))
+
+    # 预加载所有歌曲封面（并行）
+    _cover_paths: set[str] = set()
+    for music_list in rqd.music_list_map.values():
+        for m in music_list:
+            _cover_paths.add(m["music_cover"])
+    _cover_list = list(_cover_paths)
+    if _cover_list:
+        _t0 = time.perf_counter()
+        _cover_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cover_list])
+        logger.debug(
+            "[perf] compose_custom_room_score_control_image preload %d covers: %.3fs",
+            len(_cover_list), time.perf_counter() - _t0,
+        )
+        _cover_cache = dict(zip(_cover_list, _cover_imgs))
+    else:
+        _cover_cache = {}
 
     # 合成图片
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -250,7 +273,7 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                                         # Keep separator width consistent with _calc_custom_room_title_width
                                         # (TextBox has default horizontal padding=2, which may cause overflow).
                                         TextBox(" / ", style2).set_padding(0)
-                                    music_cover = await get_img_from_path(ASSETS_BASE_DIR, music_info["music_cover"])
+                                    music_cover = _cover_cache[music_info["music_cover"]]
                                     ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
                                     TextBox(str(music_info["music_title"]), style2, line_count=1).set_w(title_width)
                 # PT系数
@@ -262,7 +285,7 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                             (8, 0)
                         ).set_bg(bg)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -277,10 +300,17 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
     requests : List[MusicMetaRequest]
         歌曲Meta信息请求列表
     """
+    # 预加载所有歌曲封面
+    _t0 = time.perf_counter()
+    _meta_covers = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path) for rqd in requests])
+    logger.debug(
+        "[perf] compose_music_meta_image preload %d covers: %.3fs",
+        len(requests), time.perf_counter() - _t0,
+    )
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
-            for rqd in requests:
-                music_cover = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
+            for rqd, music_cover in zip(requests, _meta_covers):
 
                 style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
                 style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
@@ -394,7 +424,7 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
                                     TextBox("（多人）", style1)
                                     TextBox(f" {multi_skill_account * 100:.1f}%", style2)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, requests)
     return await canvas.get_img()
 
 
@@ -492,20 +522,24 @@ async def compose_music_board_image(
                 w = int(ratios[1] * unit_w)
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
                     TextBox("歌曲", title_style).set_size((w, gh)).set_content_align("c").set_bg(row_bg_fn(0))
+                    song_row_padding = 8
+                    song_row_sep = 4
+                    song_cover_size = gh - 8
+                    song_title_w = max(24, w - song_row_padding * 2 - song_cover_size - song_row_sep)
                     for i, row in enumerate(rqd.items):
                         bg = row_bg_fn(i + 1)
                         with (
                             HSplit()
                             .set_content_align("l")
                             .set_item_align("l")
-                            .set_sep(4)
-                            .set_padding((8, 0))
+                            .set_sep(song_row_sep)
+                            .set_padding((song_row_padding, 0))
                             .set_size((w, gh))
                             .set_bg(bg)
                         ):
                             music_cover = await get_img_from_path(ASSETS_BASE_DIR, row.music_cover_path)
-                            ImageBox(music_cover, size=(gh - 8, gh - 8), use_alpha_blend=False)
-                            TextBox(row.music_title, item_style, overflow='shrink')
+                            ImageBox(music_cover, size=(song_cover_size, song_cover_size), use_alpha_blend=False)
+                            TextBox(row.music_title, item_style, wrap=False, overflow="shrink").set_w(song_title_w)
 
                 # 3. 难度 Column
                 w = int(ratios[2] * unit_w)
@@ -555,5 +589,5 @@ async def compose_music_board_image(
                 add_text_column("时长", lambda r: f"{r.music_time:.1f}")
                 add_text_column("每秒点击", lambda r: f"{r.tps:.1f}")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

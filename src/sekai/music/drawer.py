@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 
 from PIL import Image
 
@@ -7,7 +9,7 @@ from src.sekai.base.draw import (
     DIFF_COLORS,
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -17,6 +19,9 @@ from src.sekai.base.painter import (
     DEFAULT_HEAVY_FONT,
     WHITE,
     LinearGradient,
+    get_font,
+    get_font_desc,
+    get_text_size,
     lerp_color,
 )
 from src.sekai.base.plot import (
@@ -46,6 +51,8 @@ from .model import (
     MusicListRequest,
     PlayProgressRequest,
 )
+
+logger = logging.getLogger(__name__)
 
 # =========================== 绘图助手 =========================== #
 
@@ -124,6 +131,63 @@ def _build_caption_vocals(vocal_info, vocal_logos):
     return caption_vocals
 
 
+def _build_music_detail_leaderboard_cell(
+    width: int,
+    height: int,
+    bg_color,
+    rank_text: str,
+    value_text: str | None,
+    rank_color,
+    *,
+    padding: int = 8,
+    gap: int = 4,
+    rank_box_w: int = 42,
+):
+    rank_font_size = 18
+    value_font_size = 12
+    rank_font = get_font(DEFAULT_BOLD_FONT, rank_font_size)
+    rank_font_desc = get_font_desc(DEFAULT_BOLD_FONT, rank_font_size)
+    value_font_desc = get_font_desc(DEFAULT_FONT, value_font_size)
+    text_color = (50, 50, 50)
+    rank_area_x = padding
+    rank_area_w = rank_box_w
+    value_area_x = padding + rank_box_w + gap
+
+    def _draw_text(_, p):
+        if value_text:
+            rank_w, _ = get_text_size(rank_font, rank_text)
+            p.text(
+                rank_text,
+                (rank_area_x + max(0, (rank_area_w - rank_w) // 2), (height - rank_font_size) // 2),
+                font=rank_font_desc,
+                fill=rank_color,
+            )
+            p.text(
+                value_text,
+                (value_area_x, (height - value_font_size) // 2),
+                font=value_font_desc,
+                fill=text_color,
+            )
+        else:
+            rank_w, _ = get_text_size(rank_font, rank_text)
+            p.text(
+                rank_text,
+                ((width - rank_w) // 2, (height - rank_font_size) // 2),
+                font=rank_font_desc,
+                fill=rank_color,
+            )
+
+    return Frame().set_bg(FillBg(bg_color)).set_size((width, height)).add_draw_func(_draw_text)
+
+
+def _ordered_music_detail_leaderboard_keys(label_map: dict[str, str] | None, preferred_order: tuple[str, ...]) -> list[str]:
+    if not label_map:
+        return []
+    ordered = [key for key in preferred_order if key in label_map]
+    ordered.extend(key for key in label_map if key not in preferred_order)
+    return ordered
+
+
 async def compose_music_detail_image(rqd: MusicDetailRequest):
     # 数据准备
     mid = rqd.music_info.id
@@ -142,16 +206,24 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     vocal_info = rqd.vocal.vocal_info
     vocal_logos_raw = rqd.vocal.vocal_assets
     # has_append = rqd.difficulty.has_append
-    event_banner = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path) if rqd.event_banner_path else None
 
-    # if not has_append:
-    #     DIFF_COLORS.pop("append")
-
+    # 并行加载封面、banner和所有vocal logos
+    _logo_names = list(vocal_logos_raw.keys())
+    _logo_paths = list(vocal_logos_raw.values())
+    _img_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _logo_paths]
+    if rqd.event_banner_path:
+        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path))
+    _t0 = time.perf_counter()
+    _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
+    logger.debug(
+        "[perf] compose_music_detail_image preload %d images: %.3fs",
+        len(_img_tasks), time.perf_counter() - _t0,
+    )
     vocal_logos = {}
-    for char_name, logo_path in vocal_logos_raw.items():
-        img = await get_img_from_path(ASSETS_BASE_DIR, logo_path)
-        if img:
-            vocal_logos[char_name] = img
+    for i, name_ in enumerate(_logo_names):
+        if _img_results[i]:
+            vocal_logos[name_] = _img_results[i]
+    event_banner = _img_results[len(_logo_names)] if rqd.event_banner_path else None
 
     if is_full_length:
         name += " [FULL]"
@@ -303,13 +375,19 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
 
                     # 排行榜
                     if rqd.leaderboard_matrix and rqd.leaderboard_live_types and rqd.leaderboard_targets:
-                        live_type_keys = list(rqd.leaderboard_live_types.keys())
-                        target_keys = list(rqd.leaderboard_targets.keys())
+                        live_type_keys = _ordered_music_detail_leaderboard_keys(
+                            rqd.leaderboard_live_types, ("solo", "multi", "auto")
+                        )
+                        target_keys = _ordered_music_detail_leaderboard_keys(
+                            rqd.leaderboard_targets, ("score", "pt", "pt/time")
+                        )
                         leaderboard_music_num = rqd.leaderboard_music_num or 1
 
                         th_w, th_h = 60, 36
                         tr_w, tr_h = 120, 36
                         gap = 4
+                        cell_padding = 8
+                        rank_box_w = 42
 
                         with (
                             VSplit()
@@ -360,20 +438,17 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                                             else lerp_color(yellow, red, rank_ratio - 0.5)
                                         )
 
-                                        with (
-                                            Frame()
-                                            .set_bg(FillBg(bg_color))
-                                            .set_size((tr_w, tr_h))
-                                            .set_content_align("c")
-                                        ):
-                                            with HSplit().set_content_align("b").set_item_align("b").set_sep(2):
-                                                TextBox(
-                                                    text1, TextStyle(DEFAULT_BOLD_FONT, 18, text_color, use_shadow=True)
-                                                )
-                                                if text2:
-                                                    TextBox(
-                                                        text2, TextStyle(DEFAULT_FONT, 12, (50, 50, 50))
-                                                    ).set_offset((0, -1))
+                                        _build_music_detail_leaderboard_cell(
+                                            tr_w,
+                                            tr_h,
+                                            bg_color,
+                                            text1,
+                                            text2,
+                                            text_color,
+                                            padding=cell_padding,
+                                            gap=gap,
+                                            rank_box_w=rank_box_w,
+                                        )
 
                 # 别名
                 aliases = rqd.alias
@@ -442,7 +517,7 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                 else:
                     draw_vocal(964)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -451,7 +526,12 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 
     # 预加载封面
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
+    _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
+    logger.debug(
+        "[perf] compose_music_brief_list_image jackets %d: %.3fs",
+        len(jacket_tasks), time.perf_counter() - _t0,
+    )
     jackets = {m.id: img for m, img in zip(rqd.music_list, loaded_jackets)}
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -516,14 +596,16 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                                         roundrect_bg(fill=DIFF_COLORS.get(diff_name, BLACK), radius=12)
                                     )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
 async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
     jackets = {}
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
+    _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
+    logger.debug("[perf] compose_music_list_image jackets %d: %.3fs", len(jacket_tasks), time.perf_counter() - _t0)
     for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
         jackets[music_id] = img
 
@@ -592,7 +674,7 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
                                         64
                                     )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -704,7 +786,7 @@ async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
                             roundrect_bg(alpha=80)
                         )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -818,7 +900,7 @@ async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> 
                                     acc += combo_reward.reward
                                     TextBox(str(acc), style2, overflow="clip").set_size((gw, gh)).set_content_align("l")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -894,5 +976,5 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
                                 rqd.combo_rewards[diff], jewel_icon if diff != "append" else shard_icon, style2
                             ).set_size((None, gh))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

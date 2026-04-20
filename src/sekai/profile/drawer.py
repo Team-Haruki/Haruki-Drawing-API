@@ -1,15 +1,15 @@
 import asyncio
 import logging
+import time
 
 from PIL import Image, ImageDraw
 
 from src.sekai.base.draw import (
     BG_PADDING,
-    DEFAULT_WATERMARK,
     DIFF_COLORS,
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -40,11 +40,29 @@ from src.sekai.base.plot import (
     colored_text_box,
 )
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import get_img_from_path, get_readable_datetime, get_str_display_length, truncate
+from src.sekai.base.utils import (
+    get_img_from_path,
+    get_img_resized,
+    get_readable_datetime,
+    get_str_display_length,
+    truncate,
+)
 from src.sekai.honor.drawer import compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
+
+
+def format_info_panel_update_time(update_time, timezone_name: str | None) -> str:
+    timezone_label = (timezone_name or "").strip()
+    if not timezone_label and update_time.tzinfo is not None:
+        timezone_label = update_time.tzname() or ""
+
+    text = update_time.strftime("%m-%d %H:%M:%S")
+    if timezone_label:
+        text += f" ({timezone_label})"
+    text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
+    return text
 
 # =========================== 常量定义 =========================== #
 
@@ -213,12 +231,16 @@ async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | Non
     border2 = 80
     inner_w = w - 2 * border
 
-    base = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.base)
-    ct = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop)
-    lb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom)
-    lt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop)
-    rb = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom)
-    rt = await get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop)
+    _t0 = time.perf_counter()
+    base, ct, lb, lt, rb, rt = await asyncio.gather(
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.base),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom),
+        get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop),
+    )
+    logger.debug("[perf] get_player_frame_image preload 6 parts: %.3fs", time.perf_counter() - _t0)
 
     ct = resize_keep_ratio(ct, scale, mode="scale")
     lt = resize_keep_ratio(lt, scale, mode="scale")
@@ -367,8 +389,8 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align(
                     "l"
                 )
-                x_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.x_icon_path)
-                x_icon = x_icon.resize((24, 24)).convert("RGBA")
+                x_icon = await get_img_resized(ASSETS_BASE_DIR, rqd.x_icon_path, 24, 24)
+                x_icon = x_icon.convert("RGBA")
                 ImageBox(x_icon, image_size_mode="original").set_offset((16, 0))
 
             # 留言
@@ -391,7 +413,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         ImageBox(img, size=(None, 48), shadow=True)
             # 卡组
             with HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0)):
-                card_imgs = [await get_card_full_thumbnail(card) for card in pcards]
+                _t0 = time.perf_counter()
+                card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in pcards])
+                logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(pcards), time.perf_counter() - _t0)
                 for i in range(len(card_imgs)):
                     ImageBox(card_imgs[i], size=(90, 90), image_size_mode="fill", shadow=True)
         return ret
@@ -402,9 +426,13 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             hs, vs, gw, gh = 8, 12, 90, 25
             with VSplit().set_sep(vs):
                 Spacer(gh, gh)
-                icon_clear = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path)
-                icon_fc = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path)
-                icon_ap = await get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path)
+                _t0 = time.perf_counter()
+                icon_clear, icon_fc, icon_ap = await asyncio.gather(
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path),
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path),
+                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path),
+                )
+                logger.debug("[perf] draw_play play icons 3: %.3fs", time.perf_counter() - _t0)
                 ImageBox(icon_clear, size=(gh, gh))
                 ImageBox(icon_fc, size=(gh, gh))
                 ImageBox(icon_ap, size=(gh, gh))
@@ -433,6 +461,26 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
     # 养成部分
     async def draw_chara():
+        # 预加载所有角色等级图标（并行）
+        chara_map = rqd.chara_rank_icon_path_map
+        _chara_paths: dict[str, str] = {}
+        for chara, cid in CHARA_LIST:
+            if chara is None:
+                continue
+            p = chara_map.get(cid) or chara_map.get(str(cid))
+            if p and p not in _chara_paths:
+                _chara_paths[p] = p
+        if solo_live is not None:
+            scid = solo_live.character_id
+            p = chara_map.get(scid) or chara_map.get(str(scid))
+            if p and p not in _chara_paths:
+                _chara_paths[p] = p
+        _cp_list = list(_chara_paths.keys())
+        _t0 = time.perf_counter()
+        _cp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cp_list]) if _cp_list else []
+        logger.debug("[perf] draw_chara chara icons %d: %.3fs", len(_cp_list), time.perf_counter() - _t0)
+        _chara_icon_cache = dict(zip(_cp_list, _cp_imgs))
+
         with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
             hs, vs, gw, gh = 8, 7, 96, 48
             # 角色等级
@@ -443,12 +491,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         continue
                     rank = character_rank[cid]
                     with Frame().set_size((gw, gh)):
-                        chara_map = rqd.chara_rank_icon_path_map
                         c_rank_path = chara_map.get(cid) or chara_map.get(str(cid))
                         if not c_rank_path:
                             Spacer(gw, gh)
                             continue
-                        chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
+                        chara_img = _chara_icon_cache[c_rank_path]
                         ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
@@ -460,11 +507,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
-                        c_rank_path = rqd.chara_rank_icon_path_map.get(scid) or rqd.chara_rank_icon_path_map.get(
-                            str(scid)
-                        )
+                        c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
                         if c_rank_path:
-                            chara_img = await get_img_from_path(ASSETS_BASE_DIR, c_rank_path)
+                            chara_img = _chara_icon_cache[c_rank_path]
                             ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
                         else:
                             Spacer(100, 50)
@@ -495,14 +540,11 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 (await draw_play()).set_bg(None)
                 (await draw_chara()).set_bg(None)
 
-    if rqd.update_time:
-        update_time = datetime_from_millis(rqd.update_time, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        update_time = "?"
-    text = f"DT: {update_time}  " + DEFAULT_WATERMARK
-    if bg_settings.img_path:
-        text = text + "  This background is user-uploaded."
-    add_watermark(canvas, text)
+    add_request_watermark(
+        canvas,
+        rqd,
+        extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
+    )
     return await canvas.get_img(1.5)
 
 
@@ -582,20 +624,14 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     if len(data_sources) <= 1:
                         if primary_source and primary_source.update_time:
                             update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
-                            update_time_text = (
-                                update_time.strftime("%m-%d %H:%M:%S")
-                                + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                            )
+                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
                             TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     else:
                         for data_source in data_sources[:2]:
                             if not data_source.update_time:
                                 continue
                             update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
-                            update_time_text = (
-                                update_time.strftime("%m-%d %H:%M:%S")
-                                + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                            )
+                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
                             TextBox(
                                 f"{data_source_label(data_source.name)}更新时间: {update_time_text}",
                                 TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),

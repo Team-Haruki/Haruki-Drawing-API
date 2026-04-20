@@ -4,6 +4,10 @@ Education 模块绘图函数
 提供挑战Live详情、加成详情、区域道具升级材料、羁绊等级、队长次数等图片的绘制功能。
 """
 
+import asyncio
+import logging
+import time
+
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -11,7 +15,7 @@ from src.sekai.base.draw import (
     SEKAI_BLUE_BG,
     Canvas,
     TextStyle,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.plot import (
@@ -39,6 +43,8 @@ from .model import (
     PowerBonusDetailRequest,
 )
 
+logger = logging.getLogger(__name__)
+
 # ========== 挑战Live详情 ==========
 
 
@@ -60,9 +66,33 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
     w1, w2, w3, w4, w5, w6 = 80, 80, 150, 300, 80, 80
 
-    # 获取图标
-    jewel_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.jewel_icon_path) if rqd.jewel_icon_path else None
-    shard_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.shard_icon_path) if rqd.shard_icon_path else None
+    # 获取图标（并行）
+    _icon_tasks = []
+    if rqd.jewel_icon_path:
+        _icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.jewel_icon_path))
+    if rqd.shard_icon_path:
+        _icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.shard_icon_path))
+    _icon_results = await asyncio.gather(*_icon_tasks) if _icon_tasks else []
+    _idx = 0
+    if rqd.jewel_icon_path:
+        jewel_icon = _icon_results[_idx]
+        _idx += 1
+    else:
+        jewel_icon = None
+    if rqd.shard_icon_path:
+        shard_icon = _icon_results[_idx]
+    else:
+        shard_icon = None
+
+    # 预加载角色图标（并行）
+    _t0 = time.perf_counter()
+    chara_icons = await asyncio.gather(
+        *[get_img_from_path(ASSETS_BASE_DIR, ch.chara_icon_path) for ch in character_challenges]
+    )
+    logger.debug(
+        "[perf] compose_challenge_live_detail_image preload %d chara icons: %.3fs",
+        len(chara_icons), time.perf_counter() - _t0,
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -99,7 +129,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
                     jewel_text = str(challenge.jewel)
                     shard_text = str(challenge.shard)
 
-                    chara_icon = await get_img_from_path(ASSETS_BASE_DIR, challenge.chara_icon_path)
+                    chara_icon = chara_icons[idx]
 
                     with (
                         HSplit()
@@ -164,7 +194,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
                         TextBox(jewel_text, text_style).set_w(w5).set_content_align("c")
                         TextBox(shard_text, text_style).set_w(w6).set_content_align("c")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -188,6 +218,23 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=16, color=(100, 100, 100, 255))
 
+    # 预加载所有图标（并行）
+    _t0 = time.perf_counter()
+    _chara_icon_imgs = await asyncio.gather(
+        *[get_img_from_path(ASSETS_BASE_DIR, b.chara_icon_path) for b in chara_bonuses]
+    )
+    _unit_icon_imgs = await asyncio.gather(
+        *[get_img_from_path(ASSETS_BASE_DIR, b.unit_icon_path) for b in unit_bonuses]
+    )
+    _attr_icon_imgs = await asyncio.gather(
+        *[get_img_from_path(ASSETS_BASE_DIR, b.attr_icon_path) for b in attr_bonuses]
+    )
+    logger.debug(
+        "[perf] compose_power_bonus_detail_image preload %d icons: %.3fs",
+        len(chara_bonuses) + len(unit_bonuses) + len(attr_bonuses),
+        time.perf_counter() - _t0,
+    )
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(profile.to_profile_card_request())
@@ -209,7 +256,7 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                         continue
                     with Grid(col_count=2).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
                         for bonus in bonuses_group:
-                            chara_icon = await get_img_from_path(ASSETS_BASE_DIR, bonus.chara_icon_path)
+                            chara_icon = _chara_icon_imgs[chara_bonuses.index(bonus)]
                             with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
                                 if chara_icon:
                                     ImageBox(chara_icon, size=(None, 40))
@@ -225,8 +272,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
 
                 # 组合加成
                 with Grid(col_count=3).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
-                    for bonus in unit_bonuses:
-                        unit_icon = await get_img_from_path(ASSETS_BASE_DIR, bonus.unit_icon_path)
+                    for i, bonus in enumerate(unit_bonuses):
+                        unit_icon = _unit_icon_imgs[i]
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
                             if unit_icon:
                                 ImageBox(unit_icon, size=(None, 40))
@@ -238,8 +285,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
 
                 # 属性加成
                 with Grid(col_count=5).set_content_align("l").set_item_align("l").set_sep(20, 4).set_padding(16):
-                    for bonus in attr_bonuses:
-                        attr_icon = await get_img_from_path(ASSETS_BASE_DIR, bonus.attr_icon_path)
+                    for i, bonus in enumerate(attr_bonuses):
+                        attr_icon = _attr_icon_imgs[i]
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(4):
                             if attr_icon:
                                 ImageBox(attr_icon, size=(None, 40))
@@ -247,7 +294,7 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                                 "clip"
                             )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -289,6 +336,28 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
     ok_color = green_color if has_profile else gray_color
     no_color = red_color if has_profile else gray_color
 
+    # 预加载所有图标（并行）
+    _all_icon_paths = {}
+    for item in area_items:
+        if item.item_icon_path:
+            _all_icon_paths[item.item_icon_path] = None
+        if item.target_icon_path:
+            _all_icon_paths[item.target_icon_path] = None
+        for level_info in item.levels:
+            for mat in level_info.materials:
+                _all_icon_paths[mat.material_icon_path] = None
+    _unique_paths = list(_all_icon_paths.keys())
+    if _unique_paths:
+        _t0 = time.perf_counter()
+        _loaded = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _unique_paths])
+        logger.debug(
+            "[perf] compose_area_item_upgrade_materials_image preload %d icons: %.3fs",
+            len(_unique_paths), time.perf_counter() - _t0,
+        )
+        _icon_cache = dict(zip(_unique_paths, _loaded))
+    else:
+        _icon_cache = {}
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if profile:
@@ -310,16 +379,8 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                         .set_padding(8)
                     ):
                         # 列头
-                        item_icon = (
-                            await get_img_from_path(ASSETS_BASE_DIR, item.item_icon_path)
-                            if item.item_icon_path
-                            else None
-                        )
-                        target_icon = (
-                            await get_img_from_path(ASSETS_BASE_DIR, item.target_icon_path)
-                            if item.target_icon_path
-                            else None
-                        )
+                        item_icon = _icon_cache.get(item.item_icon_path) if item.item_icon_path else None
+                        target_icon = _icon_cache.get(item.target_icon_path) if item.target_icon_path else None
 
                         with HSplit().set_content_align("c").set_item_align("c").set_omit_parent_bg(True):
                             if target_icon:
@@ -356,7 +417,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                                         TextBox(" ", TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=gray_color))
                                 else:
                                     for mat in level_info.materials:
-                                        material_icon = await get_img_from_path(ASSETS_BASE_DIR, mat.material_icon_path)
+                                        material_icon = _icon_cache.get(mat.material_icon_path)
                                         with VSplit().set_content_align("c").set_item_align("c").set_sep(4):
                                             quantity_text = _get_quant_text(mat.quantity)
                                             have_text = _get_quant_text(mat.have_quantity)
@@ -373,7 +434,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                                             text = f"{have_text}/{sum_text}" if has_profile else f"{sum_text}"
                                             TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color))
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -397,6 +458,18 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
     w1, w2, w3, w4, w5 = 100, 120, 100, 350, 150
+
+    # 预加载所有角色图标（并行）
+    _bond_icon_tasks = []
+    for bond in bonds:
+        _bond_icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path1))
+        _bond_icon_tasks.append(get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path2))
+    _t0 = time.perf_counter()
+    _bond_icons = await asyncio.gather(*_bond_icon_tasks) if _bond_icon_tasks else []
+    logger.debug(
+        "[perf] compose_bonds_image preload %d bond icons: %.3fs",
+        len(_bond_icon_tasks), time.perf_counter() - _t0,
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -441,8 +514,8 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
                     if min(bond.chara_rank1, bond.chara_rank2) <= level < max_level:
                         level_color = (150, 0, 0, 255)
 
-                    chara_icon1 = await get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path1)
-                    chara_icon2 = await get_img_from_path(ASSETS_BASE_DIR, bond.chara_icon_path2)
+                    chara_icon1 = _bond_icons[idx * 2]
+                    chara_icon2 = _bond_icons[idx * 2 + 1]
 
                     with (
                         HSplit()
@@ -500,7 +573,7 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
 
                         TextBox(need_exp_text, text_style).set_w(w5).set_content_align("c")
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -524,6 +597,16 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
     w1, w2, w3, w4, w5 = 80, 100, 100, 100, 350
+
+    # 预加载所有角色图标（并行）
+    _t0 = time.perf_counter()
+    _leader_icons = await asyncio.gather(
+        *[get_img_from_path(ASSETS_BASE_DIR, info.chara_icon_path) for info in leader_counts]
+    )
+    logger.debug(
+        "[perf] compose_leader_count_image preload %d icons: %.3fs",
+        len(leader_counts), time.perf_counter() - _t0,
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -555,7 +638,7 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
                     pc_ex_text = str(info.ex_count) if info.ex_count else "-"
                     ex_level_text = f"x{info.ex_level}" if info.ex_level else "-"
 
-                    chara_icon = await get_img_from_path(ASSETS_BASE_DIR, info.chara_icon_path)
+                    chara_icon = _leader_icons[idx]
 
                     with (
                         HSplit()
@@ -619,5 +702,5 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
                                     RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)
                                 )
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()

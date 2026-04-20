@@ -74,7 +74,24 @@ def datetime_from_millis(value: int | float | str | None, timezone_name: str | N
 
 class TimeZoneRequest(BaseModel):
     timezone: str = Field(default=DEFAULT_TIMEZONE)
+    dt: int | None = Field(default=None)
 
     def model_post_init(self, __context) -> None:
         self.timezone = normalize_timezone(self.timezone)
+        if self.dt is not None:
+            self.dt = normalize_unix_millis(self.dt)
 
+    def apply_timezone(self, *targets) -> None:
+        for target in targets:
+            _apply_timezone(target, self.timezone)
+
+
+def _apply_timezone(target, timezone_name: str) -> None:
+    if target is None:
+        return
+    if isinstance(target, list | tuple):
+        for item in target:
+            _apply_timezone(item, timezone_name)
+        return
+    if hasattr(target, "timezone"):
+        target.timezone = timezone_name

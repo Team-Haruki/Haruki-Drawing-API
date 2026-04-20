@@ -62,8 +62,16 @@ async def mysekai_msr_map(request: MysekaiMsrMapRequest):
 async def mysekai_fixture_list(request: MysekaiFixtureListRequest):
     """Generate MySekai fixture collection list image."""
     try:
+        _t0 = time.perf_counter()
         image = await compose_mysekai_fixture_list_image(request)
-        return image_to_response(image)
+        _t1 = time.perf_counter()
+        resp = image_to_response(image)
+        _perf_logger.info(
+            "/fixture-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
+            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
+            image.width, image.height,
+        )
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -92,8 +100,16 @@ async def mysekai_door_upgrade(request: MysekaiDoorUpgradeRequest):
 async def mysekai_music_record(request: MysekaiMusicrecordRequest):
     """Generate MySekai music record collection list image."""
     try:
+        _t0 = time.perf_counter()
         image = await compose_mysekai_musicrecord_image(request)
-        return image_to_response(image)
+        _t1 = time.perf_counter()
+        resp = image_to_response(image)
+        _perf_logger.info(
+            "/music-record total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
+            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
+            image.width, image.height,
+        )
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -102,7 +118,15 @@ async def mysekai_music_record(request: MysekaiMusicrecordRequest):
 async def mysekai_talk_list(request: MysekaiTalkListRequest):
     """Generate MySekai character talk collection list image."""
     try:
+        _t0 = time.perf_counter()
         image = await compose_mysekai_talk_list_image(request)
-        return image_to_response(image)
+        _t1 = time.perf_counter()
+        resp = image_to_response(image)
+        _perf_logger.info(
+            "/talk-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
+            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
+            image.width, image.height,
+        )
+        return resp
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

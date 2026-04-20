@@ -1,11 +1,14 @@
+import asyncio
+import logging
 import math
+import time
 
 from PIL import Image
 
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
-    add_watermark,
+    add_request_watermark,
     roundrect_bg,
 )
 from src.sekai.base.painter import (
@@ -28,6 +31,7 @@ from .model import (
 )
 
 IMAGE_LOAD_EXCEPTIONS = (FileNotFoundError, OSError, ValueError)
+logger = logging.getLogger(__name__)
 async def get_unknown_fallback_image() -> Image.Image:
     """加载 UnKnown 占位图；素材未挂载时退回纯色占位图避免整张图失败。"""
     try:
@@ -121,6 +125,21 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
 
+    # 预加载所有logo图片
+    _logo_paths = [rqd.gacha_logos.get(g.id) for g in gachas]
+    _logo_str_paths = [p for p in _logo_paths if isinstance(p, str)]
+    _t0 = time.perf_counter()
+    _logo_imgs = (
+        await asyncio.gather(*[get_gacha_image_or_unknown(p) for p in _logo_str_paths])
+        if _logo_str_paths
+        else []
+    )
+    logger.debug(
+        "[perf] compose_gacha_list_image preload %d logos: %.3fs",
+        len(_logo_str_paths), time.perf_counter() - _t0,
+    )
+    _logo_cache: dict[str, Image.Image] = dict(zip(_logo_str_paths, _logo_imgs))
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
             TextBox(
@@ -141,7 +160,7 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             # 处理logo图片
                             logo_data = rqd.gacha_logos.get(g.id)
                             if isinstance(logo_data, str):
-                                logo_img = await get_gacha_image_or_unknown(logo_data)
+                                logo_img = _logo_cache[logo_data]
                             elif isinstance(logo_data, Image.Image):
                                 logo_img = logo_data
                             else:
@@ -152,7 +171,7 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             TextBox(f"S {g.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
 
 
@@ -171,6 +190,52 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
     if rqd.bg_img_path:
         bg_img = await get_gacha_image_or_unknown(rqd.bg_img_path)
         bg = ImageBg(bg_img) if bg_img else SEKAI_BLUE_BG
+
+    # 预加载所有图片（并行）
+    _gd_coros = []
+    _gd_keys = []
+
+    if rqd.logo_img_path:
+        _gd_keys.append("logo")
+        _gd_coros.append(get_gacha_image_or_unknown(rqd.logo_img_path))
+    if rqd.banner_img_path:
+        _gd_keys.append("banner")
+        _gd_coros.append(get_gacha_image_or_unknown(rqd.banner_img_path))
+    if rqd.gacha.ceil_item_img_path:
+        _gd_keys.append("ceil_item")
+        _gd_coros.append(get_gacha_image_or_unknown(rqd.gacha.ceil_item_img_path))
+
+    # cost icons
+    _cost_icon_indices: list[tuple[str, str]] = []
+    for behavior in rqd.gacha.behaviors:
+        if behavior.cost_type and behavior.cost_icon_path:
+            key = f"cost_{behavior.cost_icon_path}"
+            if key not in _gd_keys:
+                _gd_keys.append(key)
+                _gd_coros.append(get_gacha_image_or_unknown(behavior.cost_icon_path))
+
+    # pickup card thumbnails
+    if rqd.pickup_cards:
+        for i, card in enumerate(rqd.pickup_cards):
+            _gd_keys.append(f"card_{i}")
+            _gd_coros.append(get_card_full_thumbnail(card.thumbnail_request))
+
+    # rarity images
+    for rarity in GACHA_RATE_RARITIES:
+        rate = getattr(rqd.weight_info, f"{rarity}_rate", 0.0)
+        if rate != 0.0:
+            _gd_keys.append(f"rarity_{rarity}")
+            _gd_coros.append(get_rarity_img(rarity))
+
+    _t0 = time.perf_counter()
+    _gd_results = await asyncio.gather(*_gd_coros, return_exceptions=True) if _gd_coros else []
+    logger.debug(
+        "[perf] compose_gacha_detail_image preload %d items: %.3fs",
+        len(_gd_coros), time.perf_counter() - _t0,
+    )
+    _gd_cache: dict[str, Image.Image | None] = {}
+    for k, v in zip(_gd_keys, _gd_results):
+        _gd_cache[k] = v if not isinstance(v, BaseException) else None
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with HSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
@@ -194,11 +259,13 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                     .set_omit_parent_bg(True)
                 ):
                     if rqd.logo_img_path:
-                        logo_img = await get_gacha_image_or_unknown(rqd.logo_img_path)
-                        ImageBox(logo_img, size=(None, 100))
+                        logo_img = _gd_cache.get("logo")
+                        if logo_img:
+                            ImageBox(logo_img, size=(None, 100))
                     if rqd.banner_img_path:
-                        banner_img = await get_gacha_image_or_unknown(rqd.banner_img_path)
-                        ImageBox(banner_img, size=(None, 100))
+                        banner_img = _gd_cache.get("banner")
+                        if banner_img:
+                            ImageBox(banner_img, size=(None, 100))
 
                 # 基本信息
                 TextBox(rqd.gacha.name, title_style, use_real_line_count=True).set_w(w).set_padding(
@@ -213,8 +280,9 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                     if rqd.gacha.ceil_item_img_path:
                         Spacer(w=24)
                         TextBox("交换物品", label_style)
-                        ceilitem_img = await get_gacha_image_or_unknown(rqd.gacha.ceil_item_img_path)
-                        ImageBox(ceilitem_img, size=(None, 30))
+                        ceilitem_img = _gd_cache.get("ceil_item")
+                        if ceilitem_img:
+                            ImageBox(ceilitem_img, size=(None, 30))
 
                 with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
                     with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
@@ -262,8 +330,9 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                                         TextBox(" / ", text_style)
                                     if behavior.cost_type:
                                         if behavior.cost_icon_path:
-                                            cost_icon = await get_gacha_image_or_unknown(behavior.cost_icon_path)
-                                            ImageBox(cost_icon, size=(None, 48))
+                                            cost_icon = _gd_cache.get(f"cost_{behavior.cost_icon_path}")
+                                            if cost_icon:
+                                                ImageBox(cost_icon, size=(None, 48))
                                         if "paid" in behavior.cost_type:
                                             TextBox("(付费)", text_style)
                                         if behavior.cost_quantity and behavior.cost_quantity > 1:
@@ -283,11 +352,10 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                             .set_item_align("c")
                         ):
                             card_size = 80
-                            for card in rqd.pickup_cards:
+                            for idx, card in enumerate(rqd.pickup_cards):
                                 with VSplit().set_padding(0).set_sep(1).set_content_align("c").set_item_align("c"):
-                                    try:
-                                        full_thumb = await get_card_full_thumbnail(card.thumbnail_request)
-                                    except IMAGE_LOAD_EXCEPTIONS:
+                                    full_thumb = _gd_cache.get(f"card_{idx}")
+                                    if not full_thumb:
                                         full_thumb = await get_unknown_fallback_image()
 
                                     ImageBox(full_thumb, size=(card_size, card_size), shadow=True)
@@ -332,8 +400,7 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                             if count > 0:
                                 # 显示稀有度名称和数量
                                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
-                                    # 获取稀有度图片
-                                    rarity_img = await get_rarity_img(rarity)
+                                    rarity_img = _gd_cache.get(f"rarity_{rarity}")
                                     if rarity_img:
                                         ImageBox(rarity_img, size=(None, 24))
                                     else:
@@ -354,7 +421,7 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                                 TextBox(rate_text, text_style)
                             else:
                                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
-                                    rarity_img = await get_rarity_img(rarity)
+                                    rarity_img = _gd_cache.get(f"rarity_{rarity}")
                                     if rarity_img:
                                         ImageBox(rarity_img, size=(None, 24))
                                     else:
@@ -375,5 +442,5 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
                                 TextBox(rate_text, text_style)
 
-    add_watermark(canvas)
+    add_request_watermark(canvas, rqd)
     return await canvas.get_img()
