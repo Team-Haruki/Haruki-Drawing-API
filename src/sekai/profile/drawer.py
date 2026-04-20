@@ -52,6 +52,18 @@ from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
 
+
+def format_info_panel_update_time(update_time, timezone_name: str | None) -> str:
+    timezone_label = (timezone_name or "").strip()
+    if not timezone_label and update_time.tzinfo is not None:
+        timezone_label = update_time.tzname() or ""
+
+    text = update_time.strftime("%m-%d %H:%M:%S")
+    if timezone_label:
+        text += f" ({timezone_label})"
+    text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
+    return text
+
 # =========================== 常量定义 =========================== #
 
 CHARA_LIST = [
@@ -612,20 +624,14 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                     if len(data_sources) <= 1:
                         if primary_source and primary_source.update_time:
                             update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
-                            update_time_text = (
-                                update_time.strftime("%m-%d %H:%M:%S")
-                                + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                            )
+                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
                             TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
                     else:
                         for data_source in data_sources[:2]:
                             if not data_source.update_time:
                                 continue
                             update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
-                            update_time_text = (
-                                update_time.strftime("%m-%d %H:%M:%S")
-                                + f" ({get_readable_datetime(update_time, show_original_time=False)})"
-                            )
+                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
                             TextBox(
                                 f"{data_source_label(data_source.name)}更新时间: {update_time_text}",
                                 TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
