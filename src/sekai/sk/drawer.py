@@ -581,18 +581,15 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
 
     rankcounts: list[list[int]] = []
     playcounts: list[list[int]] = []
-    abnormals: list[list[bool]] = []
     start_date = ranks[0].time.date()
 
     for i in range(len(ranks) - 1):
         cur = ranks[i]
         nxt = ranks[i + 1]
-        prev = ranks[i - 1] if i > 0 else None
         day = (cur.time.date() - start_date).days
         while len(rankcounts) <= day:
             rankcounts.append([0] * 24)
             playcounts.append([0] * 24)
-            abnormals.append([False] * 24)
 
         hour = cur.time.hour
         rankcounts[day][hour] += 1
@@ -600,14 +597,6 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
         next_score = nxt.score or 0
         if next_score > cur_score:
             playcounts[day][hour] += 1
-
-        def mark_abnormal(left_time, right_time):
-            if right_time - left_time > SK_RECORD_TOLERANCE:
-                abnormals[day][hour] = True
-
-        if prev is not None and cur.time.hour != prev.time.hour:
-            mark_abnormal(prev.time, cur.time)
-        mark_abnormal(cur.time, nxt.time)
 
     stop_segments: list[tuple[RankInfo, RankInfo]] = []
     left = None
@@ -631,6 +620,18 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
     if left is not None and right is not None:
         stop_segments.append((left, right))
 
+    stop_hours: list[list[bool]] = [[False] * 24 for _ in range(len(rankcounts))]
+
+    def mark_stop_hours(start_time, end_time):
+        hour_cursor = start_time.replace(minute=0, second=0, microsecond=0)
+        end_hour = end_time.replace(minute=0, second=0, microsecond=0)
+        while hour_cursor <= end_hour:
+            day = (hour_cursor.date() - start_date).days
+            while len(stop_hours) <= day:
+                stop_hours.append([False] * 24)
+            stop_hours[day][hour_cursor.hour] = True
+            hour_cursor += timedelta(hours=1)
+
     stop_texts: list[tuple[str, TextStyle]] = [(f'T{latest_rank.rank} "{latest_name}" 的停车区间', style1)]
     for left_rank, right_rank in stop_segments:
         if left_rank == right_rank:
@@ -638,6 +639,7 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
         duration = right_rank.time - left_rank.time
         if duration < SK_CSB_STOP_THRESHOLD:
             continue
+        mark_stop_hours(left_rank.time, right_rank.time)
         start_text = left_rank.time.strftime("%m-%d %H:%M")
         end_text = right_rank.time.strftime("%m-%d %H:%M")
         stop_texts.append((f"{start_text} ~ {end_text}（{get_readable_timedelta(duration)}）", style2))
@@ -676,7 +678,7 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
 
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
                 TextBox(f'T{latest_rank.rank} "{latest_name}" 各小时Pt变化次数', heat_title_style)
-                TextBox("标注*号的小时有数据缺失，周回数可能不准确", heat_hint_style)
+                TextBox("标注*号的小时存在停车区间", heat_hint_style)
                 with Grid(col_count=24).set_sep(1, 1):
                     for hour in range(24):
                         TextBox(str(hour), TextStyle(font=DEFAULT_FONT, size=12, color=BLACK)).set_content_align(
@@ -686,13 +688,12 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
                         for hour in range(24):
                             playcount = playcounts[day][hour]
                             rankcount = rankcounts[day][hour]
-                            abnormal = abnormals[day][hour]
                             if rankcount < 10:
                                 Spacer(w=30, h=30)
                                 continue
 
                             label = str(playcount)
-                            if abnormal:
+                            if day < len(stop_hours) and stop_hours[day][hour]:
                                 label += "*"
                             if playcount > SK_PLAYCOUNT_MYSEKAI_THRESHOLD:
                                 color = heat_color_mysekai
