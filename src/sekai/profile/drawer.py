@@ -456,7 +456,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             # 挑战Live等级
             if solo_live is not None:
                 with VSplit().set_content_align("c").set_item_align("c").set_padding((32, 64)).set_sep(12):
-                    t = TextBox("CHANLLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
+                    t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
                     t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
