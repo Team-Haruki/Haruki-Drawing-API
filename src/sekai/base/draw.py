@@ -47,7 +47,8 @@ WATERMARK_MIN_SIZE = 8
 WATERMARK_MAX_LINES = 2
 WATERMARK_LINE_SEP = 2
 WATERMARK_RIGHT_OFFSET = int(16 - BG_PADDING * 0.5)
-WATERMARK_BOTTOM_OFFSET = 16
+WATERMARK_TOP_OFFSET = 1
+WATERMARK_BOTTOM_OFFSET = 2
 WATERMARK_SHADOW_OFFSET = 1
 
 CHARACTER_COLOR_CODE = {
@@ -244,13 +245,16 @@ def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     font_size, lines, _, text_h = get_watermark_render_spec(text, max_text_width, size)
     wrapped_text = "\n".join(lines)
     content_w, content_h = get_watermark_content_size(canvas)
-    footer_height = text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
+    original_h_padding = canvas.h_padding
+    original_v_padding = canvas.v_padding
     text_box_w = max_text_width + WATERMARK_SHADOW_OFFSET
     text_box_h = text_h + WATERMARK_SHADOW_OFFSET
 
     items = list(canvas.items)
     frame_canvas = Frame().set_content_align(canvas.get_content_align()).set_padding(0).set_size((content_w, content_h))
-    footer = Frame().set_content_align("rb").set_padding(0).set_size((content_w, footer_height))
+    footer = VSplit().set_sep(0).set_item_align("rb").set_padding(0)
+    if WATERMARK_TOP_OFFSET > 0:
+        footer.add_item(Frame().set_size((content_w, WATERMARK_TOP_OFFSET)))
     footer_text = (
         TextBox(
             wrapped_text,
@@ -276,10 +280,15 @@ def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
 
     root = VSplit().set_sep(0).set_item_align("rb").set_padding(0)
     canvas.set_items([])
+    canvas.set_padding((original_h_padding, 0))
+    if original_v_padding > 0:
+        root.add_item(Frame().set_size((content_w, original_v_padding)))
     for item in items:
         frame_canvas.add_item(item)
     root.add_item(frame_canvas)
     root.add_item(footer)
+    if WATERMARK_BOTTOM_OFFSET > 0:
+        root.add_item(Frame().set_size((content_w, WATERMARK_BOTTOM_OFFSET)))
     canvas.add_item(root).set_size(None)
 
 
@@ -326,7 +335,7 @@ def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, si
     max_text_width = image.width - WATERMARK_RIGHT_OFFSET
     font_size, lines, text_w, text_h = get_watermark_render_spec(text, max_text_width, size)
     font = get_font(DEFAULT_FONT, font_size)
-    footer_height = text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
+    footer_height = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
     sample_height = max(1, min(image.height, max(1, footer_height)))
     footer_bg = image.crop((0, image.height - sample_height, image.width, image.height))
     if footer_bg.height != footer_height:
@@ -338,7 +347,7 @@ def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, si
 
     draw = ImageDraw.Draw(output)
     x = max(0, output.width - text_w - WATERMARK_RIGHT_OFFSET)
-    y = max(0, image.height + footer_height - text_h - WATERMARK_BOTTOM_OFFSET)
+    y = max(0, image.height + WATERMARK_TOP_OFFSET)
     for idx, line in enumerate(lines):
         line_w, _ = get_text_size(font, line)
         line_x = x + max(0, text_w - line_w)
