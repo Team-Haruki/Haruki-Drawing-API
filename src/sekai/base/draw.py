@@ -16,6 +16,7 @@ from .plot import (
     RoundRectBg,
     TextBox,
     TextStyle,
+    VSplit,
 )
 from .timezone import datetime_from_millis, request_now
 
@@ -47,6 +48,7 @@ WATERMARK_MAX_LINES = 2
 WATERMARK_LINE_SEP = 2
 WATERMARK_RIGHT_OFFSET = int(16 - BG_PADDING * 0.5)
 WATERMARK_BOTTOM_OFFSET = 16
+WATERMARK_SHADOW_OFFSET = 1
 
 CHARACTER_COLOR_CODE = {
     1: "#33aaee",
@@ -197,6 +199,18 @@ def build_watermark_layout(
     return min_size, "\n".join(wrap_watermark_text(text, font, max_width))
 
 
+def get_watermark_render_spec(text: str, max_width: int, size: int) -> tuple[int, list[str], int, int]:
+    """
+    计算水印的字号、换行结果与实际占用尺寸。
+    """
+    font_size, wrapped_text = build_watermark_layout(text, max_width, size)
+    font = get_font(DEFAULT_FONT, font_size)
+    lines = wrapped_text.split("\n")
+    text_w = max((get_text_size(font, line)[0] for line in lines), default=0)
+    text_h = len(lines) * (font_size + WATERMARK_LINE_SEP) - WATERMARK_LINE_SEP
+    return font_size, lines, text_w, text_h
+
+
 def get_watermark_layout_width(canvas: Canvas) -> int:
     """
     获取当前正文内容宽度，用于限制水印宽度，避免水印把整体排版撑宽。
@@ -210,57 +224,63 @@ def get_watermark_layout_width(canvas: Canvas) -> int:
     return 1
 
 
+def get_watermark_content_size(canvas: Canvas) -> tuple[int, int]:
+    """
+    获取当前正文区域尺寸，水印 footer 会在该尺寸基础上向下扩展。
+    """
+    content_w, content_h = canvas._get_content_size()
+    if content_w <= 0 and canvas.w is not None:
+        content_w = int(canvas.w) - canvas.h_padding * 2 - canvas.h_margin * 2
+    if content_h <= 0 and canvas.h is not None:
+        content_h = int(canvas.h) - canvas.v_padding * 2 - canvas.v_margin * 2
+    return max(1, int(content_w)), max(1, int(content_h))
+
+
 def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     """
     在画布上添加水印
     """
-    max_text_width = get_watermark_layout_width(canvas)
-    font_size, wrapped_text = build_watermark_layout(text, max_text_width, size)
-    frame_watermark = Frame().set_content_align("rb").set_padding(0)
-    frame_canvas = Frame().set_content_align(canvas.get_content_align()).set_padding(0).set_size((canvas.w, canvas.h))
-    s1 = TextStyle(font=DEFAULT_FONT, size=font_size, color=(255, 255, 255, 256))
-    s2 = TextStyle(font=DEFAULT_FONT, size=font_size, color=(75, 75, 75, 256))
-    offset1 = (WATERMARK_RIGHT_OFFSET, WATERMARK_BOTTOM_OFFSET)
-    offset2 = (offset1[0] + 1, offset1[1] + 1)
-    text1 = (
+    max_text_width = max(1, get_watermark_layout_width(canvas) - WATERMARK_SHADOW_OFFSET)
+    font_size, lines, _, text_h = get_watermark_render_spec(text, max_text_width, size)
+    wrapped_text = "\n".join(lines)
+    content_w, content_h = get_watermark_content_size(canvas)
+    footer_height = text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
+    text_box_w = max_text_width + WATERMARK_SHADOW_OFFSET
+    text_box_h = text_h + WATERMARK_SHADOW_OFFSET
+
+    items = list(canvas.items)
+    frame_canvas = Frame().set_content_align(canvas.get_content_align()).set_padding(0).set_size((content_w, content_h))
+    footer = Frame().set_content_align("rb").set_padding(0).set_size((content_w, footer_height))
+    footer_text = (
         TextBox(
             wrapped_text,
-            style=s1,
+            TextStyle(
+                font=DEFAULT_FONT,
+                size=font_size,
+                color=(255, 255, 255, 255),
+                use_shadow=True,
+                shadow_offset=(WATERMARK_SHADOW_OFFSET, WATERMARK_SHADOW_OFFSET),
+                shadow_color=(75, 75, 75, 255),
+            ),
             line_sep=WATERMARK_LINE_SEP,
             wrap=False,
             overflow="clip",
             use_real_line_count=True,
         )
-        .set_size((max_text_width, None))
+        .set_size((text_box_w, text_box_h))
         .set_content_align("r")
         .set_padding(0)
         .set_omit_parent_bg(True)
-        .set_offset(offset1)
     )
-    text2 = (
-        TextBox(
-            wrapped_text,
-            style=s2,
-            line_sep=WATERMARK_LINE_SEP,
-            wrap=False,
-            overflow="clip",
-            use_real_line_count=True,
-        )
-        .set_size((max_text_width, None))
-        .set_content_align("r")
-        .set_padding(0)
-        .set_omit_parent_bg(True)
-        .set_offset(offset2)
-    )
-    items = canvas.items
+    footer.add_item(footer_text)
+
+    root = VSplit().set_sep(0).set_item_align("rb").set_padding(0)
     canvas.set_items([])
-    canvas.set_padding((max(canvas.h_padding, BG_PADDING), max(canvas.v_padding, BG_PADDING)))
     for item in items:
         frame_canvas.add_item(item)
-    frame_watermark.add_item(frame_canvas)
-    frame_watermark.add_item(text2)
-    frame_watermark.add_item(text1)
-    canvas.add_item(frame_watermark).set_size(None)
+    root.add_item(frame_canvas)
+    root.add_item(footer)
+    canvas.add_item(root).set_size(None)
 
 
 def build_request_watermark_text(request, extra_suffix: str | None = None) -> str:
@@ -303,22 +323,29 @@ def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, si
     if image.mode != "RGBA":
         image = image.convert("RGBA")
     image = image.copy()
-    draw = ImageDraw.Draw(image)
     max_text_width = image.width - WATERMARK_RIGHT_OFFSET
-    font_size, wrapped_text = build_watermark_layout(text, max_text_width, size)
+    font_size, lines, text_w, text_h = get_watermark_render_spec(text, max_text_width, size)
     font = get_font(DEFAULT_FONT, font_size)
-    lines = wrapped_text.split("\n")
-    text_w = max((get_text_size(font, line)[0] for line in lines), default=0)
-    text_h = len(lines) * (font_size + WATERMARK_LINE_SEP) - WATERMARK_LINE_SEP
-    x = max(0, image.width - text_w - WATERMARK_RIGHT_OFFSET)
-    y = max(0, image.height - text_h - WATERMARK_BOTTOM_OFFSET)
+    footer_height = text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
+    sample_height = max(1, min(image.height, max(1, footer_height)))
+    footer_bg = image.crop((0, image.height - sample_height, image.width, image.height))
+    if footer_bg.height != footer_height:
+        footer_bg = footer_bg.resize((image.width, footer_height), Image.Resampling.BILINEAR)
+
+    output = Image.new("RGBA", (image.width, image.height + footer_height))
+    output.paste(image, (0, 0))
+    output.paste(footer_bg, (0, image.height))
+
+    draw = ImageDraw.Draw(output)
+    x = max(0, output.width - text_w - WATERMARK_RIGHT_OFFSET)
+    y = max(0, image.height + footer_height - text_h - WATERMARK_BOTTOM_OFFSET)
     for idx, line in enumerate(lines):
         line_w, _ = get_text_size(font, line)
         line_x = x + max(0, text_w - line_w)
         line_y = y + idx * (font_size + WATERMARK_LINE_SEP)
         draw.text((line_x + 1, line_y + 1), line, font=font, fill=(75, 75, 75, 255))
         draw.text((line_x, line_y), line, font=font, fill=(255, 255, 255, 255))
-    return image
+    return output
 
 
 def add_request_watermark_to_image(
