@@ -136,29 +136,48 @@ def fit_watermark_font_size(text: str, max_width: int, size: int, min_size: int 
     return max(min_size, font_size)
 
 
+def get_watermark_layout_width(canvas: Canvas) -> int:
+    """
+    获取当前正文内容宽度，用于限制水印宽度，避免水印把整体排版撑宽。
+    """
+    content_w, _ = canvas._get_content_size()
+    if content_w > 0:
+        return int(content_w)
+
+    if canvas.w is not None:
+        return max(1, int(canvas.w) - canvas.h_padding * 2 - canvas.h_margin * 2)
+    return 1
+
+
 def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     """
     在画布上添加水印
     """
-    canvas_w, canvas_h = canvas._get_self_size()
-    font_size = fit_watermark_font_size(text, canvas_w - WATERMARK_RIGHT_OFFSET, size)
-    frame_watermark = (
-        Frame()
-        .set_content_align("rb")
-        .set_padding(0)
-        .set_size((canvas_w, canvas_h))
-        .set_allow_draw_outside(True)
-    )
-    frame_canvas = Frame().set_content_align(canvas.get_content_align()).set_padding(0).set_size((canvas_w, canvas_h))
+    max_text_width = get_watermark_layout_width(canvas)
+    font_size = fit_watermark_font_size(text, max_text_width, size)
+    frame_watermark = Frame().set_content_align("rb").set_padding(0)
+    frame_canvas = Frame().set_content_align(canvas.get_content_align()).set_padding(0).set_size((canvas.w, canvas.h))
     s1 = TextStyle(font=DEFAULT_FONT, size=font_size, color=(255, 255, 255, 256))
     s2 = TextStyle(font=DEFAULT_FONT, size=font_size, color=(75, 75, 75, 256))
-    offset1 = (-WATERMARK_RIGHT_OFFSET, -WATERMARK_BOTTOM_OFFSET)
+    offset1 = (WATERMARK_RIGHT_OFFSET, WATERMARK_BOTTOM_OFFSET)
     offset2 = (offset1[0] + 1, offset1[1] + 1)
-    text1 = TextBox(text, style=s1).set_omit_parent_bg(True).set_offset(offset1)
-    text2 = TextBox(text, style=s2).set_omit_parent_bg(True).set_offset(offset2)
+    text1 = (
+        TextBox(text, style=s1, wrap=False, overflow="shrink")
+        .set_size((max_text_width, None))
+        .set_content_align("r")
+        .set_omit_parent_bg(True)
+        .set_offset(offset1)
+    )
+    text2 = (
+        TextBox(text, style=s2, wrap=False, overflow="shrink")
+        .set_size((max_text_width, None))
+        .set_content_align("r")
+        .set_omit_parent_bg(True)
+        .set_offset(offset2)
+    )
     items = canvas.items
     canvas.set_items([])
-    canvas.set_padding(BG_PADDING)
+    canvas.set_padding((max(canvas.h_padding, BG_PADDING), max(canvas.v_padding, BG_PADDING)))
     for item in items:
         frame_canvas.add_item(item)
     frame_watermark.add_item(frame_canvas)
@@ -185,7 +204,13 @@ def build_request_watermark_text(request, extra_suffix: str | None = None) -> st
         dt = datetime_from_millis(dt_value, timezone_name)
         if dt is None:
             dt = request_now(timezone_name)
-        text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')}  {text}"
+        timezone_label = (timezone_name or "").strip()
+        if not timezone_label and dt.tzinfo is not None:
+            timezone_label = dt.tzname() or ""
+        if timezone_label:
+            text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')} ({timezone_label})  {text}"
+        else:
+            text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')}  {text}"
 
     suffix = (extra_suffix or "").strip()
     if suffix:
