@@ -1,10 +1,11 @@
+import asyncio
 import logging
 import os
 
 from PIL import Image, ImageDraw
 
 from src.sekai.base.painter import WHITE, get_font, get_text_size, resize_keep_ratio
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.utils import get_img_from_path, run_in_pool
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 
 # 从 model.py 导入数据模型
@@ -69,111 +70,66 @@ face_pos = {
 }
 
 
-async def compose_full_honor_image(rqd: HonorRequest):
-    logger.info(
-        "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s "
-        "honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s "
-        "bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
-        rqd.honor_type,
-        rqd.group_type,
-        rqd.is_main_honor,
-        rqd.honor_level,
-        rqd.honor_rarity,
-        rqd.honor_img_path,
-        rqd.frame_img_path,
-        rqd.frame_degree_level_img_path,
-        rqd.rank_img_path,
-        rqd.scroll_img_path,
-        rqd.word_img_path,
-        rqd.bonds_bg_path,
-        rqd.bonds_bg_path2,
-        rqd.mask_img_path,
-        rqd.lv_img_path,
-        rqd.lv6_img_path,
-    )
-    async def load_honor_image(path: str | None):
-        return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Image | None]) -> Image.Image | None:
+    is_main = rqd.is_main_honor
+    htype = rqd.honor_type
+    hlv = rqd.honor_level
+    lv = rqd.fc_or_ap_level
+    lv_img = images.get("lv_img")
+    lv6_img = images.get("lv6_img")
 
     if rqd.is_empty:
-        img = await load_honor_image(rqd.empty_honor_path)
+        img = images.get("empty_honor")
+        if img is None:
+            return None
         padding = 3
         bg = Image.new("RGBA", (img.size[0] + padding * 2, img.size[1] + padding * 2), (0, 0, 0, 0))
         bg.paste(img, (padding, padding), img)
         return bg
-    is_main = rqd.is_main_honor
-    htype = rqd.honor_type
-    hlv = rqd.honor_level
-    if rqd.lv_img_path:
-        lv_img = await load_honor_image(rqd.lv_img_path)
-    else:
-        lv_img = None
-    if rqd.lv6_img_path:
-        lv6_img = await load_honor_image(rqd.lv6_img_path)
-    else:
-        lv6_img = None
-    lv = rqd.fc_or_ap_level
 
-    async def load_optional_image(path: str | None):
-        if not path:
-            return None
-        try:
-            return await load_honor_image(path)
-        except (FileNotFoundError, OSError, ValueError):
-            logger.warning("optional honor asset missing: %s", path)
-            return None
-
-    async def add_frame(img: Image.Image, rarity: str, level: int | None = None):
-        RARE_MAP = {"low": 1, "middle": 2, "high": 3, "highest": 4}
-        RARE_MAP.get(rarity, 1)
-        if not rqd.frame_img_path:
+    def add_frame(img: Image.Image, rarity: str, level: int | None = None):
+        frame = images.get("frame_img")
+        if frame is None:
             return
-        frame = await load_honor_image(rqd.frame_img_path)
         img.paste(frame, (8, 0) if rarity == "low" else (0, 0), frame)
-        # 添加生日牌子的等级标志
-        if htype == "birthday" and rqd.frame_degree_level_img_path:
-            icon = await load_honor_image(rqd.frame_degree_level_img_path)
+        if htype == "birthday":
+            icon = images.get("frame_degree_level_img")
+            if icon is None or not level:
+                return
             w, h = img.size
             sz = 18
             icon = icon.resize((sz, sz))
             for i in range(level):
                 img.paste(icon, (int(w / 2 - sz * level / 2 + i * sz), h - sz), icon)
 
-    def add_lv_star(img: Image.Image, lv):
-        if lv > 10:
-            lv = lv - 10
-        for i in range(0, min(lv, 5)):
-            img.paste(lv_img, (50 + 16 * i, 61), lv_img)
-        for i in range(5, lv):
-            img.paste(lv6_img, (50 + 16 * (i - 5), 61), lv6_img)
+    def add_lv_star(img: Image.Image, level: int):
+        if level > 10:
+            level = level - 10
+        if lv_img is not None:
+            for i in range(0, min(level, 5)):
+                img.paste(lv_img, (50 + 16 * i, 61), lv_img)
+        if lv6_img is not None:
+            for i in range(5, level):
+                img.paste(lv6_img, (50 + 16 * (i - 5), 61), lv6_img)
 
     def add_fcap_lv(img: Image.Image):
+        lv_text = str(lv or "")
         font = get_font(path=DEFAULT_BOLD_FONT, size=22)
-        text_w, _ = get_text_size(font, lv)
+        text_w, _ = get_text_size(font, lv_text)
         offset = 215 if is_main else 37
         draw = ImageDraw.Draw(img)
-        draw.text((offset + 50 - text_w // 2, 46), lv, font=font, fill=WHITE)
+        draw.text((offset + 50 - text_w // 2, 46), lv_text, font=font, fill=WHITE)
 
     if htype in ("normal", "birthday"):
-        # 普通牌子
         rarity = rqd.honor_rarity
         gtype = rqd.group_type
         wl_rank_style = is_world_link_rank_style(gtype, rqd.rank_img_path)
+        img = images.get("honor_img")
+        if img is None:
+            return None
+        rank_img = images.get("rank_img")
 
-        if gtype == "rank_match":
-            if not rqd.honor_img_path:
-                return None
-            img = await load_honor_image(rqd.honor_img_path)
-            rank_img = await load_optional_image(rqd.rank_img_path)
-        else:
-            if not rqd.honor_img_path:
-                return None
-            img = await load_honor_image(rqd.honor_img_path)
-            if rqd.rank_img_path and (gtype == "event" or gtype == "wl_event" or wl_rank_style):
-                rank_img = await load_optional_image(rqd.rank_img_path)
-            else:
-                rank_img = None
-
-        await add_frame(img, rarity, hlv)
+        add_frame(img, rarity, hlv)
         if rank_img:
             if gtype == "rank_match":
                 img.paste(rank_img, (190, 0) if is_main else (17, 42), rank_img)
@@ -183,31 +139,28 @@ async def compose_full_honor_image(rqd: HonorRequest):
                 img.paste(rank_img, resolve_event_rank_position(img, rank_img, is_main), rank_img)
 
         if gtype == "fc_ap":
-            if rqd.scroll_img_path:
-                scroll_img = await load_honor_image(rqd.scroll_img_path)
-                if scroll_img:
-                    img.paste(scroll_img, (215, 3) if is_main else (37, 3), scroll_img)
+            scroll_img = images.get("scroll_img")
+            if scroll_img is not None:
+                img.paste(scroll_img, (215, 3) if is_main else (37, 3), scroll_img)
             add_fcap_lv(img)
-        elif gtype == "character" or gtype == "achievement":
+        elif gtype in ("character", "achievement"):
             add_lv_star(img, hlv)
         return img
 
-    elif htype == "bonds":
-        # 羁绊牌子
+    if htype == "bonds":
         rarity = rqd.honor_rarity
-        if not rqd.bonds_bg_path or not rqd.bonds_bg_path2:
+        img = images.get("bonds_bg")
+        img2 = images.get("bonds_bg2")
+        if img is None or img2 is None:
             return None
-        img = await load_honor_image(rqd.bonds_bg_path)
-        img2 = await load_honor_image(rqd.bonds_bg_path2)
         x = 190 if is_main else 90
         img2 = img2.crop((x, 0, 380, 80))
         img.paste(img2, (x, 0))
 
-        if not rqd.chara_icon_path or not rqd.chara_icon_path2:
+        c1_img = images.get("chara_icon_1")
+        c2_img = images.get("chara_icon_2")
+        if c1_img is None or c2_img is None:
             return img
-
-        c1_img = await load_honor_image(rqd.chara_icon_path)
-        c2_img = await load_honor_image(rqd.chara_icon_path2)
 
         c1_face = face_pos.get(rqd.chara_id, c1_img.size[0] // 2)
         c2_face = face_pos.get(rqd.chara_id2, c2_img.size[0] // 2)
@@ -236,17 +189,97 @@ async def compose_full_honor_image(rqd: HonorRequest):
 
         img.paste(c1_img, (c1_face_x - c1_face, h - c1h), c1_img)
         img.paste(c2_img, (c2_face_x - c2_face, h - c2h), c2_img)
-        if rqd.mask_img_path:
-            _, _, _, mask = (await load_honor_image(rqd.mask_img_path)).split()
+        mask_img = images.get("mask_img")
+        if mask_img is not None:
+            _, _, _, mask = mask_img.split()
             img.putalpha(mask)
 
-        await add_frame(img, rarity)
+        add_frame(img, rarity)
 
         if is_main:
-            if rqd.word_img_path:
-                word_img = await load_honor_image(rqd.word_img_path)
+            word_img = images.get("word_img")
+            if word_img is not None:
                 img.paste(word_img, (int(190 - (word_img.size[0] / 2)), int(40 - (word_img.size[1] / 2))), word_img)
 
         add_lv_star(img, hlv)
         return img
     return None
+
+
+async def compose_full_honor_image(rqd: HonorRequest):
+    logger.info(
+        "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s "
+        "honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s "
+        "bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
+        rqd.honor_type,
+        rqd.group_type,
+        rqd.is_main_honor,
+        rqd.honor_level,
+        rqd.honor_rarity,
+        rqd.honor_img_path,
+        rqd.frame_img_path,
+        rqd.frame_degree_level_img_path,
+        rqd.rank_img_path,
+        rqd.scroll_img_path,
+        rqd.word_img_path,
+        rqd.bonds_bg_path,
+        rqd.bonds_bg_path2,
+        rqd.mask_img_path,
+        rqd.lv_img_path,
+        rqd.lv6_img_path,
+    )
+
+    async def load_honor_image(path: str | None):
+        return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+
+    async def load_optional_image(path: str | None):
+        if not path:
+            return None
+        try:
+            return await load_honor_image(path)
+        except (FileNotFoundError, OSError, ValueError):
+            logger.warning("optional honor asset missing: %s", path)
+            return None
+
+    tasks: dict[str, object] = {}
+
+    if rqd.is_empty and rqd.empty_honor_path:
+        tasks["empty_honor"] = load_honor_image(rqd.empty_honor_path)
+    if rqd.lv_img_path:
+        tasks["lv_img"] = load_honor_image(rqd.lv_img_path)
+    if rqd.lv6_img_path:
+        tasks["lv6_img"] = load_honor_image(rqd.lv6_img_path)
+    if rqd.frame_img_path:
+        tasks["frame_img"] = load_honor_image(rqd.frame_img_path)
+
+    htype = rqd.honor_type
+    gtype = rqd.group_type
+    wl_rank_style = is_world_link_rank_style(gtype, rqd.rank_img_path)
+    if htype == "birthday" and rqd.frame_degree_level_img_path:
+        tasks["frame_degree_level_img"] = load_honor_image(rqd.frame_degree_level_img_path)
+
+    if htype in ("normal", "birthday"):
+        if rqd.honor_img_path:
+            tasks["honor_img"] = load_honor_image(rqd.honor_img_path)
+        if rqd.rank_img_path and (gtype in ("event", "wl_event", "rank_match") or wl_rank_style):
+            tasks["rank_img"] = load_optional_image(rqd.rank_img_path)
+        if gtype == "fc_ap" and rqd.scroll_img_path:
+            tasks["scroll_img"] = load_honor_image(rqd.scroll_img_path)
+    elif htype == "bonds":
+        if rqd.bonds_bg_path:
+            tasks["bonds_bg"] = load_honor_image(rqd.bonds_bg_path)
+        if rqd.bonds_bg_path2:
+            tasks["bonds_bg2"] = load_honor_image(rqd.bonds_bg_path2)
+        if rqd.chara_icon_path:
+            tasks["chara_icon_1"] = load_honor_image(rqd.chara_icon_path)
+        if rqd.chara_icon_path2:
+            tasks["chara_icon_2"] = load_honor_image(rqd.chara_icon_path2)
+        if rqd.mask_img_path:
+            tasks["mask_img"] = load_honor_image(rqd.mask_img_path)
+        if rqd.word_img_path:
+            tasks["word_img"] = load_honor_image(rqd.word_img_path)
+
+    keys = list(tasks.keys())
+    values = await asyncio.gather(*tasks.values()) if tasks else []
+    images = dict(zip(keys, values))
+    return await run_in_pool(_compose_full_honor_image_sync, rqd, images)

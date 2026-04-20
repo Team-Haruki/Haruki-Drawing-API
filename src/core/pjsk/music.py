@@ -30,7 +30,7 @@ async def music_detail(request: MusicDetailRequest):
     """
     try:
         image = await compose_music_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -44,7 +44,7 @@ async def music_brief_list(request: MusicBriefListRequest):
     """
     try:
         image = await compose_music_brief_list_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -58,7 +58,7 @@ async def music_list(request: MusicListRequest):
     """
     try:
         image = await compose_music_list_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -72,7 +72,7 @@ async def music_progress(request: PlayProgressRequest):
     """
     try:
         image = await compose_play_progress_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -86,7 +86,7 @@ async def music_rewards_detail(request: DetailMusicRewardsRequest):
     """
     try:
         image = await compose_detail_music_rewards_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -100,6 +100,6 @@ async def music_rewards_basic(request: BasicMusicRewardsRequest):
     """
     try:
         image = await compose_basic_music_rewards_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

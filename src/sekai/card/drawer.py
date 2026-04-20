@@ -338,8 +338,10 @@ async def compose_card_list_image(
         if len(thumbnails) == 1:
             img = await get_card_full_thumbnail(thumbnails[0])
             return [img] if img is not None else []
-        normal = await get_card_full_thumbnail(thumbnails[0])
-        after = await get_card_full_thumbnail(thumbnails[1])
+        normal, after = await asyncio.gather(
+            get_card_full_thumbnail(thumbnails[0]),
+            get_card_full_thumbnail(thumbnails[1]),
+        )
         return [img for img in (normal, after) if img is not None]
 
     thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
@@ -468,19 +470,17 @@ async def compose_box_image(
     show_id = rqd.show_id
     show_box = rqd.show_box
 
-    thumbs = []
-    for card in cards:
-        # 根据use_after_training决定使用哪张缩略图
+    async def get_box_thumb(card):
         thumbnails = card.card.thumbnail_info or []
         if not thumbnails:
-            thumbs.append(None)
-            continue
+            return None
         if len(thumbnails) == 1:
-            thumbs.append(await get_card_full_thumbnail(thumbnails[0]))
-        elif card.card.is_after_training:
-            thumbs.append(await get_card_full_thumbnail(thumbnails[1]))
-        else:
-            thumbs.append(await get_card_full_thumbnail(thumbnails[0]))
+            return await get_card_full_thumbnail(thumbnails[0])
+        if card.card.is_after_training:
+            return await get_card_full_thumbnail(thumbnails[1])
+        return await get_card_full_thumbnail(thumbnails[0])
+
+    thumbs = await asyncio.gather(*[get_box_thumb(card) for card in cards])
 
     # 按角色收集卡牌
     chara_cards = {}

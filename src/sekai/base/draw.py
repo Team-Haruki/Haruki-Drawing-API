@@ -19,6 +19,7 @@ from .plot import (
     VSplit,
 )
 from .timezone import datetime_from_millis, request_now
+from .utils import run_in_pool
 
 SEKAI_BLUE_BG = RandomTriangleBg(True)
 SEKAI_RED_BG = RandomTriangleBg(False, main_hue=0.05)
@@ -357,10 +358,11 @@ def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, si
     return output
 
 
-def add_request_watermark_to_image(
+async def add_request_watermark_to_image(
     image: Image.Image,
     request,
     extra_suffix: str | None = None,
     size=12,
 ) -> Image.Image:
-    return add_watermark_to_image(image, build_request_watermark_text(request, extra_suffix=extra_suffix), size=size)
+    text = build_request_watermark_text(request, extra_suffix=extra_suffix)
+    return await run_in_pool(add_watermark_to_image, image, text, size)

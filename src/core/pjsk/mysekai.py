@@ -32,7 +32,7 @@ async def mysekai_resource(request: MysekaiResourceRequest):
     """Generate MySekai resource list image."""
     try:
         image = await compose_mysekai_resource_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -44,7 +44,7 @@ async def mysekai_msr_map(request: MysekaiMsrMapRequest):
     try:
         image = await compose_mysekai_msr_map_image(request)
         _t1 = time.perf_counter()
-        resp = image_to_response(image)
+        resp = await image_to_response(image)
         _perf_logger.info(
             "/map total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
             time.perf_counter() - _t0,
@@ -65,7 +65,7 @@ async def mysekai_fixture_list(request: MysekaiFixtureListRequest):
         _t0 = time.perf_counter()
         image = await compose_mysekai_fixture_list_image(request)
         _t1 = time.perf_counter()
-        resp = image_to_response(image)
+        resp = await image_to_response(image)
         _perf_logger.info(
             "/fixture-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
             time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
@@ -81,7 +81,7 @@ async def mysekai_fixture_detail(request: list[MysekaiFixtureDetailRequest]):
     """Generate MySekai fixture detail cards image."""
     try:
         image = await compose_mysekai_fixture_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -91,7 +91,7 @@ async def mysekai_door_upgrade(request: MysekaiDoorUpgradeRequest):
     """Generate MySekai gate upgrade materials image."""
     try:
         image = await compose_mysekai_door_upgrade_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -103,7 +103,7 @@ async def mysekai_music_record(request: MysekaiMusicrecordRequest):
         _t0 = time.perf_counter()
         image = await compose_mysekai_musicrecord_image(request)
         _t1 = time.perf_counter()
-        resp = image_to_response(image)
+        resp = await image_to_response(image)
         _perf_logger.info(
             "/music-record total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
             time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
@@ -121,7 +121,7 @@ async def mysekai_talk_list(request: MysekaiTalkListRequest):
         _t0 = time.perf_counter()
         image = await compose_mysekai_talk_list_image(request)
         _t1 = time.perf_counter()
-        resp = image_to_response(image)
+        resp = await image_to_response(image)
         _perf_logger.info(
             "/talk-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
             time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,

@@ -44,6 +44,7 @@ from src.sekai.base.utils import (
     get_img_from_path,
     get_img_resized,
     get_readable_datetime,
+    run_in_pool,
     get_str_display_length,
     truncate,
 )
@@ -144,14 +145,18 @@ from .model import (
 )
 
 
-async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
-    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
-    rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rare_img_path)
+def _compose_card_full_thumbnail_sync(
+    rqd: CardFullThumbnailRequest,
+    img: Image.Image,
+    rare_img: Image.Image,
+    frame_img: Image.Image | None,
+    rank_img: Image.Image | None,
+    attr_img: Image.Image | None,
+) -> Image.Image:
+    # 兼容 "rarity_4", "4_star", "4" 等格式
     if rqd.rare == "rarity_birthday":
-        rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.birthday_icon_path)
         rare_num = 1
     else:
-        # 兼容 "rarity_4", "4_star", "4" 等格式
         import re
 
         match = re.search(r"(\d+)", rqd.rare)
@@ -161,53 +166,68 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
             rare_num = 0
 
     img_w, img_h = img.size
-    custom_text = None
-    if rqd.custom_text:
-        custom_text = rqd.custom_text
+    custom_text = rqd.custom_text or None
     pcard = rqd.is_pcard
-    # 如果是profile卡片则绘制等级/加成
     if pcard:
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
         if custom_text is not None:
-            draw = ImageDraw.Draw(img)
-            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
             draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
         else:
-            level = rqd.level
-            draw = ImageDraw.Draw(img)
-            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
-            draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+            draw.text((6, img_h - 31), f"Lv.{rqd.level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
-    # 绘制边框
-    if rqd.frame_img_path:
-        frame_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+    if frame_img is not None:
         frame_img = frame_img.resize((img_w, img_h))
         img.paste(frame_img, (0, 0), frame_img)
-    # 绘制特训等级
-    if pcard:
-        rank = rqd.train_rank
-        if rank and rqd.train_rank_img_path:
-            rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
-            rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
-            rank_img_w, rank_img_h = rank_img.size
-            img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
-    # 左上角绘制属性
-    if rqd.attr_img_path:
-        attr_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
+
+    if pcard and rqd.train_rank and rank_img is not None:
+        rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
+        rank_img_w, rank_img_h = rank_img.size
+        img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
+
+    if attr_img is not None:
         attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
         img.paste(attr_img, (1, 0), attr_img)
-    # 左下角绘制稀有度
+
     hoffset, voffset = 6, 6 if not pcard else 24
     scale = 0.17 if not pcard else 0.15
     rare_img = rare_img.resize((int(img_w * scale), int(img_h * scale)))
     rare_w, rare_h = rare_img.size
     for i in range(rare_num):
         img.paste(rare_img, (hoffset + rare_w * i, img_h - rare_h - voffset), rare_img)
+
     mask = Image.new("L", (img_w, img_h), 0)
     draw = ImageDraw.Draw(mask)
     draw.rounded_rectangle((0, 0, img_w, img_h), radius=10, fill=255)
     img.putalpha(mask)
-
     return img
+
+
+async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
+    rare_img_path = rqd.birthday_icon_path if rqd.rare == "rarity_birthday" else rqd.rare_img_path
+    tasks = {
+        "img": get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
+        "rare_img": get_img_from_path(ASSETS_BASE_DIR, rare_img_path),
+    }
+    if rqd.frame_img_path:
+        tasks["frame_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+    if rqd.is_pcard and rqd.train_rank and rqd.train_rank_img_path:
+        tasks["rank_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
+    if rqd.attr_img_path:
+        tasks["attr_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
+
+    keys = list(tasks.keys())
+    values = await asyncio.gather(*tasks.values())
+    loaded = dict(zip(keys, values))
+    return await run_in_pool(
+        _compose_card_full_thumbnail_sync,
+        rqd,
+        loaded["img"],
+        loaded["rare_img"],
+        loaded.get("frame_img"),
+        loaded.get("rank_img"),
+        loaded.get("attr_img"),
+    )
 
 
 # 获取头像框图片，失败返回None

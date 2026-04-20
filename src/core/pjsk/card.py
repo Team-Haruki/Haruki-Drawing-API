@@ -24,7 +24,7 @@ async def card_detail(request: CardDetailRequest):
     """
     try:
         image = await compose_card_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -38,7 +38,7 @@ async def card_list(request: CardListRequest):
     """
     try:
         image = await compose_card_list_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -52,6 +52,6 @@ async def card_box(request: CardBoxRequest):
     """
     try:
         image = await compose_box_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
