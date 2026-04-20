@@ -98,7 +98,14 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(profile.to_profile_card_request())
 
-            with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
+            with (
+                VSplit()
+                .set_content_align("c")
+                .set_item_align("c")
+                .set_sep(8)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题行
                 with (
                     HSplit()
@@ -107,7 +114,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
                     .set_sep(8)
                     .set_h(header_h)
                     .set_padding(4)
-                    .set_bg(roundrect_bg())
+                    .set_bg(roundrect_bg(alpha=80))
                 ):
                     TextBox("角色", header_style).set_w(w1).set_content_align("c")
                     TextBox("等级", header_style).set_w(w2).set_content_align("c")
@@ -244,8 +251,8 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                 .set_content_align("lt")
                 .set_item_align("lt")
                 .set_sep(8)
-                .set_item_bg(roundrect_bg())
-                .set_bg(roundrect_bg())
+                .set_item_bg(roundrect_bg(alpha=80))
+                .set_bg(roundrect_bg(alpha=80))
                 .set_padding(16)
             ):
                 # 角色加成 - 分组显示
@@ -364,7 +371,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                 await get_profile_card(profile.to_profile_card_request())
 
             with (
-                HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg()).set_padding(8)
+                HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg(alpha=80)).set_padding(8)
             ):
                 for item in area_items:
                     current_lv = item.current_level
@@ -375,7 +382,7 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                         .set_content_align("l")
                         .set_item_align("l")
                         .set_sep(8)
-                        .set_item_bg(roundrect_bg())
+                        .set_item_bg(roundrect_bg(alpha=80))
                         .set_padding(8)
                     ):
                         # 列头
@@ -475,7 +482,14 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(profile.to_profile_card_request())
 
-            with VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
+            with (
+                VSplit()
+                .set_content_align("l")
+                .set_item_align("l")
+                .set_sep(8)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题
                 with (
                     HSplit()
@@ -484,7 +498,7 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
                     .set_sep(8)
                     .set_h(header_h)
                     .set_padding(4)
-                    .set_bg(roundrect_bg())
+                    .set_bg(roundrect_bg(alpha=80))
                 ):
                     TextBox("角色", header_style).set_w(w1).set_content_align("c")
                     TextBox("角色等级", header_style).set_w(w2).set_content_align("c")
@@ -612,7 +626,14 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(profile.to_profile_card_request())
 
-            with VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg()):
+            with (
+                VSplit()
+                .set_content_align("l")
+                .set_item_align("l")
+                .set_sep(8)
+                .set_padding(16)
+                .set_bg(roundrect_bg(alpha=80))
+            ):
                 # 标题
                 with (
                     HSplit()
@@ -621,7 +642,7 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
                     .set_sep(8)
                     .set_h(header_h)
                     .set_padding(4)
-                    .set_bg(roundrect_bg())
+                    .set_bg(roundrect_bg(alpha=80))
                 ):
                     TextBox("角色", header_style).set_w(w1).set_content_align("c")
                     TextBox("队长次数", header_style).set_w(w2).set_content_align("c")

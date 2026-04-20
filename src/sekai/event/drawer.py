@@ -335,7 +335,7 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
             TextBox(
                 "活动按时间顺序排列，黄色为当期活动，灰色为过去活动",
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
-            ).set_bg(roundrect_bg(radius=4)).set_padding(4)
+            ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
                 for d in event_list:
                     now = request_now(rqd.timezone)

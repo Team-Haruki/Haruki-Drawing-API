@@ -97,8 +97,8 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
             .set_item_align("c")
             .set_padding(16)
             .set_sep(8)
-            .set_item_bg(roundrect_bg())
-            .set_bg(roundrect_bg())
+            .set_item_bg(roundrect_bg(alpha=80))
+            .set_bg(roundrect_bg(alpha=80))
         ):
             # 角色信息头部
             with HSplit().set_sep(16).set_padding(16).set_content_align("c").set_item_align("c"):
@@ -170,7 +170,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
 
                         b = ImageBox(chara_icon, size=(40, 40)).set_padding(4)
                         if chara.cid == cid:
-                            b.set_bg(roundrect_bg(radius=8))
+                            b.set_bg(roundrect_bg(radius=8, alpha=80))
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
     add_request_watermark(canvas, rqd)

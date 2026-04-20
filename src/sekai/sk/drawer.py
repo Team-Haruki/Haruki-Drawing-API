@@ -1099,7 +1099,14 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
         if rqd.wl_chara_icon_path is not None:
-            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_bg(roundrect_bg()).set_padding(8):
+            with (
+                VSplit()
+                .set_content_align("c")
+                .set_item_align("c")
+                .set_sep(4)
+                .set_bg(roundrect_bg(alpha=80))
+                .set_padding(8)
+            ):
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
     add_request_watermark(canvas, rqd)

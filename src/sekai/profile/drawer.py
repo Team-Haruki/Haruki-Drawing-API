@@ -504,7 +504,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
             if solo_live is not None:
                 with VSplit().set_content_align("c").set_item_align("c").set_padding((32, 64)).set_sep(12):
                     t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
-                    t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
+                    t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
                     with Frame():
                         scid = solo_live.character_id
                         c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
@@ -522,7 +522,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                     t = TextBox(
                         f"SCORE {solo_live.score}", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
                     )
-                    t.set_bg(roundrect_bg(radius=6)).set_padding((10, 7))
+                    t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
         return ret
 
     vertical = bg_settings.vertical
