@@ -19,6 +19,8 @@ drawing:
   thread_pool_size: 8
   image_cache_size: 0
   image_cache_max_mb: 0
+  thumbnail_cache_size: 0
+  thumbnail_cache_max_mb: 0
   use_process_pool: false
   process_pool_workers: 4
   process_pool_threshold: 2000000

@@ -22,6 +22,8 @@ from src.settings import (
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
     SCREENSHOT_API_PATH,
+    THUMB_CACHE_MAX_BYTES,
+    THUMB_CACHE_SIZE,
     TMP_PATH,
 )
 
@@ -100,6 +102,12 @@ _image_cache_lock = threading.RLock()
 # target (0, 0) means original size (no resize)
 _image_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
+
+# 缩略图专用缓存：路径含 "thumbnail" 的图片路由到此缓存，避免被大图驱逐
+_thumb_cache_lock = threading.RLock()
+_thumb_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
+_thumb_cache_total_bytes = 0
+
 _missing_placeholder_lock = threading.RLock()
 _missing_placeholder_cache: dict[str, Image.Image] = {}
 _missing_placeholder_logged: set[str] = set()
@@ -245,46 +253,78 @@ def _estimate_image_bytes(img: Image.Image) -> int:
     return img.width * img.height * bpp
 
 
+def _is_thumbnail_path(path: str) -> bool:
+    return "thumbnail" in path
+
+
+def _cache_enabled(path: str) -> bool:
+    """判断给定路径是否有可用的缓存。"""
+    if _is_thumbnail_path(path):
+        return THUMB_CACHE_SIZE > 0 and THUMB_CACHE_MAX_BYTES > 0
+    return IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0
+
+
 def _load_image_cached(
     path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0
 ) -> Image.Image | None:
     cache_key = (path, mtime_ns, size, target_w, target_h)
-    with _image_cache_lock:
-        entry = _image_cache.get(cache_key)
+    if _is_thumbnail_path(path):
+        lock, cache = _thumb_cache_lock, _thumb_cache
+    else:
+        lock, cache = _image_cache_lock, _image_cache
+    with lock:
+        entry = cache.get(cache_key)
         if entry is None:
             return None
         image, _ = entry
-        _image_cache.move_to_end(cache_key)
+        cache.move_to_end(cache_key)
         return image.copy()
 
 
 def _put_image_cache(
     path: str, mtime_ns: int, size: int, image: Image.Image, target_w: int = 0, target_h: int = 0
 ) -> None:
-    global _image_cache_total_bytes
+    global _image_cache_total_bytes, _thumb_cache_total_bytes
 
-    if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
+    is_thumb = _is_thumbnail_path(path)
+    if is_thumb:
+        lock, cache = _thumb_cache_lock, _thumb_cache
+        max_size, max_bytes = THUMB_CACHE_SIZE, THUMB_CACHE_MAX_BYTES
+    else:
+        lock, cache = _image_cache_lock, _image_cache
+        max_size, max_bytes = IMAGE_CACHE_SIZE, IMAGE_CACHE_MAX_BYTES
+
+    if max_size <= 0 or max_bytes <= 0:
         return
 
     cache_key = (path, mtime_ns, size, target_w, target_h)
     cache_bytes = _estimate_image_bytes(image)
-    with _image_cache_lock:
-        old_entry = _image_cache.pop(cache_key, None)
+    with lock:
+        old_entry = cache.pop(cache_key, None)
         if old_entry is not None:
             old_image, old_bytes = old_entry
-            _image_cache_total_bytes -= old_bytes
+            if is_thumb:
+                _thumb_cache_total_bytes -= old_bytes
+            else:
+                _image_cache_total_bytes -= old_bytes
             old_image.close()
 
-        _image_cache[cache_key] = (image, cache_bytes)
-        _image_cache_total_bytes += cache_bytes
+        cache[cache_key] = (image, cache_bytes)
+        if is_thumb:
+            _thumb_cache_total_bytes += cache_bytes
+        else:
+            _image_cache_total_bytes += cache_bytes
 
-        # 双阈值驱逐：条目数和总字节数都受控，防止缓存长期持有大量大图。
-        while _image_cache and (
-            len(_image_cache) > IMAGE_CACHE_SIZE or _image_cache_total_bytes > IMAGE_CACHE_MAX_BYTES
-        ):
-            _, (evict_image, evict_bytes) = _image_cache.popitem(last=False)
-            _image_cache_total_bytes -= evict_bytes
+        # 双阈值驱逐：条目数和总字节数都受控
+        current_bytes = _thumb_cache_total_bytes if is_thumb else _image_cache_total_bytes
+        while cache and (len(cache) > max_size or current_bytes > max_bytes):
+            _, (evict_image, evict_bytes) = cache.popitem(last=False)
+            current_bytes -= evict_bytes
             evict_image.close()
+        if is_thumb:
+            _thumb_cache_total_bytes = current_bytes
+        else:
+            _image_cache_total_bytes = current_bytes
 
 
 def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Path | None:
@@ -359,7 +399,7 @@ def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
             raise FileNotFoundError(f"图片文件不存在: {full_path}")
         full_path = fallback_path
 
-    if IMAGE_CACHE_SIZE <= 0 or IMAGE_CACHE_MAX_BYTES <= 0:
+    if not _cache_enabled(str(full_path)):
         return _open_image_copy(full_path)
 
     stat = full_path.stat()
@@ -398,10 +438,10 @@ def _load_image_resized_sync(
     target_h: int,
     resample: int = Image.Resampling.BILINEAR,
 ) -> Image.Image:
-    """加载图片并 resize 到目标尺寸，结果缓存在 _image_cache 中。"""
+    """加载图片并 resize 到目标尺寸，结果缓存。"""
     full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
 
-    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+    if _cache_enabled(full_path_str):
         cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, target_w, target_h)
         if cached is not None:
             return cached
@@ -410,7 +450,7 @@ def _load_image_resized_sync(
     resized = loaded.resize((target_w, target_h), resample)
     loaded.close()
 
-    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+    if _cache_enabled(full_path_str):
         ret = resized.copy()
         _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, target_w, target_h)
         return ret
@@ -503,7 +543,7 @@ def _load_image_contain_resized_sync(
 
     # 使用负值区分 contain resize 与 exact resize
     cache_tw, cache_th = -max_w, -max_h
-    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+    if _cache_enabled(full_path_str):
         cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, cache_tw, cache_th)
         if cached is not None:
             return cached
@@ -513,7 +553,7 @@ def _load_image_contain_resized_sync(
     if resized is not loaded:
         loaded.close()
 
-    if IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0:
+    if _cache_enabled(full_path_str):
         ret = resized.copy()
         _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, cache_tw, cache_th)
         return ret
@@ -824,7 +864,7 @@ async def run_in_pool(func, *args, pool=None):
 
 def shutdown_utils() -> None:
     """关闭 utils 模块持有的全局资源（线程池、图片缓存、临时文件）"""
-    global _image_cache_total_bytes
+    global _image_cache_total_bytes, _thumb_cache_total_bytes
 
     _default_pool_executor.shutdown(wait=False)
 
@@ -835,6 +875,12 @@ def shutdown_utils() -> None:
             img.close()
         _image_cache.clear()
         _image_cache_total_bytes = 0
+
+    with _thumb_cache_lock:
+        for img, _ in _thumb_cache.values():
+            img.close()
+        _thumb_cache.clear()
+        _thumb_cache_total_bytes = 0
 
     with _missing_placeholder_lock:
         for img in _missing_placeholder_cache.values():
