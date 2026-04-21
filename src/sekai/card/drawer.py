@@ -37,6 +37,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
+    get_profile_card,
 )
 
 # 从 model.py 导入数据模型
@@ -120,9 +121,24 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
         "character_color_codes": rqd.character_color_codes,
         "term_limited_icon_path": rqd.term_limited_icon_path,
         "fes_limited_icon_path": rqd.fes_limited_icon_path,
-        "has_user_info": rqd.user_info is not None,
+        "user_info": (
+            {
+                "id": rqd.user_info.id,
+                "region": rqd.user_info.region,
+                "nickname": rqd.user_info.nickname,
+                "source": rqd.user_info.source,
+                "update_time": rqd.user_info.update_time,
+                "mode": rqd.user_info.mode,
+                "is_hide_uid": rqd.user_info.is_hide_uid,
+                "leader_image_path": rqd.user_info.leader_image_path,
+                "has_frame": rqd.user_info.has_frame,
+                "frame_path": rqd.user_info.frame_path,
+            }
+            if rqd.user_info is not None
+            else None
+        ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 3})
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 4})
 
 
 # ========== 主要函数 ==========
@@ -744,6 +760,9 @@ async def compose_box_image(
                         TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
                         use_real_line_count=True,
                     ).set_w(box_notice_text_width)
+            if user_info:
+                with HSplit().set_content_align("l").set_item_align("l"):
+                    await get_profile_card(user_info.to_profile_card_request())
             # 卡牌网格
             with (
                 HSplit()
