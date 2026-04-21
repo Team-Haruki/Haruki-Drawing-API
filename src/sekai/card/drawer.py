@@ -520,7 +520,7 @@ async def compose_card_list_image(
                         # 检查是否为未来卡牌
                         release_time = datetime_from_millis(card.release_at, rqd.timezone)
                         if release_time > now:
-                            TextBox("LEAK", leak_style).set_offset((4, -4))
+                            TextBox("未上线", leak_style).set_offset((4, -4))
 
                         # 技能图标区域
                         with Frame().set_content_align("rb"):
