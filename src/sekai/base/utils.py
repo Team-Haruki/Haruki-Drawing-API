@@ -108,11 +108,19 @@ _image_cache_lock = threading.RLock()
 # target (0, 0) means original size (no resize)
 _image_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
+_image_cache_hits = 0
+_image_cache_misses = 0
+_image_cache_sets = 0
+_image_cache_evictions = 0
 
 # 缩略图专用缓存：路径含 "thumbnail" 的图片路由到此缓存，避免被大图驱逐
 _thumb_cache_lock = threading.RLock()
 _thumb_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _thumb_cache_total_bytes = 0
+_thumb_cache_hits = 0
+_thumb_cache_misses = 0
+_thumb_cache_sets = 0
+_thumb_cache_evictions = 0
 
 _missing_placeholder_lock = threading.RLock()
 _missing_placeholder_cache: dict[str, Image.Image] = {}
@@ -278,14 +286,21 @@ class _TTLImageCache:
         self._lock = threading.RLock()
         self._cache: OrderedDict[str, tuple[Image.Image, int, float]] = OrderedDict()
         self._total_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._sets = 0
+        self._evictions = 0
+        self._expired = 0
 
     def _enabled(self) -> bool:
         return self._max_size > 0 and self._max_bytes > 0 and self._ttl_seconds > 0
 
-    def _delete_unlocked(self, key: str, entry: tuple[Image.Image, int, float]) -> None:
+    def _delete_unlocked(self, key: str, entry: tuple[Image.Image, int, float], *, count_eviction: bool = False) -> None:
         image, image_bytes, _ = entry
         self._cache.pop(key, None)
         self._total_bytes -= image_bytes
+        if count_eviction:
+            self._evictions += 1
         image.close()
 
     def _prune_expired_unlocked(self, now: float) -> None:
@@ -293,6 +308,7 @@ class _TTLImageCache:
         for key in expired_keys:
             entry = self._cache.get(key)
             if entry is not None:
+                self._expired += 1
                 self._delete_unlocked(key, entry)
 
     def get(self, key: str) -> Image.Image | None:
@@ -302,11 +318,15 @@ class _TTLImageCache:
         with self._lock:
             entry = self._cache.get(key)
             if entry is None:
+                self._misses += 1
                 return None
             image, _, expires_at = entry
             if now >= expires_at:
+                self._expired += 1
+                self._misses += 1
                 self._delete_unlocked(key, entry)
                 return None
+            self._hits += 1
             self._cache.move_to_end(key)
             return image.copy()
 
@@ -328,12 +348,35 @@ class _TTLImageCache:
 
             self._cache[key] = (cached_image, cache_bytes, expires_at)
             self._total_bytes += cache_bytes
+            self._sets += 1
 
             while self._cache and (len(self._cache) > self._max_size or self._total_bytes > self._max_bytes):
                 _, entry = self._cache.popitem(last=False)
                 evict_image, evict_bytes, _ = entry
                 self._total_bytes -= evict_bytes
+                self._evictions += 1
                 evict_image.close()
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            self._prune_expired_unlocked(now)
+            total_queries = self._hits + self._misses
+            hit_rate = (self._hits / total_queries) if total_queries > 0 else None
+            return {
+                "enabled": self._enabled(),
+                "entries": len(self._cache),
+                "max_entries": self._max_size,
+                "bytes": self._total_bytes,
+                "max_bytes": self._max_bytes,
+                "ttl_seconds": self._ttl_seconds,
+                "hits": self._hits,
+                "misses": self._misses,
+                "sets": self._sets,
+                "evictions": self._evictions,
+                "expired": self._expired,
+                "hit_rate": hit_rate,
+            }
 
     def clear(self) -> None:
         with self._lock:
@@ -341,6 +384,11 @@ class _TTLImageCache:
                 image.close()
             self._cache.clear()
             self._total_bytes = 0
+            self._hits = 0
+            self._misses = 0
+            self._sets = 0
+            self._evictions = 0
+            self._expired = 0
 
 
 _composed_image_cache = _TTLImageCache(
@@ -411,19 +459,86 @@ def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
     _composed_image_cache.set(cache_key, image)
 
 
+def _build_shared_cache_stats(
+    *,
+    enabled: bool,
+    entries: int,
+    max_entries: int,
+    current_bytes: int,
+    max_bytes: int,
+    hits: int,
+    misses: int,
+    sets: int,
+    evictions: int,
+) -> dict[str, Any]:
+    total_queries = hits + misses
+    hit_rate = (hits / total_queries) if total_queries > 0 else None
+    return {
+        "enabled": enabled,
+        "entries": entries,
+        "max_entries": max_entries,
+        "bytes": current_bytes,
+        "max_bytes": max_bytes,
+        "hits": hits,
+        "misses": misses,
+        "sets": sets,
+        "evictions": evictions,
+        "hit_rate": hit_rate,
+    }
+
+
+def get_runtime_cache_stats() -> dict[str, Any]:
+    with _image_cache_lock:
+        image_stats = _build_shared_cache_stats(
+            enabled=IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0,
+            entries=len(_image_cache),
+            max_entries=IMAGE_CACHE_SIZE,
+            current_bytes=_image_cache_total_bytes,
+            max_bytes=IMAGE_CACHE_MAX_BYTES,
+            hits=_image_cache_hits,
+            misses=_image_cache_misses,
+            sets=_image_cache_sets,
+            evictions=_image_cache_evictions,
+        )
+
+    with _thumb_cache_lock:
+        thumb_stats = _build_shared_cache_stats(
+            enabled=THUMB_CACHE_SIZE > 0 and THUMB_CACHE_MAX_BYTES > 0,
+            entries=len(_thumb_cache),
+            max_entries=THUMB_CACHE_SIZE,
+            current_bytes=_thumb_cache_total_bytes,
+            max_bytes=THUMB_CACHE_MAX_BYTES,
+            hits=_thumb_cache_hits,
+            misses=_thumb_cache_misses,
+            sets=_thumb_cache_sets,
+            evictions=_thumb_cache_evictions,
+        )
+
+    composed_stats = _composed_image_cache.stats()
+    return {
+        "image_cache": image_stats,
+        "thumbnail_cache": thumb_stats,
+        "composed_image_cache": composed_stats,
+    }
+
+
 def _load_image_cached(
     path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0
 ) -> Image.Image | None:
     cache_key = (path, mtime_ns, size, target_w, target_h)
     if _is_thumbnail_path(path):
         lock, cache = _thumb_cache_lock, _thumb_cache
+        hit_name, miss_name = "_thumb_cache_hits", "_thumb_cache_misses"
     else:
         lock, cache = _image_cache_lock, _image_cache
+        hit_name, miss_name = "_image_cache_hits", "_image_cache_misses"
     with lock:
         entry = cache.get(cache_key)
         if entry is None:
+            globals()[miss_name] += 1
             return None
         image, _ = entry
+        globals()[hit_name] += 1
         cache.move_to_end(cache_key)
         return image.copy()
 
@@ -432,6 +547,7 @@ def _put_image_cache(
     path: str, mtime_ns: int, size: int, image: Image.Image, target_w: int = 0, target_h: int = 0
 ) -> None:
     global _image_cache_total_bytes, _thumb_cache_total_bytes
+    global _image_cache_sets, _thumb_cache_sets, _image_cache_evictions, _thumb_cache_evictions
 
     is_thumb = _is_thumbnail_path(path)
     if is_thumb:
@@ -459,14 +575,20 @@ def _put_image_cache(
         cache[cache_key] = (image, cache_bytes)
         if is_thumb:
             _thumb_cache_total_bytes += cache_bytes
+            _thumb_cache_sets += 1
         else:
             _image_cache_total_bytes += cache_bytes
+            _image_cache_sets += 1
 
         # 双阈值驱逐：条目数和总字节数都受控
         current_bytes = _thumb_cache_total_bytes if is_thumb else _image_cache_total_bytes
         while cache and (len(cache) > max_size or current_bytes > max_bytes):
             _, (evict_image, evict_bytes) = cache.popitem(last=False)
             current_bytes -= evict_bytes
+            if is_thumb:
+                _thumb_cache_evictions += 1
+            else:
+                _image_cache_evictions += 1
             evict_image.close()
         if is_thumb:
             _thumb_cache_total_bytes = current_bytes
