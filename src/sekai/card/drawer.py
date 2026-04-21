@@ -15,6 +15,11 @@ from src.sekai.base import (
     get_img_from_path,
     roundrect_bg,
 )
+from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    put_composed_image_cache,
+)
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -32,7 +37,6 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
-    get_profile_card,
 )
 
 # 从 model.py 导入数据模型
@@ -57,6 +61,67 @@ def get_notice_dimensions(content_width: int, min_width: int = 520) -> tuple[int
     panel_width = max(min_width, content_width)
     text_width = max(240, panel_width - 120)
     return panel_width, text_width
+
+
+def _build_card_list_cache_key(rqd: CardListRequest) -> str:
+    request_payload = {
+        "cards": [
+            {
+                "card_id": card.card_id,
+                "release_at": card.release_at,
+                "supply_type": card.supply_type,
+                "prefix": card.prefix,
+                "skill_icon_path": card.skill.skill_type_icon_path if card.skill else None,
+                "thumbnail_info": [
+                    thumb.model_dump(mode="json")
+                    for thumb in (card.thumbnail_info or [])
+                ],
+            }
+            for card in rqd.cards
+        ],
+        "region": rqd.region,
+        "title": rqd.title,
+        "timezone": rqd.timezone,
+        "background_img_path": rqd.background_img_path,
+        "term_limited_icon_path": rqd.term_limited_icon_path,
+        "fes_limited_icon_path": rqd.fes_limited_icon_path,
+    }
+    return build_rendered_image_cache_key("card_list", request_payload, extra={"version": 3})
+
+
+def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
+    request_payload = {
+        "cards": [
+            {
+                "card": {
+                    "card_id": user_card.card.card_id,
+                    "character_id": user_card.card.character_id,
+                    "release_at": user_card.card.release_at,
+                    "supply_type": user_card.card.supply_type,
+                    "rare": user_card.card.rare,
+                    "thumbnail_info": [
+                        thumb.model_dump(mode="json")
+                        for thumb in (user_card.card.thumbnail_info or [])
+                    ],
+                    "is_after_training": user_card.card.is_after_training,
+                },
+                "has_card": user_card.has_card,
+            }
+            for user_card in rqd.cards
+        ],
+        "region": rqd.region,
+        "title": rqd.title,
+        "timezone": rqd.timezone,
+        "show_id": rqd.show_id,
+        "show_box": rqd.show_box,
+        "background_img_path": rqd.background_img_path,
+        "character_icon_paths": rqd.character_icon_paths,
+        "character_color_codes": rqd.character_color_codes,
+        "term_limited_icon_path": rqd.term_limited_icon_path,
+        "fes_limited_icon_path": rqd.fes_limited_icon_path,
+        "has_user_info": rqd.user_info is not None,
+    }
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 3})
 
 
 # ========== 主要函数 ==========
@@ -319,17 +384,14 @@ async def compose_card_list_image(
     """
     合成卡牌列表图片
     """
+    cache_key = _build_card_list_cache_key(rqd)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+
     cards = rqd.cards
     region = rqd.region  # noqa: F841
-    user_info = rqd.user_info
     # 如果只有一张卡，调用详情函数
-
-    # 创建用户卡牌ID到卡牌信息的映射
-    user_card_map = {}
-    if user_info and user_info.user_cards:
-        for user_card in user_info.user_cards:
-            if isinstance(user_card, dict) and "cardId" in user_card:
-                user_card_map[user_card["cardId"]] = user_card
 
     async def get_card_list_thumbs(card):
         thumbnails = card.thumbnail_info or []
@@ -369,18 +431,39 @@ async def compose_card_list_image(
     else:
         bg = SEKAI_BLUE_BG
 
-    term_img = None
-    fes_img = None
+    skill_icon_paths = sorted(
+        {
+            card.skill.skill_type_icon_path
+            for card, _ in card_and_thumbs
+            if card.skill and card.skill.skill_type_icon_path
+        }
+    )
+
+    preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        try:
-            term_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
-        except FileNotFoundError:
-            pass
+        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        try:
-            fes_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
-        except FileNotFoundError:
-            pass
+        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+    for path in skill_icon_paths:
+        preload_tasks[f"skill::{path}"] = get_img_from_path(ASSETS_BASE_DIR, path)
+
+    preloaded: dict[str, object] = {}
+    if preload_tasks:
+        preload_keys = list(preload_tasks.keys())
+        preload_results = await asyncio.gather(*preload_tasks.values(), return_exceptions=True)
+        preloaded = dict(zip(preload_keys, preload_results))
+
+    term_img = preloaded.get("term_img")
+    if isinstance(term_img, BaseException):
+        term_img = None
+    fes_img = preloaded.get("fes_img")
+    if isinstance(fes_img, BaseException):
+        fes_img = None
+    skill_icon_cache = {
+        path: img
+        for path in skill_icon_paths
+        if (img := preloaded.get(f"skill::{path}")) is not None and not isinstance(img, BaseException)
+    }
 
     list_panel_width, list_notice_text_width = get_notice_dimensions(300 * 3 + 16 * 2, min_width=300 * 3 + 16 * 2)
 
@@ -421,12 +504,9 @@ async def compose_card_list_image(
                             # 根据skill_type自动匹配技能图标
                             if card.skill and card.skill.skill_type:
                                 skill_icon_path = card.skill.skill_type_icon_path
-                                try:
-                                    skill_img = await get_img_from_path(ASSETS_BASE_DIR, skill_icon_path)
+                                skill_img = skill_icon_cache.get(skill_icon_path)
+                                if skill_img is not None:
                                     ImageBox(skill_img, image_size_mode="fit").set_w(32).set_margin(8)
-                                except FileNotFoundError:
-                                    # 如果找不到对应的技能图标，静默跳过
-                                    pass
 
                             # 卡牌信息区域
                             with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
@@ -455,7 +535,9 @@ async def compose_card_list_image(
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    image = await canvas.get_img()
+    put_composed_image_cache(cache_key, image)
+    return image
 
 
 async def compose_box_image(
@@ -464,6 +546,11 @@ async def compose_box_image(
     """
     合成卡牌一览图片（按角色分类的卡牌收集册）
     """
+    cache_key = _build_card_box_cache_key(rqd)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+
     cards = rqd.cards
     region = rqd.region  # noqa: F841
     user_info = rqd.user_info
@@ -552,27 +639,34 @@ async def compose_box_image(
         box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
     box_notice_width, box_notice_text_width = get_notice_dimensions(box_content_width)
 
-    # 预加载所有图标
-    term_img = None
-    fes_img = None
+    preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        try:
-            term_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
-        except FileNotFoundError:
-            pass
+        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        try:
-            fes_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
-        except FileNotFoundError:
-            pass
+        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+    if rqd.character_icon_paths:
+        for chara_id, path in rqd.character_icon_paths.items():
+            preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
 
-    # 预加载角色图标
+    preloaded: dict[str, object] = {}
+    if preload_tasks:
+        preload_keys = list(preload_tasks.keys())
+        preload_results = await asyncio.gather(*preload_tasks.values(), return_exceptions=True)
+        preloaded = dict(zip(preload_keys, preload_results))
+
+    term_img = preloaded.get("term_img")
+    if isinstance(term_img, BaseException):
+        term_img = None
+    fes_img = preloaded.get("fes_img")
+    if isinstance(fes_img, BaseException):
+        fes_img = None
+
     chara_icons = {}
     if rqd.character_icon_paths:
-        _cids = list(rqd.character_icon_paths.keys())
-        _cpaths = list(rqd.character_icon_paths.values())
-        _cimgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cpaths])
-        chara_icons = dict(zip(_cids, _cimgs))
+        for chara_id in rqd.character_icon_paths:
+            img = preloaded.get(f"chara::{chara_id}")
+            if img is not None and not isinstance(img, BaseException):
+                chara_icons[chara_id] = img
     # 绘制单张卡
     def draw_card(card_data):
         with Frame().set_content_align("rt"):
@@ -623,9 +717,6 @@ async def compose_box_image(
                         TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
                         use_real_line_count=True,
                     ).set_w(box_notice_text_width)
-            if user_info:
-                user_profile = await get_profile_card(user_info.to_profile_card_request())  # noqa: F841
-
             # 卡牌网格
             with (
                 HSplit()
@@ -653,4 +744,6 @@ async def compose_box_image(
                                 draw_card(card_data)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    image = await canvas.get_img()
+    put_composed_image_cache(cache_key, image)
+    return image
