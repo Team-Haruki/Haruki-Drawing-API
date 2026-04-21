@@ -67,8 +67,8 @@ def format_info_panel_update_time(update_time, timezone_name: str | None) -> str
 
     text = update_time.strftime("%m-%d %H:%M:%S")
     if timezone_label:
-        text += f" ({timezone_label})"
-    text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
+        text += f"\n({timezone_label})"
+    # text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
     return text
 
 # =========================== 常量定义 =========================== #
