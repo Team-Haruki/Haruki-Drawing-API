@@ -470,10 +470,24 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}",
                         TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
                     )
-                    with Frame():
-                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
-                        ImageBox(lv_rank_bg, size=(180, None))
-                        TextBox(f"{rqd.rank}", TextStyle(font=DEFAULT_FONT, size=30, color=WHITE)).set_offset((110, 0))
+                    lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
+                    badge_w = 180
+                    badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
+                    number_box_x = 104
+                    number_box_w = max(48, badge_w - number_box_x - 10)
+                    with Frame().set_size((badge_w, badge_h)):
+                        ImageBox(lv_rank_bg, size=(badge_w, badge_h))
+                        (
+                            TextBox(
+                                f"{rqd.rank}",
+                                TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
+                            )
+                            .set_size((number_box_w, badge_h))
+                            .set_padding(0)
+                            .set_wrap(False)
+                            .set_content_align("c")
+                            .set_offset((number_box_x, 0))
+                        )
 
             # 推特
             with Frame().set_content_align("l").set_w(450):
@@ -734,3 +748,4 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
             # 错误/警告
             if rqd.error_message:
                 TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)
+    return f

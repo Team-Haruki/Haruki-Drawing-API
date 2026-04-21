@@ -138,7 +138,7 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
             else None
         ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 4})
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 7})
 
 
 # ========== 主要函数 ==========
@@ -678,7 +678,7 @@ async def compose_box_image(
             col_num = max(1, math.ceil(len(cards) / best_height))
             group_widths.append(sz * col_num + sep * (col_num - 1))
         box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
-    box_notice_width, box_notice_text_width = get_notice_dimensions(box_content_width)
+    panel_width, panel_text_width = get_notice_dimensions(box_content_width)
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
@@ -732,6 +732,12 @@ async def compose_box_image(
         if show_id:
             TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
 
+    profile_card = None
+    if user_info:
+        profile_card = await get_profile_card(user_info.to_profile_card_request())
+        panel_width = max(panel_width, profile_card._get_self_size()[0])
+        panel_text_width = max(240, panel_width - 120)
+
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_img_path:
         try:
@@ -752,17 +758,17 @@ async def compose_box_image(
                     .set_sep(12)
                     .set_content_align("l")
                     .set_item_align("c")
-                    .set_w(box_notice_width)
+                    .set_w(panel_width)
                 ):
                     TextBox("提示", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0)))
                     TextBox(
                         rqd.title,
                         TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
                         use_real_line_count=True,
-                    ).set_w(box_notice_text_width)
-            if user_info:
-                with HSplit().set_content_align("l").set_item_align("l"):
-                    await get_profile_card(user_info.to_profile_card_request())
+                    ).set_w(panel_text_width)
+            if profile_card:
+                with HSplit().set_content_align("l").set_item_align("l").set_w(panel_width) as profile_panel:
+                    profile_panel.add_item(profile_card)
             # 卡牌网格
             with (
                 HSplit()
@@ -771,6 +777,7 @@ async def compose_box_image(
                 .set_item_align("lt")
                 .set_padding(16)
                 .set_sep(4)
+                .set_w(panel_width)
             ):
                 for chara_id, cards in chara_cards:
                     with VSplit().set_content_align("t").set_item_align("t").set_sep(4):
