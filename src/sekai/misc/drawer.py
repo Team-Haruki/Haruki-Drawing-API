@@ -80,10 +80,10 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     def draw_time_range(label: str, tr: BirthdayEventTime):
         start_at = datetime_from_millis(tr.start_at, rqd.timezone)
         end_at = datetime_from_millis(tr.end_at, rqd.timezone)
-        timezone_label = ""
-        if (start_at and start_at.tzinfo):
+        timezone_label = rqd.timezone or ""
+        if timezone_label == "" and (start_at and start_at.tzinfo):
             timezone_label = start_at.tzname() or ""
-        elif  (end_at and end_at.tzinfo):
+        if timezone_label == "" and (end_at and end_at.tzinfo):
             timezone_label = end_at.tzname() or ""
         if timezone_label:
             timezone_label = f" ({timezone_label})"
