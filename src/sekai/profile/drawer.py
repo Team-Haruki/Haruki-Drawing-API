@@ -41,8 +41,12 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    get_image_asset_signature,
     get_img_from_path,
     get_img_resized,
+    put_composed_image_cache,
     get_readable_datetime,
     run_in_pool,
     get_str_display_length,
@@ -177,21 +181,16 @@ def _compose_card_full_thumbnail_sync(
             draw.text((6, img_h - 31), f"Lv.{rqd.level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
     if frame_img is not None:
-        frame_img = frame_img.resize((img_w, img_h))
         img.paste(frame_img, (0, 0), frame_img)
 
     if pcard and rqd.train_rank and rank_img is not None:
-        rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
         rank_img_w, rank_img_h = rank_img.size
         img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
 
     if attr_img is not None:
-        attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
         img.paste(attr_img, (1, 0), attr_img)
 
     hoffset, voffset = 6, 6 if not pcard else 24
-    scale = 0.17 if not pcard else 0.15
-    rare_img = rare_img.resize((int(img_w * scale), int(img_h * scale)))
     rare_w, rare_h = rare_img.size
     for i in range(rare_num):
         img.paste(rare_img, (hoffset + rare_w * i, img_h - rare_h - voffset), rare_img)
@@ -203,31 +202,87 @@ def _compose_card_full_thumbnail_sync(
     return img
 
 
+def _build_card_full_thumbnail_cache_key(
+    rqd: CardFullThumbnailRequest,
+    *,
+    rare_img_path: str,
+) -> str:
+    request_payload = {
+        "card_id": rqd.card_id,
+        "card_thumbnail_path": rqd.card_thumbnail_path,
+        "rare": rqd.rare,
+        "frame_img_path": rqd.frame_img_path,
+        "attr_img_path": rqd.attr_img_path,
+        "rare_img_path": rare_img_path,
+        "train_rank": rqd.train_rank,
+        "train_rank_img_path": rqd.train_rank_img_path,
+        "level": rqd.level,
+        "custom_text": rqd.custom_text,
+        "is_pcard": rqd.is_pcard,
+    }
+    asset_signatures = {
+        "card_thumbnail": get_image_asset_signature(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
+        "rare": get_image_asset_signature(ASSETS_BASE_DIR, rare_img_path),
+        "frame": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_img_path),
+        "attr": get_image_asset_signature(ASSETS_BASE_DIR, rqd.attr_img_path),
+        "rank": get_image_asset_signature(ASSETS_BASE_DIR, rqd.train_rank_img_path),
+    }
+    return build_rendered_image_cache_key(
+        "card_full_thumbnail",
+        request_payload,
+        asset_signatures=asset_signatures,
+    )
+
+
 async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
     rare_img_path = rqd.birthday_icon_path if rqd.rare == "rarity_birthday" else rqd.rare_img_path
+    cache_key = _build_card_full_thumbnail_cache_key(rqd, rare_img_path=rare_img_path)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+
+    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
+    img_w, img_h = img.size
+    rare_scale = 0.17 if not rqd.is_pcard else 0.15
     tasks = {
-        "img": get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
-        "rare_img": get_img_from_path(ASSETS_BASE_DIR, rare_img_path),
+        "rare_img": get_img_resized(
+            ASSETS_BASE_DIR,
+            rare_img_path,
+            max(1, int(img_w * rare_scale)),
+            max(1, int(img_h * rare_scale)),
+        ),
     }
     if rqd.frame_img_path:
-        tasks["frame_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
+        tasks["frame_img"] = get_img_resized(ASSETS_BASE_DIR, rqd.frame_img_path, img_w, img_h)
     if rqd.is_pcard and rqd.train_rank and rqd.train_rank_img_path:
-        tasks["rank_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
+        tasks["rank_img"] = get_img_resized(
+            ASSETS_BASE_DIR,
+            rqd.train_rank_img_path,
+            max(1, int(img_w * 0.35)),
+            max(1, int(img_h * 0.35)),
+        )
     if rqd.attr_img_path:
-        tasks["attr_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
+        tasks["attr_img"] = get_img_resized(
+            ASSETS_BASE_DIR,
+            rqd.attr_img_path,
+            max(1, int(img_w * 0.22)),
+            max(1, int(img_h * 0.25)),
+        )
 
     keys = list(tasks.keys())
     values = await asyncio.gather(*tasks.values())
     loaded = dict(zip(keys, values))
-    return await run_in_pool(
+    composed = await run_in_pool(
         _compose_card_full_thumbnail_sync,
         rqd,
-        loaded["img"],
+        img,
         loaded["rare_img"],
         loaded.get("frame_img"),
         loaded.get("rank_img"),
         loaded.get("attr_img"),
     )
+    put_composed_image_cache(cache_key, composed)
+    return composed
 
 
 # 获取头像框图片，失败返回None

@@ -1,13 +1,16 @@
 import asyncio
 from collections import OrderedDict
 from datetime import datetime, timedelta
+import hashlib
 import io
+import json
 import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
 import threading
-from typing import Literal
+import time
+from typing import Any, Literal
 from uuid import uuid4
 
 import aiohttp
@@ -21,6 +24,9 @@ from src.settings import (
     FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_MAX_BYTES,
+    COMPOSED_IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
     SCREENSHOT_API_PATH,
     THUMB_CACHE_MAX_BYTES,
     THUMB_CACHE_SIZE,
@@ -262,6 +268,147 @@ def _cache_enabled(path: str) -> bool:
     if _is_thumbnail_path(path):
         return THUMB_CACHE_SIZE > 0 and THUMB_CACHE_MAX_BYTES > 0
     return IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0
+
+
+class _TTLImageCache:
+    def __init__(self, max_size: int, max_bytes: int, ttl_seconds: int):
+        self._max_size = max_size
+        self._max_bytes = max_bytes
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+        self._cache: OrderedDict[str, tuple[Image.Image, int, float]] = OrderedDict()
+        self._total_bytes = 0
+
+    def _enabled(self) -> bool:
+        return self._max_size > 0 and self._max_bytes > 0 and self._ttl_seconds > 0
+
+    def _delete_unlocked(self, key: str, entry: tuple[Image.Image, int, float]) -> None:
+        image, image_bytes, _ = entry
+        self._cache.pop(key, None)
+        self._total_bytes -= image_bytes
+        image.close()
+
+    def _prune_expired_unlocked(self, now: float) -> None:
+        expired_keys = [key for key, (_, _, expires_at) in self._cache.items() if now >= expires_at]
+        for key in expired_keys:
+            entry = self._cache.get(key)
+            if entry is not None:
+                self._delete_unlocked(key, entry)
+
+    def get(self, key: str) -> Image.Image | None:
+        if not self._enabled():
+            return None
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                return None
+            image, _, expires_at = entry
+            if now >= expires_at:
+                self._delete_unlocked(key, entry)
+                return None
+            self._cache.move_to_end(key)
+            return image.copy()
+
+    def set(self, key: str, image: Image.Image) -> None:
+        if not self._enabled():
+            return
+
+        cached_image = image.copy()
+        cache_bytes = _estimate_image_bytes(cached_image)
+        now = time.monotonic()
+        expires_at = now + self._ttl_seconds
+
+        with self._lock:
+            self._prune_expired_unlocked(now)
+
+            old_entry = self._cache.get(key)
+            if old_entry is not None:
+                self._delete_unlocked(key, old_entry)
+
+            self._cache[key] = (cached_image, cache_bytes, expires_at)
+            self._total_bytes += cache_bytes
+
+            while self._cache and (len(self._cache) > self._max_size or self._total_bytes > self._max_bytes):
+                _, entry = self._cache.popitem(last=False)
+                evict_image, evict_bytes, _ = entry
+                self._total_bytes -= evict_bytes
+                evict_image.close()
+
+    def clear(self) -> None:
+        with self._lock:
+            for image, _, _ in self._cache.values():
+                image.close()
+            self._cache.clear()
+            self._total_bytes = 0
+
+
+_composed_image_cache = _TTLImageCache(
+    COMPOSED_IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_MAX_BYTES,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
+)
+
+
+def _normalize_cache_material(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _normalize_cache_material(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list | tuple | set):
+        return [_normalize_cache_material(item) for item in value]
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _normalize_cache_material(model_dump(mode="json"))
+
+    return str(value)
+
+
+def build_rendered_image_cache_key(
+    namespace: str,
+    request: Any,
+    *,
+    asset_signatures: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str:
+    material = {
+        "namespace": namespace,
+        "request": _normalize_cache_material(request),
+        "assets": _normalize_cache_material(asset_signatures or {}),
+        "extra": _normalize_cache_material(extra or {}),
+    }
+    payload = json.dumps(material, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, Any] | None:
+    if path is None or path.strip() == "":
+        return None
+
+    try:
+        full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+    except (FileNotFoundError, OSError, ValueError):
+        return {"source_path": path, "missing": True}
+
+    return {
+        "source_path": path,
+        "resolved_path": full_path_str,
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
+
+
+def get_composed_image_cached(cache_key: str) -> Image.Image | None:
+    return _composed_image_cache.get(cache_key)
+
+
+def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
+    _composed_image_cache.set(cache_key, image)
 
 
 def _load_image_cached(
@@ -887,6 +1034,8 @@ def shutdown_utils() -> None:
             img.close()
         _missing_placeholder_cache.clear()
         _missing_placeholder_logged.clear()
+
+    _composed_image_cache.clear()
 
 
 # ============================ chromedp截图 ============================ #

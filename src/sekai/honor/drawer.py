@@ -5,7 +5,14 @@ import os
 from PIL import Image, ImageDraw
 
 from src.sekai.base.painter import WHITE, get_font, get_text_size, resize_keep_ratio
-from src.sekai.base.utils import get_img_from_path, run_in_pool
+from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    get_image_asset_signature,
+    get_img_from_path,
+    put_composed_image_cache,
+    run_in_pool,
+)
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT
 
 # 从 model.py 导入数据模型
@@ -206,7 +213,37 @@ def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Im
     return None
 
 
+def _build_full_honor_cache_key(rqd: HonorRequest) -> str:
+    request_payload = rqd.model_dump(mode="json", exclude_none=False, exclude={"timezone"})
+    asset_signatures = {
+        "honor_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.honor_img_path),
+        "rank_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.rank_img_path),
+        "lv_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.lv_img_path),
+        "lv6_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.lv6_img_path),
+        "empty_honor": get_image_asset_signature(ASSETS_BASE_DIR, rqd.empty_honor_path),
+        "scroll_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.scroll_img_path),
+        "word_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.word_img_path),
+        "chara_icon_1": get_image_asset_signature(ASSETS_BASE_DIR, rqd.chara_icon_path),
+        "chara_icon_2": get_image_asset_signature(ASSETS_BASE_DIR, rqd.chara_icon_path2),
+        "bonds_bg": get_image_asset_signature(ASSETS_BASE_DIR, rqd.bonds_bg_path),
+        "bonds_bg2": get_image_asset_signature(ASSETS_BASE_DIR, rqd.bonds_bg_path2),
+        "mask_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.mask_img_path),
+        "frame_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_img_path),
+        "frame_degree_level_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_degree_level_img_path),
+    }
+    return build_rendered_image_cache_key(
+        "full_honor_image",
+        request_payload,
+        asset_signatures=asset_signatures,
+    )
+
+
 async def compose_full_honor_image(rqd: HonorRequest):
+    cache_key = _build_full_honor_cache_key(rqd)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+
     logger.info(
         "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s "
         "honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s "
@@ -282,4 +319,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
     keys = list(tasks.keys())
     values = await asyncio.gather(*tasks.values()) if tasks else []
     images = dict(zip(keys, values))
-    return await run_in_pool(_compose_full_honor_image_sync, rqd, images)
+    composed = await run_in_pool(_compose_full_honor_image_sync, rqd, images)
+    if composed is not None:
+        put_composed_image_cache(cache_key, composed)
+    return composed
