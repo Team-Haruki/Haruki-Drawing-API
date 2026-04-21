@@ -51,6 +51,7 @@ TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
 FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
 
 logger = logging.getLogger(__name__)
+_perf_logger = logging.getLogger("card.draw.perf")
 
 
 def is_non_limited_supply_type(value: str | None) -> bool:
@@ -387,8 +388,10 @@ async def compose_card_list_image(
     cache_key = _build_card_list_cache_key(rqd)
     cached = get_composed_image_cached(cache_key)
     if cached is not None:
+        _perf_logger.info("card/list cache hit: cards=%d", len(rqd.cards))
         return cached
 
+    _t_total = time.perf_counter()
     cards = rqd.cards
     region = rqd.region  # noqa: F841
     # 如果只有一张卡，调用详情函数
@@ -406,7 +409,9 @@ async def compose_card_list_image(
         )
         return [img for img in (normal, after) if img is not None]
 
+    _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
+    _t_thumbs = time.perf_counter() - _t0
 
     # 并行获取所有缩略图
     card_and_thumbs = [(card, thumb_group) for card, thumb_group in zip(cards, thumbs) if thumb_group]
@@ -447,11 +452,13 @@ async def compose_card_list_image(
     for path in skill_icon_paths:
         preload_tasks[f"skill::{path}"] = get_img_from_path(ASSETS_BASE_DIR, path)
 
+    _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
     if preload_tasks:
         preload_keys = list(preload_tasks.keys())
         preload_results = await asyncio.gather(*preload_tasks.values(), return_exceptions=True)
         preloaded = dict(zip(preload_keys, preload_results))
+    _t_preload = time.perf_counter() - _t0
 
     term_img = preloaded.get("term_img")
     if isinstance(term_img, BaseException):
@@ -535,8 +542,22 @@ async def compose_card_list_image(
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
+    _t0 = time.perf_counter()
     image = await canvas.get_img()
+    _t_render = time.perf_counter() - _t0
     put_composed_image_cache(cache_key, image)
+    _perf_logger.info(
+        "card/list total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, cards=%d, rendered=%d, skills=%d, image=%dx%d)",
+        time.perf_counter() - _t_total,
+        _t_thumbs,
+        _t_preload,
+        _t_render,
+        len(rqd.cards),
+        len(card_and_thumbs),
+        len(skill_icon_paths),
+        image.width,
+        image.height,
+    )
     return image
 
 
@@ -549,8 +570,10 @@ async def compose_box_image(
     cache_key = _build_card_box_cache_key(rqd)
     cached = get_composed_image_cached(cache_key)
     if cached is not None:
+        _perf_logger.info("card/box cache hit: cards=%d", len(rqd.cards))
         return cached
 
+    _t_total = time.perf_counter()
     cards = rqd.cards
     region = rqd.region  # noqa: F841
     user_info = rqd.user_info
@@ -567,7 +590,9 @@ async def compose_box_image(
             return await get_card_full_thumbnail(thumbnails[1])
         return await get_card_full_thumbnail(thumbnails[0])
 
+    _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_box_thumb(card) for card in cards])
+    _t_thumbs = time.perf_counter() - _t0
 
     # 按角色收集卡牌
     chara_cards = {}
@@ -648,11 +673,13 @@ async def compose_box_image(
         for chara_id, path in rqd.character_icon_paths.items():
             preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
 
+    _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
     if preload_tasks:
         preload_keys = list(preload_tasks.keys())
         preload_results = await asyncio.gather(*preload_tasks.values(), return_exceptions=True)
         preloaded = dict(zip(preload_keys, preload_results))
+    _t_preload = time.perf_counter() - _t0
 
     term_img = preloaded.get("term_img")
     if isinstance(term_img, BaseException):
@@ -744,6 +771,20 @@ async def compose_box_image(
                                 draw_card(card_data)
 
     add_request_watermark(canvas, rqd)
+    _t0 = time.perf_counter()
     image = await canvas.get_img()
+    _t_render = time.perf_counter() - _t0
     put_composed_image_cache(cache_key, image)
+    _perf_logger.info(
+        "card/box total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, cards=%d, visible=%d, groups=%d, image=%dx%d)",
+        time.perf_counter() - _t_total,
+        _t_thumbs,
+        _t_preload,
+        _t_render,
+        len(rqd.cards),
+        sum(len(group_cards) for _, group_cards in chara_cards),
+        len(chara_cards),
+        image.width,
+        image.height,
+    )
     return image

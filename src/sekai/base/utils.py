@@ -396,6 +396,140 @@ _composed_image_cache = _TTLImageCache(
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
     COMPOSED_IMAGE_CACHE_TTL_SECONDS,
 )
+COMPOSED_IMAGE_DISK_CACHE_DIR = Path("data/utils/composed_image_disk_cache")
+
+
+class _DiskImageCache:
+    def __init__(self, cache_dir: Path, ttl_seconds: int):
+        self._cache_dir = cache_dir
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+        self._sets = 0
+        self._expired = 0
+        self._errors = 0
+
+    def _enabled(self) -> bool:
+        return self._ttl_seconds > 0
+
+    def _path(self, namespace: str, key: str) -> Path:
+        safe_namespace = (namespace or "default").strip().replace("\\", "/").strip("/")
+        if safe_namespace == "":
+            safe_namespace = "default"
+        return self._cache_dir / safe_namespace / f"{key}.png"
+
+    def get(self, namespace: str, key: str) -> Image.Image | None:
+        if not self._enabled():
+            return None
+
+        cache_path = self._path(namespace, key)
+        now = time.time()
+
+        with self._lock:
+            try:
+                stat = cache_path.stat()
+            except OSError:
+                self._misses += 1
+                return None
+
+            if now - stat.st_mtime >= self._ttl_seconds:
+                self._misses += 1
+                self._expired += 1
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+                return None
+
+            try:
+                image = _open_image_copy(cache_path)
+            except (FileNotFoundError, OSError):
+                self._misses += 1
+                self._errors += 1
+                return None
+
+            self._hits += 1
+            try:
+                os.utime(cache_path, None)
+            except OSError:
+                pass
+            return image
+
+    def set(self, namespace: str, key: str, image: Image.Image) -> None:
+        if not self._enabled():
+            return
+
+        cache_path = self._path(namespace, key)
+        tmp_path = cache_path.with_suffix(".tmp")
+        image_copy = image.copy()
+
+        try:
+            with self._lock:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                image_copy.save(tmp_path, format="PNG")
+                os.replace(tmp_path, cache_path)
+                self._sets += 1
+        except OSError:
+            with self._lock:
+                self._errors += 1
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        finally:
+            image_copy.close()
+
+    def cleanup_expired(self) -> int:
+        if not self._enabled():
+            return 0
+
+        cutoff = time.time() - self._ttl_seconds
+        removed = 0
+        with self._lock:
+            for path in self._cache_dir.rglob("*.png"):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+            self._expired += removed
+        return removed
+
+    def stats(self) -> dict[str, Any]:
+        entries = 0
+        total_bytes = 0
+        if self._cache_dir.is_dir():
+            for path in self._cache_dir.rglob("*.png"):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                entries += 1
+                total_bytes += stat.st_size
+
+        with self._lock:
+            total_queries = self._hits + self._misses
+            hit_rate = (self._hits / total_queries) if total_queries > 0 else None
+            return {
+                "enabled": self._enabled(),
+                "entries": entries,
+                "bytes": total_bytes,
+                "ttl_seconds": self._ttl_seconds,
+                "hits": self._hits,
+                "misses": self._misses,
+                "sets": self._sets,
+                "expired": self._expired,
+                "errors": self._errors,
+                "hit_rate": hit_rate,
+            }
+
+
+_composed_image_disk_cache = _DiskImageCache(
+    COMPOSED_IMAGE_DISK_CACHE_DIR,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
+)
 
 
 def _normalize_cache_material(value: Any) -> Any:
@@ -459,6 +593,18 @@ def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
     _composed_image_cache.set(cache_key, image)
 
 
+def get_composed_image_disk_cached(namespace: str, cache_key: str) -> Image.Image | None:
+    return _composed_image_disk_cache.get(namespace, cache_key)
+
+
+def put_composed_image_disk_cache(namespace: str, cache_key: str, image: Image.Image) -> None:
+    _composed_image_disk_cache.set(namespace, cache_key, image)
+
+
+def cleanup_expired_composed_image_disk_cache() -> int:
+    return _composed_image_disk_cache.cleanup_expired()
+
+
 def _build_shared_cache_stats(
     *,
     enabled: bool,
@@ -515,10 +661,12 @@ def get_runtime_cache_stats() -> dict[str, Any]:
         )
 
     composed_stats = _composed_image_cache.stats()
+    composed_disk_stats = _composed_image_disk_cache.stats()
     return {
         "image_cache": image_stats,
         "thumbnail_cache": thumb_stats,
         "composed_image_cache": composed_stats,
+        "composed_image_disk_cache": composed_disk_stats,
     }
 
 

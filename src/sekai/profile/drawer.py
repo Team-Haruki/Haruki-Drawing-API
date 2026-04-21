@@ -43,10 +43,12 @@ from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     get_composed_image_cached,
+    get_composed_image_disk_cached,
     get_image_asset_signature,
     get_img_from_path,
     get_img_resized,
     put_composed_image_cache,
+    put_composed_image_disk_cache,
     get_readable_datetime,
     run_in_pool,
     get_str_display_length,
@@ -240,7 +242,12 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
     cached = get_composed_image_cached(cache_key)
     if cached is not None:
         return cached
+    disk_cached = get_composed_image_disk_cached("card_full_thumbnail", cache_key)
+    if disk_cached is not None:
+        put_composed_image_cache(cache_key, disk_cached)
+        return disk_cached
 
+    _t0 = time.perf_counter()
     img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
     img_w, img_h = img.size
     rare_scale = 0.17 if not rqd.is_pcard else 0.15
@@ -270,7 +277,9 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
         )
 
     keys = list(tasks.keys())
+    _t1 = time.perf_counter()
     values = await asyncio.gather(*tasks.values())
+    _t2 = time.perf_counter()
     loaded = dict(zip(keys, values))
     composed = await run_in_pool(
         _compose_card_full_thumbnail_sync,
@@ -281,7 +290,18 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
         loaded.get("rank_img"),
         loaded.get("attr_img"),
     )
+    _t3 = time.perf_counter()
     put_composed_image_cache(cache_key, composed)
+    put_composed_image_disk_cache("card_full_thumbnail", cache_key, composed)
+    if _t3 - _t0 >= 0.05:
+        logger.info(
+            "[perf] card_full_thumbnail miss: card=%s total=%.3fs load_base=%.3fs preload=%.3fs compose=%.3fs",
+            rqd.card_id,
+            _t3 - _t0,
+            _t1 - _t0,
+            _t2 - _t1,
+            _t3 - _t2,
+        )
     return composed
 
 
