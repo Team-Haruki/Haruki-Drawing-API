@@ -612,7 +612,16 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
             # 挑战Live / 协力统计
             if solo_live is not None or multi_live is not None:
-                with VSplit().set_content_align("c").set_item_align("c").set_padding((32, 64)).set_sep(12):
+                # 这块统计卡整体使用右下锚点覆盖在角色等级区域上方；
+                # 额外下移一段距离，避免顶到上半部分角色等级格子。
+                with (
+                    VSplit()
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_padding((32, 64))
+                    .set_sep(12)
+                    .set_offset((0, 48))
+                ):
                     if solo_live is not None:
                         t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
                         t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
