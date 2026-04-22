@@ -38,6 +38,7 @@ This API provides endpoints for generating various Project Sekai images.
 - **Music**: Generate music detail, list, progress, and rewards images
 - **Profile**: Generate player profile images
 - **Event**: Generate event detail, record, and list images
+- **VLive**: Generate virtual live reminder-style list images
 - **Gacha**: Generate gacha list and detail images
 - **Honor**: Generate honor/badge images
 - **Score**: Generate score control images

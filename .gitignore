@@ -206,5 +206,7 @@ scripts/benchmark_all_apis_concurrent.py
 
 build/
 # local benchmark artifacts
+*.bundle
+out/
 out/docker-load/
 out/sk-trend-sample-docker/

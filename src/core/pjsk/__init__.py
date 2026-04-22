@@ -15,6 +15,7 @@ from . import (
     score,
     sk,
     stamp,
+    vlive,
 )
 
 router = APIRouter(prefix="/api/pjsk")
@@ -33,3 +34,4 @@ router.include_router(deck.router, prefix="/deck")
 router.include_router(mysekai.router, prefix="/mysekai")
 router.include_router(sk.router, prefix="/sk")
 router.include_router(chart.router, prefix="/chart")
+router.include_router(vlive.router, prefix="/vlive")
