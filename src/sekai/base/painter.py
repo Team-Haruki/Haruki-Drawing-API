@@ -28,7 +28,6 @@ from src.settings import (
     DEFAULT_FONT,  # noqa: F401
     DEFAULT_HEAVY_FONT,  # noqa: F401
     FONT_DIR,
-    TRI_PATHS,
     settings,
 )
 
@@ -1331,6 +1330,74 @@ class Painter:
             (19, 0.57, 3.0, 0.2),
             (24, 0.57, 7.0, 0.1),
         ]
+        pink_time_palettes = [
+            {
+                "hour": 0,
+                "grad1": (128, 106, 170),
+                "grad2": (194, 145, 210),
+                "overlay1": (255, 194, 228, 60),
+                "overlay2": (198, 184, 255, 42),
+                "tri_colors": [(255, 142, 202), (202, 158, 255), (148, 203, 255), (255, 222, 138)],
+                "white_alpha": 72,
+            },
+            {
+                "hour": 5,
+                "grad1": (248, 218, 234),
+                "grad2": (205, 214, 255),
+                "overlay1": (255, 240, 246, 84),
+                "overlay2": (255, 214, 236, 52),
+                "tri_colors": [(255, 150, 206), (208, 166, 255), (158, 210, 255), (255, 228, 146)],
+                "white_alpha": 76,
+            },
+            {
+                "hour": 9,
+                "grad1": (236, 208, 228),
+                "grad2": (172, 205, 255),
+                "overlay1": (255, 244, 248, 76),
+                "overlay2": (226, 221, 255, 52),
+                "tri_colors": [(255, 144, 198), (194, 170, 255), (132, 206, 255), (255, 228, 148)],
+                "white_alpha": 72,
+            },
+            {
+                "hour": 12,
+                "grad1": (230, 198, 224),
+                "grad2": (160, 198, 255),
+                "overlay1": (255, 246, 249, 72),
+                "overlay2": (214, 219, 255, 50),
+                "tri_colors": [(255, 142, 194), (188, 166, 255), (126, 202, 255), (255, 220, 142)],
+                "white_alpha": 70,
+            },
+            {
+                "hour": 15,
+                "grad1": (242, 186, 216),
+                "grad2": (173, 186, 242),
+                "overlay1": (255, 220, 236, 88),
+                "overlay2": (255, 192, 224, 54),
+                "tri_colors": [(255, 136, 188), (188, 160, 255), (146, 196, 255), (255, 212, 132)],
+                "white_alpha": 64,
+            },
+            {
+                "hour": 19,
+                "grad1": (176, 132, 190),
+                "grad2": (146, 156, 226),
+                "overlay1": (255, 194, 224, 62),
+                "overlay2": (213, 188, 255, 40),
+                "tri_colors": [(255, 142, 196), (180, 154, 255), (138, 190, 255), (255, 206, 126)],
+                "white_alpha": 58,
+            },
+            {
+                "hour": 24,
+                "grad1": (128, 106, 170),
+                "grad2": (194, 145, 210),
+                "overlay1": (255, 194, 228, 60),
+                "overlay2": (198, 184, 255, 42),
+                "tri_colors": [(255, 142, 202), (202, 158, 255), (148, 203, 255), (255, 222, 138)],
+                "white_alpha": 72,
+            },
+        ]
+
+        def lerp_tuple(c1, c2, t):
+            return tuple(int(c1[i] * (1 - t) + c2[i] * t) for i in range(len(c1)))
 
         def get_timecolor(t: datetime):
             if t.hour < timecolors[0][0]:
@@ -1353,7 +1420,42 @@ class Painter:
                         l1 + (light2 - l1) * x,
                     )
 
+        def get_pink_palette(t: datetime):
+            hour = t.hour + t.minute / 60 + t.second / 3600
+            if hour < pink_time_palettes[0]["hour"]:
+                return pink_time_palettes[0]
+            if hour >= pink_time_palettes[-1]["hour"]:
+                return pink_time_palettes[-1]
+            for i in range(0, len(pink_time_palettes) - 1):
+                current = pink_time_palettes[i]
+                nxt = pink_time_palettes[i + 1]
+                if current["hour"] <= hour <= nxt["hour"]:
+                    span = nxt["hour"] - current["hour"]
+                    x = 0 if span == 0 else (hour - current["hour"]) / span
+                    return {
+                        "grad1": lerp_tuple(current["grad1"], nxt["grad1"], x),
+                        "grad2": lerp_tuple(current["grad2"], nxt["grad2"], x),
+                        "overlay1": lerp_tuple(current["overlay1"], nxt["overlay1"], x),
+                        "overlay2": lerp_tuple(current["overlay2"], nxt["overlay2"], x),
+                        "tri_colors": [
+                            lerp_tuple(current["tri_colors"][j], nxt["tri_colors"][j], x) for j in range(4)
+                        ],
+                        "white_alpha": int(current["white_alpha"] * (1 - x) + nxt["white_alpha"] * x),
+                    }
+            return pink_time_palettes[-1]
+
         now = datetime.now()
+        override_hour = os.getenv("HARUKI_BG_TEST_HOUR")
+        if override_hour is not None:
+            try:
+                override_hour_float = max(0.0, min(23.999, float(override_hour)))
+                hour = int(override_hour_float)
+                minute_float = (override_hour_float - hour) * 60
+                minute = int(minute_float)
+                second = int((minute_float - minute) * 60)
+                now = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
+            except ValueError:
+                pass
         # now = datetime.strptime("2024-06-21 23:00", "%Y-%m-%d %H:%M")
 
         w, h = self.size
@@ -1369,16 +1471,46 @@ class Painter:
             r, g, b = colorsys.hls_to_rgb(h, l * ml, s * ms)
             return [int(255 * c) for c in (r, g, b)] + [a]
 
+        def get_gradient_points(size: Size) -> tuple[Position, Position, Position, Position]:
+            width, height = size
+            aspect = width / max(height, 1)
+            wide_bias = max(0.0, min(0.2, (aspect - 1.0) * 0.12))
+            tall_bias = max(0.0, min(0.16, (1.0 - aspect) * 0.16))
+            primary_p1 = (0.02 + tall_bias * 0.3, 0.96 - wide_bias)
+            primary_p2 = (0.98 - tall_bias * 0.3, 0.08 + wide_bias * 0.8)
+            overlay_p1 = (0.04 + tall_bias * 0.2, 0.06 + wide_bias * 0.3)
+            overlay_p2 = (0.96 - tall_bias * 0.2, 0.94 - wide_bias * 0.5)
+            return primary_p1, primary_p2, overlay_p1, overlay_p2
+
         ofs, s = 0.025, 4
-        bg = LinearGradient(c1=h2c(mh, 0.5, 1.0), c2=h2c(mh + ofs, 0.9, 0.5), p1=(0, 1), p2=(1, 0)).get_img(
-            (w // s, h // s)
-        )
-        bg.alpha_composite(
-            LinearGradient(c1=h2c(mh, 0.9, 0.7, 100), c2=h2c(mh - ofs, 0.5, 0.5, 100), p1=(0, 0), p2=(1, 1)).get_img(
+        primary_p1, primary_p2, overlay_p1, overlay_p2 = get_gradient_points((w, h))
+        pink_palette = get_pink_palette(now) if use_time_color else None
+        if pink_palette:
+            bg = LinearGradient(
+                c1=(*pink_palette["grad1"], 255),
+                c2=(*pink_palette["grad2"], 255),
+                p1=primary_p1,
+                p2=primary_p2,
+            ).get_img((w // s, h // s))
+            bg.alpha_composite(
+                LinearGradient(
+                    c1=pink_palette["overlay1"],
+                    c2=pink_palette["overlay2"],
+                    p1=overlay_p1,
+                    p2=overlay_p2,
+                ).get_img((w // s, h // s))
+            )
+            bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, pink_palette["white_alpha"])))
+        else:
+            bg = LinearGradient(c1=h2c(mh, 0.5, 1.0), c2=h2c(mh + ofs, 0.9, 0.5), p1=primary_p1, p2=primary_p2).get_img(
                 (w // s, h // s)
             )
-        )
-        bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
+            bg.alpha_composite(
+                LinearGradient(
+                    c1=h2c(mh, 0.9, 0.7, 100), c2=h2c(mh - ofs, 0.5, 0.5, 100), p1=overlay_p1, p2=overlay_p2
+                ).get_img((w // s, h // s))
+            )
+            bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
         # preset_tris = [
@@ -1387,58 +1519,92 @@ class Painter:
         #     .resize((128, 128), Image.Resampling.BILINEAR)
         #     for i in range(3)
         # ]
-        def _load_triangle_template(path: str) -> Image.Image:
-            with Image.open(path) as img:
-                tri = img.convert("RGBA")
-                tri.load()
-                return tri.resize((128, 128), Image.Resampling.BILINEAR)
+        def brighten_color(color: tuple[int, int, int], amount: float = 0.22) -> tuple[int, int, int]:
+            return tuple(min(255, int(c + (255 - c) * amount)) for c in color)
 
-        preset_tris = [_load_triangle_template(tri_path) for tri_path in TRI_PATHS]
-        preset_colors = [
-            # (255, 255, 255),
-            (255, 189, 246),
-            (183, 246, 255),
-            (255, 247, 146),
-        ]
+        def mix_color(c1: tuple[int, int, int], c2: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
+            return tuple(int(c1[i] * (1 - ratio) + c2[i] * ratio) for i in range(3))
+
+        if pink_palette:
+            grad1 = pink_palette["grad1"]
+            grad2 = pink_palette["grad2"]
+            mid = mix_color(grad1, grad2, 0.5)
+            preset_colors = [
+                brighten_color(mix_color(grad1, (255, 206, 232), 0.72), 0.20),
+                brighten_color(mix_color(mid, (238, 214, 255), 0.68), 0.18),
+                brighten_color(mix_color(grad2, (208, 232, 255), 0.66), 0.20),
+                brighten_color(mix_color(mid, (255, 228, 176), 0.56), 0.18),
+            ]
+        else:
+            preset_colors = [
+                brighten_color(color)
+                for color in [
+                    (255, 189, 246),
+                    (183, 246, 255),
+                    (255, 247, 146),
+                ]
+            ]
 
         def draw_tri(x, y, rot, size, color, type):
-            img = preset_tris[type]
-            img = img.resize((size, size), Image.Resampling.BILINEAR)
-            img = img.rotate(rot, expand=True)
-            img = ImageChops.multiply(img, Image.new("RGBA", img.size, color))
-            bg.alpha_composite(img, (int(x) - img.width // 2, int(y) - img.height // 2))
+            overlay = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(overlay)
+            center = size
+            r = size * 0.56
+            type_angle_offset = (0, 18, -18)[type % 3]
+            points = []
+            for idx in range(3):
+                angle = math.radians(rot + type_angle_offset + idx * 120 - 90)
+                points.append((center + r * math.cos(angle), center + r * math.sin(angle)))
+            draw.polygon(points, fill=color)
+            bg.alpha_composite(overlay, (int(x) - overlay.width // 2, int(y) - overlay.height // 2))
 
         factor = min(w, h) / 2048 * 1.5
         size_factor = 1.0 + (factor - 1.0) * (1.0 - size_fixed_rate)
         dense_factor = 1.0 + (factor * factor - 1.0) * size_fixed_rate
+        aspect_density_boost = min(1.55, max(1.15, (w / max(h, 1)) ** 0.22))
 
         def rand_tri(num, sz):
             for i in range(num):
-                x = random.uniform(0, w)
-                y = random.uniform(0, h)
+                if random.random() < 0.78:
+                    edge = random.choice(("left", "right", "top", "bottom"))
+                    if edge == "left":
+                        x = random.uniform(-0.04 * w, 0.18 * w)
+                        y = random.uniform(0, h)
+                    elif edge == "right":
+                        x = random.uniform(0.82 * w, 1.04 * w)
+                        y = random.uniform(0, h)
+                    elif edge == "top":
+                        x = random.uniform(0, w)
+                        y = random.uniform(-0.04 * h, 0.20 * h)
+                    else:
+                        x = random.uniform(0, w)
+                        y = random.uniform(0.80 * h, 1.04 * h)
+                else:
+                    x = random.uniform(0.12 * w, 0.88 * w)
+                    y = random.uniform(0.12 * h, 0.88 * h)
                 if x < 0 or x >= w or y < 0 or y >= h:
                     continue
                 rot = random.uniform(0, 360)
                 size = max(1, min(1000, int(random.normalvariate(sz[0], sz[1]))))
                 dist = ((x - w // 2) / w * 2) ** 2 + ((y - h // 2) / h * 2) ** 2
-                size = int(size * dist)
+                size = int(size * max(0.28, dist))
 
                 size_alpha_factor, std_size_lower, std_size_upper = 1.0, 64 * size_factor, 128 * size_factor
                 if size < std_size_lower:
                     size_alpha_factor = size / std_size_lower
                 if size > std_size_upper:
                     size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5)
-                alpha = int(random.normalvariate(50, 200) * max(0, min(1.2, size_alpha_factor) * (ml**0.5)))
+                alpha = int(random.normalvariate(122, 138) * max(0, min(1.5, size_alpha_factor) * (ml**0.5)))
                 if random.random() < 0.05 and size > std_size_lower:
                     alpha = 255
-                if alpha <= 10:
+                if alpha <= 34:
                     continue
                 color = random.choice(preset_colors)
                 color = (*color, alpha)
-                type = random.choice([1, 1, 1, 1, 1, 1, 0, 2])
+                type = random.choice([0, 1, 1, 1, 2, 2])
                 draw_tri(x, y, rot, size, color, type)
 
-        rand_tri(int(20 * dense_factor), (128 * size_factor, 16 * size_factor))
-        rand_tri(int(200 * dense_factor), (64 * size_factor, 16 * size_factor))
+        rand_tri(int(28 * dense_factor * aspect_density_boost), (128 * size_factor, 16 * size_factor))
+        rand_tri(int(280 * dense_factor * aspect_density_boost), (64 * size_factor, 16 * size_factor))
 
         self.img.paste(bg, self.offset)
