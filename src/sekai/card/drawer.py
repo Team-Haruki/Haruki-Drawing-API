@@ -37,6 +37,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
+    get_profile_card,
 )
 
 # 从 model.py 导入数据模型
@@ -120,9 +121,24 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
         "character_color_codes": rqd.character_color_codes,
         "term_limited_icon_path": rqd.term_limited_icon_path,
         "fes_limited_icon_path": rqd.fes_limited_icon_path,
-        "has_user_info": rqd.user_info is not None,
+        "user_info": (
+            {
+                "id": rqd.user_info.id,
+                "region": rqd.user_info.region,
+                "nickname": rqd.user_info.nickname,
+                "source": rqd.user_info.source,
+                "update_time": rqd.user_info.update_time,
+                "mode": rqd.user_info.mode,
+                "is_hide_uid": rqd.user_info.is_hide_uid,
+                "leader_image_path": rqd.user_info.leader_image_path,
+                "has_frame": rqd.user_info.has_frame,
+                "frame_path": rqd.user_info.frame_path,
+            }
+            if rqd.user_info is not None
+            else None
+        ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 3})
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 7})
 
 
 # ========== 主要函数 ==========
@@ -504,7 +520,7 @@ async def compose_card_list_image(
                         # 检查是否为未来卡牌
                         release_time = datetime_from_millis(card.release_at, rqd.timezone)
                         if release_time > now:
-                            TextBox("LEAK", leak_style).set_offset((4, -4))
+                            TextBox("未上线", leak_style).set_offset((4, -4))
 
                         # 技能图标区域
                         with Frame().set_content_align("rb"):
@@ -662,7 +678,7 @@ async def compose_box_image(
             col_num = max(1, math.ceil(len(cards) / best_height))
             group_widths.append(sz * col_num + sep * (col_num - 1))
         box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
-    box_notice_width, box_notice_text_width = get_notice_dimensions(box_content_width)
+    panel_width, panel_text_width = get_notice_dimensions(box_content_width)
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
@@ -716,6 +732,12 @@ async def compose_box_image(
         if show_id:
             TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
 
+    profile_card = None
+    if user_info:
+        profile_card = await get_profile_card(user_info.to_profile_card_request())
+        panel_width = max(panel_width, profile_card._get_self_size()[0])
+        panel_text_width = max(240, panel_width - 120)
+
     # 使用传入的背景图片，如果没有则使用默认背景
     if rqd.background_img_path:
         try:
@@ -736,14 +758,17 @@ async def compose_box_image(
                     .set_sep(12)
                     .set_content_align("l")
                     .set_item_align("c")
-                    .set_w(box_notice_width)
+                    .set_w(panel_width)
                 ):
                     TextBox("提示", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0)))
                     TextBox(
                         rqd.title,
                         TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
                         use_real_line_count=True,
-                    ).set_w(box_notice_text_width)
+                    ).set_w(panel_text_width)
+            if profile_card:
+                with HSplit().set_content_align("l").set_item_align("l").set_w(panel_width) as profile_panel:
+                    profile_panel.add_item(profile_card)
             # 卡牌网格
             with (
                 HSplit()
@@ -752,6 +777,7 @@ async def compose_box_image(
                 .set_item_align("lt")
                 .set_padding(16)
                 .set_sep(4)
+                .set_w(panel_width)
             ):
                 for chara_id, cards in chara_cards:
                     with VSplit().set_content_align("t").set_item_align("t").set_sep(4):

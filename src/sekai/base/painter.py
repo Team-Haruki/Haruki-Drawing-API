@@ -32,7 +32,7 @@ from src.settings import (
     settings,
 )
 
-from .img_utils import adjust_image_alpha_inplace, mix_image_by_color
+from .img_utils import adjust_image_alpha_inplace
 from .utils import run_in_pool
 
 # Process pool for CPU-intensive drawing operations
@@ -1195,6 +1195,9 @@ class Painter:
         corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
         edge_strength: float = 0.6,
     ) -> Self:
+        if min(size) <= 0:
+            return self
+
         sw = shaodow_width
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
         draw_pos = (pos[0] - sw, pos[1] - sw)
@@ -1228,8 +1231,15 @@ class Painter:
             # 复制pos位置的size大小的原图模糊并混合颜色
             bg = self.img.crop(bg_region)
             if blur > 0:
-                bg = bg.filter(ImageFilter.GaussianBlur(radius=blur))
-            bg = mix_image_by_color(bg, fill)
+                downsample = max(1, int(blur // 2))
+                if downsample > 1:
+                    bg = bg.resize(
+                        (max(1, bg.width // downsample), max(1, bg.height // downsample)),
+                        Image.Resampling.BILINEAR,
+                    )
+                blur_method = ImageFilter.GaussianBlur if downsample >= 2 else ImageFilter.BoxBlur
+                bg = bg.filter(blur_method(radius=blur / downsample))
+            bg.alpha_composite(Image.new("RGBA", bg.size, fill))
 
         # 超分绘制圆角矩形，缩放到目标大小
         overlay = Image.new("RGBA", (aa_size[0], aa_size[1]), (0, 0, 0, 0))
