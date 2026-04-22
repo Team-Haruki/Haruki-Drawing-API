@@ -18,7 +18,7 @@ async def deck_recommend(request: DeckRequest):
     """
     try:
         image = await compose_deck_recommend_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

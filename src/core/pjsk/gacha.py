@@ -22,7 +22,7 @@ async def gacha_list(request: GachaListRequest):
     """
     try:
         image = await compose_gacha_list_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -36,6 +36,6 @@ async def gacha_detail(request: GachaDetailRequest):
     """
     try:
         image = await compose_gacha_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -67,7 +67,7 @@ TMP_CLEANUP_INTERVAL = 300  # 临时文件清理间隔（秒）
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
     from src.sekai.base.painter import shutdown_painter
-    from src.sekai.base.utils import cleanup_expired_tmp_files, shutdown_utils
+    from src.sekai.base.utils import cleanup_expired_composed_image_disk_cache, cleanup_expired_tmp_files, shutdown_utils
     from src.sekai.sk.drawer import shutdown_sk_drawer
 
     _ensure_nogil_runtime()
@@ -86,6 +86,10 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_periodic_tmp_cleanup())
 
     # Startup
+    try:
+        cleanup_expired_composed_image_disk_cache()
+    except Exception:
+        logger.warning("Failed to cleanup composed image disk cache", exc_info=True)
     logger.info("Haruki Drawing API is starting...")
     yield
     # Shutdown

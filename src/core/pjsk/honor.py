@@ -17,7 +17,7 @@ async def honor(request: HonorRequest):
     """
     try:
         image = await compose_full_honor_image(request)
-        image = add_request_watermark_to_image(image, request)
-        return image_to_response(image)
+        image = await add_request_watermark_to_image(image, request)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

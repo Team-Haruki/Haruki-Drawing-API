@@ -26,7 +26,7 @@ async def score_control(request: ScoreControlRequest):
     """
     try:
         image = await compose_score_control_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -40,7 +40,7 @@ async def custom_room_score_control(request: CustomRoomScoreRequest):
     """
     try:
         image = await compose_custom_room_score_control_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -54,7 +54,7 @@ async def music_meta(request: list[MusicMetaRequest]):
     """
     try:
         image = await compose_music_meta_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -68,6 +68,6 @@ async def music_board(request: MusicBoardRequest):
     """
     try:
         image = await compose_music_board_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

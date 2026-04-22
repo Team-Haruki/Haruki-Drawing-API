@@ -330,6 +330,28 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
     row_count = math.ceil(math.sqrt(len(event_list)))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
+
+    async def preload_event_entry(d):
+        tasks = {}
+        if d.event_banner_path:
+            tasks["banner"] = get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path)
+        if d.event_cards:
+            tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail(thumb) for thumb in d.event_cards])
+        if d.event_attr_path:
+            tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path)
+        if d.event_unit_path:
+            tasks["unit"] = get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path)
+        if d.event_chara_path:
+            tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path)
+        if not tasks:
+            return {}
+        keys = list(tasks.keys())
+        values = await asyncio.gather(*tasks.values())
+        return dict(zip(keys, values))
+
+    preloaded = await asyncio.gather(*[preload_event_entry(d) for d in event_list]) if event_list else []
+    now = request_now(rqd.timezone)
+
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
             TextBox(
@@ -337,8 +359,7 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
-                for d in event_list:
-                    now = request_now(rqd.timezone)
+                for d, loaded in zip(event_list, preloaded):
                     event_start_at = d.start_at
                     event_end_at = d.end_at
                     bg_color = WIDGET_BG_COLOR
@@ -350,12 +371,14 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
 
                     with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
                         with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            if d.event_banner_path:
-                                ImageBox(await get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path), size=(None, 40))
+                            banner = loaded.get("banner")
+                            if banner is not None:
+                                ImageBox(banner, size=(None, 40))
                             with Grid(col_count=3).set_padding(0).set_sep(1, 1):
-                                if d.event_cards:
-                                    for thumb in d.event_cards:
-                                        ImageBox(await get_card_full_thumbnail(thumb), size=(30, 30))
+                                card_thumbs = loaded.get("cards", [])
+                                if card_thumbs:
+                                    for thumb in card_thumbs:
+                                        ImageBox(thumb, size=(30, 30))
                             if not d.event_cards:
                                 Spacer(h=60)
                             if d.event_cards:
@@ -367,18 +390,12 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                             TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             with HSplit().set_padding(0).set_sep(4):
-                                if d.event_attr_path:
-                                    ImageBox(
-                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path), size=(None, 24)
-                                    )
-                                if d.event_unit_path:
-                                    ImageBox(
-                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path), size=(None, 24)
-                                    )
-                                if d.event_chara_path:
-                                    ImageBox(
-                                        await get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path), size=(None, 24)
-                                    )
+                                if loaded.get("attr") is not None:
+                                    ImageBox(loaded["attr"], size=(None, 24))
+                                if loaded.get("unit") is not None:
+                                    ImageBox(loaded["unit"], size=(None, 24))
+                                if loaded.get("chara") is not None:
+                                    ImageBox(loaded["chara"], size=(None, 24))
                                 if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
                                     Spacer(w=24, h=24)
 

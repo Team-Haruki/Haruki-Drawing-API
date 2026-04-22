@@ -30,7 +30,7 @@ async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
     """
     try:
         image = await compose_challenge_live_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -44,7 +44,7 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
     """
     try:
         image = await compose_power_bonus_detail_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -59,7 +59,7 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
     """
     try:
         image = await compose_area_item_upgrade_materials_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -74,7 +74,7 @@ async def bonds_level(request: BondsRequest):
     """
     try:
         image = await compose_bonds_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -89,6 +89,6 @@ async def leader_count(request: LeaderCountRequest):
     """
     try:
         image = await compose_leader_count_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

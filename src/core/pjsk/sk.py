@@ -28,7 +28,7 @@ async def sk_line(request: SklRequest):
     """Generate event ranking line list image."""
     try:
         image = await compose_skl_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -38,7 +38,7 @@ async def sk_query(request: SKRequest):
     """Generate sk image."""
     try:
         image = await compose_sk_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -48,7 +48,7 @@ async def sk_check_room(request: CFRequest):
     """Generate 'Check Room' participation record image."""
     try:
         image = await compose_cf_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -58,7 +58,7 @@ async def sk_csb(request: CSBRequest):
     """Generate 'CSB' heatmap image."""
     try:
         image = await compose_csb_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -68,7 +68,7 @@ async def sk_speed(request: SpeedRequest):
     """Generate event ranking speed list image."""
     try:
         image = await compose_sks_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -78,7 +78,7 @@ async def sk_player_trace(request: PlayerTraceRequest):
     """Generate player point trace chart image."""
     try:
         image = await compose_player_trace_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -88,7 +88,7 @@ async def sk_rank_trace(request: RankTraceRequest):
     """Generate ranking line trace and prediction chart image."""
     try:
         image = await compose_rank_trace_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -98,6 +98,6 @@ async def sk_winrate(request: WinRateRequest):
     """Generate Cheerful Live team winrate prediction image."""
     try:
         image = await compose_winrate_predict_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

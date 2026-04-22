@@ -17,10 +17,13 @@ font:
 
 drawing:
   thread_pool_size: 8
-  image_cache_size: 0
-  image_cache_max_mb: 0
-  thumbnail_cache_size: 0
-  thumbnail_cache_max_mb: 0
+  image_cache_size: 1024
+  image_cache_max_mb: 256
+  thumbnail_cache_size: 2048
+  thumbnail_cache_max_mb: 256
+  composed_image_cache_size: 2048
+  composed_image_cache_max_mb: 256
+  composed_image_cache_ttl_seconds: 604800
   use_process_pool: false
   process_pool_workers: 4
   process_pool_threshold: 2000000

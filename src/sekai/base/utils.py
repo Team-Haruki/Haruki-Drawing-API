@@ -1,13 +1,16 @@
 import asyncio
 from collections import OrderedDict
 from datetime import datetime, timedelta
+import hashlib
 import io
+import json
 import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
 import threading
-from typing import Literal
+import time
+from typing import Any, Literal
 from uuid import uuid4
 
 import aiohttp
@@ -21,6 +24,9 @@ from src.settings import (
     FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_MAX_BYTES,
+    COMPOSED_IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
     SCREENSHOT_API_PATH,
     THUMB_CACHE_MAX_BYTES,
     THUMB_CACHE_SIZE,
@@ -102,11 +108,19 @@ _image_cache_lock = threading.RLock()
 # target (0, 0) means original size (no resize)
 _image_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
+_image_cache_hits = 0
+_image_cache_misses = 0
+_image_cache_sets = 0
+_image_cache_evictions = 0
 
 # 缩略图专用缓存：路径含 "thumbnail" 的图片路由到此缓存，避免被大图驱逐
 _thumb_cache_lock = threading.RLock()
 _thumb_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
 _thumb_cache_total_bytes = 0
+_thumb_cache_hits = 0
+_thumb_cache_misses = 0
+_thumb_cache_sets = 0
+_thumb_cache_evictions = 0
 
 _missing_placeholder_lock = threading.RLock()
 _missing_placeholder_cache: dict[str, Image.Image] = {}
@@ -264,19 +278,415 @@ def _cache_enabled(path: str) -> bool:
     return IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0
 
 
+class _TTLImageCache:
+    def __init__(self, max_size: int, max_bytes: int, ttl_seconds: int):
+        self._max_size = max_size
+        self._max_bytes = max_bytes
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+        self._cache: OrderedDict[str, tuple[Image.Image, int, float]] = OrderedDict()
+        self._total_bytes = 0
+        self._hits = 0
+        self._misses = 0
+        self._sets = 0
+        self._evictions = 0
+        self._expired = 0
+
+    def _enabled(self) -> bool:
+        return self._max_size > 0 and self._max_bytes > 0 and self._ttl_seconds > 0
+
+    def _delete_unlocked(self, key: str, entry: tuple[Image.Image, int, float], *, count_eviction: bool = False) -> None:
+        image, image_bytes, _ = entry
+        self._cache.pop(key, None)
+        self._total_bytes -= image_bytes
+        if count_eviction:
+            self._evictions += 1
+        image.close()
+
+    def _prune_expired_unlocked(self, now: float) -> None:
+        expired_keys = [key for key, (_, _, expires_at) in self._cache.items() if now >= expires_at]
+        for key in expired_keys:
+            entry = self._cache.get(key)
+            if entry is not None:
+                self._expired += 1
+                self._delete_unlocked(key, entry)
+
+    def get(self, key: str) -> Image.Image | None:
+        if not self._enabled():
+            return None
+        now = time.monotonic()
+        with self._lock:
+            entry = self._cache.get(key)
+            if entry is None:
+                self._misses += 1
+                return None
+            image, _, expires_at = entry
+            if now >= expires_at:
+                self._expired += 1
+                self._misses += 1
+                self._delete_unlocked(key, entry)
+                return None
+            self._hits += 1
+            self._cache.move_to_end(key)
+            return image.copy()
+
+    def set(self, key: str, image: Image.Image) -> None:
+        if not self._enabled():
+            return
+
+        cached_image = image.copy()
+        cache_bytes = _estimate_image_bytes(cached_image)
+        now = time.monotonic()
+        expires_at = now + self._ttl_seconds
+
+        with self._lock:
+            self._prune_expired_unlocked(now)
+
+            old_entry = self._cache.get(key)
+            if old_entry is not None:
+                self._delete_unlocked(key, old_entry)
+
+            self._cache[key] = (cached_image, cache_bytes, expires_at)
+            self._total_bytes += cache_bytes
+            self._sets += 1
+
+            while self._cache and (len(self._cache) > self._max_size or self._total_bytes > self._max_bytes):
+                _, entry = self._cache.popitem(last=False)
+                evict_image, evict_bytes, _ = entry
+                self._total_bytes -= evict_bytes
+                self._evictions += 1
+                evict_image.close()
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.monotonic()
+            self._prune_expired_unlocked(now)
+            total_queries = self._hits + self._misses
+            hit_rate = (self._hits / total_queries) if total_queries > 0 else None
+            return {
+                "enabled": self._enabled(),
+                "entries": len(self._cache),
+                "max_entries": self._max_size,
+                "bytes": self._total_bytes,
+                "max_bytes": self._max_bytes,
+                "ttl_seconds": self._ttl_seconds,
+                "hits": self._hits,
+                "misses": self._misses,
+                "sets": self._sets,
+                "evictions": self._evictions,
+                "expired": self._expired,
+                "hit_rate": hit_rate,
+            }
+
+    def clear(self) -> None:
+        with self._lock:
+            for image, _, _ in self._cache.values():
+                image.close()
+            self._cache.clear()
+            self._total_bytes = 0
+            self._hits = 0
+            self._misses = 0
+            self._sets = 0
+            self._evictions = 0
+            self._expired = 0
+
+
+_composed_image_cache = _TTLImageCache(
+    COMPOSED_IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_MAX_BYTES,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
+)
+COMPOSED_IMAGE_DISK_CACHE_DIR = Path("data/utils/composed_image_disk_cache")
+
+
+class _DiskImageCache:
+    def __init__(self, cache_dir: Path, ttl_seconds: int):
+        self._cache_dir = cache_dir
+        self._ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+        self._hits = 0
+        self._misses = 0
+        self._sets = 0
+        self._expired = 0
+        self._errors = 0
+
+    def _enabled(self) -> bool:
+        return self._ttl_seconds > 0
+
+    def _path(self, namespace: str, key: str) -> Path:
+        safe_namespace = (namespace or "default").strip().replace("\\", "/").strip("/")
+        if safe_namespace == "":
+            safe_namespace = "default"
+        return self._cache_dir / safe_namespace / f"{key}.png"
+
+    def get(self, namespace: str, key: str) -> Image.Image | None:
+        if not self._enabled():
+            return None
+
+        cache_path = self._path(namespace, key)
+        now = time.time()
+
+        with self._lock:
+            try:
+                stat = cache_path.stat()
+            except OSError:
+                self._misses += 1
+                return None
+
+            if now - stat.st_mtime >= self._ttl_seconds:
+                self._misses += 1
+                self._expired += 1
+                try:
+                    cache_path.unlink()
+                except OSError:
+                    pass
+                return None
+
+            try:
+                image = _open_image_copy(cache_path)
+            except (FileNotFoundError, OSError):
+                self._misses += 1
+                self._errors += 1
+                return None
+
+            self._hits += 1
+            try:
+                os.utime(cache_path, None)
+            except OSError:
+                pass
+            return image
+
+    def set(self, namespace: str, key: str, image: Image.Image) -> None:
+        if not self._enabled():
+            return
+
+        cache_path = self._path(namespace, key)
+        tmp_path = cache_path.with_suffix(".tmp")
+        image_copy = image.copy()
+
+        try:
+            with self._lock:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                image_copy.save(tmp_path, format="PNG")
+                os.replace(tmp_path, cache_path)
+                self._sets += 1
+        except OSError:
+            with self._lock:
+                self._errors += 1
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        finally:
+            image_copy.close()
+
+    def cleanup_expired(self) -> int:
+        if not self._enabled():
+            return 0
+
+        cutoff = time.time() - self._ttl_seconds
+        removed = 0
+        with self._lock:
+            for path in self._cache_dir.rglob("*.png"):
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+            self._expired += removed
+        return removed
+
+    def stats(self) -> dict[str, Any]:
+        entries = 0
+        total_bytes = 0
+        if self._cache_dir.is_dir():
+            for path in self._cache_dir.rglob("*.png"):
+                try:
+                    stat = path.stat()
+                except OSError:
+                    continue
+                entries += 1
+                total_bytes += stat.st_size
+
+        with self._lock:
+            total_queries = self._hits + self._misses
+            hit_rate = (self._hits / total_queries) if total_queries > 0 else None
+            return {
+                "enabled": self._enabled(),
+                "entries": entries,
+                "bytes": total_bytes,
+                "ttl_seconds": self._ttl_seconds,
+                "hits": self._hits,
+                "misses": self._misses,
+                "sets": self._sets,
+                "expired": self._expired,
+                "errors": self._errors,
+                "hit_rate": hit_rate,
+            }
+
+
+_composed_image_disk_cache = _DiskImageCache(
+    COMPOSED_IMAGE_DISK_CACHE_DIR,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
+)
+
+
+def _normalize_cache_material(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _normalize_cache_material(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+    if isinstance(value, list | tuple | set):
+        return [_normalize_cache_material(item) for item in value]
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _normalize_cache_material(model_dump(mode="json"))
+
+    return str(value)
+
+
+def build_rendered_image_cache_key(
+    namespace: str,
+    request: Any,
+    *,
+    asset_signatures: dict[str, Any] | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str:
+    material = {
+        "namespace": namespace,
+        "request": _normalize_cache_material(request),
+        "assets": _normalize_cache_material(asset_signatures or {}),
+        "extra": _normalize_cache_material(extra or {}),
+    }
+    payload = json.dumps(material, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, Any] | None:
+    if path is None or path.strip() == "":
+        return None
+
+    try:
+        full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+    except (FileNotFoundError, OSError, ValueError):
+        return {"source_path": path, "missing": True}
+
+    return {
+        "source_path": path,
+        "resolved_path": full_path_str,
+        "mtime_ns": stat.st_mtime_ns,
+        "size": stat.st_size,
+    }
+
+
+def get_composed_image_cached(cache_key: str) -> Image.Image | None:
+    return _composed_image_cache.get(cache_key)
+
+
+def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
+    _composed_image_cache.set(cache_key, image)
+
+
+def get_composed_image_disk_cached(namespace: str, cache_key: str) -> Image.Image | None:
+    return _composed_image_disk_cache.get(namespace, cache_key)
+
+
+def put_composed_image_disk_cache(namespace: str, cache_key: str, image: Image.Image) -> None:
+    _composed_image_disk_cache.set(namespace, cache_key, image)
+
+
+def cleanup_expired_composed_image_disk_cache() -> int:
+    return _composed_image_disk_cache.cleanup_expired()
+
+
+def _build_shared_cache_stats(
+    *,
+    enabled: bool,
+    entries: int,
+    max_entries: int,
+    current_bytes: int,
+    max_bytes: int,
+    hits: int,
+    misses: int,
+    sets: int,
+    evictions: int,
+) -> dict[str, Any]:
+    total_queries = hits + misses
+    hit_rate = (hits / total_queries) if total_queries > 0 else None
+    return {
+        "enabled": enabled,
+        "entries": entries,
+        "max_entries": max_entries,
+        "bytes": current_bytes,
+        "max_bytes": max_bytes,
+        "hits": hits,
+        "misses": misses,
+        "sets": sets,
+        "evictions": evictions,
+        "hit_rate": hit_rate,
+    }
+
+
+def get_runtime_cache_stats() -> dict[str, Any]:
+    with _image_cache_lock:
+        image_stats = _build_shared_cache_stats(
+            enabled=IMAGE_CACHE_SIZE > 0 and IMAGE_CACHE_MAX_BYTES > 0,
+            entries=len(_image_cache),
+            max_entries=IMAGE_CACHE_SIZE,
+            current_bytes=_image_cache_total_bytes,
+            max_bytes=IMAGE_CACHE_MAX_BYTES,
+            hits=_image_cache_hits,
+            misses=_image_cache_misses,
+            sets=_image_cache_sets,
+            evictions=_image_cache_evictions,
+        )
+
+    with _thumb_cache_lock:
+        thumb_stats = _build_shared_cache_stats(
+            enabled=THUMB_CACHE_SIZE > 0 and THUMB_CACHE_MAX_BYTES > 0,
+            entries=len(_thumb_cache),
+            max_entries=THUMB_CACHE_SIZE,
+            current_bytes=_thumb_cache_total_bytes,
+            max_bytes=THUMB_CACHE_MAX_BYTES,
+            hits=_thumb_cache_hits,
+            misses=_thumb_cache_misses,
+            sets=_thumb_cache_sets,
+            evictions=_thumb_cache_evictions,
+        )
+
+    composed_stats = _composed_image_cache.stats()
+    composed_disk_stats = _composed_image_disk_cache.stats()
+    return {
+        "image_cache": image_stats,
+        "thumbnail_cache": thumb_stats,
+        "composed_image_cache": composed_stats,
+        "composed_image_disk_cache": composed_disk_stats,
+    }
+
+
 def _load_image_cached(
     path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0
 ) -> Image.Image | None:
     cache_key = (path, mtime_ns, size, target_w, target_h)
     if _is_thumbnail_path(path):
         lock, cache = _thumb_cache_lock, _thumb_cache
+        hit_name, miss_name = "_thumb_cache_hits", "_thumb_cache_misses"
     else:
         lock, cache = _image_cache_lock, _image_cache
+        hit_name, miss_name = "_image_cache_hits", "_image_cache_misses"
     with lock:
         entry = cache.get(cache_key)
         if entry is None:
+            globals()[miss_name] += 1
             return None
         image, _ = entry
+        globals()[hit_name] += 1
         cache.move_to_end(cache_key)
         return image.copy()
 
@@ -285,6 +695,7 @@ def _put_image_cache(
     path: str, mtime_ns: int, size: int, image: Image.Image, target_w: int = 0, target_h: int = 0
 ) -> None:
     global _image_cache_total_bytes, _thumb_cache_total_bytes
+    global _image_cache_sets, _thumb_cache_sets, _image_cache_evictions, _thumb_cache_evictions
 
     is_thumb = _is_thumbnail_path(path)
     if is_thumb:
@@ -312,14 +723,20 @@ def _put_image_cache(
         cache[cache_key] = (image, cache_bytes)
         if is_thumb:
             _thumb_cache_total_bytes += cache_bytes
+            _thumb_cache_sets += 1
         else:
             _image_cache_total_bytes += cache_bytes
+            _image_cache_sets += 1
 
         # 双阈值驱逐：条目数和总字节数都受控
         current_bytes = _thumb_cache_total_bytes if is_thumb else _image_cache_total_bytes
         while cache and (len(cache) > max_size or current_bytes > max_bytes):
             _, (evict_image, evict_bytes) = cache.popitem(last=False)
             current_bytes -= evict_bytes
+            if is_thumb:
+                _thumb_cache_evictions += 1
+            else:
+                _image_cache_evictions += 1
             evict_image.close()
         if is_thumb:
             _thumb_cache_total_bytes = current_bytes
@@ -887,6 +1304,8 @@ def shutdown_utils() -> None:
             img.close()
         _missing_placeholder_cache.clear()
         _missing_placeholder_logged.clear()
+
+    _composed_image_cache.clear()
 
 
 # ============================ chromedp截图 ============================ #

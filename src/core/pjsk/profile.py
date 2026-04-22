@@ -38,6 +38,6 @@ async def profile(request: ProfileRequest):
             ],
         )
         image = await compose_profile_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

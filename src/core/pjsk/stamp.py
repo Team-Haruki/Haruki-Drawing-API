@@ -16,6 +16,6 @@ async def stamp_list(request: StampListRequest):
     """
     try:
         image = await compose_stamp_list_image(request)
-        return image_to_response(image)
+        return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -41,9 +41,16 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    get_composed_image_disk_cached,
+    get_image_asset_signature,
     get_img_from_path,
     get_img_resized,
+    put_composed_image_cache,
+    put_composed_image_disk_cache,
     get_readable_datetime,
+    run_in_pool,
     get_str_display_length,
     truncate,
 )
@@ -60,8 +67,8 @@ def format_info_panel_update_time(update_time, timezone_name: str | None) -> str
 
     text = update_time.strftime("%m-%d %H:%M:%S")
     if timezone_label:
-        text += f" ({timezone_label})"
-    text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
+        text = f"{text} ({timezone_label})"
+    # text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
     return text
 
 # =========================== 常量定义 =========================== #
@@ -144,14 +151,18 @@ from .model import (
 )
 
 
-async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
-    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
-    rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.rare_img_path)
+def _compose_card_full_thumbnail_sync(
+    rqd: CardFullThumbnailRequest,
+    img: Image.Image,
+    rare_img: Image.Image,
+    frame_img: Image.Image | None,
+    rank_img: Image.Image | None,
+    attr_img: Image.Image | None,
+) -> Image.Image:
+    # 兼容 "rarity_4", "4_star", "4" 等格式
     if rqd.rare == "rarity_birthday":
-        rare_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.birthday_icon_path)
         rare_num = 1
     else:
-        # 兼容 "rarity_4", "4_star", "4" 等格式
         import re
 
         match = re.search(r"(\d+)", rqd.rare)
@@ -161,53 +172,137 @@ async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
             rare_num = 0
 
     img_w, img_h = img.size
-    custom_text = None
-    if rqd.custom_text:
-        custom_text = rqd.custom_text
+    custom_text = rqd.custom_text or None
     pcard = rqd.is_pcard
-    # 如果是profile卡片则绘制等级/加成
     if pcard:
+        draw = ImageDraw.Draw(img)
+        draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
         if custom_text is not None:
-            draw = ImageDraw.Draw(img)
-            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
             draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
         else:
-            level = rqd.level
-            draw = ImageDraw.Draw(img)
-            draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
-            draw.text((6, img_h - 31), f"Lv.{level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
+            draw.text((6, img_h - 31), f"Lv.{rqd.level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
 
-    # 绘制边框
-    if rqd.frame_img_path:
-        frame_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.frame_img_path)
-        frame_img = frame_img.resize((img_w, img_h))
+    if frame_img is not None:
         img.paste(frame_img, (0, 0), frame_img)
-    # 绘制特训等级
-    if pcard:
-        rank = rqd.train_rank
-        if rank and rqd.train_rank_img_path:
-            rank_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.train_rank_img_path)
-            rank_img = rank_img.resize((int(img_w * 0.35), int(img_h * 0.35)))
-            rank_img_w, rank_img_h = rank_img.size
-            img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
-    # 左上角绘制属性
-    if rqd.attr_img_path:
-        attr_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_img_path)
-        attr_img = attr_img.resize((int(img_w * 0.22), int(img_h * 0.25)))
+
+    if pcard and rqd.train_rank and rank_img is not None:
+        rank_img_w, rank_img_h = rank_img.size
+        img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
+
+    if attr_img is not None:
         img.paste(attr_img, (1, 0), attr_img)
-    # 左下角绘制稀有度
+
     hoffset, voffset = 6, 6 if not pcard else 24
-    scale = 0.17 if not pcard else 0.15
-    rare_img = rare_img.resize((int(img_w * scale), int(img_h * scale)))
     rare_w, rare_h = rare_img.size
     for i in range(rare_num):
         img.paste(rare_img, (hoffset + rare_w * i, img_h - rare_h - voffset), rare_img)
+
     mask = Image.new("L", (img_w, img_h), 0)
     draw = ImageDraw.Draw(mask)
     draw.rounded_rectangle((0, 0, img_w, img_h), radius=10, fill=255)
     img.putalpha(mask)
-
     return img
+
+
+def _build_card_full_thumbnail_cache_key(
+    rqd: CardFullThumbnailRequest,
+    *,
+    rare_img_path: str,
+) -> str:
+    request_payload = {
+        "card_id": rqd.card_id,
+        "card_thumbnail_path": rqd.card_thumbnail_path,
+        "rare": rqd.rare,
+        "frame_img_path": rqd.frame_img_path,
+        "attr_img_path": rqd.attr_img_path,
+        "rare_img_path": rare_img_path,
+        "train_rank": rqd.train_rank,
+        "train_rank_img_path": rqd.train_rank_img_path,
+        "level": rqd.level,
+        "custom_text": rqd.custom_text,
+        "is_pcard": rqd.is_pcard,
+    }
+    asset_signatures = {
+        "card_thumbnail": get_image_asset_signature(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
+        "rare": get_image_asset_signature(ASSETS_BASE_DIR, rare_img_path),
+        "frame": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_img_path),
+        "attr": get_image_asset_signature(ASSETS_BASE_DIR, rqd.attr_img_path),
+        "rank": get_image_asset_signature(ASSETS_BASE_DIR, rqd.train_rank_img_path),
+    }
+    return build_rendered_image_cache_key(
+        "card_full_thumbnail",
+        request_payload,
+        asset_signatures=asset_signatures,
+    )
+
+
+async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
+    rare_img_path = rqd.birthday_icon_path if rqd.rare == "rarity_birthday" else rqd.rare_img_path
+    cache_key = _build_card_full_thumbnail_cache_key(rqd, rare_img_path=rare_img_path)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+    disk_cached = get_composed_image_disk_cached("card_full_thumbnail", cache_key)
+    if disk_cached is not None:
+        put_composed_image_cache(cache_key, disk_cached)
+        return disk_cached
+
+    _t0 = time.perf_counter()
+    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
+    img_w, img_h = img.size
+    rare_scale = 0.17 if not rqd.is_pcard else 0.15
+    tasks = {
+        "rare_img": get_img_resized(
+            ASSETS_BASE_DIR,
+            rare_img_path,
+            max(1, int(img_w * rare_scale)),
+            max(1, int(img_h * rare_scale)),
+        ),
+    }
+    if rqd.frame_img_path:
+        tasks["frame_img"] = get_img_resized(ASSETS_BASE_DIR, rqd.frame_img_path, img_w, img_h)
+    if rqd.is_pcard and rqd.train_rank and rqd.train_rank_img_path:
+        tasks["rank_img"] = get_img_resized(
+            ASSETS_BASE_DIR,
+            rqd.train_rank_img_path,
+            max(1, int(img_w * 0.35)),
+            max(1, int(img_h * 0.35)),
+        )
+    if rqd.attr_img_path:
+        tasks["attr_img"] = get_img_resized(
+            ASSETS_BASE_DIR,
+            rqd.attr_img_path,
+            max(1, int(img_w * 0.22)),
+            max(1, int(img_h * 0.25)),
+        )
+
+    keys = list(tasks.keys())
+    _t1 = time.perf_counter()
+    values = await asyncio.gather(*tasks.values())
+    _t2 = time.perf_counter()
+    loaded = dict(zip(keys, values))
+    composed = await run_in_pool(
+        _compose_card_full_thumbnail_sync,
+        rqd,
+        img,
+        loaded["rare_img"],
+        loaded.get("frame_img"),
+        loaded.get("rank_img"),
+        loaded.get("attr_img"),
+    )
+    _t3 = time.perf_counter()
+    put_composed_image_cache(cache_key, composed)
+    put_composed_image_disk_cache("card_full_thumbnail", cache_key, composed)
+    if _t3 - _t0 >= 0.05:
+        logger.info(
+            "[perf] card_full_thumbnail miss: card=%s total=%.3fs load_base=%.3fs preload=%.3fs compose=%.3fs",
+            rqd.card_id,
+            _t3 - _t0,
+            _t1 - _t0,
+            _t2 - _t1,
+            _t3 - _t2,
+        )
+    return composed
 
 
 # 获取头像框图片，失败返回None
@@ -376,10 +471,24 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}",
                         TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
                     )
-                    with Frame():
-                        lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
-                        ImageBox(lv_rank_bg, size=(180, None))
-                        TextBox(f"{rqd.rank}", TextStyle(font=DEFAULT_FONT, size=30, color=WHITE)).set_offset((110, 0))
+                    lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
+                    badge_w = 180
+                    badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
+                    number_box_x = 104
+                    number_box_w = max(48, badge_w - number_box_x - 10)
+                    with Frame().set_size((badge_w, badge_h)):
+                        ImageBox(lv_rank_bg, size=(badge_w, badge_h))
+                        (
+                            TextBox(
+                                f"{rqd.rank}",
+                                TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
+                            )
+                            .set_size((number_box_w, badge_h))
+                            .set_padding(0)
+                            .set_wrap(False)
+                            .set_content_align("c")
+                            .set_offset((number_box_x, 0))
+                        )
 
             # 推特
             with Frame().set_content_align("l").set_w(450):
@@ -656,3 +765,4 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
             # 错误/警告
             if rqd.error_message:
                 TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)
+    return f

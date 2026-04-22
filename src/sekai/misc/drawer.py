@@ -80,12 +80,19 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     def draw_time_range(label: str, tr: BirthdayEventTime):
         start_at = datetime_from_millis(tr.start_at, rqd.timezone)
         end_at = datetime_from_millis(tr.end_at, rqd.timezone)
+        timezone_label = rqd.timezone or ""
+        if timezone_label == "" and (start_at and start_at.tzinfo):
+            timezone_label = start_at.tzname() or ""
+        if timezone_label == "" and (end_at and end_at.tzinfo):
+            timezone_label = end_at.tzname() or ""
+        if timezone_label:
+            timezone_label = f" ({timezone_label})"
         with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
             TextBox(f"{label} ", style1)
             TextBox(
                 (
-                    f"{start_at.strftime('%m-%d %H:%M')}({get_readable_datetime(start_at, show_original_time=False)})"
-                    f" ~ {end_at.strftime('%m-%d %H:%M')}({get_readable_datetime(end_at, show_original_time=False)})"
+                    f"{start_at.strftime('%m-%d %H:%M')}"
+                    f" ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}"
                 ),
                 style2,
             )
