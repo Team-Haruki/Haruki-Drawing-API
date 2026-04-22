@@ -28,7 +28,15 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.timezone import datetime_from_millis, request_now
-from src.sekai.base.utils import get_img_from_path, get_readable_timedelta
+from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    get_composed_image_disk_cached,
+    get_img_from_path,
+    get_readable_timedelta,
+    put_composed_image_cache,
+    put_composed_image_disk_cache,
+)
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
@@ -36,6 +44,8 @@ from src.sekai.profile.drawer import (
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
+_perf_logger = logging.getLogger("event.draw.perf")
+_EVENT_LIST_ENTRY_CACHE_NAMESPACE = "event_list_entry"
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -237,7 +247,6 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
 
 # 合成活动记录图片
 async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
-    profile = rqd.user_info
     user_events = rqd.event_info
     user_wl_events = rqd.wl_event_info
 
@@ -323,6 +332,120 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     return await canvas.get_img()
 
 
+def _resolve_event_list_entry_phase(start_at, end_at, now) -> str:
+    if start_at <= now <= end_at:
+        return "current"
+    if now > end_at:
+        return "past"
+    return "upcoming"
+
+
+def _resolve_event_list_entry_bg_color(phase: str) -> tuple[int, int, int, int]:
+    if phase == "current":
+        return (255, 250, 220, 200)
+    if phase == "past":
+        return (220, 220, 220, 200)
+    return WIDGET_BG_COLOR
+
+
+def _build_event_list_entry_cache_key(d, phase: str) -> str:
+    request_payload = {
+        "event": d.model_dump(mode="json"),
+        "phase": phase,
+    }
+    return build_rendered_image_cache_key("event_list_entry", request_payload, extra={"version": 1})
+
+
+async def _preload_event_entry_assets(d) -> dict[str, object]:
+    tasks = {}
+    if d.event_banner_path:
+        tasks["banner"] = get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path)
+    if d.event_cards:
+        tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail(thumb) for thumb in d.event_cards])
+    if d.event_attr_path:
+        tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path)
+    if d.event_unit_path:
+        tasks["unit"] = get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path)
+    if d.event_chara_path:
+        tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path)
+    if not tasks:
+        return {}
+    keys = list(tasks.keys())
+    values = await asyncio.gather(*tasks.values())
+    return dict(zip(keys, values))
+
+
+async def _compose_event_list_entry_image(
+    d,
+    loaded: dict[str, object],
+    phase: str,
+    style1: TextStyle,
+    style2: TextStyle,
+):
+    bg = roundrect_bg(_resolve_event_list_entry_bg_color(phase), 5, alpha=180)
+
+    with Canvas().set_padding(0) as canvas:
+        with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
+            with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
+                banner = loaded.get("banner")
+                if banner is not None:
+                    ImageBox(banner, size=(None, 40))
+                with Grid(col_count=3).set_padding(0).set_sep(1, 1):
+                    card_thumbs = loaded.get("cards", [])
+                    if card_thumbs:
+                        for thumb in card_thumbs:
+                            ImageBox(thumb, size=(30, 30))
+                if not d.event_cards:
+                    Spacer(h=60)
+                if d.event_cards and len(d.event_cards) <= 3:
+                    Spacer(h=29)
+            with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
+                TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
+                TextBox(f"ID: {d.id} {d.event_type_name}", style2)
+                TextBox(f"S {d.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
+                TextBox(f"T {d.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
+                with HSplit().set_padding(0).set_sep(4):
+                    if loaded.get("attr") is not None:
+                        ImageBox(loaded["attr"], size=(None, 24))
+                    if loaded.get("unit") is not None:
+                        ImageBox(loaded["unit"], size=(None, 24))
+                    if loaded.get("chara") is not None:
+                        ImageBox(loaded["chara"], size=(None, 24))
+                    if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
+                        Spacer(w=24, h=24)
+
+    return await canvas.get_img()
+
+
+async def _get_event_list_entry_image(d, now, style1: TextStyle, style2: TextStyle) -> Image.Image:
+    phase = _resolve_event_list_entry_phase(d.start_at, d.end_at, now)
+    cache_key = _build_event_list_entry_cache_key(d, phase)
+
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        _perf_logger.info("event/list entry memory hit: id=%s phase=%s", d.id, phase)
+        return cached
+
+    disk_cached = get_composed_image_disk_cached(_EVENT_LIST_ENTRY_CACHE_NAMESPACE, cache_key)
+    if disk_cached is not None:
+        put_composed_image_cache(cache_key, disk_cached)
+        _perf_logger.info("event/list entry disk hit: id=%s phase=%s", d.id, phase)
+        return disk_cached
+
+    loaded = await _preload_event_entry_assets(d)
+    image = await _compose_event_list_entry_image(d, loaded, phase, style1, style2)
+    put_composed_image_cache(cache_key, image)
+    put_composed_image_disk_cache(_EVENT_LIST_ENTRY_CACHE_NAMESPACE, cache_key, image)
+    _perf_logger.info(
+        "event/list entry miss: id=%s phase=%s size=%dx%d",
+        d.id,
+        phase,
+        image.width,
+        image.height,
+    )
+    return image
+
+
 # 合成活动列表图片
 async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
     event_list = rqd.event_info
@@ -330,27 +453,14 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
     row_count = math.ceil(math.sqrt(len(event_list)))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
-
-    async def preload_event_entry(d):
-        tasks = {}
-        if d.event_banner_path:
-            tasks["banner"] = get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path)
-        if d.event_cards:
-            tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail(thumb) for thumb in d.event_cards])
-        if d.event_attr_path:
-            tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path)
-        if d.event_unit_path:
-            tasks["unit"] = get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path)
-        if d.event_chara_path:
-            tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path)
-        if not tasks:
-            return {}
-        keys = list(tasks.keys())
-        values = await asyncio.gather(*tasks.values())
-        return dict(zip(keys, values))
-
-    preloaded = await asyncio.gather(*[preload_event_entry(d) for d in event_list]) if event_list else []
     now = request_now(rqd.timezone)
+    _t0 = time.perf_counter()
+    entry_images = (
+        await asyncio.gather(*[_get_event_list_entry_image(d, now, style1, style2) for d in event_list])
+        if event_list
+        else []
+    )
+    _t_entries = time.perf_counter() - _t0
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
@@ -359,46 +469,19 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
-                for d, loaded in zip(event_list, preloaded):
-                    event_start_at = d.start_at
-                    event_end_at = d.end_at
-                    bg_color = WIDGET_BG_COLOR
-                    if event_start_at <= now <= event_end_at:
-                        bg_color = (255, 250, 220, 200)
-                    elif now > event_end_at:
-                        bg_color = (220, 220, 220, 200)
-                    bg = roundrect_bg(bg_color, 5, alpha=180)
-
-                    with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
-                        with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            banner = loaded.get("banner")
-                            if banner is not None:
-                                ImageBox(banner, size=(None, 40))
-                            with Grid(col_count=3).set_padding(0).set_sep(1, 1):
-                                card_thumbs = loaded.get("cards", [])
-                                if card_thumbs:
-                                    for thumb in card_thumbs:
-                                        ImageBox(thumb, size=(30, 30))
-                            if not d.event_cards:
-                                Spacer(h=60)
-                            if d.event_cards:
-                                if len(d.event_cards) <= 3:
-                                    Spacer(h=29)
-                        with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
-                            TextBox(f"ID: {d.id} {d.event_type_name}", style2)
-                            TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
-                            TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
-                            with HSplit().set_padding(0).set_sep(4):
-                                if loaded.get("attr") is not None:
-                                    ImageBox(loaded["attr"], size=(None, 24))
-                                if loaded.get("unit") is not None:
-                                    ImageBox(loaded["unit"], size=(None, 24))
-                                if loaded.get("chara") is not None:
-                                    ImageBox(loaded["chara"], size=(None, 24))
-                                if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
-                                    Spacer(w=24, h=24)
+                for entry_image in entry_images:
+                    ImageBox(entry_image)
 
     add_request_watermark(canvas, rqd)
-
-    return await canvas.get_img()
+    _t0 = time.perf_counter()
+    image = await canvas.get_img()
+    _t_render = time.perf_counter() - _t0
+    _perf_logger.info(
+        "event/list total: entries=%.3fs render=%.3fs events=%d image=%dx%d",
+        _t_entries,
+        _t_render,
+        len(event_list),
+        image.width,
+        image.height,
+    )
+    return image
