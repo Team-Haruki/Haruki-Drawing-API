@@ -22,6 +22,7 @@ from src.sekai.base.painter import (
     WHITE,
     Painter,
     get_font,
+    get_text_size,
     resize_keep_ratio,
 )
 from src.sekai.base.plot import (
@@ -49,6 +50,7 @@ from src.sekai.base.utils import (
     get_img_resized,
     put_composed_image_cache,
     put_composed_image_disk_cache,
+    get_readable_datetime,
     run_in_pool,
     get_str_display_length,
     truncate,
@@ -66,7 +68,7 @@ def format_info_panel_update_time(update_time, timezone_name: str | None) -> str
 
     text = update_time.strftime("%m-%d %H:%M:%S")
     if timezone_label:
-        text += f" ({timezone_label})"
+        text = f"{text} ({timezone_label})"
     # text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
     return text
 
@@ -444,8 +446,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     for crank in rqd.character_rank:
         character_rank[crank.character_id] = crank.rank
 
-    # 挑战live / 协力统计
+    # 挑战live等级
     solo_live = rqd.solo_live
+    # 多人live统计
     multi_live = rqd.multi_live
 
     # 个人信息部分
@@ -592,7 +595,25 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
         with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
             hs, vs, gw, gh = 8, 7, 96, 48
-            # 左侧：角色等级
+
+            def stats_badge(text: str, *, font_size: int = 18, width: int | None = None):
+                badge = (
+                    TextBox(
+                        text,
+                        TextStyle(font=DEFAULT_FONT, size=font_size, color=(50, 50, 50, 255)),
+                    )
+                    .set_bg(roundrect_bg(radius=6, alpha=80))
+                    .set_padding((10, 7))
+                    .set_content_align("c")
+                )
+                if width is not None:
+                    badge.set_w(width)
+                return badge
+
+            def stats_badge_width(text: str, *, font_size: int = 18):
+                return get_text_size(get_font(DEFAULT_FONT, font_size), text)[0] + 20
+
+            # 角色等级
             with Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs).set_padding(32):
                 for chara, cid in CHARA_LIST:
                     if chara is None:
@@ -609,37 +630,89 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
 
-            # 右侧：Challenge Live + Multi Live
-            if solo_live is not None or multi_live is not None:
-                with VSplit().set_content_align("c").set_item_align("c").set_padding((50, 36)).set_sep(9):
-                    common_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
-                    box_bg = roundrect_bg(radius=6, alpha=80)
-                    box_padding = (10, 7)
+            multi_live_widget = None
+            multi_live_padding_v = 16
+            side_panel_offset_y = -16
+            solo_live_score_w = None
+            side_panel_w = None
+            side_panel_content_w = 0
 
-                    if solo_live is not None:
-                        TextBox("CHALLENGE LIVE", common_style).set_bg(box_bg).set_padding(box_padding)
+            if solo_live is not None:
+                solo_live_content_w = max(
+                    stats_badge_width("CHALLENGE LIVE"),
+                    100,
+                    stats_badge_width(f"SCORE {solo_live.score}"),
+                )
+                solo_live_score_w = stats_badge_width(f"SCORE {solo_live.score}")
+                side_panel_content_w = max(side_panel_content_w, solo_live_content_w)
 
-                        with Frame():
-                            scid = solo_live.character_id
-                            c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
-                            if c_rank_path:
-                                chara_img = _chara_icon_cache[c_rank_path]
-                                ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
-                            else:
-                                Spacer(100, 50)
-                            t = TextBox(
-                                str(solo_live.rank),
-                                TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
-                                overflow="clip",
-                            )
-                            t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
+            if multi_live is not None:
+                multi_live_stats_w = max(
+                    solo_live_score_w or 0,
+                    stats_badge_width(f"MVP {multi_live.mvp}次"),
+                    stats_badge_width(f"SUPERSTAR {multi_live.super_star}次", font_size=17),
+                )
+                multi_live_content_w = max(
+                    stats_badge_width("MULTI LIVE"),
+                    multi_live_stats_w,
+                )
+                side_panel_content_w = max(side_panel_content_w, multi_live_content_w)
 
-                        TextBox(f"SCORE  {solo_live.score}", common_style).set_bg(box_bg).set_padding(box_padding)
+            if side_panel_content_w > 0:
+                side_panel_w = side_panel_content_w + 64
 
-                    if multi_live is not None:
-                        TextBox("MULTI LIVE", common_style).set_bg(box_bg).set_padding(box_padding)
-                        TextBox(f"MVP  {multi_live.mvp}次", common_style).set_bg(box_bg).set_padding(box_padding)
-                        TextBox(f"SUPERSTAR  {multi_live.super_star}次", common_style).set_bg(box_bg).set_padding(box_padding)
+            if multi_live is not None:
+                multi_live_container = (
+                    VSplit()
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_padding((32, multi_live_padding_v))
+                    .set_sep(10)
+                )
+                if side_panel_w is not None:
+                    multi_live_container.set_w(side_panel_w)
+                multi_live_container.set_offset((0, side_panel_offset_y))
+                with (
+                    multi_live_container
+                ) as multi_live_widget:
+                    stats_badge("MULTI LIVE")
+                    stats_badge(f"MVP {multi_live.mvp}次", width=multi_live_stats_w)
+                    stats_badge(f"SUPERSTAR {multi_live.super_star}次", font_size=17, width=multi_live_stats_w)
+
+            if solo_live is not None:
+                solo_live_padding_v = 64
+                solo_live_offset_y = side_panel_offset_y
+                if multi_live_widget is not None:
+                    multi_live_widget_h = multi_live_widget._get_self_size()[1]
+                    solo_live_offset_y -= max(0, multi_live_widget_h - multi_live_padding_v + 12 - solo_live_padding_v)
+                solo_live_container = (
+                    VSplit()
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_padding((32, solo_live_padding_v))
+                    .set_sep(12)
+                )
+                if side_panel_w is not None:
+                    solo_live_container.set_w(side_panel_w)
+                if solo_live_offset_y != 0:
+                    solo_live_container.set_offset((0, solo_live_offset_y))
+                with solo_live_container:
+                    stats_badge("CHALLENGE LIVE")
+                    with Frame():
+                        scid = solo_live.character_id
+                        c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
+                        if c_rank_path:
+                            chara_img = _chara_icon_cache[c_rank_path]
+                            ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
+                        else:
+                            Spacer(100, 50)
+                        t = TextBox(
+                            str(solo_live.rank),
+                            TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
+                            overflow="clip",
+                        )
+                        t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
+                    stats_badge(f"SCORE {solo_live.score}", font_size=18)
         return ret
 
     vertical = bg_settings.vertical

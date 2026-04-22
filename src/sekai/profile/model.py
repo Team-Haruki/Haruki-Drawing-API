@@ -287,14 +287,14 @@ class SoloLiveRank(BaseModel):
 class MultiLiveTopScoreCount(BaseModel):
     r"""MultiLiveTopScoreCount
 
-    协力模式最高得分结算次数
+    多人Live统计
 
     Attributes
     ----------
-    mvp : int = 0
-        MVP 次数
-    super_star : int = 0
-        SUPERSTAR 次数
+    MVP : int = 0
+        MVP次数
+    SuperStar : int = 0
+        SUPERSTAR次数
     """
 
     mvp: int = 0
@@ -329,7 +329,7 @@ class ProfileRequest(TimeZoneRequest):
     solo_live : Optional[ SoloLiveRank ] = None
         挑战live等级
     multi_live : Optional[ MultiLiveTopScoreCount ] = None
-        协力模式 MVP / SUPERSTAR 次数
+        多人live统计
     update_time : Optional[ int ] = None
         更新时间
     lv_rank_bg_path: Optional[str] = None
