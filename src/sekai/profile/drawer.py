@@ -350,8 +350,9 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     for crank in rqd.character_rank:
         character_rank[crank.character_id] = crank.rank
 
-    # 挑战live等级
+    # 挑战live / 协力统计
     solo_live = rqd.solo_live
+    multi_live = rqd.multi_live
 
     # 个人信息部分
     async def draw_info():
@@ -500,29 +501,45 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
 
-            # 挑战Live等级
-            if solo_live is not None:
+            # 挑战Live / 协力统计
+            if solo_live is not None or multi_live is not None:
                 with VSplit().set_content_align("c").set_item_align("c").set_padding((32, 64)).set_sep(12):
-                    t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
-                    t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
-                    with Frame():
-                        scid = solo_live.character_id
-                        c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
-                        if c_rank_path:
-                            chara_img = _chara_icon_cache[c_rank_path]
-                            ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
-                        else:
-                            Spacer(100, 50)
+                    if solo_live is not None:
+                        t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
+                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+                        with Frame():
+                            scid = solo_live.character_id
+                            c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
+                            if c_rank_path:
+                                chara_img = _chara_icon_cache[c_rank_path]
+                                ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
+                            else:
+                                Spacer(100, 50)
+                            t = TextBox(
+                                str(solo_live.rank),
+                                TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
+                                overflow="clip",
+                            )
+                            t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
                         t = TextBox(
-                            str(solo_live.rank),
-                            TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
-                            overflow="clip",
+                            f"SCORE {solo_live.score}", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
                         )
-                        t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
-                    t = TextBox(
-                        f"SCORE {solo_live.score}", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
-                    )
-                    t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+
+                    if multi_live is not None:
+                        t = TextBox("MULTI LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
+                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
+                            t = TextBox(
+                                f"MVP {multi_live.mvp}",
+                                TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)),
+                            )
+                            t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((12, 8))
+                            t = TextBox(
+                                f"SUPERSTAR {multi_live.super_star}",
+                                TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)),
+                            )
+                            t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((12, 8))
         return ret
 
     vertical = bg_settings.vertical

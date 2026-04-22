@@ -284,6 +284,23 @@ class SoloLiveRank(BaseModel):
     rank: int = 0
 
 
+class MultiLiveTopScoreCount(BaseModel):
+    r"""MultiLiveTopScoreCount
+
+    协力模式最高得分结算次数
+
+    Attributes
+    ----------
+    mvp : int = 0
+        MVP 次数
+    super_star : int = 0
+        SUPERSTAR 次数
+    """
+
+    mvp: int = 0
+    super_star: int = 0
+
+
 class ProfileRequest(TimeZoneRequest):
     r"""ProfileRequest
 
@@ -311,6 +328,8 @@ class ProfileRequest(TimeZoneRequest):
         角色等级信息
     solo_live : Optional[ SoloLiveRank ] = None
         挑战live等级
+    multi_live : Optional[ MultiLiveTopScoreCount ] = None
+        协力模式 MVP / SUPERSTAR 次数
     update_time : Optional[ int ] = None
         更新时间
     lv_rank_bg_path: Optional[str] = None
@@ -331,6 +350,7 @@ class ProfileRequest(TimeZoneRequest):
     music_difficulty_count: list[MusicClearCount] = []
     character_rank: list[CharacterRank] = []
     solo_live: SoloLiveRank | None = None
+    multi_live: MultiLiveTopScoreCount | None = None
     update_time: int | None = None
     lv_rank_bg_path: str
     x_icon_path: str
