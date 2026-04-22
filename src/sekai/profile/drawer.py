@@ -593,7 +593,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
 
         with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
             hs, vs, gw, gh = 8, 7, 96, 48
-            # 角色等级
+            # 左侧：角色等级
             with Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs).set_padding(32):
                 for chara, cid in CHARA_LIST:
                     if chara is None:
@@ -610,21 +610,16 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                         t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
                         t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
 
-            # 挑战Live / 协力统计
+            # 右侧：Challenge Live + Multi Live
             if solo_live is not None or multi_live is not None:
-                # 这块统计卡整体使用右下锚点覆盖在角色等级区域上方；
-                # 额外下移一段距离，避免顶到上半部分角色等级格子。
-                with (
-                    VSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_padding((32, 64))
-                    .set_sep(12)
-                    .set_offset((0, 48))
-                ):
+                with VSplit().set_content_align("c").set_item_align("c").set_padding((50, 36)).set_sep(9):
+                    common_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
+                    box_bg = roundrect_bg(radius=6, alpha=80)
+                    box_padding = (10, 7)
+
                     if solo_live is not None:
-                        t = TextBox("CHALLENGE LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
-                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+                        TextBox("CHALLENGE LIVE", common_style).set_bg(box_bg).set_padding(box_padding)
+
                         with Frame():
                             scid = solo_live.character_id
                             c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
@@ -639,25 +634,13 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                                 overflow="clip",
                             )
                             t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
-                        t = TextBox(
-                            f"SCORE {solo_live.score}", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255))
-                        )
-                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
+
+                        TextBox(f"SCORE  {solo_live.score}", common_style).set_bg(box_bg).set_padding(box_padding)
 
                     if multi_live is not None:
-                        t = TextBox("MULTI LIVE", TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50, 255)))
-                        t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((10, 7))
-                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
-                            t = TextBox(
-                                f"MVP {multi_live.mvp}",
-                                TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)),
-                            )
-                            t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((12, 8))
-                            t = TextBox(
-                                f"SUPERSTAR {multi_live.super_star}",
-                                TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)),
-                            )
-                            t.set_bg(roundrect_bg(radius=6, alpha=80)).set_padding((12, 8))
+                        TextBox("MULTI LIVE", common_style).set_bg(box_bg).set_padding(box_padding)
+                        TextBox(f"MVP  {multi_live.mvp}次", common_style).set_bg(box_bg).set_padding(box_padding)
+                        TextBox(f"SUPERSTAR  {multi_live.super_star}次", common_style).set_bg(box_bg).set_padding(box_padding)
         return ret
 
     vertical = bg_settings.vertical
