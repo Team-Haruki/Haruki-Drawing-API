@@ -156,7 +156,9 @@ def draw_day_night_bg(ax, start_time: datetime, end_time: datetime):
     bg_colors = [get_time_bg_color(t) for t in bg_times]
     for i in range(len(bg_times)):
         start = bg_times[i]
-        end = bg_times[i] + interval
+        end = min(bg_times[i] + interval, end_time)
+        if end <= start:
+            continue
         ax.axvspan(start, end, facecolor=bg_colors[i], edgecolor=None, zorder=0)
 
 
@@ -949,7 +951,8 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
 
             labels = [line.get_label() for line in lines]
-            ax.legend(lines, labels, loc="upper left")
+            legend = ax2.legend(lines, labels, loc="upper left")
+            legend.set_zorder(1000)
 
             return plt_fig_to_image(fig)
         finally:
@@ -1090,7 +1093,8 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
 
             lines = [line_speeds]
             labels = [line.get_label() for line in lines]
-            ax.legend(lines, labels, loc="upper left")
+            legend = ax2.legend(lines, labels, loc="upper left")
+            legend.set_zorder(1000)
 
             return plt_fig_to_image(fig)
         finally:
