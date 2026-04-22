@@ -489,7 +489,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
         if next_rank := rqd.next_rank:
             next_score_text = get_board_score_str(next_rank.score)
             score_gap = (
-                get_board_score_str(next_rank.score - rank.score)
+                get_board_score_str(rank.score - next_rank.score)
                 if next_rank.score is not None and rank.score is not None
                 else "?"
             )
