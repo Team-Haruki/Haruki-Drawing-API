@@ -126,3 +126,32 @@ class CharaBirthdayRequest(TimeZoneRequest):
     party_time: BirthdayEventTime | None = None
 
     all_characters: list[CharaBirthdayData]
+
+
+class AliasListRequest(BaseModel):
+    r"""AliasListRequest
+
+    通用别名列表图片请求
+
+    Attributes
+    ----------
+    title : str
+        图片标题
+    entity_label : str
+        实体 ID 标签，如“歌曲ID”“角色ID”
+    entity_id : int
+        实体 ID
+    entity_name : str
+        实体名称
+    music_jacket_path : str | None = None
+        歌曲封面路径，仅歌曲别名图片使用
+    aliases : list[str]
+        别名列表
+    """
+
+    title: str
+    entity_label: str
+    entity_id: int
+    entity_name: str
+    music_jacket_path: str | None = None
+    aliases: list[str]
