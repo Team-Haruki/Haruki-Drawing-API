@@ -98,3 +98,34 @@ Ruff with `line-length = 120`. See `pyproject.toml [tool.ruff]` for the full rul
 - **Use `asyncio.gather`** when loading multiple images; never serialize independent I/O in async contexts.
 - **Performance-sensitive paths** should use the existing `*.perf` loggers (e.g. `mysekai.endpoint.perf`, `mysekai.map.perf`) — see `docs/optimizations.md` §4.
 - **Refer to `docs/optimizations.md`** for the full history of memory, concurrency, and caching work — it documents the rationale behind current patterns.
+
+## Git Commit Format
+
+All commits **must** follow:
+
+```
+[Type] Short description starting with capital letter
+```
+
+| Type      | Usage                                                 |
+|-----------|-------------------------------------------------------|
+| `[Feat]`  | New feature or capability                             |
+| `[Fix]`   | Bug fix                                               |
+| `[Chore]` | Maintenance, refactoring, dependency or build changes |
+| `[Docs]`  | Documentation-only changes                            |
+
+Rules:
+
+- Description starts with a **capital letter**.
+- Imperative mood (`Add ...`, not `Added ...`).
+- No trailing period.
+- Keep subject ≤ ~70 chars.
+
+Examples from this project:
+
+```
+[Feat] Add dedicated thumbnail cache separated from general image cache
+[Fix] Route map harvest-point resize through global cache
+[Chore] Replace mysekai drawer with public placeholder stub
+[Docs] Add resize cache section to optimizations.md
+```
