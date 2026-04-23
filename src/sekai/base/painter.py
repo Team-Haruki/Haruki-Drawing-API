@@ -1562,23 +1562,29 @@ class Painter:
         size_factor = 1.0 + (factor - 1.0) * (1.0 - size_fixed_rate)
         dense_factor = 1.0 + (factor * factor - 1.0) * size_fixed_rate
         aspect_density_boost = min(1.55, max(1.15, (w / max(h, 1)) ** 0.22))
+        aspect = w / max(h, 1)
+        wide_shift = min(0.12, max(0.0, (aspect - 1.0) * 0.08))
 
         def rand_tri(num, sz):
             for i in range(num):
                 if random.random() < 0.78:
-                    edge = random.choice(("left", "right", "top", "bottom"))
+                    edge = random.choices(
+                        ("left", "right", "top", "bottom"),
+                        weights=(0.9, 0.95 - wide_shift * 1.8, 1.18 + wide_shift * 1.6, 0.72 - wide_shift * 1.2),
+                        k=1,
+                    )[0]
                     if edge == "left":
                         x = random.uniform(-0.04 * w, 0.18 * w)
                         y = random.uniform(0, h)
                     elif edge == "right":
-                        x = random.uniform(0.82 * w, 1.04 * w)
+                        x = random.uniform((0.82 - wide_shift) * w, 1.03 * w)
                         y = random.uniform(0, h)
                     elif edge == "top":
                         x = random.uniform(0, w)
-                        y = random.uniform(-0.04 * h, 0.20 * h)
+                        y = random.uniform(-0.04 * h, (0.20 + wide_shift * 0.5) * h)
                     else:
                         x = random.uniform(0, w)
-                        y = random.uniform(0.80 * h, 1.04 * h)
+                        y = random.uniform((0.80 - wide_shift * 0.8) * h, 1.03 * h)
                 else:
                     x = random.uniform(0.12 * w, 0.88 * w)
                     y = random.uniform(0.12 * h, 0.88 * h)
