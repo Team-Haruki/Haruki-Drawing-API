@@ -210,3 +210,6 @@ build/
 out/
 out/docker-load/
 out/sk-trend-sample-docker/
+
+# proprietary implementation (not distributed)
+src/sekai/mysekai/drawer.real.py

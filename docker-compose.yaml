@@ -20,6 +20,8 @@ services:
       # 容器内统一挂载为 /pjskdata/Data。
       - "./data:/pjskdata/Data"
       - "./configs.docker.yaml:/app/haruki_drawing_api/configs.yaml"
+      # 挂载真实的 drawer.py 以替换占位文件（开源版本不包含真实实现）：
+      # - "/path/to/real/drawer.py:/app/haruki_drawing_api/src/sekai/mysekai/drawer.py"
     restart: always
     depends_on:
       screenshot-service:
