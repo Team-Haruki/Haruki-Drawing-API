@@ -145,6 +145,10 @@ class AliasListRequest(TimeZoneRequest):
         实体名称
     music_jacket_path : str | None = None
         歌曲封面路径，仅歌曲别名图片使用
+    character_trim_path : str | None = None
+        角色立绘/剪影路径，由上游显式传入
+    character_silhouette_path : str | None = None
+        角色剪影路径，由上游显式传入
     aliases : list[str]
         别名列表
     """
@@ -154,4 +158,6 @@ class AliasListRequest(TimeZoneRequest):
     entity_id: int
     entity_name: str
     music_jacket_path: str | None = None
+    character_trim_path: str | None = None
+    character_silhouette_path: str | None = None
     aliases: list[str]

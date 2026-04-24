@@ -64,7 +64,8 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     card_thumbs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in rqd.event_cards])
     logger.debug(
         "[perf] compose_event_detail_image card thumbs %d: %.3fs",
-        len(rqd.event_cards), time.perf_counter() - _t0,
+        len(rqd.event_cards),
+        time.perf_counter() - _t0,
     )
 
     if detail:
@@ -113,7 +114,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
             with (
                 Frame().set_size((w - BG_PADDING * 2, h - BG_PADDING * 2)).set_content_align("lb").set_padding((64, 0))
             ):
-                if use_story_bg:
+                if use_story_bg and event_chara_img is not None:
                     ImageBox(event_chara_img, size=(None, int(h * 0.9)), use_alpha_blend=True).set_offset(
                         (0, BG_PADDING)
                     )
@@ -138,7 +139,8 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         TextBox(f"{detail.event_type_name}", text_style)
                         if detail.banner_cid:
                             Spacer(w=8)
-                            ImageBox(ban_chara_icon, size=(30, 30))
+                            if ban_chara_icon is not None:
+                                ImageBox(ban_chara_icon, size=(30, 30))
                             TextBox(f"{banner_index}箱", label_style)
 
                 # 活动时间
@@ -232,8 +234,7 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                         if rqd.event_assets.bonus_chara_path:
                             TextBox("加成角色", label_style)
                             bonus_chara_image = [
-                                _ev[f"bonus_chara_{i}"]
-                                for i in range(len(rqd.event_assets.bonus_chara_path))
+                                _ev[f"bonus_chara_{i}"] for i in range(len(rqd.event_assets.bonus_chara_path))
                             ]
                             with Grid(col_count=5 if len(bonus_chara_image) < 20 else 7).set_sep(4, 4):
                                 for image in bonus_chara_image:

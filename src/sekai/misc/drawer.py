@@ -66,13 +66,15 @@ def _resolve_alias_accent(entity_label: str, entity_id: int) -> tuple[int, int, 
 
 
 def _build_alias_list_cache_key(rqd: AliasListRequest) -> str:
-    trim_path = _resolve_alias_trim_path(rqd.entity_label, rqd.entity_id)
+    trim_path = _resolve_alias_trim_path(rqd)
     request_payload = {
         "title": rqd.title,
         "entity_label": rqd.entity_label,
         "entity_id": rqd.entity_id,
         "entity_name": rqd.entity_name,
         "music_jacket_path": rqd.music_jacket_path,
+        "character_trim_path": rqd.character_trim_path,
+        "character_silhouette_path": rqd.character_silhouette_path,
         "aliases": [alias.strip() for alias in rqd.aliases if alias and alias.strip()],
     }
     return build_rendered_image_cache_key(
@@ -104,10 +106,12 @@ def _resolve_alias_name_box_width(
     return max(280, min(760, estimated))
 
 
-def _resolve_alias_trim_path(entity_label: str, entity_id: int) -> str | None:
-    if "角色" not in entity_label or entity_id <= 0:
-        return None
-    return f"startapp/character/character_trim/chr_trim_{entity_id}.png"
+def _resolve_alias_trim_path(rqd: AliasListRequest) -> str | None:
+    if rqd.character_silhouette_path and rqd.character_silhouette_path.strip():
+        return rqd.character_silhouette_path.strip()
+    if rqd.character_trim_path and rqd.character_trim_path.strip():
+        return rqd.character_trim_path.strip()
+    return None
 
 
 def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
@@ -542,7 +546,7 @@ async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
     if rqd.music_jacket_path:
         jacket_img = await get_img_resized(ASSETS_BASE_DIR, rqd.music_jacket_path, 92, 92)
     trim_img = None
-    trim_path = _resolve_alias_trim_path(rqd.entity_label, rqd.entity_id)
+    trim_path = _resolve_alias_trim_path(rqd)
     if trim_path:
         try:
             trim_img = _prepare_alias_trim_image(
