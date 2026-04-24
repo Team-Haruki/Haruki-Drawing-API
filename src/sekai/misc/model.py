@@ -128,7 +128,7 @@ class CharaBirthdayRequest(TimeZoneRequest):
     all_characters: list[CharaBirthdayData]
 
 
-class AliasListRequest(BaseModel):
+class AliasListRequest(TimeZoneRequest):
     r"""AliasListRequest
 
     通用别名列表图片请求
