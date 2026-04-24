@@ -47,6 +47,14 @@ logger = logging.getLogger(__name__)
 
 BONUS_ICON_SLOT_W = 44
 BONUS_ICON_SLOT_H = 40
+INFO_PANEL_ROW_ALPHA = 80
+INFO_PANEL_ROW_ALT_ALPHA = 64
+
+
+def _info_panel_row_fill(idx: int) -> tuple[int, int, int, int]:
+    alpha = INFO_PANEL_ROW_ALPHA if idx % 2 == 0 else INFO_PANEL_ROW_ALT_ALPHA
+    return (255, 255, 255, alpha)
+
 
 # ========== 挑战Live详情 ==========
 
@@ -94,7 +102,8 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
     )
     logger.debug(
         "[perf] compose_challenge_live_detail_image preload %d chara icons: %.3fs",
-        len(chara_icons), time.perf_counter() - _t0,
+        len(chara_icons),
+        time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -132,7 +141,7 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
 
                 # 角色数据行
                 for idx, challenge in enumerate(character_challenges):
-                    bg_color = (255, 255, 255, 150) if idx % 2 == 0 else (255, 255, 255, 100)
+                    bg_color = _info_panel_row_fill(idx)
 
                     rank_text = str(challenge.rank) if challenge.rank else "-"
                     score_text = str(challenge.score) if challenge.score else "-"
@@ -366,7 +375,8 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
         _loaded = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _unique_paths])
         logger.debug(
             "[perf] compose_area_item_upgrade_materials_image preload %d icons: %.3fs",
-            len(_unique_paths), time.perf_counter() - _t0,
+            len(_unique_paths),
+            time.perf_counter() - _t0,
         )
         _icon_cache = dict(zip(_unique_paths, _loaded))
     else:
@@ -378,7 +388,12 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                 await get_profile_card(profile.to_profile_card_request())
 
             with (
-                HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg(alpha=80)).set_padding(8)
+                HSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(16)
+                .set_bg(roundrect_bg(alpha=80))
+                .set_padding(8)
             ):
                 for item in area_items:
                     current_lv = item.current_level
@@ -482,7 +497,8 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
     _bond_icons = await asyncio.gather(*_bond_icon_tasks) if _bond_icon_tasks else []
     logger.debug(
         "[perf] compose_bonds_image preload %d bond icons: %.3fs",
-        len(_bond_icon_tasks), time.perf_counter() - _t0,
+        len(_bond_icon_tasks),
+        time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -515,7 +531,7 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
 
                 # 项目
                 for idx, bond in enumerate(bonds):
-                    bg_color = (255, 255, 255, 150) if idx % 2 == 0 else (255, 255, 255, 100)
+                    bg_color = _info_panel_row_fill(idx)
 
                     level = bond.bond_level
                     level_text = str(level) if level else "-"
@@ -626,7 +642,8 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
     )
     logger.debug(
         "[perf] compose_leader_count_image preload %d icons: %.3fs",
-        len(leader_counts), time.perf_counter() - _t0,
+        len(leader_counts),
+        time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -659,7 +676,7 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
 
                 # 项目
                 for idx, info in enumerate(leader_counts):
-                    bg_color = (255, 255, 255, 150) if idx % 2 == 0 else (255, 255, 255, 100)
+                    bg_color = _info_panel_row_fill(idx)
 
                     pc = info.play_count
                     pc_text = str(pc) if pc else "-"

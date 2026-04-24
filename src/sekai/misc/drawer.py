@@ -51,6 +51,12 @@ logger = logging.getLogger(__name__)
 BLACK = (0, 0, 0, 255)
 _ALIAS_LIST_CACHE_NAMESPACE = "alias_list"
 _ALIAS_TRIM_ALPHA_FLOOR = 36
+_ALIAS_TRIM_MIN_FRAME_W = 260
+_ALIAS_TRIM_MAX_FRAME_W = 920
+_ALIAS_TRIM_MIN_OVERLAP = 32
+_ALIAS_TRIM_MAX_OVERLAP = 128
+_ALIAS_TRIM_MIN_DISPLAY_H = 460
+_ALIAS_TRIM_BOTTOM_OVERFLOW = 24
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
@@ -80,7 +86,7 @@ def _build_alias_list_cache_key(rqd: AliasListRequest) -> str:
     return build_rendered_image_cache_key(
         _ALIAS_LIST_CACHE_NAMESPACE,
         request_payload,
-        extra={"version": 8},
+        extra={"version": 12},
         asset_signatures={
             "music_jacket": get_image_asset_signature(ASSETS_BASE_DIR, rqd.music_jacket_path),
             "character_trim": get_image_asset_signature(ASSETS_BASE_DIR, trim_path),
@@ -127,11 +133,30 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
     return img
 
 
-def _resolve_alias_trim_metrics(left_panel_h: int) -> tuple[int, int, int, tuple[int, int]]:
-    trim_display_h = max(500, min(920, int(left_panel_h * 0.97)))
-    trim_frame_w = max(330, min(460, int(trim_display_h * 0.56)))
-    trim_frame_h = max(left_panel_h, int(trim_display_h * 0.92))
-    trim_offset = (-max(34, int(trim_display_h * 0.065)), max(28, int(trim_display_h * 0.074)))
+def _resolve_alias_trim_metrics(
+    trim_img: Image.Image, left_panel_w: int, left_panel_h: int
+) -> tuple[int, int, int, tuple[int, int]]:
+    trim_display_h = max(500, min(920, left_panel_h + _ALIAS_TRIM_BOTTOM_OVERFLOW))
+    aspect_ratio = trim_img.width / max(1, trim_img.height)
+    max_allowed_overlap = max(_ALIAS_TRIM_MIN_OVERLAP, min(_ALIAS_TRIM_MAX_OVERLAP, int(left_panel_w * 0.18)))
+    max_rendered_w = _ALIAS_TRIM_MAX_FRAME_W + max_allowed_overlap
+    rendered_w = max(1, int(trim_display_h * aspect_ratio))
+
+    if rendered_w > max_rendered_w:
+        trim_display_h = max(_ALIAS_TRIM_MIN_DISPLAY_H, int(max_rendered_w / max(aspect_ratio, 1e-6)))
+        rendered_w = max(1, int(trim_display_h * aspect_ratio))
+
+    desired_overlap = max(
+        _ALIAS_TRIM_MIN_OVERLAP,
+        min(
+            max_allowed_overlap,
+            int(rendered_w * 0.10) + max(0, int((aspect_ratio - 1.0) * 28)),
+        ),
+    )
+    trim_frame_w = max(_ALIAS_TRIM_MIN_FRAME_W, min(_ALIAS_TRIM_MAX_FRAME_W, rendered_w - desired_overlap))
+    trim_frame_w = min(trim_frame_w, rendered_w)
+    trim_frame_h = left_panel_h
+    trim_offset = (0, _ALIAS_TRIM_BOTTOM_OVERFLOW)
     return trim_frame_w, trim_frame_h, trim_display_h, trim_offset
 
 
@@ -153,7 +178,6 @@ def _build_alias_info_panel(
         .set_item_align("t")
         .set_sep(16)
         .set_padding(18)
-        .set_w(panel_w)
         .set_bg(roundrect_bg(alpha=86, blur_glass_kwargs={"blur": 8}))
     )
 
@@ -319,10 +343,13 @@ def _build_alias_left_panel(
         Widget._thread_local.reset(token)
 
 
-def _build_alias_trim_panel(trim_img: Image.Image, left_panel_h: int) -> Frame:
+def _build_alias_trim_panel(trim_img: Image.Image, left_panel_size: tuple[int, int]) -> Frame:
     token = Widget._thread_local.set(None)
     try:
-        trim_frame_w, trim_frame_h, trim_display_h, trim_offset = _resolve_alias_trim_metrics(left_panel_h)
+        left_panel_w, left_panel_h = left_panel_size
+        trim_frame_w, trim_frame_h, trim_display_h, trim_offset = _resolve_alias_trim_metrics(
+            trim_img, left_panel_w, left_panel_h
+        )
         trim_panel = Frame().set_size((trim_frame_w, trim_frame_h)).set_content_align("rb").set_allow_draw_outside(True)
         trim_panel.add_item(
             ImageBox(trim_img, size=(None, trim_display_h), use_alpha_blend=True).set_offset(trim_offset)
@@ -605,7 +632,7 @@ async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
                     style_label,
                     style_chip,
                 )
-                trim_panel = _build_alias_trim_panel(trim_img, left_panel._get_self_size()[1])
+                trim_panel = _build_alias_trim_panel(trim_img, left_panel._get_self_size())
                 HSplit().set_content_align("lt").set_item_align("t").set_sep(0).add_item(left_panel).add_item(
                     trim_panel
                 )

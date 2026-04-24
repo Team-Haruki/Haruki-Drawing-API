@@ -87,8 +87,9 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     _event_img_tasks = {}
     bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
     _event_img_tasks["bg"] = get_img_from_path(ASSETS_BASE_DIR, bg_path)
-    if detail.banner_cid:
-        _event_img_tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_ban_chara_img)
+    event_chara_path = (rqd.event_assets.event_ban_chara_img or "").strip()
+    if use_story_bg and event_chara_path:
+        _event_img_tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, event_chara_path)
     _event_img_tasks["logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     if rqd.event_assets.ban_chara_icon_path:
         _event_img_tasks["ban_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)

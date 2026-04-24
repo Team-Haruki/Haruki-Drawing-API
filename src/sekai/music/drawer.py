@@ -180,7 +180,9 @@ def _build_music_detail_leaderboard_cell(
     return Frame().set_bg(FillBg(bg_color)).set_size((width, height)).add_draw_func(_draw_text)
 
 
-def _ordered_music_detail_leaderboard_keys(label_map: dict[str, str] | None, preferred_order: tuple[str, ...]) -> list[str]:
+def _ordered_music_detail_leaderboard_keys(
+    label_map: dict[str, str] | None, preferred_order: tuple[str, ...]
+) -> list[str]:
     if not label_map:
         return []
     ordered = [key for key in preferred_order if key in label_map]
@@ -217,7 +219,8 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
     _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
     logger.debug(
         "[perf] compose_music_detail_image preload %d images: %.3fs",
-        len(_img_tasks), time.perf_counter() - _t0,
+        len(_img_tasks),
+        time.perf_counter() - _t0,
     )
     vocal_logos = {}
     for i, name_ in enumerate(_logo_names):
@@ -530,7 +533,8 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
     loaded_jackets = await asyncio.gather(*jacket_tasks)
     logger.debug(
         "[perf] compose_music_brief_list_image jackets %d: %.3fs",
-        len(jacket_tasks), time.perf_counter() - _t0,
+        len(jacket_tasks),
+        time.perf_counter() - _t0,
     )
     jackets = {m.id: img for m, img in zip(rqd.music_list, loaded_jackets)}
 
@@ -574,7 +578,9 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                                 result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
                                 result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
                                 if result_img:
-                                    ImageBox(result_img, size=(20, 20), image_size_mode="fill").set_offset((96 - 14, 96 - 14))
+                                    ImageBox(result_img, size=(20, 20), image_size_mode="fill").set_offset(
+                                        (96 - 14, 96 - 14)
+                                    )
 
                         with VSplit().set_sep(8).set_content_align("lt").set_item_align("lt"):
                             TextBox(
@@ -963,6 +969,7 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
                     .set_content_align("lt")
                     .set_item_align("lt")
                     .set_sep(8)
+                    .set_item_bg(roundrect_bg(alpha=80))
                     .set_padding(16)
                     .set_bg(roundrect_bg(alpha=80))
                 ):
