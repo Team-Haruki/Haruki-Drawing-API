@@ -573,16 +573,17 @@ wheels = [
 
 [[package]]
 name = "pjsekai-scores-rs"
-version = "0.1.3"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/68/df/6424f792fcdd80776ffce94c9c61e5f651accc0eaed32a913235db852ce8/pjsekai_scores_rs-0.1.3.tar.gz", hash = "sha256:37aad5327e413ef19954a55ee6a60950d1f5e603c19c37dc255d29d8078173e5", size = 43923, upload-time = "2026-04-25T00:30:22.664Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/29/49/d50456c306c84c99865fdcdb295609dac54421170f71d60a0c656f0c6e1c/pjsekai_scores_rs-0.2.0.tar.gz", hash = "sha256:e71e10e74fddd221fd883bf52ae89c3654a00cee9847d75f0aa4e45690ccc2be", size = 44498, upload-time = "2026-04-25T01:46:28.607Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7f/3d/4c25c755f78bc146868196cdeeca044199cd36f1de10a0607b82172835e5/pjsekai_scores_rs-0.1.3-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:bb7af92a636d1b93740b4c7e4403007368de65885c0626d0bc5c1708de91c397", size = 1146849, upload-time = "2026-04-25T00:30:06.13Z" },
-    { url = "https://files.pythonhosted.org/packages/a1/d0/6dffbe7ec8323b1779656224cf51fe3d11fc6a74a59dee3e259e5f1981e4/pjsekai_scores_rs-0.1.3-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:b788a86abc7e1c75c3a75128f798ae3f6b458fbf76ec08233cf0d5bc2ff80a8a", size = 1168498, upload-time = "2026-04-25T00:30:07.595Z" },
-    { url = "https://files.pythonhosted.org/packages/7f/c7/76a19e64b2dc1773deeaac5415b1b8df762f295cd47e75979294c54b9bc2/pjsekai_scores_rs-0.1.3-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:731b19934288e4a26e92f98c28bc83269287f1a2049d2228735a52d659130f96", size = 1061472, upload-time = "2026-04-25T00:30:08.953Z" },
-    { url = "https://files.pythonhosted.org/packages/03/01/f2d6e10d6a3c71ddad442be1819aa71a8971efbab3db2286351510f669d5/pjsekai_scores_rs-0.1.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:f0a8d9d533c50e30cf855cd69c013a40d49f383e57dedb81e4730cd7be0ff62c", size = 1013833, upload-time = "2026-04-25T00:30:10.212Z" },
-    { url = "https://files.pythonhosted.org/packages/84/de/deb37d7517d7f935c85e7d4dd07caf599b3601804c783790c7118fc9b1cb/pjsekai_scores_rs-0.1.3-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:aaa9e8c32af08880de739e8120a427de4c9ffdc986931d2b736bf6efd98a7156", size = 1145521, upload-time = "2026-04-25T00:30:11.493Z" },
-    { url = "https://files.pythonhosted.org/packages/95/32/f752700eeeb232896e83d9ec25ddcfb74e7420288c34852197cc804322bb/pjsekai_scores_rs-0.1.3-cp314-cp314t-win_amd64.whl", hash = "sha256:0a0af95207818d4c067f9c48b1faebd7f59817e9b8c8e5099b58b9d9146a54fd", size = 918093, upload-time = "2026-04-25T00:30:12.704Z" },
+    { url = "https://files.pythonhosted.org/packages/d3/a0/59413dc0cb3fbab9bf4ab01e4a3f1c62408dec49b4e3ce767ad8aa93af59/pjsekai_scores_rs-0.2.0-cp314-cp314-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:6fe7d2caccfae901754493f3f7ceab44b840b506ad806fcf1c24c24895132eca", size = 1147027, upload-time = "2026-04-25T01:46:27.297Z" },
+    { url = "https://files.pythonhosted.org/packages/43/65/6b3da0df7cf01a415e3c362522e3daee8ebf65164addac0a3c4aafb4fa0e/pjsekai_scores_rs-0.2.0-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:068ad84207aeed1c26edacd2d00758e467be999bf55dc86385d8fbfa99ed2f27", size = 1168810, upload-time = "2026-04-25T01:46:23.348Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/ae/063cf806d1c0e4f087dc1a550ad1344ef0d8c4a231f903390f1ac82aef26/pjsekai_scores_rs-0.2.0-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:67909d639f2aed796e2dbc154b81ce4ea82ff79b20454c9897eb85756a0e82ba", size = 1063025, upload-time = "2026-04-25T01:46:08.538Z" },
+    { url = "https://files.pythonhosted.org/packages/07/56/04524ce75238f784598e4cebf99dd138eac05bc41d6f6bfe9c53b99e9ba9/pjsekai_scores_rs-0.2.0-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:497fa581ada569912ebdca8ec3ca71999bdfa652e0e04ef93c212ce8e26fac68", size = 1014719, upload-time = "2026-04-25T01:46:06.321Z" },
+    { url = "https://files.pythonhosted.org/packages/43/25/53636778334520212b25bae2287edce9196b9bae2fd72d28071aace7d670/pjsekai_scores_rs-0.2.0-cp314-cp314t-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:0971d7268c089c3cec9c6332a38480f1bfe376759acaad5595425295e8deb994", size = 1145802, upload-time = "2026-04-25T01:46:24.567Z" },
+    { url = "https://files.pythonhosted.org/packages/25/1a/a39d644dcad8ff4e091e23d305ede4d74283eb1ac416a9bc4e808ab984f6/pjsekai_scores_rs-0.2.0-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:7e055de6ade040c7ff1e9ddb23b081c8331690b941dbb941a9ce5356c585a616", size = 1170038, upload-time = "2026-04-25T01:46:15.863Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/03/6a9c997ef619c1c2e16849de1fb40dce426bdbaa3e1263fe017dc2e23a84/pjsekai_scores_rs-0.2.0-cp314-cp314t-win_amd64.whl", hash = "sha256:152f1fd91542fa20c942694e8b8655ab7e1a340b3a3abd543e632f0ec1864708", size = 918387, upload-time = "2026-04-25T01:46:12.279Z" },
 ]
 
 [[package]]
