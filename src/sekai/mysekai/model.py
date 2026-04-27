@@ -614,12 +614,15 @@ class MysekaiGateMaterials(BaseModel):
         大门id
     level : Optional[ int ] = None
         大门的当前等级
+    gate_icon_path : Optional[ str ] = None
+        大门图标路径
     level_materials : List[ MysekaiGateLevelMaterials ]
         大门各个等级所需的材料
     """
 
     id: int
     level: int | None = None
+    gate_icon_path: str | None = None
     level_materials: list[MysekaiGateLevelMaterials]
 
 
