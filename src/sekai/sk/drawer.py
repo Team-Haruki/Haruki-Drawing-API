@@ -1,7 +1,7 @@
 import asyncio
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 import math
 import os
 
@@ -9,8 +9,8 @@ import matplotlib
 from matplotlib import font_manager
 import matplotlib.dates as mdates
 from matplotlib.figure import Figure
+import matplotlib.patheffects as patheffects
 from matplotlib.ticker import FuncFormatter
-import numpy as np
 from PIL import Image
 
 from src.sekai.base.draw import (
@@ -46,7 +46,7 @@ from .model import (
     CFRequest,
     CSBRequest,
     PlayerTraceRequest,
-    RankInfo,  # noqa: F401 - used in type annotations via Request classes
+    RankInfo,
     RankTraceRequest,
     SklRequest,
     SKRequest,
@@ -105,6 +105,19 @@ ALL_RANKS = [
 SK_RECORD_TOLERANCE = timedelta(seconds=70)
 SK_CSB_STOP_THRESHOLD = timedelta(minutes=5)
 SK_PLAYCOUNT_MYSEKAI_THRESHOLD = 37
+RANK_TRACE_SCORE_COLORS = [
+    "#1d4ed8",
+    "#dc2626",
+    "#7c3aed",
+    "#d97706",
+    "#0891b2",
+    "#c026d3",
+    "#15803d",
+    "#be123c",
+    "#4b5563",
+    "#a16207",
+]
+PLOT_LABEL_PATH_EFFECTS = [patheffects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
 
 
 def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> str:
@@ -672,7 +685,10 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
                     TextBox(
-                        f"数据更新于: {get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}",
+                        (
+                            "数据更新于: "
+                            f"{get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}"
+                        ),
                         TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
                     )
                 if wl_chara_img_path:
@@ -885,6 +901,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 color=color_p1[0],
                 fontsize=12,
                 ha="right",
+                path_effects=PLOT_LABEL_PATH_EFFECTS,
             )
             if ranks2 is not None:
                 (line_score2,) = ax.plot(
@@ -898,6 +915,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     color=color_p2[0],
                     fontsize=12,
                     ha="right",
+                    path_effects=PLOT_LABEL_PATH_EFFECTS,
                 )
 
             ax.set_ylim(min_score * 0.95, max_score * 1.05)
@@ -923,6 +941,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 color=color_p1[1],
                 fontsize=12,
                 ha="right",
+                path_effects=PLOT_LABEL_PATH_EFFECTS,
             )
             if ranks2 is not None:
                 (line_rank2,) = ax2.plot(
@@ -936,6 +955,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     color=color_p2[1],
                     fontsize=12,
                     ha="right",
+                    path_effects=PLOT_LABEL_PATH_EFFECTS,
                 )
 
             ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
@@ -1031,31 +1051,17 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             draw_day_night_bg(ax, times[0], times[-1])
 
             num_unique_names = len(unique_names)
-            if num_unique_names > 10:
+            if num_unique_names > len(RANK_TRACE_SCORE_COLORS):
                 # 数量太多，直接使用同一个颜色
-                point_colors = ["blue" for _ in ranks]
+                point_colors = [RANK_TRACE_SCORE_COLORS[0] for _ in ranks]
             else:  # 否则为每个玩家分配不同颜色
-                num_part1 = num_unique_names // 2
-                num_part2 = num_unique_names - num_part1
-
-                cmap = matplotlib.colormaps["coolwarm"]
-                colors1 = cmap(np.linspace(start=0.0, stop=0.4, num=num_part1))
-                colors2 = cmap(np.linspace(start=0.6, stop=1.0, num=num_part2))
-
-                if num_unique_names > 0:
-                    combined_colors = np.vstack((colors1, colors2))
-                    np.random.shuffle(combined_colors)
-                else:
-                    combined_colors = []
-
-                # 创建从 name 到 color 的映射字典
-                name_to_color = dict(zip(unique_names, combined_colors))
+                name_to_color = {name: RANK_TRACE_SCORE_COLORS[idx] for idx, name in enumerate(unique_names)}
 
                 # 根据原始的、带重复的 name 列表来生成颜色列表
                 point_colors = [name_to_color.get(name) for name in original_names]
 
             # 绘制分数，为不同uid的数据点使用不同颜色
-            ax.scatter(times, scores, c=point_colors, s=2)
+            score_points = ax.scatter(times, scores, c=point_colors, s=3, label="分数线", zorder=3)
             if scores:
                 ax.annotate(
                     f"{get_board_score_str(scores[-1])}",
@@ -1064,6 +1070,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
                     color=point_colors[-1],
                     fontsize=12,
                     ha="right",
+                    path_effects=PLOT_LABEL_PATH_EFFECTS,
                 )
 
             # 绘制预测线
@@ -1091,7 +1098,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
             fig.autofmt_xdate()
             ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
 
-            lines = [line_speeds]
+            lines = [score_points, line_speeds]
             labels = [line.get_label() for line in lines]
             legend = ax2.legend(lines, labels, loc="upper left")
             legend.set_zorder(1000)
