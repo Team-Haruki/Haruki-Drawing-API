@@ -257,12 +257,23 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
     style4 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))
 
+    def event_record_sort_rank(item: EventHistoryInfo) -> int | float:
+        if item.rank is not None:
+            return item.rank
+        if item.rank_tier is not None:
+            return item.rank_tier
+        if item.rank_display:
+            rank_display = item.rank_display.strip().upper()
+            if rank_display.startswith("T") and rank_display[1:].isdigit():
+                return int(rank_display[1:])
+        return float("inf")
+
     async def draw_events(name, user_events: list[EventHistoryInfo]):
         topk = 30
-        if any(item.rank is not None for item in user_events):
+        if any(item.rank is not None or item.rank_display or item.rank_tier is not None for item in user_events):
             has_rank = True
             title = f"排名前{topk}的{name}记录"
-            user_events.sort(key=lambda x: (x.rank if x.rank is not None else float("inf"), -x.event_point))
+            user_events.sort(key=lambda x: (event_record_sort_rank(x), -x.event_point))
         else:
             has_rank = False
             title = f"活动点数前{topk}的{name}记录"
@@ -310,7 +321,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                     with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
                         TextBox("排名", style1).set_h(th).set_content_align("c")
                         for item in user_events:
-                            rank_text = f"#{item.rank}" if item.rank is not None else "-"
+                            rank_text = f"#{item.rank}" if item.rank is not None else (item.rank_display or "-")
                             TextBox(rank_text, style3, overflow="clip").set_h(gh).set_content_align("c")
                 # 活动点数
                 with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
@@ -321,9 +332,10 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             await get_profile_card(rqd.user_info.to_profile_card_request())
-            TextBox("每次上传时进行增量更新，未上传过的记录将会丢失", style4).set_bg(
-                roundrect_bg(alpha=80)
-            ).set_padding(12)
+            note = "每次上传时进行增量更新，未上传过的记录将会丢失"
+            if rqd.rank_note:
+                note = f"{note}\n{rqd.rank_note}"
+            TextBox(note, style4).set_bg(roundrect_bg(alpha=80)).set_padding(12)
             with HSplit().set_sep(16).set_item_align("lt").set_content_align("lt"):
                 if user_events:
                     await draw_events("活动", user_events)

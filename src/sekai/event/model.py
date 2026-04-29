@@ -78,6 +78,10 @@ class EventHistory(BaseModel):
         活动结束时间（毫秒时间戳）
     rank : Optional[int]
         活动排名
+    rank_display : Optional[str]
+        活动排名展示文本，例如 T5000
+    rank_tier : Optional[int]
+        活动档线排序值
     event_point : int
         活动点数
     is_wl_event : bool
@@ -93,6 +97,8 @@ class EventHistory(BaseModel):
     start_at: datetime
     end_at: datetime
     rank: int | None = None
+    rank_display: str | None = None
+    rank_tier: int | None = None
     event_point: int
     is_wl_event: bool = False
     banner_path: str
@@ -206,7 +212,7 @@ class EventDetailRequest(TimeZoneRequest):
     event_assets: EventAssets
     event_cards: list[CardFullThumbnailRequest]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.event_info.start_at = localize_datetime(self.event_info.start_at, self.timezone)
         self.event_info.end_at = localize_datetime(self.event_info.end_at, self.timezone)
@@ -223,13 +229,16 @@ class EventRecordRequest(TimeZoneRequest):
         WL活动记录列表
     user_info : DetailedProfileCardRequest
         用户信息
+    rank_note : Optional[str]
+        排名说明
     """
 
     event_info: list[EventHistory]
     wl_event_info: list[EventHistory]
     user_info: DetailedProfileCardRequest
+    rank_note: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in [*self.event_info, *self.wl_event_info]:
             item.start_at = localize_datetime(item.start_at, self.timezone)
@@ -248,7 +257,7 @@ class EventListRequest(TimeZoneRequest):
 
     event_info: list[EventBrief]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.event_info:
             item.start_at = localize_datetime(item.start_at, self.timezone)
