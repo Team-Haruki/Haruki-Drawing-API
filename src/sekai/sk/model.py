@@ -143,6 +143,8 @@ class SklRequest(TimeZoneRequest):
         当前榜线（预测模式下优先使用）
     forecast_columns : list[SklForecastColumn] | None
         多来源预测列
+    prediction_notice : str | None
+        预测说明
     full : bool
         是否显示完整榜线 (True: ALL_RANKS, False: SKL_QUERY_RANKS)
     """
@@ -158,6 +160,7 @@ class SklRequest(TimeZoneRequest):
     ranks: list[RankInfo]
     current_ranks: list[RankInfo] | None = None
     forecast_columns: list[SklForecastColumn] | None = None
+    prediction_notice: str | None = None
     full: bool = False
 
     def model_post_init(self, __context) -> None:

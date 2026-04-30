@@ -214,6 +214,9 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
     query_rank_set = set(query_ranks)
     forecast_columns = list(rqd.forecast_columns or [])
     is_predict_mode = len(forecast_columns) > 0
+    prediction_notice = rqd.prediction_notice
+    if is_predict_mode and not prediction_notice:
+        prediction_notice = "预测数据仅供参考，请以实际为准规划好冲榜计划"
     current_ranks = list(rqd.current_ranks or rqd.ranks)
 
     if not full:
@@ -266,6 +269,11 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
                 title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK)
                 item_style = TextStyle(font=DEFAULT_FONT, size=20, color=BLACK)
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(8):
+                    if prediction_notice:
+                        TextBox(
+                            prediction_notice,
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(70, 70, 70, 255)),
+                        ).set_content_align("c").set_padding((4, 0))
                     if is_predict_mode:
                         gw = 180
                         with (
