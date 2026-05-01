@@ -62,18 +62,33 @@ def _ensure_nogil_runtime() -> None:
 
 
 TMP_CLEANUP_INTERVAL = 300  # 临时文件清理间隔（秒）
+DISK_CACHE_CLEANUP_INTERVAL = 3600  # 磁盘缓存清理间隔（秒）
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
-    from src.sekai.base.painter import shutdown_painter
-    from src.sekai.base.utils import cleanup_expired_composed_image_disk_cache, cleanup_expired_tmp_files, shutdown_utils
+    from src.sekai.base.painter import Painter, shutdown_painter
+    from src.sekai.base.utils import (
+        cleanup_expired_composed_image_disk_cache,
+        cleanup_expired_tmp_files,
+        shutdown_utils,
+    )
     from src.sekai.sk.drawer import shutdown_sk_drawer
 
     _ensure_nogil_runtime()
     # Configure coloredlogs
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+
+    def _cleanup_disk_caches() -> None:
+        composed_removed = cleanup_expired_composed_image_disk_cache()
+        painter_removed = Painter.cleanup_old_disk_cache()
+        if composed_removed or painter_removed:
+            logger.info(
+                "Cleaned drawing disk caches: composed=%d painter=%d",
+                composed_removed,
+                painter_removed,
+            )
 
     # 后台定期清理临时文件
     async def _periodic_tmp_cleanup():
@@ -84,18 +99,32 @@ async def lifespan(app: FastAPI):
             except Exception:
                 logger.warning("Failed to cleanup tmp files", exc_info=True)
 
-    cleanup_task = asyncio.create_task(_periodic_tmp_cleanup())
+    # 后台定期清理磁盘缓存。内存缓存本身有 LRU/TTL，这里只处理长期运行服务中的落盘缓存。
+    async def _periodic_disk_cache_cleanup():
+        while True:
+            await asyncio.sleep(DISK_CACHE_CLEANUP_INTERVAL)
+            try:
+                _cleanup_disk_caches()
+            except Exception:
+                logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
+
+    cleanup_tasks = [
+        asyncio.create_task(_periodic_tmp_cleanup()),
+        asyncio.create_task(_periodic_disk_cache_cleanup()),
+    ]
 
     # Startup
     try:
-        cleanup_expired_composed_image_disk_cache()
+        _cleanup_disk_caches()
     except Exception:
-        logger.warning("Failed to cleanup composed image disk cache", exc_info=True)
+        logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
     logger.info("Haruki Drawing API is starting...")
     yield
     # Shutdown
     logger.info("Haruki Drawing API is shutting down...")
-    cleanup_task.cancel()
+    for cleanup_task in cleanup_tasks:
+        cleanup_task.cancel()
+    await asyncio.gather(*cleanup_tasks, return_exceptions=True)
     shutdown_painter()
     shutdown_sk_drawer()
     shutdown_utils()

@@ -131,6 +131,38 @@ def _build_caption_vocals(vocal_info, vocal_logos):
     return caption_vocals
 
 
+def _draw_vocal_name_chip(vocal_name: str, max_text_width: int):
+    display_len = max(1, get_str_display_length(vocal_name))
+    font_size = max(16, int(24 * min(1.0, 50 / display_len)))
+    style = TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70))
+    text_width, _ = get_text_size(get_font(DEFAULT_FONT, font_size), vocal_name)
+
+    with (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(2)
+        .set_padding(4)
+        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8))
+    ):
+        textbox = TextBox(vocal_name, style, line_count=2, overflow="shrink", use_real_line_count=True)
+        if text_width > max_text_width:
+            textbox.set_w(max_text_width)
+
+
+def _draw_vocal_image_chip(chara_imgs: list[Image.Image]):
+    with (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(2)
+        .set_padding(4)
+        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8))
+    ):
+        for img in chara_imgs:
+            ImageBox(img, size=(32, 32), use_alpha_blend=True)
+
+
 def _build_music_detail_leaderboard_cell(
     width: int,
     height: int,
@@ -469,39 +501,47 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
 
                 def draw_vocal(width: int | None = None):
                     # 歌手
+                    resolved_width = width or 964
+                    content_width = resolved_width - 32
+                    max_text_width = max(120, min(420, content_width - 32))
+                    max_icons_per_chip = max(1, (content_width - 12) // 34)
                     with Flow().set_content_align("lt").set_item_align("lt").set_sep(8, 8).set_padding(16) as flow:
-                        if width:
-                            flow.set_w(width)
+                        flow.set_w(resolved_width)
                         for caption, vocals in sorted(caption_vocals.items(), key=lambda x: len(x[1])):
-                            with HSplit().set_padding(0).set_sep(4).set_content_align("c").set_item_align("c"):
+                            with (
+                                VSplit()
+                                .set_w(content_width)
+                                .set_padding(0)
+                                .set_sep(6)
+                                .set_content_align("lt")
+                                .set_item_align("lt")
+                            ):
                                 TextBox(
-                                    caption + "  ver.", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50))
-                                )
-                                Spacer(w=8)
-                                for vocal in vocals:
-                                    with (
-                                        HSplit()
-                                        .set_content_align("c")
-                                        .set_item_align("c")
-                                        .set_sep(2)
-                                        .set_padding(4)
-                                        .set_bg(roundrect_bg(fill=(255, 255, 255, 75), radius=8))
-                                    ):
+                                    caption + "  ver.",
+                                    TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)),
+                                    line_count=2,
+                                    overflow="shrink",
+                                    use_real_line_count=True,
+                                ).set_w(content_width)
+                                with (
+                                    Flow()
+                                    .set_content_align("lt")
+                                    .set_item_align("lt")
+                                    .set_sep(6, 6)
+                                    .set_padding(0)
+                                    .set_w(content_width)
+                                ):
+                                    for vocal in vocals:
                                         if vocal_name := vocal.get("vocal_name"):
-                                            font_size = int(24 * min(1.0, 50 / get_str_display_length(vocal_name)))
-                                            TextBox(
-                                                vocal_name,
-                                                TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)),
-                                            )
-                                        elif vocal["vocal_names"]:
-                                            for vn in vocal["vocal_names"]:
-                                                font_size = int(24 * min(1.0, 50 / get_str_display_length(vn)))
-                                                TextBox(
-                                                    vn, TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70))
-                                                )
-                                        else:
-                                            for img in vocal["chara_imgs"]:
-                                                ImageBox(img, size=(32, 32), use_alpha_blend=True)
+                                            _draw_vocal_name_chip(vocal_name, max_text_width)
+                                            continue
+
+                                        chara_imgs = vocal.get("chara_imgs") or []
+                                        for i in range(0, len(chara_imgs), max_icons_per_chip):
+                                            _draw_vocal_image_chip(chara_imgs[i : i + max_icons_per_chip])
+
+                                        for vn in vocal.get("vocal_names") or []:
+                                            _draw_vocal_name_chip(vn, max_text_width)
 
                 def draw_event():
                     # 活动
