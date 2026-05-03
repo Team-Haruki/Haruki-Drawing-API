@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
@@ -178,7 +178,7 @@ class ProfileCardRequest(TimeZoneRequest):
     """
 
     profile: BasicProfile | None = None
-    data_sources: list[ProfileDataSource] = []
+    data_sources: list[ProfileDataSource] = Field(default_factory=list)
     mysekai_level: int | None = None
     bg_alpha: int | None = None
     error_message: str | None = None
@@ -346,9 +346,9 @@ class ProfileRequest(TimeZoneRequest):
     word: str = ""
     pcards: list[CardFullThumbnailRequest]
     bg_settings: ProfileBgSettings | None = None
-    honors: list[HonorRequest] = []
-    music_difficulty_count: list[MusicClearCount] = []
-    character_rank: list[CharacterRank] = []
+    honors: list[HonorRequest] = Field(default_factory=list)
+    music_difficulty_count: list[MusicClearCount] = Field(default_factory=list)
+    character_rank: list[CharacterRank] = Field(default_factory=list)
     solo_live: SoloLiveRank | None = None
     multi_live: MultiLiveTopScoreCount | None = None
     update_time: int | None = None

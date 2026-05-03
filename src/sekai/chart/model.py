@@ -1,7 +1,5 @@
 from typing import Literal
 
-from pydantic import BaseModel
-
 from src.sekai.base.timezone import TimeZoneRequest
 
 

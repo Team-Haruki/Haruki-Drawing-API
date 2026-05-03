@@ -18,15 +18,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 from src.settings import (
     ASSETS_BASE_DIR,
+    COMPOSED_IMAGE_CACHE_MAX_BYTES,
+    COMPOSED_IMAGE_CACHE_SIZE,
+    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
     DEFAULT_BOLD_FONT,
     DEFAULT_HEAVY_FONT,
     DEFAULT_THREAD_POOL_SIZE,
     FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
-    COMPOSED_IMAGE_CACHE_MAX_BYTES,
-    COMPOSED_IMAGE_CACHE_SIZE,
-    COMPOSED_IMAGE_CACHE_TTL_SECONDS,
     SCREENSHOT_API_PATH,
     THUMB_CACHE_MAX_BYTES,
     THUMB_CACHE_SIZE,
@@ -237,7 +237,13 @@ def _build_missing_placeholder_image(variant: str) -> Image.Image:
     _draw_centered_text(draw, "?", qmark_center, qmark_font, (118, 128, 140, 255))
 
     label_font = _load_placeholder_font(max(16, int(short_side * 0.08)))
-    _draw_centered_text(draw, "MISSING", (width / 2, height - outer_pad - short_side * 0.1), label_font, (142, 150, 160, 255))
+    _draw_centered_text(
+        draw,
+        "MISSING",
+        (width / 2, height - outer_pad - short_side * 0.1),
+        label_font,
+        (142, 150, 160, 255),
+    )
     return canvas
 
 
@@ -295,7 +301,13 @@ class _TTLImageCache:
     def _enabled(self) -> bool:
         return self._max_size > 0 and self._max_bytes > 0 and self._ttl_seconds > 0
 
-    def _delete_unlocked(self, key: str, entry: tuple[Image.Image, int, float], *, count_eviction: bool = False) -> None:
+    def _delete_unlocked(
+        self,
+        key: str,
+        entry: tuple[Image.Image, int, float],
+        *,
+        count_eviction: bool = False,
+    ) -> None:
         image, image_bytes, _ = entry
         self._cache.pop(key, None)
         self._total_bytes -= image_bytes
@@ -540,7 +552,10 @@ def _normalize_cache_material(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, dict):
-        return {str(key): _normalize_cache_material(child) for key, child in sorted(value.items(), key=lambda item: str(item[0]))}
+        return {
+            str(key): _normalize_cache_material(child)
+            for key, child in sorted(value.items(), key=lambda item: str(item[0]))
+        }
     if isinstance(value, list | tuple | set):
         return [_normalize_cache_material(item) for item in value]
 
@@ -573,7 +588,7 @@ def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, An
         return None
 
     try:
-        full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+        _full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
     except (FileNotFoundError, OSError, ValueError):
         return {"source_path": path, "missing": True}
 
@@ -670,9 +685,7 @@ def get_runtime_cache_stats() -> dict[str, Any]:
     }
 
 
-def _load_image_cached(
-    path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0
-) -> Image.Image | None:
+def _load_image_cached(path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0) -> Image.Image | None:
     cache_key = (path, mtime_ns, size, target_w, target_h)
     if _is_thumbnail_path(path):
         lock, cache = _thumb_cache_lock, _thumb_cache
@@ -899,9 +912,7 @@ async def get_img_resized(
         raise ValueError("图片路径不能为空(None)")
 
     try:
-        return await run_in_pool(
-            _load_image_resized_sync, base_path, path, target_w, target_h, resample
-        )
+        return await run_in_pool(_load_image_resized_sync, base_path, path, target_w, target_h, resample)
     except (FileNotFoundError, OSError) as exc:
         if on_missing == "placeholder":
             _log_missing_image_once(path, exc)
@@ -952,9 +963,7 @@ def _contain_resize(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     return img.resize((new_w, new_h))
 
 
-def _load_image_contain_resized_sync(
-    base_path: Path, path: str, max_w: int, max_h: int
-) -> Image.Image:
+def _load_image_contain_resized_sync(base_path: Path, path: str, max_w: int, max_h: int) -> Image.Image:
     """加载图片并 contain-resize，结果缓存（key 使用负值 max 尺寸以区分 exact resize）。"""
     full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
 

@@ -196,6 +196,8 @@ cython_debug/
 # 测试文件
 test/
 test*
+!tests/
+!tests/**/*.py
 data/
 .idea/
 *.png

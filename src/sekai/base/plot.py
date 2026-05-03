@@ -546,7 +546,7 @@ class HSplit(Widget):
         else:
             unit_w = 0
             for r, item in zip(ratios, self.items):
-                iw, ih = item._get_self_size()
+                iw, _ih = item._get_self_size()
                 if r > 0:
                     unit_w = max(unit_w, iw / r)
         ret = []
@@ -657,7 +657,7 @@ class VSplit(Widget):
         else:
             unit_h = 0
             for r, item in zip(ratios, self.items):
-                iw, ih = item._get_self_size()
+                _iw, ih = item._get_self_size()
                 if r > 0:
                     unit_h = max(unit_h, ih / r)
         ret = []
@@ -1360,6 +1360,11 @@ class TextBox(Widget):
             p.restore_region()
 
 
+class Seg(TypedDict):
+    text: str
+    color: tuple[int, int, int] | None
+
+
 class ColoredTextBox(Widget):
     def __init__(
         self,
@@ -1689,12 +1694,6 @@ class Canvas(Frame):
             logging.debug(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
             pass
         return img
-
-
-# =========================== 控件函数 =========================== #
-class Seg(TypedDict):
-    text: str
-    color: tuple[int, int, int] | None
 
 
 def parse_colored_text_segments(s: str) -> list[Seg]:

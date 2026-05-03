@@ -40,6 +40,7 @@ def resolve_event_rank_position(base_img: Image.Image, rank_img: Image.Image, is
 
     return (190, 0) if is_main else (34, 42)
 
+
 face_pos = {
     1: 48,
     2: 58,

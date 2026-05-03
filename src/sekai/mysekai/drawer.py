@@ -21,10 +21,7 @@ from .model import (
     MysekaiTalkListRequest,
 )
 
-_NOT_IMPL_MSG = (
-    "drawer.py is a placeholder. "
-    "Mount or replace it with the real implementation before running."
-)
+_NOT_IMPL_MSG = "drawer.py is a placeholder. Mount or replace it with the real implementation before running."
 
 
 async def compose_mysekai_resource_image(rqd: MysekaiResourceRequest) -> Image.Image:

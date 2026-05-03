@@ -255,7 +255,7 @@ class CardDetailRequest(TimeZoneRequest):
     event_unit_icon_path: str | None = None
     event_chara_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         if self.event_info is not None:
             self.event_info.start_at = localize_datetime(self.event_info.start_at, self.timezone)
@@ -296,7 +296,7 @@ class CardListRequest(TimeZoneRequest):
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         if self.user_info is not None:
             self.user_info.timezone = self.timezone
@@ -339,11 +339,11 @@ class CardBoxRequest(TimeZoneRequest):
     show_box: bool = False
     background_img_path: str | None = None
     character_icon_paths: dict[int, str]
-    character_color_codes: dict[int, str] = {}
+    character_color_codes: dict[int, str] = Field(default_factory=dict)
     term_limited_icon_path: str | None = None
     fes_limited_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         if self.user_info is not None:
             self.user_info.timezone = self.timezone

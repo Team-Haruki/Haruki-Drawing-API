@@ -4,8 +4,6 @@ Honor 模块数据模型
 定义称号/勋章相关的 Pydantic 模型，用于称号图片的绘制请求。
 """
 
-from pydantic import BaseModel
-
 from src.sekai.base.timezone import TimeZoneRequest
 
 

@@ -62,7 +62,7 @@ class ChallengeLiveDetailsRequest(TimeZoneRequest):
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -162,7 +162,7 @@ class PowerBonusDetailRequest(TimeZoneRequest):
     unit_bonuses: list[UnitBonus]
     attr_bonuses: list[AttrBonus]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -259,7 +259,7 @@ class AreaItemUpgradeMaterialsRequest(TimeZoneRequest):
     area_items: list[AreaItemInfo]
     has_profile: bool = False
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -326,7 +326,7 @@ class BondsRequest(TimeZoneRequest):
     bonds: list[BondInfo]
     max_level: int
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -375,6 +375,6 @@ class LeaderCountRequest(TimeZoneRequest):
     leader_counts: list[LeaderCountInfo]
     max_play_count: int
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)

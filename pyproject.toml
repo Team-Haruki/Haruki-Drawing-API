@@ -26,6 +26,7 @@ dependencies = [
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+extend-exclude = ["src/sekai/mysekai/drawer.real.py"]
 
 [tool.ruff.format]
 line-ending = "lf"
@@ -66,3 +67,14 @@ mark-parentheses = false
 
 [tool.ruff.lint.pyupgrade]
 keep-runtime-typing = true
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+]

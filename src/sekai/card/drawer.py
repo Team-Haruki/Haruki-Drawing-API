@@ -15,11 +15,6 @@ from src.sekai.base import (
     get_img_from_path,
     roundrect_bg,
 )
-from src.sekai.base.utils import (
-    build_rendered_image_cache_key,
-    get_composed_image_cached,
-    put_composed_image_cache,
-)
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -35,6 +30,11 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.utils import (
+    build_rendered_image_cache_key,
+    get_composed_image_cached,
+    put_composed_image_cache,
+)
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
@@ -74,10 +74,7 @@ def _build_card_list_cache_key(rqd: CardListRequest) -> str:
                 "supply_type": card.supply_type,
                 "prefix": card.prefix,
                 "skill_icon_path": card.skill.skill_type_icon_path if card.skill else None,
-                "thumbnail_info": [
-                    thumb.model_dump(mode="json")
-                    for thumb in (card.thumbnail_info or [])
-                ],
+                "thumbnail_info": [thumb.model_dump(mode="json") for thumb in (card.thumbnail_info or [])],
             }
             for card in rqd.cards
         ],
@@ -102,8 +99,7 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
                     "supply_type": user_card.card.supply_type,
                     "rare": user_card.card.rare,
                     "thumbnail_info": [
-                        thumb.model_dump(mode="json")
-                        for thumb in (user_card.card.thumbnail_info or [])
+                        thumb.model_dump(mode="json") for thumb in (user_card.card.thumbnail_info or [])
                     ],
                     "is_after_training": user_card.card.is_after_training,
                 },
@@ -168,17 +164,21 @@ async def compose_card_detail_image(
         _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
     _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks)
-    logger.debug("[perf] compose_card_detail_image preload %d images: %.3fs", len(_img_tasks), time.perf_counter() - _t0)
+    logger.debug(
+        "[perf] compose_card_detail_image preload %d images: %.3fs",
+        len(_img_tasks),
+        time.perf_counter() - _t0,
+    )
 
     _n_cards = len(rqd.card_images_path)
     _n_costumes = len(rqd.costume_images_path)
     _n_thumbs = len(rqd.card_info.thumbnail_info)
     _offset = 0
-    card_images = list(_img_results[_offset:_offset + _n_cards])
+    card_images = list(_img_results[_offset : _offset + _n_cards])
     _offset += _n_cards
-    costume_images = list(_img_results[_offset:_offset + _n_costumes])
+    costume_images = list(_img_results[_offset : _offset + _n_costumes])
     _offset += _n_costumes
-    thumbnail_images = list(_img_results[_offset:_offset + _n_thumbs])
+    thumbnail_images = list(_img_results[_offset : _offset + _n_thumbs])
     _offset += _n_thumbs
     character_icon = _img_results[_offset]
     _offset += 1
@@ -563,7 +563,8 @@ async def compose_card_list_image(
     _t_render = time.perf_counter() - _t0
     put_composed_image_cache(cache_key, image)
     _perf_logger.info(
-        "card/list total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, cards=%d, rendered=%d, skills=%d, image=%dx%d)",
+        "card/list total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, "
+        "cards=%d, rendered=%d, skills=%d, image=%dx%d)",
         time.perf_counter() - _t_total,
         _t_thumbs,
         _t_preload,
@@ -710,6 +711,7 @@ async def compose_box_image(
             img = preloaded.get(f"chara::{chara_id}")
             if img is not None and not isinstance(img, BaseException):
                 chara_icons[chara_id] = img
+
     # 绘制单张卡
     def draw_card(card_data):
         with Frame().set_content_align("rt"):
@@ -790,9 +792,12 @@ async def compose_box_image(
                         row_num = max(1, min(best_height, len(cards)))
                         Spacer(w=sz * col_num + sep * (col_num - 1), h=sep).set_bg(FillBg(chara_color))
                         # 卡牌列表
-                        with Grid(row_count=row_num, vertical=row_num > col_num).set_content_align("lt").set_item_align(
-                            "lt"
-                        ).set_sep(sep, sep):
+                        with (
+                            Grid(row_count=row_num, vertical=row_num > col_num)
+                            .set_content_align("lt")
+                            .set_item_align("lt")
+                            .set_sep(sep, sep)
+                        ):
                             for card_data in cards:
                                 draw_card(card_data)
 
@@ -802,7 +807,8 @@ async def compose_box_image(
     _t_render = time.perf_counter() - _t0
     put_composed_image_cache(cache_key, image)
     _perf_logger.info(
-        "card/box total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, cards=%d, visible=%d, groups=%d, image=%dx%d)",
+        "card/box total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, "
+        "cards=%d, visible=%d, groups=%d, image=%dx%d)",
         time.perf_counter() - _t_total,
         _t_thumbs,
         _t_preload,

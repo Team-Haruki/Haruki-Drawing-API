@@ -32,6 +32,8 @@ from .model import (
 
 IMAGE_LOAD_EXCEPTIONS = (FileNotFoundError, OSError, ValueError)
 logger = logging.getLogger(__name__)
+
+
 async def get_unknown_fallback_image() -> Image.Image:
     """加载 UnKnown 占位图；素材未挂载时退回纯色占位图避免整张图失败。"""
     try:
@@ -130,13 +132,12 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     _logo_str_paths = [p for p in _logo_paths if isinstance(p, str)]
     _t0 = time.perf_counter()
     _logo_imgs = (
-        await asyncio.gather(*[get_gacha_image_or_unknown(p) for p in _logo_str_paths])
-        if _logo_str_paths
-        else []
+        await asyncio.gather(*[get_gacha_image_or_unknown(p) for p in _logo_str_paths]) if _logo_str_paths else []
     )
     logger.debug(
         "[perf] compose_gacha_list_image preload %d logos: %.3fs",
-        len(_logo_str_paths), time.perf_counter() - _t0,
+        len(_logo_str_paths),
+        time.perf_counter() - _t0,
     )
     _logo_cache: dict[str, Image.Image] = dict(zip(_logo_str_paths, _logo_imgs))
 
@@ -231,7 +232,8 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
     _gd_results = await asyncio.gather(*_gd_coros, return_exceptions=True) if _gd_coros else []
     logger.debug(
         "[perf] compose_gacha_detail_image preload %d items: %.3fs",
-        len(_gd_coros), time.perf_counter() - _t0,
+        len(_gd_coros),
+        time.perf_counter() - _t0,
     )
     _gd_cache: dict[str, Image.Image | None] = {}
     for k, v in zip(_gd_keys, _gd_results):

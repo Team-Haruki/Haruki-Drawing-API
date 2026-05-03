@@ -1,0 +1,73 @@
+name: Quick Checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install CPython free-threaded
+        run: uv python install cpython-3.14.3+freethreaded
+
+      - name: Create 3.14t venv and sync dependencies
+        run: |
+          uv venv .venv314t --python cpython-3.14.3+freethreaded
+          UV_PROJECT_ENVIRONMENT=.venv314t uv sync --frozen --all-groups --python .venv314t/bin/python
+
+      - name: Verify no-GIL runtime
+        run: |
+          .venv314t/bin/python -X gil=0 - <<'PY'
+          import sys
+
+          assert hasattr(sys, "_is_gil_enabled"), "Python does not expose _is_gil_enabled"
+          assert sys._is_gil_enabled() is False, "GIL is still enabled"
+          print("free-threaded runtime passed")
+          PY
+
+      - name: Lint source, tests, and utility scripts
+        run: .venv314t/bin/python -m ruff check src tests scripts
+
+      - name: Format-check source, tests, and utility scripts
+        run: .venv314t/bin/python -m ruff format --check src tests scripts
+
+      - name: Compile source and tests
+        run: .venv314t/bin/python -m compileall src tests scripts
+
+      - name: Validate configuration and repository guards
+        run: |
+          set -euo pipefail
+
+          if git ls-files --error-unmatch src/sekai/mysekai/drawer.real.py >/dev/null 2>&1; then
+            echo "::error file=src/sekai/mysekai/drawer.real.py::drawer.real.py must stay untracked"
+            exit 1
+          fi
+
+          .venv314t/bin/python - <<'PY'
+          from pathlib import Path
+
+          from src.settings import Settings
+
+          for config_path in (Path("configs.yaml"), Path("configs.docker.yaml")):
+              settings = Settings.from_yaml(config_path)
+              assert settings.drawing.export_image_format in {"png", "jpg"}, config_path
+              assert settings.drawing.jpg_quality >= 1, config_path
+              assert settings.drawing.jpg_quality <= 100, config_path
+          print("configuration validation passed")
+          PY
+
+      - name: Validate docker compose config
+        run: docker compose config >/dev/null
+
+      - name: Run pytest
+        run: .venv314t/bin/python -m pytest -q

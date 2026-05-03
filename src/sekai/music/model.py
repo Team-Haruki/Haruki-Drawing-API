@@ -1,7 +1,7 @@
 # 绘图所需的数据类型
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest, ProfileCardRequest
@@ -235,7 +235,7 @@ class MusicBriefListRequest(TimeZoneRequest):
     title_style: Any | None = None
     title_shadow: bool = False
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         if self.profile is not None:
             self.profile.timezone = self.timezone
@@ -280,7 +280,7 @@ class MusicListRequest(TimeZoneRequest):
     title_style: Any | None = None
     title_shadow: bool = False
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         if self.profile is not None:
             self.profile.timezone = self.timezone
@@ -334,7 +334,7 @@ class PlayProgressRequest(TimeZoneRequest):
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"] = "master"
     profile: ProfileCardRequest
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.profile.timezone = self.timezone
 
@@ -372,17 +372,19 @@ class DetailMusicRewardsRequest(TimeZoneRequest):
     """
 
     rank_rewards: int = 0
-    combo_rewards: dict[Literal["hard", "expert", "master", "append"], list[MusicComboReward]] = {
-        "hard": [],
-        "expert": [],
-        "master": [],
-        "append": [],
-    }
+    combo_rewards: dict[Literal["hard", "expert", "master", "append"], list[MusicComboReward]] = Field(
+        default_factory=lambda: {
+            "hard": [],
+            "expert": [],
+            "master": [],
+            "append": [],
+        }
+    )
     profile: ProfileCardRequest
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.profile.timezone = self.timezone
 
@@ -413,11 +415,13 @@ class BasicMusicRewardsRequest(TimeZoneRequest):
     """
 
     rank_rewards: str = "0"
-    combo_rewards: dict[str, str] = {"hard": "0", "expert": "0", "master": "0", "append": "0"}
+    combo_rewards: dict[str, str] = Field(
+        default_factory=lambda: {"hard": "0", "expert": "0", "master": "0", "append": "0"}
+    )
     profile: ProfileCardRequest
     jewel_icon_path: str | None = None
     shard_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.profile.timezone = self.timezone

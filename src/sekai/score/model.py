@@ -1,6 +1,6 @@
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.timezone import TimeZoneRequest
 
@@ -54,7 +54,7 @@ class ScoreControlRequest(TimeZoneRequest):
     music_title: str
     music_basic_point: int
     target_point: int
-    valid_scores: list[ScoreData] = []
+    valid_scores: list[ScoreData] = Field(default_factory=list)
 
 
 class CustomRoomScoreRequest(TimeZoneRequest):
@@ -231,5 +231,5 @@ class MusicBoardRequest(TimeZoneRequest):
     total_page: int
     title_text: str
     items: list[MusicBoardItem]
-    spec_mid_diffs: list[tuple[int, str]] = []
+    spec_mid_diffs: list[tuple[int, str]] = Field(default_factory=list)
     description: str = ""

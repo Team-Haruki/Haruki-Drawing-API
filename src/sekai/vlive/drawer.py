@@ -1,13 +1,13 @@
 import asyncio
+from datetime import datetime
 import logging
 import time
-from datetime import datetime
 
 from PIL import Image
 
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT
-from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.plot import Canvas, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
@@ -187,9 +187,7 @@ async def compose_vlive_list_image(rqd: VLiveListRequest) -> Image.Image:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(16).set_item_align("lt").set_content_align("lt"):
             for entry_image in entry_images:
-                with Frame().set_w(760).set_padding(18).set_bg(
-                    roundrect_bg(alpha=80, blur_glass_kwargs={"blur": 8})
-                ):
+                with Frame().set_w(760).set_padding(18).set_bg(roundrect_bg(alpha=80, blur_glass_kwargs={"blur": 8})):
                     ImageBox(entry_image)
 
     add_request_watermark(canvas, rqd)

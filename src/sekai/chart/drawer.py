@@ -1,12 +1,12 @@
-import os
+from pathlib import Path
 
 from PIL import Image
+from pjsekai_scores_rs import Drawing, Score
 
 from src.sekai.base.utils import TempFilePath, run_in_pool, screenshot
 from src.settings import ASSETS_BASE_DIR
 
 from .model import GenerateMusicChartRequest
-from pjsekai_scores_rs import Drawing, Score
 
 
 async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
@@ -49,7 +49,8 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
             svg_content = drawing.svg(score)
             with open(svg_path, "w", encoding="utf-8") as f:
                 f.write(svg_content)
+            return Path(svg_path).resolve().as_uri()
 
-        await run_in_pool(get_svg)
+        svg_uri = await run_in_pool(get_svg)
         # 用浏览器微服务
-        return await screenshot(f"file://{os.path.abspath(svg_path)}", format="png", full_page=True)
+        return await screenshot(svg_uri, format="png", full_page=True)

@@ -230,7 +230,7 @@ class DeckRequest(TimeZoneRequest):
     cost_times: dict | None = None
     wait_times: dict | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 

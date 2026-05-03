@@ -163,7 +163,7 @@ class SklRequest(TimeZoneRequest):
     prediction_notice: str | None = None
     full: bool = False
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -216,7 +216,7 @@ class SKRequest(TimeZoneRequest):
     prev_ranks: RankInfo | None = None
     next_ranks: RankInfo | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -277,7 +277,7 @@ class CFRequest(TimeZoneRequest):
     def parse_datetime_fields(cls, value):
         return parse_datetime_utc(value)
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -327,7 +327,7 @@ class CSBRequest(TimeZoneRequest):
     def parse_datetime_fields(cls, value):
         return parse_datetime_utc(value)
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -378,7 +378,7 @@ class SpeedRequest(TimeZoneRequest):
     banner_img_path: str | None = None
     wl_chara_icon_path: str | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.record_time = localize_datetime(item.record_time, self.timezone)
@@ -409,7 +409,7 @@ class PlayerTraceRequest(TimeZoneRequest):
     ranks: list[RankInfo]
     ranks2: list[RankInfo] | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -447,7 +447,7 @@ class RankTraceRequest(TimeZoneRequest):
     ranks: list[RankInfo]
     predict_ranks: RankInfo | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.ranks:
             item.time = localize_datetime(item.time, self.timezone)
@@ -528,6 +528,6 @@ class WinRateRequest(TimeZoneRequest):
     def parse_datetime_fields(cls, value):
         return parse_datetime_utc(value)
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.updated_at = localize_datetime(self.updated_at, self.timezone)

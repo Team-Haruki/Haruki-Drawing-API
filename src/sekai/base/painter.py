@@ -666,7 +666,9 @@ class Painter:
 
             # 根据图片大小选择执行方式
             total_pixels = self.size[0] * self.size[1]
-            use_process_pool = settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+            use_process_pool = (
+                settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+            )
 
             if use_process_pool:
                 loop = asyncio.get_event_loop()
@@ -1437,9 +1439,7 @@ class Painter:
                         "grad2": lerp_tuple(current["grad2"], nxt["grad2"], x),
                         "overlay1": lerp_tuple(current["overlay1"], nxt["overlay1"], x),
                         "overlay2": lerp_tuple(current["overlay2"], nxt["overlay2"], x),
-                        "tri_colors": [
-                            lerp_tuple(current["tri_colors"][j], nxt["tri_colors"][j], x) for j in range(4)
-                        ],
+                        "tri_colors": [lerp_tuple(current["tri_colors"][j], nxt["tri_colors"][j], x) for j in range(4)],
                         "white_alpha": int(current["white_alpha"] * (1 - x) + nxt["white_alpha"] * x),
                     }
             return pink_time_palettes[-1]

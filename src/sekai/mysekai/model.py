@@ -2,8 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.base.painter import Color
+from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import ProfileCardRequest
 
 # =========================== 绘制资源数量=========================== #
@@ -131,7 +131,7 @@ class MysekaiResourceRequest(TimeZoneRequest):
     visit_characters: list[MysekaiVisitCharacter]
     site_resource_numbers: list[MysekaiSiteResourceNumber] | None = None
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.profile.timezone = self.timezone
 
@@ -432,9 +432,9 @@ class MysekaiFixtureListRequest(TimeZoneRequest):
     profile: ProfileCardRequest | None = None
     progress_message: str | None = None
     show_id: bool = False
-    main_genres: list[MysekaiFixtureMainGenre] = []
+    main_genres: list[MysekaiFixtureMainGenre] = Field(default_factory=list)
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -642,7 +642,7 @@ class MysekaiDoorUpgradeRequest(TimeZoneRequest):
     profile: ProfileCardRequest | None = None
     gate_materials: list[MysekaiGateMaterials]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -710,7 +710,7 @@ class MysekaiMusicrecordRequest(TimeZoneRequest):
     progress_message: str | None = None
     category_musicrecords: list[MysekaiCategoryMusicrecord]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 
@@ -788,10 +788,10 @@ class MysekaiTalkListRequest(TimeZoneRequest):
     progress_message: str | None = None
     prompt_message: str | None = None
     show_id: bool = False
-    single_main_genres: list[MysekaiSingleTalkMainGenre] = []
-    multi_reads: list[MysekaiTalkFixtures] = []
+    single_main_genres: list[MysekaiSingleTalkMainGenre] = Field(default_factory=list)
+    multi_reads: list[MysekaiTalkFixtures] = Field(default_factory=list)
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
 

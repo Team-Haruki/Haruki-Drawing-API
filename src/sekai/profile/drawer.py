@@ -48,11 +48,10 @@ from src.sekai.base.utils import (
     get_image_asset_signature,
     get_img_from_path,
     get_img_resized,
+    get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
-    get_readable_datetime,
     run_in_pool,
-    get_str_display_length,
     truncate,
 )
 from src.sekai.honor.drawer import compose_full_honor_image
@@ -71,6 +70,7 @@ def format_info_panel_update_time(update_time, timezone_name: str | None) -> str
         text = f"{text} ({timezone_label})"
     # text += f" ({get_readable_datetime(update_time, show_original_time=False)})"
     return text
+
 
 # =========================== 常量定义 =========================== #
 
@@ -672,9 +672,7 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
                 if side_panel_w is not None:
                     multi_live_container.set_w(side_panel_w)
                 multi_live_container.set_offset((0, side_panel_offset_y))
-                with (
-                    multi_live_container
-                ) as multi_live_widget:
+                with multi_live_container as multi_live_widget:
                     stats_badge("MULTI LIVE")
                     stats_badge(f"MVP {multi_live.mvp}次", width=multi_live_stats_w)
                     stats_badge(f"SUPERSTAR {multi_live.super_star}次", font_size=17, width=multi_live_stats_w)
@@ -761,7 +759,7 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
             return name[:-2]
         return name
 
-    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:  # noqa: F841
+    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:
         with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
             # 个人信息
             if rqd.profile:
@@ -798,9 +796,7 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
                                 if isinstance(item, TextBox):
                                     name_length += get_str_display_length(item.text)
                             ms_lv_text = (
-                                f"MySekai Lv.{rqd.mysekai_level}"
-                                if name_length <= 12
-                                else f"MSLv.{rqd.mysekai_level}"
+                                f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
                             )
                             TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
                     user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)

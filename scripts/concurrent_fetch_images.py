@@ -234,6 +234,7 @@ async def run() -> int:
     sem = asyncio.Semaphore(args.concurrency)
 
     async with aiohttp.ClientSession(timeout=timeout, connector=connector, headers=headers) as session:
+
         async def wrapped(idx: int) -> RequestResult:
             async with sem:
                 payload = pick_payload(payloads, idx)
@@ -285,9 +286,7 @@ async def run() -> int:
 
     with (out_dir / "results.csv").open("w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            ["index", "status", "elapsed_ms", "ok", "bytes", "content_type", "response_path", "error"]
-        )
+        writer.writerow(["index", "status", "elapsed_ms", "ok", "bytes", "content_type", "response_path", "error"])
         for r in results:
             writer.writerow(
                 [

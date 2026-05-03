@@ -37,7 +37,7 @@ class VLiveListRequest(TimeZoneRequest):
     region: str
     lives: list[VLiveBrief]
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.lives:
             item.start_at = localize_datetime(item.start_at, self.timezone)

@@ -178,7 +178,8 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
         _cover_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cover_list])
         logger.debug(
             "[perf] compose_custom_room_score_control_image preload %d covers: %.3fs",
-            len(_cover_list), time.perf_counter() - _t0,
+            len(_cover_list),
+            time.perf_counter() - _t0,
         )
         _cover_cache = dict(zip(_cover_list, _cover_imgs))
     else:
@@ -305,13 +306,13 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
     _meta_covers = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path) for rqd in requests])
     logger.debug(
         "[perf] compose_music_meta_image preload %d covers: %.3fs",
-        len(requests), time.perf_counter() - _t0,
+        len(requests),
+        time.perf_counter() - _t0,
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
             for rqd, music_cover in zip(requests, _meta_covers):
-
                 style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
                 style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
 

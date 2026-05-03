@@ -692,11 +692,13 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    update_text = get_readable_datetime(
+                        rqd.update_at,
+                        show_original_time=False,
+                        use_en_unit=False,
+                    )
                     TextBox(
-                        (
-                            "数据更新于: "
-                            f"{get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}"
-                        ),
+                        f"数据更新于: {update_text}",
                         TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
                     )
                 if wl_chara_img_path:

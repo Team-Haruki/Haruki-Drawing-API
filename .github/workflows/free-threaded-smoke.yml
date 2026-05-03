@@ -140,3 +140,24 @@ jobs:
           for line in summary_lines:
               print(" -", line)
           PY
+
+      - name: Collect smoke logs
+        if: always()
+        run: |
+          mkdir -p out
+          if [ -f /tmp/haruki_granian.log ]; then
+            cp /tmp/haruki_granian.log out/haruki_granian.log
+          fi
+
+      - name: Upload smoke artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: free-threaded-smoke-artifacts
+          path: |
+            out/**/*.csv
+            out/**/*.json
+            out/**/*.png
+            out/**/*.txt
+            out/haruki_granian.log
+          if-no-files-found: ignore

@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.painter import Color
 from src.sekai.base.timezone import TimeZoneRequest
@@ -43,4 +43,4 @@ class StampListRequest(TimeZoneRequest):
 
     prompt_message: str | None = None
     page_message: str | None = None
-    stamps: list[StampData] = []
+    stamps: list[StampData] = Field(default_factory=list)

@@ -222,13 +222,13 @@ class GachaListRequest(TimeZoneRequest):
     gachas: list[GachaBrief]
     page_size: int = 20
     region: str = "jp"
-    gacha_logos: dict[int, str] = {}
+    gacha_logos: dict[int, str] = Field(default_factory=dict)
     filter: GachaFilter = Field(default_factory=GachaFilter)
     current_page: int | None = None
     total_page: int | None = None
     pre_paginated: bool = False
 
-    def model_post_init(self, __context) -> None:
+    def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         for item in self.gachas:
             item.start_at = localize_datetime(item.start_at, self.timezone)
@@ -258,7 +258,7 @@ class GachaDetailRequest(TimeZoneRequest):
 
     gacha: GachaInfo
     weight_info: GachaWeight
-    pickup_cards: list[GachaCardWeight] = []
+    pickup_cards: list[GachaCardWeight] = Field(default_factory=list)
     logo_img_path: str | None = None
     banner_img_path: str | None = None
     bg_img_path: str | None = None

@@ -192,9 +192,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
         len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks),
         time.perf_counter() - _t0,
     )
-    _di = dict(zip(_dk, _all_results[:len(_dk)]))
-    _thumb_results = _all_results[len(_dk):len(_dk) + len(_card_thumb_tasks)]
-    _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks):]
+    _di = dict(zip(_dk, _all_results[: len(_dk)]))
+    _thumb_results = _all_results[len(_dk) : len(_dk) + len(_card_thumb_tasks)]
+    _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks) :]
 
     wl_chara_icon = _di.get("wl_chara")
     unit_logo = _di.get("unit_logo")

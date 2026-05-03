@@ -68,8 +68,11 @@ async def mysekai_fixture_list(request: MysekaiFixtureListRequest):
         resp = await image_to_response(image)
         _perf_logger.info(
             "/fixture-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
-            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
-            image.width, image.height,
+            time.perf_counter() - _t0,
+            _t1 - _t0,
+            time.perf_counter() - _t1,
+            image.width,
+            image.height,
         )
         return resp
     except Exception as e:
@@ -106,8 +109,11 @@ async def mysekai_music_record(request: MysekaiMusicrecordRequest):
         resp = await image_to_response(image)
         _perf_logger.info(
             "/music-record total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
-            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
-            image.width, image.height,
+            time.perf_counter() - _t0,
+            _t1 - _t0,
+            time.perf_counter() - _t1,
+            image.width,
+            image.height,
         )
         return resp
     except Exception as e:
@@ -124,8 +130,11 @@ async def mysekai_talk_list(request: MysekaiTalkListRequest):
         resp = await image_to_response(image)
         _perf_logger.info(
             "/talk-list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
-            time.perf_counter() - _t0, _t1 - _t0, time.perf_counter() - _t1,
-            image.width, image.height,
+            time.perf_counter() - _t0,
+            _t1 - _t0,
+            time.perf_counter() - _t1,
+            image.width,
+            image.height,
         )
         return resp
     except Exception as e:
