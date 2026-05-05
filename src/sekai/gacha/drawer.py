@@ -32,10 +32,16 @@ from .model import (
 
 IMAGE_LOAD_EXCEPTIONS = (FileNotFoundError, OSError, ValueError)
 logger = logging.getLogger(__name__)
+GACHA_LIST_LOGO_BOX_SIZE = (130, 60)
 
 
-async def get_unknown_fallback_image() -> Image.Image:
-    """加载 UnKnown 占位图；素材未挂载时退回纯色占位图避免整张图失败。"""
+async def get_unknown_fallback_image(path: str | None = None) -> Image.Image:
+    """加载缺失图；优先按目标路径返回比例合适的 placeholder。"""
+    if path:
+        try:
+            return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="placeholder")
+        except IMAGE_LOAD_EXCEPTIONS:
+            pass
     try:
         return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/unknown.jpg")
     except IMAGE_LOAD_EXCEPTIONS:
@@ -48,7 +54,7 @@ async def get_gacha_image_or_unknown(path: str | None, *, allow_empty: bool = Fa
         try:
             return await get_img_from_path(ASSETS_BASE_DIR, path)
         except IMAGE_LOAD_EXCEPTIONS:
-            return await get_unknown_fallback_image()
+            return await get_unknown_fallback_image(path)
     if allow_empty:
         return None
     return await get_unknown_fallback_image()
@@ -165,9 +171,9 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             elif isinstance(logo_data, Image.Image):
                                 logo_img = logo_data
                             else:
-                                logo_img = await get_unknown_fallback_image()
+                                logo_img = await get_unknown_fallback_image("gacha/logo_missing.png")
 
-                            ImageBox(logo_img, size=(None, 60))
+                            ImageBox(logo_img, size=GACHA_LIST_LOGO_BOX_SIZE)
                             TextBox(f"【{g.id}】{g.name}", style1, line_count=2, use_real_line_count=False).set_w(130)
                             TextBox(f"S {g.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
