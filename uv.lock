@@ -199,9 +199,12 @@ wheels = [
 
 [[package]]
 name = "emoji"
-version = "2.0.0"
+version = "2.15.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/85/f3/0a09c327f81c792707727125e0b43e4eb6b1397f77d44162a8a5115260c0/emoji-2.0.0.tar.gz", hash = "sha256:297fac7ec9e86f7b602792c28eb6f04819ba67ab88a34c56afcde52243a9a105", size = 197343, upload-time = "2022-07-16T16:39:38.409Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a2/78/0d2db9382c92a163d7095fc08efff7800880f830a152cfced40161e7638d/emoji-2.15.0.tar.gz", hash = "sha256:eae4ab7d86456a70a00a985125a03263a5eac54cd55e51d7e184b1ed3b6757e4", size = 615483, upload-time = "2025-09-21T12:13:02.755Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e1/5e/4b5aaaabddfacfe36ba7768817bd1f71a7a810a43705e531f3ae4c690767/emoji-2.15.0-py3-none-any.whl", hash = "sha256:205296793d66a89d88af4688fa57fd6496732eb48917a87175a023c8138995eb", size = 608433, upload-time = "2025-09-21T12:13:01.197Z" },
+]
 
 [[package]]
 name = "fastapi"
@@ -358,7 +361,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.13.3" },
     { name = "coloredlogs", specifier = ">=15.0.1" },
-    { name = "emoji", specifier = "==2.0.0" },
+    { name = "emoji", specifier = "==2.15.0" },
     { name = "fastapi", specifier = ">=0.135.1" },
     { name = "granian", specifier = ">=2.7.2" },
     { name = "matplotlib", specifier = ">=3.10.8" },
