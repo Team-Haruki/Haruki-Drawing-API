@@ -364,7 +364,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "pillow", specifier = ">=12.1.1" },
-    { name = "pilmoji", specifier = "==2.0.4" },
+    { name = "pilmoji", specifier = "==2.0.5" },
     { name = "pjsekai-scores-rs", specifier = ">=0.1.2" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
@@ -627,15 +627,15 @@ wheels = [
 
 [[package]]
 name = "pilmoji"
-version = "2.0.4"
+version = "2.0.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "emoji" },
     { name = "pillow" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e1/04/e463218cffa0d8e145aa3c5fb409e483134df69ccfdce02bff0e05bce08e/pilmoji-2.0.4.tar.gz", hash = "sha256:3861c09999f36bb32dd559e181b63a8a9c8068b2cddcac32637581e48de2d11f", size = 9952, upload-time = "2023-08-10T02:56:10.878Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/75/e5430da7a99ea66c9b93cdbd66372a010022398887eb3f8fcccb866010ee/pilmoji-2.0.5.tar.gz", hash = "sha256:e038532c97b79b3d55c29f5a6c2b6b627105b8cd1db0c1d2271402b3e4e9be18", size = 11889, upload-time = "2026-01-06T01:33:20.637Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/7c/b7139e422e460889077d34b8e668b7b61af19e303b7a66adc736313fb71a/pilmoji-2.0.4-py3-none-any.whl", hash = "sha256:2fcb2116226ed8aa600fcf6e65d7693b5d08d60715f8c460553130081a5adc26", size = 9709, upload-time = "2023-08-10T02:56:09.123Z" },
+    { url = "https://files.pythonhosted.org/packages/24/09/2dcc3fa1e0627f95143b61cc2c8a13042f5dcd7e11d1e12b0ba5e205aeca/pilmoji-2.0.5-py3-none-any.whl", hash = "sha256:856ddf827d42d8c8d2a1f879fdc1ae318ffb72435c4adc934be6d3e48376173d", size = 11740, upload-time = "2026-01-29T17:25:35.378Z" },
 ]
 
 [[package]]
