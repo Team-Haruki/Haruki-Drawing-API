@@ -369,7 +369,7 @@ def get_font(path: str, size: int) -> Font:
                 font = ImageFont.truetype(font_path, size)
                 break
         if font is None:
-            raise FileNotFoundError(f"Font file not found: {path}")
+            font = ImageFont.load_default()
         entry = FontCacheEntry(font, datetime.now())
         font_cache[key] = entry
         # 清理当前线程中过期的字体缓存
