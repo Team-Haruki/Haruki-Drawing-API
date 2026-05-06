@@ -71,4 +71,4 @@ VOLUME ["/app/haruki_drawing_api/data", "/app/haruki_drawing_api/config.yaml"]
 
 # 使用自由线程解释器启动
 ENTRYPOINT ["/app/haruki_drawing_api/.venv/bin/python", "-X", "gil=0", "-m", "granian"]
-CMD ["--interface", "asgi", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--workers-lifetime", "1200", "--workers-kill-timeout", "30", "src.core.main:app"]
+CMD ["--interface", "asgi", "--host", "0.0.0.0", "--port", "8000", "--workers", "1", "--workers-kill-timeout", "30", "src.core.main:app"]

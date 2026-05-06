@@ -209,6 +209,8 @@ class GachaListRequest(TimeZoneRequest):
         服务器地区
     gacha_logos : Dict[int, str]
         卡池ID对应的logo图片路径
+    gacha_banners : Dict[int, str]
+        卡池ID对应的banner兜底图片路径
     filter : GachaFilter
         筛选条件
     current_page : Optional[int]
@@ -223,6 +225,7 @@ class GachaListRequest(TimeZoneRequest):
     page_size: int = 20
     region: str = "jp"
     gacha_logos: dict[int, str] = Field(default_factory=dict)
+    gacha_banners: dict[int, str] = Field(default_factory=dict)
     filter: GachaFilter = Field(default_factory=GachaFilter)
     current_page: int | None = None
     total_page: int | None = None

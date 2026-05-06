@@ -60,6 +60,24 @@ async def get_gacha_image_or_unknown(path: str | None, *, allow_empty: bool = Fa
     return await get_unknown_fallback_image()
 
 
+async def get_gacha_list_image_with_fallback(
+    logo_path: str | None,
+    banner_path: str | None,
+) -> tuple[Image.Image, str]:
+    """优先使用 logo，缺失时回退到 banner，再退回 unknown。"""
+    if logo_path:
+        try:
+            return await get_img_from_path(ASSETS_BASE_DIR, logo_path, on_missing="raise"), "logo"
+        except IMAGE_LOAD_EXCEPTIONS:
+            pass
+    if banner_path:
+        try:
+            return await get_img_from_path(ASSETS_BASE_DIR, banner_path, on_missing="raise"), "banner"
+        except IMAGE_LOAD_EXCEPTIONS:
+            pass
+    return await get_unknown_fallback_image(), "unknown"
+
+
 async def get_rarity_img(
     rarity: str,
     rarity_img_path: str = f"{RESULT_ASSET_PATH}/card/rare_star_normal.png",
@@ -133,19 +151,25 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
 
-    # 预加载所有logo图片
-    _logo_paths = [rqd.gacha_logos.get(g.id) for g in gachas]
-    _logo_str_paths = [p for p in _logo_paths if isinstance(p, str)]
+    # 预加载所有列表缩略图，优先 logo，缺失时回退 banner。
+    _list_image_inputs = [(rqd.gacha_logos.get(g.id), rqd.gacha_banners.get(g.id)) for g in gachas]
     _t0 = time.perf_counter()
-    _logo_imgs = (
-        await asyncio.gather(*[get_gacha_image_or_unknown(p) for p in _logo_str_paths]) if _logo_str_paths else []
+    _list_image_results = (
+        await asyncio.gather(
+            *[
+                get_gacha_list_image_with_fallback(logo_path, banner_path)
+                for logo_path, banner_path in _list_image_inputs
+            ]
+        )
+        if _list_image_inputs
+        else []
     )
+    _list_image_cache = {g.id: result for g, result in zip(gachas, _list_image_results)}
     logger.debug(
-        "[perf] compose_gacha_list_image preload %d logos: %.3fs",
-        len(_logo_str_paths),
+        "[perf] compose_gacha_list_image preload %d list images: %.3fs",
+        len(_list_image_inputs),
         time.perf_counter() - _t0,
     )
-    _logo_cache: dict[str, Image.Image] = dict(zip(_logo_str_paths, _logo_imgs))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
@@ -164,17 +188,22 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                     bg = roundrect_bg(bg_color, 5)
                     with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
                         with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            # 处理logo图片
-                            logo_data = rqd.gacha_logos.get(g.id)
-                            if isinstance(logo_data, str):
-                                logo_img = _logo_cache[logo_data]
-                            elif isinstance(logo_data, Image.Image):
-                                logo_img = logo_data
+                            list_image_data = _list_image_cache.get(g.id)
+                            if list_image_data is None:
+                                fallback_path = rqd.gacha_banners.get(g.id) or rqd.gacha_logos.get(g.id)
+                                list_image_data = (await get_unknown_fallback_image(fallback_path), "unknown")
+                            list_image, image_kind = list_image_data
+                            if image_kind == "banner":
+                                ImageBox(list_image, size=(160, 60), image_size_mode="fit").set_content_align("c")
                             else:
-                                logo_img = await get_unknown_fallback_image("gacha/logo_missing.png")
-
-                            ImageBox(logo_img, size=GACHA_LIST_LOGO_BOX_SIZE)
-                            TextBox(f"【{g.id}】{g.name}", style1, line_count=2, use_real_line_count=False).set_w(130)
+                                ImageBox(list_image, size=GACHA_LIST_LOGO_BOX_SIZE)
+                            title_box = TextBox(
+                                f"【{g.id}】{g.name}",
+                                style1,
+                                line_count=2,
+                                use_real_line_count=False,
+                            )
+                            title_box.set_w(130)
                             TextBox(f"S {g.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
 
