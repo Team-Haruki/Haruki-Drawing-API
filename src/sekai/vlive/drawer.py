@@ -7,7 +7,7 @@ from PIL import Image
 
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT
-from src.sekai.base.plot import Canvas, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
+from src.sekai.base.plot import Canvas, Flow, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
@@ -24,6 +24,7 @@ from .model import VLiveBrief, VLiveListRequest
 
 _perf_logger = logging.getLogger("vlive.draw.perf")
 _VLIVE_LIST_ENTRY_CACHE_NAMESPACE = "vlive_list_entry"
+_VLIVE_ENTRY_CONTENT_W = 724
 
 
 def _format_time(dt: datetime | None) -> str:
@@ -70,7 +71,7 @@ def _build_vlive_entry_cache_key(vlive: VLiveBrief, now: datetime) -> str:
         "vlive_list_entry",
         vlive,
         extra={
-            "version": 8,
+            "version": 9,
             "state": "living" if vlive.living else "upcoming",
             "bucket": now.strftime("%Y%m%d%H%M"),
         },
@@ -118,7 +119,7 @@ async def _compose_vlive_entry_image(
                 title_style,
                 line_count=2,
                 use_real_line_count=True,
-            ).set_w(724)
+            ).set_w(_VLIVE_ENTRY_CONTENT_W)
 
             with HSplit().set_content_align("c").set_item_align("c").set_sep(16):
                 if banner is not None:
@@ -133,7 +134,7 @@ async def _compose_vlive_entry_image(
                     ).set_w(388)
 
             if rewards or characters:
-                with HSplit().set_content_align("t").set_item_align("t").set_sep(28):
+                with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
                     if rewards:
                         with VSplit().set_content_align("l").set_item_align("l").set_sep(6):
                             TextBox("参与奖励", section_style)
@@ -147,7 +148,7 @@ async def _compose_vlive_entry_image(
                     if characters:
                         with VSplit().set_content_align("l").set_item_align("l").set_sep(6):
                             TextBox("出演角色", section_style)
-                            with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                            with Flow().set_w(_VLIVE_ENTRY_CONTENT_W).set_content_align("lt").set_item_align("lt").set_sep(4, 4):
                                 for character_image in characters:
                                     ImageBox(character_image, size=(30, 30), use_alpha_blend=True)
 
