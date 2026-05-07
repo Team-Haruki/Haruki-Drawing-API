@@ -595,7 +595,7 @@ class Painter:
                     font=font,
                     fill=fill,
                     align=align,
-                    emoji_position_offset=(0, -std_size[1]),
+                    emoji_position_offset=(0, 0),
                     anchor="ls",
                 )
         return self
