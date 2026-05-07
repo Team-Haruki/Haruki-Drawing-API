@@ -146,6 +146,52 @@ def build_algorithm_runtime_text(cost_times: dict | None, wait_times: dict | Non
     return "\n".join(lines)
 
 
+def build_recommend_title(
+    recommend_type: str,
+    event_id: int | None,
+    wl_chara_name: str | None,
+    live_type: str | None,
+    live_name: str | None,
+) -> str:
+    title = ""
+
+    if recommend_type == "mysekai":
+        if event_id:
+            title += f"烤森活动#{event_id}组卡"
+        else:
+            title += "烤森模拟活动组卡"
+    elif recommend_type in ["challenge", "challenge_all"]:
+        title += "每日挑战组卡"
+    elif recommend_type in ["bonus", "wl_bonus"]:
+        if recommend_type == "bonus":
+            title += f"活动#{event_id}加成组卡"
+        elif recommend_type == "wl_bonus":
+            title += f"WL活动#{event_id}加成组卡"
+    else:
+        if recommend_type == "event":
+            title += f"活动#{event_id}组卡"
+        elif recommend_type == "wl":
+            if event_id:
+                title += f"WL活动#{event_id}组卡"
+            elif wl_chara_name:
+                title += "WL模拟组卡"
+            else:
+                title += "WL终章活动组卡"
+        elif recommend_type == "unit_attr":
+            title += "团队+颜色模拟活动组卡"
+        elif recommend_type == "no_event":
+            title += "无活动组卡"
+
+        if live_type == "multi":
+            title += f"({live_name})"
+        elif live_type == "solo":
+            title += "(单人)"
+        elif live_type == "auto":
+            title += "(AUTO)"
+
+    return title
+
+
 async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
@@ -235,39 +281,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     .set_padding(16)
                     .set_bg(roundrect_bg(alpha=80))
                 ):
-                    title = ""
-
-                    if recommend_type == "mysekai":
-                        if event_id:
-                            title += f"烤森活动#{event_id}组卡"
-                        else:
-                            title += "烤森模拟活动组卡"
-                    elif recommend_type in ["challenge", "challenge_all"]:
-                        title += "每日挑战组卡"
-                    elif recommend_type in ["bonus", "wl_bonus"]:
-                        if recommend_type == "bonus":
-                            title += f"活动#{event_id}加成组卡"
-                        elif recommend_type == "wl_bonus":
-                            title += f"WL活动#{event_id}加成组卡"
-                    else:
-                        if recommend_type == "event":
-                            title += f"活动#{event_id}组卡"
-                        elif recommend_type == "wl":
-                            if wl_chara_name:
-                                title += f"WL活动#{event_id}组卡"
-                            else:
-                                title += "WL终章活动组卡"
-                        elif recommend_type == "unit_attr":
-                            title += "团队+颜色模拟活动组卡"
-                        elif recommend_type == "no_event":
-                            title += "无活动组卡"
-
-                        if live_type == "multi":
-                            title += f"({live_name})"
-                        elif live_type == "solo":
-                            title += "(单人)"
-                        elif live_type == "auto":
-                            title += "(AUTO)"
+                    title = build_recommend_title(recommend_type, event_id, wl_chara_name, live_type, live_name)
 
                     score_name = "PT"
                     if recommend_type in ["challenge", "challenge_all", "no_event"]:
