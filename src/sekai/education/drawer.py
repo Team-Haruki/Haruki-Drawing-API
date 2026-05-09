@@ -795,25 +795,25 @@ def _draw_character_mission_progress(
     title_frame.add_item(title_row)
     root.add_item(title_frame)
 
-    with Frame().set_w(bar_width).set_h(18).set_content_align("lt") as bar:
-        progress = max(0.0, min(ratio, 1.0))
-        total_w, total_h, border = bar_width, 14, 2
-        progress_w = int((total_w - border * 2) * progress)
-        progress_h = total_h - border * 2
+    bar = Frame().set_w(bar_width).set_h(18).set_content_align("lt")
+    progress = max(0.0, min(ratio, 1.0))
+    total_w, total_h, border = bar_width, 14, 2
+    progress_w = int((total_w - border * 2) * progress)
+    progress_h = total_h - border * 2
 
-        if progress > 0:
-            bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 255), radius=total_h // 2)))
-            bar.add_item(
-                Spacer(w=progress_w, h=progress_h)
-                .set_bg(RoundRectBg(fill=_education_progress_color(progress), radius=(total_h - border) // 2))
-                .set_offset((border, border))
-            )
-            for i in range(1, 5):
-                lx = int((total_w - border * 2) * (i / 5.0))
-                line_color = (100, 100, 100, 255) if i / 5.0 < progress else (150, 150, 150, 255)
-                bar.add_item(Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset((border + lx - 1, total_h // 2)))
-        else:
-            bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)))
+    if progress > 0:
+        bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 255), radius=total_h // 2)))
+        bar.add_item(
+            Spacer(w=progress_w, h=progress_h)
+            .set_bg(RoundRectBg(fill=_education_progress_color(progress), radius=(total_h - border) // 2))
+            .set_offset((border, border))
+        )
+        for i in range(1, 5):
+            lx = int((total_w - border * 2) * (i / 5.0))
+            line_color = (100, 100, 100, 255) if i / 5.0 < progress else (150, 150, 150, 255)
+            bar.add_item(Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset((border + lx - 1, total_h // 2)))
+    else:
+        bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)))
     root.add_item(bar)
 
     upper_text = "∞" if upper is None else f"{upper:,}"
@@ -895,75 +895,75 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
     note_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(0, 0, 0, 255))
     card_w = 520
 
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-        root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
 
-        note_panel = VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_item_bg(roundrect_bg())
-        note_panel.add_item(TextBox("各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数", note_style, use_real_line_count=True).set_padding(12))
-        root.add_item(note_panel)
+    note_panel = VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_item_bg(roundrect_bg())
+    note_panel.add_item(TextBox("各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数", note_style, use_real_line_count=True).set_padding(12))
+    root.add_item(note_panel)
 
-        summary_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
-        header_row = HSplit().set_content_align("c").set_item_align("c").set_sep(12)
-        header_row.add_item(ImageBox(chara_icon, size=(48, 48)))
-        header_row.add_item(
-            TextBox(
-                f"{rqd.character_name} 当前Lv.{rqd.current_level} EXP×{rqd.current_exp} + 未领取EXP×{rqd.pending_exp} = 总计Lv.{rqd.final_level} EXP×{rqd.final_exp}",
-                header_style,
-                use_real_line_count=True,
-            )
+    summary_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    header_row = HSplit().set_content_align("c").set_item_align("c").set_sep(12)
+    header_row.add_item(ImageBox(chara_icon, size=(48, 48)))
+    header_row.add_item(
+        TextBox(
+            f"{rqd.character_name} 当前Lv.{rqd.current_level} EXP×{rqd.current_exp} + 未领取EXP×{rqd.pending_exp} = 总计Lv.{rqd.final_level} EXP×{rqd.final_exp}",
+            header_style,
+            use_real_line_count=True,
         )
-        summary_panel.add_item(header_row)
-        root.add_item(summary_panel)
+    )
+    summary_panel.add_item(header_row)
+    root.add_item(summary_panel)
 
-        basic_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
-        basic_panel.add_item(TextBox("基本任务", sub_header_style))
-        if rqd.basic_rows:
-            for i in range(0, len(rqd.basic_rows), 2):
-                row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-                row.add_item(_build_character_mission_card(rqd.basic_rows[i], card_w))
-                if i + 1 < len(rqd.basic_rows):
-                    row.add_item(_build_character_mission_card(rqd.basic_rows[i + 1], card_w))
-                else:
-                    row.add_item(Spacer(card_w, 1))
-                basic_panel.add_item(row)
-        else:
-            basic_panel.add_item(TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
-        root.add_item(basic_panel)
+    basic_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    basic_panel.add_item(TextBox("基本任务", sub_header_style))
+    if rqd.basic_rows:
+        for i in range(0, len(rqd.basic_rows), 2):
+            row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+            row.add_item(_build_character_mission_card(rqd.basic_rows[i], card_w))
+            if i + 1 < len(rqd.basic_rows):
+                row.add_item(_build_character_mission_card(rqd.basic_rows[i + 1], card_w))
+            else:
+                row.add_item(Spacer(card_w, 1))
+            basic_panel.add_item(row)
+    else:
+        basic_panel.add_item(TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+    root.add_item(basic_panel)
 
-        achievement_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
-        achievement_panel.add_item(TextBox("成就", sub_header_style))
-        by_type = {row.mission_type: row for row in rqd.achievement_rows}
+    achievement_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    achievement_panel.add_item(TextBox("成就", sub_header_style))
+    by_type = {row.mission_type: row for row in rqd.achievement_rows}
 
-        play_live = by_type.get("play_live")
-        play_live_ex = by_type.get("play_live_ex")
-        waiting_room = by_type.get("waiting_room")
-        waiting_room_ex = by_type.get("waiting_room_ex")
-        if play_live and play_live_ex and waiting_room and waiting_room_ex:
-            dual_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-            dual_row.add_item(_build_character_mission_dual_card("队长次数", play_live, play_live_ex, card_w))
-            dual_row.add_item(_build_character_mission_dual_card("休息室次数", waiting_room, waiting_room_ex, card_w))
-            achievement_panel.add_item(dual_row)
+    play_live = by_type.get("play_live")
+    play_live_ex = by_type.get("play_live_ex")
+    waiting_room = by_type.get("waiting_room")
+    waiting_room_ex = by_type.get("waiting_room_ex")
+    if play_live and play_live_ex and waiting_room and waiting_room_ex:
+        dual_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+        dual_row.add_item(_build_character_mission_dual_card("队长次数", play_live, play_live_ex, card_w))
+        dual_row.add_item(_build_character_mission_dual_card("休息室次数", waiting_room, waiting_room_ex, card_w))
+        achievement_panel.add_item(dual_row)
 
-        remaining_rows = [
-            row
-            for row in rqd.achievement_rows
-            if row.mission_type not in {"play_live", "play_live_ex", "waiting_room", "waiting_room_ex"}
-        ]
-        if remaining_rows:
-            for i in range(0, len(remaining_rows), 2):
-                row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-                row.add_item(_build_character_mission_card(remaining_rows[i], card_w))
-                if i + 1 < len(remaining_rows):
-                    row.add_item(_build_character_mission_card(remaining_rows[i + 1], card_w))
-                else:
-                    row.add_item(Spacer(card_w, 1))
-                achievement_panel.add_item(row)
-        elif not (play_live and play_live_ex and waiting_room and waiting_room_ex):
-            achievement_panel.add_item(TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
-        root.add_item(achievement_panel)
+    remaining_rows = [
+        row
+        for row in rqd.achievement_rows
+        if row.mission_type not in {"play_live", "play_live_ex", "waiting_room", "waiting_room_ex"}
+    ]
+    if remaining_rows:
+        for i in range(0, len(remaining_rows), 2):
+            row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+            row.add_item(_build_character_mission_card(remaining_rows[i], card_w))
+            if i + 1 < len(remaining_rows):
+                row.add_item(_build_character_mission_card(remaining_rows[i + 1], card_w))
+            else:
+                row.add_item(Spacer(card_w, 1))
+            achievement_panel.add_item(row)
+    elif not (play_live and play_live_ex and waiting_room and waiting_room_ex):
+        achievement_panel.add_item(TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+    root.add_item(achievement_panel)
 
-        canvas.add_item(root)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return await canvas.get_img()
@@ -1031,33 +1031,33 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
         root.add_item(column_wrap)
         return root
 
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg())
-        root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg())
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
 
-        header = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8)
-        title_row = HSplit().set_content_align("lb").set_item_align("c").set_sep(8)
-        title_row.add_item(ImageBox(chara_icon, size=(48, 48)))
-        title_row.add_item(TextBox(f"{rqd.character_name} {rqd.title} 任务详览", title_style))
-        header.add_item(title_row)
-        header.add_item(TextBox("普通任务高亮栏为已达成的最近档位，EX任务高亮栏为当前进行中的档位", style2))
-        root.add_item(header)
+    header = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8)
+    title_row = HSplit().set_content_align("lb").set_item_align("c").set_sep(8)
+    title_row.add_item(ImageBox(chara_icon, size=(48, 48)))
+    title_row.add_item(TextBox(f"{rqd.character_name} {rqd.title} 任务详览", title_style))
+    header.add_item(title_row)
+    header.add_item(TextBox("普通任务高亮栏为已达成的最近档位，EX任务高亮栏为当前进行中的档位", style2))
+    root.add_item(header)
 
-        normal_section = next((section for section in rqd.sections if not section.is_ex), None)
-        normal_col_count = None
-        if normal_section is not None:
-            normal_col_count = max(1, math.ceil(len(normal_section.display_rows) / default_chunk_size))
+    normal_section = next((section for section in rqd.sections if not section.is_ex), None)
+    normal_col_count = None
+    if normal_section is not None:
+        normal_col_count = max(1, math.ceil(len(normal_section.display_rows) / default_chunk_size))
 
-        if rqd.sections:
-            for section in rqd.sections:
-                target_col_count = normal_col_count if section.is_ex and normal_col_count else None
-                root.add_item(draw_section_table(section, target_col_count))
-        else:
-            empty_panel = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8).set_bg(roundrect_bg(fill=(255, 255, 255, 120)))
-            empty_panel.add_item(TextBox("没有可显示的任务表数据", style2))
-            root.add_item(empty_panel)
+    if rqd.sections:
+        for section in rqd.sections:
+            target_col_count = normal_col_count if section.is_ex and normal_col_count else None
+            root.add_item(draw_section_table(section, target_col_count))
+    else:
+        empty_panel = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8).set_bg(roundrect_bg(fill=(255, 255, 255, 120)))
+        empty_panel.add_item(TextBox("没有可显示的任务表数据", style2))
+        root.add_item(empty_panel)
 
-        canvas.add_item(root)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return await canvas.get_img()

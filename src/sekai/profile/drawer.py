@@ -1008,21 +1008,21 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     )
     modules = await _build_profile_layout_modules(layout_ctx)
 
-    with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
-        if not vertical:
-            root = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-            right_column = VSplit().set_content_align("c").set_item_align("c").set_sep(16)
-            right_column.add_item(modules["play"])
-            right_column.add_item(modules["growth"])
-            root.add_item(modules["info"])
-            root.add_item(right_column)
-            canvas.add_item(root)
-        else:
-            root = VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_item_bg(ui_bg)
-            for module in modules.values():
-                module.set_bg(None)
-                root.add_item(module)
-            canvas.add_item(root)
+    canvas = Canvas(bg=bg).set_padding(BG_PADDING)
+    if not vertical:
+        root = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+        right_column = VSplit().set_content_align("c").set_item_align("c").set_sep(16)
+        right_column.add_item(modules["play"])
+        right_column.add_item(modules["growth"])
+        root.add_item(modules["info"])
+        root.add_item(right_column)
+        canvas.add_item(root)
+    else:
+        root = VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_item_bg(ui_bg)
+        for module in modules.values():
+            module.set_bg(None)
+            root.add_item(module)
+        canvas.add_item(root)
 
     add_request_watermark(
         canvas,
@@ -1146,9 +1146,9 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     """
     bg_alpha = rqd.bg_alpha if rqd.bg_alpha is not None else 150
 
-    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:
-        row = HSplit().set_content_align("c").set_item_align("c").set_sep(14)
-        for module in await _build_profile_card_modules(rqd):
-            row.add_item(module)
-        f.add_item(row)
+    f = Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16)
+    row = HSplit().set_content_align("c").set_item_align("c").set_sep(14)
+    for module in await _build_profile_card_modules(rqd):
+        row.add_item(module)
+    f.add_item(row)
     return f
