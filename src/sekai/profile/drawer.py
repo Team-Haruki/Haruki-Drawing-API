@@ -1058,52 +1058,48 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
         return None
 
     primary_source = data_sources[0] if data_sources else None
-    identity = VSplit().set_content_align("c").set_item_align("l").set_sep(5)
-    header = HSplit().set_content_align("lb").set_item_align("lb").set_sep(5)
-    hs = colored_text_box(
-        truncate(rqd.profile.nickname, 64),
-        TextStyle(
-            font=DEFAULT_BOLD_FONT,
-            size=24,
-            color=BLACK,
-            use_shadow=True,
-            shadow_offset=2,
-            shadow_color=ADAPTIVE_SHADOW,
-        ),
-    )
-    header.add_item(hs)
-    if rqd.mysekai_level:
-        name_length = 0
-        for item in hs.items:
-            if isinstance(item, TextBox):
-                name_length += get_str_display_length(item.text)
-        ms_lv_text = f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
-        header.add_item(TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK)))
-    identity.add_item(header)
+    with VSplit().set_content_align("c").set_item_align("l").set_sep(5) as identity:
+        with HSplit().set_content_align("lb").set_item_align("lb").set_sep(5):
+            hs = colored_text_box(
+                truncate(rqd.profile.nickname, 64),
+                TextStyle(
+                    font=DEFAULT_BOLD_FONT,
+                    size=24,
+                    color=BLACK,
+                    use_shadow=True,
+                    shadow_offset=2,
+                    shadow_color=ADAPTIVE_SHADOW,
+                ),
+            )
+            if rqd.mysekai_level:
+                name_length = 0
+                for item in hs.items:
+                    if isinstance(item, TextBox):
+                        name_length += get_str_display_length(item.text)
+                ms_lv_text = f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
+                TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
 
-    user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
-    summary_line = f"{rqd.profile.region.upper()}: {user_id}"
-    if len(data_sources) <= 1 and primary_source and primary_source.name:
-        summary_line += f" {primary_source.name}"
-    identity.add_item(TextBox(summary_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)))
+        user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
+        summary_line = f"{rqd.profile.region.upper()}: {user_id}"
+        if len(data_sources) <= 1 and primary_source and primary_source.name:
+            summary_line += f" {primary_source.name}"
+        TextBox(summary_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
 
-    if len(data_sources) <= 1:
-        if primary_source and primary_source.update_time:
-            update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
-            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-            identity.add_item(TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)))
-    else:
-        for data_source in data_sources[:2]:
-            if not data_source.update_time:
-                continue
-            update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
-            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-            identity.add_item(
+        if len(data_sources) <= 1:
+            if primary_source and primary_source.update_time:
+                update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
+                update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
+                TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+        else:
+            for data_source in data_sources[:2]:
+                if not data_source.update_time:
+                    continue
+                update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
+                update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
                 TextBox(
                     f"{_profile_card_data_source_label(data_source.name)}更新时间: {update_time_text}",
                     TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
                 )
-            )
 
     return identity
 
@@ -1146,9 +1142,10 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     """
     bg_alpha = rqd.bg_alpha if rqd.bg_alpha is not None else 150
 
-    f = Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16)
-    row = HSplit().set_content_align("c").set_item_align("c").set_sep(14)
-    for module in await _build_profile_card_modules(rqd):
-        row.add_item(module)
-    f.add_item(row)
+    # Widgets auto-attach to the current active container on construction.
+    # Build the card within nested contexts so the modules attach exactly once
+    # to the inner row instead of being added both implicitly and manually.
+    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:
+        with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
+            await _build_profile_card_modules(rqd)
     return f

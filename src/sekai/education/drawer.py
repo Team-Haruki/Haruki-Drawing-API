@@ -19,6 +19,7 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
+from src.sekai.base.painter import BLACK
 from src.sekai.base.plot import (
     FillBg,
     Frame,
@@ -30,6 +31,7 @@ from src.sekai.base.plot import (
     Spacer,
     TextBox,
     VSplit,
+    Widget,
 )
 from src.sekai.base.utils import get_img_from_path
 from src.sekai.profile.drawer import get_profile_card
@@ -52,11 +54,21 @@ BONUS_ICON_SLOT_W = 44
 BONUS_ICON_SLOT_H = 40
 INFO_PANEL_ROW_ALPHA = 80
 INFO_PANEL_ROW_ALT_ALPHA = 64
+CHARACTER_MISSION_PANEL_ALPHA = 80
+CHARACTER_MISSION_CARD_ALPHA = 80
 
 
 def _info_panel_row_fill(idx: int) -> tuple[int, int, int, int]:
     alpha = INFO_PANEL_ROW_ALPHA if idx % 2 == 0 else INFO_PANEL_ROW_ALT_ALPHA
     return (255, 255, 255, alpha)
+
+
+def _character_mission_panel_bg() -> RoundRectBg:
+    return roundrect_bg(alpha=CHARACTER_MISSION_PANEL_ALPHA)
+
+
+def _character_mission_card_bg() -> RoundRectBg:
+    return roundrect_bg(alpha=CHARACTER_MISSION_CARD_ALPHA)
 
 
 # ========== 挑战Live详情 ==========
@@ -830,7 +842,7 @@ def _draw_character_mission_progress(
 
 
 def _build_character_mission_card(row, card_w: int) -> Widget:
-    frame = Frame().set_w(card_w).set_bg(roundrect_bg(fill=(255, 255, 255, 140))).set_padding((12, 10))
+    frame = Frame().set_w(card_w).set_bg(_character_mission_card_bg()).set_padding((12, 10))
     frame.add_item(
         _draw_character_mission_progress(
             row.title,
@@ -852,7 +864,7 @@ def _build_character_mission_dual_card(
     ex_row,
     card_w: int,
 ) -> Widget:
-    frame = Frame().set_w(card_w).set_bg(roundrect_bg(fill=(255, 255, 255, 155))).set_padding((12, 10))
+    frame = Frame().set_w(card_w).set_bg(_character_mission_card_bg()).set_padding((12, 10))
     content = VSplit().set_content_align("l").set_item_align("l").set_sep(10)
 
     title_frame = Frame().set_w(card_w - 24).set_content_align("c")
@@ -899,11 +911,31 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
     root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
 
-    note_panel = VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_item_bg(roundrect_bg())
-    note_panel.add_item(TextBox("各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数", note_style, use_real_line_count=True).set_padding(12))
+    note_panel = (
+        VSplit()
+        .set_content_align("l")
+        .set_item_align("l")
+        .set_sep(8)
+        .set_padding(12)
+        .set_bg(_character_mission_panel_bg())
+    )
+    note_panel.add_item(
+        TextBox(
+            "各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数",
+            note_style,
+            use_real_line_count=True,
+        )
+    )
     root.add_item(note_panel)
 
-    summary_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    summary_panel = (
+        VSplit()
+        .set_bg(_character_mission_panel_bg())
+        .set_padding(16)
+        .set_sep(12)
+        .set_content_align("lt")
+        .set_item_align("lt")
+    )
     header_row = HSplit().set_content_align("c").set_item_align("c").set_sep(12)
     header_row.add_item(ImageBox(chara_icon, size=(48, 48)))
     header_row.add_item(
@@ -916,7 +948,14 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
     summary_panel.add_item(header_row)
     root.add_item(summary_panel)
 
-    basic_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    basic_panel = (
+        VSplit()
+        .set_bg(_character_mission_panel_bg())
+        .set_padding(16)
+        .set_sep(12)
+        .set_content_align("lt")
+        .set_item_align("lt")
+    )
     basic_panel.add_item(TextBox("基本任务", sub_header_style))
     if rqd.basic_rows:
         for i in range(0, len(rqd.basic_rows), 2):
@@ -931,7 +970,14 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
         basic_panel.add_item(TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
     root.add_item(basic_panel)
 
-    achievement_panel = VSplit().set_bg(roundrect_bg()).set_padding(16).set_sep(12).set_content_align("lt").set_item_align("lt")
+    achievement_panel = (
+        VSplit()
+        .set_bg(_character_mission_panel_bg())
+        .set_padding(16)
+        .set_sep(12)
+        .set_content_align("lt")
+        .set_item_align("lt")
+    )
     achievement_panel.add_item(TextBox("成就", sub_header_style))
     by_type = {row.mission_type: row for row in rqd.achievement_rows}
 
@@ -981,7 +1027,14 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
     default_chunk_size = 40
 
     def draw_section_table(section, target_col_count: int | None = None) -> Widget:
-        root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8).set_bg(roundrect_bg(fill=(255, 255, 255, 120)))
+        root = (
+            VSplit()
+            .set_content_align("lt")
+            .set_item_align("lt")
+            .set_sep(8)
+            .set_padding(8)
+            .set_bg(_character_mission_panel_bg())
+        )
         root.add_item(TextBox("EX任务" if section.is_ex else "普通任务", sub_header_style))
 
         header_row = HSplit().set_content_align("lb").set_item_align("lb").set_sep(8)
@@ -1032,7 +1085,7 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
         return root
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
-    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg())
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(_character_mission_panel_bg())
     root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
 
     header = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8)
@@ -1053,7 +1106,14 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
             target_col_count = normal_col_count if section.is_ex and normal_col_count else None
             root.add_item(draw_section_table(section, target_col_count))
     else:
-        empty_panel = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8).set_bg(roundrect_bg(fill=(255, 255, 255, 120)))
+        empty_panel = (
+            VSplit()
+            .set_content_align("lt")
+            .set_item_align("lt")
+            .set_sep(8)
+            .set_padding(8)
+            .set_bg(_character_mission_panel_bg())
+        )
         empty_panel.add_item(TextBox("没有可显示的任务表数据", style2))
         root.add_item(empty_panel)
 

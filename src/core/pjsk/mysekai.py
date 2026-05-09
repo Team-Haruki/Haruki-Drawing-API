@@ -25,6 +25,7 @@ from src.sekai.mysekai.model import (
 
 router = APIRouter(tags=["MySekai"])
 _perf_logger = logging.getLogger("mysekai.endpoint.perf")
+_logger = logging.getLogger(__name__)
 
 
 @router.post("/resource", summary="Generate MySekai resource image")
@@ -34,6 +35,7 @@ async def mysekai_resource(request: MysekaiResourceRequest):
         image = await compose_mysekai_resource_image(request)
         return await image_to_response(image)
     except Exception as e:
+        _logger.exception("mysekai_resource render failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -55,6 +57,7 @@ async def mysekai_msr_map(request: MysekaiMsrMapRequest):
         )
         return resp
     except Exception as e:
+        _logger.exception("mysekai_msr_map render failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
