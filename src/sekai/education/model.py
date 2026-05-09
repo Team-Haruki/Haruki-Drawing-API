@@ -378,3 +378,78 @@ class LeaderCountRequest(TimeZoneRequest):
     def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
         self.apply_timezone(self.profile)
+
+
+# ========== 角色等级任务 ========== #
+
+
+class CharacterMissionOverviewRow(BaseModel):
+    mission_id: int
+    mission_type: str
+    title: str
+    is_achievement: bool
+    is_ex: bool
+    current: int
+    upper: int | None = None
+    ratio: float
+    next_need: int | None = None
+    next_exp: int | None = None
+    current_round: int | None = None
+    current_round_progress: int | None = None
+    current_round_need: int | None = None
+    ex_display_round_text: str | None = None
+
+
+class CharacterMissionOverviewRequest(TimeZoneRequest):
+    profile: DetailedProfileCardRequest
+    character_id: int
+    character_name: str
+    character_icon_path: str
+    current_level: int
+    current_exp: int
+    pending_exp: int
+    final_level: int
+    final_exp: int
+    basic_rows: list[CharacterMissionOverviewRow]
+    achievement_rows: list[CharacterMissionOverviewRow]
+
+    def model_post_init(self, __context, /) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
+
+
+class CharacterMissionAllTableRow(BaseModel):
+    seq: int
+    requirement: int
+    acc_requirement: int
+    exp: int
+    acc_exp: int
+
+
+class CharacterMissionAllSection(BaseModel):
+    mission_type: str
+    title: str
+    is_ex: bool
+    current_total: int
+    reached_seq: int
+    current_round_no: int | None = None
+    current_round_progress: int | None = None
+    current_round_need: int | None = None
+    upper: int | None = None
+    ratio: float
+    next_need: int | None = None
+    next_exp: int | None = None
+    display_rows: list[CharacterMissionAllTableRow]
+
+
+class CharacterMissionAllRequest(TimeZoneRequest):
+    profile: DetailedProfileCardRequest
+    character_id: int
+    character_name: str
+    character_icon_path: str
+    title: str
+    sections: list[CharacterMissionAllSection]
+
+    def model_post_init(self, __context, /) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)

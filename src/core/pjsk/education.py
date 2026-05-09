@@ -6,6 +6,8 @@ from src.core.utils import image_to_response
 from src.sekai.education.drawer import (
     compose_area_item_upgrade_materials_image,
     compose_bonds_image,
+    compose_character_mission_all_image,
+    compose_character_mission_overview_image,
     compose_challenge_live_detail_image,
     compose_leader_count_image,
     compose_power_bonus_detail_image,
@@ -13,6 +15,8 @@ from src.sekai.education.drawer import (
 from src.sekai.education.model import (
     AreaItemUpgradeMaterialsRequest,
     BondsRequest,
+    CharacterMissionAllRequest,
+    CharacterMissionOverviewRequest,
     ChallengeLiveDetailsRequest,
     LeaderCountRequest,
     PowerBonusDetailRequest,
@@ -89,6 +93,24 @@ async def leader_count(request: LeaderCountRequest):
     """
     try:
         image = await compose_leader_count_image(request)
+        return await image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/character-mission-overview", summary="Generate character mission overview image")
+async def character_mission_overview(request: CharacterMissionOverviewRequest):
+    try:
+        image = await compose_character_mission_overview_image(request)
+        return await image_to_response(image)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/character-mission-all", summary="Generate character mission full table image")
+async def character_mission_all(request: CharacterMissionAllRequest):
+    try:
+        image = await compose_character_mission_all_image(request)
         return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
