@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 
@@ -38,6 +39,7 @@ from src.sekai.base.plot import (
     TextBox,
     TextStyle,
     VSplit,
+    Widget,
     colored_text_box,
 )
 from src.sekai.base.timezone import datetime_from_millis
@@ -54,7 +56,7 @@ from src.sekai.base.utils import (
     run_in_pool,
     truncate,
 )
-from src.sekai.honor.drawer import compose_full_honor_image
+from src.sekai.honor.drawer import HonorRequest, compose_full_honor_image
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -145,11 +147,30 @@ CHARA_ID2NICKNAME = {
 # =========================== 从.model导入数据类型 =========================== #
 
 from .model import (
+    BasicProfile,
     CardFullThumbnailRequest,
+    CharacterRank,
+    MusicClearCount,
+    MultiLiveTopScoreCount,
     ProfileBgSettings,
     ProfileCardRequest,
     ProfileRequest,
+    SoloLiveRank,
 )
+
+
+@dataclass(slots=True)
+class _ProfileLayoutContext:
+    request: ProfileRequest
+    profile: BasicProfile
+    avatar_img: Image.Image
+    ui_bg: RoundRectBg
+    pcards: list[CardFullThumbnailRequest]
+    honors: list[HonorRequest]
+    diff_count: dict[str, dict[str, int]]
+    character_rank: dict[int, int]
+    solo_live: SoloLiveRank | None
+    multi_live: MultiLiveTopScoreCount | None
 
 
 def _compose_card_full_thumbnail_sync(
@@ -401,6 +422,533 @@ def process_hide_uid(is_hide_uid: bool, uid: str, keep: int = 0) -> str:
     return uid
 
 
+def _build_profile_diff_count(music_difficulty_count: list[MusicClearCount]) -> dict[str, dict[str, int]]:
+    diff_count = {diff: {"clear": 0, "fc": 0, "ap": 0} for diff in DIFF_COLORS.keys()}
+    for count in music_difficulty_count:
+        if count.difficulty in diff_count:
+            diff_count[count.difficulty] = {"clear": count.clear, "fc": count.fc, "ap": count.ap}
+    return diff_count
+
+
+def _build_profile_character_rank_lookup(character_ranks: list[CharacterRank]) -> dict[int, int]:
+    rank_lookup = {cid: 1 for _, cid in CHARA_LIST if cid is not None}
+    for crank in character_ranks:
+        rank_lookup[crank.character_id] = crank.rank
+    return rank_lookup
+
+
+async def _render_profile_widget_image(widget: Widget, *, scale: float = 1.0) -> Image.Image:
+    with Canvas().set_padding(0) as canvas:
+        canvas.add_item(widget)
+    return await canvas.get_img(scale)
+
+
+async def _build_cached_profile_module_image(
+    namespace: str,
+    request_payload,
+    build_widget,
+    *,
+    asset_signatures: dict | None = None,
+    extra: dict | None = None,
+    scale: float = 1.0,
+) -> Image.Image:
+    cache_key = build_rendered_image_cache_key(
+        namespace,
+        request_payload,
+        asset_signatures=asset_signatures,
+        extra=extra or {"version": 1},
+    )
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+    disk_cached = get_composed_image_disk_cached(namespace, cache_key)
+    if disk_cached is not None:
+        put_composed_image_cache(cache_key, disk_cached)
+        return disk_cached
+
+    widget = await build_widget()
+    image = await _render_profile_widget_image(widget, scale=scale)
+    put_composed_image_cache(cache_key, image)
+    put_composed_image_disk_cache(namespace, cache_key, image)
+    return image
+
+
+def _build_cached_profile_module_widget(image: Image.Image) -> Widget:
+    return ImageBox(image, image_size_mode="original", use_alpha_blend=True)
+
+
+async def _build_profile_avatar_module(ctx: _ProfileLayoutContext) -> Widget:
+    return await get_avatar_widget_with_frame(
+        is_frame=bool(ctx.request.profile.has_frame),
+        frame_paths=ctx.request.frame_paths,
+        avatar_img=ctx.avatar_img,
+        avatar_w=128,
+        frame_data=[],
+    )
+
+
+def _build_profile_identity_text_module(ctx: _ProfileLayoutContext) -> Widget:
+    profile = ctx.profile
+    request = ctx.request
+    text_col = VSplit().set_content_align("c").set_item_align("l").set_sep(16)
+    text_col.add_item(
+        colored_text_box(
+            truncate(request.profile.nickname, 64),
+            TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=ADAPTIVE_WB, use_shadow=True, shadow_offset=2),
+        )
+    )
+    text_col.add_item(
+        TextBox(
+            f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}",
+            TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
+        )
+    )
+    return text_col
+
+
+async def _build_profile_rank_badge_module(ctx: _ProfileLayoutContext) -> Widget:
+    lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, ctx.request.lv_rank_bg_path)
+    badge_w = 180
+    badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
+    number_box_x = 104
+    number_box_w = max(48, badge_w - number_box_x - 10)
+
+    badge = Frame().set_size((badge_w, badge_h))
+    badge.add_item(ImageBox(lv_rank_bg, size=(badge_w, badge_h)))
+    badge.add_item(
+        (
+            TextBox(
+                f"{ctx.request.rank}",
+                TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
+            )
+            .set_size((number_box_w, badge_h))
+            .set_padding(0)
+            .set_wrap(False)
+            .set_content_align("c")
+            .set_offset((number_box_x, 0))
+        )
+    )
+    return badge
+
+
+async def _build_profile_identity_module(ctx: _ProfileLayoutContext) -> Widget:
+    async def _build_identity_widget() -> Widget:
+        avatar_module, rank_badge_module = await asyncio.gather(
+            _build_profile_avatar_module(ctx),
+            _build_profile_rank_badge_module(ctx),
+        )
+        root = HSplit().set_content_align("c").set_item_align("c").set_sep(32).set_padding((32, 0))
+        root.add_item(avatar_module)
+        text_col = _build_profile_identity_text_module(ctx)
+        text_col.add_item(rank_badge_module)
+        root.add_item(text_col)
+        return root
+
+    asset_signatures = {
+        "leader": get_image_asset_signature(ASSETS_BASE_DIR, ctx.profile.leader_image_path),
+        "lv_rank_bg": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.lv_rank_bg_path),
+    }
+    if ctx.request.frame_paths is not None:
+        asset_signatures["frame_base"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.base)
+        asset_signatures["frame_centertop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.centertop)
+        asset_signatures["frame_leftbottom"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.leftbottom)
+        asset_signatures["frame_lefttop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.lefttop)
+        asset_signatures["frame_rightbottom"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.rightbottom)
+        asset_signatures["frame_righttop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.righttop)
+
+    image = await _build_cached_profile_module_image(
+        "profile_identity_module",
+        {
+            "profile": ctx.profile,
+            "rank": ctx.request.rank,
+            "frame_paths": ctx.request.frame_paths,
+        },
+        _build_identity_widget,
+        asset_signatures=asset_signatures,
+    )
+    return _build_cached_profile_module_widget(image)
+
+
+async def _build_profile_twitter_module(ctx: _ProfileLayoutContext) -> Widget:
+    root = Frame().set_content_align("l").set_w(450)
+    root.add_item(
+        (
+            TextBox(
+                "        @ " + ctx.request.twitter_id,
+                TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
+                line_count=1,
+            )
+            .set_wrap(False)
+            .set_bg(ctx.ui_bg)
+            .set_line_sep(2)
+            .set_padding(10)
+            .set_w(300)
+            .set_content_align("l")
+        )
+    )
+    x_icon = await get_img_resized(ASSETS_BASE_DIR, ctx.request.x_icon_path, 24, 24)
+    root.add_item(ImageBox(x_icon.convert("RGBA"), image_size_mode="original").set_offset((16, 0)))
+    return root
+
+
+def _build_profile_word_module(ctx: _ProfileLayoutContext) -> Widget:
+    return (
+        ColoredTextBox(
+            ctx.request.word,
+            TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
+            line_count=3,
+        )
+        .set_wrap(True)
+        .set_bg(ctx.ui_bg)
+        .set_line_sep(2)
+        .set_padding((18, 16))
+        .set_w(450)
+    )
+
+
+async def _build_profile_honor_module(ctx: _ProfileLayoutContext) -> Widget:
+    async def _build_honor_widget() -> Widget:
+        root = HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0))
+        honor_imgs = await asyncio.gather(*[compose_full_honor_image(honor) for honor in ctx.honors], return_exceptions=True)
+        for img in honor_imgs:
+            if isinstance(img, Exception):
+                logger.warning("skip broken honor asset in profile image: %s", img)
+                continue
+            if img:
+                root.add_item(ImageBox(img, size=(None, 48), shadow=True))
+        return root
+
+    image = await _build_cached_profile_module_image(
+        "profile_honor_module",
+        {"honors": ctx.honors},
+        _build_honor_widget,
+        extra={"version": 1},
+    )
+    return _build_cached_profile_module_widget(image)
+
+
+async def _build_profile_cards_module(ctx: _ProfileLayoutContext) -> Widget:
+    async def _build_cards_widget() -> Widget:
+        root = HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0))
+        _t0 = time.perf_counter()
+        card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in ctx.pcards])
+        logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(ctx.pcards), time.perf_counter() - _t0)
+        for card_img in card_imgs:
+            root.add_item(ImageBox(card_img, size=(90, 90), image_size_mode="fill", shadow=True))
+        return root
+
+    image = await _build_cached_profile_module_image(
+        "profile_cards_module",
+        {"pcards": ctx.pcards},
+        _build_cards_widget,
+        extra={"version": 1},
+    )
+    return _build_cached_profile_module_widget(image)
+
+
+async def _build_profile_info_panel(ctx: _ProfileLayoutContext) -> Widget:
+    identity_module, twitter_module, honor_module, cards_module = await asyncio.gather(
+        _build_profile_identity_module(ctx),
+        _build_profile_twitter_module(ctx),
+        _build_profile_honor_module(ctx),
+        _build_profile_cards_module(ctx),
+    )
+
+    root = VSplit().set_bg(ctx.ui_bg).set_content_align("c").set_item_align("c").set_sep(32).set_padding((32, 35))
+    root.add_item(identity_module)
+    root.add_item(twitter_module)
+    root.add_item(_build_profile_word_module(ctx))
+    root.add_item(honor_module)
+    root.add_item(cards_module)
+    return root
+
+
+async def _build_profile_play_icon_module(ctx: _ProfileLayoutContext) -> Widget:
+    gh = 25
+    vs = 12
+    icon_column = VSplit().set_sep(vs)
+    icon_column.add_item(Spacer(gh, gh))
+    _t0 = time.perf_counter()
+    icon_clear, icon_fc, icon_ap = await asyncio.gather(
+        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_clear_path),
+        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_fc_path),
+        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_ap_path),
+    )
+    logger.debug("[perf] draw_play play icons 3: %.3fs", time.perf_counter() - _t0)
+    icon_column.add_item(ImageBox(icon_clear, size=(gh, gh)))
+    icon_column.add_item(ImageBox(icon_fc, size=(gh, gh)))
+    icon_column.add_item(ImageBox(icon_ap, size=(gh, gh)))
+    return icon_column
+
+
+def _build_profile_play_grid_module(ctx: _ProfileLayoutContext) -> Widget:
+    hs, vs, gw, gh = 8, 12, 90, 25
+    grid = Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs)
+    for diff, color in DIFF_COLORS.items():
+        grid.add_item(
+            TextBox(diff.upper(), TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=WHITE))
+            .set_bg(RoundRectBg(fill=color, radius=3))
+            .set_size((gw, gh))
+            .set_content_align("c")
+        )
+
+    for result_name in ["clear", "fc", "ap"]:
+        for column, diff in enumerate(DIFF_COLORS.keys()):
+            bg_color = (255, 255, 255, 150) if column % 2 == 0 else (255, 255, 255, 100)
+            count = ctx.diff_count[diff][result_name]
+            grid.add_item(
+                TextBox(
+                    str(count),
+                    TextStyle(
+                        DEFAULT_FONT,
+                        20,
+                        PLAY_RESULT_COLORS["not_clear"],
+                        use_shadow=True,
+                        shadow_color=PLAY_RESULT_COLORS[result_name],
+                        shadow_offset=1,
+                    ),
+                )
+                .set_bg(RoundRectBg(fill=bg_color, radius=3))
+                .set_size((gw, gh))
+                .set_content_align("c")
+            )
+    return grid
+
+
+async def _build_profile_play_content_module(ctx: _ProfileLayoutContext) -> Widget:
+    icon_module = await _build_profile_play_icon_module(ctx)
+    root = HSplit().set_content_align("c").set_item_align("t").set_sep(12)
+    root.add_item(icon_module)
+    root.add_item(_build_profile_play_grid_module(ctx))
+    return root
+
+
+async def _build_profile_play_panel(ctx: _ProfileLayoutContext) -> Widget:
+    image = await _build_cached_profile_module_image(
+        "profile_play_module",
+        {
+            "diff_count": ctx.diff_count,
+            "icon_clear_path": ctx.request.icon_clear_path,
+            "icon_fc_path": ctx.request.icon_fc_path,
+            "icon_ap_path": ctx.request.icon_ap_path,
+        },
+        lambda: _build_profile_play_content_module(ctx),
+        asset_signatures={
+            "icon_clear": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_clear_path),
+            "icon_fc": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_fc_path),
+            "icon_ap": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_ap_path),
+        },
+        extra={"version": 1},
+    )
+    root = HSplit().set_content_align("c").set_item_align("t").set_sep(12).set_bg(ctx.ui_bg).set_padding(32)
+    root.add_item(_build_cached_profile_module_widget(image))
+    return root
+
+
+async def _preload_profile_chara_icons(ctx: _ProfileLayoutContext) -> dict[str, Image.Image]:
+    chara_map = ctx.request.chara_rank_icon_path_map
+    chara_paths: dict[str, str] = {}
+    for chara, cid in CHARA_LIST:
+        if chara is None:
+            continue
+        path = chara_map.get(cid) or chara_map.get(str(cid))
+        if path and path not in chara_paths:
+            chara_paths[path] = path
+    if ctx.solo_live is not None:
+        solo_path = chara_map.get(ctx.solo_live.character_id) or chara_map.get(str(ctx.solo_live.character_id))
+        if solo_path and solo_path not in chara_paths:
+            chara_paths[solo_path] = solo_path
+    ordered_paths = list(chara_paths.keys())
+    _t0 = time.perf_counter()
+    images = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, path) for path in ordered_paths]) if ordered_paths else []
+    logger.debug("[perf] draw_chara chara icons %d: %.3fs", len(ordered_paths), time.perf_counter() - _t0)
+    return dict(zip(ordered_paths, images))
+
+
+def _build_profile_stats_badge(text: str, *, font_size: int = 18, width: int | None = None) -> Widget:
+    badge = (
+        TextBox(
+            text,
+            TextStyle(font=DEFAULT_FONT, size=font_size, color=(50, 50, 50, 255)),
+        )
+        .set_bg(roundrect_bg(radius=6, alpha=80))
+        .set_padding((10, 7))
+        .set_content_align("c")
+    )
+    if width is not None:
+        badge.set_w(width)
+    return badge
+
+
+def _profile_stats_badge_width(text: str, *, font_size: int = 18) -> int:
+    return get_text_size(get_font(DEFAULT_FONT, font_size), text)[0] + 20
+
+
+def _build_profile_character_grid_module(ctx: _ProfileLayoutContext, chara_icon_cache: dict[str, Image.Image]) -> Widget:
+    chara_map = ctx.request.chara_rank_icon_path_map
+    grid = Grid(col_count=6).set_sep(h_sep=8, v_sep=7).set_padding(32)
+    for chara, cid in CHARA_LIST:
+        if chara is None:
+            grid.add_item(Spacer(96, 48))
+            continue
+        rank = ctx.character_rank[cid]
+        c_rank_path = chara_map.get(cid) or chara_map.get(str(cid))
+        if not c_rank_path:
+            grid.add_item(Spacer(96, 48))
+            continue
+
+        chara_frame = Frame().set_size((96, 48))
+        chara_frame.add_item(ImageBox(chara_icon_cache[c_rank_path], size=(96, 48), use_alpha_blend=True))
+        chara_frame.add_item(
+            TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
+            .set_size((60, 48))
+            .set_content_align("c")
+            .set_offset((36, 4))
+        )
+        grid.add_item(chara_frame)
+    return grid
+
+
+def _build_profile_multi_live_module(side_panel_w: int | None, multi_live: MultiLiveTopScoreCount, stats_w: int) -> Widget:
+    module = VSplit().set_content_align("c").set_item_align("c").set_padding((32, 16)).set_sep(10).set_offset((0, -16))
+    if side_panel_w is not None:
+        module.set_w(side_panel_w)
+    module.add_item(_build_profile_stats_badge("MULTI LIVE"))
+    module.add_item(_build_profile_stats_badge(f"MVP {multi_live.mvp}次", width=stats_w))
+    module.add_item(_build_profile_stats_badge(f"SUPERSTAR {multi_live.super_star}次", font_size=17, width=stats_w))
+    return module
+
+
+def _build_profile_solo_live_module(
+    ctx: _ProfileLayoutContext,
+    chara_icon_cache: dict[str, Image.Image],
+    side_panel_w: int | None,
+    stats_score_w: int | None,
+    solo_live_offset_y: int,
+) -> Widget:
+    solo_live = ctx.solo_live
+    chara_map = ctx.request.chara_rank_icon_path_map
+
+    module = VSplit().set_content_align("c").set_item_align("c").set_padding((32, 64)).set_sep(12)
+    if side_panel_w is not None:
+        module.set_w(side_panel_w)
+    if solo_live_offset_y != 0:
+        module.set_offset((0, solo_live_offset_y))
+
+    module.add_item(_build_profile_stats_badge("CHALLENGE LIVE"))
+    chara_frame = Frame()
+    c_rank_path = chara_map.get(solo_live.character_id) or chara_map.get(str(solo_live.character_id))
+    if c_rank_path:
+        chara_frame.add_item(ImageBox(chara_icon_cache[c_rank_path], size=(100, 50), use_alpha_blend=True))
+    else:
+        chara_frame.add_item(Spacer(100, 50))
+    chara_frame.add_item(
+        TextBox(
+            str(solo_live.rank),
+            TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
+            overflow="clip",
+        )
+        .set_size((50, 50))
+        .set_content_align("c")
+        .set_offset((40, 5))
+    )
+    module.add_item(chara_frame)
+    module.add_item(_build_profile_stats_badge(f"SCORE {solo_live.score}", font_size=18, width=stats_score_w))
+    return module
+
+
+async def _build_profile_growth_content_module(ctx: _ProfileLayoutContext) -> Widget:
+    chara_icon_cache = await _preload_profile_chara_icons(ctx)
+    root = Frame().set_content_align("rb")
+    root.add_item(_build_profile_character_grid_module(ctx, chara_icon_cache))
+
+    solo_live_score_w = None
+    side_panel_w = None
+    side_panel_content_w = 0
+
+    if ctx.solo_live is not None:
+        solo_live_content_w = max(
+            _profile_stats_badge_width("CHALLENGE LIVE"),
+            100,
+            _profile_stats_badge_width(f"SCORE {ctx.solo_live.score}"),
+        )
+        solo_live_score_w = _profile_stats_badge_width(f"SCORE {ctx.solo_live.score}")
+        side_panel_content_w = max(side_panel_content_w, solo_live_content_w)
+
+    multi_live_widget = None
+    if ctx.multi_live is not None:
+        multi_live_stats_w = max(
+            solo_live_score_w or 0,
+            _profile_stats_badge_width(f"MVP {ctx.multi_live.mvp}次"),
+            _profile_stats_badge_width(f"SUPERSTAR {ctx.multi_live.super_star}次", font_size=17),
+        )
+        multi_live_content_w = max(
+            _profile_stats_badge_width("MULTI LIVE"),
+            multi_live_stats_w,
+        )
+        side_panel_content_w = max(side_panel_content_w, multi_live_content_w)
+        side_panel_w = side_panel_content_w + 64
+        multi_live_widget = _build_profile_multi_live_module(side_panel_w, ctx.multi_live, multi_live_stats_w)
+        root.add_item(multi_live_widget)
+    elif side_panel_content_w > 0:
+        side_panel_w = side_panel_content_w + 64
+
+    if ctx.solo_live is not None:
+        solo_live_offset_y = -16
+        if multi_live_widget is not None:
+            multi_live_widget_h = multi_live_widget._get_self_size()[1]
+            solo_live_offset_y -= max(0, multi_live_widget_h - 16 + 12 - 64)
+        root.add_item(
+            _build_profile_solo_live_module(
+                ctx,
+                chara_icon_cache,
+                side_panel_w,
+                solo_live_score_w,
+                solo_live_offset_y,
+            )
+        )
+
+    return root
+
+
+async def _build_profile_growth_panel(ctx: _ProfileLayoutContext) -> Widget:
+    chara_asset_signatures = {}
+    for key, path in sorted((ctx.request.chara_rank_icon_path_map or {}).items(), key=lambda item: str(item[0])):
+        if path:
+            chara_asset_signatures[f"chara::{key}"] = get_image_asset_signature(ASSETS_BASE_DIR, path)
+
+    image = await _build_cached_profile_module_image(
+        "profile_growth_module",
+        {
+            "character_rank": ctx.character_rank,
+            "solo_live": ctx.solo_live,
+            "multi_live": ctx.multi_live,
+            "chara_rank_icon_path_map": ctx.request.chara_rank_icon_path_map,
+        },
+        lambda: _build_profile_growth_content_module(ctx),
+        asset_signatures=chara_asset_signatures,
+        extra={"version": 1},
+    )
+    root = Frame().set_content_align("rb").set_bg(ctx.ui_bg)
+    root.add_item(_build_cached_profile_module_widget(image))
+    return root
+
+
+async def _build_profile_layout_modules(ctx: _ProfileLayoutContext) -> dict[str, Widget]:
+    # Visible rounded panels are treated as the top-level profile modules so
+    # future feature work can target one panel at a time.
+    info_module, play_module, growth_module = await asyncio.gather(
+        _build_profile_info_panel(ctx),
+        _build_profile_play_panel(ctx),
+        _build_profile_growth_panel(ctx),
+    )
+    return {
+        "info": info_module,
+        "play": play_module,
+        "growth": growth_module,
+    }
+
+
 async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     r"""compose_profile_image
 
@@ -436,297 +984,45 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
     )
     # 称号
     honors = rqd.honors
-    # 歌曲完成情况
-    diff_count = {diff: {"clear": 0, "fc": 0, "ap": 0} for diff in DIFF_COLORS.keys()}
-    for count in rqd.music_difficulty_count:
-        if count.difficulty in diff_count:
-            diff_count[count.difficulty] = {"clear": count.clear, "fc": count.fc, "ap": count.ap}
-    # 角色等级
-    character_rank = {cid: 1 for _, cid in CHARA_LIST if cid is not None}
-    for crank in rqd.character_rank:
-        character_rank[crank.character_id] = crank.rank
+    # 歌曲完成情况 / 角色等级
+    diff_count = _build_profile_diff_count(rqd.music_difficulty_count)
+    character_rank = _build_profile_character_rank_lookup(rqd.character_rank)
 
     # 挑战live等级
     solo_live = rqd.solo_live
     # 多人live统计
     multi_live = rqd.multi_live
 
-    # 个人信息部分
-    async def draw_info():
-        with VSplit().set_bg(ui_bg).set_content_align("c").set_item_align("c").set_sep(32).set_padding((32, 35)) as ret:
-            # 名片
-            with HSplit().set_content_align("c").set_item_align("c").set_sep(32).set_padding((32, 0)):
-                has_frame = rqd.profile.has_frame
-                avatar_widget = await get_avatar_widget_with_frame(  # noqa: F841
-                    is_frame=bool(has_frame),
-                    frame_paths=rqd.frame_paths,
-                    avatar_img=avatar_img,
-                    avatar_w=128,
-                    frame_data=[],
-                )
-                with VSplit().set_content_align("c").set_item_align("l").set_sep(16):
-                    colored_text_box(
-                        truncate(rqd.profile.nickname, 64),
-                        TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=ADAPTIVE_WB, use_shadow=True, shadow_offset=2),
-                    )
-                    TextBox(
-                        f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}",
-                        TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
-                    )
-                    lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, rqd.lv_rank_bg_path)
-                    badge_w = 180
-                    badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
-                    number_box_x = 104
-                    number_box_w = max(48, badge_w - number_box_x - 10)
-                    with Frame().set_size((badge_w, badge_h)):
-                        ImageBox(lv_rank_bg, size=(badge_w, badge_h))
-                        (
-                            TextBox(
-                                f"{rqd.rank}",
-                                TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
-                            )
-                            .set_size((number_box_w, badge_h))
-                            .set_padding(0)
-                            .set_wrap(False)
-                            .set_content_align("c")
-                            .set_offset((number_box_x, 0))
-                        )
-
-            # 推特
-            with Frame().set_content_align("l").set_w(450):
-                tw_id = rqd.twitter_id
-                tw_id_box = TextBox(
-                    "        @ " + tw_id, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=1
-                )
-                tw_id_box.set_wrap(False).set_bg(ui_bg).set_line_sep(2).set_padding(10).set_w(300).set_content_align(
-                    "l"
-                )
-                x_icon = await get_img_resized(ASSETS_BASE_DIR, rqd.x_icon_path, 24, 24)
-                x_icon = x_icon.convert("RGBA")
-                ImageBox(x_icon, image_size_mode="original").set_offset((16, 0))
-
-            # 留言
-            user_word = rqd.word
-            user_word_box = ColoredTextBox(
-                user_word, TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB), line_count=3
-            )
-            user_word_box.set_wrap(True).set_bg(ui_bg).set_line_sep(2).set_padding((18, 16)).set_w(450)
-
-            # 头衔
-            with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0)):
-                honor_imgs = await asyncio.gather(
-                    *[compose_full_honor_image(honor) for honor in honors], return_exceptions=True
-                )
-                for img in honor_imgs:
-                    if isinstance(img, Exception):
-                        logger.warning("skip broken honor asset in profile image: %s", img)
-                        continue
-                    if img:
-                        ImageBox(img, size=(None, 48), shadow=True)
-            # 卡组
-            with HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0)):
-                _t0 = time.perf_counter()
-                card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in pcards])
-                logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(pcards), time.perf_counter() - _t0)
-                for i in range(len(card_imgs)):
-                    ImageBox(card_imgs[i], size=(90, 90), image_size_mode="fill", shadow=True)
-        return ret
-
-    # 打歌部分
-    async def draw_play():
-        with HSplit().set_content_align("c").set_item_align("t").set_sep(12).set_bg(ui_bg).set_padding(32) as ret:
-            hs, vs, gw, gh = 8, 12, 90, 25
-            with VSplit().set_sep(vs):
-                Spacer(gh, gh)
-                _t0 = time.perf_counter()
-                icon_clear, icon_fc, icon_ap = await asyncio.gather(
-                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_clear_path),
-                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_fc_path),
-                    get_img_from_path(ASSETS_BASE_DIR, rqd.icon_ap_path),
-                )
-                logger.debug("[perf] draw_play play icons 3: %.3fs", time.perf_counter() - _t0)
-                ImageBox(icon_clear, size=(gh, gh))
-                ImageBox(icon_fc, size=(gh, gh))
-                ImageBox(icon_ap, size=(gh, gh))
-            with Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs):
-                for diff, color in DIFF_COLORS.items():
-                    t = TextBox(diff.upper(), TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=WHITE))
-                    t.set_bg(RoundRectBg(fill=color, radius=3)).set_size((gw, gh)).set_content_align("c")
-
-                play_result = ["clear", "fc", "ap"]
-                for i, score in enumerate(play_result):
-                    for j, diff in enumerate(DIFF_COLORS.keys()):
-                        bg_color = (255, 255, 255, 150) if j % 2 == 0 else (255, 255, 255, 100)
-                        count = diff_count[diff][score]
-                        TextBox(
-                            str(count),
-                            TextStyle(
-                                DEFAULT_FONT,
-                                20,
-                                PLAY_RESULT_COLORS["not_clear"],
-                                use_shadow=True,
-                                shadow_color=PLAY_RESULT_COLORS[play_result[i]],
-                                shadow_offset=1,
-                            ),
-                        ).set_bg(RoundRectBg(fill=bg_color, radius=3)).set_size((gw, gh)).set_content_align("c")
-        return ret
-
-    # 养成部分
-    async def draw_chara():
-        # 预加载所有角色等级图标（并行）
-        chara_map = rqd.chara_rank_icon_path_map
-        _chara_paths: dict[str, str] = {}
-        for chara, cid in CHARA_LIST:
-            if chara is None:
-                continue
-            p = chara_map.get(cid) or chara_map.get(str(cid))
-            if p and p not in _chara_paths:
-                _chara_paths[p] = p
-        if solo_live is not None:
-            scid = solo_live.character_id
-            p = chara_map.get(scid) or chara_map.get(str(scid))
-            if p and p not in _chara_paths:
-                _chara_paths[p] = p
-        _cp_list = list(_chara_paths.keys())
-        _t0 = time.perf_counter()
-        _cp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, p) for p in _cp_list]) if _cp_list else []
-        logger.debug("[perf] draw_chara chara icons %d: %.3fs", len(_cp_list), time.perf_counter() - _t0)
-        _chara_icon_cache = dict(zip(_cp_list, _cp_imgs))
-
-        with Frame().set_content_align("rb").set_bg(ui_bg) as ret:
-            hs, vs, gw, gh = 8, 7, 96, 48
-
-            def stats_badge(text: str, *, font_size: int = 18, width: int | None = None):
-                badge = (
-                    TextBox(
-                        text,
-                        TextStyle(font=DEFAULT_FONT, size=font_size, color=(50, 50, 50, 255)),
-                    )
-                    .set_bg(roundrect_bg(radius=6, alpha=80))
-                    .set_padding((10, 7))
-                    .set_content_align("c")
-                )
-                if width is not None:
-                    badge.set_w(width)
-                return badge
-
-            def stats_badge_width(text: str, *, font_size: int = 18):
-                return get_text_size(get_font(DEFAULT_FONT, font_size), text)[0] + 20
-
-            # 角色等级
-            with Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs).set_padding(32):
-                for chara, cid in CHARA_LIST:
-                    if chara is None:
-                        Spacer(gw, gh)
-                        continue
-                    rank = character_rank[cid]
-                    with Frame().set_size((gw, gh)):
-                        c_rank_path = chara_map.get(cid) or chara_map.get(str(cid))
-                        if not c_rank_path:
-                            Spacer(gw, gh)
-                            continue
-                        chara_img = _chara_icon_cache[c_rank_path]
-                        ImageBox(chara_img, size=(gw, gh), use_alpha_blend=True)
-                        t = TextBox(str(rank), TextStyle(font=DEFAULT_FONT, size=20, color=(40, 40, 40, 255)))
-                        t.set_size((60, 48)).set_content_align("c").set_offset((36, 4))
-
-            multi_live_widget = None
-            multi_live_padding_v = 16
-            side_panel_offset_y = -16
-            solo_live_score_w = None
-            side_panel_w = None
-            side_panel_content_w = 0
-
-            if solo_live is not None:
-                solo_live_content_w = max(
-                    stats_badge_width("CHALLENGE LIVE"),
-                    100,
-                    stats_badge_width(f"SCORE {solo_live.score}"),
-                )
-                solo_live_score_w = stats_badge_width(f"SCORE {solo_live.score}")
-                side_panel_content_w = max(side_panel_content_w, solo_live_content_w)
-
-            if multi_live is not None:
-                multi_live_stats_w = max(
-                    solo_live_score_w or 0,
-                    stats_badge_width(f"MVP {multi_live.mvp}次"),
-                    stats_badge_width(f"SUPERSTAR {multi_live.super_star}次", font_size=17),
-                )
-                multi_live_content_w = max(
-                    stats_badge_width("MULTI LIVE"),
-                    multi_live_stats_w,
-                )
-                side_panel_content_w = max(side_panel_content_w, multi_live_content_w)
-
-            if side_panel_content_w > 0:
-                side_panel_w = side_panel_content_w + 64
-
-            if multi_live is not None:
-                multi_live_container = (
-                    VSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_padding((32, multi_live_padding_v))
-                    .set_sep(10)
-                )
-                if side_panel_w is not None:
-                    multi_live_container.set_w(side_panel_w)
-                multi_live_container.set_offset((0, side_panel_offset_y))
-                with multi_live_container as multi_live_widget:
-                    stats_badge("MULTI LIVE")
-                    stats_badge(f"MVP {multi_live.mvp}次", width=multi_live_stats_w)
-                    stats_badge(f"SUPERSTAR {multi_live.super_star}次", font_size=17, width=multi_live_stats_w)
-
-            if solo_live is not None:
-                solo_live_padding_v = 64
-                solo_live_offset_y = side_panel_offset_y
-                if multi_live_widget is not None:
-                    multi_live_widget_h = multi_live_widget._get_self_size()[1]
-                    solo_live_offset_y -= max(0, multi_live_widget_h - multi_live_padding_v + 12 - solo_live_padding_v)
-                solo_live_container = (
-                    VSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_padding((32, solo_live_padding_v))
-                    .set_sep(12)
-                )
-                if side_panel_w is not None:
-                    solo_live_container.set_w(side_panel_w)
-                if solo_live_offset_y != 0:
-                    solo_live_container.set_offset((0, solo_live_offset_y))
-                with solo_live_container:
-                    stats_badge("CHALLENGE LIVE")
-                    with Frame():
-                        scid = solo_live.character_id
-                        c_rank_path = chara_map.get(scid) or chara_map.get(str(scid))
-                        if c_rank_path:
-                            chara_img = _chara_icon_cache[c_rank_path]
-                            ImageBox(chara_img, size=(100, 50), use_alpha_blend=True)
-                        else:
-                            Spacer(100, 50)
-                        t = TextBox(
-                            str(solo_live.rank),
-                            TextStyle(font=DEFAULT_FONT, size=22, color=(40, 40, 40, 255)),
-                            overflow="clip",
-                        )
-                        t.set_size((50, 50)).set_content_align("c").set_offset((40, 5))
-                    stats_badge(f"SCORE {solo_live.score}", font_size=18)
-        return ret
-
     vertical = bg_settings.vertical
+    layout_ctx = _ProfileLayoutContext(
+        request=rqd,
+        profile=profile,
+        avatar_img=avatar_img,
+        ui_bg=ui_bg,
+        pcards=pcards,
+        honors=honors,
+        diff_count=diff_count,
+        character_rank=character_rank,
+        solo_live=solo_live,
+        multi_live=multi_live,
+    )
+    modules = await _build_profile_layout_modules(layout_ctx)
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         if not vertical:
-            with HSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-                await draw_info()
-                with VSplit().set_content_align("c").set_item_align("c").set_sep(16):
-                    await draw_play()
-                    await draw_chara()
+            root = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+            right_column = VSplit().set_content_align("c").set_item_align("c").set_sep(16)
+            right_column.add_item(modules["play"])
+            right_column.add_item(modules["growth"])
+            root.add_item(modules["info"])
+            root.add_item(right_column)
+            canvas.add_item(root)
         else:
-            with VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_item_bg(ui_bg):
-                (await draw_info()).set_bg(None)
-                (await draw_play()).set_bg(None)
-                (await draw_chara()).set_bg(None)
+            root = VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_item_bg(ui_bg)
+            for module in modules.values():
+                module.set_bg(None)
+                root.add_item(module)
+            canvas.add_item(root)
 
     add_request_watermark(
         canvas,
@@ -734,6 +1030,104 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
         extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
     )
     return await canvas.get_img(1.5)
+
+
+def _profile_card_data_source_label(name: str | None) -> str:
+    if not name:
+        return "数据"
+    if name.endswith("数据"):
+        return name[:-2]
+    return name
+
+
+async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget | None:
+    if not rqd.profile:
+        return None
+    avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
+    return await get_avatar_widget_with_frame(
+        is_frame=bool(rqd.profile.has_frame),
+        frame_paths=None,
+        avatar_img=avatar_img,
+        avatar_w=80,
+        frame_data=[],
+    )
+
+
+def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: list) -> Widget | None:
+    if not rqd.profile:
+        return None
+
+    primary_source = data_sources[0] if data_sources else None
+    identity = VSplit().set_content_align("c").set_item_align("l").set_sep(5)
+    header = HSplit().set_content_align("lb").set_item_align("lb").set_sep(5)
+    hs = colored_text_box(
+        truncate(rqd.profile.nickname, 64),
+        TextStyle(
+            font=DEFAULT_BOLD_FONT,
+            size=24,
+            color=BLACK,
+            use_shadow=True,
+            shadow_offset=2,
+            shadow_color=ADAPTIVE_SHADOW,
+        ),
+    )
+    header.add_item(hs)
+    if rqd.mysekai_level:
+        name_length = 0
+        for item in hs.items:
+            if isinstance(item, TextBox):
+                name_length += get_str_display_length(item.text)
+        ms_lv_text = f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
+        header.add_item(TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK)))
+    identity.add_item(header)
+
+    user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
+    summary_line = f"{rqd.profile.region.upper()}: {user_id}"
+    if len(data_sources) <= 1 and primary_source and primary_source.name:
+        summary_line += f" {primary_source.name}"
+    identity.add_item(TextBox(summary_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)))
+
+    if len(data_sources) <= 1:
+        if primary_source and primary_source.update_time:
+            update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
+            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
+            identity.add_item(TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)))
+    else:
+        for data_source in data_sources[:2]:
+            if not data_source.update_time:
+                continue
+            update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
+            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
+            identity.add_item(
+                TextBox(
+                    f"{_profile_card_data_source_label(data_source.name)}更新时间: {update_time_text}",
+                    TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
+                )
+            )
+
+    return identity
+
+
+def _build_profile_card_error_module(rqd: ProfileCardRequest) -> Widget | None:
+    if not rqd.error_message:
+        return None
+    return TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)
+
+
+async def _build_profile_card_modules(rqd: ProfileCardRequest) -> list[Widget]:
+    data_sources = [item for item in rqd.data_sources if item]
+    avatar_module = await _build_profile_card_avatar_module(rqd)
+    identity_module = _build_profile_card_identity_module(rqd, data_sources)
+    error_module = _build_profile_card_error_module(rqd)
+
+    modules: list[Widget] = []
+    if avatar_module is not None:
+        modules.append(avatar_module)
+    if identity_module is not None:
+        modules.append(identity_module)
+    if error_module is not None:
+        modules.append(error_module)
+    return modules
 
 
 # 获取玩家个人信息的简单卡片控件
@@ -752,77 +1146,9 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     """
     bg_alpha = rqd.bg_alpha if rqd.bg_alpha is not None else 150
 
-    def data_source_label(name: str | None) -> str:
-        if not name:
-            return "数据"
-        if name.endswith("数据"):
-            return name[:-2]
-        return name
-
     with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:
-        with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
-            # 个人信息
-            if rqd.profile:
-                # 框
-                has_frame = rqd.profile.has_frame
-                avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
-                # 头像
-                avatar_widget = await get_avatar_widget_with_frame(  # noqa: F841
-                    is_frame=bool(has_frame),
-                    frame_paths=None,  # ProfileCardRequest 不支持 frame_paths
-                    avatar_img=avatar_img,
-                    avatar_w=80,
-                    frame_data=[],
-                )
-                data_sources = [item for item in rqd.data_sources if item]
-                primary_source = data_sources[0] if data_sources else None
-                with VSplit().set_content_align("c").set_item_align("l").set_sep(5):
-                    # 昵称、id和区服
-                    with HSplit().set_content_align("lb").set_item_align("lb").set_sep(5):
-                        hs = colored_text_box(
-                            truncate(rqd.profile.nickname, 64),
-                            TextStyle(
-                                font=DEFAULT_BOLD_FONT,
-                                size=24,
-                                color=BLACK,
-                                use_shadow=True,
-                                shadow_offset=2,
-                                shadow_color=ADAPTIVE_SHADOW,
-                            ),
-                        )
-                        if rqd.mysekai_level:
-                            name_length = 0
-                            for item in hs.items:
-                                if isinstance(item, TextBox):
-                                    name_length += get_str_display_length(item.text)
-                            ms_lv_text = (
-                                f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
-                            )
-                            TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
-                    user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
-                    summary_line = f"{rqd.profile.region.upper()}: {user_id}"
-                    if len(data_sources) <= 1 and primary_source and primary_source.name:
-                        summary_line += f" {primary_source.name}"
-                    TextBox(
-                        summary_line,
-                        TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
-                    )
-                    if len(data_sources) <= 1:
-                        if primary_source and primary_source.update_time:
-                            update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
-                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-                            TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-                    else:
-                        for data_source in data_sources[:2]:
-                            if not data_source.update_time:
-                                continue
-                            update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
-                            update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-                            TextBox(
-                                f"{data_source_label(data_source.name)}更新时间: {update_time_text}",
-                                TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
-                            )
-            # 错误/警告
-            if rqd.error_message:
-                TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)
+        row = HSplit().set_content_align("c").set_item_align("c").set_sep(14)
+        for module in await _build_profile_card_modules(rqd):
+            row.add_item(module)
+        f.add_item(row)
     return f

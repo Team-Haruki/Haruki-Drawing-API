@@ -18,6 +18,7 @@ import coloredlogs
 from fastapi import FastAPI
 from granian import Granian
 
+from src.core.debug import install_debug_middleware
 from src.core import health
 from src.core.pjsk import router as pjsk_router
 from src.settings import (
@@ -139,6 +140,8 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+install_debug_middleware(app)
 
 
 # ======================= Include Routers =======================

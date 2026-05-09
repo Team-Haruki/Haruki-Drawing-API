@@ -16,6 +16,7 @@ from uuid import uuid4
 import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 
+from src.core.debug import current_request_context, snapshot_process_metrics
 from src.settings import (
     ASSETS_BASE_DIR,
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
@@ -1279,13 +1280,30 @@ class TempFilePath:
 from concurrent.futures import ThreadPoolExecutor
 
 _default_pool_executor = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_SIZE)
+_SLOW_POOL_TASK_SECONDS = 0.2
 
 
 async def run_in_pool(func, *args, pool=None):
     if pool is None:
         global _default_pool_executor
         pool = _default_pool_executor
-    return await asyncio.get_running_loop().run_in_executor(pool, func, *args)
+    request_ctx = current_request_context()
+    started = time.perf_counter()
+    try:
+        return await asyncio.get_running_loop().run_in_executor(pool, func, *args)
+    finally:
+        elapsed = time.perf_counter() - started
+        if elapsed >= _SLOW_POOL_TASK_SECONDS:
+            logger.log(
+                logging.WARNING if elapsed >= 1.0 else logging.INFO,
+                "pool.task id=%s path=%s method=%s func=%s elapsed=%.3fs metrics=%s",
+                request_ctx["request_id"],
+                request_ctx["path"],
+                request_ctx["method"],
+                getattr(func, "__name__", repr(func)),
+                elapsed,
+                snapshot_process_metrics(include_asyncio=False),
+            )
 
 
 def shutdown_utils() -> None:

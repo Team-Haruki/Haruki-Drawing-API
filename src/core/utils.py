@@ -1,10 +1,15 @@
 import io
+import logging
+import time
 
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
+from src.core.debug import current_request_context, snapshot_process_metrics
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
+
+logger = logging.getLogger(__name__)
 
 
 def _encode_image(image, export_format: str, jpg_quality: int) -> tuple[io.BytesIO, str, str]:
@@ -33,7 +38,27 @@ def _encode_image(image, export_format: str, jpg_quality: int) -> tuple[io.Bytes
 
 async def image_to_response(image) -> StreamingResponse:
     """Convert PIL Image to StreamingResponse without blocking the event loop."""
+    request_ctx = current_request_context()
+    image_width = getattr(image, "width", None)
+    image_height = getattr(image, "height", None)
+    image_mode = getattr(image, "mode", None)
+    started = time.perf_counter()
     buffer, media_type, filename = await run_in_pool(_encode_image, image, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
+    elapsed = time.perf_counter() - started
+    byte_len = buffer.getbuffer().nbytes
+    logger.info(
+        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs metrics=%s",
+        request_ctx["request_id"],
+        request_ctx["path"],
+        request_ctx["method"],
+        image_width,
+        image_height,
+        image_mode,
+        media_type,
+        byte_len,
+        elapsed,
+        snapshot_process_metrics(include_asyncio=False),
+    )
     return StreamingResponse(
         buffer,
         media_type=media_type,
