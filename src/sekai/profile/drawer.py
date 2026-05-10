@@ -544,29 +544,10 @@ async def _build_profile_identity_module(ctx: _ProfileLayoutContext) -> Widget:
         root.add_item(text_col)
         return root
 
-    asset_signatures = {
-        "leader": get_image_asset_signature(ASSETS_BASE_DIR, ctx.profile.leader_image_path),
-        "lv_rank_bg": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.lv_rank_bg_path),
-    }
-    if ctx.request.frame_paths is not None:
-        asset_signatures["frame_base"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.base)
-        asset_signatures["frame_centertop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.centertop)
-        asset_signatures["frame_leftbottom"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.leftbottom)
-        asset_signatures["frame_lefttop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.lefttop)
-        asset_signatures["frame_rightbottom"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.rightbottom)
-        asset_signatures["frame_righttop"] = get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.frame_paths.righttop)
-
-    image = await _build_cached_profile_module_image(
-        "profile_identity_module",
-        {
-            "profile": ctx.profile,
-            "rank": ctx.request.rank,
-            "frame_paths": ctx.request.frame_paths,
-        },
-        _build_identity_widget,
-        asset_signatures=asset_signatures,
-    )
-    return _build_cached_profile_module_widget(image)
+    # Adaptive text colors must be evaluated on the final painted background.
+    # Rendering this module through the disk/memory widget cache bakes it on a
+    # transparent canvas first, which turns the nickname/ID text white.
+    return await _build_identity_widget()
 
 
 async def _build_profile_twitter_module(ctx: _ProfileLayoutContext) -> Widget:
@@ -912,25 +893,10 @@ async def _build_profile_growth_content_module(ctx: _ProfileLayoutContext) -> Wi
 
 
 async def _build_profile_growth_panel(ctx: _ProfileLayoutContext) -> Widget:
-    chara_asset_signatures = {}
-    for key, path in sorted((ctx.request.chara_rank_icon_path_map or {}).items(), key=lambda item: str(item[0])):
-        if path:
-            chara_asset_signatures[f"chara::{key}"] = get_image_asset_signature(ASSETS_BASE_DIR, path)
-
-    image = await _build_cached_profile_module_image(
-        "profile_growth_module",
-        {
-            "character_rank": ctx.character_rank,
-            "solo_live": ctx.solo_live,
-            "multi_live": ctx.multi_live,
-            "chara_rank_icon_path_map": ctx.request.chara_rank_icon_path_map,
-        },
-        lambda: _build_profile_growth_content_module(ctx),
-        asset_signatures=chara_asset_signatures,
-        extra={"version": 1},
-    )
     root = Frame().set_content_align("rb").set_bg(ctx.ui_bg)
-    root.add_item(_build_cached_profile_module_widget(image))
+    # The growth panel contains nested translucent badges. They need the real
+    # destination background to preserve the intended alpha/glass appearance.
+    root.add_item(await _build_profile_growth_content_module(ctx))
     return root
 
 
