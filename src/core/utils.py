@@ -5,7 +5,7 @@ import time
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from src.core.debug import current_request_context, snapshot_process_metrics
+from src.core.debug import current_request_context, set_request_stage, snapshot_process_metrics
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
@@ -42,6 +42,7 @@ async def image_to_response(image) -> StreamingResponse:
     image_width = getattr(image, "width", None)
     image_height = getattr(image, "height", None)
     image_mode = getattr(image, "mode", None)
+    set_request_stage("encode_image")
     started = time.perf_counter()
     buffer, media_type, filename = await run_in_pool(_encode_image, image, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
     elapsed = time.perf_counter() - started
@@ -59,6 +60,7 @@ async def image_to_response(image) -> StreamingResponse:
         elapsed,
         snapshot_process_metrics(include_asyncio=False),
     )
+    set_request_stage("stream_response")
     return StreamingResponse(
         buffer,
         media_type=media_type,

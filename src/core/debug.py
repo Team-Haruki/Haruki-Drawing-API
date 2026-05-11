@@ -19,12 +19,15 @@ logger = logging.getLogger("src.core.debug")
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_id", default="-")
 _request_path_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_path", default="-")
 _request_method_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_method", default="-")
+_request_stage_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_stage", default="startup")
 
 _inflight_lock = threading.Lock()
 _inflight_requests = 0
 
 _SLOW_REQUEST_SECONDS = 1.5
 _BODY_PREVIEW_LIMIT = 512
+_WATCHDOG_WARN_SECONDS = 10.0
+_WATCHDOG_REPEAT_SECONDS = 15.0
 
 
 @dataclass(slots=True)
@@ -32,6 +35,7 @@ class RequestContextTokens:
     request_id: contextvars.Token
     path: contextvars.Token
     method: contextvars.Token
+    stage: contextvars.Token
 
 
 def current_request_context() -> dict[str, str]:
@@ -39,6 +43,7 @@ def current_request_context() -> dict[str, str]:
         "request_id": _request_id_var.get(),
         "path": _request_path_var.get(),
         "method": _request_method_var.get(),
+        "stage": _request_stage_var.get(),
     }
 
 
@@ -47,6 +52,7 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         request_id=_request_id_var.set(request_id),
         path=_request_path_var.set(path),
         method=_request_method_var.set(method),
+        stage=_request_stage_var.set("middleware"),
     )
 
 
@@ -54,6 +60,42 @@ def pop_request_context(tokens: RequestContextTokens) -> None:
     _request_id_var.reset(tokens.request_id)
     _request_path_var.reset(tokens.path)
     _request_method_var.reset(tokens.method)
+    _request_stage_var.reset(tokens.stage)
+
+
+def set_request_stage(stage: str) -> None:
+    _request_stage_var.set((stage or "").strip() or "unknown")
+
+
+def current_request_stage() -> str:
+    return _request_stage_var.get()
+
+
+@dataclass(slots=True)
+class RequestWatchdog:
+    request_id: str
+    method: str
+    path: str
+    started_at: float
+    cancelled: bool = False
+
+    async def run(self) -> None:
+        await asyncio.sleep(_WATCHDOG_WARN_SECONDS)
+        while not self.cancelled:
+            elapsed = time.perf_counter() - self.started_at
+            logger.warning(
+                "request.stuck id=%s method=%s path=%s stage=%s elapsed=%.3fs metrics=%s",
+                self.request_id,
+                self.method,
+                self.path,
+                current_request_stage(),
+                elapsed,
+                snapshot_process_metrics(include_asyncio=True),
+            )
+            await asyncio.sleep(_WATCHDOG_REPEAT_SECONDS)
+
+    def cancel(self) -> None:
+        self.cancelled = True
 
 
 def next_request_id() -> str:
@@ -158,6 +200,52 @@ def summarize_request_body(body: bytes, content_type: str | None) -> dict[str, A
     return summary
 
 
+def extract_debug_request_focus(path: str, body: bytes, content_type: str | None) -> dict[str, Any] | None:
+    content_type = (content_type or "").strip().lower()
+    if "json" not in content_type or not body:
+        return None
+    try:
+        payload = json.loads(body)
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    focus: dict[str, Any] = {}
+    profile = payload.get("profile")
+    if isinstance(profile, dict):
+        if profile.get("id") not in (None, ""):
+            focus["profile_id"] = profile.get("id")
+        if profile.get("region") not in (None, ""):
+            focus["profile_region"] = profile.get("region")
+
+    if payload.get("region") not in (None, ""):
+        focus["region"] = payload.get("region")
+    if isinstance(payload.get("honors"), list):
+        focus["honors"] = len(payload["honors"])
+    if isinstance(payload.get("pcards"), list):
+        focus["pcards"] = len(payload["pcards"])
+    if isinstance(payload.get("maps"), list):
+        focus["maps"] = len(payload["maps"])
+    if isinstance(payload.get("deck_data"), list):
+        focus["decks"] = len(payload["deck_data"])
+
+    bg_settings = payload.get("bg_settings")
+    if isinstance(bg_settings, dict):
+        bg_focus = {}
+        for key in ("alpha", "blur", "vertical", "img_path"):
+            if key in bg_settings:
+                bg_focus[key] = bg_settings.get(key)
+        if bg_focus:
+            focus["bg_settings"] = bg_focus
+
+    if not focus:
+        return None
+    focus["path"] = path
+    return focus
+
+
 def summarize_json_shape(value: Any, *, depth: int = 0) -> Any:
     if depth >= 2:
         return type(value).__name__
@@ -191,11 +279,14 @@ def install_debug_middleware(app: FastAPI) -> None:
         body = await request.body()
         inflight_now = inflight_enter()
         tokens = push_request_context(request_id, request.url.path, request.method)
+        watchdog = RequestWatchdog(request_id=request_id, method=request.method, path=request.url.path, started_at=start)
+        watchdog_task = asyncio.create_task(watchdog.run())
         body_summary = summarize_request_body(body, request.headers.get("content-type"))
+        focus_summary = extract_debug_request_focus(request.url.path, body, request.headers.get("content-type"))
         start_metrics = snapshot_process_metrics(include_asyncio=True)
 
         logger.info(
-            "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s body=%s metrics=%s",
+            "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s body=%s focus=%s metrics=%s",
             request_id,
             request.method,
             request.url.path,
@@ -203,18 +294,21 @@ def install_debug_middleware(app: FastAPI) -> None:
             getattr(request.client, "host", "-"),
             inflight_now,
             body_summary,
+            focus_summary,
             start_metrics,
         )
         try:
+            set_request_stage("handler")
             response = await call_next(request)
         except Exception:
             elapsed = time.perf_counter() - start
             end_metrics = snapshot_process_metrics(include_asyncio=True)
             logger.exception(
-                "request.error id=%s method=%s path=%s elapsed=%.3fs inflight=%s metrics=%s",
+                "request.error id=%s method=%s path=%s stage=%s elapsed=%.3fs inflight=%s metrics=%s",
                 request_id,
                 request.method,
                 request.url.path,
+                current_request_stage(),
                 elapsed,
                 _inflight_requests,
                 end_metrics,
@@ -234,10 +328,11 @@ def install_debug_middleware(app: FastAPI) -> None:
                     cache_stats = {"error": str(exc)}
             logger.log(
                 level,
-                "request.end id=%s method=%s path=%s status=%s elapsed=%.3fs inflight=%s metrics=%s headers={content_length=%s content_type=%s} cache_stats=%s",
+                "request.end id=%s method=%s path=%s stage=%s status=%s elapsed=%.3fs inflight=%s metrics=%s headers={content_length=%s content_type=%s} cache_stats=%s",
                 request_id,
                 request.method,
                 request.url.path,
+                current_request_stage(),
                 getattr(response, "status_code", "-"),
                 elapsed,
                 _inflight_requests,
@@ -248,5 +343,8 @@ def install_debug_middleware(app: FastAPI) -> None:
             )
             return response
         finally:
+            watchdog.cancel()
+            watchdog_task.cancel()
+            await asyncio.gather(watchdog_task, return_exceptions=True)
             inflight_leave()
             pop_request_context(tokens)

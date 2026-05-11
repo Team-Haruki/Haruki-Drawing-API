@@ -2,6 +2,7 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.debug import set_request_stage
 from src.core.utils import image_to_response
 from src.sekai.deck.drawer import compose_deck_recommend_image
 from src.sekai.deck.model import DeckRequest
@@ -17,7 +18,9 @@ async def deck_recommend(request: DeckRequest):
     Provides card recommendations for specific events or songs based on optimization targets.
     """
     try:
+        set_request_stage("deck:compose_image")
         image = await compose_deck_recommend_image(request)
+        set_request_stage("deck:image_to_response")
         return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()

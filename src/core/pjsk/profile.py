@@ -2,6 +2,7 @@ import logging
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.debug import set_request_stage
 from src.core.utils import image_to_response
 from src.sekai.profile.drawer import compose_profile_image
 from src.sekai.profile.model import ProfileRequest
@@ -18,6 +19,7 @@ async def profile(request: ProfileRequest):
     Shows player info, rank, honors, cards, and play statistics.
     """
     try:
+        set_request_stage("profile:log_request")
         logger.info(
             "profile request debug: id=%s region=%s honors=%d leader=%s honor_summary=%s",
             request.profile.id if request.profile else None,
@@ -37,7 +39,9 @@ async def profile(request: ProfileRequest):
                 for idx, honor in enumerate(request.honors or [])
             ],
         )
+        set_request_stage("profile:compose_image")
         image = await compose_profile_image(request)
+        set_request_stage("profile:image_to_response")
         return await image_to_response(image)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
