@@ -588,43 +588,25 @@ def _build_profile_word_module(ctx: _ProfileLayoutContext) -> Widget:
 
 
 async def _build_profile_honor_module(ctx: _ProfileLayoutContext) -> Widget:
-    async def _build_honor_widget() -> Widget:
-        root = HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0))
-        honor_imgs = await asyncio.gather(*[compose_full_honor_image(honor) for honor in ctx.honors], return_exceptions=True)
-        for img in honor_imgs:
-            if isinstance(img, Exception):
-                logger.warning("skip broken honor asset in profile image: %s", img)
-                continue
-            if img:
-                root.add_item(ImageBox(img, size=(None, 48), shadow=True))
-        return root
-
-    image = await _build_cached_profile_module_image(
-        "profile_honor_module",
-        {"honors": ctx.honors},
-        _build_honor_widget,
-        extra={"version": 1},
-    )
-    return _build_cached_profile_module_widget(image)
+    root = HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0))
+    honor_imgs = await asyncio.gather(*[compose_full_honor_image(honor) for honor in ctx.honors], return_exceptions=True)
+    for img in honor_imgs:
+        if isinstance(img, Exception):
+            logger.warning("skip broken honor asset in profile image: %s", img)
+            continue
+        if img:
+            root.add_item(ImageBox(img, size=(None, 48), shadow=True))
+    return root
 
 
 async def _build_profile_cards_module(ctx: _ProfileLayoutContext) -> Widget:
-    async def _build_cards_widget() -> Widget:
-        root = HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0))
-        _t0 = time.perf_counter()
-        card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in ctx.pcards])
-        logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(ctx.pcards), time.perf_counter() - _t0)
-        for card_img in card_imgs:
-            root.add_item(ImageBox(card_img, size=(90, 90), image_size_mode="fill", shadow=True))
-        return root
-
-    image = await _build_cached_profile_module_image(
-        "profile_cards_module",
-        {"pcards": ctx.pcards},
-        _build_cards_widget,
-        extra={"version": 1},
-    )
-    return _build_cached_profile_module_widget(image)
+    root = HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0))
+    _t0 = time.perf_counter()
+    card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in ctx.pcards])
+    logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(ctx.pcards), time.perf_counter() - _t0)
+    for card_img in card_imgs:
+        root.add_item(ImageBox(card_img, size=(90, 90), image_size_mode="fill", shadow=True))
+    return root
 
 
 async def _build_profile_info_panel(ctx: _ProfileLayoutContext) -> Widget:
@@ -705,24 +687,8 @@ async def _build_profile_play_content_module(ctx: _ProfileLayoutContext) -> Widg
 
 
 async def _build_profile_play_panel(ctx: _ProfileLayoutContext) -> Widget:
-    image = await _build_cached_profile_module_image(
-        "profile_play_module",
-        {
-            "diff_count": ctx.diff_count,
-            "icon_clear_path": ctx.request.icon_clear_path,
-            "icon_fc_path": ctx.request.icon_fc_path,
-            "icon_ap_path": ctx.request.icon_ap_path,
-        },
-        lambda: _build_profile_play_content_module(ctx),
-        asset_signatures={
-            "icon_clear": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_clear_path),
-            "icon_fc": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_fc_path),
-            "icon_ap": get_image_asset_signature(ASSETS_BASE_DIR, ctx.request.icon_ap_path),
-        },
-        extra={"version": 1},
-    )
     root = HSplit().set_content_align("c").set_item_align("t").set_sep(12).set_bg(ctx.ui_bg).set_padding(32)
-    root.add_item(_build_cached_profile_module_widget(image))
+    root.add_item(await _build_profile_play_content_module(ctx))
     return root
 
 
