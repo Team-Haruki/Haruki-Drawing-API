@@ -64,6 +64,8 @@ Sizes are configured in `configs.yaml` under `drawing.*` and exported as `IMAGE_
 
 Notable `drawing.*` keys:
 - `thread_pool_size` — default thread pool size (CPU-bound rendering).
+- `overload_max_inflight_requests` / `overload_retry_after_seconds` — optional overload guard; reject new requests with `503` once in-flight requests exceed the threshold.
+- `readiness_unhealthy_inflight_requests` / `readiness_unhealthy_rss_mb` / `readiness_unhealthy_asyncio_tasks` — readiness thresholds used by `/ready`; once exceeded, the service reports `503` so orchestration can stop routing more traffic.
 - `use_process_pool`, `process_pool_workers`, `process_pool_threshold` — optional process-pool offload for very large images.
 - `image_cache_size` / `image_cache_max_mb` — general image LRU.
 - `thumbnail_cache_size` / `thumbnail_cache_max_mb` — dedicated thumbnail LRU (recommend 4096 / 256MB).

@@ -17,6 +17,11 @@ font:
 
 drawing:
   thread_pool_size: 8
+  overload_max_inflight_requests: 64
+  overload_retry_after_seconds: 5
+  readiness_unhealthy_inflight_requests: 48
+  readiness_unhealthy_rss_mb: 4096
+  readiness_unhealthy_asyncio_tasks: 256
   image_cache_size: 1024
   image_cache_max_mb: 256
   thumbnail_cache_size: 2048

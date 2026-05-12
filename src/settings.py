@@ -85,6 +85,11 @@ class DrawingSettings(BaseModel):
     """画图配置"""
 
     thread_pool_size: int = 8
+    overload_max_inflight_requests: int = 0  # 过载保护：允许的最大并发请求数，0 表示关闭
+    overload_retry_after_seconds: int = 5  # 过载拒绝后的 Retry-After 秒数
+    readiness_unhealthy_inflight_requests: int = 0  # readiness: inflight 达到该值时返回不健康，0 表示关闭
+    readiness_unhealthy_rss_mb: int = 0  # readiness: RSS 达到该值时返回不健康，0 表示关闭
+    readiness_unhealthy_asyncio_tasks: int = 0  # readiness: asyncio task 达到该值时返回不健康，0 表示关闭
     image_cache_size: int = 0  # 图片解码缓存条目数，0 表示关闭
     image_cache_max_mb: int = 0  # 图片解码缓存总内存上限（MB），0 表示关闭
     thumbnail_cache_size: int = 0  # 缩略图专用缓存条目数，0 表示关闭
@@ -179,6 +184,11 @@ DEFAULT_EMOJI_FONT = settings.font.emoji
 
 # Drawing
 DEFAULT_THREAD_POOL_SIZE = settings.drawing.thread_pool_size
+OVERLOAD_MAX_INFLIGHT_REQUESTS = settings.drawing.overload_max_inflight_requests
+OVERLOAD_RETRY_AFTER_SECONDS = settings.drawing.overload_retry_after_seconds
+READINESS_UNHEALTHY_INFLIGHT_REQUESTS = settings.drawing.readiness_unhealthy_inflight_requests
+READINESS_UNHEALTHY_RSS_MB = settings.drawing.readiness_unhealthy_rss_mb
+READINESS_UNHEALTHY_ASYNCIO_TASKS = settings.drawing.readiness_unhealthy_asyncio_tasks
 IMAGE_CACHE_SIZE = settings.drawing.image_cache_size
 IMAGE_CACHE_MAX_BYTES = settings.drawing.image_cache_max_mb * 1024 * 1024
 THUMB_CACHE_SIZE = settings.drawing.thumbnail_cache_size

@@ -12,6 +12,9 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+from src.settings import OVERLOAD_MAX_INFLIGHT_REQUESTS, OVERLOAD_RETRY_AFTER_SECONDS, READINESS_UNHEALTHY_ASYNCIO_TASKS, READINESS_UNHEALTHY_INFLIGHT_REQUESTS, READINESS_UNHEALTHY_RSS_MB
 
 
 logger = logging.getLogger("src.core.debug")
@@ -19,7 +22,17 @@ logger = logging.getLogger("src.core.debug")
 _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_id", default="-")
 _request_path_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_path", default="-")
 _request_method_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_method", default="-")
-_request_stage_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_stage", default="startup")
+
+
+@dataclass(slots=True)
+class RequestStageRef:
+    value: str = "startup"
+
+
+_request_stage_var: contextvars.ContextVar[RequestStageRef | None] = contextvars.ContextVar(
+    "drawing_request_stage",
+    default=None,
+)
 
 _inflight_lock = threading.Lock()
 _inflight_requests = 0
@@ -28,6 +41,15 @@ _SLOW_REQUEST_SECONDS = 1.5
 _BODY_PREVIEW_LIMIT = 512
 _WATCHDOG_WARN_SECONDS = 10.0
 _WATCHDOG_REPEAT_SECONDS = 15.0
+_EXEMPT_RUNTIME_GUARD_PATHS = frozenset({
+    "/",
+    "/health",
+    "/ready",
+    "/cache/stats",
+    "/docs",
+    "/redoc",
+    "/openapi.json",
+})
 
 
 @dataclass(slots=True)
@@ -39,11 +61,12 @@ class RequestContextTokens:
 
 
 def current_request_context() -> dict[str, str]:
+    stage_ref = _request_stage_var.get()
     return {
         "request_id": _request_id_var.get(),
         "path": _request_path_var.get(),
         "method": _request_method_var.get(),
-        "stage": _request_stage_var.get(),
+        "stage": stage_ref.value if stage_ref is not None else "startup",
     }
 
 
@@ -52,7 +75,7 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         request_id=_request_id_var.set(request_id),
         path=_request_path_var.set(path),
         method=_request_method_var.set(method),
-        stage=_request_stage_var.set("middleware"),
+        stage=_request_stage_var.set(RequestStageRef("middleware")),
     )
 
 
@@ -64,11 +87,17 @@ def pop_request_context(tokens: RequestContextTokens) -> None:
 
 
 def set_request_stage(stage: str) -> None:
-    _request_stage_var.set((stage or "").strip() or "unknown")
+    cleaned = (stage or "").strip() or "unknown"
+    stage_ref = _request_stage_var.get()
+    if stage_ref is None:
+        _request_stage_var.set(RequestStageRef(cleaned))
+        return
+    stage_ref.value = cleaned
 
 
 def current_request_stage() -> str:
-    return _request_stage_var.get()
+    stage_ref = _request_stage_var.get()
+    return stage_ref.value if stage_ref is not None else "startup"
 
 
 @dataclass(slots=True)
@@ -165,6 +194,52 @@ def snapshot_process_metrics(*, include_asyncio: bool = False) -> dict[str, Any]
         except RuntimeError:
             metrics["asyncio_tasks"] = None
     return metrics
+
+
+def runtime_readiness_thresholds() -> dict[str, int]:
+    return {
+        "inflight": READINESS_UNHEALTHY_INFLIGHT_REQUESTS,
+        "rss_mb": READINESS_UNHEALTHY_RSS_MB,
+        "asyncio_tasks": READINESS_UNHEALTHY_ASYNCIO_TASKS,
+    }
+
+
+def evaluate_runtime_readiness(metrics: dict[str, Any] | None = None) -> tuple[bool, list[str], dict[str, Any]]:
+    if metrics is None:
+        metrics = snapshot_process_metrics(include_asyncio=True)
+
+    reasons: list[str] = []
+    inflight = metrics.get("inflight")
+    rss_mb = metrics.get("rss_mb")
+    asyncio_tasks = metrics.get("asyncio_tasks")
+
+    if READINESS_UNHEALTHY_INFLIGHT_REQUESTS > 0 and isinstance(inflight, int):
+        if inflight >= READINESS_UNHEALTHY_INFLIGHT_REQUESTS:
+            reasons.append(
+                f"inflight {inflight} >= {READINESS_UNHEALTHY_INFLIGHT_REQUESTS}"
+            )
+    if READINESS_UNHEALTHY_RSS_MB > 0 and isinstance(rss_mb, int | float):
+        if rss_mb >= READINESS_UNHEALTHY_RSS_MB:
+            reasons.append(
+                f"rss_mb {rss_mb} >= {READINESS_UNHEALTHY_RSS_MB}"
+            )
+    if READINESS_UNHEALTHY_ASYNCIO_TASKS > 0 and isinstance(asyncio_tasks, int):
+        if asyncio_tasks >= READINESS_UNHEALTHY_ASYNCIO_TASKS:
+            reasons.append(
+                f"asyncio_tasks {asyncio_tasks} >= {READINESS_UNHEALTHY_ASYNCIO_TASKS}"
+            )
+
+    return len(reasons) == 0, reasons, metrics
+
+
+def should_reject_for_overload(path: str, inflight: int) -> str | None:
+    if OVERLOAD_MAX_INFLIGHT_REQUESTS <= 0:
+        return None
+    if path in _EXEMPT_RUNTIME_GUARD_PATHS or path.startswith("/docs/") or path.startswith("/redoc/"):
+        return None
+    if inflight > OVERLOAD_MAX_INFLIGHT_REQUESTS:
+        return f"inflight {inflight} > {OVERLOAD_MAX_INFLIGHT_REQUESTS}"
+    return None
 
 
 def summarize_request_body(body: bytes, content_type: str | None) -> dict[str, Any]:
@@ -276,28 +351,58 @@ def install_debug_middleware(app: FastAPI) -> None:
     async def _debug_request_middleware(request: Request, call_next):
         request_id = next_request_id()
         start = time.perf_counter()
-        body = await request.body()
         inflight_now = inflight_enter()
-        tokens = push_request_context(request_id, request.url.path, request.method)
-        watchdog = RequestWatchdog(request_id=request_id, method=request.method, path=request.url.path, started_at=start)
-        watchdog_task = asyncio.create_task(watchdog.run())
-        body_summary = summarize_request_body(body, request.headers.get("content-type"))
-        focus_summary = extract_debug_request_focus(request.url.path, body, request.headers.get("content-type"))
-        start_metrics = snapshot_process_metrics(include_asyncio=True)
-
-        logger.info(
-            "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s body=%s focus=%s metrics=%s",
-            request_id,
-            request.method,
-            request.url.path,
-            request.url.query,
-            getattr(request.client, "host", "-"),
-            inflight_now,
-            body_summary,
-            focus_summary,
-            start_metrics,
-        )
+        tokens: RequestContextTokens | None = None
+        watchdog: RequestWatchdog | None = None
+        watchdog_task: asyncio.Task[None] | None = None
         try:
+            overload_reason = should_reject_for_overload(request.url.path, inflight_now)
+            if overload_reason is not None:
+                metrics = snapshot_process_metrics(include_asyncio=True)
+                logger.warning(
+                    "request.reject id=%s method=%s path=%s query=%s client=%s reason=%s inflight=%s metrics=%s",
+                    request_id,
+                    request.method,
+                    request.url.path,
+                    request.url.query,
+                    getattr(request.client, "host", "-"),
+                    overload_reason,
+                    inflight_now,
+                    metrics,
+                )
+                headers = {}
+                if OVERLOAD_RETRY_AFTER_SECONDS > 0:
+                    headers["Retry-After"] = str(OVERLOAD_RETRY_AFTER_SECONDS)
+                return JSONResponse(
+                    status_code=503,
+                    headers=headers,
+                    content={
+                        "status": "overloaded",
+                        "reason": overload_reason,
+                        "inflight": inflight_now,
+                    },
+                )
+
+            tokens = push_request_context(request_id, request.url.path, request.method)
+            watchdog = RequestWatchdog(request_id=request_id, method=request.method, path=request.url.path, started_at=start)
+            watchdog_task = asyncio.create_task(watchdog.run())
+            body = await request.body()
+            body_summary = summarize_request_body(body, request.headers.get("content-type"))
+            focus_summary = extract_debug_request_focus(request.url.path, body, request.headers.get("content-type"))
+            start_metrics = snapshot_process_metrics(include_asyncio=True)
+
+            logger.info(
+                "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s body=%s focus=%s metrics=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                request.url.query,
+                getattr(request.client, "host", "-"),
+                inflight_now,
+                body_summary,
+                focus_summary,
+                start_metrics,
+            )
             set_request_stage("handler")
             response = await call_next(request)
         except Exception:
@@ -343,8 +448,11 @@ def install_debug_middleware(app: FastAPI) -> None:
             )
             return response
         finally:
-            watchdog.cancel()
-            watchdog_task.cancel()
-            await asyncio.gather(watchdog_task, return_exceptions=True)
+            if watchdog is not None:
+                watchdog.cancel()
+            if watchdog_task is not None:
+                watchdog_task.cancel()
+                await asyncio.gather(watchdog_task, return_exceptions=True)
             inflight_leave()
-            pop_request_context(tokens)
+            if tokens is not None:
+                pop_request_context(tokens)

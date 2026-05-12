@@ -18,6 +18,7 @@ import coloredlogs
 from fastapi import FastAPI
 from granian import Granian
 
+from src.core.diagnostics import configure_runtime_diagnostics, dump_runtime_diagnostics
 from src.core.debug import install_debug_middleware
 from src.core import health
 from src.core.pjsk import router as pjsk_router
@@ -80,6 +81,7 @@ async def lifespan(app: FastAPI):
     _ensure_nogil_runtime()
     # Configure coloredlogs
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+    configure_runtime_diagnostics()
 
     def _cleanup_disk_caches() -> None:
         composed_removed = cleanup_expired_composed_image_disk_cache()
@@ -123,6 +125,7 @@ async def lifespan(app: FastAPI):
     yield
     # Shutdown
     logger.info("Haruki Drawing API is shutting down...")
+    dump_runtime_diagnostics("lifespan_shutdown")
     for cleanup_task in cleanup_tasks:
         cleanup_task.cancel()
     await asyncio.gather(*cleanup_tasks, return_exceptions=True)

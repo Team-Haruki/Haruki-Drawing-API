@@ -49,12 +49,16 @@ server:
 
 def test_settings_reads_nested_environment_overrides(monkeypatch):
     monkeypatch.setenv("HARUKI_DRAWING__THREAD_POOL_SIZE", "17")
+    monkeypatch.setenv("HARUKI_DRAWING__OVERLOAD_MAX_INFLIGHT_REQUESTS", "64")
+    monkeypatch.setenv("HARUKI_DRAWING__READINESS_UNHEALTHY_INFLIGHT_REQUESTS", "48")
     monkeypatch.setenv("HARUKI_DRAWING__EXPORT_IMAGE_FORMAT", "jpg")
     monkeypatch.setenv("HARUKI_DRAWING__JPG_QUALITY", "91")
 
     settings = Settings()
 
     assert settings.drawing.thread_pool_size == 17
+    assert settings.drawing.overload_max_inflight_requests == 64
+    assert settings.drawing.readiness_unhealthy_inflight_requests == 48
     assert settings.drawing.export_image_format == "jpg"
     assert settings.drawing.jpg_quality == 91
 
