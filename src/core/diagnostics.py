@@ -1,19 +1,16 @@
 import asyncio
 import faulthandler
 import logging
-import os
 import signal
 import sys
 import threading
 import traceback
-from typing import Any
 
 
 logger = logging.getLogger("src.core.diagnostics")
 
 _config_lock = threading.Lock()
 _configured = False
-_previous_signal_handlers: dict[int, Any] = {}
 
 
 def _signal_name(signum: int) -> str:
@@ -30,13 +27,6 @@ def _safe_snapshot_metrics() -> dict[str, Any]:
         return snapshot_process_metrics(include_asyncio=True)
     except Exception as exc:
         return {"snapshot_error": str(exc)}
-
-
-def _write_stderr_line(message: str) -> None:
-    try:
-        os.write(2, (message.rstrip() + "\n").encode("utf-8", errors="replace"))
-    except Exception:
-        pass
 
 
 def _dump_thread_frames(reason: str) -> None:
@@ -107,28 +97,6 @@ def dump_runtime_diagnostics(reason: str) -> None:
     logger.warning("runtime diagnostics end: reason=%s", reason)
 
 
-def _chain_previous_signal_handler(signum: int, frame: Any) -> None:
-    previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
-    if previous is None or previous == signal.SIG_DFL:
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
-        return
-    if previous == signal.SIG_IGN:
-        return
-    if callable(previous):
-        previous(signum, frame)
-
-
-def _handle_termination_signal(signum: int, frame: Any) -> None:
-    signame = _signal_name(signum)
-    _write_stderr_line(f"=== {signame} received; dumping Python traceback ===")
-    try:
-        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
-    except Exception:
-        _write_stderr_line(f"=== {signame} traceback dump failed ===")
-    _chain_previous_signal_handler(signum, frame)
-
-
 def configure_runtime_diagnostics() -> None:
     global _configured
     with _config_lock:
@@ -151,12 +119,11 @@ def configure_runtime_diagnostics() -> None:
         termination_signal = getattr(signal, "SIGTERM", None)
         if termination_signal is not None:
             try:
-                _previous_signal_handlers[termination_signal] = signal.getsignal(termination_signal)
-                signal.signal(termination_signal, _handle_termination_signal)
-                logger.info("termination traceback handler installed: %s", _signal_name(termination_signal))
+                faulthandler.register(termination_signal, file=sys.stderr, all_threads=True, chain=True)
+                logger.info("termination traceback dump registered: %s", _signal_name(termination_signal))
             except Exception:
                 logger.warning(
-                    "failed to install termination traceback handler: %s",
+                    "failed to register termination traceback dump: %s",
                     _signal_name(termination_signal),
                     exc_info=True,
                 )
