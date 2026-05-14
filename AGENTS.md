@@ -119,9 +119,20 @@ All commits **must** follow:
 Rules:
 
 - Description starts with a **capital letter**.
-- Imperative mood (`Add ...`, not `Added ...`).
+- Use imperative mood: `Add ...`, not `Added ...`.
 - No trailing period.
-- Keep subject ≤ ~70 chars.
+- Keep the subject at or below roughly 70 characters.
+- Agent attribution uses the standard Git `Co-authored-by:` trailer in the commit body, not a free-form
+  `Agent:` line. This makes GitHub render the co-author avatar on the commit page. The trailer must be on its
+  own line, separated from the subject by a blank line, in the form `Co-authored-by: <Display Name> <email>`.
+
+Suggested co-author trailers:
+
+| Agent | Trailer |
+|-------|---------|
+| Claude (any 4.x) | `Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>` (substitute the actual model, e.g. `Claude Sonnet 4.6`) |
+| Codex | `Co-authored-by: Codex <noreply@openai.com>` |
+| Copilot | `Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>` |
 
 Examples from this project:
 
@@ -130,4 +141,12 @@ Examples from this project:
 [Fix] Route map harvest-point resize through global cache
 [Chore] Replace mysekai drawer with public placeholder stub
 [Docs] Add resize cache section to optimizations.md
+```
+
+Example with agent attribution:
+
+```
+[Docs] Update commit attribution rules
+
+Co-authored-by: Codex <noreply@openai.com>
 ```
