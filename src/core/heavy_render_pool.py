@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from PIL import Image
 
-from src.settings import EXPORT_IMAGE_FORMAT, ISOLATED_WORKER_POOL_SIZE, JPG_QUALITY, REQUEST_HARD_TIMEOUT_SECONDS
+from src.settings import EXPORT_IMAGE_FORMAT, ISOLATED_WORKER_POOL_SIZE, JPG_QUALITY, REQUEST_HARD_TIMEOUT_SECONDS, settings
 
 
 logger = logging.getLogger("src.core.heavy_render_pool")
@@ -105,7 +105,15 @@ def _encode_image_payload(image: Image.Image) -> EncodedImagePayload:
     )
 
 
+def _configure_worker_render_environment() -> None:
+    # Heavy requests already run inside isolated worker processes.
+    # Disable nested painter process-pool fanout there to avoid spawning
+    # grandchildren from worker processes.
+    settings.drawing.use_process_pool = False
+
+
 def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
+    _configure_worker_render_environment()
     if kind == "deck_recommend":
         from src.sekai.deck.drawer import compose_deck_recommend_image
         from src.sekai.deck.model import DeckRequest
@@ -222,11 +230,11 @@ class HeavyRenderWorkerPool:
         self._heartbeat_timeout_seconds = max(1.0, float(heartbeat_timeout_seconds))
         self._result_poll_interval_seconds = max(0.1, float(result_poll_interval_seconds))
         self._slots = [_WorkerSlot(index=i, name=f"heavy-render-{i + 1}") for i in range(self._worker_count)]
-        self._condition = asyncio.Condition()
+        self._condition = threading.Condition()
         self._started = False
 
     async def start(self) -> None:
-        async with self._condition:
+        with self._condition:
             if self._started:
                 return
             for slot in self._slots:
@@ -240,7 +248,7 @@ class HeavyRenderWorkerPool:
         )
 
     async def shutdown(self) -> None:
-        async with self._condition:
+        with self._condition:
             if not self._started:
                 return
             for slot in self._slots:
@@ -293,7 +301,13 @@ class HeavyRenderWorkerPool:
             await self._release_slot(slot)
 
     async def _acquire_slot(self, kind: HeavyTaskKind) -> _WorkerSlot:
-        async with self._condition:
+        return await asyncio.to_thread(self._acquire_slot_sync, kind)
+
+    async def _release_slot(self, slot: _WorkerSlot) -> None:
+        await asyncio.to_thread(self._release_slot_sync, slot)
+
+    def _acquire_slot_sync(self, kind: HeavyTaskKind) -> _WorkerSlot:
+        with self._condition:
             while True:
                 for slot in self._slots:
                     if slot.busy:
@@ -309,10 +323,10 @@ class HeavyRenderWorkerPool:
                         getattr(slot.process, "pid", None),
                     )
                     return slot
-                await self._condition.wait()
+                self._condition.wait()
 
-    async def _release_slot(self, slot: _WorkerSlot) -> None:
-        async with self._condition:
+    def _release_slot_sync(self, slot: _WorkerSlot) -> None:
+        with self._condition:
             slot.busy = False
             slot.current_task_id = None
             slot.current_task_kind = None
@@ -392,6 +406,9 @@ class HeavyRenderWorkerPool:
     def _put_task(self, slot: _WorkerSlot, task: _WorkerTask) -> None:
         if slot.task_queue is None:
             raise RuntimeError(f"worker queue not initialized: {slot.name}")
+        if slot.heartbeat_at is not None:
+            with slot.heartbeat_at.get_lock():
+                slot.heartbeat_at.value = time.monotonic()
         slot.task_queue.put(task)
 
     def _get_result(self, slot: _WorkerSlot, timeout_seconds: float) -> _WorkerResult:
@@ -421,7 +438,7 @@ class HeavyRenderWorkerPool:
                 "result_queue": slot.result_queue,
                 "heartbeat_at": slot.heartbeat_at,
             },
-            daemon=True,
+            daemon=False,
         )
         slot.process.start()
         slot.recycle_count += 1

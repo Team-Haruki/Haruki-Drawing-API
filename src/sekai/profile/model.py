@@ -42,7 +42,7 @@ class DetailedProfileCardRequest(TimeZoneRequest):
     nickname: str
     source: str
     update_time: int
-    mode: str = None
+    mode: str | None = None
     is_hide_uid: bool = False
     leader_image_path: str
     has_frame: bool = False
