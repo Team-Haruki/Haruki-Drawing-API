@@ -85,6 +85,8 @@ class DrawingSettings(BaseModel):
     """画图配置"""
 
     thread_pool_size: int = 8
+    isolated_worker_pool_size: int = 2  # 重任务隔离子进程池大小，仅用于高风险接口
+    request_hard_timeout_seconds: int = 180  # 单个重任务的硬超时（秒）
     overload_max_inflight_requests: int = 0  # 过载保护：允许的最大并发请求数，0 表示关闭
     overload_retry_after_seconds: int = 5  # 过载拒绝后的 Retry-After 秒数
     readiness_unhealthy_inflight_requests: int = 0  # readiness: inflight 达到该值时返回不健康，0 表示关闭
@@ -184,6 +186,8 @@ DEFAULT_EMOJI_FONT = settings.font.emoji
 
 # Drawing
 DEFAULT_THREAD_POOL_SIZE = settings.drawing.thread_pool_size
+ISOLATED_WORKER_POOL_SIZE = settings.drawing.isolated_worker_pool_size
+REQUEST_HARD_TIMEOUT_SECONDS = settings.drawing.request_hard_timeout_seconds
 OVERLOAD_MAX_INFLIGHT_REQUESTS = settings.drawing.overload_max_inflight_requests
 OVERLOAD_RETRY_AFTER_SECONDS = settings.drawing.overload_retry_after_seconds
 READINESS_UNHEALTHY_INFLIGHT_REQUESTS = settings.drawing.readiness_unhealthy_inflight_requests

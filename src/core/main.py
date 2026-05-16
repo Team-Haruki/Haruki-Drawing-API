@@ -70,6 +70,7 @@ DISK_CACHE_CLEANUP_INTERVAL = 3600  # 磁盘缓存清理间隔（秒）
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
+    from src.core.heavy_render_pool import shutdown_heavy_render_worker_pool, startup_heavy_render_worker_pool
     from src.sekai.base.painter import Painter, shutdown_painter
     from src.sekai.base.utils import (
         cleanup_expired_composed_image_disk_cache,
@@ -121,6 +122,7 @@ async def lifespan(app: FastAPI):
         _cleanup_disk_caches()
     except Exception:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
+    await startup_heavy_render_worker_pool()
     logger.info("Haruki Drawing API is starting...")
     yield
     # Shutdown
@@ -129,6 +131,7 @@ async def lifespan(app: FastAPI):
     for cleanup_task in cleanup_tasks:
         cleanup_task.cancel()
     await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+    await shutdown_heavy_render_worker_pool()
     shutdown_painter()
     shutdown_sk_drawer()
     shutdown_utils()
