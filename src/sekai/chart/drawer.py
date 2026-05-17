@@ -4,7 +4,7 @@ from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
 
 from src.sekai.base.utils import run_in_pool
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, JPG_QUALITY
 
 from .model import GenerateMusicChartRequest
 
@@ -27,7 +27,7 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
     if rqd.style_path:
         style_sheet = (ASSETS_BASE_DIR / rqd.style_path).read_text(encoding="utf-8")
 
-    def render_png() -> Image.Image:
+    def render_jpg() -> Image.Image:
         score = Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
         score.set_meta(
             title=rqd.title,
@@ -44,9 +44,9 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
             music_meta=rqd.music_meta,
             target_segment_seconds=rqd.target_segment_seconds,
         )
-        png_bytes = drawing.png(score)
-        image = Image.open(BytesIO(png_bytes))
+        jpg_bytes = drawing.jpg(score, jpeg_quality=max(JPG_QUALITY, 95))
+        image = Image.open(BytesIO(jpg_bytes))
         image.load()
         return image
 
-    return await run_in_pool(render_png)
+    return await run_in_pool(render_jpg)

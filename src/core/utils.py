@@ -1,3 +1,4 @@
+from functools import partial
 import io
 import logging
 import time
@@ -13,7 +14,13 @@ from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 logger = logging.getLogger(__name__)
 
 
-def _encode_image(image, export_format: str, jpg_quality: int) -> tuple[io.BytesIO, str, str]:
+def _encode_image(
+    image,
+    export_format: str,
+    jpg_quality: int,
+    *,
+    jpeg_subsampling: int | str | None = None,
+) -> tuple[io.BytesIO, str, str]:
     buffer = io.BytesIO()
     try:
         if export_format == "jpg":
@@ -22,7 +29,10 @@ def _encode_image(image, export_format: str, jpg_quality: int) -> tuple[io.Bytes
                 rgb = image.convert("RGB")
                 image.close()
                 image = rgb
-            image.save(buffer, format="JPEG", quality=jpg_quality)
+            save_kwargs = {"quality": jpg_quality}
+            if jpeg_subsampling is not None:
+                save_kwargs["subsampling"] = jpeg_subsampling
+            image.save(buffer, format="JPEG", **save_kwargs)
             media_type = "image/jpeg"
             filename = "image.jpg"
         else:
@@ -37,7 +47,13 @@ def _encode_image(image, export_format: str, jpg_quality: int) -> tuple[io.Bytes
     return buffer, media_type, filename
 
 
-async def image_to_response(image) -> StreamingResponse:
+async def image_to_response(
+    image,
+    export_format: str | None = None,
+    jpg_quality: int | None = None,
+    *,
+    jpeg_subsampling: int | str | None = None,
+) -> StreamingResponse:
     """Convert PIL Image to StreamingResponse without blocking the event loop."""
     request_ctx = current_request_context()
     image_width = getattr(image, "width", None)
@@ -45,7 +61,14 @@ async def image_to_response(image) -> StreamingResponse:
     image_mode = getattr(image, "mode", None)
     set_request_stage("encode_image")
     started = time.perf_counter()
-    buffer, media_type, filename = await run_in_pool(_encode_image, image, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
+    encoder = partial(
+        _encode_image,
+        image,
+        export_format if export_format is not None else EXPORT_IMAGE_FORMAT,
+        jpg_quality if jpg_quality is not None else JPG_QUALITY,
+        jpeg_subsampling=jpeg_subsampling,
+    )
+    buffer, media_type, filename = await run_in_pool(encoder)
     elapsed = time.perf_counter() - started
     byte_len = buffer.getbuffer().nbytes
     logger.info(
