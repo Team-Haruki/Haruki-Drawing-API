@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 
 from src.core.utils import image_to_response
 from src.sekai.base.draw import add_request_watermark_to_image
-from src.sekai.chart.drawer import GenerateMusicChartRequest, generate_music_chart
+from src.sekai.chart.model import GenerateMusicChartRequest
 
 router = APIRouter(tags=["Chart"])
 
@@ -10,6 +10,8 @@ router = APIRouter(tags=["Chart"])
 @router.post("", summary="Generate music chart image")
 async def music_chart(request: GenerateMusicChartRequest):
     try:
+        from src.sekai.chart.drawer import generate_music_chart
+
         image = await generate_music_chart(request)
         image = await add_request_watermark_to_image(image, request)
         return await image_to_response(image)
