@@ -17,7 +17,15 @@ from uuid import uuid4
 
 from PIL import Image
 
-from src.settings import EXPORT_IMAGE_FORMAT, ISOLATED_WORKER_POOL_SIZE, JPG_QUALITY, REQUEST_HARD_TIMEOUT_SECONDS, settings
+from src.settings import (
+    EXPORT_IMAGE_FORMAT,
+    ISOLATED_WORKER_POOL_SIZE,
+    ISOLATED_WORKER_QUEUE_LIMIT,
+    ISOLATED_WORKER_QUEUE_TIMEOUT_SECONDS,
+    JPG_QUALITY,
+    REQUEST_HARD_TIMEOUT_SECONDS,
+    settings,
+)
 
 
 logger = logging.getLogger("src.core.heavy_render_pool")
@@ -68,6 +76,14 @@ class HeavyRenderTaskTimeoutError(TimeoutError):
 
 
 class HeavyRenderTaskExecutionError(RuntimeError):
+    pass
+
+
+class HeavyRenderQueueFullError(RuntimeError):
+    pass
+
+
+class HeavyRenderQueueTimeoutError(TimeoutError):
     pass
 
 
@@ -220,17 +236,22 @@ class HeavyRenderWorkerPool:
         self,
         *,
         worker_count: int,
+        queue_limit: int,
+        queue_timeout_seconds: float,
         task_timeout_seconds: float,
         heartbeat_timeout_seconds: float = _HEARTBEAT_TIMEOUT_SECONDS,
         result_poll_interval_seconds: float = _RESULT_POLL_INTERVAL_SECONDS,
     ) -> None:
         self._ctx = _heavy_pool_ctx
         self._worker_count = max(1, worker_count)
+        self._queue_limit = max(0, queue_limit)
+        self._queue_timeout_seconds = max(0.1, float(queue_timeout_seconds))
         self._task_timeout_seconds = max(1.0, float(task_timeout_seconds))
         self._heartbeat_timeout_seconds = max(1.0, float(heartbeat_timeout_seconds))
         self._result_poll_interval_seconds = max(0.1, float(result_poll_interval_seconds))
         self._slots = [_WorkerSlot(index=i, name=f"heavy-render-{i + 1}") for i in range(self._worker_count)]
         self._condition = threading.Condition()
+        self._pending_waiters = 0
         self._started = False
 
     async def start(self) -> None:
@@ -241,8 +262,10 @@ class HeavyRenderWorkerPool:
                 self._spawn_worker(slot, reason="startup")
             self._started = True
         logger.info(
-            "heavy render worker pool started: workers=%d timeout=%.0fs heartbeat_timeout=%.0fs",
+            "heavy render worker pool started: workers=%d queue_limit=%d queue_timeout=%.0fs timeout=%.0fs heartbeat_timeout=%.0fs",
             self._worker_count,
+            self._queue_limit,
+            self._queue_timeout_seconds,
             self._task_timeout_seconds,
             self._heartbeat_timeout_seconds,
         )
@@ -264,8 +287,8 @@ class HeavyRenderWorkerPool:
     async def render(self, kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
         from src.core.debug import current_request_context
 
-        slot = await self._acquire_slot(kind)
         request_ctx = current_request_context()
+        slot = await self._acquire_slot(kind, request_ctx)
         task = _WorkerTask(
             task_id=uuid4().hex[:12],
             kind=kind,
@@ -300,30 +323,92 @@ class HeavyRenderWorkerPool:
         finally:
             await self._release_slot(slot)
 
-    async def _acquire_slot(self, kind: HeavyTaskKind) -> _WorkerSlot:
-        return await asyncio.to_thread(self._acquire_slot_sync, kind)
+    async def _acquire_slot(self, kind: HeavyTaskKind, request_ctx: dict[str, str]) -> _WorkerSlot:
+        return await asyncio.to_thread(self._acquire_slot_sync, kind, request_ctx)
 
     async def _release_slot(self, slot: _WorkerSlot) -> None:
         await asyncio.to_thread(self._release_slot_sync, slot)
 
-    def _acquire_slot_sync(self, kind: HeavyTaskKind) -> _WorkerSlot:
+    def _busy_count_unlocked(self) -> int:
+        return sum(1 for slot in self._slots if slot.busy)
+
+    def _acquire_slot_sync(self, kind: HeavyTaskKind, request_ctx: dict[str, str]) -> _WorkerSlot:
+        wait_started = time.monotonic()
+        queued = False
         with self._condition:
-            while True:
-                for slot in self._slots:
-                    if slot.busy:
-                        continue
-                    if not self._is_worker_alive(slot):
-                        self._spawn_worker(slot, reason="slot-revive-before-acquire")
-                    slot.busy = True
-                    logger.info(
-                        "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s",
-                        slot.name,
-                        kind,
-                        slot.recycle_count,
-                        getattr(slot.process, "pid", None),
-                    )
-                    return slot
-                self._condition.wait()
+            try:
+                while True:
+                    busy_count = self._busy_count_unlocked()
+                    for slot in self._slots:
+                        if slot.busy:
+                            continue
+                        if not self._is_worker_alive(slot):
+                            self._spawn_worker(slot, reason="slot-revive-before-acquire")
+                        slot.busy = True
+                        wait_ms = (time.monotonic() - wait_started) * 1000
+                        logger.info(
+                            "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s busy=%d pending=%d wait_ms=%.1f request_id=%s path=%s",
+                            slot.name,
+                            kind,
+                            slot.recycle_count,
+                            getattr(slot.process, "pid", None),
+                            busy_count + 1,
+                            self._pending_waiters,
+                            wait_ms,
+                            request_ctx.get("request_id", "-"),
+                            request_ctx.get("path", "-"),
+                        )
+                        return slot
+
+                    if not queued:
+                        if self._pending_waiters >= self._queue_limit:
+                            logger.warning(
+                                "heavy render queue full: kind=%s busy=%d pending=%d workers=%d queue_limit=%d request_id=%s path=%s",
+                                kind,
+                                busy_count,
+                                self._pending_waiters,
+                                self._worker_count,
+                                self._queue_limit,
+                                request_ctx.get("request_id", "-"),
+                                request_ctx.get("path", "-"),
+                            )
+                            raise HeavyRenderQueueFullError(
+                                f"heavy render queue is full: kind={kind} pending={self._pending_waiters} limit={self._queue_limit}"
+                            )
+                        self._pending_waiters += 1
+                        queued = True
+                        logger.warning(
+                            "heavy render queued: kind=%s busy=%d pending=%d workers=%d queue_limit=%d queue_timeout=%.0fs request_id=%s path=%s",
+                            kind,
+                            busy_count,
+                            self._pending_waiters,
+                            self._worker_count,
+                            self._queue_limit,
+                            self._queue_timeout_seconds,
+                            request_ctx.get("request_id", "-"),
+                            request_ctx.get("path", "-"),
+                        )
+
+                    remaining = self._queue_timeout_seconds - (time.monotonic() - wait_started)
+                    if remaining <= 0:
+                        logger.warning(
+                            "heavy render queue timeout: kind=%s busy=%d pending=%d workers=%d queue_limit=%d wait_ms=%.1f request_id=%s path=%s",
+                            kind,
+                            self._busy_count_unlocked(),
+                            self._pending_waiters,
+                            self._worker_count,
+                            self._queue_limit,
+                            (time.monotonic() - wait_started) * 1000,
+                            request_ctx.get("request_id", "-"),
+                            request_ctx.get("path", "-"),
+                        )
+                        raise HeavyRenderQueueTimeoutError(
+                            f"heavy render queue timeout after {self._queue_timeout_seconds:.0f}s: kind={kind}"
+                        )
+                    self._condition.wait(timeout=remaining)
+            finally:
+                if queued:
+                    self._pending_waiters = max(0, self._pending_waiters - 1)
 
     def _release_slot_sync(self, slot: _WorkerSlot) -> None:
         with self._condition:
@@ -497,6 +582,8 @@ def get_heavy_render_worker_pool() -> HeavyRenderWorkerPool:
         if _heavy_render_pool is None:
             _heavy_render_pool = HeavyRenderWorkerPool(
                 worker_count=max(1, ISOLATED_WORKER_POOL_SIZE),
+                queue_limit=max(0, ISOLATED_WORKER_QUEUE_LIMIT),
+                queue_timeout_seconds=float(ISOLATED_WORKER_QUEUE_TIMEOUT_SECONDS),
                 task_timeout_seconds=float(REQUEST_HARD_TIMEOUT_SECONDS),
             )
     return _heavy_render_pool

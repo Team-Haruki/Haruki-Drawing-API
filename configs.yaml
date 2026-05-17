@@ -17,7 +17,9 @@ font:
 
 drawing:
   thread_pool_size: 8
-  isolated_worker_pool_size: 2
+  isolated_worker_pool_size: 8
+  isolated_worker_queue_limit: 16
+  isolated_worker_queue_timeout_seconds: 30
   request_hard_timeout_seconds: 180
   overload_max_inflight_requests: 64
   overload_retry_after_seconds: 5

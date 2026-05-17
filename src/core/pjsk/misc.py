@@ -1,7 +1,13 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
-from src.core.heavy_render_pool import HeavyRenderTaskExecutionError, HeavyRenderTaskTimeoutError, get_heavy_render_worker_pool
+from src.core.heavy_render_pool import (
+    HeavyRenderQueueFullError,
+    HeavyRenderQueueTimeoutError,
+    HeavyRenderTaskExecutionError,
+    HeavyRenderTaskTimeoutError,
+    get_heavy_render_worker_pool,
+)
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.misc.drawer import compose_alias_list_image
 from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
@@ -21,6 +27,8 @@ async def chara_birthday(request: CharaBirthdayRequest):
         payload = await get_heavy_render_worker_pool().render("chara_birthday", request.model_dump(mode="json"))
         set_request_stage("misc:chara_birthday:stream_response")
         return encoded_image_payload_to_response(payload)
+    except (HeavyRenderQueueFullError, HeavyRenderQueueTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except HeavyRenderTaskTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except HeavyRenderTaskExecutionError as exc:
