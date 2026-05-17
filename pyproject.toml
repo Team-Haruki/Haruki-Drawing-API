@@ -13,7 +13,7 @@ dependencies = [
     "pilmoji==2.0.5",
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
-    "pydantic-settings>=2.13.1",
+    "pydantic-settings>=2.14.1",
     "redis>=7.2.1",
     "ruff>=0.15.4",
     "pyyaml>=6.0.3",

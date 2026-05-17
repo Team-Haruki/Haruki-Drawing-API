@@ -371,7 +371,7 @@ requires-dist = [
     { name = "pjsekai-scores-rs-skia-image", specifier = ">=0.4.3" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
-    { name = "pydantic-settings", specifier = ">=2.13.1" },
+    { name = "pydantic-settings", specifier = ">=2.14.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "redis", specifier = ">=7.2.1" },
     { name = "ruff", specifier = ">=0.15.4" },
@@ -645,10 +645,16 @@ wheels = [
 name = "pjsekai-scores-rs-skia-image"
 version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/59/cda251f070827ff2b1e330ef11610ba128d5109570565bff5168a040d893/pjsekai_scores_rs_skia_image-0.4.3.tar.gz", hash = "sha256:e8f403ee7f8ec21273d8ef2bd283dff4c937abdf2c2d4f0d5ed436b8250aae51", size = 80325, upload-time = "2026-05-17T14:25:45.505Z" }
 wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/ce/6c5bdcc7134bb5667a3fd8bfbae283599c82b35ead626dc7bbebf2c1e025/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:e7727cf053477dd68f739c17d03f689b7ca759bbbdb8987bfc4b61e3a7e6a762", size = 3320708, upload-time = "2026-05-17T14:25:34.265Z" },
     { url = "https://files.pythonhosted.org/packages/e2/a1/fcbc695652de90b4403b115f6fe2073dd519be4256e5b8db8268499dbaca/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:dc3a389cfbe9589b6ffe3af72fb1dc0f22f2b4e828eb92b988ee5825776b89c2", size = 3466911, upload-time = "2026-05-17T14:24:40.757Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/8c/12875dfd397a1ae3987eab8908e0eb5fcbc968ae009ff10e7da3f09d592d/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:df2647fc1e591a551571de270eaaea2fa1b784c3ba546968ff71fdbcf1ffd92e", size = 2452733, upload-time = "2026-05-17T14:25:31.836Z" },
     { url = "https://files.pythonhosted.org/packages/5b/c6/9e65e621e7e3d3acd29a34d59cf326ab31e2e7e42b6797bdef2b920949b8/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:38dfce5f535d7f9065c05986dade744be696be25c6227d8891b679a7861256b4", size = 2301534, upload-time = "2026-05-17T14:24:59.339Z" },
     { url = "https://files.pythonhosted.org/packages/14/ca/2424216350c7999f86895a5d64f57e5ce2567ee3a4f37e95714f6ddfbbbb/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:5b36a5f1c2285b877a149638d478f2d3ffce9b358fd1d6e9f2ab4a88fd6dfca7", size = 3356937, upload-time = "2026-05-17T14:25:24.889Z" },
+    { url = "https://files.pythonhosted.org/packages/f6/41/d05899d512e705e372892198ae3214e4b2dcd3ea0d472c70e0701e018202/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-manylinux_2_34_aarch64.whl", hash = "sha256:4cb7f5c6ce7b6be94ce51a7fc7d855ec7acaef656d1c09885093e84e92887fc8", size = 3464935, upload-time = "2026-05-17T14:25:43.12Z" },
+    { url = "https://files.pythonhosted.org/packages/cf/68/8c3e940cc2373a0a345c7a9d48a6ff130cac50b2f1f6eff975735d7f5835/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-win_amd64.whl", hash = "sha256:f91c73774b9af6cda5a06cf42caf9f181efafcde2652c9b2140f03e110e908b6", size = 2573824, upload-time = "2026-05-17T14:25:25.961Z" },
+    { url = "https://files.pythonhosted.org/packages/d1/49/24cda9936a106a235597b2eeddda4dc88cf4ddd0a5f99633daa6d73690bb/pjsekai_scores_rs_skia_image-0.4.3-cp315-cp315-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:1a470d71b68d0ea9f843b6cf7c4d21f89f1e04ac53dc89ff88033de77ee2fdc7", size = 3320708, upload-time = "2026-05-17T14:25:28.517Z" },
 ]
 
 [[package]]
@@ -779,16 +785,16 @@ wheels = [
 
 [[package]]
 name = "pydantic-settings"
-version = "2.14.0"
+version = "2.14.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pydantic" },
     { name = "python-dotenv" },
     { name = "typing-inspection" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/98/c8345dccdc31de4228c039a98f6467a941e39558da41c1744fbe29fa5666/pydantic_settings-2.14.0.tar.gz", hash = "sha256:24285fd4b0e0c06507dd9fdfd331ee23794305352aaec8fc4eb92d4047aeb67d", size = 235709, upload-time = "2026-04-20T13:37:40.293Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/07/60/1d1e59c9c90d54591469ada7d268251f71c24bdb765f1a8a832cee8c6653/pydantic_settings-2.14.1.tar.gz", hash = "sha256:e874d3bec7e787b0c9958277956ed9b4dd5de6a80e162188fdaff7c5e26fd5fa", size = 235551, upload-time = "2026-05-08T13:40:06.542Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/01/dd/bebff3040138f00ae8a102d426b27349b9a49acc310fcae7f92112d867e3/pydantic_settings-2.14.0-py3-none-any.whl", hash = "sha256:fc8d5d692eb7092e43c8647c1c35a3ecd00e040fcf02ed86f4cb5458ca62182e", size = 60940, upload-time = "2026-04-20T13:37:38.586Z" },
+    { url = "https://files.pythonhosted.org/packages/ae/8d/f1af3832f5e6eb13ba94ee809e72b8ecb5eef226d27ee0bef7d963d943c7/pydantic_settings-2.14.1-py3-none-any.whl", hash = "sha256:6e3c7edfd8277687cdc598f56e5cff0e9bfff0910a3749deaa8d4401c3a2b9de", size = 60964, upload-time = "2026-05-08T13:40:04.958Z" },
 ]
 
 [[package]]
