@@ -65,7 +65,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && fc-cache -fv \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# pjsekai-scores-rs-skia-image 0.4.1 bundles an auditwheel FreeType that is too old
+# pjsekai-scores-rs-skia-image bundles an auditwheel FreeType that is too old
 # for Skia's FT_Palette_Data_Get reference. Prefer Debian's runtime FreeType and fail
 # the image build early if the Python extension still cannot be imported.
 RUN set -eux; \
