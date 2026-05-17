@@ -1,12 +1,19 @@
 FROM python:3.14-slim-trixie AS builder
 
+ARG PJSEKAI_SCORES_RS_REF=v0.4.0
+
 # 构建部分三方包（例如 psutil）需要编译工具链
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
+    cargo \
+    git \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    pkg-config \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 安装 uv（避免依赖 ghcr 拉取权限）
-RUN pip install --no-cache-dir uv
+# 安装 uv / maturin（避免依赖 ghcr 拉取权限）
+RUN pip install --no-cache-dir uv maturin
 # 工作目录
 WORKDIR /app/haruki_drawing_api
 
@@ -22,7 +29,15 @@ COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=$UV_CACHE_DIR \
     uv python install ${UV_PYTHON} \
     && uv venv ${UV_PROJECT_ENVIRONMENT} --python ${UV_PYTHON} \
-    && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python
+    && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python \
+    && git clone --depth 1 --branch ${PJSEKAI_SCORES_RS_REF} https://github.com/Team-Haruki/pjsekai-scores-rs.git /tmp/pjsekai-scores-rs \
+    && cd /tmp/pjsekai-scores-rs \
+    && PYTHON_PACKAGE_NAME=pjsekai-scores-rs-skia-image \
+       MATURIN_FEATURES_TOML='["python", "skia-image"]' \
+       RELEASE_TAG=${PJSEKAI_SCORES_RS_REF} \
+       bash .github/scripts/configure-python-package.sh \
+    && maturin build --release --interpreter ${UV_PROJECT_ENVIRONMENT}/bin/python --features python,skia-image --out /tmp/pjsekai-dist \
+    && uv pip install --python ${UV_PROJECT_ENVIRONMENT}/bin/python --no-deps --force-reinstall /tmp/pjsekai-dist/*.whl
 
 # 运行阶段
 FROM python:3.14-slim-trixie AS runtime
