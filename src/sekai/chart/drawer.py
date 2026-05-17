@@ -8,6 +8,20 @@ from src.settings import ASSETS_BASE_DIR, FONT_DIR
 
 from .model import GenerateMusicChartRequest
 
+CHART_FONT_FILENAMES = (
+    "SourceHanSansSC-Regular.otf",
+    "SourceHanSansSC-Bold.otf",
+    "SourceHanSansSC-Heavy.otf",
+    "TwitterColorEmoji-SVGinOT.ttf",
+)
+
+
+def chart_font_kwargs() -> dict[str, list[str]]:
+    font_paths = [str(FONT_DIR / filename) for filename in CHART_FONT_FILENAMES if (FONT_DIR / filename).is_file()]
+    if font_paths:
+        return {"font_paths": font_paths}
+    return {"font_dirs": [str(FONT_DIR)]}
+
 
 async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
     r"""generate_music_chart
@@ -43,7 +57,7 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
             skill=rqd.skill,
             music_meta=rqd.music_meta,
             target_segment_seconds=rqd.target_segment_seconds,
-            font_dirs=[str(FONT_DIR)],
+            **chart_font_kwargs(),
         )
         png_bytes = drawing.png(score)
         image = Image.open(BytesIO(png_bytes))

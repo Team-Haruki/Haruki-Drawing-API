@@ -368,7 +368,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "pillow", specifier = ">=12.1.1" },
     { name = "pilmoji", specifier = "==2.0.5" },
-    { name = "pjsekai-scores-rs-skia-image", specifier = ">=0.4.2" },
+    { name = "pjsekai-scores-rs-skia-image", specifier = ">=0.4.3" },
     { name = "psutil", specifier = ">=7.2.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pydantic-settings", specifier = ">=2.13.1" },
@@ -643,16 +643,12 @@ wheels = [
 
 [[package]]
 name = "pjsekai-scores-rs-skia-image"
-version = "0.4.2"
+version = "0.4.3"
 source = { registry = "https://pypi.org/simple" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/87/3b/d94cc68271da8ededa53916f4db0059e7d2acc8884fd6184543f18053500/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f241db042d7380fd452ac45ad3ce9c4422570919d41327ce014ad5a98b9772fb", size = 3317474, upload-time = "2026-05-17T13:43:17.477Z" },
-    { url = "https://files.pythonhosted.org/packages/3b/a9/4739cfc472a92eb6e7a355dc8610ba160cf5f69826b66110706299aef7ae/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:67a6976b346e6d3531fa434a527c29e712e12419327e992137ebe639d82d7bc9", size = 3462881, upload-time = "2026-05-17T13:43:31.067Z" },
-    { url = "https://files.pythonhosted.org/packages/9f/9a/5845bff09b0a9af18e0e25530b8a5a1203397bb766b0a7699dbbb96c14a0/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314t-macosx_10_12_x86_64.whl", hash = "sha256:07aee417f11fd1d9ebbdfd5f8320a6934f3339411c477773b9e341ca9523fe1d", size = 2448674, upload-time = "2026-05-17T13:43:25.604Z" },
-    { url = "https://files.pythonhosted.org/packages/ce/5b/4fcebc7a2a4e30b2f636999b95e9797f57b6c455fe530db8c37519848005/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:ceea270645f90d8b8c25de805f5ca31579ac86be6cdc80c6a0ec6238296d1337", size = 2305776, upload-time = "2026-05-17T13:42:55.67Z" },
-    { url = "https://files.pythonhosted.org/packages/ae/ce/dca7485747cc37d185fe2442d3b3d707cc3e1a416929a80721e00ef6ec30/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:690e684e970666d2dd5974e1961269522d51e8aade34e3291009bf7e7e7842d1", size = 3350976, upload-time = "2026-05-17T13:42:52.549Z" },
-    { url = "https://files.pythonhosted.org/packages/2b/3b/137ce4e18c450da04298d56aa13c25694b4e119cc6aa5a66a1e3d5f31365/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314t-manylinux_2_34_aarch64.whl", hash = "sha256:5a29b55e89c61db93c9ec875fa533857d1cb62a4987600ca5620b44d5d55dd62", size = 3458826, upload-time = "2026-05-17T13:43:18.981Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/20/590518a27d4afdbd035c8e056971ebcbcfe4fb901610631d95cbf87c3c3e/pjsekai_scores_rs_skia_image-0.4.2-cp314-cp314t-win_amd64.whl", hash = "sha256:4d49e064c2578d5b593093368ee5054280969ff7796cd53c77fce127fd6ecd28", size = 2568794, upload-time = "2026-05-17T13:42:57.364Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/a1/fcbc695652de90b4403b115f6fe2073dd519be4256e5b8db8268499dbaca/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314-manylinux_2_34_aarch64.whl", hash = "sha256:dc3a389cfbe9589b6ffe3af72fb1dc0f22f2b4e828eb92b988ee5825776b89c2", size = 3466911, upload-time = "2026-05-17T14:24:40.757Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/c6/9e65e621e7e3d3acd29a34d59cf326ab31e2e7e42b6797bdef2b920949b8/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-macosx_11_0_arm64.whl", hash = "sha256:38dfce5f535d7f9065c05986dade744be696be25c6227d8891b679a7861256b4", size = 2301534, upload-time = "2026-05-17T14:24:59.339Z" },
+    { url = "https://files.pythonhosted.org/packages/14/ca/2424216350c7999f86895a5d64f57e5ce2567ee3a4f37e95714f6ddfbbbb/pjsekai_scores_rs_skia_image-0.4.3-cp314-cp314t-manylinux_2_28_x86_64.whl", hash = "sha256:5b36a5f1c2285b877a149638d478f2d3ffce9b358fd1d6e9f2ab4a88fd6dfca7", size = 3356937, upload-time = "2026-05-17T14:25:24.889Z" },
 ]
 
 [[package]]
