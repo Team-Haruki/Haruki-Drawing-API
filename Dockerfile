@@ -40,8 +40,15 @@ ENV TZ=Asia/Shanghai \
     MALLOC_TRIM_THRESHOLD_=131072 \
     PATH="/app/haruki_drawing_api/.venv/bin:$PATH"
 
-# 安装 opencv 所需库
+# 安装图片渲染运行时依赖：
+# - libstdc++/libgcc/expat/zlib 是 pjsekai-scores-rs-skia-image wheel 剩余的外部 ELF 依赖。
+# - libgl/glib/x11 相关库用于现有图像依赖链。
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libstdc++6 \
+    libgcc-s1 \
+    libexpat1 \
+    zlib1g \
+    libfreetype6 \
     libgl1 \
     libglib2.0-0 \
     libsm6 \
@@ -57,6 +64,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
     && fc-cache -fv \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# pjsekai-scores-rs-skia-image 0.4.1 bundles an auditwheel FreeType that is too old
+# for Skia's FT_Palette_Data_Get reference. Prefer Debian's runtime FreeType and fail
+# the image build early if the Python extension still cannot be imported.
+RUN set -eux; \
+    system_freetype="$(ldconfig -p | awk '/libfreetype\.so\.6 / { print $NF; exit }')"; \
+    bundled_freetype="$(find /app/haruki_drawing_api/.venv/lib -path '*/pjsekai_scores_rs_skia_image.libs/libfreetype-*.so.6' -print -quit)"; \
+    test -n "$system_freetype"; \
+    test -n "$bundled_freetype"; \
+    rm "$bundled_freetype"; \
+    ln -s "$system_freetype" "$bundled_freetype"; \
+    /app/haruki_drawing_api/.venv/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
 
 
 # 复制项目代码
