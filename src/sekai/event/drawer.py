@@ -268,16 +268,19 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                 return int(rank_display[1:])
         return float("inf")
 
+    def event_record_point(item: EventHistoryInfo) -> int:
+        return item.event_point if item.event_point is not None else 0
+
     async def draw_events(name, user_events: list[EventHistoryInfo]):
         topk = 30
         if any(item.rank is not None or item.rank_display or item.rank_tier is not None for item in user_events):
             has_rank = True
             title = f"排名前{topk}的{name}记录"
-            user_events.sort(key=lambda x: (event_record_sort_rank(x), -x.event_point))
+            user_events.sort(key=lambda x: (event_record_sort_rank(x), -event_record_point(x)))
         else:
             has_rank = False
             title = f"活动点数前{topk}的{name}记录"
-            user_events.sort(key=lambda x: -x.event_point)
+            user_events.sort(key=lambda x: -event_record_point(x))
 
         user_events = user_events[:topk]
 
@@ -327,7 +330,8 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                 with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
                     TextBox("PT", style1).set_h(th).set_content_align("c")
                     for item in user_events:
-                        TextBox(f"{item.event_point}", style3, overflow="clip").set_h(gh).set_content_align("c")
+                        point_text = str(item.event_point) if item.event_point is not None else "-"
+                        TextBox(point_text, style3, overflow="clip").set_h(gh).set_content_align("c")
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):

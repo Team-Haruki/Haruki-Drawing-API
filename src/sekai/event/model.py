@@ -82,8 +82,8 @@ class EventHistory(BaseModel):
         活动排名展示文本，例如 T5000
     rank_tier : Optional[int]
         活动档线排序值
-    event_point : int
-        活动点数
+    event_point : Optional[int]
+        活动点数，缺省时展示为 -
     is_wl_event : bool
         是否为 WL 活动
     banner_path : str
@@ -99,7 +99,7 @@ class EventHistory(BaseModel):
     rank: int | None = None
     rank_display: str | None = None
     rank_tier: int | None = None
-    event_point: int
+    event_point: int | None = None
     is_wl_event: bool = False
     banner_path: str
     wl_chara_icon_path: str | None = None
