@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Any, Literal
 
 from src.sekai.base.timezone import TimeZoneRequest
 
@@ -26,6 +26,8 @@ class GenerateMusicChartRequest(TimeZoneRequest):
         歌曲封面路径
     sus_path : str
         谱面数据路径
+    chart_json : Optional[Union[str, dict]]
+        自制谱面 JSON 数据；存在时优先于 sus_path
     style_path : Optional[ str ] = None
         css样式路径
     note_host : str
@@ -43,7 +45,8 @@ class GenerateMusicChartRequest(TimeZoneRequest):
     play_level: str | int
     skill: bool = False
     jacket_path: str
-    sus_path: str
+    sus_path: str | None = None
+    chart_json: str | dict[str, Any] | None = None
     style_path: str | None = None
     note_host: str
     music_meta: dict | None = None

@@ -1,4 +1,5 @@
 from io import BytesIO
+import json
 
 from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
@@ -23,6 +24,16 @@ def chart_font_kwargs() -> dict[str, list[str]]:
     return {"font_dirs": [str(FONT_DIR)]}
 
 
+def load_score(rqd: GenerateMusicChartRequest) -> Score:
+    if rqd.chart_json is not None:
+        if isinstance(rqd.chart_json, str):
+            return Score.from_json(rqd.chart_json)
+        return Score.from_json(json.dumps(rqd.chart_json, ensure_ascii=False))
+    if not rqd.sus_path:
+        raise ValueError("either chart_json or sus_path is required")
+    return Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
+
+
 async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
     r"""generate_music_chart
 
@@ -42,7 +53,7 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
         style_sheet = (ASSETS_BASE_DIR / rqd.style_path).read_text(encoding="utf-8")
 
     def render_png() -> Image.Image:
-        score = Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
+        score = load_score(rqd)
         score.set_meta(
             title=rqd.title,
             artist=rqd.artist,
