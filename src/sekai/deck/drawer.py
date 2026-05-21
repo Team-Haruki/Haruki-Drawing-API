@@ -226,7 +226,13 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
             _compare_cover_paths.append(deck.music_cover_path)
         for card in deck.card_data:
             _card_thumb_tasks.append(get_card_full_thumbnail(card.card_thumbnail))
-            _card_thumb_keys.append(card.card_thumbnail.card_id)
+            _card_thumb_keys.append(
+                (
+                    card.card_thumbnail.card_id,
+                    card.card_thumbnail.is_after_training,
+                    card.card_thumbnail.card_thumbnail_path,
+                )
+            )
     _compare_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
 
     # 并行执行所有加载
@@ -254,7 +260,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     boost_bonus = BOOST_BONUS_DICT.get(boost or 0, 1) if boost is not None else 1
     result_decks = rqd.deck_data
     result_algs = rqd.model_name or [""] * len(result_decks)
-    # 获取卡组卡牌缩略图
+    # The same card id can appear in multiple candidate decks with different
+    # flower-before/after skill art states, so card_id alone is not a safe key.
     card_imgs = dict(zip(_card_thumb_keys, _thumb_results))
     compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
 
@@ -537,6 +544,11 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                     with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
                                         for card in deck.card_data:
                                             card_id = card.card_thumbnail.card_id
+                                            card_key = (
+                                                card_id,
+                                                card.card_thumbnail.is_after_training,
+                                                card.card_thumbnail.card_thumbnail_path,
+                                            )
                                             character_id = card.chara_id
                                             event_bonus = card.event_bonus_rate
                                             ep1_read, ep2_read = card.is_before_story, card.is_after_story
@@ -552,7 +564,6 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             ):
                                                 with Frame().set_w(card_col_w).set_content_align("c"):
                                                     with Frame().set_content_align("rt"):
-                                                        card_key = card_id
                                                         ImageBox(card_imgs[card_key], size=(None, 80))
                                                         if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
                                                             rqd.fixed_characters_id
