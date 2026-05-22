@@ -78,6 +78,13 @@ face_pos = {
 }
 
 
+def _int_or_none(value: object) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Image | None]) -> Image.Image | None:
     is_main = rqd.is_main_honor
     htype = rqd.honor_type
@@ -170,8 +177,8 @@ def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Im
         if c1_img is None or c2_img is None:
             return img
 
-        c1_face = face_pos.get(rqd.chara_id, c1_img.size[0] // 2)
-        c2_face = face_pos.get(rqd.chara_id2, c2_img.size[0] // 2)
+        c1_face = face_pos.get(_int_or_none(rqd.chara_id), c1_img.size[0] // 2)
+        c2_face = face_pos.get(_int_or_none(rqd.chara_id2), c2_img.size[0] // 2)
 
         w, h = img.size
         scale = 0.8
@@ -212,6 +219,13 @@ def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Im
         add_lv_star(img, hlv)
         return img
     return None
+
+
+def compose_full_honor_image_from_loaded_assets(
+    rqd: HonorRequest,
+    images: dict[str, Image.Image | None],
+) -> Image.Image | None:
+    return _compose_full_honor_image_sync(rqd, images)
 
 
 def _build_full_honor_cache_key(rqd: HonorRequest) -> str:

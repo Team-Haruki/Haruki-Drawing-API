@@ -39,6 +39,12 @@ drawing:
   screenshot_api_path: http://localhost:28080/screenshot
   export_image_format: png  # png 或 jpg
   jpg_quality: 85  # JPEG 压缩质量 (1-100)，仅在 export_image_format 为 jpg 时生效
+  custom_profile_assets_dir: data/cn-assets/startapp/custom_profile
+  custom_profile_fonts_dir: /Users/deseer/Downloads/sekai-custom-profile-fonts/cn/fonts
+  custom_profile_tmp_font_metadata: ../custom-profile-render-lab/out/tmp-font-assets/cn/metadata.json
+  custom_profile_shape_sprite_dir: ../custom-profile-render-lab/out/shape-bundle/sprites-native
+  custom_profile_unity_ui_sprite_dir: data/static_images/customprofile
+  custom_profile_parallel_workers: 1
 
 server:
   host: 0.0.0.0

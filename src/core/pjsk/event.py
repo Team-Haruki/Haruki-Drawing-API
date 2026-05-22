@@ -6,11 +6,13 @@ from src.core.utils import image_to_response
 from src.sekai.event.drawer import (
     compose_event_detail_image,
     compose_event_list_image,
+    compose_event_planner_image,
     compose_event_record_image,
 )
 from src.sekai.event.model import (
     EventDetailRequest,
     EventListRequest,
+    EventPlannerRequest,
     EventRecordRequest,
 )
 
@@ -56,6 +58,21 @@ async def event_list(request: EventListRequest):
     """
     try:
         image = await compose_event_list_image(request)
+        return await image_to_response(image)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/planner", summary="Generate event planner image")
+async def event_planner(request: EventPlannerRequest):
+    """
+    Generate an event planning image.
+
+    Shows target points, selected deck, and estimated plays/energy per song.
+    """
+    try:
+        image = await compose_event_planner_image(request)
         return await image_to_response(image)
     except Exception as e:
         traceback.print_exc()

@@ -1,6 +1,6 @@
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
@@ -299,6 +299,18 @@ class MultiLiveTopScoreCount(BaseModel):
 
     mvp: int = 0
     super_star: int = 0
+
+
+class CustomProfileCardRenderRequest(BaseModel):
+    schema_version: int = 1
+    kind: Literal["pjsk_custom_profile_card"] = "pjsk_custom_profile_card"
+    region: str = "cn"
+    card: dict[str, Any]
+    resources: dict[str, Any] = Field(default_factory=dict)
+    profile_context: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("profile_context", "profileContext", "context"),
+    )
 
 
 class ProfileRequest(TimeZoneRequest):

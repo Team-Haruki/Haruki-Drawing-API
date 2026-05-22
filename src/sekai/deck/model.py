@@ -105,6 +105,32 @@ class DeckData(BaseModel):
     multi_live_score_up: float | None = None
 
 
+class DeckPlannerBoostRow(BaseModel):
+    boost: int
+    point_per_play: int
+    plays: int
+    energy: int
+
+
+class DeckPlannerSong(BaseModel):
+    music_id: int | None = None
+    query: str | None = None
+    title: str
+    music_cover_path: str | None = None
+    difficulty: str | None = None
+    rows: list[DeckPlannerBoostRow]
+
+
+class DeckPlannerInfo(BaseModel):
+    target_point: int
+    current_point: int | None = None
+    remaining_point: int
+    daily_point: int | None = None
+    target_source: str | None = None
+    songs: list[DeckPlannerSong]
+    warnings: list[str] | None = None
+
+
 class DeckRequest(TimeZoneRequest):
     """组卡推荐绘制请求
 
@@ -229,6 +255,7 @@ class DeckRequest(TimeZoneRequest):
     fixed_characters_id: list[int] | None = None
     cost_times: dict | None = None
     wait_times: dict | None = None
+    event_planner: DeckPlannerInfo | None = None
 
     def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)

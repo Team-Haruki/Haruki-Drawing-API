@@ -146,6 +146,142 @@ def build_algorithm_runtime_text(cost_times: dict | None, wait_times: dict | Non
     return "\n".join(lines)
 
 
+def format_planner_int(value: int | None) -> str:
+    try:
+        return f"{int(value or 0):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def format_planner_optional_int(value: int | None) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "-"
+    if number <= 0:
+        return "-"
+    return f"{number:,}"
+
+
+def planner_cover_key(song) -> str:
+    return str(song.music_id or song.music_cover_path or song.title)
+
+
+def draw_event_planner_block(planner, planner_music_imgs: dict[str, Image.Image]) -> None:
+    th_style = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(75, 75, 75))
+    tb_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(70, 70, 70))
+    rows = []
+    for song in planner.songs:
+        if not song.rows:
+            rows.append((song, None))
+            continue
+        for row in song.rows:
+            rows.append((song, row))
+
+    with (
+        VSplit().set_content_align("lt").set_item_align("lt").set_sep(14).set_padding(16).set_bg(roundrect_bg(alpha=80))
+    ):
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
+            TextBox("活动规划", TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(50, 50, 50)))
+            TextBox(
+                f"目标 {format_planner_int(planner.target_point)}pt",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
+            )
+            TextBox(
+                f"当前 {format_planner_int(planner.current_point)}pt",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
+            )
+            TextBox(
+                f"还需 {format_planner_int(planner.remaining_point)}pt",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 180, 220)),
+            )
+            if planner.target_source:
+                TextBox(
+                    f"来源 {planner.target_source}",
+                    TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
+                    overflow="shrink",
+                ).set_w(240)
+
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
+            TextBox("歌曲 / 火数", th_style).set_w(330).set_h(48).set_content_align("c")
+            TextBox("每把PT", th_style).set_w(140).set_h(48).set_content_align("c")
+            TextBox("需要把数", th_style).set_w(140).set_h(48).set_content_align("c")
+            TextBox("体力", th_style).set_w(120).set_h(48).set_content_align("c")
+            TextBox("日速", th_style).set_w(140).set_h(48).set_content_align("c")
+
+        if rows:
+            for song, row in rows:
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
+                    with HSplit().set_w(330).set_h(76).set_content_align("c").set_item_align("c").set_sep(10):
+                        with Frame().set_size((56, 56)).set_content_align("c"):
+                            diff = (song.difficulty or "").lower()
+                            if diff in DIFF_COLORS:
+                                Spacer(w=52, h=52).set_bg(FillBg(fill=DIFF_COLORS[diff])).set_offset((3, 3))
+                            cover = planner_music_imgs.get(song.music_cover_path or planner_cover_key(song))
+                            if cover is not None:
+                                ImageBox(cover, size=(52, 52)).set_offset((-2, -2))
+                            else:
+                                Spacer(w=52, h=52).set_bg(RoundRectBg((235, 242, 248, 255), 6)).set_offset((-2, -2))
+
+                        with VSplit().set_w(230).set_content_align("l").set_item_align("l").set_sep(2).set_padding(0):
+                            TextBox(
+                                song.title,
+                                TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(70, 70, 70)),
+                                overflow="shrink",
+                            ).set_w(230)
+                            with HSplit().set_content_align("l").set_item_align("l").set_sep(6).set_padding(0):
+                                TextBox(
+                                    (song.difficulty or "DIFF").upper(),
+                                    TextStyle(
+                                        font=DEFAULT_BOLD_FONT,
+                                        size=12,
+                                        color=DIFF_COLORS.get(diff, (70, 70, 70)),
+                                    ),
+                                ).set_bg(RoundRectBg((255, 255, 255, 180), 4))
+                                TextBox(
+                                    f"{row.boost}火" if row else "-",
+                                    TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(130, 80, 180)),
+                                ).set_bg(RoundRectBg((246, 237, 255, 220), 4))
+
+                    def planner_number_cell(text: str, sub_text: str, width: int, color=(70, 70, 70)) -> None:
+                        with VSplit().set_w(width).set_h(76).set_content_align("c").set_item_align("c").set_sep(2):
+                            TextBox(text, tb_style.replace(color=color), overflow="shrink").set_w(
+                                width
+                            ).set_content_align("c")
+                            TextBox(
+                                sub_text,
+                                TextStyle(font=DEFAULT_FONT, size=13, color=(75, 75, 75)),
+                            ).set_w(width).set_content_align("c")
+
+                    planner_number_cell(format_planner_int(row.point_per_play if row else 0), "pt/把", 140)
+                    planner_number_cell(format_planner_int(row.plays if row else 0), "把", 140, (0, 180, 220))
+                    planner_number_cell(format_planner_int(row.energy if row else 0), "火", 120, (142, 94, 190))
+                    planner_number_cell(format_planner_optional_int(planner.daily_point), "pt/日", 140)
+        else:
+            TextBox("没有可展示的规划歌曲", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(255, 50, 50)))
+
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+            tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
+            TextBox(
+                "活动规划按当前数据估算，实际结算以游戏内和榜线更新为准。",
+                tip_style,
+                use_real_line_count=True,
+            ).set_w(920)
+            TextBox(
+                "未指定当前 pt 时按 0 计算；不写歌曲时默认虾 EXPERT / 龙 HARD。",
+                tip_style,
+                use_real_line_count=True,
+            ).set_w(920)
+            for warning in planner.warnings or []:
+                TextBox(
+                    f"提示: {warning}",
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(200, 75, 75)),
+                    use_real_line_count=True,
+                ).set_w(920)
+
+
 def build_recommend_title(
     recommend_type: str,
     event_id: int | None,
@@ -221,6 +357,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     _card_thumb_tasks = []
     _card_thumb_keys = []
     _compare_cover_paths = []
+    _planner_cover_paths = []
     for deck in rqd.deck_data:
         if music_compare and deck.music_cover_path and deck.music_cover_path not in dict.fromkeys(_compare_cover_paths):
             _compare_cover_paths.append(deck.music_cover_path)
@@ -233,20 +370,28 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     card.card_thumbnail.card_thumbnail_path,
                 )
             )
+    if rqd.event_planner:
+        for song in rqd.event_planner.songs:
+            if song.music_cover_path and song.music_cover_path not in dict.fromkeys(_planner_cover_paths):
+                _planner_cover_paths.append(song.music_cover_path)
     _compare_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
+    _planner_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _planner_cover_paths]
 
     # 并行执行所有加载
     _dk = list(_deck_tasks.keys())
     _t0 = time.perf_counter()
-    _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks)
+    _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks, *_planner_tasks)
     logger.debug(
         "[perf] compose_deck_recommend_image preload %d items: %.3fs",
-        len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks),
+        len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks) + len(_planner_tasks),
         time.perf_counter() - _t0,
     )
     _di = dict(zip(_dk, _all_results[: len(_dk)]))
     _thumb_results = _all_results[len(_dk) : len(_dk) + len(_card_thumb_tasks)]
-    _compare_results = _all_results[len(_dk) + len(_card_thumb_tasks) :]
+    _compare_start = len(_dk) + len(_card_thumb_tasks)
+    _compare_end = _compare_start + len(_compare_tasks)
+    _compare_results = _all_results[_compare_start:_compare_end]
+    _planner_results = _all_results[_compare_end:]
 
     wl_chara_icon = _di.get("wl_chara")
     unit_logo = _di.get("unit_logo")
@@ -264,6 +409,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     # flower-before/after skill art states, so card_id alone is not a safe key.
     card_imgs = dict(zip(_card_thumb_keys, _thumb_results))
     compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
+    planner_music_imgs = dict(zip(_planner_cover_paths, _planner_results))
 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -289,6 +435,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     .set_bg(roundrect_bg(alpha=80))
                 ):
                     title = build_recommend_title(recommend_type, event_id, wl_chara_name, live_type, live_name)
+                    if rqd.event_planner:
+                        title = title.replace("组卡", "规划")
 
                     score_name = "PT"
                     if recommend_type in ["challenge", "challenge_all", "no_event"]:
@@ -368,7 +516,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                 "WL仅支持自动组主队，支援队请自行配置",
                                 TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
                             )
-                    elif recommend_type != "mysekai" and not music_compare:
+                    elif recommend_type != "mysekai" and not music_compare and not rqd.event_planner:
                         with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                             with Frame().set_size((50, 50)):
                                 if rqd.music_id is not None and rqd.music_id != OMAKASE_MUSIC_ID:
@@ -720,6 +868,9 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     # 找不到结果
                     else:
                         TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
+
+                if rqd.event_planner:
+                    draw_event_planner_block(rqd.event_planner, planner_music_imgs)
 
                 # 说明
                 with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):

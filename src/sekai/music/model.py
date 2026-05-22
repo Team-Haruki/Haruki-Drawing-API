@@ -107,6 +107,23 @@ class LeaderboardInfo(BaseModel):
     value: str
 
 
+class CustomChartInfo(BaseModel):
+    score_id: str
+    title: str | None = None
+    author: str | None = None
+    description: str | None = None
+    difficulty: str | None = None
+    play_level: int | None = None
+    note_count: int | None = None
+    bpm: str | None = None
+    published_at: int | None = None
+    preview_start_time_sec: float | None = None
+    review_count: int | None = None
+    play_count: int | None = None
+    full_combo_rate: float | None = None
+    tags: list[str] | None = None
+
+
 class MusicDetailRequest(TimeZoneRequest):
     r"""MusicDetailRequest
 
@@ -170,6 +187,7 @@ class MusicDetailRequest(TimeZoneRequest):
     leaderboard_music_num: int | None = None
     leaderboard_live_types: dict[str, str] | None = None
     leaderboard_targets: dict[str, str] | None = None
+    custom_chart_info: CustomChartInfo | None = None
     title: str | None = None
     title_style: Any | None = None
     title_shadow: bool = False

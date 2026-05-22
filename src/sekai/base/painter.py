@@ -357,8 +357,9 @@ def get_font(path: str, size: int) -> Font:
     paths = [
         path,
         os.path.join(FONT_DIR, path),
-        os.path.join(FONT_DIR, path + ".ttf"),
         os.path.join(FONT_DIR, path + ".otf"),
+        os.path.join(FONT_DIR, path + ".ttf"),
+        os.path.join(FONT_DIR, path + ".ttc"),
     ]
     font_cache = _get_thread_font_cache()
     entry = font_cache.get(key)

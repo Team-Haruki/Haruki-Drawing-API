@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, field_validator
 
 from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
+from src.sekai.deck.model import DeckRequest
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
 # ========== 基础数据模型 ==========
@@ -262,6 +263,60 @@ class EventListRequest(TimeZoneRequest):
         for item in self.event_info:
             item.start_at = localize_datetime(item.start_at, self.timezone)
             item.end_at = localize_datetime(item.end_at, self.timezone)
+
+
+class EventPlannerDeckCard(BaseModel):
+    """活动规划卡组卡牌信息"""
+
+    card_thumbnail: CardFullThumbnailRequest
+    skill_level: str | None = None
+    skill_rate: float | None = None
+    event_bonus_rate: float | None = None
+
+
+class EventPlannerBoostRow(BaseModel):
+    """活动规划单个火数的估算结果"""
+
+    boost: int
+    point_per_play: int
+    plays: int
+    energy: int
+
+
+class EventPlannerSong(BaseModel):
+    """活动规划中的歌曲估算项"""
+
+    music_id: int | None = None
+    query: str | None = None
+    title: str
+    music_cover_path: str | None = None
+    difficulty: str | None = None
+    rows: list[EventPlannerBoostRow]
+
+
+class EventPlannerRequest(TimeZoneRequest):
+    """活动规划绘制请求"""
+
+    title: str = "活动规划"
+    region: str
+    event_id: int | None = None
+    event_name: str | None = None
+    event_banner_path: str | None = None
+    live_name: str | None = None
+    profile: DetailedProfileCardRequest | None = None
+    target_point: int
+    current_point: int | None = None
+    remaining_point: int
+    daily_point: int | None = None
+    target_source: str | None = None
+    deck_summary: str | None = None
+    deck_cards: list[EventPlannerDeckCard] | None = None
+    deck_total_power: int | None = None
+    deck_event_bonus: float | None = None
+    deck_skill_up: float | None = None
+    songs: list[EventPlannerSong]
+    warnings: list[str] | None = None
+    deck_request: DeckRequest | None = None
 
 
 # 兼容性别名

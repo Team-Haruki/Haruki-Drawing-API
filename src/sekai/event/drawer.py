@@ -37,6 +37,15 @@ from src.sekai.base.utils import (
     put_composed_image_cache,
     put_composed_image_disk_cache,
 )
+from src.sekai.deck.drawer import compose_deck_recommend_image
+from src.sekai.deck.model import (
+    DeckCardData,
+    DeckData,
+    DeckPlannerBoostRow,
+    DeckPlannerInfo,
+    DeckPlannerSong,
+    DeckRequest,
+)
 from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
@@ -53,6 +62,7 @@ from .model import (
     # 兼容性别名
     EventHistoryInfo,
     EventListRequest,
+    EventPlannerRequest,
     EventRecordRequest,
 )
 
@@ -348,6 +358,101 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
 
     add_request_watermark(canvas, rqd)
     return await canvas.get_img()
+
+
+def _event_planner_info(rqd: EventPlannerRequest) -> DeckPlannerInfo:
+    return DeckPlannerInfo(
+        target_point=rqd.target_point,
+        current_point=rqd.current_point,
+        remaining_point=rqd.remaining_point,
+        daily_point=rqd.daily_point,
+        target_source=rqd.target_source,
+        songs=[
+            DeckPlannerSong(
+                music_id=song.music_id,
+                query=song.query,
+                title=song.title,
+                music_cover_path=song.music_cover_path,
+                difficulty=song.difficulty,
+                rows=[
+                    DeckPlannerBoostRow(
+                        boost=row.boost,
+                        point_per_play=row.point_per_play,
+                        plays=row.plays,
+                        energy=row.energy,
+                    )
+                    for row in song.rows
+                ],
+            )
+            for song in rqd.songs
+        ],
+        warnings=rqd.warnings,
+    )
+
+
+def _event_planner_fallback_deck_request(rqd: EventPlannerRequest) -> DeckRequest:
+    if rqd.profile is None:
+        raise ValueError("活动规划缺少组卡请求，且没有用户信息可用于回退绘制")
+
+    deck = DeckData(
+        card_data=[
+            DeckCardData(
+                card_thumbnail=card.card_thumbnail,
+                chara_id=0,
+                skill_level=card.skill_level or "",
+                skill_rate=card.skill_rate or 0,
+                event_bonus_rate=card.event_bonus_rate or 0,
+            )
+            for card in rqd.deck_cards or []
+        ],
+        score=0,
+        event_bonus_rate=rqd.deck_event_bonus,
+        total_power=rqd.deck_total_power,
+        multi_live_score_up=rqd.deck_skill_up,
+    )
+    planner_title = (
+        f"目标 {rqd.target_point:,}pt / 当前 {(rqd.current_point or 0):,}pt / 还需 {rqd.remaining_point:,}pt"
+    )
+    return DeckRequest(
+        region=rqd.region,
+        profile=rqd.profile,
+        deck_data=[deck],
+        event_name=rqd.event_name,
+        music_title=planner_title,
+        music_id=10000,
+        event_banner_path=rqd.event_banner_path,
+        is_max_deck=False,
+        recommend_type="event",
+        event_id=rqd.event_id,
+        live_type="multi",
+        live_name=rqd.live_name or "协力",
+        multi_live_teammate_power=250000,
+        multi_live_teammate_score_up=200,
+        target="score",
+        model_name=[""],
+    )
+
+
+async def compose_event_planner_image(rqd: EventPlannerRequest) -> Image.Image:
+    deck_request = (
+        rqd.deck_request.model_copy(deep=True)
+        if rqd.deck_request is not None
+        else _event_planner_fallback_deck_request(rqd)
+    )
+    deck_request.event_planner = _event_planner_info(rqd)
+    if not deck_request.event_banner_path and rqd.event_banner_path:
+        deck_request.event_banner_path = rqd.event_banner_path
+    if not deck_request.event_name and rqd.event_name:
+        deck_request.event_name = rqd.event_name
+    deck_request.music_title = None
+    deck_request.music_id = None
+    deck_request.music_diff = None
+    deck_request.music_cover_path = None
+    deck_request.target = deck_request.target or "score"
+    deck_request.live_type = deck_request.live_type or "multi"
+    deck_request.live_name = deck_request.live_name or rqd.live_name or "协力"
+    deck_request.recommend_type = deck_request.recommend_type or "event"
+    return await compose_deck_recommend_image(deck_request)
 
 
 def _resolve_event_list_entry_phase(start_at, end_at, now) -> str:

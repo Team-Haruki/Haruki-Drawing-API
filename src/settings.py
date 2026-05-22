@@ -107,6 +107,29 @@ class DrawingSettings(BaseModel):
     screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
+    custom_profile_assets_dir: Path | None = None
+    custom_profile_fonts_dir: Path | None = None
+    custom_profile_tmp_font_metadata: Path | None = None
+    custom_profile_shape_sprite_dir: Path | None = None
+    custom_profile_unity_ui_sprite_dir: Path | None = None
+    custom_profile_parallel_workers: int = 1
+
+    @field_validator(
+        "custom_profile_assets_dir",
+        "custom_profile_fonts_dir",
+        "custom_profile_tmp_font_metadata",
+        "custom_profile_shape_sprite_dir",
+        "custom_profile_unity_ui_sprite_dir",
+        mode="before",
+    )
+    @classmethod
+    def resolve_optional_path(cls, v: str | Path | None) -> Path | None:
+        if v is None or str(v).strip() == "":
+            return None
+        path = Path(v)
+        if not path.is_absolute():
+            return (PROJECT_ROOT / path).resolve()
+        return path
 
 
 class Settings(BaseSettings):
@@ -207,6 +230,12 @@ COMPOSED_IMAGE_CACHE_TTL_SECONDS = settings.drawing.composed_image_cache_ttl_sec
 SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
+CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir
+CUSTOM_PROFILE_FONTS_DIR = settings.drawing.custom_profile_fonts_dir
+CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_metadata
+CUSTOM_PROFILE_SHAPE_SPRITE_DIR = settings.drawing.custom_profile_shape_sprite_dir
+CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR = settings.drawing.custom_profile_unity_ui_sprite_dir
+CUSTOM_PROFILE_PARALLEL_WORKERS = settings.drawing.custom_profile_parallel_workers
 
 # Server
 SERVER_HOST = settings.server.host
