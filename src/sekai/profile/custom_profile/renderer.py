@@ -4000,6 +4000,10 @@ class PNGRenderer:
         if card_member_type == 1:
             rels.extend(
                 [
+                    Path("character") / "member_cutout_trm" / bundle / cutout_file,
+                    Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_trim_file,
                     Path("character") / "member_cutout" / bundle / cutout_file,
                     Path("character") / "member_cutout" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,

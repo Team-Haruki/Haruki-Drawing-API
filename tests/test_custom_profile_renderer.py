@@ -153,7 +153,7 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
         / "cn-assets"
         / "startapp"
         / "character"
-        / "member_cutout"
+        / "member_cutout_trm"
         / "res010_no034"
         / "after_training.png"
     )
@@ -188,7 +188,7 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
                         "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
                     ),
                     "deckAfterTrainingPath": (
-                        "asset/cn-assets/startapp/character/member_cutout/res010_no034/after_training.png"
+                        "asset/cn-assets/startapp/character/member_cutout_trm/res010_no034/after_training.png"
                     ),
                 }
             },
@@ -200,7 +200,7 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
         for path in renderer.card_member_image_candidates({"id": 915, "type": 1, "useAfterSpecialTraining": True})
     ]
 
-    assert candidates[0].endswith("/character/member_cutout/res010_no034/after_training.png")
+    assert candidates[0].endswith("/character/member_cutout_trm/res010_no034/after_training.png")
     assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
 
 
