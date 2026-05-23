@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,8 @@ from src.settings import (
     CUSTOM_PROFILE_TMP_FONT_METADATA,
     CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _require_path(name: str, path: Path | None, *, is_file: bool = False) -> Path:
@@ -43,6 +46,18 @@ def _require_region_path(name: str, path: Path | None, region: str, *, is_file: 
     return _require_path(name, _expand_region_path(path, region), is_file=is_file)
 
 
+def _optional_region_file(name: str, path: Path | None, region: str) -> Path | None:
+    if path is None:
+        return None
+    expanded = _expand_region_path(path, region)
+    if not expanded.exists():
+        logger.warning("optional drawing.%s missing: %s", name, expanded)
+        return None
+    if not expanded.is_file():
+        raise RuntimeError(f"drawing.{name} must be a file: {expanded}")
+    return expanded
+
+
 def _render_custom_profile_card_sync(
     card: dict[str, Any],
     profile_context: dict[str, Any],
@@ -51,11 +66,10 @@ def _render_custom_profile_card_sync(
 ) -> Image.Image:
     assets = _require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region)
     fonts = _require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region)
-    tmp_font_metadata = _require_region_path(
+    tmp_font_metadata = _optional_region_file(
         "custom_profile_tmp_font_metadata",
         CUSTOM_PROFILE_TMP_FONT_METADATA,
         region,
-        is_file=True,
     )
     shape_sprite_dir = _require_region_path(
         "custom_profile_shape_sprite_dir",

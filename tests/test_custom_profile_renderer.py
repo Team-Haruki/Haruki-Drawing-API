@@ -2,7 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from src.sekai.profile.custom_profile.drawer import _require_region_path
+from src.sekai.profile.custom_profile.drawer import _optional_region_file, _require_region_path
 from src.sekai.profile.custom_profile.renderer import PNGRenderer
 
 
@@ -179,3 +179,9 @@ def test_custom_profile_region_path_expands_region_placeholder(tmp_path: Path) -
         )
         == target
     )
+
+
+def test_custom_profile_tmp_font_metadata_is_optional(tmp_path: Path) -> None:
+    path = tmp_path / "custom_profile" / "tmp-font-assets" / "{region}" / "metadata.json"
+
+    assert _optional_region_file("custom_profile_tmp_font_metadata", path, "cn") is None
