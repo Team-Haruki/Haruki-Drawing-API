@@ -85,6 +85,10 @@ def _int_or_none(value: object) -> int | None:
         return None
 
 
+def honor_group_uses_scroll_level(group_type: str | None) -> bool:
+    return group_type in {"fc_ap", "event", "wl_event"}
+
+
 def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Image | None]) -> Image.Image | None:
     is_main = rqd.is_main_honor
     htype = rqd.honor_type
@@ -153,11 +157,12 @@ def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Im
             else:
                 img.paste(rank_img, resolve_event_rank_position(img, rank_img, is_main), rank_img)
 
-        if gtype == "fc_ap":
+        if honor_group_uses_scroll_level(gtype):
             scroll_img = images.get("scroll_img")
             if scroll_img is not None:
                 img.paste(scroll_img, (215, 3) if is_main else (37, 3), scroll_img)
-            add_fcap_lv(img)
+            if gtype == "fc_ap" or scroll_img is not None:
+                add_fcap_lv(img)
         elif gtype in ("character", "achievement"):
             add_lv_star(img, hlv)
         return img
@@ -315,7 +320,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
             tasks["honor_img"] = load_honor_image(rqd.honor_img_path)
         if rqd.rank_img_path and (gtype in ("event", "wl_event", "rank_match") or wl_rank_style):
             tasks["rank_img"] = load_optional_image(rqd.rank_img_path)
-        if gtype == "fc_ap" and rqd.scroll_img_path:
+        if honor_group_uses_scroll_level(gtype) and rqd.scroll_img_path:
             tasks["scroll_img"] = load_honor_image(rqd.scroll_img_path)
     elif htype == "bonds":
         if rqd.bonds_bg_path:

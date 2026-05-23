@@ -273,6 +273,119 @@ def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path:
     assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
 
 
+def test_custom_profile_collection_prefers_image_asset_for_badges(tmp_path: Path) -> None:
+    asset_path = (
+        tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile" / "collection" / "collab001" / "badge.png"
+    )
+    _write_png(asset_path, (25, 25))
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "customProfileCollectionResources": {
+                801: {
+                    "id": 801,
+                    "customProfileResourceCollectionType": "can_badge",
+                    "imagePath": "asset/cn-assets/startapp/custom_profile/collection/collab001/badge.png",
+                }
+            }
+        },
+    )
+
+    rendered = renderer.render_collection_content({"id": 801})
+
+    assert isinstance(rendered, tuple)
+    assert rendered[0].size == (25, 25)
+
+
+def test_custom_profile_music_clear_info_uses_profile_counts(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userMusicDifficultyClearCount": [
+                {"musicDifficultyType": "easy", "liveClear": 1, "fullCombo": 2, "allPerfect": 3},
+                {"musicDifficultyType": "master", "liveClear": 4, "fullCombo": 5, "allPerfect": 6},
+            ],
+        },
+    )
+
+    image = renderer.render_general_music_clear_info()
+
+    assert image.size == (752, 250)
+    assert renderer.music_clear_count_map()["master"]["fullCombo"] == 5
+
+
+def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) -> None:
+    icon_path = tmp_path / "static_images" / "chara_rank_icon" / "miku.png"
+    _write_png(icon_path, (9, 4))
+    renderer = _make_renderer(
+        tmp_path,
+        resources={"charaRankIconPathMap": {"21": "static_images/chara_rank_icon/miku.png"}},
+    )
+
+    assert renderer.chara_rank_icon_path(21) == icon_path
+
+
+def test_custom_profile_general_deck_card_uses_still_art(tmp_path: Path) -> None:
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_small"
+        / "res010_no034"
+        / "card_after_training.png",
+        (330, 512),
+    )
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_cutout_trm"
+        / "res010_no034"
+        / "after_training.png",
+        (330, 512),
+    )
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCards": [
+                {
+                    "cardId": 915,
+                    "specialTrainingStatus": "done",
+                    "defaultImage": "special_training",
+                    "level": 60,
+                    "masterRank": 5,
+                }
+            ],
+        },
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetbundleName": "res010_no034",
+                    "smallAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_small/res010_no034/card_after_training.png"
+                    ),
+                    "deckAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_cutout_trm/res010_no034/after_training.png"
+                    ),
+                }
+            },
+        },
+    )
+
+    assert (
+        renderer.card_image_path_for_state(915, True, "small")
+        .as_posix()
+        .endswith("/character/member_small/res010_no034/card_after_training.png")
+    )
+    assert renderer.compose_profile_deck_card(915) is not None
+
+
 def test_custom_profile_unity_sprite_reuses_static_card_assets(tmp_path: Path) -> None:
     _write_png(tmp_path / "static_images" / "card" / "train_rank_0.png", (7, 6))
     _write_png(tmp_path / "static_images" / "card" / "attr_icon_cute.png", (8, 8))
