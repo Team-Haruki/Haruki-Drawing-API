@@ -824,9 +824,7 @@ def _draw_character_mission_progress(
             lx = int((total_w - border * 2) * (i / 5.0))
             line_color = (100, 100, 100, 255) if i / 5.0 < progress else (150, 150, 150, 255)
             bar.add_item(
-                Spacer(w=1, h=total_h // 2 - 1)
-                .set_bg(FillBg(line_color))
-                .set_offset((border + lx - 1, total_h // 2))
+                Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset((border + lx - 1, total_h // 2))
             )
     else:
         bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)))

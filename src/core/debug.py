@@ -46,15 +46,17 @@ _SLOW_REQUEST_SECONDS = 1.5
 _BODY_PREVIEW_LIMIT = 512
 _WATCHDOG_WARN_SECONDS = 10.0
 _WATCHDOG_REPEAT_SECONDS = 15.0
-_EXEMPT_RUNTIME_GUARD_PATHS = frozenset({
-    "/",
-    "/health",
-    "/ready",
-    "/cache/stats",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
-})
+_EXEMPT_RUNTIME_GUARD_PATHS = frozenset(
+    {
+        "/",
+        "/health",
+        "/ready",
+        "/cache/stats",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+    }
+)
 
 
 @dataclass(slots=True)
@@ -220,19 +222,13 @@ def evaluate_runtime_readiness(metrics: dict[str, Any] | None = None) -> tuple[b
 
     if READINESS_UNHEALTHY_INFLIGHT_REQUESTS > 0 and isinstance(inflight, int):
         if inflight >= READINESS_UNHEALTHY_INFLIGHT_REQUESTS:
-            reasons.append(
-                f"inflight {inflight} >= {READINESS_UNHEALTHY_INFLIGHT_REQUESTS}"
-            )
+            reasons.append(f"inflight {inflight} >= {READINESS_UNHEALTHY_INFLIGHT_REQUESTS}")
     if READINESS_UNHEALTHY_RSS_MB > 0 and isinstance(rss_mb, int | float):
         if rss_mb >= READINESS_UNHEALTHY_RSS_MB:
-            reasons.append(
-                f"rss_mb {rss_mb} >= {READINESS_UNHEALTHY_RSS_MB}"
-            )
+            reasons.append(f"rss_mb {rss_mb} >= {READINESS_UNHEALTHY_RSS_MB}")
     if READINESS_UNHEALTHY_ASYNCIO_TASKS > 0 and isinstance(asyncio_tasks, int):
         if asyncio_tasks >= READINESS_UNHEALTHY_ASYNCIO_TASKS:
-            reasons.append(
-                f"asyncio_tasks {asyncio_tasks} >= {READINESS_UNHEALTHY_ASYNCIO_TASKS}"
-            )
+            reasons.append(f"asyncio_tasks {asyncio_tasks} >= {READINESS_UNHEALTHY_ASYNCIO_TASKS}")
 
     return len(reasons) == 0, reasons, metrics
 

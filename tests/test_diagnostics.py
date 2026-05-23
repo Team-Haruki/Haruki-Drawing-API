@@ -14,4 +14,3 @@ def test_dump_runtime_diagnostics_logs_reason(caplog, monkeypatch):
     messages = [record.message for record in caplog.records]
     assert any("runtime diagnostics begin: reason=unit-test" in message for message in messages)
     assert any("runtime diagnostics end: reason=unit-test" in message for message in messages)
-
