@@ -17,7 +17,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 Image.MAX_IMAGE_PIXELS = None
 
-from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets
+from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets, honor_group_uses_scroll_level
 from src.sekai.honor.model import HonorRequest
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
@@ -259,7 +259,61 @@ GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     "Deck": (783, 242),
     "LeaderCard": (940, 530),
     "HonorDeck": (783, 179),
+    "MultiLive": (380, 180),
+    "ChallengeLive": (380, 220),
+    "CharacterRankAndChallengeStage": (752, 330),
+    "CharacterRankAndChallengeStageScroll": (752, 330),
+    "MusicClearInfo": (752, 250),
+    "MusicClearSelectTabInfo": (752, 250),
+    "StoryFavorite": (752, 250),
 }
+GENERAL_MUSIC_DIFFICULTIES: tuple[tuple[str, str, tuple[int, int, int, int]], ...] = (
+    ("easy", "EASY", (73, 211, 111, 255)),
+    ("normal", "NORMAL", (65, 198, 222, 255)),
+    ("hard", "HARD", (241, 201, 65, 255)),
+    ("expert", "EXPERT", (236, 74, 115, 255)),
+    ("master", "MASTER", (166, 89, 214, 255)),
+    ("append", "APPEND", (218, 116, 221, 255)),
+)
+CHARA_LIST: tuple[tuple[str | None, int | None], ...] = (
+    ("miku", 21),
+    ("rin", 22),
+    ("len", 23),
+    ("luka", 24),
+    ("meiko", 25),
+    ("kaito", 26),
+    ("ick", 1),
+    ("saki", 2),
+    ("hnm", 3),
+    ("shiho", 4),
+    (None, None),
+    (None, None),
+    ("mnr", 5),
+    ("hrk", 6),
+    ("airi", 7),
+    ("szk", 8),
+    (None, None),
+    (None, None),
+    ("khn", 9),
+    ("an", 10),
+    ("akt", 11),
+    ("toya", 12),
+    (None, None),
+    (None, None),
+    ("tks", 13),
+    ("emu", 14),
+    ("nene", 15),
+    ("rui", 16),
+    (None, None),
+    (None, None),
+    ("knd", 17),
+    ("mfy", 18),
+    ("ena", 19),
+    ("mzk", 20),
+    (None, None),
+    (None, None),
+)
+CHARA_ID2NICKNAME = {character_id: nickname for nickname, character_id in CHARA_LIST if nickname and character_id}
 GENERAL_TEMPLATE_UNIT1_POSITIONS: dict[int, tuple[float, float]] = {
     # custom_profile/template/templatelayout.json unit 1.
     13: (-598.0, 330.0),
@@ -1801,6 +1855,9 @@ class PNGRenderer:
         self.honor_requests = self.load_string_resource_map("honorRequests", "honor_requests")
         self.profile_honor_requests = self.load_string_resource_map("profileHonorRequests", "profile_honor_requests")
         self.bonds_honor_requests = self.load_string_resource_map("bondsHonorRequests", "bonds_honor_requests")
+        self.chara_rank_icon_path_map = self.coerce_string_map(
+            self.resources.get("charaRankIconPathMap", self.resources.get("chara_rank_icon_path_map", {}))
+        )
         self.static_images = self.resolve_static_images_root()
         self.unity_ui_sprite_dir = unity_ui_sprite_dir or DEFAULT_UNITY_UI_SPRITE_DIR
         self._unity_ui_sprite_cache: dict[str, Image.Image | None] = {}
@@ -1862,6 +1919,16 @@ class PNGRenderer:
         for key, item in value.items():
             if isinstance(item, dict):
                 result[str(key)] = item
+        return result
+
+    def coerce_string_map(self, value: Any) -> dict[str, str]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, str] = {}
+        for key, item in value.items():
+            text = str(item or "").strip()
+            if text:
+                result[str(key)] = text
         return result
 
     def resolve_static_images_root(self) -> Path:
@@ -2384,6 +2451,13 @@ class PNGRenderer:
             "LeaderCard": self.render_general_leader_card,
             "Deck": self.render_general_deck,
             "HonorDeck": self.render_general_honor_deck,
+            "MultiLive": self.render_general_multi_live,
+            "ChallengeLive": self.render_general_challenge_live,
+            "CharacterRankAndChallengeStage": self.render_general_character_rank_and_challenge_stage,
+            "CharacterRankAndChallengeStageScroll": self.render_general_character_rank_and_challenge_stage,
+            "MusicClearInfo": self.render_general_music_clear_info,
+            "MusicClearSelectTabInfo": self.render_general_music_clear_info,
+            "StoryFavorite": self.render_general_story_favorite,
         }
         renderer = renderers.get(file_name)
         if renderer is not None:
@@ -2987,6 +3061,252 @@ class PNGRenderer:
             self.paste_in_rect(image, badge, rects[idx])
         return image
 
+    def render_general_music_clear_info(self) -> Image.Image:
+        size = GENERAL_NATIVE_SIZES["MusicClearInfo"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        self.draw_general_panel(image, (0, 0, size[0], size[1]))
+        rows = (
+            ("完成", "liveClear"),
+            ("FULL COMBO", "fullCombo"),
+            ("ALL PERFECT", "allPerfect"),
+        )
+        counts = self.music_clear_count_map()
+        row_h = 70
+        start_y = 14
+        for idx, (label, key) in enumerate(rows):
+            top = start_y + idx * 76
+            self.draw_music_clear_row(image, (28, top, size[0] - 28, top + row_h), label, key, counts)
+        return image
+
+    def render_general_multi_live(self) -> Image.Image | None:
+        data = self.profile_context.get("userMultiLiveTopScoreCount") or {}
+        if not isinstance(data, dict):
+            return None
+        size = GENERAL_NATIVE_SIZES["MultiLive"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        self.draw_general_panel(image, (0, 0, size[0], size[1]))
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, (24, 18, size[0] - 24, 54), "MULTI LIVE", size=24, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        )
+        stats = [("MVP", int(data.get("mvp", 0) or 0)), ("SUPER STAR", int(data.get("superStar", 0) or 0))]
+        for idx, (label, value) in enumerate(stats):
+            y = 72 + idx * 48
+            self.paste_unity_sprite(
+                image,
+                "bg_base_r16_wh",
+                (34, y, size[0] - 34, y + 36),
+                tint=UNITY_UI_INPUT_TINT,
+                sliced_border=(21, 21, 21, 21),
+            )
+            self.draw_fit_text_rect(
+                draw, (52, y, size[0] - 134, y + 36), label, max_size=20, fill=GENERAL_TEMPLATE_TEXT
+            )
+            self.draw_fit_text_rect(
+                draw,
+                (size[0] - 136, y, size[0] - 52, y + 36),
+                str(value),
+                max_size=22,
+                fill=GENERAL_TEMPLATE_TEXT,
+                anchor="rm",
+            )
+        return image
+
+    def render_general_challenge_live(self) -> Image.Image | None:
+        data = self.profile_context.get("userChallengeLiveSoloResult") or {}
+        if not isinstance(data, dict):
+            return None
+        character_id = int(data.get("characterId", 0) or 0)
+        high_score = int(data.get("highScore", 0) or 0)
+        if character_id <= 0 and high_score <= 0:
+            return None
+        size = GENERAL_NATIVE_SIZES["ChallengeLive"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        self.draw_general_panel(image, (0, 0, size[0], size[1]))
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, (22, 16, size[0] - 22, 52), "CHALLENGE LIVE", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        )
+        icon_path = self.chara_rank_icon_path(character_id)
+        if icon := self.open_rgba(icon_path):
+            self.paste_in_rect(image, icon, (34, 72, 134, 122))
+        rank = self.challenge_live_rank_for(character_id)
+        self.draw_center_text_rect(draw, (142, 70, 226, 124), str(rank), size=30, fill=GENERAL_TEMPLATE_TEXT)
+        self.draw_center_text_rect(draw, (34, 140, size[0] - 34, 176), f"SCORE {high_score}", size=24)
+        return image
+
+    def render_general_character_rank_and_challenge_stage(self) -> Image.Image:
+        size = GENERAL_NATIVE_SIZES["CharacterRankAndChallengeStage"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        self.draw_general_panel(image, (0, 0, size[0], size[1]))
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, (24, 12, size[0] - 24, 46), "角色等级", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        )
+        ranks = self.character_rank_map()
+        cell_w, cell_h = 96, 48
+        gap_x, gap_y = 12, 7
+        start_x, start_y = 32, 58
+        for index, (nickname, character_id) in enumerate(CHARA_LIST):
+            col = index % 6
+            row = index // 6
+            x = start_x + col * (cell_w + gap_x)
+            y = start_y + row * (cell_h + gap_y)
+            if nickname is None or character_id is None:
+                continue
+            icon_path = self.chara_rank_icon_path(character_id)
+            if icon := self.open_rgba(icon_path):
+                self.paste_in_rect(image, icon, (x, y, x + cell_w, y + cell_h))
+            else:
+                self.paste_unity_sprite(
+                    image,
+                    "bg_base_r16_wh",
+                    (x, y, x + cell_w, y + cell_h),
+                    tint=UNITY_UI_INPUT_TINT,
+                    sliced_border=(21, 21, 21, 21),
+                )
+            draw.text(
+                (x + cell_w - 22, y + cell_h / 2),
+                str(ranks.get(character_id, 0)),
+                font=self.general_font(20),
+                fill=GENERAL_TEMPLATE_TEXT,
+                anchor="mm",
+            )
+        return image
+
+    def render_general_story_favorite(self) -> Image.Image | None:
+        stories = self.profile_context.get("userStoryFavorites") or []
+        if not isinstance(stories, list):
+            return None
+        size = GENERAL_NATIVE_SIZES["StoryFavorite"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        self.draw_general_panel(image, (0, 0, size[0], size[1]))
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, (24, 12, size[0] - 24, 48), "最喜欢的剧情", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        )
+        font = self.general_font(22)
+        y = 66
+        if not stories:
+            draw.text((size[0] / 2, size[1] / 2), "未设置", font=font, fill=GENERAL_TEMPLATE_TEXT, anchor="mm")
+            return image
+        for story in stories[:4]:
+            if not isinstance(story, dict):
+                continue
+            title = str(story.get("comment", "") or "").strip()
+            if not title:
+                title = f"{story.get('storyType', '')} #{story.get('storyId', '')}".strip()
+            self.paste_unity_sprite(
+                image,
+                "bg_base_r16_wh",
+                (30, y, size[0] - 30, y + 36),
+                tint=UNITY_UI_INPUT_TINT,
+                sliced_border=(21, 21, 21, 21),
+            )
+            self.draw_fit_text_rect(draw, (48, y, size[0] - 48, y + 36), title, max_size=21, fill=GENERAL_TEMPLATE_TEXT)
+            y += 44
+        return image
+
+    def draw_general_panel(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
+        if not self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            rect,
+            tint=UNITY_UI_HONOR_TINT,
+            sliced_border=(21, 21, 21, 21),
+        ):
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle(
+                tuple(round(v) for v in rect),
+                radius=GENERAL_TEMPLATE_PANEL_RADIUS,
+                fill=(238, 240, 248, 210),
+            )
+
+    def music_clear_count_map(self) -> dict[str, dict[str, int]]:
+        result: dict[str, dict[str, int]] = {}
+        for row in self.profile_context.get("userMusicDifficultyClearCount", []) or []:
+            if not isinstance(row, dict):
+                continue
+            difficulty = str(row.get("musicDifficultyType", "") or "").lower()
+            if difficulty:
+                result[difficulty] = {
+                    "liveClear": int(row.get("liveClear", 0) or 0),
+                    "fullCombo": int(row.get("fullCombo", 0) or 0),
+                    "allPerfect": int(row.get("allPerfect", 0) or 0),
+                }
+        return result
+
+    def draw_music_clear_row(
+        self,
+        image: Image.Image,
+        rect: tuple[float, float, float, float],
+        label: str,
+        key: str,
+        counts: dict[str, dict[str, int]],
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = rect
+        header_h = 24
+        self.paste_unity_sprite(
+            image,
+            "bg_base_wh",
+            (left, top, right, top + header_h),
+            tint=(0.62, 0.63, 0.72, 0.85),
+        )
+        self.draw_center_text_rect(draw, (left, top, right, top + header_h), label, size=18, fill=(255, 255, 255, 255))
+        cell_gap = 8
+        cell_count = len(GENERAL_MUSIC_DIFFICULTIES)
+        cell_w = (right - left - cell_gap * (cell_count - 1)) / cell_count
+        y = top + header_h + 8
+        for idx, (difficulty, text, color) in enumerate(GENERAL_MUSIC_DIFFICULTIES):
+            x = left + idx * (cell_w + cell_gap)
+            self.draw_difficulty_count_cell(
+                image, (x, y, x + cell_w, bottom), text, color, counts.get(difficulty, {}).get(key, 0)
+            )
+
+    def draw_difficulty_count_cell(
+        self,
+        image: Image.Image,
+        rect: tuple[float, float, float, float],
+        label: str,
+        color: tuple[int, int, int, int],
+        value: int,
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = rect
+        tag_h = 26
+        draw.rounded_rectangle((left, top, right, top + tag_h), radius=5, fill=color)
+        self.draw_center_text_rect(draw, (left, top, right, top + tag_h), label, size=14, fill=(255, 255, 255, 255))
+        self.draw_center_text_rect(draw, (left, top + tag_h + 4, right, bottom), str(value), size=20)
+
+    def character_rank_map(self) -> dict[int, int]:
+        result: dict[int, int] = {}
+        for row in self.profile_context.get("userCharacters", []) or []:
+            if isinstance(row, dict):
+                character_id = int(row.get("characterId", 0) or 0)
+                if character_id:
+                    result[character_id] = int(row.get("characterRank", 0) or 0)
+        return result
+
+    def challenge_live_rank_for(self, character_id: int) -> int:
+        best = 0
+        for row in self.profile_context.get("userChallengeLiveSoloStages", []) or []:
+            if not isinstance(row, dict) or int(row.get("characterId", 0) or 0) != character_id:
+                continue
+            best = max(best, int(row.get("rank", 0) or 0))
+        return best
+
+    def chara_rank_icon_path(self, character_id: int) -> Path | None:
+        raw_path = self.chara_rank_icon_path_map.get(str(character_id))
+        if raw_path:
+            path = self.resolve_request_asset_path(raw_path)
+            if path is not None:
+                return path
+        nickname = CHARA_ID2NICKNAME.get(character_id)
+        if not nickname:
+            return None
+        return self.static_image_path("chara_rank_icon", f"{nickname}.png")
+
     def honor_request_image(self, payload: dict[str, Any] | None) -> Image.Image | None:
         if not payload:
             return None
@@ -3057,6 +3377,13 @@ class PNGRenderer:
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
                     Path("character") / "member_cutout" / bundle / "deck.png",
                     Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                ]
+            )
+        elif kind == "small":
+            rels.extend(
+                [
+                    Path("character") / "member_small" / bundle / full_file,
+                    Path("character") / "member_small" / f"{bundle}_rip" / full_file,
                 ]
             )
         rels.extend(
@@ -3186,7 +3513,7 @@ class PNGRenderer:
         return self.compose_card_member_image(path, (float(target_size[0]), float(target_size[1])), contain=False)
 
     def compose_profile_deck_card(self, card_id: int, leader: bool = False) -> Image.Image | None:
-        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "deck")
+        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
         if path is None:
             return None
         source = Image.open(path).convert("RGBA")
@@ -3406,7 +3733,7 @@ class PNGRenderer:
             group_type=request_group_type,
             honor_rarity=rarity,
             honor_level=level,
-            fc_or_ap_level=str(level) if request_group_type == "fc_ap" else None,
+            fc_or_ap_level=str(level) if honor_group_uses_scroll_level(request_group_type) else None,
             is_main_honor=full_size,
             honor_img_path=self.honor_request_path(honor_path),
             rank_img_path=self.honor_request_path(rank_path),
@@ -3753,6 +4080,10 @@ class PNGRenderer:
     ) -> tuple[Image.Image, tuple[float, float]] | NativeUnresolvedContent | None:
         resource = self.image_resource_for("collection", item)
         collection_type = str(resource.get("customProfileResourceCollectionType", "none") or "none")
+        path = self.resource_path(resource)
+        if path:
+            image = Image.open(path).convert("RGBA")
+            return image, (image.width / 2, image.height / 2)
         if collection_type in {"none", "other", ""}:
             return self.render_image_content("collection", item)
         expected_view = (
