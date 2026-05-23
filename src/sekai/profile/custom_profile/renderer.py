@@ -249,6 +249,7 @@ PREFAB_NATIVE_SIZES: dict[str, tuple[float, float]] = {
     "CollectionCustomPrefabContentView": (178.0, 154.0),
     "DynamicProfileContentView": (178.0, 154.0),
 }
+CLIP_CARD_MEMBER_ART_SIZE = (328.0, 538.2559814453125)
 GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     # Static data.unity3d prefab RectTransform.sizeDelta values, extracted
     # into out/general-template-prefabs-cn/metadata.json.
@@ -3312,7 +3313,15 @@ class PNGRenderer:
         path = self.card_member_image_path(item)
         if path:
             target_size = PREFAB_NATIVE_SIZES.get(expected_view, PREFAB_NATIVE_SIZES["FullSizeCardContentView"])
-            image = self.compose_card_member_image(path, target_size, contain=False)
+            if card_member_type == 1:
+                image = self.compose_card_member_image(path, CLIP_CARD_MEMBER_ART_SIZE, contain=False)
+                target_w = round(target_size[0])
+                target_h = round(target_size[1])
+                left = max(0, (image.width - target_w) // 2)
+                top = max(0, (image.height - target_h) // 2)
+                image = image.crop((left, top, left + target_w, top + target_h))
+            else:
+                image = self.compose_card_member_image(path, target_size, contain=False)
             return image, (image.width / 2, image.height / 2)
         return self.native_unresolved(
             "card_member",
@@ -3950,45 +3959,34 @@ class PNGRenderer:
         asset = self.card_assets.get(card_id, {})
         if not asset:
             return None
-        keys = (
-            ("deckAfterTrainingPath", "deck_after_training_path", "afterTrainingPath", "after_training_path")
-            if kind == "deck" and after_training
-            else ("deckNormalPath", "deck_normal_path", "normalPath", "normal_path")
-            if kind == "deck"
-            else ("afterTrainingPath", "after_training_path")
-            if after_training
-            else ("normalPath", "normal_path")
-        )
+        if kind == "deck":
+            keys = (
+                ("deckAfterTrainingPath", "deck_after_training_path", "afterTrainingPath", "after_training_path")
+                if after_training
+                else ("deckNormalPath", "deck_normal_path", "normalPath", "normal_path")
+            )
+        elif kind == "small":
+            keys = (
+                ("smallAfterTrainingPath", "small_after_training_path", "afterTrainingPath", "after_training_path")
+                if after_training
+                else ("smallNormalPath", "small_normal_path", "normalPath", "normal_path")
+            )
+        else:
+            keys = ("afterTrainingPath", "after_training_path") if after_training else ("normalPath", "normal_path")
         for key in keys:
             if path := self.resolve_request_asset_path(str(asset.get(key, "") or "")):
                 return path
         return None
 
     def card_member_after_training(self, item: dict[str, Any]) -> bool:
-        if not bool_from_profile(item.get("useAfterSpecialTraining", False)):
-            return False
-        user_card = self.user_card_for(content_data_id("card_member", item)) or {}
-        status = str(user_card.get("specialTrainingStatus", "") or "").strip().lower()
-        if status and status not in {"done", "true", "1", "special_training", "after_training", "trained"}:
-            return False
-        default_image = str(user_card.get("defaultImage", "") or "").strip().lower()
-        if default_image in {"normal", "original", "before_training", "card_normal"}:
-            return False
-        card = self.card_master_for(content_data_id("card_member", item)) or {}
-        rarity = str(card.get("cardRarityType", "") or "")
-        if rarity not in {"rarity_3", "rarity_4"}:
-            return False
-        return status == "done" or default_image in {
-            "special_training",
-            "after_training",
-            "card_after_training",
-            "trained",
-        }
+        return bool_from_profile(item.get("useAfterSpecialTraining", False))
 
     def card_member_image_candidates(self, item: dict[str, Any]) -> list[Path]:
         card_id = content_data_id("card_member", item)
         after_training = self.card_member_after_training(item)
-        if path := self.card_asset_path_for_state(card_id, after_training):
+        card_member_type = int(item.get("type", 0) or 0)
+        kind = "deck" if card_member_type == 1 else "small" if card_member_type == 2 else "full"
+        if path := self.card_asset_path_for_state(card_id, after_training, kind):
             return [path]
         if self.masterdata is None:
             return []
@@ -3996,10 +3994,31 @@ class PNGRenderer:
         if not bundle:
             return []
         full_file = "card_after_training.png" if after_training else "card_normal.png"
+        cutout_file = "after_training.png" if after_training else "normal.png"
+        cutout_trim_file = "card_after_training_trim.png" if after_training else "card_normal_trim.png"
         rels: list[Path] = []
+        if card_member_type == 1:
+            rels.extend(
+                [
+                    Path("character") / "member_cutout" / bundle / cutout_file,
+                    Path("character") / "member_cutout" / bundle / cutout_trim_file,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
+                    Path("character") / "member_cutout" / bundle / "deck.png",
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                ]
+            )
+        if card_member_type == 2:
+            rels.extend(
+                [
+                    Path("character") / "member_small" / bundle / full_file,
+                    Path("character") / "member_small" / f"{bundle}_rip" / full_file,
+                ]
+            )
         rels.append(Path("character") / "member" / bundle / full_file)
         if not bundle.endswith("_rip"):
             rels.append(Path("character") / "member" / f"{bundle}_rip" / full_file)
+        rels.append(Path("thumbnail") / "chara" / f"{bundle}_{'after_training' if after_training else 'normal'}.png")
         return self.region_asset_candidate_paths(rels)
 
     def card_member_image_path(self, item: dict[str, Any]) -> Path | None:

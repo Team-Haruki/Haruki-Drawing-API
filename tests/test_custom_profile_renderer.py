@@ -2,6 +2,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _require_region_path
 from src.sekai.profile.custom_profile.renderer import PNGRenderer
 
@@ -145,6 +146,133 @@ def test_custom_profile_card_member_candidates_match_cloud_member_paths(tmp_path
     assert not any("/thumbnail/chara/" in path for path in candidates)
 
 
+def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: Path) -> None:
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_cutout"
+        / "res010_no034"
+        / "after_training.png"
+    )
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCards": [
+                {
+                    "cardId": 915,
+                    "specialTrainingStatus": "done",
+                    "defaultImage": "special_training",
+                }
+            ],
+        },
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetbundleName": "res010_no034",
+                    "afterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
+                    ),
+                    "deckAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_cutout/res010_no034/after_training.png"
+                    ),
+                }
+            },
+        },
+    )
+
+    candidates = [
+        path.as_posix()
+        for path in renderer.card_member_image_candidates({"id": 915, "type": 1, "useAfterSpecialTraining": True})
+    ]
+
+    assert candidates[0].endswith("/character/member_cutout/res010_no034/after_training.png")
+    assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
+
+
+def test_custom_profile_card_member_uses_saved_training_state(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCards": [
+                {
+                    "cardId": 915,
+                    "specialTrainingStatus": "done",
+                    "defaultImage": "normal",
+                }
+            ],
+        },
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+        },
+    )
+
+    assert renderer.card_member_after_training({"id": 915, "useAfterSpecialTraining": True})
+
+
+def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path: Path) -> None:
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_small"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    _write_png(
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetbundleName": "res010_no034",
+                    "afterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
+                    ),
+                    "smallAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_small/res010_no034/card_after_training.png"
+                    ),
+                }
+            },
+        },
+    )
+
+    candidates = [
+        path.as_posix()
+        for path in renderer.card_member_image_candidates({"id": 915, "type": 2, "useAfterSpecialTraining": True})
+    ]
+
+    assert candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
+    assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
+
+
 def test_custom_profile_unity_sprite_reuses_static_card_assets(tmp_path: Path) -> None:
     _write_png(tmp_path / "static_images" / "card" / "train_rank_0.png", (7, 6))
     _write_png(tmp_path / "static_images" / "card" / "attr_icon_cute.png", (8, 8))
@@ -185,3 +313,39 @@ def test_custom_profile_tmp_font_metadata_is_optional(tmp_path: Path) -> None:
     path = tmp_path / "custom_profile" / "tmp-font-assets" / "{region}" / "metadata.json"
 
     assert _optional_region_file("custom_profile_tmp_font_metadata", path, "cn") is None
+
+
+def test_custom_profile_api_uses_cropped_profile_viewport(tmp_path: Path, monkeypatch) -> None:
+    assets = tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile"
+    fonts = tmp_path / "fonts" / "cn"
+    shape_sprites = tmp_path / "shape-sprites"
+    ui_sprites = tmp_path / "unity-ui-sprites"
+    for path in (assets, fonts, shape_sprites, ui_sprites):
+        path.mkdir(parents=True)
+    captured: dict[str, object] = {}
+
+    class FakePNGRenderer:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+        def render_card(self, card: dict) -> Image.Image:
+            return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+
+    monkeypatch.setattr(
+        custom_profile_drawer,
+        "CUSTOM_PROFILE_ASSETS_DIR",
+        tmp_path / "asset" / "{region}-assets" / "startapp" / "custom_profile",
+    )
+    monkeypatch.setattr(custom_profile_drawer, "CUSTOM_PROFILE_FONTS_DIR", tmp_path / "fonts" / "{region}")
+    monkeypatch.setattr(custom_profile_drawer, "CUSTOM_PROFILE_SHAPE_SPRITE_DIR", shape_sprites)
+    monkeypatch.setattr(custom_profile_drawer, "CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR", ui_sprites)
+    monkeypatch.setattr(custom_profile_drawer, "CUSTOM_PROFILE_TMP_FONT_METADATA", None)
+    monkeypatch.setattr(custom_profile_drawer, "PNGRenderer", FakePNGRenderer)
+
+    image = custom_profile_drawer._render_custom_profile_card_sync({}, {}, {}, "cn")
+
+    assert image.size == (1, 1)
+    assert captured["canvas_w"] == 2048
+    assert captured["canvas_h"] == 909
+    assert captured["origin_x"] == 1024.0
+    assert captured["origin_y"] == 454.5

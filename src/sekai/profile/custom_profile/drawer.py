@@ -7,7 +7,7 @@ from typing import Any
 from PIL import Image
 
 from src.sekai.base.utils import run_in_pool
-from src.sekai.profile.custom_profile.renderer import PNGRenderer
+from src.sekai.profile.custom_profile.renderer import PROFILE_RENDER_VIEW_H, PROFILE_RENDER_VIEW_W, PNGRenderer
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.settings import (
     CUSTOM_PROFILE_ASSETS_DIR,
@@ -93,6 +93,10 @@ def _render_custom_profile_card_sync(
         parallel_workers=max(1, int(CUSTOM_PROFILE_PARALLEL_WORKERS or 1)),
         parallel_stage="transform",
         clip_canvas_transform=True,
+        canvas_w=int(PROFILE_RENDER_VIEW_W),
+        canvas_h=int(PROFILE_RENDER_VIEW_H),
+        origin_x=PROFILE_RENDER_VIEW_W / 2.0,
+        origin_y=PROFILE_RENDER_VIEW_H / 2.0,
         unity_ui_sprite_dir=unity_ui_sprite_dir,
         region=region,
     )
