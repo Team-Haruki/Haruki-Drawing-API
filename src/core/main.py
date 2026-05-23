@@ -141,7 +141,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Haruki Drawing API",
     description=_description,
-    version="1.0.0",
+    version="0.0.1",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
