@@ -5,7 +5,7 @@ import signal
 import sys
 import threading
 import traceback
-
+from typing import Any
 
 logger = logging.getLogger("src.core.diagnostics")
 
@@ -114,7 +114,11 @@ def configure_runtime_diagnostics() -> None:
                 faulthandler.register(manual_dump_signal, file=sys.stderr, all_threads=True, chain=False)
                 logger.info("faulthandler manual dump signal registered: %s", _signal_name(manual_dump_signal))
             except Exception:
-                logger.warning("failed to register manual dump signal: %s", _signal_name(manual_dump_signal), exc_info=True)
+                logger.warning(
+                    "failed to register manual dump signal: %s",
+                    _signal_name(manual_dump_signal),
+                    exc_info=True,
+                )
 
         termination_signal = getattr(signal, "SIGTERM", None)
         if termination_signal is not None:

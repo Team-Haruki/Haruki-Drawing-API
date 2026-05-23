@@ -18,9 +18,9 @@ import coloredlogs
 from fastapi import FastAPI
 from granian import Granian
 
-from src.core.diagnostics import configure_runtime_diagnostics, dump_runtime_diagnostics
-from src.core.debug import install_debug_middleware
 from src.core import health
+from src.core.debug import install_debug_middleware
+from src.core.diagnostics import configure_runtime_diagnostics, dump_runtime_diagnostics
 from src.core.pjsk import router as pjsk_router
 from src.settings import (
     FIELD_STYLE,

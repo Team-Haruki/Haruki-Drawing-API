@@ -150,8 +150,8 @@ from .model import (
     BasicProfile,
     CardFullThumbnailRequest,
     CharacterRank,
-    MusicClearCount,
     MultiLiveTopScoreCount,
+    MusicClearCount,
     ProfileBgSettings,
     ProfileCardRequest,
     ProfileRequest,
@@ -516,17 +516,15 @@ async def _build_profile_rank_badge_module(ctx: _ProfileLayoutContext) -> Widget
     badge = Frame().set_size((badge_w, badge_h))
     badge.add_item(ImageBox(lv_rank_bg, size=(badge_w, badge_h)))
     badge.add_item(
-        (
-            TextBox(
-                f"{ctx.request.rank}",
-                TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
-            )
-            .set_size((number_box_w, badge_h))
-            .set_padding(0)
-            .set_wrap(False)
-            .set_content_align("c")
-            .set_offset((number_box_x, 0))
+        TextBox(
+            f"{ctx.request.rank}",
+            TextStyle(font=DEFAULT_FONT, size=30, color=WHITE),
         )
+        .set_size((number_box_w, badge_h))
+        .set_padding(0)
+        .set_wrap(False)
+        .set_content_align("c")
+        .set_offset((number_box_x, 0))
     )
     return badge
 
@@ -553,19 +551,17 @@ async def _build_profile_identity_module(ctx: _ProfileLayoutContext) -> Widget:
 async def _build_profile_twitter_module(ctx: _ProfileLayoutContext) -> Widget:
     root = Frame().set_content_align("l").set_w(450)
     root.add_item(
-        (
-            TextBox(
-                "        @ " + ctx.request.twitter_id,
-                TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
-                line_count=1,
-            )
-            .set_wrap(False)
-            .set_bg(ctx.ui_bg)
-            .set_line_sep(2)
-            .set_padding(10)
-            .set_w(300)
-            .set_content_align("l")
+        TextBox(
+            "        @ " + ctx.request.twitter_id,
+            TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
+            line_count=1,
         )
+        .set_wrap(False)
+        .set_bg(ctx.ui_bg)
+        .set_line_sep(2)
+        .set_padding(10)
+        .set_w(300)
+        .set_content_align("l")
     )
     x_icon = await get_img_resized(ASSETS_BASE_DIR, ctx.request.x_icon_path, 24, 24)
     root.add_item(ImageBox(x_icon.convert("RGBA"), image_size_mode="original").set_offset((16, 0)))
@@ -589,7 +585,10 @@ def _build_profile_word_module(ctx: _ProfileLayoutContext) -> Widget:
 
 async def _build_profile_honor_module(ctx: _ProfileLayoutContext) -> Widget:
     root = HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0))
-    honor_imgs = await asyncio.gather(*[compose_full_honor_image(honor) for honor in ctx.honors], return_exceptions=True)
+    honor_imgs = await asyncio.gather(
+        *[compose_full_honor_image(honor) for honor in ctx.honors],
+        return_exceptions=True,
+    )
     for img in honor_imgs:
         if isinstance(img, Exception):
             logger.warning("skip broken honor asset in profile image: %s", img)
@@ -707,7 +706,11 @@ async def _preload_profile_chara_icons(ctx: _ProfileLayoutContext) -> dict[str, 
             chara_paths[solo_path] = solo_path
     ordered_paths = list(chara_paths.keys())
     _t0 = time.perf_counter()
-    images = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, path) for path in ordered_paths]) if ordered_paths else []
+    images = (
+        await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, path) for path in ordered_paths])
+        if ordered_paths
+        else []
+    )
     logger.debug("[perf] draw_chara chara icons %d: %.3fs", len(ordered_paths), time.perf_counter() - _t0)
     return dict(zip(ordered_paths, images))
 
@@ -731,7 +734,10 @@ def _profile_stats_badge_width(text: str, *, font_size: int = 18) -> int:
     return get_text_size(get_font(DEFAULT_FONT, font_size), text)[0] + 20
 
 
-def _build_profile_character_grid_module(ctx: _ProfileLayoutContext, chara_icon_cache: dict[str, Image.Image]) -> Widget:
+def _build_profile_character_grid_module(
+    ctx: _ProfileLayoutContext,
+    chara_icon_cache: dict[str, Image.Image],
+) -> Widget:
     chara_map = ctx.request.chara_rank_icon_path_map
     grid = Grid(col_count=6).set_sep(h_sep=8, v_sep=7).set_padding(32)
     for chara, cid in CHARA_LIST:
@@ -756,7 +762,11 @@ def _build_profile_character_grid_module(ctx: _ProfileLayoutContext, chara_icon_
     return grid
 
 
-def _build_profile_multi_live_module(side_panel_w: int | None, multi_live: MultiLiveTopScoreCount, stats_w: int) -> Widget:
+def _build_profile_multi_live_module(
+    side_panel_w: int | None,
+    multi_live: MultiLiveTopScoreCount,
+    stats_w: int,
+) -> Widget:
     module = VSplit().set_content_align("c").set_item_align("c").set_padding((32, 16)).set_sep(10).set_offset((0, -16))
     if side_panel_w is not None:
         module.set_w(side_panel_w)

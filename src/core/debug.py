@@ -14,8 +14,13 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from src.settings import OVERLOAD_MAX_INFLIGHT_REQUESTS, OVERLOAD_RETRY_AFTER_SECONDS, READINESS_UNHEALTHY_ASYNCIO_TASKS, READINESS_UNHEALTHY_INFLIGHT_REQUESTS, READINESS_UNHEALTHY_RSS_MB
-
+from src.settings import (
+    OVERLOAD_MAX_INFLIGHT_REQUESTS,
+    OVERLOAD_RETRY_AFTER_SECONDS,
+    READINESS_UNHEALTHY_ASYNCIO_TASKS,
+    READINESS_UNHEALTHY_INFLIGHT_REQUESTS,
+    READINESS_UNHEALTHY_RSS_MB,
+)
 
 logger = logging.getLogger("src.core.debug")
 
@@ -384,7 +389,12 @@ def install_debug_middleware(app: FastAPI) -> None:
                 )
 
             tokens = push_request_context(request_id, request.url.path, request.method)
-            watchdog = RequestWatchdog(request_id=request_id, method=request.method, path=request.url.path, started_at=start)
+            watchdog = RequestWatchdog(
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                started_at=start,
+            )
             watchdog_task = asyncio.create_task(watchdog.run())
             body = await request.body()
             body_summary = summarize_request_body(body, request.headers.get("content-type"))
@@ -433,7 +443,8 @@ def install_debug_middleware(app: FastAPI) -> None:
                     cache_stats = {"error": str(exc)}
             logger.log(
                 level,
-                "request.end id=%s method=%s path=%s stage=%s status=%s elapsed=%.3fs inflight=%s metrics=%s headers={content_length=%s content_type=%s} cache_stats=%s",
+                "request.end id=%s method=%s path=%s stage=%s status=%s elapsed=%.3fs inflight=%s "
+                "metrics=%s headers={content_length=%s content_type=%s} cache_stats=%s",
                 request_id,
                 request.method,
                 request.url.path,

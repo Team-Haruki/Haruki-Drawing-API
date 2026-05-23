@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import io
 import logging
 import multiprocessing
@@ -26,7 +25,6 @@ from src.settings import (
     REQUEST_HARD_TIMEOUT_SECONDS,
     settings,
 )
-
 
 logger = logging.getLogger("src.core.heavy_render_pool")
 
@@ -199,7 +197,7 @@ def _heavy_render_worker_main(
             set_request_stage(f"worker:{task.kind}:compose_image")
             payload = _render_heavy_task(task.kind, task.payload)
             result_queue.put(_WorkerResult(task_id=task.task_id, ok=True, payload=payload))
-        except BaseException as exc:  # noqa: BLE001
+        except BaseException as exc:
             result_queue.put(
                 _WorkerResult(
                     task_id=task.task_id,
@@ -262,7 +260,8 @@ class HeavyRenderWorkerPool:
                 self._spawn_worker(slot, reason="startup")
             self._started = True
         logger.info(
-            "heavy render worker pool started: workers=%d queue_limit=%d queue_timeout=%.0fs timeout=%.0fs heartbeat_timeout=%.0fs",
+            "heavy render worker pool started: workers=%d queue_limit=%d queue_timeout=%.0fs "
+            "timeout=%.0fs heartbeat_timeout=%.0fs",
             self._worker_count,
             self._queue_limit,
             self._queue_timeout_seconds,
@@ -347,7 +346,8 @@ class HeavyRenderWorkerPool:
                         slot.busy = True
                         wait_ms = (time.monotonic() - wait_started) * 1000
                         logger.info(
-                            "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s busy=%d pending=%d wait_ms=%.1f request_id=%s path=%s",
+                            "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s "
+                            "busy=%d pending=%d wait_ms=%.1f request_id=%s path=%s",
                             slot.name,
                             kind,
                             slot.recycle_count,
@@ -363,7 +363,8 @@ class HeavyRenderWorkerPool:
                     if not queued:
                         if self._pending_waiters >= self._queue_limit:
                             logger.warning(
-                                "heavy render queue full: kind=%s busy=%d pending=%d workers=%d queue_limit=%d request_id=%s path=%s",
+                                "heavy render queue full: kind=%s busy=%d pending=%d workers=%d "
+                                "queue_limit=%d request_id=%s path=%s",
                                 kind,
                                 busy_count,
                                 self._pending_waiters,
@@ -373,12 +374,14 @@ class HeavyRenderWorkerPool:
                                 request_ctx.get("path", "-"),
                             )
                             raise HeavyRenderQueueFullError(
-                                f"heavy render queue is full: kind={kind} pending={self._pending_waiters} limit={self._queue_limit}"
+                                f"heavy render queue is full: kind={kind} pending={self._pending_waiters} "
+                                f"limit={self._queue_limit}"
                             )
                         self._pending_waiters += 1
                         queued = True
                         logger.warning(
-                            "heavy render queued: kind=%s busy=%d pending=%d workers=%d queue_limit=%d queue_timeout=%.0fs request_id=%s path=%s",
+                            "heavy render queued: kind=%s busy=%d pending=%d workers=%d queue_limit=%d "
+                            "queue_timeout=%.0fs request_id=%s path=%s",
                             kind,
                             busy_count,
                             self._pending_waiters,
@@ -392,7 +395,8 @@ class HeavyRenderWorkerPool:
                     remaining = self._queue_timeout_seconds - (time.monotonic() - wait_started)
                     if remaining <= 0:
                         logger.warning(
-                            "heavy render queue timeout: kind=%s busy=%d pending=%d workers=%d queue_limit=%d wait_ms=%.1f request_id=%s path=%s",
+                            "heavy render queue timeout: kind=%s busy=%d pending=%d workers=%d "
+                            "queue_limit=%d wait_ms=%.1f request_id=%s path=%s",
                             kind,
                             self._busy_count_unlocked(),
                             self._pending_waiters,
@@ -438,7 +442,8 @@ class HeavyRenderWorkerPool:
                     ),
                 )
                 raise HeavyRenderTaskTimeoutError(
-                    f"heavy render task timeout: worker={slot.name} kind={task.kind} timeout={self._task_timeout_seconds:.0f}s"
+                    f"heavy render task timeout: worker={slot.name} kind={task.kind} "
+                    f"timeout={self._task_timeout_seconds:.0f}s"
                 )
             if heartbeat_age is not None and heartbeat_age >= self._heartbeat_timeout_seconds:
                 self._spawn_worker(

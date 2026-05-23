@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from PIL import Image
 
@@ -10,7 +10,7 @@ from src.sekai.vlive.model import VLiveBrief, VLiveCharacterItem
 
 
 def test_compose_vlive_entry_image_wraps_connected_live_characters() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     vlive = VLiveBrief(
         id=202,
         name="Connected Live",

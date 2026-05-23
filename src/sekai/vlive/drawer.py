@@ -148,7 +148,13 @@ async def _compose_vlive_entry_image(
                     if characters:
                         with VSplit().set_content_align("l").set_item_align("l").set_sep(6):
                             TextBox("出演角色", section_style)
-                            with Flow().set_w(_VLIVE_ENTRY_CONTENT_W).set_content_align("lt").set_item_align("lt").set_sep(4, 4):
+                            with (
+                                Flow()
+                                .set_w(_VLIVE_ENTRY_CONTENT_W)
+                                .set_content_align("lt")
+                                .set_item_align("lt")
+                                .set_sep(4, 4)
+                            ):
                                 for character_image in characters:
                                     ImageBox(character_image, size=(30, 30), use_alpha_blend=True)
 

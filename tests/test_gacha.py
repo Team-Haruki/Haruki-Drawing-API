@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from src.sekai.gacha.drawer import compose_gacha_list_image
 from src.sekai.gacha.model import GachaBrief, GachaFilter, GachaListRequest
 
 
 def test_compose_gacha_list_image_missing_logo_stays_bounded() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     request = GachaListRequest(
         gachas=[
             GachaBrief(

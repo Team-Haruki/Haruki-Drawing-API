@@ -6,18 +6,18 @@ from src.core.utils import image_to_response
 from src.sekai.education.drawer import (
     compose_area_item_upgrade_materials_image,
     compose_bonds_image,
+    compose_challenge_live_detail_image,
     compose_character_mission_all_image,
     compose_character_mission_overview_image,
-    compose_challenge_live_detail_image,
     compose_leader_count_image,
     compose_power_bonus_detail_image,
 )
 from src.sekai.education.model import (
     AreaItemUpgradeMaterialsRequest,
     BondsRequest,
+    ChallengeLiveDetailsRequest,
     CharacterMissionAllRequest,
     CharacterMissionOverviewRequest,
-    ChallengeLiveDetailsRequest,
     LeaderCountRequest,
     PowerBonusDetailRequest,
 )

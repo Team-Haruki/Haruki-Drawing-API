@@ -3,8 +3,8 @@ import asyncio
 import httpx
 import pytest
 
-from src.core.main import app
 from src.core import health
+from src.core.main import app
 
 
 async def _request(method: str, url: str, **kwargs) -> httpx.Response:

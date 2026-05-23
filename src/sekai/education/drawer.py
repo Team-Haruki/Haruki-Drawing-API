@@ -41,9 +41,9 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 from .model import (
     AreaItemUpgradeMaterialsRequest,
     BondsRequest,
+    ChallengeLiveDetailsRequest,
     CharacterMissionAllRequest,
     CharacterMissionOverviewRequest,
-    ChallengeLiveDetailsRequest,
     LeaderCountRequest,
     PowerBonusDetailRequest,
 )
@@ -823,7 +823,11 @@ def _draw_character_mission_progress(
         for i in range(1, 5):
             lx = int((total_w - border * 2) * (i / 5.0))
             line_color = (100, 100, 100, 255) if i / 5.0 < progress else (150, 150, 150, 255)
-            bar.add_item(Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset((border + lx - 1, total_h // 2)))
+            bar.add_item(
+                Spacer(w=1, h=total_h // 2 - 1)
+                .set_bg(FillBg(line_color))
+                .set_offset((border + lx - 1, total_h // 2))
+            )
     else:
         bar.add_item(Spacer(w=total_w, h=total_h).set_bg(RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)))
     root.add_item(bar)
@@ -834,7 +838,12 @@ def _draw_character_mission_progress(
     info_row.add_item(TextBox(f"{current:,}/{upper_text} ({pct_text})", text_style))
     if next_need is not None:
         exp_text = "?" if next_exp is None else str(next_exp)
-        info_row.add_item(TextBox(f"下一档{current:,}/{next_need:,} EXP+{exp_text}", TextStyle(font=DEFAULT_FONT, size=14, color=(80, 80, 80, 255))))
+        info_row.add_item(
+            TextBox(
+                f"下一档{current:,}/{next_need:,} EXP+{exp_text}",
+                TextStyle(font=DEFAULT_FONT, size=14, color=(80, 80, 80, 255)),
+            )
+        )
     else:
         info_row.add_item(TextBox("下一档已满", TextStyle(font=DEFAULT_FONT, size=14, color=(80, 80, 80, 255))))
     root.add_item(info_row)
@@ -940,7 +949,8 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
     header_row.add_item(ImageBox(chara_icon, size=(48, 48)))
     header_row.add_item(
         TextBox(
-            f"{rqd.character_name} 当前Lv.{rqd.current_level} EXP×{rqd.current_exp} + 未领取EXP×{rqd.pending_exp} = 总计Lv.{rqd.final_level} EXP×{rqd.final_exp}",
+            f"{rqd.character_name} 当前Lv.{rqd.current_level} EXP×{rqd.current_exp} + "
+            f"未领取EXP×{rqd.pending_exp} = 总计Lv.{rqd.final_level} EXP×{rqd.final_exp}",
             header_style,
             use_real_line_count=True,
         )
@@ -967,7 +977,9 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
                 row.add_item(Spacer(card_w, 1))
             basic_panel.add_item(row)
     else:
-        basic_panel.add_item(TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+        basic_panel.add_item(
+            TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255)))
+        )
     root.add_item(basic_panel)
 
     achievement_panel = (
@@ -1006,7 +1018,9 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
                 row.add_item(Spacer(card_w, 1))
             achievement_panel.add_item(row)
     elif not (play_live and play_live_ex and waiting_room and waiting_room_ex):
-        achievement_panel.add_item(TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+        achievement_panel.add_item(
+            TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255)))
+        )
     root.add_item(achievement_panel)
 
     canvas.add_item(root)
@@ -1062,7 +1076,9 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
             chunk_size = max(1, math.ceil(len(section.display_rows) / target_col_count))
         else:
             chunk_size = default_chunk_size
-        chunks = [section.display_rows[i:i + chunk_size] for i in range(0, len(section.display_rows), chunk_size)] or [[]]
+        chunks = [
+            section.display_rows[i : i + chunk_size] for i in range(0, len(section.display_rows), chunk_size)
+        ] or [[]]
         column_wrap = HSplit().set_content_align("lt").set_item_align("lt").set_sep(12)
         for chunk in chunks:
             grid_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsep)
@@ -1071,8 +1087,19 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
                 col = VSplit().set_content_align("c").set_item_align("c").set_sep(vsep)
                 col.add_item(TextBox(title, style1).set_size((width, gh)).set_content_align("c"))
                 for idx, row in enumerate(chunk):
-                    bg_fill = roundrect_bg(fill=(255, 244, 196, 210) if row.seq == section.reached_seq and section.reached_seq > 0 else _info_panel_row_fill(idx))
-                    col.add_item(TextBox(str(extractor(row)), style2).set_bg(bg_fill).set_size((width, gh)).set_content_align("c"))
+                    bg_fill = roundrect_bg(
+                        fill=(
+                            (255, 244, 196, 210)
+                            if row.seq == section.reached_seq and section.reached_seq > 0
+                            else _info_panel_row_fill(idx)
+                        )
+                    )
+                    col.add_item(
+                        TextBox(str(extractor(row)), style2)
+                        .set_bg(bg_fill)
+                        .set_size((width, gh))
+                        .set_content_align("c")
+                    )
                 return col
 
             grid_row.add_item(build_col("档位", gw_seq, lambda row: f"#{row.seq}"))
