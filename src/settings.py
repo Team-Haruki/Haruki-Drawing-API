@@ -16,7 +16,7 @@ Usage:
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
 
@@ -146,6 +146,25 @@ class Settings(BaseSettings):
     server: ServerSettings = ServerSettings()
     logging: LoggingSettings = LoggingSettings()
     drawing: DrawingSettings = DrawingSettings()
+
+    @model_validator(mode="after")
+    def fill_custom_profile_defaults(self) -> "Settings":
+        custom_profile_assets = self.assets.base_dir / "asset" / "{region}-assets" / "startapp" / "custom_profile"
+        if self.drawing.custom_profile_assets_dir is None:
+            self.drawing.custom_profile_assets_dir = custom_profile_assets
+        if self.drawing.custom_profile_fonts_dir is None:
+            self.drawing.custom_profile_fonts_dir = custom_profile_assets / "font"
+        if self.drawing.custom_profile_tmp_font_metadata is None:
+            self.drawing.custom_profile_tmp_font_metadata = (
+                self.assets.base_dir / "custom_profile" / "tmp-font-assets" / "{region}" / "metadata.json"
+            )
+        if self.drawing.custom_profile_shape_sprite_dir is None:
+            self.drawing.custom_profile_shape_sprite_dir = custom_profile_assets / "shape"
+        if self.drawing.custom_profile_unity_ui_sprite_dir is None:
+            self.drawing.custom_profile_unity_ui_sprite_dir = (
+                self.assets.base_dir / self.assets.result_asset_path / "customprofile"
+            )
+        return self
 
     @classmethod
     def from_yaml(cls, path: Path | None = None) -> "Settings":

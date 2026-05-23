@@ -43,6 +43,32 @@ server:
     assert settings.drawing.thread_pool_size == 3
     assert settings.drawing.export_image_format == "jpg"
     assert settings.drawing.jpg_quality == 77
+    assert (
+        settings.drawing.custom_profile_assets_dir
+        == (PROJECT_ROOT / "custom-data" / "asset" / "{region}-assets" / "startapp" / "custom_profile").resolve()
+    )
+    assert (
+        settings.drawing.custom_profile_fonts_dir
+        == (
+            PROJECT_ROOT / "custom-data" / "asset" / "{region}-assets" / "startapp" / "custom_profile" / "font"
+        ).resolve()
+    )
+    assert (
+        settings.drawing.custom_profile_tmp_font_metadata
+        == (
+            PROJECT_ROOT / "custom-data" / "custom_profile" / "tmp-font-assets" / "{region}" / "metadata.json"
+        ).resolve()
+    )
+    assert (
+        settings.drawing.custom_profile_shape_sprite_dir
+        == (
+            PROJECT_ROOT / "custom-data" / "asset" / "{region}-assets" / "startapp" / "custom_profile" / "shape"
+        ).resolve()
+    )
+    assert (
+        settings.drawing.custom_profile_unity_ui_sprite_dir
+        == (PROJECT_ROOT / "custom-data" / "assets" / "customprofile").resolve()
+    )
     assert settings.server.host == "127.0.0.1"
     assert settings.server.port == 12345
 
