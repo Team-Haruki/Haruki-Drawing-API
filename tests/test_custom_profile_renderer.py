@@ -5,11 +5,16 @@ from PIL import Image
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _require_region_path
 from src.sekai.profile.custom_profile.renderer import PNGRenderer
+from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGBA", size, (255, 0, 0, 255)).save(path)
+
+
+def _image_has_content_in_box(image: Image.Image, box: tuple[int, int, int, int]) -> bool:
+    return image.crop(box).getchannel("A").getbbox() is not None
 
 
 def _make_renderer(
@@ -187,7 +192,7 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
                     "afterTrainingPath": (
                         "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
                     ),
-                    "deckAfterTrainingPath": (
+                    "clipAfterTrainingPath": (
                         "asset/cn-assets/startapp/character/member_cutout_trm/res010_no034/after_training.png"
                     ),
                 }
@@ -224,7 +229,7 @@ def test_custom_profile_card_member_uses_saved_training_state(tmp_path: Path) ->
     assert renderer.card_member_after_training({"id": 915, "useAfterSpecialTraining": True})
 
 
-def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path: Path) -> None:
+def test_custom_profile_card_member_full_type_prefers_full_card_path(tmp_path: Path) -> None:
     _write_png(
         tmp_path
         / "asset"
@@ -269,8 +274,8 @@ def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path:
         for path in renderer.card_member_image_candidates({"id": 915, "type": 2, "useAfterSpecialTraining": True})
     ]
 
-    assert candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
-    assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
+    assert candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
+    assert not candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
 
 
 def test_custom_profile_collection_prefers_image_asset_for_badges(tmp_path: Path) -> None:
@@ -310,31 +315,140 @@ def test_custom_profile_music_clear_info_uses_profile_counts(tmp_path: Path) -> 
 
     image = renderer.render_general_music_clear_info()
 
-    assert image.size == (752, 250)
+    assert image.size == (860, 318)
     assert renderer.music_clear_count_map()["master"]["fullCombo"] == 5
+    assert _image_has_content_in_box(image, (344, 12, 516, 50))
+    assert _image_has_content_in_box(image, (344, 166, 516, 204))
+    assert not _image_has_content_in_box(image, (344, 306, 516, 317))
+
+
+def test_custom_profile_music_clear_select_tab_info_draws_value_panel(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+
+    image = renderer.render_general_music_clear_select_tab_info()
+
+    assert image.size == (860, 166)
+    assert _image_has_content_in_box(image, (32, 72, 828, 158))
 
 
 def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) -> None:
-    icon_path = tmp_path / "static_images" / "chara_rank_icon" / "miku.png"
+    icon_path = tmp_path / "static_images" / "chara_icon" / "miku.png"
     _write_png(icon_path, (9, 4))
+    (tmp_path / "static_images" / "card").mkdir(parents=True)
     renderer = _make_renderer(
         tmp_path,
-        resources={"charaRankIconPathMap": {"21": "static_images/chara_rank_icon/miku.png"}},
+        resources={"charaRankIconPathMap": {"21": "static_images/chara_icon/miku.png"}},
     )
 
     assert renderer.chara_rank_icon_path(21) == icon_path
 
 
-def test_custom_profile_general_deck_card_uses_still_art(tmp_path: Path) -> None:
+def test_custom_profile_chara_rank_icons_require_cloud_path(tmp_path: Path) -> None:
+    icon_path = tmp_path / "static_images" / "chara_icon" / "miku.png"
+    _write_png(icon_path, (9, 4))
+    (tmp_path / "static_images" / "card").mkdir(parents=True)
+    renderer = _make_renderer(tmp_path)
+
+    assert renderer.chara_rank_icon_path(21) is None
+
+
+def test_custom_profile_story_favorite_uses_cloud_resources(tmp_path: Path) -> None:
+    banner_path = tmp_path / "asset" / "cn-assets" / "startapp" / "event_story" / "event_test" / "screen_image"
+    _write_png(banner_path / "banner_event_story.png", (128, 64))
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userStoryFavorites": [
+                {"shareNo": 2, "storyType": "event_story", "storyId": 20},
+                {"shareNo": 1, "storyType": "event_story", "storyId": 10},
+            ]
+        },
+        resources={
+            "storyFavoriteResources": {
+                "event_story:10": {
+                    "title": "First",
+                    "imagePath": "asset/cn-assets/startapp/event_story/event_test/screen_image/banner_event_story.png",
+                }
+            }
+        },
+    )
+
+    image = renderer.render_general_story_favorite()
+
+    assert image is not None
+    assert image.size == (909, 813)
+    assert renderer.ordered_story_favorites(renderer.profile_context["userStoryFavorites"])[0]["storyId"] == 10
+
+
+def test_custom_profile_story_favorite_requires_cloud_image_path(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "storyFavoriteResources": {
+                "event_story:10": {
+                    "title": "First",
+                    "bannerPath": "asset/cn-assets/startapp/event_story/event_test/screen_image/banner_event_story.png",
+                }
+            }
+        },
+    )
+
+    assert renderer.story_favorite_image_path({"storyType": "event_story", "storyId": 10}) is None
+
+
+def test_custom_profile_render_request_decodes_resources() -> None:
+    card, context, resources = decode_custom_profile_render_request(
+        {
+            "card": {"seq": 1},
+            "profile_context": {"user": {"userId": 1}},
+            "resources": {"storyFavoriteResources": {"event_story:10": {"imagePath": "asset/path.png"}}},
+        }
+    )
+
+    assert card["seq"] == 1
+    assert context["user"]["userId"] == 1
+    assert resources["storyFavoriteResources"]["event_story:10"]["imagePath"] == "asset/path.png"
+
+
+def test_custom_profile_honor_transform_keeps_native_canvas(tmp_path: Path) -> None:
+    layer = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    layer.putpixel((10, 10), (255, 0, 0, 255))
+    (tmp_path / "fonts").mkdir()
+    (tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile").mkdir(parents=True)
+    renderer = PNGRenderer(
+        masterdata=None,
+        assets=tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile",
+        fonts=tmp_path / "fonts",
+        resources={},
+        tmp_font_metadata=None,
+        shape_sprite_dir=None,
+        unity_ui_sprite_dir=None,
+        profile_context={},
+        region="cn",
+        position_scale=1.0,
+        clip_canvas_transform=False,
+    )
+
+    prepared = renderer.prepare_transformed_layer(
+        (layer, (10, 10)),
+        {"position": {"x": 0, "y": 0}, "rotation": {"z": 0}, "scale": {"x": 1, "y": 1}},
+        "bonds_honor",
+    )
+
+    assert prepared is not None
+    assert prepared.image.size == (20, 20)
+
+
+def test_custom_profile_general_deck_card_uses_deck_cutout_art(tmp_path: Path) -> None:
     _write_png(
         tmp_path
         / "asset"
         / "cn-assets"
         / "startapp"
         / "character"
-        / "member_small"
+        / "member_cutout"
         / "res010_no034"
-        / "card_after_training.png",
+        / "after_training.png",
         (330, 512),
     )
     _write_png(
@@ -371,6 +485,9 @@ def test_custom_profile_general_deck_card_uses_still_art(tmp_path: Path) -> None
                         "asset/cn-assets/startapp/character/member_small/res010_no034/card_after_training.png"
                     ),
                     "deckAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_cutout/res010_no034/after_training.png"
+                    ),
+                    "clipAfterTrainingPath": (
                         "asset/cn-assets/startapp/character/member_cutout_trm/res010_no034/after_training.png"
                     ),
                 }
@@ -379,9 +496,9 @@ def test_custom_profile_general_deck_card_uses_still_art(tmp_path: Path) -> None
     )
 
     assert (
-        renderer.card_image_path_for_state(915, True, "small")
+        renderer.card_image_path_for_state(915, True, "deck")
         .as_posix()
-        .endswith("/character/member_small/res010_no034/card_after_training.png")
+        .endswith("/character/member_cutout/res010_no034/after_training.png")
     )
     assert renderer.compose_profile_deck_card(915) is not None
 

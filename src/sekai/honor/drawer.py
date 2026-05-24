@@ -77,12 +77,26 @@ face_pos = {
     56: 52,
 }
 
+BONDS_BACKGROUND_CENTER_OVERLAP = 3
+
 
 def _int_or_none(value: object) -> int | None:
     try:
         return int(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+
+
+def _paste_bonds_background(left_bg: Image.Image, right_bg: Image.Image) -> Image.Image:
+    img = right_bg.copy()
+    if left_bg.size != img.size:
+        left_bg = left_bg.resize(img.size, Image.Resampling.BILINEAR)
+    w, h = img.size
+    split = w // 2
+    left_width = min(w, split + BONDS_BACKGROUND_CENTER_OVERLAP)
+    left_half = left_bg.crop((0, 0, left_width, h))
+    img.paste(left_half, (0, 0), left_half)
+    return img
 
 
 def honor_group_uses_scroll_level(group_type: str | None) -> bool:
@@ -169,21 +183,21 @@ def _compose_full_honor_image_sync(rqd: HonorRequest, images: dict[str, Image.Im
 
     if htype == "bonds":
         rarity = rqd.honor_rarity
-        img = images.get("bonds_bg")
-        img2 = images.get("bonds_bg2")
-        if img is None or img2 is None:
+        left_bg = images.get("bonds_bg")
+        right_bg = images.get("bonds_bg2")
+        if left_bg is None or right_bg is None:
             return None
-        x = 190 if is_main else 90
-        img2 = img2.crop((x, 0, 380, 80))
-        img.paste(img2, (x, 0))
+        img = _paste_bonds_background(left_bg, right_bg)
 
         c1_img = images.get("chara_icon_1")
         c2_img = images.get("chara_icon_2")
         if c1_img is None or c2_img is None:
             return img
 
-        c1_face = face_pos.get(_int_or_none(rqd.chara_id), c1_img.size[0] // 2)
-        c2_face = face_pos.get(_int_or_none(rqd.chara_id2), c2_img.size[0] // 2)
+        # Legacy releases serialized chara_id as a string, so face_pos never matched.
+        # Keep the observed center-anchor layout instead of re-enabling that table.
+        c1_face = c1_img.size[0] // 2
+        c2_face = c2_img.size[0] // 2
 
         w, h = img.size
         scale = 0.8
@@ -311,14 +325,13 @@ async def compose_full_honor_image(rqd: HonorRequest):
 
     htype = rqd.honor_type
     gtype = rqd.group_type
-    wl_rank_style = is_world_link_rank_style(gtype, rqd.rank_img_path)
     if htype == "birthday" and rqd.frame_degree_level_img_path:
         tasks["frame_degree_level_img"] = load_honor_image(rqd.frame_degree_level_img_path)
 
     if htype in ("normal", "birthday"):
         if rqd.honor_img_path:
             tasks["honor_img"] = load_honor_image(rqd.honor_img_path)
-        if rqd.rank_img_path and (gtype in ("event", "wl_event", "rank_match") or wl_rank_style):
+        if rqd.rank_img_path:
             tasks["rank_img"] = load_optional_image(rqd.rank_img_path)
         if honor_group_uses_scroll_level(gtype) and rqd.scroll_img_path:
             tasks["scroll_img"] = load_honor_image(rqd.scroll_img_path)

@@ -259,14 +259,17 @@ GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     "Deck": (783, 242),
     "LeaderCard": (940, 530),
     "HonorDeck": (783, 179),
-    "MultiLive": (380, 180),
-    "ChallengeLive": (380, 220),
-    "CharacterRankAndChallengeStage": (752, 330),
-    "CharacterRankAndChallengeStageScroll": (752, 330),
-    "MusicClearInfo": (752, 250),
-    "MusicClearSelectTabInfo": (752, 250),
-    "StoryFavorite": (752, 250),
+    "MultiLive": (860, 166),
+    "ChallengeLive": (860, 178),
+    "CharacterRankAndChallengeStage": (908, 813),
+    "CharacterRankAndChallengeStageScroll": (908, 550),
+    "MusicClearInfo": (860, 318),
+    "MusicClearSelectTabInfo": (860, 166),
+    "StoryFavorite": (909, 813),
 }
+MUSIC_CLEAR_ROW_HEIGHT = 148
+MUSIC_CLEAR_ROW_STEP = 154
+MUSIC_CLEAR_ROW_TOP = 0
 GENERAL_MUSIC_DIFFICULTIES: tuple[tuple[str, str, tuple[int, int, int, int]], ...] = (
     ("easy", "EASY", (73, 211, 111, 255)),
     ("normal", "NORMAL", (65, 198, 222, 255)),
@@ -282,36 +285,28 @@ CHARA_LIST: tuple[tuple[str | None, int | None], ...] = (
     ("luka", 24),
     ("meiko", 25),
     ("kaito", 26),
+    (None, None),
+    (None, None),
     ("ick", 1),
     ("saki", 2),
     ("hnm", 3),
     ("shiho", 4),
-    (None, None),
-    (None, None),
     ("mnr", 5),
     ("hrk", 6),
     ("airi", 7),
     ("szk", 8),
-    (None, None),
-    (None, None),
     ("khn", 9),
     ("an", 10),
     ("akt", 11),
     ("toya", 12),
-    (None, None),
-    (None, None),
     ("tks", 13),
     ("emu", 14),
     ("nene", 15),
     ("rui", 16),
-    (None, None),
-    (None, None),
     ("knd", 17),
     ("mfy", 18),
     ("ena", 19),
     ("mzk", 20),
-    (None, None),
-    (None, None),
 )
 CHARA_ID2NICKNAME = {character_id: nickname for nickname, character_id in CHARA_LIST if nickname and character_id}
 GENERAL_TEMPLATE_UNIT1_POSITIONS: dict[int, tuple[float, float]] = {
@@ -1855,6 +1850,9 @@ class PNGRenderer:
         self.honor_requests = self.load_string_resource_map("honorRequests", "honor_requests")
         self.profile_honor_requests = self.load_string_resource_map("profileHonorRequests", "profile_honor_requests")
         self.bonds_honor_requests = self.load_string_resource_map("bondsHonorRequests", "bonds_honor_requests")
+        self.story_favorite_resources = self.load_string_resource_map(
+            "storyFavoriteResources", "story_favorite_resources"
+        )
         self.chara_rank_icon_path_map = self.coerce_string_map(
             self.resources.get("charaRankIconPathMap", self.resources.get("chara_rank_icon_path_map", {}))
         )
@@ -2453,10 +2451,14 @@ class PNGRenderer:
             "HonorDeck": self.render_general_honor_deck,
             "MultiLive": self.render_general_multi_live,
             "ChallengeLive": self.render_general_challenge_live,
-            "CharacterRankAndChallengeStage": self.render_general_character_rank_and_challenge_stage,
-            "CharacterRankAndChallengeStageScroll": self.render_general_character_rank_and_challenge_stage,
+            "CharacterRankAndChallengeStage": lambda: self.render_general_character_rank_and_challenge_stage(
+                scroll=False
+            ),
+            "CharacterRankAndChallengeStageScroll": lambda: self.render_general_character_rank_and_challenge_stage(
+                scroll=True
+            ),
             "MusicClearInfo": self.render_general_music_clear_info,
-            "MusicClearSelectTabInfo": self.render_general_music_clear_info,
+            "MusicClearSelectTabInfo": self.render_general_music_clear_select_tab_info,
             "StoryFavorite": self.render_general_story_favorite,
         }
         renderer = renderers.get(file_name)
@@ -2650,8 +2652,14 @@ class PNGRenderer:
         right = max(0, min(right, src_w - left))
         top = max(0, min(top, src_h))
         bottom = max(0, min(bottom, src_h - top))
-        if target_w <= left + right or target_h <= top + bottom:
-            return sprite.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        if target_w <= left + right and left + right > 0:
+            scale = target_w / (left + right)
+            left = math.floor(left * scale)
+            right = target_w - left
+        if target_h <= top + bottom and top + bottom > 0:
+            scale = target_h / (top + bottom)
+            top = math.floor(top * scale)
+            bottom = target_h - top
 
         out = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 0))
         mid_src_w = max(0, src_w - left - right)
@@ -2662,9 +2670,18 @@ class PNGRenderer:
         def paste_region(src_box: tuple[int, int, int, int], dst_box: tuple[int, int, int, int]) -> None:
             dst_w = dst_box[2] - dst_box[0]
             dst_h = dst_box[3] - dst_box[1]
-            if dst_w <= 0 or dst_h <= 0 or src_box[2] <= src_box[0] or src_box[3] <= src_box[1]:
+            if dst_w <= 0 or dst_h <= 0:
                 return
-            region = sprite.crop(src_box).resize((dst_w, dst_h), Image.Resampling.BICUBIC)
+            src_left, src_top, src_right, src_bottom = src_box
+            if src_right <= src_left:
+                src_left = max(0, min(src_w - 1, src_left - 1))
+                src_right = src_left + 1
+            if src_bottom <= src_top:
+                src_top = max(0, min(src_h - 1, src_top - 1))
+                src_bottom = src_top + 1
+            region = sprite.crop((src_left, src_top, src_right, src_bottom)).resize(
+                (dst_w, dst_h), Image.Resampling.BICUBIC
+            )
             out.alpha_composite(region, (dst_box[0], dst_box[1]))
 
         sx0, sx1, sx2, sx3 = 0, left, src_w - right, src_w
@@ -2774,18 +2791,42 @@ class PNGRenderer:
         min_size: int = 12,
         fill: tuple[int, int, int, int] = (58, 65, 82, 255),
         anchor: str = "lm",
+        stroke_width: int = 0,
+        stroke_fill: tuple[int, int, int, int] | None = None,
     ) -> None:
         left, top, right, bottom = box
         text = text or ""
+        if anchor.startswith("r"):
+            x = right
+        elif anchor.startswith("m"):
+            x = (left + right) // 2
+        else:
+            x = left
         for size in range(max_size, min_size - 1, -1):
             font = self.general_font(size)
             bbox = draw.textbbox((0, 0), text, font=font)
             if bbox[2] - bbox[0] <= right - left and bbox[3] - bbox[1] <= bottom - top:
                 y = (top + bottom) // 2 if anchor.endswith("m") else top
-                draw.text((left, y), text, font=font, fill=fill, anchor=anchor)
+                draw.text(
+                    (x, y),
+                    text,
+                    font=font,
+                    fill=fill,
+                    anchor=anchor,
+                    stroke_width=stroke_width,
+                    stroke_fill=stroke_fill,
+                )
                 return
         font = self.general_font(min_size)
-        draw.text((left, (top + bottom) // 2), text, font=font, fill=fill, anchor=anchor)
+        draw.text(
+            (x, (top + bottom) // 2),
+            text,
+            font=font,
+            fill=fill,
+            anchor=anchor,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
+        )
 
     def draw_fit_text_rect(
         self,
@@ -2797,6 +2838,8 @@ class PNGRenderer:
         min_size: int = 12,
         fill: tuple[int, int, int, int] = GENERAL_TEMPLATE_TEXT,
         anchor: str = "lm",
+        stroke_width: int = 0,
+        stroke_fill: tuple[int, int, int, int] | None = None,
     ) -> None:
         left, top, right, bottom = rect
         self.draw_fit_text(
@@ -2807,6 +2850,8 @@ class PNGRenderer:
             min_size=min_size,
             fill=fill,
             anchor=anchor,
+            stroke_width=stroke_width,
+            stroke_fill=stroke_fill,
         )
 
     def draw_center_text_rect(
@@ -3064,18 +3109,58 @@ class PNGRenderer:
     def render_general_music_clear_info(self) -> Image.Image:
         size = GENERAL_NATIVE_SIZES["MusicClearInfo"]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_general_panel(image, (0, 0, size[0], size[1]))
         rows = (
             ("完成", "liveClear"),
             ("FULL COMBO", "fullCombo"),
-            ("ALL PERFECT", "allPerfect"),
         )
         counts = self.music_clear_count_map()
-        row_h = 70
-        start_y = 14
         for idx, (label, key) in enumerate(rows):
-            top = start_y + idx * 76
-            self.draw_music_clear_row(image, (28, top, size[0] - 28, top + row_h), label, key, counts)
+            top = MUSIC_CLEAR_ROW_TOP + idx * MUSIC_CLEAR_ROW_STEP
+            self.draw_music_clear_row(image, (0, top, size[0], top + MUSIC_CLEAR_ROW_HEIGHT), label, key, counts)
+        return image
+
+    def render_general_music_clear_select_tab_info(self) -> Image.Image:
+        size = GENERAL_NATIVE_SIZES["MusicClearSelectTabInfo"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+
+        tab_rect = (26, 0, size[0] - 22, 48)
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            tab_rect,
+            tint=UNITY_UI_INPUT_TINT,
+            sliced_border=(21, 21, 21, 21),
+        )
+        segment_w = (tab_rect[2] - tab_rect[0]) / 3.0
+        selected_rect = (tab_rect[0], tab_rect[1], tab_rect[0] + segment_w, tab_rect[3])
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            selected_rect,
+            tint=(244, 246, 252, 230),
+            sliced_border=(21, 21, 21, 21),
+        )
+        for index, label in enumerate(("クリア", "フルコンボ", "AP")):
+            self.draw_center_text_rect(
+                draw,
+                (tab_rect[0] + segment_w * index, tab_rect[1], tab_rect[0] + segment_w * (index + 1), tab_rect[3]),
+                label,
+                size=23,
+                fill=GENERAL_TEMPLATE_TEXT if index == 0 else (255, 255, 255, 245),
+            )
+        for index in (1, 2):
+            x = tab_rect[0] + segment_w * index
+            draw.rounded_rectangle((x - 2, 10, x + 2, 41), radius=2, fill=(116, 122, 142, 130))
+        append_separator_x = size[0] - 142
+        draw.rounded_rectangle(
+            (append_separator_x - 1, 71, append_separator_x + 1, 152),
+            radius=1,
+            fill=(203, 106, 211, 180),
+        )
+
+        counts = self.music_clear_count_map()
+        self.draw_music_clear_value_strip(image, (26, 72, size[0] - 22, 158), "liveClear", counts)
         return image
 
     def render_general_multi_live(self) -> Image.Image | None:
@@ -3084,32 +3169,70 @@ class PNGRenderer:
             return None
         size = GENERAL_NATIVE_SIZES["MultiLive"]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_general_panel(image, (0, 0, size[0], size[1]))
         draw = ImageDraw.Draw(image)
-        self.draw_center_text_rect(
-            draw, (24, 18, size[0] - 24, 54), "MULTI LIVE", size=24, fill=GENERAL_TEMPLATE_LABEL_TEXT
+
+        self.draw_fit_text_rect(
+            draw,
+            (20, 16, 280, 52),
+            "多人演出",
+            max_size=30,
+            min_size=18,
+            fill=GENERAL_TEMPLATE_TEXT,
+            anchor="lm",
         )
-        stats = [("MVP", int(data.get("mvp", 0) or 0)), ("SUPER STAR", int(data.get("superStar", 0) or 0))]
-        for idx, (label, value) in enumerate(stats):
-            y = 72 + idx * 48
+        self.paste_unity_sprite(
+            image,
+            "bg_base_wh",
+            (34, 62, size[0] - 34, 66),
+            tint=UNITY_UI_TOTAL_LINE_TINT,
+        )
+
+        def draw_stat(
+            root_center_x: float,
+            root_center_y: float,
+            label: str,
+            value: int,
+            *,
+            label_width: float = 130.0,
+            value_width: float = 142.0,
+        ) -> None:
+            label_left = root_center_x
+            label_top = root_center_y - 28.0
+            label_rect = (label_left, label_top, label_left + label_width, label_top + 56.0)
             self.paste_unity_sprite(
                 image,
                 "bg_base_r16_wh",
-                (34, y, size[0] - 34, y + 36),
+                label_rect,
                 tint=UNITY_UI_INPUT_TINT,
                 sliced_border=(21, 21, 21, 21),
             )
             self.draw_fit_text_rect(
-                draw, (52, y, size[0] - 134, y + 36), label, max_size=20, fill=GENERAL_TEMPLATE_TEXT
+                draw,
+                (label_rect[0] + 10.0, label_rect[1] + 2.0, label_rect[2] - 10.0, label_rect[3] - 2.0),
+                label,
+                max_size=29,
+                min_size=17,
+                fill=(255, 255, 255, 255),
+                anchor="mm",
             )
+            value_center_x = root_center_x + (210.0 if label == "MVP" else 207.0)
             self.draw_fit_text_rect(
                 draw,
-                (size[0] - 136, y, size[0] - 52, y + 36),
-                str(value),
-                max_size=22,
+                (
+                    value_center_x - value_width / 2.0,
+                    root_center_y - 30.0,
+                    value_center_x + value_width / 2.0,
+                    root_center_y + 30.0,
+                ),
+                f"{value}次",
+                max_size=30,
+                min_size=18,
                 fill=GENERAL_TEMPLATE_TEXT,
-                anchor="rm",
+                anchor="mm",
             )
+
+        draw_stat(26.0, 118.0, "MVP", int(data.get("mvp", 0) or 0))
+        draw_stat(399.0, 118.0, "SUPER\nSTAR", int(data.get("superStar", 0) or 0))
         return image
 
     def render_general_challenge_live(self) -> Image.Image | None:
@@ -3122,56 +3245,70 @@ class PNGRenderer:
             return None
         size = GENERAL_NATIVE_SIZES["ChallengeLive"]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_general_panel(image, (0, 0, size[0], size[1]))
-        draw = ImageDraw.Draw(image)
-        self.draw_center_text_rect(
-            draw, (22, 16, size[0] - 22, 52), "CHALLENGE LIVE", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            (0.0, 0.0, float(size[0]), float(size[1])),
+            tint=(225, 238, 239, 205),
+            sliced_border=(21, 21, 21, 21),
         )
-        icon_path = self.chara_rank_icon_path(character_id)
+        draw = ImageDraw.Draw(image)
+        self.draw_fit_text_rect(
+            draw,
+            (28, 18, size[0] - 28, 58),
+            "チャレンジライブ",
+            max_size=28,
+            min_size=18,
+            fill=GENERAL_TEMPLATE_TEXT,
+            anchor="lm",
+        )
+        self.paste_unity_sprite(image, "bg_base_wh", (24, 62, size[0] - 22, 66), tint=UNITY_UI_TOTAL_LINE_TINT)
+        solo_rect = (24, 96, 136, 144)
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            solo_rect,
+            tint=(169, 171, 205, 235),
+            sliced_border=(21, 21, 21, 21),
+        )
+        self.draw_center_text_rect(draw, solo_rect, "ソロ", size=25, fill=(255, 255, 255, 255))
+        icon_path = self.chara_icon_path(character_id)
         if icon := self.open_rgba(icon_path):
-            self.paste_in_rect(image, icon, (34, 72, 134, 122))
-        rank = self.challenge_live_rank_for(character_id)
-        self.draw_center_text_rect(draw, (142, 70, 226, 124), str(rank), size=30, fill=GENERAL_TEMPLATE_TEXT)
-        self.draw_center_text_rect(draw, (34, 140, size[0] - 34, 176), f"SCORE {high_score}", size=24)
+            self.paste_in_rect(image, icon, (158, 86, 222, 150))
+        self.draw_fit_text_rect(
+            draw,
+            (244, 92, size[0] - 30, 148),
+            f"{high_score}",
+            max_size=31,
+            min_size=20,
+            fill=GENERAL_TEMPLATE_TEXT,
+            anchor="lm",
+        )
         return image
 
-    def render_general_character_rank_and_challenge_stage(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["CharacterRankAndChallengeStage"]
+    def render_general_character_rank_and_challenge_stage(self, scroll: bool = True) -> Image.Image:
+        size_key = "CharacterRankAndChallengeStageScroll" if scroll else "CharacterRankAndChallengeStage"
+        size = GENERAL_NATIVE_SIZES[size_key]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_general_panel(image, (0, 0, size[0], size[1]))
         draw = ImageDraw.Draw(image)
-        self.draw_center_text_rect(
-            draw, (24, 12, size[0] - 24, 46), "角色等级", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
-        )
+        self.draw_character_rank_tabs(image, scroll=scroll)
         ranks = self.character_rank_map()
-        cell_w, cell_h = 96, 48
-        gap_x, gap_y = 12, 7
-        start_x, start_y = 32, 58
-        for index, (nickname, character_id) in enumerate(CHARA_LIST):
-            col = index % 6
-            row = index // 6
+
+        cell_w, cell_h = 195.0, 84.0
+        gap_x, gap_y = 15.0, 15.0
+        cols = 4
+        start_x = (size[0] - (cell_w * cols + gap_x * (cols - 1))) / 2.0
+        start_y = 104.0 if scroll else 64.0
+        for index, (_nickname, character_id) in enumerate(CHARA_LIST):
+            col = index % cols
+            row = index // cols
             x = start_x + col * (cell_w + gap_x)
             y = start_y + row * (cell_h + gap_y)
-            if nickname is None or character_id is None:
+            if character_id is None:
                 continue
-            icon_path = self.chara_rank_icon_path(character_id)
-            if icon := self.open_rgba(icon_path):
-                self.paste_in_rect(image, icon, (x, y, x + cell_w, y + cell_h))
-            else:
-                self.paste_unity_sprite(
-                    image,
-                    "bg_base_r16_wh",
-                    (x, y, x + cell_w, y + cell_h),
-                    tint=UNITY_UI_INPUT_TINT,
-                    sliced_border=(21, 21, 21, 21),
-                )
-            draw.text(
-                (x + cell_w - 22, y + cell_h / 2),
-                str(ranks.get(character_id, 0)),
-                font=self.general_font(20),
-                fill=GENERAL_TEMPLATE_TEXT,
-                anchor="mm",
-            )
+            self.draw_profile_rank_and_stage_cell(image, (x, y), character_id, ranks.get(character_id, 0))
+        if scroll:
+            self.draw_general_vertical_scrollbar(image, (size[0] - 29, 104, size[0] - 23, size[1] - 26))
         return image
 
     def render_general_story_favorite(self) -> Image.Image | None:
@@ -3180,32 +3317,197 @@ class PNGRenderer:
             return None
         size = GENERAL_NATIVE_SIZES["StoryFavorite"]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_general_panel(image, (0, 0, size[0], size[1]))
         draw = ImageDraw.Draw(image)
-        self.draw_center_text_rect(
-            draw, (24, 12, size[0] - 24, 48), "最喜欢的剧情", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
-        )
+        self.draw_story_favorite_header(image)
         font = self.general_font(22)
-        y = 66
         if not stories:
             draw.text((size[0] / 2, size[1] / 2), "未设置", font=font, fill=GENERAL_TEMPLATE_TEXT, anchor="mm")
             return image
-        for story in stories[:4]:
+        ordered_stories = self.ordered_story_favorites(stories)
+        card_w, card_h = 403, 172
+        gap_x, gap_y = 24, 20
+        start_x, start_y = 25, 92
+        for index, story in enumerate(ordered_stories):
             if not isinstance(story, dict):
                 continue
-            title = str(story.get("comment", "") or "").strip()
-            if not title:
-                title = f"{story.get('storyType', '')} #{story.get('storyId', '')}".strip()
-            self.paste_unity_sprite(
-                image,
-                "bg_base_r16_wh",
-                (30, y, size[0] - 30, y + 36),
-                tint=UNITY_UI_INPUT_TINT,
-                sliced_border=(21, 21, 21, 21),
-            )
-            self.draw_fit_text_rect(draw, (48, y, size[0] - 48, y + 36), title, max_size=21, fill=GENERAL_TEMPLATE_TEXT)
-            y += 44
+            col = index % 2
+            row = index // 2
+            x = start_x + col * (card_w + gap_x)
+            y = start_y + row * (card_h + gap_y)
+            self.draw_story_favorite_cell(image, story, (x, y, x + card_w, y + card_h))
+        if len(ordered_stories) > 8:
+            self.draw_general_vertical_scrollbar(image, (size[0] - 23, 92, size[0] - 17, size[1] - 25))
         return image
+
+    def draw_character_rank_tabs(self, image: Image.Image, *, scroll: bool) -> None:
+        draw = ImageDraw.Draw(image)
+        tab_w = 828 if scroll else 760
+        left = (image.width - tab_w) / 2.0
+        top = 24.0
+        bottom = top + 57.0
+        mid = left + tab_w / 2.0
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            (left, top, left + tab_w, bottom),
+            tint=UNITY_UI_INPUT_TINT,
+            sliced_border=(21, 21, 21, 21),
+        )
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            (left, top, mid, bottom),
+            tint=(244, 246, 252, 230),
+            sliced_border=(21, 21, 21, 21),
+        )
+        self.draw_center_text_rect(draw, (left, top, mid, bottom), "角色收藏等级", size=27, fill=GENERAL_TEMPLATE_TEXT)
+        self.draw_center_text_rect(
+            draw,
+            (mid, top, left + tab_w, bottom),
+            "挑战舞台",
+            size=27,
+            fill=(255, 255, 255, 230),
+        )
+
+    def draw_profile_rank_and_stage_cell(
+        self,
+        image: Image.Image,
+        top_left: tuple[float, float],
+        character_id: int,
+        rank: int,
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        x, y = top_left
+        root_center_x = x + 97.5
+        root_center_y = y + 42.0
+        tint = (0.266667, 0.866667, 1.0, 1.0)
+        base_center_x = root_center_x + 7.5
+        base_center_y = root_center_y + 10.0
+        self.paste_unity_sprite(
+            image,
+            "bg_base_round_h64_wh",
+            (base_center_x - 90.0, base_center_y - 32.5, base_center_x + 90.0, base_center_y + 32.5),
+            tint=tint,
+            sliced_border=(37, 0, 37, 0),
+        )
+        circle_rect = (
+            root_center_x - 55.5 - 42.0,
+            root_center_y - 42.0,
+            root_center_x - 55.5 + 42.0,
+            root_center_y + 42.0,
+        )
+        self.paste_unity_sprite(image, "bg_base_circle_h96_wh", circle_rect, tint=tint)
+        if icon := self.open_rgba(self.chara_icon_path(character_id)):
+            icon_rect = (
+                root_center_x - 55.5 - 38.0,
+                root_center_y - 38.0,
+                root_center_x - 55.5 + 38.0,
+                root_center_y + 38.0,
+            )
+            self.paste_in_rect(image, icon, icon_rect)
+        self.draw_center_text_rect(
+            draw,
+            (root_center_x - 39.0, root_center_y + 11.0 - 24.5, root_center_x + 93.0, root_center_y + 11.0 + 24.5),
+            str(rank),
+            size=31,
+            fill=GENERAL_TEMPLATE_TEXT,
+        )
+
+    def draw_story_favorite_header(self, image: Image.Image) -> None:
+        draw = ImageDraw.Draw(image)
+        title_rect = (47, 10, 547, 66)
+        self.draw_fit_text_rect(draw, title_rect, "最喜欢的剧情", max_size=30, min_size=18, fill=GENERAL_TEMPLATE_TEXT)
+        self.paste_unity_sprite(
+            image,
+            "bg_base_wh",
+            (40, 66, image.width - 40, 70),
+            tint=UNITY_UI_TOTAL_LINE_TINT,
+        )
+
+    def draw_story_favorite_cell(
+        self,
+        image: Image.Image,
+        story: dict[str, Any],
+        rect: tuple[float, float, float, float],
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        left, top, right, bottom = rect
+        width = max(1, round(right - left))
+        height = max(1, round(bottom - top))
+        title = self.story_favorite_title(story)
+        banner = self.open_rgba(self.story_favorite_image_path(story))
+        if banner is not None:
+            tile = self.resize_cover_aligned(banner, (width, height), align_x=0.5, align_y=0.5)
+            mask = Image.new("L", tile.size, 0)
+            ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=10, fill=255)
+            tile.putalpha(ImageChops.multiply(tile.getchannel("A"), mask))
+            image.alpha_composite(tile, (round(left), round(top)))
+            draw.rounded_rectangle(
+                (round(left), round(top), round(right), round(bottom)),
+                radius=10,
+                outline=(235, 242, 255, 210),
+                width=2,
+            )
+            return
+        self.paste_unity_sprite(
+            image,
+            "bg_base_r16_wh",
+            rect,
+            tint=UNITY_UI_INPUT_TINT,
+            sliced_border=(21, 21, 21, 21),
+        )
+        self.draw_fit_text_rect(
+            draw,
+            (left + 18, top + 12, right - 18, bottom - 12),
+            title,
+            max_size=24,
+            min_size=13,
+            fill=GENERAL_TEMPLATE_TEXT,
+        )
+
+    def draw_general_vertical_scrollbar(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
+        left, top, right, bottom = rect
+        self.paste_unity_sprite(
+            image,
+            "bg_base_round_vertical_h6_wh",
+            rect,
+            tint=(0.333333, 0.333333, 0.466667, 0.2),
+            sliced_border=(0, 5, 0, 5),
+        )
+        handle_h = min(220.0, max(80.0, (bottom - top) * 0.28))
+        handle_rect = (left - 1, top + 18, right + 1, top + 18 + handle_h)
+        self.paste_unity_sprite(
+            image,
+            "bg_base_round_vertical_h8_wh",
+            handle_rect,
+            tint=(0.333333, 0.333333, 0.466667, 1.0),
+            sliced_border=(0, 6, 0, 6),
+        )
+
+    def ordered_story_favorites(self, stories: list[Any]) -> list[dict[str, Any]]:
+        items = [story for story in stories if isinstance(story, dict)]
+        return sorted(items, key=lambda story: int(story.get("shareNo", story.get("share_no", 9999)) or 9999))
+
+    def story_favorite_key(self, story: dict[str, Any]) -> str:
+        return f"{story.get('storyType', '')}:{story.get('storyId', '')}"
+
+    def story_favorite_resource(self, story: dict[str, Any]) -> dict[str, Any]:
+        key = self.story_favorite_key(story)
+        return self.story_favorite_resources.get(key) or {}
+
+    def story_favorite_title(self, story: dict[str, Any]) -> str:
+        resource = self.story_favorite_resource(story)
+        title = str(resource.get("title", "") or story.get("comment", "") or "").strip()
+        if title:
+            return title
+        return f"{story.get('storyType', '')} #{story.get('storyId', '')}".strip()
+
+    def story_favorite_image_path(self, story: dict[str, Any]) -> Path | None:
+        resource = self.story_favorite_resource(story)
+        raw_path = str(resource.get("imagePath", "") or "").strip()
+        if raw_path:
+            return self.resolve_request_asset_path(raw_path)
+        return None
 
     def draw_general_panel(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         if not self.paste_unity_sprite(
@@ -3246,22 +3548,38 @@ class PNGRenderer:
     ) -> None:
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
-        header_h = 24
-        self.paste_unity_sprite(
+        header_h = 54
+        header_rect = (left, top, right, top + header_h)
+        if not self.paste_unity_sprite(
             image,
-            "bg_base_wh",
-            (left, top, right, top + header_h),
-            tint=(0.62, 0.63, 0.72, 0.85),
-        )
-        self.draw_center_text_rect(draw, (left, top, right, top + header_h), label, size=18, fill=(255, 255, 255, 255))
+            "bg_base_r16_wh",
+            header_rect,
+            tint=UNITY_UI_TOTAL_LINE_TINT,
+            sliced_border=(21, 21, 21, 21),
+        ):
+            draw.rounded_rectangle(
+                tuple(round(v) for v in header_rect),
+                radius=12,
+                fill=(167, 167, 188, 220),
+            )
+        self.draw_center_text_rect(draw, header_rect, label, size=31, fill=(255, 255, 255, 255))
+        self.draw_music_clear_value_strip(image, (left + 15, top + header_h + 15, right - 15, bottom), key, counts)
+
+    def draw_music_clear_value_strip(
+        self,
+        image: Image.Image,
+        rect: tuple[float, float, float, float],
+        key: str,
+        counts: dict[str, dict[str, int]],
+    ) -> None:
         cell_gap = 8
         cell_count = len(GENERAL_MUSIC_DIFFICULTIES)
+        left, top, right, bottom = rect
         cell_w = (right - left - cell_gap * (cell_count - 1)) / cell_count
-        y = top + header_h + 8
         for idx, (difficulty, text, color) in enumerate(GENERAL_MUSIC_DIFFICULTIES):
             x = left + idx * (cell_w + cell_gap)
             self.draw_difficulty_count_cell(
-                image, (x, y, x + cell_w, bottom), text, color, counts.get(difficulty, {}).get(key, 0)
+                image, (x, top, x + cell_w, bottom), text, color, counts.get(difficulty, {}).get(key, 0)
             )
 
     def draw_difficulty_count_cell(
@@ -3274,10 +3592,10 @@ class PNGRenderer:
     ) -> None:
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
-        tag_h = 26
-        draw.rounded_rectangle((left, top, right, top + tag_h), radius=5, fill=color)
-        self.draw_center_text_rect(draw, (left, top, right, top + tag_h), label, size=14, fill=(255, 255, 255, 255))
-        self.draw_center_text_rect(draw, (left, top + tag_h + 4, right, bottom), str(value), size=20)
+        tag_h = 34
+        draw.rounded_rectangle((left, top, right, top + tag_h), radius=6, fill=color)
+        self.draw_center_text_rect(draw, (left, top, right, top + tag_h), label, size=20, fill=(255, 255, 255, 255))
+        self.draw_center_text_rect(draw, (left, top + tag_h + 2, right, bottom), str(value), size=28)
 
     def character_rank_map(self) -> dict[int, int]:
         result: dict[int, int] = {}
@@ -3296,16 +3614,16 @@ class PNGRenderer:
             best = max(best, int(row.get("rank", 0) or 0))
         return best
 
-    def chara_rank_icon_path(self, character_id: int) -> Path | None:
+    def chara_icon_path(self, character_id: int) -> Path | None:
         raw_path = self.chara_rank_icon_path_map.get(str(character_id))
         if raw_path:
             path = self.resolve_request_asset_path(raw_path)
             if path is not None:
                 return path
-        nickname = CHARA_ID2NICKNAME.get(character_id)
-        if not nickname:
-            return None
-        return self.static_image_path("chara_rank_icon", f"{nickname}.png")
+        return None
+
+    def chara_rank_icon_path(self, character_id: int) -> Path | None:
+        return self.chara_icon_path(character_id)
 
     def honor_request_image(self, payload: dict[str, Any] | None) -> Image.Image | None:
         if not payload:
@@ -3332,8 +3650,19 @@ class PNGRenderer:
     def honor_slot_key(self, honor_id: int, level: int, full_size: bool) -> str:
         return f"{honor_id}:{level}:{'main' if full_size else 'sub'}"
 
-    def bonds_honor_slot_key(self, honor_id: int, level: int, full_size: bool, word_id: int, inverse: bool) -> str:
-        return f"{honor_id}:{level}:{'main' if full_size else 'sub'}:{word_id}:{'reverse' if inverse else 'normal'}"
+    def bonds_honor_slot_key(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+        word_id: int,
+        inverse: bool,
+        use_unit_virtual_singer: bool = False,
+    ) -> str:
+        mode = "main" if full_size else "sub"
+        direction = "reverse" if inverse else "normal"
+        suffix = ":unit_vs" if use_unit_virtual_singer else ""
+        return f"{honor_id}:{level}:{mode}:{word_id}:{direction}{suffix}"
 
     def compose_profile_honor_image(self, row: dict[str, Any], full_size: bool) -> Image.Image | None:
         seq = int(row.get("seq", 0) or 0)
@@ -3369,14 +3698,26 @@ class PNGRenderer:
             return None
         full_file = "card_after_training.png" if after_training else "card_normal.png"
         cutout_file = "after_training.png" if after_training else "normal.png"
+        cutout_trim_file = "card_after_training_trim.png" if after_training else "card_normal_trim.png"
         rels: list[Path] = []
         if kind == "deck":
             rels.extend(
                 [
                     Path("character") / "member_cutout" / bundle / cutout_file,
+                    Path("character") / "member_cutout" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
                     Path("character") / "member_cutout" / bundle / "deck.png",
                     Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                ]
+            )
+        elif kind == "clip":
+            rels.extend(
+                [
+                    Path("character") / "member_cutout_trm" / bundle / cutout_file,
+                    Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_trim_file,
                 ]
             )
         elif kind == "small":
@@ -3513,7 +3854,7 @@ class PNGRenderer:
         return self.compose_card_member_image(path, (float(target_size[0]), float(target_size[1])), contain=False)
 
     def compose_profile_deck_card(self, card_id: int, leader: bool = False) -> Image.Image | None:
-        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
+        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "deck")
         if path is None:
             return None
         source = Image.open(path).convert("RGBA")
@@ -3968,10 +4309,15 @@ class PNGRenderer:
         level = self.user_bonds_honor_level_for(honor_id)
         word_id = int(item.get("wordId", 0) or 0)
         inverse = bool_from_profile(item.get("inverse", False))
-        if image := self.honor_request_image(
-            self.bonds_honor_requests.get(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
-        ):
-            return image
+        use_unit_virtual_singer = bool_from_profile(item.get("useUnitVirtualSinger", False))
+        request_keys = [
+            self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer),
+        ]
+        if use_unit_virtual_singer:
+            request_keys.append(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
+        for key in request_keys:
+            if image := self.honor_request_image(self.bonds_honor_requests.get(key)):
+                return image
         if image := self.honor_request_image(self.bonds_honor_requests.get(str(honor_id))):
             return image
         if self.masterdata is None:
@@ -3993,10 +4339,7 @@ class PNGRenderer:
         if character_id1 <= 0 or character_id2 <= 0:
             return None
 
-        display_slots = [
-            (unit_id1, character_id1),
-            (unit_id2, character_id2),
-        ]
+        display_slots = self.bonds_honor_display_slots(honor, item, unit_id1, character_id1, unit_id2, character_id2)
         if bool_from_profile(item.get("inverse", False)):
             display_slots[0], display_slots[1] = display_slots[1], display_slots[0]
 
@@ -4055,6 +4398,43 @@ class PNGRenderer:
         if not unit:
             return 0
         return int(unit.get("gameCharacterId", 0) or 0)
+
+    def bonds_honor_display_slots(
+        self,
+        honor: dict[str, Any],
+        item: dict[str, Any],
+        unit_id1: int,
+        character_id1: int,
+        unit_id2: int,
+        character_id2: int,
+    ) -> list[tuple[int, int]]:
+        if bool_from_profile(honor.get("configurableUnitVirtualSinger", False)) and bool_from_profile(
+            item.get("useUnitVirtualSinger", False)
+        ):
+            original_unit_id1 = unit_id1
+            original_unit_id2 = unit_id2
+            unit_id1 = self.unit_virtual_singer_unit_id(original_unit_id1, original_unit_id2)
+            unit_id2 = self.unit_virtual_singer_unit_id(original_unit_id2, original_unit_id1)
+            character_id1 = self.game_character_id_for_unit(unit_id1) or character_id1
+            character_id2 = self.game_character_id_for_unit(unit_id2) or character_id2
+        return [(unit_id1, character_id1), (unit_id2, character_id2)]
+
+    def unit_virtual_singer_unit_id(self, candidate_unit_id: int, paired_unit_id: int) -> int:
+        candidate = self.game_character_units.get(candidate_unit_id)
+        paired = self.game_character_units.get(paired_unit_id)
+        if not candidate or not paired:
+            return candidate_unit_id
+        candidate_character_id = int(candidate.get("gameCharacterId", 0) or 0)
+        paired_unit = str(paired.get("unit", "") or "")
+        if candidate_character_id < 21 or paired_unit == "piapro":
+            return candidate_unit_id
+        for unit_id, unit in self.game_character_units.items():
+            if (
+                int(unit.get("gameCharacterId", 0) or 0) == candidate_character_id
+                and str(unit.get("unit", "") or "") == paired_unit
+            ):
+                return int(unit_id)
+        return candidate_unit_id
 
     def bonds_honor_word_bundle_name(
         self,
@@ -4296,6 +4676,17 @@ class PNGRenderer:
                 if after_training
                 else ("deckNormalPath", "deck_normal_path", "normalPath", "normal_path")
             )
+        elif kind == "clip":
+            keys = (
+                (
+                    "clipAfterTrainingPath",
+                    "clip_after_training_path",
+                    "deckAfterTrainingPath",
+                    "deck_after_training_path",
+                )
+                if after_training
+                else ("clipNormalPath", "clip_normal_path", "deckNormalPath", "deck_normal_path")
+            )
         elif kind == "small":
             keys = (
                 ("smallAfterTrainingPath", "small_after_training_path", "afterTrainingPath", "after_training_path")
@@ -4316,7 +4707,7 @@ class PNGRenderer:
         card_id = content_data_id("card_member", item)
         after_training = self.card_member_after_training(item)
         card_member_type = int(item.get("type", 0) or 0)
-        kind = "deck" if card_member_type == 1 else "small" if card_member_type == 2 else "full"
+        kind = "clip" if card_member_type == 1 else "full"
         if path := self.card_asset_path_for_state(card_id, after_training, kind):
             return [path]
         if self.masterdata is None:
@@ -4632,7 +5023,7 @@ class PNGRenderer:
     ) -> PreparedLayer | None:
         layer, pivot = local[0], local[1]
         scale_consumed = len(local) >= 3 and bool(local[2])
-        if content_kind != "general":
+        if content_kind not in {"general", "honor", "bonds_honor"}:
             layer, pivot = trim_layer_to_content(layer, pivot)
         scale = object_data.get("scale", {})
         sx = float(scale.get("x") or 1.0)
@@ -8805,7 +9196,12 @@ def resolve_render_target(args: argparse.Namespace) -> RenderTargetConfig:
     )
 
 
-def build_renderer(args: argparse.Namespace, profile: dict[str, Any], target: RenderTargetConfig) -> PNGRenderer:
+def build_renderer(
+    args: argparse.Namespace,
+    profile: dict[str, Any],
+    target: RenderTargetConfig,
+    resources: dict[str, Any] | None = None,
+) -> PNGRenderer:
     return PNGRenderer(
         args.masterdata,
         args.assets,
@@ -8848,6 +9244,7 @@ def build_renderer(args: argparse.Namespace, profile: dict[str, Any], target: Re
         None if args.no_shape_sprites else args.shape_sprite_dir,
         args.tmp_native_line_gap,
         profile,
+        resources=resources,
         canvas_w=target.canvas_w,
         canvas_h=target.canvas_h,
         origin_x=target.origin_x,
@@ -8879,8 +9276,9 @@ def main() -> None:
     warn_deprecated_probe_args(args)
 
     args.out.mkdir(parents=True, exist_ok=True)
+    resources: dict[str, Any] = {}
     if args.request is not None:
-        card, profile_context = decode_custom_profile_render_request(load_json(args.request))
+        card, profile_context, resources = decode_custom_profile_render_request(load_json(args.request))
         cards = [card]
     else:
         profile = normalize_profile_payload(load_json(args.profile))
@@ -8899,7 +9297,7 @@ def main() -> None:
             print(args.export_request, flush=True)
             return
 
-    renderer = build_renderer(args, profile_context, resolve_render_target(args))
+    renderer = build_renderer(args, profile_context, resolve_render_target(args), resources)
     for card in cards:
         img = renderer.render_card(card)
         path = args.out / custom_profile_output_name(card)

@@ -123,7 +123,9 @@ def build_custom_profile_render_request(
     }
 
 
-def decode_custom_profile_render_request(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def decode_custom_profile_render_request(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
     card = payload.get("card") or payload.get("custom_profile_card") or payload.get("customProfileCard")
     if not isinstance(card, dict):
         raise ValueError("custom profile render request is missing card")
@@ -135,7 +137,10 @@ def decode_custom_profile_render_request(payload: dict[str, Any]) -> tuple[dict[
         context = {}
     if not isinstance(context, dict):
         raise ValueError("custom profile render request profile_context must be an object")
-    return card, context
+    resources = payload.get("resources") or {}
+    if not isinstance(resources, dict):
+        raise ValueError("custom profile render request resources must be an object")
+    return card, context, resources
 
 
 def custom_profile_output_name(card: dict[str, Any]) -> str:
