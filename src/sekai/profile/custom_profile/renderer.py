@@ -220,6 +220,7 @@ ONDEMAND_PREFERRED_TOP_LEVEL = {
     "event",
     "event_story",
     "gacha",
+    "lottery_game",
     "mysekai",
     "virtual_live",
 }
@@ -249,10 +250,28 @@ PREFAB_NATIVE_SIZES: dict[str, tuple[float, float]] = {
     "CollectionCustomPrefabContentView": (178.0, 154.0),
     "DynamicProfileContentView": (178.0, 154.0),
 }
+OMIKUJI_UNIT_LABELS = {
+    "piapro": "VIRTUAL SINGER",
+    "light_sound": "Leo/need",
+    "idol": "MORE MORE JUMP!",
+    "street": "Vivid BAD SQUAD",
+    "theme_park": "Wonderlands x Showtime",
+    "school_refusal": "25ji, Nightcord de.",
+}
+OMIKUJI_UNIT_COLORS = {
+    "piapro": (51, 204, 187, 255),
+    "light_sound": (68, 85, 221, 255),
+    "idol": (136, 221, 68, 255),
+    "street": (238, 17, 102, 255),
+    "theme_park": (255, 153, 0, 255),
+    "school_refusal": (136, 68, 153, 255),
+}
+OMIKUJI_RESULT_NATIVE_SIZE = (1480.0, 490.0)
 CLIP_CARD_MEMBER_ART_SIZE = (328.0, 538.2559814453125)
 GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     # Static data.unity3d prefab RectTransform.sizeDelta values, extracted
     # into out/general-template-prefabs-cn/metadata.json.
+    "X": (548, 64),
     "EditUserName": (548, 64),
     "Comment": (638, 190),
     "TotalPower": (752, 76),
@@ -267,9 +286,38 @@ GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     "MusicClearSelectTabInfo": (860, 166),
     "StoryFavorite": (909, 813),
 }
-MUSIC_CLEAR_ROW_HEIGHT = 148
-MUSIC_CLEAR_ROW_STEP = 154
-MUSIC_CLEAR_ROW_TOP = 0
+GENERAL_LABELS: dict[str, dict[str, str]] = {
+    "cn": {
+        "comment_title": "个性签名",
+        "total_power": "综合力",
+        "multi_live_title": "多人演出",
+        "multi_live_count_suffix": "次",
+        "challenge_live_title": "挑战演出",
+        "challenge_live_solo": "单人",
+        "character_rank_tab": "角色收藏等级",
+        "challenge_stage_tab": "挑战舞台",
+        "music_clear": "完成",
+        "music_full_combo": "FULL COMBO",
+        "music_all_perfect": "ALL PERFECT",
+        "story_favorite_title": "最喜欢的剧情",
+        "not_set": "未设置",
+    },
+    "jp": {
+        "comment_title": "ひと言",
+        "total_power": "総合力",
+        "multi_live_title": "MVP / SUPER STAR",
+        "multi_live_count_suffix": "回",
+        "challenge_live_title": "チャレンジライブ",
+        "challenge_live_solo": "ソロ",
+        "character_rank_tab": "キャラクターランク",
+        "challenge_stage_tab": "チャレンジステージ",
+        "music_clear": "クリア",
+        "music_full_combo": "フルコンボ",
+        "music_all_perfect": "ALL PERFECT",
+        "story_favorite_title": "お気に入りストーリー",
+        "not_set": "未設定",
+    },
+}
 GENERAL_MUSIC_DIFFICULTIES: tuple[tuple[str, str, tuple[int, int, int, int]], ...] = (
     ("easy", "EASY", (73, 211, 111, 255)),
     ("normal", "NORMAL", (65, 198, 222, 255)),
@@ -309,6 +357,13 @@ CHARA_LIST: tuple[tuple[str | None, int | None], ...] = (
     ("mzk", 20),
 )
 CHARA_ID2NICKNAME = {character_id: nickname for nickname, character_id in CHARA_LIST if nickname and character_id}
+CHARACTER_RANK_CELL_SIZE = (196.0, 85.0)
+CHARACTER_RANK_CELL_CENTER_X = (137.5, 348.5, 559.5, 770.5)
+CHARACTER_RANK_ROW_STEP = 100.0
+CHARACTER_RANK_NON_SCROLL_FIRST_CENTER_Y = 146.5
+CHARACTER_RANK_SCROLL_VIEWPORT = (24.0, 104.0, 884.0, 524.0)
+CHARACTER_RANK_SCROLL_CONTENT_SIZE = (860, 685)
+CHARACTER_RANK_SCROLL_FIRST_CENTER_Y = 42.0
 GENERAL_TEMPLATE_UNIT1_POSITIONS: dict[int, tuple[float, float]] = {
     # custom_profile/template/templatelayout.json unit 1.
     13: (-598.0, 330.0),
@@ -339,6 +394,7 @@ GENERAL_DECK_CARD_RENDER_SIZE = (
     round(GENERAL_DECK_CARD_NATIVE_SIZE[1] * GENERAL_DECK_CARD_SCALE),
 )
 GENERAL_VIEW_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
+    "X": ("userProfile.twitterId",),
     "EditUserName": ("user.name",),
     "TotalPower": ("totalPower",),
     "Deck": ("userDeck", "userCards", "cards.json", "card thumbnail assets"),
@@ -349,8 +405,8 @@ GENERAL_VIEW_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "ChallengeLive": ("userChallengeLiveSoloResult",),
     "CharacterRankAndChallengeStage": ("userCharacters", "userChallengeLiveSoloStages"),
     "CharacterRankAndChallengeStageScroll": ("userCharacters", "userChallengeLiveSoloStages"),
-    "MusicClearInfo": ("userMusicResults",),
-    "MusicClearSelectTabInfo": ("userMusicResults",),
+    "MusicClearInfo": ("userMusicDifficultyClearCount",),
+    "MusicClearSelectTabInfo": ("userMusicDifficultyClearCount",),
     "StoryFavorite": ("userStoryFavorites",),
 }
 NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
@@ -1831,6 +1887,12 @@ class PNGRenderer:
             "custom_profile_collection_resources",
             filename="customProfileCollectionResources.json",
         )
+        self.omikujis = self.load_resource_index(
+            "omikujis",
+            "omikujiResources",
+            "omikuji_resources",
+            filename="omikujis.json",
+        )
         self.others = self.load_resource_index(
             "customProfileEtcResources", "custom_profile_etc_resources", filename="customProfileEtcResources.json"
         )
@@ -2443,6 +2505,7 @@ class PNGRenderer:
         resource = self.image_resource_for("general", item)
         file_name = str(resource.get("fileName", "") or "")
         renderers = {
+            "X": self.render_general_x,
             "EditUserName": self.render_general_user_name,
             "Comment": self.render_general_comment,
             "TotalPower": self.render_general_total_power,
@@ -2478,12 +2541,28 @@ class PNGRenderer:
             generated_data=self.generate_general_data(item, resource),
         )
 
+    def general_text(self, key: str) -> str:
+        labels = GENERAL_LABELS.get(self.region)
+        if labels is None and self.region == "ja":
+            labels = GENERAL_LABELS["jp"]
+        return (labels or GENERAL_LABELS["cn"]).get(key, GENERAL_LABELS["cn"].get(key, key))
+
     def general_font(self, size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        candidates = [
-            self.font_path_for("FOT-RodinNTLGPro-DB"),
-            self.fonts / "FOT-RodinNTLGPro-DB.ttf",
-            Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
-        ]
+        if self.region in {"jp", "ja"}:
+            candidates = [
+                self.fonts / "FOT-RodinNTLGPro-DB.otf",
+                self.fonts / "FOT-RodinNTLGPro-DB-alt.otf",
+                self.fonts / "FOT-RodinNTLGPro-DB.ttf",
+                self.font_path_for("FOT-RodinNTLGPro-DB"),
+                Path("/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc"),
+            ]
+        else:
+            candidates = [
+                self.font_path_for("FOT-RodinNTLGPro-DB"),
+                self.fonts / "FOT-RodinNTLGPro-DB.ttf",
+                self.fonts / "FOT-RodinNTLGPro-DB.otf",
+                Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+            ]
         for path in candidates:
             try:
                 if path.exists():
@@ -2917,6 +2996,16 @@ class PNGRenderer:
     def draw_total_power_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "icon_deckPower_wh", rect, tint=UNITY_UI_DARK_TINT)
 
+    def draw_x_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
+        if self.paste_unity_sprite(image, "x_icon", rect, tint=UNITY_UI_DARK_TINT):
+            return
+        if self.paste_unity_sprite(image, "icon_twitter_wh", rect, tint=UNITY_UI_DARK_TINT):
+            return
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, rect, "X", size=max(18, round(rect[3] - rect[1]) - 8), fill=GENERAL_TEMPLATE_TEXT
+        )
+
     def draw_info_button(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "btn_circle_h56_wh", rect)
         icon_rect = self.rect_transform_box(
@@ -2934,6 +3023,22 @@ class PNGRenderer:
             icon_rect[3] + rect[1],
         )
         self.paste_unity_sprite(image, "icon_infomation_wh", icon_rect, tint=UNITY_UI_DARK_TINT)
+
+    def render_general_x(self) -> Image.Image:
+        size = GENERAL_NATIVE_SIZES["X"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        base_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5))
+        self.paste_unity_sprite(
+            image, "bg_base_r16_wh", base_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
+        )
+        icon_rect = self.rect_transform_box(size, (0.0, 0.5), (0.0, 0.5), (26.0, 0.0), (38.0, 38.0), (0.5, 0.5))
+        self.draw_x_icon(image, icon_rect)
+        twitter_id = str((self.profile_context.get("userProfile") or {}).get("twitterId", "") or "").strip()
+        text = f"@{twitter_id.removeprefix('@')}" if twitter_id else ""
+        text_rect = self.rect_transform_box(size, (0.5, 0.5), (0.5, 0.5), (26.0, 0.0), (430.0, 32.0), (0.5, 0.5))
+        self.draw_fit_text_rect(draw, text_rect, text, max_size=30, fill=GENERAL_TEMPLATE_TEXT)
+        return image
 
     def render_general_user_name(self) -> Image.Image:
         size = GENERAL_NATIVE_SIZES["EditUserName"]
@@ -2956,7 +3061,9 @@ class PNGRenderer:
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         title_rect = self.rect_transform_box(size, (0.0, 1.0), (0.0, 1.0), (69.7, -13.5), (152.5, 32.0), (0.5, 0.5))
-        self.draw_center_text_rect(draw, title_rect, "个性签名", size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT)
+        self.draw_center_text_rect(
+            draw, title_rect, self.general_text("comment_title"), size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
+        )
         edit_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, -25.0), (0.0, -50.0), (0.5, 0.5))
         self.paste_unity_sprite(
             image, "bg_base_r16_wh", edit_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
@@ -3004,13 +3111,14 @@ class PNGRenderer:
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         title_font = self.general_font(30)
-        title_bbox = draw.textbbox((0, 0), "综合力", font=title_font)
+        title = self.general_text("total_power")
+        title_bbox = draw.textbbox((0, 0), title, font=title_font)
         title_w = max(1, title_bbox[2] - title_bbox[0])
         title_h = title_bbox[3] - title_bbox[1]
         title_left = -1.004974365234375
         title_center_y = size[1] / 2.0
         draw.text(
-            (title_left, title_center_y), "综合力", font=title_font, fill=GENERAL_TEMPLATE_LABEL_TEXT, anchor="lm"
+            (title_left, title_center_y), title, font=title_font, fill=GENERAL_TEMPLATE_LABEL_TEXT, anchor="lm"
         )
         title_rect_w = title_w
         line_rect = self.rect_transform_box(
@@ -3110,13 +3218,24 @@ class PNGRenderer:
         size = GENERAL_NATIVE_SIZES["MusicClearInfo"]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         rows = (
-            ("完成", "liveClear"),
-            ("FULL COMBO", "fullCombo"),
+            (self.general_text("music_clear"), "liveClear"),
+            (self.general_text("music_full_combo"), "fullCombo"),
         )
         counts = self.music_clear_count_map()
+        row_gap = 20
+        row_h = (size[1] - row_gap * (len(rows) - 1)) / len(rows)
         for idx, (label, key) in enumerate(rows):
-            top = MUSIC_CLEAR_ROW_TOP + idx * MUSIC_CLEAR_ROW_STEP
-            self.draw_music_clear_row(image, (0, top, size[0], top + MUSIC_CLEAR_ROW_HEIGHT), label, key, counts)
+            top = idx * (row_h + row_gap)
+            self.draw_music_clear_row(
+                image,
+                (0, top, size[0], top + row_h),
+                label,
+                key,
+                counts,
+                header_h=54,
+                value_inset_x=14,
+                value_top_gap=18,
+            )
         return image
 
     def render_general_music_clear_select_tab_info(self) -> Image.Image:
@@ -3124,7 +3243,7 @@ class PNGRenderer:
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
 
-        tab_rect = (26, 0, size[0] - 22, 48)
+        tab_rect = (26, 0, size[0] - 22, 50)
         self.paste_unity_sprite(
             image,
             "bg_base_r16_wh",
@@ -3141,7 +3260,13 @@ class PNGRenderer:
             tint=(244, 246, 252, 230),
             sliced_border=(21, 21, 21, 21),
         )
-        for index, label in enumerate(("クリア", "フルコンボ", "AP")):
+        for index, label in enumerate(
+            (
+                self.general_text("music_clear"),
+                self.general_text("music_full_combo"),
+                self.general_text("music_all_perfect"),
+            )
+        ):
             self.draw_center_text_rect(
                 draw,
                 (tab_rect[0] + segment_w * index, tab_rect[1], tab_rect[0] + segment_w * (index + 1), tab_rect[3]),
@@ -3154,13 +3279,20 @@ class PNGRenderer:
             draw.rounded_rectangle((x - 2, 10, x + 2, 41), radius=2, fill=(116, 122, 142, 130))
         append_separator_x = size[0] - 142
         draw.rounded_rectangle(
-            (append_separator_x - 1, 71, append_separator_x + 1, 152),
+            (append_separator_x - 1, 75, append_separator_x + 1, 154),
             radius=1,
             fill=(203, 106, 211, 180),
         )
 
         counts = self.music_clear_count_map()
-        self.draw_music_clear_value_strip(image, (26, 72, size[0] - 22, 158), "liveClear", counts)
+        self.draw_music_clear_value_strip(
+            image,
+            (26, 74, size[0] - 22, 158),
+            "liveClear",
+            counts,
+            cell_gap=8,
+            tag_h=34,
+        )
         return image
 
     def render_general_multi_live(self) -> Image.Image | None:
@@ -3174,7 +3306,7 @@ class PNGRenderer:
         self.draw_fit_text_rect(
             draw,
             (20, 16, 280, 52),
-            "多人演出",
+            self.general_text("multi_live_title"),
             max_size=30,
             min_size=18,
             fill=GENERAL_TEMPLATE_TEXT,
@@ -3224,7 +3356,7 @@ class PNGRenderer:
                     value_center_x + value_width / 2.0,
                     root_center_y + 30.0,
                 ),
-                f"{value}次",
+                f"{value}{self.general_text('multi_live_count_suffix')}",
                 max_size=30,
                 min_size=18,
                 fill=GENERAL_TEMPLATE_TEXT,
@@ -3256,7 +3388,7 @@ class PNGRenderer:
         self.draw_fit_text_rect(
             draw,
             (28, 18, size[0] - 28, 58),
-            "チャレンジライブ",
+            self.general_text("challenge_live_title"),
             max_size=28,
             min_size=18,
             fill=GENERAL_TEMPLATE_TEXT,
@@ -3271,7 +3403,9 @@ class PNGRenderer:
             tint=(169, 171, 205, 235),
             sliced_border=(21, 21, 21, 21),
         )
-        self.draw_center_text_rect(draw, solo_rect, "ソロ", size=25, fill=(255, 255, 255, 255))
+        self.draw_center_text_rect(
+            draw, solo_rect, self.general_text("challenge_live_solo"), size=25, fill=(255, 255, 255, 255)
+        )
         icon_path = self.chara_icon_path(character_id)
         if icon := self.open_rgba(icon_path):
             self.paste_in_rect(image, icon, (158, 86, 222, 150))
@@ -3290,25 +3424,34 @@ class PNGRenderer:
         size_key = "CharacterRankAndChallengeStageScroll" if scroll else "CharacterRankAndChallengeStage"
         size = GENERAL_NATIVE_SIZES[size_key]
         image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
         self.draw_character_rank_tabs(image, scroll=scroll)
         ranks = self.character_rank_map()
 
-        cell_w, cell_h = 195.0, 84.0
-        gap_x, gap_y = 15.0, 15.0
-        cols = 4
-        start_x = (size[0] - (cell_w * cols + gap_x * (cols - 1))) / 2.0
-        start_y = 104.0 if scroll else 64.0
-        for index, (_nickname, character_id) in enumerate(CHARA_LIST):
-            col = index % cols
-            row = index // cols
-            x = start_x + col * (cell_w + gap_x)
-            y = start_y + row * (cell_h + gap_y)
-            if character_id is None:
-                continue
-            self.draw_profile_rank_and_stage_cell(image, (x, y), character_id, ranks.get(character_id, 0))
         if scroll:
-            self.draw_general_vertical_scrollbar(image, (size[0] - 29, 104, size[0] - 23, size[1] - 26))
+            content = Image.new("RGBA", CHARACTER_RANK_SCROLL_CONTENT_SIZE, (0, 0, 0, 0))
+            viewport_left, viewport_top, viewport_right, viewport_bottom = CHARACTER_RANK_SCROLL_VIEWPORT
+            for index, (_nickname, character_id) in enumerate(CHARA_LIST):
+                if character_id is None:
+                    continue
+                col = index % 4
+                row = index // 4
+                center_x = CHARACTER_RANK_CELL_CENTER_X[col] - viewport_left
+                center_y = CHARACTER_RANK_SCROLL_FIRST_CENTER_Y + row * CHARACTER_RANK_ROW_STEP
+                top_left = self.character_rank_cell_top_left(center_x, center_y)
+                self.draw_profile_rank_and_stage_cell(content, top_left, character_id, ranks.get(character_id, 0))
+            viewport = content.crop((0, 0, round(viewport_right - viewport_left), round(viewport_bottom - viewport_top)))
+            image.alpha_composite(viewport, (round(viewport_left), round(viewport_top)))
+            self.draw_general_vertical_scrollbar(image, (885, 104, 891, 524))
+        else:
+            for index, (_nickname, character_id) in enumerate(CHARA_LIST):
+                if character_id is None:
+                    continue
+                col = index % 4
+                row = index // 4
+                center_x = CHARACTER_RANK_CELL_CENTER_X[col]
+                center_y = CHARACTER_RANK_NON_SCROLL_FIRST_CENTER_Y + row * CHARACTER_RANK_ROW_STEP
+                top_left = self.character_rank_cell_top_left(center_x, center_y)
+                self.draw_profile_rank_and_stage_cell(image, top_left, character_id, ranks.get(character_id, 0))
         return image
 
     def render_general_story_favorite(self) -> Image.Image | None:
@@ -3321,7 +3464,13 @@ class PNGRenderer:
         self.draw_story_favorite_header(image)
         font = self.general_font(22)
         if not stories:
-            draw.text((size[0] / 2, size[1] / 2), "未设置", font=font, fill=GENERAL_TEMPLATE_TEXT, anchor="mm")
+            draw.text(
+                (size[0] / 2, size[1] / 2),
+                self.general_text("not_set"),
+                font=font,
+                fill=GENERAL_TEMPLATE_TEXT,
+                anchor="mm",
+            )
             return image
         ordered_stories = self.ordered_story_favorites(stories)
         card_w, card_h = 403, 172
@@ -3341,9 +3490,9 @@ class PNGRenderer:
 
     def draw_character_rank_tabs(self, image: Image.Image, *, scroll: bool) -> None:
         draw = ImageDraw.Draw(image)
-        tab_w = 828 if scroll else 760
+        tab_w = 828.0 if scroll else 760.0
         left = (image.width - tab_w) / 2.0
-        top = 24.0
+        top = 23.5 if scroll else 24.0
         bottom = top + 57.0
         mid = left + tab_w / 2.0
         self.paste_unity_sprite(
@@ -3360,14 +3509,20 @@ class PNGRenderer:
             tint=(244, 246, 252, 230),
             sliced_border=(21, 21, 21, 21),
         )
-        self.draw_center_text_rect(draw, (left, top, mid, bottom), "角色收藏等级", size=27, fill=GENERAL_TEMPLATE_TEXT)
+        self.draw_center_text_rect(
+            draw, (left, top, mid, bottom), self.general_text("character_rank_tab"), size=27, fill=GENERAL_TEMPLATE_TEXT
+        )
         self.draw_center_text_rect(
             draw,
             (mid, top, left + tab_w, bottom),
-            "挑战舞台",
+            self.general_text("challenge_stage_tab"),
             size=27,
             fill=(255, 255, 255, 230),
         )
+
+    def character_rank_cell_top_left(self, center_x: float, center_y: float) -> tuple[float, float]:
+        cell_w, cell_h = CHARACTER_RANK_CELL_SIZE
+        return center_x - cell_w / 2.0, center_y - cell_h / 2.0
 
     def draw_profile_rank_and_stage_cell(
         self,
@@ -3378,8 +3533,9 @@ class PNGRenderer:
     ) -> None:
         draw = ImageDraw.Draw(image)
         x, y = top_left
-        root_center_x = x + 97.5
-        root_center_y = y + 42.0
+        cell_w, cell_h = CHARACTER_RANK_CELL_SIZE
+        root_center_x = x + cell_w / 2.0
+        root_center_y = y + cell_h / 2.0
         tint = (0.266667, 0.866667, 1.0, 1.0)
         base_center_x = root_center_x + 7.5
         base_center_y = root_center_y + 10.0
@@ -3391,32 +3547,39 @@ class PNGRenderer:
             sliced_border=(37, 0, 37, 0),
         )
         circle_rect = (
-            root_center_x - 55.5 - 42.0,
+            root_center_x - 97.5,
             root_center_y - 42.0,
-            root_center_x - 55.5 + 42.0,
+            root_center_x - 13.5,
             root_center_y + 42.0,
         )
         self.paste_unity_sprite(image, "bg_base_circle_h96_wh", circle_rect, tint=tint)
         if icon := self.open_rgba(self.chara_icon_path(character_id)):
             icon_rect = (
-                root_center_x - 55.5 - 38.0,
+                root_center_x - 93.5,
                 root_center_y - 38.0,
-                root_center_x - 55.5 + 38.0,
+                root_center_x - 17.5,
                 root_center_y + 38.0,
             )
             self.paste_in_rect(image, icon, icon_rect)
-        self.draw_center_text_rect(
-            draw,
-            (root_center_x - 39.0, root_center_y + 11.0 - 24.5, root_center_x + 93.0, root_center_y + 11.0 + 24.5),
-            str(rank),
-            size=31,
-            fill=GENERAL_TEMPLATE_TEXT,
+        rank_rect = (
+            root_center_x - 39.0,
+            root_center_y - 13.5,
+            root_center_x + 93.0,
+            root_center_y + 35.5,
         )
+        self.draw_center_text_rect(draw, rank_rect, str(rank), size=31, fill=GENERAL_TEMPLATE_TEXT)
 
     def draw_story_favorite_header(self, image: Image.Image) -> None:
         draw = ImageDraw.Draw(image)
         title_rect = (47, 10, 547, 66)
-        self.draw_fit_text_rect(draw, title_rect, "最喜欢的剧情", max_size=30, min_size=18, fill=GENERAL_TEMPLATE_TEXT)
+        self.draw_fit_text_rect(
+            draw,
+            title_rect,
+            self.general_text("story_favorite_title"),
+            max_size=30,
+            min_size=18,
+            fill=GENERAL_TEMPLATE_TEXT,
+        )
         self.paste_unity_sprite(
             image,
             "bg_base_wh",
@@ -3545,10 +3708,13 @@ class PNGRenderer:
         label: str,
         key: str,
         counts: dict[str, dict[str, int]],
+        *,
+        header_h: int = 54,
+        value_inset_x: float = 15.0,
+        value_top_gap: float = 9.0,
     ) -> None:
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
-        header_h = 54
         header_rect = (left, top, right, top + header_h)
         if not self.paste_unity_sprite(
             image,
@@ -3562,8 +3728,15 @@ class PNGRenderer:
                 radius=12,
                 fill=(167, 167, 188, 220),
             )
-        self.draw_center_text_rect(draw, header_rect, label, size=31, fill=(255, 255, 255, 255))
-        self.draw_music_clear_value_strip(image, (left + 15, top + header_h + 15, right - 15, bottom), key, counts)
+        self.draw_center_text_rect(
+            draw, header_rect, label, size=min(31, max(20, header_h - 12)), fill=(255, 255, 255, 255)
+        )
+        self.draw_music_clear_value_strip(
+            image,
+            (left + value_inset_x, top + header_h + value_top_gap, right - value_inset_x, bottom),
+            key,
+            counts,
+        )
 
     def draw_music_clear_value_strip(
         self,
@@ -3571,15 +3744,17 @@ class PNGRenderer:
         rect: tuple[float, float, float, float],
         key: str,
         counts: dict[str, dict[str, int]],
+        *,
+        cell_gap: float = 8.0,
+        tag_h: float = 34.0,
     ) -> None:
-        cell_gap = 8
         cell_count = len(GENERAL_MUSIC_DIFFICULTIES)
         left, top, right, bottom = rect
         cell_w = (right - left - cell_gap * (cell_count - 1)) / cell_count
         for idx, (difficulty, text, color) in enumerate(GENERAL_MUSIC_DIFFICULTIES):
             x = left + idx * (cell_w + cell_gap)
             self.draw_difficulty_count_cell(
-                image, (x, top, x + cell_w, bottom), text, color, counts.get(difficulty, {}).get(key, 0)
+                image, (x, top, x + cell_w, bottom), text, color, counts.get(difficulty, {}).get(key, 0), tag_h=tag_h
             )
 
     def draw_difficulty_count_cell(
@@ -3589,10 +3764,11 @@ class PNGRenderer:
         label: str,
         color: tuple[int, int, int, int],
         value: int,
+        *,
+        tag_h: float = 34.0,
     ) -> None:
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
-        tag_h = 34
         draw.rounded_rectangle((left, top, right, top + tag_h), radius=6, fill=color)
         self.draw_center_text_rect(draw, (left, top, right, top + tag_h), label, size=20, fill=(255, 255, 255, 255))
         self.draw_center_text_rect(draw, (left, top + tag_h + 2, right, bottom), str(value), size=28)
@@ -3606,13 +3782,18 @@ class PNGRenderer:
                     result[character_id] = int(row.get("characterRank", 0) or 0)
         return result
 
-    def challenge_live_rank_for(self, character_id: int) -> int:
-        best = 0
+    def challenge_live_stage_map(self) -> dict[int, int]:
+        result: dict[int, int] = {}
         for row in self.profile_context.get("userChallengeLiveSoloStages", []) or []:
-            if not isinstance(row, dict) or int(row.get("characterId", 0) or 0) != character_id:
+            if not isinstance(row, dict):
                 continue
-            best = max(best, int(row.get("rank", 0) or 0))
-        return best
+            character_id = int(row.get("characterId", 0) or 0)
+            if character_id:
+                result[character_id] = max(result.get(character_id, 0), int(row.get("rank", 0) or 0))
+        return result
+
+    def challenge_live_rank_for(self, character_id: int) -> int:
+        return self.challenge_live_stage_map().get(character_id, 0)
 
     def chara_icon_path(self, character_id: int) -> Path | None:
         raw_path = self.chara_rank_icon_path_map.get(str(character_id))
@@ -4464,6 +4645,8 @@ class PNGRenderer:
         if path:
             image = Image.open(path).convert("RGBA")
             return image, (image.width / 2, image.height / 2)
+        if collection_type == "omikuji":
+            return self.render_omikuji_collection_content(item, resource)
         if collection_type in {"none", "other", ""}:
             return self.render_image_content("collection", item)
         expected_view = (
@@ -4481,6 +4664,294 @@ class PNGRenderer:
             required_inputs=("MasterResource", "GenerateCollectionData", "collection child prefab/material assets"),
             generated_data=self.generate_collection_data(item),
         )
+
+    def render_omikuji_collection_content(
+        self,
+        item: dict[str, Any],
+        resource: dict[str, Any],
+    ) -> tuple[Image.Image, tuple[float, float]] | NativeUnresolvedContent:
+        target_id = int(item.get("targetId", 0) or 0)
+        omikuji = self.omikujis.get(target_id)
+        if not omikuji:
+            return self.native_unresolved(
+                "collection",
+                item,
+                "omikuji collection needs the target omikujis.json row",
+                resource=resource,
+                expected_view="CollectionCustomPrefabContentView",
+                expected_size=OMIKUJI_RESULT_NATIVE_SIZE,
+                required_inputs=("MasterResource", "GenerateCollectionData", "omikujis.json"),
+                generated_data=self.generate_collection_data(item),
+            )
+
+        asset_paths = {
+            "background": self.omikuji_background_asset_path(omikuji),
+            "fortune": self.omikuji_asset_path(omikuji, "fortune"),
+        }
+        missing_assets = [name for name, path in asset_paths.items() if path is None or not path.exists()]
+        if missing_assets:
+            return self.native_unresolved(
+                "collection",
+                item,
+                f"omikuji collection needs material asset(s): {', '.join(missing_assets)}",
+                resource=resource,
+                expected_view="CollectionCustomPrefabContentView",
+                expected_size=OMIKUJI_RESULT_NATIVE_SIZE,
+                required_inputs=(
+                    "MasterResource",
+                    "GenerateCollectionData",
+                    "omikujis.json",
+                    "lottery_game material assets",
+                ),
+                generated_data=self.generate_collection_data(item),
+            )
+
+        image = self.draw_omikuji_result_view(omikuji, asset_paths)
+        return image, (image.width / 2, image.height / 2)
+
+    def omikuji_background_asset_path(self, omikuji: dict[str, Any]) -> Path | None:
+        for key in (
+            "backgroundImagePath",
+            "background_imagePath",
+            "backgroundPath",
+            "background_path",
+            "resultImagePath",
+            "result_imagePath",
+        ):
+            if path := self.resolve_request_asset_path(str(omikuji.get(key, "") or "")):
+                return path
+
+        bundle = str(omikuji.get("omikujiCoverAssetbundleName", "") or "").strip("/")
+        cover_file = str(omikuji.get("omikujiCoverFilePath", "") or "").strip("/")
+        if not bundle or not cover_file:
+            return None
+        cover_stem = Path(cover_file).stem
+        if cover_stem.startswith("omikuji_"):
+            background_stem = "bg_" + cover_stem
+        else:
+            background_stem = f"bg_omikuji_{cover_stem}"
+        return self.first_region_asset((Path(bundle) / f"{background_stem}.png",))
+
+    def omikuji_asset_path(self, omikuji: dict[str, Any], prefix: str) -> Path | None:
+        for key in (
+            f"{prefix}ImagePath",
+            f"{prefix}_imagePath",
+            f"{prefix}Path",
+            f"{prefix}_path",
+        ):
+            if path := self.resolve_request_asset_path(str(omikuji.get(key, "") or "")):
+                return path
+        bundle = str(omikuji.get(f"{prefix}AssetbundleName", "") or "").strip("/")
+        file_path = str(omikuji.get(f"{prefix}FilePath", "") or "").strip("/")
+        if not bundle or not file_path:
+            return None
+        file_name = file_path if file_path.lower().endswith(".png") else f"{file_path}.png"
+        return self.first_region_asset((Path(bundle) / file_name,))
+
+    def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        names = ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"] if decorative else [
+            "FOT-UDMinchoPro-B",
+            "FOT-RodinNTLGPro-DB",
+        ]
+        candidates: list[Path] = []
+        for name in names:
+            path = self.tmp_font_library.source_font_path(name)
+            if path is not None:
+                candidates.append(path)
+            candidates.append(self.fonts / f"{name}.otf")
+            candidates.append(self.fonts / f"{name}.ttf")
+        for base in self.data_root_candidates():
+            candidates.extend(
+                (
+                    base / "custom_profile" / "tmp-font-assets" / self.region / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
+                    base / "custom_profile" / "tmp-font-assets" / "cn" / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
+                    base / "custom_profile" / "tmp-font-assets" / "kr" / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
+                )
+            )
+        for path in candidates:
+            try:
+                if path.exists():
+                    return ImageFont.truetype(str(path), size)
+            except OSError:
+                continue
+        return self.general_font(size, bold=not decorative)
+
+    def draw_omikuji_vertical_line(
+        self,
+        image: Image.Image,
+        x: float,
+        y: float,
+        text: str,
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        fill: tuple[int, int, int, int],
+        *,
+        step: float,
+    ) -> None:
+        draw = ImageDraw.Draw(image)
+        cursor_y = y
+        rotate_chars = {"、", "。", "，", "．", "・", "：", "；", "！", "？", "ー"}
+        small_kana = set("ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
+        for ch in str(text or ""):
+            if ch in {" ", "\u3000"}:
+                cursor_y += step * 0.5
+                continue
+            if ch in rotate_chars:
+                bbox = draw.textbbox((0, 0), ch, font=font)
+                glyph = Image.new("RGBA", (max(1, bbox[2] - bbox[0] + 8), max(1, bbox[3] - bbox[1] + 8)), (0, 0, 0, 0))
+                glyph_draw = ImageDraw.Draw(glyph)
+                glyph_draw.text((4 - bbox[0], 4 - bbox[1]), ch, font=font, fill=fill)
+                glyph = glyph.rotate(90, expand=True)
+                image.alpha_composite(glyph, (round(x - glyph.width / 2), round(cursor_y - glyph.height / 2 + step * 0.28)))
+            else:
+                offset_x = -step * 0.08 if ch in small_kana else 0.0
+                offset_y = step * 0.16 if ch in small_kana else 0.0
+                draw.text((x + offset_x, cursor_y + offset_y), ch, font=font, fill=fill, anchor="mm")
+            cursor_y += step
+
+    def draw_omikuji_vertical_columns(
+        self,
+        image: Image.Image,
+        right_x: float,
+        y: float,
+        lines: list[str] | tuple[str, ...],
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        fill: tuple[int, int, int, int],
+        *,
+        column_step: float,
+        char_step: float,
+    ) -> None:
+        for index, line in enumerate(lines):
+            if line:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    right_x - index * column_step,
+                    y,
+                    line,
+                    font,
+                    fill,
+                    step=char_step,
+                )
+
+    def draw_omikuji_centered_lines(
+        self,
+        draw: ImageDraw.ImageDraw,
+        rect: tuple[int, int, int, int],
+        text: str,
+        *,
+        max_size: int,
+        min_size: int,
+        fill: tuple[int, int, int, int],
+        spacing: int = 1,
+    ) -> None:
+        lines = [line for line in str(text or "").splitlines() if line]
+        if not lines:
+            return
+        left, top, right, bottom = rect
+        for size in range(max_size, min_size - 1, -1):
+            font = self.omikuji_font(size)
+            boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
+            widths = [box[2] - box[0] for box in boxes]
+            heights = [box[3] - box[1] for box in boxes]
+            total_h = sum(heights) + spacing * max(0, len(lines) - 1)
+            if max(widths, default=0) <= right - left and total_h <= bottom - top:
+                y = top + (bottom - top - total_h) / 2.0
+                for line, box, line_h in zip(lines, boxes, heights, strict=True):
+                    draw.text(
+                        ((left + right) / 2.0, y - box[1]),
+                        line,
+                        font=font,
+                        fill=fill,
+                        anchor="ma",
+                    )
+                    y += line_h + spacing
+                return
+
+        font = self.omikuji_font(min_size)
+        y = top + 2
+        for line in lines:
+            draw.text(((left + right) / 2.0, y), line, font=font, fill=fill, anchor="ma")
+            y += min_size + spacing
+
+    def draw_omikuji_result_view(self, omikuji: dict[str, Any], asset_paths: dict[str, Path]) -> Image.Image:
+        background = self.open_rgba(asset_paths.get("background"))
+        if background is None:
+            width, height = tuple(round(v) for v in OMIKUJI_RESULT_NATIVE_SIZE)
+            image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        else:
+            image = background.copy()
+            width, height = image.size
+        draw = ImageDraw.Draw(image)
+
+        unit = str(omikuji.get("unit", "") or "")
+        accent = OMIKUJI_UNIT_COLORS.get(unit, (76, 181, 210, 255))
+        text_fill = (79, 79, 79, 255)
+
+        fortune_image = self.open_rgba(asset_paths.get("fortune"))
+        if fortune_image is not None:
+            target_h = max(1, round(height * 300.0 / 490.0))
+            if fortune_image.height != target_h:
+                fortune_image = fortune_image.resize(
+                    (max(1, round(fortune_image.width * target_h / fortune_image.height)), target_h),
+                    Image.Resampling.LANCZOS,
+                )
+            image.alpha_composite(fortune_image, (round(width * 1309.0 / 1480.0), round(height * 89.0 / 490.0)))
+
+        summary = str(omikuji.get("summary", "") or "")
+        summary_font = self.omikuji_font(round(height * 36.0 / 490.0))
+        self.draw_omikuji_vertical_columns(
+            image,
+            width * 1251.0 / 1480.0,
+            height * 49.0 / 490.0,
+            [line for line in summary.splitlines() if line],
+            summary_font,
+            text_fill,
+            column_step=width * 44.0 / 1480.0,
+            char_step=height * 29.5 / 490.0,
+        )
+
+        rows = [
+            (str(omikuji.get("title3", "") or ""), str(omikuji.get("description3", "") or "")),
+            (str(omikuji.get("title2", "") or ""), str(omikuji.get("description2", "") or "")),
+            (str(omikuji.get("title1", "") or ""), str(omikuji.get("description1", "") or "")),
+        ]
+        title_font = self.omikuji_font(round(height * 40.0 / 490.0))
+        value_font = self.omikuji_font(round(height * 30.0 / 490.0))
+        title_lefts = (width * 430.0 / 1480.0, width * 584.0 / 1480.0, width * 736.0 / 1480.0)
+        title_top = height * 31.0 / 490.0
+        title_w = width * 44.0 / 1480.0
+        title_h = height * 94.0 / 490.0
+        for (title, value), title_left in zip(rows, title_lefts, strict=True):
+            if not title and not value:
+                continue
+            title_rect = (
+                round(title_left),
+                round(title_top),
+                round(title_left + title_w),
+                round(title_top + title_h),
+            )
+            draw.rectangle(title_rect, fill=accent)
+            clean_title = title.replace(" ", "")
+            if clean_title:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    title_left + title_w / 2.0,
+                    title_top + height * 27.0 / 490.0,
+                    clean_title,
+                    title_font,
+                    (255, 255, 255, 255),
+                    step=height * 39.0 / 490.0,
+                )
+            if value:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    title_left - width * 40.0 / 1480.0,
+                    height * 55.0 / 490.0,
+                    value,
+                    value_font,
+                    text_fill,
+                    step=height * 25.0 / 490.0,
+                )
+        return image
 
     def render_stamp_content(
         self,

@@ -3,8 +3,8 @@ from pathlib import Path
 from PIL import Image
 
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
-from src.sekai.profile.custom_profile.drawer import _optional_region_file, _require_region_path
-from src.sekai.profile.custom_profile.renderer import PNGRenderer
+from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
+from src.sekai.profile.custom_profile.renderer import NativeUnresolvedContent, PNGRenderer
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
 
 
@@ -22,9 +22,10 @@ def _make_renderer(
     *,
     profile_context: dict | None = None,
     resources: dict | None = None,
+    region: str = "cn",
 ) -> PNGRenderer:
     fonts = tmp_path / "fonts"
-    assets = tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile"
+    assets = tmp_path / "asset" / f"{region}-assets" / "startapp" / "custom_profile"
     fonts.mkdir(exist_ok=True)
     assets.mkdir(parents=True, exist_ok=True)
     return PNGRenderer(
@@ -36,7 +37,7 @@ def _make_renderer(
         shape_sprite_dir=None,
         unity_ui_sprite_dir=None,
         profile_context=profile_context or {},
-        region="cn",
+        region=region,
     )
 
 
@@ -302,6 +303,108 @@ def test_custom_profile_collection_prefers_image_asset_for_badges(tmp_path: Path
     assert rendered[0].size == (25, 25)
 
 
+def test_custom_profile_omikuji_collection_uses_target_master_row(tmp_path: Path) -> None:
+    material_dir = tmp_path / "asset" / "jp-assets" / "startapp" / "lottery_game" / "new_year_2026_material"
+    _write_png(material_dir / "bg_omikuji_MORE MORE JUMP.png", (1480, 490))
+    _write_png(material_dir / "unsei_daikichi.png", (24, 80))
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "customProfileCollectionResources": {
+                1000: {
+                    "id": 1000,
+                    "customProfileResourceCollectionType": "omikuji",
+                    "resourceLoadVal": "lottery_game/new_year_2026",
+                    "fileName": "Prefabs/Omikuji",
+                }
+            },
+            "omikujis": {
+                183: {
+                    "id": 183,
+                    "unit": "idol",
+                    "fortuneType": "grate_fortune",
+                    "summary": "過去の悔恨が晴れる\n年になるでしょう\n迷いは捨て挑むべし",
+                    "title1": "願望",
+                    "description1": "必ず叶う",
+                    "title2": "健康",
+                    "description2": "大変良好",
+                    "title3": "待人",
+                    "description3": "自ら行くがよし",
+                    "unitAssetbundleName": "lottery_game/new_year_2026_material",
+                    "fortuneAssetbundleName": "lottery_game/new_year_2026_material",
+                    "omikujiCoverAssetbundleName": "lottery_game/new_year_2026_material",
+                    "unitFilePath": "bird_MORE MORE JUMP",
+                    "fortuneFilePath": "unsei_daikichi",
+                    "omikujiCoverFilePath": "omikuji_MORE MORE JUMP",
+                }
+            },
+        },
+        region="jp",
+    )
+
+    rendered = renderer.render_collection_content({"id": 1000, "targetId": 183})
+
+    assert isinstance(rendered, tuple)
+    assert rendered[0].size == (1480, 490)
+    assert rendered[0].getchannel("A").getbbox() is not None
+
+
+def test_custom_profile_omikuji_collection_requires_material_assets(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "customProfileCollectionResources": {
+                1000: {
+                    "id": 1000,
+                    "customProfileResourceCollectionType": "omikuji",
+                    "resourceLoadVal": "lottery_game/new_year_2026",
+                    "fileName": "Prefabs/Omikuji",
+                }
+            },
+            "omikujis": {
+                183: {
+                    "id": 183,
+                    "unit": "idol",
+                    "fortuneType": "grate_fortune",
+                    "summary": "過去の悔恨が晴れる",
+                    "unitAssetbundleName": "lottery_game/new_year_2026_material",
+                    "fortuneAssetbundleName": "lottery_game/new_year_2026_material",
+                    "omikujiCoverAssetbundleName": "lottery_game/new_year_2026_material",
+                    "unitFilePath": "bird_MORE MORE JUMP",
+                    "fortuneFilePath": "unsei_daikichi",
+                    "omikujiCoverFilePath": "omikuji_MORE MORE JUMP",
+                }
+            },
+        },
+        region="jp",
+    )
+
+    rendered = renderer.render_collection_content({"id": 1000, "targetId": 183})
+
+    assert isinstance(rendered, NativeUnresolvedContent)
+    assert rendered.reason == "omikuji collection needs material asset(s): background, fortune"
+
+
+def test_custom_profile_omikuji_collection_requires_target_master_row(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "customProfileCollectionResources": {
+                1000: {
+                    "id": 1000,
+                    "customProfileResourceCollectionType": "omikuji",
+                }
+            }
+        },
+        region="jp",
+    )
+
+    rendered = renderer.render_collection_content({"id": 1000, "targetId": 183})
+
+    assert isinstance(rendered, NativeUnresolvedContent)
+    assert rendered.reason == "omikuji collection needs the target omikujis.json row"
+
+
 def test_custom_profile_music_clear_info_uses_profile_counts(tmp_path: Path) -> None:
     renderer = _make_renderer(
         tmp_path,
@@ -317,9 +420,10 @@ def test_custom_profile_music_clear_info_uses_profile_counts(tmp_path: Path) -> 
 
     assert image.size == (860, 318)
     assert renderer.music_clear_count_map()["master"]["fullCombo"] == 5
+    assert renderer.music_clear_count_map()["master"]["allPerfect"] == 6
     assert _image_has_content_in_box(image, (344, 12, 516, 50))
-    assert _image_has_content_in_box(image, (344, 166, 516, 204))
-    assert not _image_has_content_in_box(image, (344, 306, 516, 317))
+    assert _image_has_content_in_box(image, (344, 174, 516, 212))
+    assert not _image_has_content_in_box(image, (344, 224, 516, 238))
 
 
 def test_custom_profile_music_clear_select_tab_info_draws_value_panel(tmp_path: Path) -> None:
@@ -328,7 +432,40 @@ def test_custom_profile_music_clear_select_tab_info_draws_value_panel(tmp_path: 
     image = renderer.render_general_music_clear_select_tab_info()
 
     assert image.size == (860, 166)
-    assert _image_has_content_in_box(image, (32, 72, 828, 158))
+    assert _image_has_content_in_box(image, (32, 80, 828, 158))
+    assert not _image_has_content_in_box(image, (32, 58, 828, 72))
+
+
+def test_custom_profile_general_x_uses_twitter_id(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, profile_context={"userProfile": {"twitterId": "sekai_test"}})
+
+    image = renderer.render_general_x()
+
+    assert image.size == (548, 64)
+    assert _image_has_content_in_box(image, (20, 12, 74, 52))
+    assert _image_has_content_in_box(image, (95, 12, 420, 52))
+
+
+def test_custom_profile_jp_general_labels_are_localized(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, region="jp")
+
+    assert renderer.general_text("comment_title") == "ひと言"
+    assert renderer.general_text("total_power") == "総合力"
+    assert renderer.general_text("character_rank_tab") == "キャラクターランク"
+
+
+def test_custom_profile_general_content_maps_jp_x(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userProfile": {"twitterId": "sekai_test"}},
+        resources={"customProfilePlayerInfoResources": {1: {"id": 1, "fileName": "X"}}},
+        region="jp",
+    )
+
+    rendered = renderer.render_general_content({"type": 1})
+
+    assert isinstance(rendered, tuple)
+    assert rendered[0].size == (548, 64)
 
 
 def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) -> None:
@@ -341,6 +478,61 @@ def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) 
     )
 
     assert renderer.chara_rank_icon_path(21) == icon_path
+
+
+def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCharacters": [{"characterId": 21, "characterRank": 28}],
+            "userChallengeLiveSoloStages": [
+                {"characterId": 21, "rank": 1},
+                {"characterId": 21, "rank": 7},
+            ],
+        },
+    )
+
+    image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
+
+    assert image.size == (908, 550)
+    assert renderer.character_rank_map()[21] == 28
+    assert renderer.challenge_live_stage_map()[21] == 7
+    assert renderer.challenge_live_rank_for(21) == 7
+    assert _image_has_content_in_box(image, (250, 120, 330, 168))
+
+
+def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+
+    image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
+
+    assert image.size == (908, 550)
+    assert _image_has_content_in_box(image, (100, 500, 830, 524))
+    assert not _image_has_content_in_box(image, (100, 525, 830, 550))
+
+
+def test_custom_profile_character_rank_full_size_is_bottom_aligned(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+
+    image = renderer.render_general_character_rank_and_challenge_stage(scroll=False)
+
+    assert image.size == (908, 813)
+    assert _image_has_content_in_box(image, (100, 760, 830, 790))
+
+
+def test_custom_profile_character_rank_value_text_matches_prefab_rect(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    calls = []
+
+    def capture_text_rect(self, draw, rect, text, *, size, fill):
+        calls.append((rect, text, size))
+
+    monkeypatch.setattr(PNGRenderer, "draw_center_text_rect", capture_text_rect)
+
+    image = Image.new("RGBA", (196, 85), (0, 0, 0, 0))
+    renderer.draw_profile_rank_and_stage_cell(image, (0.0, 0.0), 21, 28)
+
+    assert calls == [((59.0, 29.0, 191.0, 78.0), "28", 31)]
 
 
 def test_custom_profile_chara_rank_icons_require_cloud_path(tmp_path: Path) -> None:
@@ -536,6 +728,16 @@ def test_custom_profile_region_path_expands_region_placeholder(tmp_path: Path) -
             "jp",
         )
         == target
+    )
+
+
+def test_custom_profile_region_path_replaces_literal_region_segment(tmp_path: Path) -> None:
+    target = tmp_path / "fonts" / "jp"
+    target.mkdir(parents=True)
+
+    assert _require_region_path("custom_profile_fonts_dir", tmp_path / "fonts" / "cn", "jp") == target
+    assert _region_path_candidates(tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile", "jp")[0] == (
+        tmp_path / "asset" / "jp-assets" / "startapp" / "custom_profile"
     )
 
 
