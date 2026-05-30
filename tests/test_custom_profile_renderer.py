@@ -615,7 +615,9 @@ def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) 
     assert renderer.chara_rank_icon_path(21) == icon_path
 
 
-def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(tmp_path: Path, monkeypatch) -> None:
+def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(
+    tmp_path: Path, monkeypatch
+) -> None:
     renderer = _make_renderer(
         tmp_path,
         profile_context={
