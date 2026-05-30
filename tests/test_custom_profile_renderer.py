@@ -615,7 +615,7 @@ def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) 
     assert renderer.chara_rank_icon_path(21) == icon_path
 
 
-def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(tmp_path: Path) -> None:
+def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(
         tmp_path,
         profile_context={
@@ -626,6 +626,13 @@ def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_
             ],
         },
     )
+    calls = []
+
+    def capture_cell(self, image, top_left, character_id, rank):
+        calls.append((round(top_left[0], 1), round(top_left[1], 1), character_id, rank))
+        image.alpha_composite(Image.new("RGBA", (8, 8), (255, 0, 0, 255)), (round(top_left[0]), round(top_left[1])))
+
+    monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", capture_cell)
 
     image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
 
@@ -633,17 +640,25 @@ def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_
     assert renderer.character_rank_map()[21] == 28
     assert renderer.challenge_live_stage_map()[21] == 7
     assert renderer.challenge_live_rank_for(21) == 7
-    assert _image_has_content_in_box(image, (250, 120, 330, 168))
+    assert calls[0] == (15.5, -0.5, 21, 28)
 
 
-def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Path) -> None:
+def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path)
+
+    def draw_marker(self, image, top_left, character_id, rank):
+        if character_id == 17:
+            image.alpha_composite(Image.new("RGBA", (16, 16), (255, 0, 0, 255)), (100, 400))
+        if character_id == 21:
+            image.alpha_composite(Image.new("RGBA", (16, 16), (0, 0, 255, 255)), (100, 500))
+
+    monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", draw_marker)
 
     image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
 
     assert image.size == (908, 550)
-    assert _image_has_content_in_box(image, (100, 500, 830, 524))
-    assert not _image_has_content_in_box(image, (100, 525, 830, 550))
+    assert _image_has_content_in_box(image, (120, 500, 140, 520))
+    assert not _image_has_content_in_box(image, (120, 604, 140, 624))
 
 
 def test_custom_profile_character_rank_full_size_is_bottom_aligned(tmp_path: Path) -> None:
