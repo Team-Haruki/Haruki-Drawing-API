@@ -176,7 +176,8 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
             TextBox(
                 f"卡池按时间顺序排列，黄色为开放中卡池，当前为第 {page}/{total_pages} 页",
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
-            ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
+                overflow="shrink",
+            ).set_w(280).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(8, 2).set_item_align("c").set_content_align("c"):
                 now = request_now(rqd.timezone)
                 for g in gachas:

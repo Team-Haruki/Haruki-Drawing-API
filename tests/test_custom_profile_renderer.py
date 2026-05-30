@@ -13,6 +13,11 @@ def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:
     Image.new("RGBA", size, (255, 0, 0, 255)).save(path)
 
 
+def _write_png_color(path: Path, size: tuple[int, int], color: tuple[int, int, int, int]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGBA", size, color).save(path)
+
+
 def _image_has_content_in_box(image: Image.Image, box: tuple[int, int, int, int]) -> bool:
     return image.crop(box).getchannel("A").getbbox() is not None
 
@@ -107,14 +112,14 @@ def test_custom_profile_resource_path_requires_cloud_image_path_without_masterda
     assert renderer.resource_path(renderer.general_bgs[1]) == bg_path
 
 
-def test_custom_profile_card_member_candidates_match_cloud_member_paths(tmp_path: Path) -> None:
+def test_custom_profile_card_member_candidates_match_cloud_small_still_paths(tmp_path: Path) -> None:
     _write_png(
         tmp_path
         / "asset"
         / "cn-assets"
         / "startapp"
         / "character"
-        / "member"
+        / "member_small"
         / "res010_no034"
         / "card_after_training.png"
     )
@@ -135,8 +140,8 @@ def test_custom_profile_card_member_candidates_match_cloud_member_paths(tmp_path
                 915: {
                     "id": 915,
                     "assetbundleName": "res010_no034",
-                    "afterTrainingPath": (
-                        "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
+                    "smallAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_small/res010_no034/card_after_training.png"
                     ),
                 }
             },
@@ -144,22 +149,24 @@ def test_custom_profile_card_member_candidates_match_cloud_member_paths(tmp_path
     )
 
     candidates = [
-        path.as_posix() for path in renderer.card_member_image_candidates({"id": 915, "useAfterSpecialTraining": True})
+        path.as_posix()
+        for path in renderer.card_member_image_candidates({"id": 915, "type": 2, "useAfterSpecialTraining": True})
     ]
 
-    assert any(path.endswith("/character/member/res010_no034/card_after_training.png") for path in candidates)
+    assert any(path.endswith("/character/member_small/res010_no034/card_after_training.png") for path in candidates)
+    assert not any(path.endswith("/character/member/res010_no034/card_after_training.png") for path in candidates)
     assert not any("/member_cutout/" in path for path in candidates)
     assert not any("/thumbnail/chara/" in path for path in candidates)
 
 
-def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: Path) -> None:
+def test_custom_profile_card_member_clip_type_prefers_deck_cutout_path(tmp_path: Path) -> None:
     _write_png(
         tmp_path
         / "asset"
         / "cn-assets"
         / "startapp"
         / "character"
-        / "member_cutout_trm"
+        / "member_cutout"
         / "res010_no034"
         / "after_training.png"
     )
@@ -193,8 +200,8 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
                     "afterTrainingPath": (
                         "asset/cn-assets/startapp/character/member/res010_no034/card_after_training.png"
                     ),
-                    "clipAfterTrainingPath": (
-                        "asset/cn-assets/startapp/character/member_cutout_trm/res010_no034/after_training.png"
+                    "deckAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_cutout/res010_no034/after_training.png"
                     ),
                 }
             },
@@ -206,7 +213,7 @@ def test_custom_profile_card_member_clip_type_uses_cloud_cutout_path(tmp_path: P
         for path in renderer.card_member_image_candidates({"id": 915, "type": 1, "useAfterSpecialTraining": True})
     ]
 
-    assert candidates[0].endswith("/character/member_cutout_trm/res010_no034/after_training.png")
+    assert candidates[0].endswith("/character/member_cutout/res010_no034/after_training.png")
     assert not candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
 
 
@@ -230,7 +237,7 @@ def test_custom_profile_card_member_uses_saved_training_state(tmp_path: Path) ->
     assert renderer.card_member_after_training({"id": 915, "useAfterSpecialTraining": True})
 
 
-def test_custom_profile_card_member_full_type_prefers_full_card_path(tmp_path: Path) -> None:
+def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path: Path) -> None:
     _write_png(
         tmp_path
         / "asset"
@@ -275,8 +282,136 @@ def test_custom_profile_card_member_full_type_prefers_full_card_path(tmp_path: P
         for path in renderer.card_member_image_candidates({"id": 915, "type": 2, "useAfterSpecialTraining": True})
     ]
 
-    assert candidates[0].endswith("/character/member/res010_no034/card_after_training.png")
-    assert not candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
+    assert candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
+    assert not any(path.endswith("/character/member/res010_no034/card_after_training.png") for path in candidates)
+
+
+def test_custom_profile_leader_card_uses_small_still_path(tmp_path: Path) -> None:
+    small_path = (
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_small"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    full_path = (
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    _write_png_color(small_path, (940, 530), (0, 255, 0, 255))
+    _write_png_color(full_path, (940, 530), (255, 0, 0, 255))
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCards": [
+                {
+                    "cardId": 915,
+                    "specialTrainingStatus": "done",
+                    "defaultImage": "special_training",
+                }
+            ],
+        },
+        resources={
+            "cards": {915: {"id": 915, "assetBundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetBundleName": "res010_no034",
+                    "afterTrainingPath": full_path.as_posix(),
+                    "smallAfterTrainingPath": small_path.as_posix(),
+                }
+            },
+        },
+    )
+
+    image = renderer.compose_profile_leader_card(915)
+
+    assert image is not None
+    assert image.size == (940, 530)
+    assert image.getpixel((470, 265))[:3] == (0, 255, 0)
+
+
+def test_custom_profile_card_member_full_type_renders_small_still_frame(tmp_path: Path) -> None:
+    small_path = (
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_small"
+        / "res010_no034"
+        / "card_after_training.png"
+    )
+    _write_png_color(small_path, (940, 530), (255, 0, 0, 255))
+    _write_png_color(tmp_path / "static_images" / "customprofile" / "cardFrame_L_4.png", (940, 530), (0, 255, 0, 255))
+    renderer = _make_renderer(
+        tmp_path,
+        resources={
+            "cards": {915: {"id": 915, "assetBundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetBundleName": "res010_no034",
+                    "smallAfterTrainingPath": small_path.as_posix(),
+                }
+            },
+        },
+    )
+
+    rendered = renderer.render_card_member_content(
+        {"id": 915, "type": 2, "useAfterSpecialTraining": True, "showMasterRank": True}
+    )
+
+    assert isinstance(rendered, tuple)
+    assert rendered[0].size == (940, 530)
+    assert rendered[0].getpixel((10, 10))[:3] == (0, 255, 0)
+
+
+def test_custom_profile_card_member_clip_type_renders_deck_card_frame(tmp_path: Path) -> None:
+    clip_path = (
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_cutout"
+        / "res010_no034"
+        / "after_training.png"
+    )
+    _write_png_color(clip_path, (328, 538), (255, 0, 0, 255))
+    _write_png_color(tmp_path / "static_images" / "customprofile" / "cardFrame_M_4.png", (312, 512), (0, 255, 0, 255))
+    _write_png_color(tmp_path / "static_images" / "customprofile" / "tex_mask_card_s.png", (174, 212), (0, 0, 0, 255))
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userCards": [{"cardId": 915, "level": 60, "masterRank": 5}]},
+        resources={
+            "cards": {915: {"id": 915, "assetBundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetBundleName": "res010_no034",
+                    "deckAfterTrainingPath": clip_path.as_posix(),
+                }
+            },
+        },
+    )
+
+    rendered = renderer.render_card_member_content(
+        {"id": 915, "type": 1, "useAfterSpecialTraining": True, "showMasterRank": True}
+    )
+
+    assert isinstance(rendered, tuple)
+    assert rendered[0].size == (328, 520)
+    assert rendered[0].getpixel((10, 10))[:3] == (0, 255, 0)
 
 
 def test_custom_profile_collection_prefers_image_asset_for_badges(tmp_path: Path) -> None:
@@ -692,7 +827,9 @@ def test_custom_profile_general_deck_card_uses_deck_cutout_art(tmp_path: Path) -
         .as_posix()
         .endswith("/character/member_cutout/res010_no034/after_training.png")
     )
-    assert renderer.compose_profile_deck_card(915) is not None
+    image = renderer.compose_profile_deck_card(915)
+    assert image is not None
+    assert image.size == (156, 242)
 
 
 def test_custom_profile_unity_sprite_reuses_static_card_assets(tmp_path: Path) -> None:

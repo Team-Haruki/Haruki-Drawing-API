@@ -268,6 +268,14 @@ OMIKUJI_UNIT_COLORS = {
 }
 OMIKUJI_RESULT_NATIVE_SIZE = (1480.0, 490.0)
 CLIP_CARD_MEMBER_ART_SIZE = (328.0, 538.2559814453125)
+CLIP_CARD_MEMBER_NATIVE_SIZE = (
+    round(PREFAB_NATIVE_SIZES["ClipSizeCardContentView"][0]),
+    round(PREFAB_NATIVE_SIZES["ClipSizeCardContentView"][1]),
+)
+FULL_CARD_MEMBER_NATIVE_SIZE = (
+    round(PREFAB_NATIVE_SIZES["FullSizeCardContentView"][0]),
+    round(PREFAB_NATIVE_SIZES["FullSizeCardContentView"][1]),
+)
 GENERAL_NATIVE_SIZES: dict[str, tuple[int, int]] = {
     # Static data.unity3d prefab RectTransform.sizeDelta values, extracted
     # into out/general-template-prefabs-cn/metadata.json.
@@ -2678,7 +2686,7 @@ class PNGRenderer:
 
     def unity_ui_sprite_candidates(self, name: str) -> list[Path]:
         candidates = self.static_unity_ui_sprite_candidates(name)
-        candidates.extend(path / f"{name}.png" for path in self.customprofile_sprite_dirs())
+        candidates = [path / f"{name}.png" for path in self.customprofile_sprite_dirs()] + candidates
         if self.unity_ui_sprite_dir is not None:
             candidates.append(self.unity_ui_sprite_dir / f"{name}.png")
         seen: set[Path] = set()
@@ -3117,9 +3125,7 @@ class PNGRenderer:
         title_h = title_bbox[3] - title_bbox[1]
         title_left = -1.004974365234375
         title_center_y = size[1] / 2.0
-        draw.text(
-            (title_left, title_center_y), title, font=title_font, fill=GENERAL_TEMPLATE_LABEL_TEXT, anchor="lm"
-        )
+        draw.text((title_left, title_center_y), title, font=title_font, fill=GENERAL_TEMPLATE_LABEL_TEXT, anchor="lm")
         title_rect_w = title_w
         line_rect = self.rect_transform_box(
             size, (0.0, 0.5), (0.0, 0.5), (title_left + title_rect_w + 14.004974365234375, 0.0), (4.0, 32.0), (0.5, 0.5)
@@ -3439,7 +3445,9 @@ class PNGRenderer:
                 center_y = CHARACTER_RANK_SCROLL_FIRST_CENTER_Y + row * CHARACTER_RANK_ROW_STEP
                 top_left = self.character_rank_cell_top_left(center_x, center_y)
                 self.draw_profile_rank_and_stage_cell(content, top_left, character_id, ranks.get(character_id, 0))
-            viewport = content.crop((0, 0, round(viewport_right - viewport_left), round(viewport_bottom - viewport_top)))
+            viewport = content.crop(
+                (0, 0, round(viewport_right - viewport_left), round(viewport_bottom - viewport_top))
+            )
             image.alpha_composite(viewport, (round(viewport_left), round(viewport_top)))
             self.draw_general_vertical_scrollbar(image, (885, 104, 891, 524))
         else:
@@ -3895,6 +3903,10 @@ class PNGRenderer:
         elif kind == "clip":
             rels.extend(
                 [
+                    Path("character") / "member_cutout" / bundle / cutout_file,
+                    Path("character") / "member_cutout" / bundle / cutout_trim_file,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
                     Path("character") / "member_cutout_trm" / bundle / cutout_file,
                     Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
@@ -3908,13 +3920,14 @@ class PNGRenderer:
                     Path("character") / "member_small" / f"{bundle}_rip" / full_file,
                 ]
             )
-        rels.extend(
-            [
-                Path("character") / "member" / bundle / full_file,
-                Path("character") / "member" / f"{bundle}_rip" / full_file,
-                Path("thumbnail") / "chara" / f"{bundle}_{'after_training' if after_training else 'normal'}.png",
-            ]
-        )
+        else:
+            rels.extend(
+                [
+                    Path("character") / "member" / bundle / full_file,
+                    Path("character") / "member" / f"{bundle}_rip" / full_file,
+                    Path("thumbnail") / "chara" / f"{bundle}_{'after_training' if after_training else 'normal'}.png",
+                ]
+            )
         return self.first_region_asset(rels)
 
     def resize_cover_aligned(
@@ -4028,54 +4041,194 @@ class PNGRenderer:
             anchor="lm",
         )
 
-    def compose_profile_card_still(self, card_id: int, target_size: tuple[int, int]) -> Image.Image | None:
-        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "full")
-        if path is None:
-            return None
-        return self.compose_card_member_image(path, (float(target_size[0]), float(target_size[1])), contain=False)
+    def apply_card_frame_mask(self, image: Image.Image, sprite_name: str = "tex_mask_card_s") -> Image.Image:
+        mask_sprite = self.unity_ui_sprite(sprite_name)
+        if mask_sprite is None:
+            mask = Image.new("L", image.size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.rounded_rectangle(
+                (0, 0, image.width, image.height),
+                radius=max(1, round(min(image.width, image.height) * 0.03)),
+                fill=255,
+            )
+        else:
+            mask = mask_sprite.getchannel("A").resize(image.size, Image.Resampling.LANCZOS)
+        masked = image.copy()
+        masked.putalpha(ImageChops.multiply(masked.getchannel("A"), mask))
+        return masked
 
-    def compose_profile_deck_card(self, card_id: int, leader: bool = False) -> Image.Image | None:
-        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "deck")
-        if path is None:
-            return None
-        source = Image.open(path).convert("RGBA")
-        native = Image.new("RGBA", GENERAL_DECK_CARD_NATIVE_SIZE, (0, 0, 0, 0))
-        art = self.resize_cover_aligned(source, GENERAL_DECK_CARD_ART_SIZE, align_x=0.5, align_y=0.0)
-        native.alpha_composite(
-            art.crop((0, 0, GENERAL_DECK_CARD_NATIVE_SIZE[0], GENERAL_DECK_CARD_NATIVE_SIZE[1])), (0, 0)
-        )
-        self.draw_deck_card_level(native, card_id)
+    def draw_deck_card_view_overlays(
+        self,
+        image: Image.Image,
+        card_id: int,
+        *,
+        leader: bool = False,
+        show_detail: bool = True,
+        attr_x: float = 3.70001220703125,
+    ) -> None:
+        if not show_detail:
+            return
         card = self.card_master_for(card_id) or {}
         frame_path, attr_path, star_path, rank_path = self.card_overlay_paths(card_id)
         if (
-            not self.paste_unity_sprite(native, self.card_frame_sprite_name(card, "M"), (0.0, 0.0, 330.0, 512.0))
+            not self.paste_unity_sprite(
+                image, self.card_frame_sprite_name(card, "M"), (0.0, 0.0, float(image.width), float(image.height))
+            )
             and frame_path.exists()
         ):
             frame = Image.open(frame_path).convert("RGBA")
-            self.paste_in_rect(native, frame, (0.0, 0.0, 330.0, 512.0))
-        attr_rect = self.rect_transform_box(native.size, (0.0, 1.0), (0.0, 1.0), (3.7, 0.0), (64.0, 68.0), (0.0, 1.0))
-        if not self.paste_unity_sprite(native, self.card_attr_sprite_name(card, 64), attr_rect) and attr_path.exists():
+            self.paste_in_rect(image, frame, (0.0, 0.0, float(image.width), float(image.height)))
+        attr_rect = self.rect_transform_box(
+            image.size,
+            (0.0, 1.0),
+            (0.0, 1.0),
+            (attr_x, 0.0),
+            (64.0, 68.0),
+            (0.0, 1.0),
+        )
+        if not self.paste_unity_sprite(image, self.card_attr_sprite_name(card, 64), attr_rect) and attr_path.exists():
             attr = Image.open(attr_path).convert("RGBA")
-            self.paste_in_rect(native, attr, attr_rect)
+            self.paste_in_rect(image, attr, attr_rect)
         star_positions = []
         star_size = 56.0 * 0.8
         for idx in range(4):
             left = 5.0 + idx * 40.0
             bottom = 64.0
-            star_positions.append((left, native.height - bottom - star_size, left + star_size, native.height - bottom))
-        self.draw_card_rarity(native, card_id, star_path, star_positions)
+            star_positions.append((left, image.height - bottom - star_size, left + star_size, image.height - bottom))
+        self.draw_card_rarity(image, card_id, star_path, star_positions)
         rank_rect = self.rect_transform_box(
-            native.size, (1.0, 0.0), (1.0, 0.0), (1.4, 0.8), (88.0 * 0.95, 88.0 * 0.95), (1.0, 0.0)
+            image.size, (1.0, 0.0), (1.0, 0.0), (1.4, 0.8), (88.0 * 0.95, 88.0 * 0.95), (1.0, 0.0)
         )
         if (
-            not self.paste_unity_sprite(native, self.card_master_rank_sprite_name(card_id, "S"), rank_rect)
+            not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "S"), rank_rect)
             and rank_path.exists()
         ):
             rank = Image.open(rank_path).convert("RGBA")
-            self.paste_in_rect(native, rank, rank_rect)
+            self.paste_in_rect(image, rank, rank_rect)
         if leader:
-            self.draw_deck_leader_label(native)
-        return native.resize(GENERAL_DECK_CARD_RENDER_SIZE, Image.Resampling.LANCZOS)
+            self.draw_deck_leader_label(image)
+
+    def compose_deck_card_view(
+        self,
+        card_id: int,
+        path: Path,
+        *,
+        native_size: tuple[int, int],
+        art_size: tuple[float, float],
+        crop_align_y: float,
+        leader: bool = False,
+        show_detail: bool = True,
+        attr_x: float = 3.70001220703125,
+        mask_sprite_name: str | None = "tex_mask_card_s",
+        render_size: tuple[int, int] | None = None,
+    ) -> Image.Image:
+        source = Image.open(path).convert("RGBA")
+        art = self.resize_cover_aligned(source, art_size, align_x=0.5, align_y=0.5)
+        crop_left = max(0, round((art.width - native_size[0]) * 0.5))
+        crop_top = max(0, round((art.height - native_size[1]) * crop_align_y))
+        content = Image.new("RGBA", native_size, (0, 0, 0, 0))
+        content.alpha_composite(art.crop((crop_left, crop_top, crop_left + native_size[0], crop_top + native_size[1])))
+        if show_detail:
+            self.draw_deck_card_level(content, card_id)
+        native = self.apply_card_frame_mask(content, mask_sprite_name) if mask_sprite_name else content
+        self.draw_deck_card_view_overlays(
+            native,
+            card_id,
+            leader=leader,
+            show_detail=show_detail,
+            attr_x=attr_x,
+        )
+        if render_size is not None:
+            return native.resize(render_size, Image.Resampling.LANCZOS)
+        return native
+
+    def draw_small_still_card_overlays(self, image: Image.Image, card_id: int, *, show_detail: bool = True) -> None:
+        if not show_detail:
+            return
+        card = self.card_master_for(card_id) or {}
+        frame_path, attr_path, star_path, master_path = self.card_overlay_paths(card_id)
+        if (
+            not self.paste_unity_sprite(
+                image, self.card_frame_sprite_name(card, "L"), (0.0, 0.0, float(image.width), float(image.height))
+            )
+            and frame_path.exists()
+        ):
+            frame = Image.open(frame_path).convert("RGBA")
+            self.paste_in_rect(image, frame, (0.0, 0.0, float(image.width), float(image.height)))
+        attr_rect = self.rect_transform_box(image.size, (1.0, 1.0), (1.0, 1.0), (-40.0, 0.0), (88.0, 92.0), (1.0, 1.0))
+        if not self.paste_unity_sprite(image, self.card_attr_sprite_name(card, 88), attr_rect) and attr_path.exists():
+            attr_img = Image.open(attr_path).convert("RGBA")
+            self.paste_in_rect(image, attr_img, attr_rect)
+        star_positions = [
+            (
+                24.2 + 0.37,
+                image.height - (17.0 + 10.75998592376709 + 55.7599983215332),
+                24.2 + 0.37 + 55.7599983215332,
+                image.height - (17.0 + 10.75998592376709),
+            ),
+            (
+                24.2 + 0.37,
+                image.height - (17.0 + 58.81999969482422 + 55.7599983215332),
+                24.2 + 0.37 + 55.7599983215332,
+                image.height - (17.0 + 58.81999969482422),
+            ),
+            (
+                24.2 + 0.37,
+                image.height - (17.0 + 106.88999938964844 + 55.7599983215332),
+                24.2 + 0.37 + 55.7599983215332,
+                image.height - (17.0 + 106.88999938964844),
+            ),
+            (
+                24.2 + 0.37,
+                image.height - (17.0 + 154.9600067138672 + 55.7599983215332),
+                24.2 + 0.37 + 55.7599983215332,
+                image.height - (17.0 + 154.9600067138672),
+            ),
+        ]
+        self.draw_card_rarity(image, card_id, star_path, star_positions)
+        master_rect = self.rect_transform_box(
+            image.size, (1.0, 0.0), (1.0, 0.0), (-24.0, 24.0), (104.0, 104.0), (1.0, 0.0)
+        )
+        if (
+            not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "L"), master_rect)
+            and master_path.exists()
+        ):
+            rank_img = Image.open(master_path).convert("RGBA")
+            self.paste_in_rect(image, rank_img, master_rect)
+
+    def compose_profile_small_still_card(
+        self,
+        card_id: int,
+        path: Path,
+        *,
+        target_size: tuple[int, int] = FULL_CARD_MEMBER_NATIVE_SIZE,
+        show_detail: bool = True,
+    ) -> Image.Image:
+        base = self.resize_cover_aligned(Image.open(path).convert("RGBA"), target_size, align_x=0.5, align_y=0.5)
+        self.draw_small_still_card_overlays(base, card_id, show_detail=show_detail)
+        return base
+
+    def compose_profile_card_still(self, card_id: int, target_size: tuple[int, int]) -> Image.Image | None:
+        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
+        if path is None:
+            return None
+        return self.compose_profile_small_still_card(card_id, path, target_size=target_size, show_detail=True)
+
+    def compose_profile_deck_card(self, card_id: int, leader: bool = False) -> Image.Image | None:
+        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "deck")
+        if path is None:
+            return None
+        return self.compose_deck_card_view(
+            card_id,
+            path,
+            native_size=GENERAL_DECK_CARD_NATIVE_SIZE,
+            art_size=GENERAL_DECK_CARD_ART_SIZE,
+            crop_align_y=0.0,
+            leader=leader,
+            show_detail=True,
+            attr_x=3.70001220703125,
+            render_size=GENERAL_DECK_CARD_RENDER_SIZE,
+        )
 
     def card_frame_file(self, card: dict[str, Any]) -> str:
         rarity = str(card.get("cardRarityType", "") or "")
@@ -4094,63 +4247,15 @@ class PNGRenderer:
         return image
 
     def compose_profile_leader_card(self, card_id: int) -> Image.Image | None:
-        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "full")
+        path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
         if path is None:
             return None
-        base = self.resize_cover_aligned(
-            Image.open(path).convert("RGBA"), GENERAL_NATIVE_SIZES["LeaderCard"], align_x=0.5, align_y=0.5
+        return self.compose_profile_small_still_card(
+            card_id,
+            path,
+            target_size=GENERAL_NATIVE_SIZES["LeaderCard"],
+            show_detail=True,
         )
-        card = self.card_master_for(card_id) or {}
-        frame_path, attr_path, star_path, master_path = self.card_overlay_paths(card_id)
-        if (
-            not self.paste_unity_sprite(
-                base, self.card_frame_sprite_name(card, "L"), (0.0, 0.0, float(base.width), float(base.height))
-            )
-            and frame_path.exists()
-        ):
-            frame = Image.open(frame_path).convert("RGBA")
-            self.paste_in_rect(base, frame, (0.0, 0.0, float(base.width), float(base.height)))
-        attr_rect = self.rect_transform_box(base.size, (1.0, 1.0), (1.0, 1.0), (-40.0, 0.0), (88.0, 92.0), (1.0, 1.0))
-        if not self.paste_unity_sprite(base, self.card_attr_sprite_name(card, 88), attr_rect) and attr_path.exists():
-            attr_img = Image.open(attr_path).convert("RGBA")
-            self.paste_in_rect(base, attr_img, attr_rect)
-        star_positions = [
-            (
-                24.2 + 0.37,
-                base.height - (17.0 + 10.75998592376709 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                base.height - (17.0 + 10.75998592376709),
-            ),
-            (
-                24.2 + 0.37,
-                base.height - (17.0 + 58.81999969482422 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                base.height - (17.0 + 58.81999969482422),
-            ),
-            (
-                24.2 + 0.37,
-                base.height - (17.0 + 106.88999938964844 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                base.height - (17.0 + 106.88999938964844),
-            ),
-            (
-                24.2 + 0.37,
-                base.height - (17.0 + 154.9600067138672 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                base.height - (17.0 + 154.9600067138672),
-            ),
-        ]
-        self.draw_card_rarity(base, card_id, star_path, star_positions)
-        master_rect = self.rect_transform_box(
-            base.size, (1.0, 0.0), (1.0, 0.0), (-24.0, 24.0), (104.0, 104.0), (1.0, 0.0)
-        )
-        if (
-            not self.paste_unity_sprite(base, self.card_master_rank_sprite_name(card_id, "L"), master_rect)
-            and master_path.exists()
-        ):
-            rank_img = Image.open(master_path).convert("RGBA")
-            self.paste_in_rect(base, rank_img, master_rect)
-        return base
 
     def render_card_member_content(
         self,
@@ -4159,18 +4264,28 @@ class PNGRenderer:
         card_member_type = int(item.get("type", 0) or 0)
         expected_view = "ClipSizeCardContentView" if card_member_type == 1 else "FullSizeCardContentView"
         generated = self.generate_card_member_data(item)
+        card_id = content_data_id("card_member", item)
         path = self.card_member_image_path(item)
         if path:
-            target_size = PREFAB_NATIVE_SIZES.get(expected_view, PREFAB_NATIVE_SIZES["FullSizeCardContentView"])
             if card_member_type == 1:
-                image = self.compose_card_member_image(path, CLIP_CARD_MEMBER_ART_SIZE, contain=False)
-                target_w = round(target_size[0])
-                target_h = round(target_size[1])
-                left = max(0, (image.width - target_w) // 2)
-                top = max(0, (image.height - target_h) // 2)
-                image = image.crop((left, top, left + target_w, top + target_h))
+                image = self.compose_deck_card_view(
+                    card_id,
+                    path,
+                    native_size=CLIP_CARD_MEMBER_NATIVE_SIZE,
+                    art_size=CLIP_CARD_MEMBER_ART_SIZE,
+                    crop_align_y=0.5,
+                    leader=False,
+                    show_detail=bool_from_profile(item.get("showMasterRank", False)),
+                    attr_x=8.0,
+                    mask_sprite_name=None,
+                )
             else:
-                image = self.compose_card_member_image(path, target_size, contain=False)
+                image = self.compose_profile_small_still_card(
+                    card_id,
+                    path,
+                    target_size=FULL_CARD_MEMBER_NATIVE_SIZE,
+                    show_detail=bool_from_profile(item.get("showMasterRank", False)),
+                )
             return image, (image.width / 2, image.height / 2)
         return self.native_unresolved(
             "card_member",
@@ -4749,10 +4864,14 @@ class PNGRenderer:
         return self.first_region_asset((Path(bundle) / file_name,))
 
     def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        names = ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"] if decorative else [
-            "FOT-UDMinchoPro-B",
-            "FOT-RodinNTLGPro-DB",
-        ]
+        names = (
+            ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
+            if decorative
+            else [
+                "FOT-UDMinchoPro-B",
+                "FOT-RodinNTLGPro-DB",
+            ]
+        )
         candidates: list[Path] = []
         for name in names:
             path = self.tmp_font_library.source_font_path(name)
@@ -4763,9 +4882,24 @@ class PNGRenderer:
         for base in self.data_root_candidates():
             candidates.extend(
                 (
-                    base / "custom_profile" / "tmp-font-assets" / self.region / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
-                    base / "custom_profile" / "tmp-font-assets" / "cn" / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
-                    base / "custom_profile" / "tmp-font-assets" / "kr" / "source-fonts" / "FOT-Omikuji_4956192661917990345.otf",
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / self.region
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / "cn"
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / "kr"
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
                 )
             )
         for path in candidates:
@@ -4801,7 +4935,9 @@ class PNGRenderer:
                 glyph_draw = ImageDraw.Draw(glyph)
                 glyph_draw.text((4 - bbox[0], 4 - bbox[1]), ch, font=font, fill=fill)
                 glyph = glyph.rotate(90, expand=True)
-                image.alpha_composite(glyph, (round(x - glyph.width / 2), round(cursor_y - glyph.height / 2 + step * 0.28)))
+                image.alpha_composite(
+                    glyph, (round(x - glyph.width / 2), round(cursor_y - glyph.height / 2 + step * 0.28))
+                )
             else:
                 offset_x = -step * 0.08 if ch in small_kana else 0.0
                 offset_y = step * 0.16 if ch in small_kana else 0.0
@@ -5143,26 +5279,26 @@ class PNGRenderer:
             return None
         if kind == "deck":
             keys = (
-                ("deckAfterTrainingPath", "deck_after_training_path", "afterTrainingPath", "after_training_path")
+                ("deckAfterTrainingPath", "deck_after_training_path")
                 if after_training
-                else ("deckNormalPath", "deck_normal_path", "normalPath", "normal_path")
+                else ("deckNormalPath", "deck_normal_path")
             )
         elif kind == "clip":
             keys = (
                 (
-                    "clipAfterTrainingPath",
-                    "clip_after_training_path",
                     "deckAfterTrainingPath",
                     "deck_after_training_path",
+                    "clipAfterTrainingPath",
+                    "clip_after_training_path",
                 )
                 if after_training
-                else ("clipNormalPath", "clip_normal_path", "deckNormalPath", "deck_normal_path")
+                else ("deckNormalPath", "deck_normal_path", "clipNormalPath", "clip_normal_path")
             )
         elif kind == "small":
             keys = (
-                ("smallAfterTrainingPath", "small_after_training_path", "afterTrainingPath", "after_training_path")
+                ("smallAfterTrainingPath", "small_after_training_path")
                 if after_training
-                else ("smallNormalPath", "small_normal_path", "normalPath", "normal_path")
+                else ("smallNormalPath", "small_normal_path")
             )
         else:
             keys = ("afterTrainingPath", "after_training_path") if after_training else ("normalPath", "normal_path")
@@ -5178,7 +5314,7 @@ class PNGRenderer:
         card_id = content_data_id("card_member", item)
         after_training = self.card_member_after_training(item)
         card_member_type = int(item.get("type", 0) or 0)
-        kind = "clip" if card_member_type == 1 else "full"
+        kind = "clip" if card_member_type == 1 else "small"
         if path := self.card_asset_path_for_state(card_id, after_training, kind):
             return [path]
         if self.masterdata is None:
@@ -5193,29 +5329,32 @@ class PNGRenderer:
         if card_member_type == 1:
             rels.extend(
                 [
-                    Path("character") / "member_cutout_trm" / bundle / cutout_file,
-                    Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
-                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
-                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_trim_file,
                     Path("character") / "member_cutout" / bundle / cutout_file,
                     Path("character") / "member_cutout" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
                     Path("character") / "member_cutout" / bundle / "deck.png",
                     Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                    Path("character") / "member_cutout_trm" / bundle / cutout_file,
+                    Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
+                    Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_trim_file,
                 ]
             )
-        if card_member_type == 2:
+        elif card_member_type == 2:
             rels.extend(
                 [
                     Path("character") / "member_small" / bundle / full_file,
                     Path("character") / "member_small" / f"{bundle}_rip" / full_file,
                 ]
             )
-        rels.append(Path("character") / "member" / bundle / full_file)
-        if not bundle.endswith("_rip"):
-            rels.append(Path("character") / "member" / f"{bundle}_rip" / full_file)
-        rels.append(Path("thumbnail") / "chara" / f"{bundle}_{'after_training' if after_training else 'normal'}.png")
+        else:
+            rels.append(Path("character") / "member" / bundle / full_file)
+            if not bundle.endswith("_rip"):
+                rels.append(Path("character") / "member" / f"{bundle}_rip" / full_file)
+            rels.append(
+                Path("thumbnail") / "chara" / f"{bundle}_{'after_training' if after_training else 'normal'}.png"
+            )
         return self.region_asset_candidate_paths(rels)
 
     def card_member_image_path(self, item: dict[str, Any]) -> Path | None:
