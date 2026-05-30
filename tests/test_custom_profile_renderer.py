@@ -630,7 +630,10 @@ def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_
 
     def capture_cell(self, image, top_left, character_id, rank):
         calls.append((round(top_left[0], 1), round(top_left[1], 1), character_id, rank))
-        image.alpha_composite(Image.new("RGBA", (8, 8), (255, 0, 0, 255)), (round(top_left[0]), round(top_left[1])))
+        image.alpha_composite(
+            Image.new("RGBA", (8, 8), (255, 0, 0, 255)),
+            (round(top_left[0]), round(top_left[1])),
+        )
 
     monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", capture_cell)
 
@@ -648,9 +651,15 @@ def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Pat
 
     def draw_marker(self, image, top_left, character_id, rank):
         if character_id == 17:
-            image.alpha_composite(Image.new("RGBA", (16, 16), (255, 0, 0, 255)), (100, 400))
+            image.alpha_composite(
+                Image.new("RGBA", (16, 16), (255, 0, 0, 255)),
+                (100, 400),
+            )
         if character_id == 21:
-            image.alpha_composite(Image.new("RGBA", (16, 16), (0, 0, 255, 255)), (100, 500))
+            image.alpha_composite(
+                Image.new("RGBA", (16, 16), (0, 0, 255, 255)),
+                (100, 500),
+            )
 
     monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", draw_marker)
 
