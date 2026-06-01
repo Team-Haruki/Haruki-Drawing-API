@@ -4,7 +4,16 @@ from PIL import Image
 
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
-from src.sekai.profile.custom_profile.renderer import NativeUnresolvedContent, PNGRenderer
+from src.sekai.profile.custom_profile.renderer import (
+    NativeContent,
+    NativeUnresolvedContent,
+    PNGRenderer,
+    PreparedLayer,
+    RenderedLayer,
+    build_arg_parser,
+    harden_rgba_alpha,
+    resize_rgba_premul,
+)
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
 
 
@@ -28,6 +37,7 @@ def _make_renderer(
     profile_context: dict | None = None,
     resources: dict | None = None,
     region: str = "cn",
+    **renderer_kwargs: object,
 ) -> PNGRenderer:
     fonts = tmp_path / "fonts"
     assets = tmp_path / "asset" / f"{region}-assets" / "startapp" / "custom_profile"
@@ -43,7 +53,155 @@ def _make_renderer(
         unity_ui_sprite_dir=None,
         profile_context=profile_context or {},
         region=region,
+        **renderer_kwargs,
     )
+
+
+def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_decorative_face_only=True)
+    decorative = {
+        "text": "<color=#F9D2C0><size=160><scale=2.2>●",
+        "outlineSize": 0.08361797034740448,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+    normal = {
+        "text": "<color=#F9D2C0>Hello",
+        "outlineSize": 0.08361797034740448,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+
+    assert renderer.is_decorative_text_item(decorative)
+    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == 0.0
+    assert not renderer.is_decorative_text_item(normal)
+    assert renderer.decorative_outline_dilate(normal, normal["outlineSize"]) == normal["outlineSize"]
+
+
+def test_custom_profile_decorative_face_only_matches_seq08_symbols(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_decorative_face_only=True)
+    decorative = {
+        "text": "<scale=.8>▼〇∽︿>",
+        "outlineSize": 0.1,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+
+    assert renderer.is_decorative_text_item(decorative)
+    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == 0.0
+
+
+def test_custom_profile_decorative_direct_raster_is_default(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    decorative = {
+        "text": "<color=#F9D2C0><size=160><scale=2.2>●",
+        "outlineSize": 0.08361797034740448,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+
+    assert renderer.is_decorative_text_item(decorative)
+    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == 0.0
+    assert renderer.tmp_decorative_face_only
+    assert renderer.tmp_decorative_direct_raster
+    assert not renderer.premultiply_alpha_transforms
+
+
+def test_custom_profile_decorative_face_only_can_be_disabled(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_decorative_face_only=False, tmp_decorative_direct_raster=False)
+    decorative = {
+        "text": "<color=#F9D2C0><size=160><scale=2.2>●",
+        "outlineSize": 0.08361797034740448,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+
+    assert renderer.is_decorative_text_item(decorative)
+    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == decorative["outlineSize"]
+    assert not renderer.tmp_decorative_face_only
+    assert not renderer.tmp_decorative_direct_raster
+
+
+def test_custom_profile_cli_uses_decorative_tmp_main_logic_by_default() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+
+    assert args.tmp_decorative_face_only
+    assert args.tmp_decorative_direct_raster
+    assert not args.premultiply_alpha_transforms
+
+    disabled = parser.parse_args(["--no-tmp-decorative-face-only", "--no-tmp-decorative-direct-raster"])
+    assert not disabled.tmp_decorative_face_only
+    assert not disabled.tmp_decorative_direct_raster
+
+
+def test_custom_profile_premul_resize_does_not_bleed_transparent_rgb() -> None:
+    image = Image.new("RGBA", (2, 1), (0, 0, 0, 0))
+    image.putpixel((0, 0), (255, 255, 255, 0))
+    image.putpixel((1, 0), (255, 0, 0, 255))
+
+    resized = resize_rgba_premul(image, (1, 1), Image.Resampling.BILINEAR)
+
+    r, g, b, a = resized.getpixel((0, 0))
+    assert a > 0
+    assert r > 0
+    assert g == 0
+    assert b == 0
+
+
+def test_custom_profile_harden_alpha_preserves_layer_opacity() -> None:
+    image = Image.new("RGBA", (3, 1), (100, 120, 140, 0))
+    image.putpixel((0, 0), (100, 120, 140, 0))
+    image.putpixel((1, 0), (100, 120, 140, 32))
+    image.putpixel((2, 0), (100, 120, 140, 64))
+
+    hardened = harden_rgba_alpha(image, 8.0)
+
+    assert hardened.getpixel((0, 0))[3] == 0
+    assert hardened.getpixel((1, 0))[3] > 32
+    assert hardened.getpixel((2, 0))[3] == 64
+
+
+def test_custom_profile_direct_raster_preserves_mixed_layer_order(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        tmp_decorative_direct_raster=True,
+        canvas_w=1,
+        canvas_h=1,
+        origin_x=0.0,
+        origin_y=0.0,
+    )
+    direct_first = NativeContent(1, "text", {"id": 1}, {"visible": True})
+    deferred_middle = NativeContent(2, "shape", {"id": 2}, {"visible": True})
+    direct_last = NativeContent(3, "text", {"id": 3}, {"visible": True})
+    renderer.build_native_contents = lambda card: [direct_first, deferred_middle, direct_last]  # type: ignore[method-assign]
+
+    def draw_direct(canvas: Image.Image, content: NativeContent) -> bool:
+        if content.kind != "text":
+            return False
+        color = (255, 0, 0, 255) if content.layer == 1 else (0, 0, 255, 255)
+        canvas.alpha_composite(Image.new("RGBA", (1, 1), color), (0, 0))
+        return True
+
+    def draw_deferred(content: NativeContent) -> RenderedLayer:
+        return RenderedLayer(
+            content,
+            "rendered",
+            (Image.new("RGBA", (1, 1), (0, 255, 0, 255)), (0.0, 0.0)),
+            PreparedLayer(Image.new("RGBA", (1, 1), (0, 255, 0, 255)), (0, 0)),
+        )
+
+    renderer.render_content_direct_on_card = draw_direct  # type: ignore[method-assign]
+    renderer.render_and_prepare_content_for_card = draw_deferred  # type: ignore[method-assign]
+
+    rendered = renderer.render_card({"customProfileCard": {}})
+
+    assert rendered.getpixel((0, 0)) == (0, 0, 255, 255)
 
 
 def test_custom_profile_stamp_uses_cloud_region_asset_layout(tmp_path: Path) -> None:

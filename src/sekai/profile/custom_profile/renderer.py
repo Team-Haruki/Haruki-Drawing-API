@@ -54,6 +54,12 @@ from src.sekai.profile.custom_profile.split import (
 TMP_EM_BLOCK_CHARS = {"■", "█"}
 TMP_SPACE_EQUIVALENT_CHARS = {" ", "\u00a0"}
 TMP_MISSING_GLYPH_CHAR = "□"
+TMP_DECORATIVE_TEXT_CHARS = frozenset(
+    "●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 "
+)
+DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
+DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
+DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
 TMP_DEFAULT_TEXT_BOX_W = 108.0
 TMP_TEXT_BOX_W_SIZE_FACTOR = 1.6
 TMP_LINE_HEIGHT_FACTOR = 1.0
@@ -1591,6 +1597,68 @@ def rgba_from_premul(rgb_premul: Any, alpha: Any) -> Any:
     return rgba
 
 
+def premultiply_rgba_image(image: Image.Image) -> Image.Image:
+    import numpy as np
+
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[:, :, 3:4] / 255.0
+    rgba[:, :, :3] *= alpha
+    return Image.fromarray(np.clip(np.rint(rgba), 0, 255).astype(np.uint8), "RGBA")
+
+
+def unpremultiply_rgba_image(image: Image.Image) -> Image.Image:
+    import numpy as np
+
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[:, :, 3] / 255.0
+    rgb_premul = rgba[:, :, :3] / 255.0
+    return Image.fromarray(rgba_from_premul(rgb_premul, alpha), "RGBA")
+
+
+def harden_rgba_alpha(image: Image.Image, strength: float) -> Image.Image:
+    if strength <= 1.0 or image.mode != "RGBA":
+        return image
+
+    import numpy as np
+
+    rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    alpha = rgba[:, :, 3]
+    max_alpha = float(alpha.max()) if alpha.size else 0.0
+    if max_alpha <= 0.0:
+        return image
+    coverage = np.clip(alpha / max_alpha, 0.0, 1.0)
+    hardened = 1.0 - np.power(1.0 - coverage, strength)
+    rgba[:, :, 3] = np.clip(np.rint(hardened * max_alpha), 0, 255)
+    return Image.fromarray(rgba.astype(np.uint8), "RGBA")
+
+
+def resize_rgba_premul(image: Image.Image, size: tuple[int, int], resample: Image.Resampling) -> Image.Image:
+    if image.mode != "RGBA" or image.getchannel("A").getextrema() == (255, 255):
+        return image.resize(size, resample)
+    return unpremultiply_rgba_image(premultiply_rgba_image(image).resize(size, resample))
+
+
+def transform_rgba_premul(
+    image: Image.Image,
+    size: tuple[int, int],
+    method: Image.Transform,
+    data: tuple[float, float, float, float, float, float],
+    resample: Image.Resampling,
+    fillcolor: tuple[int, int, int, int] = (0, 0, 0, 0),
+) -> Image.Image:
+    if image.mode != "RGBA" or image.getchannel("A").getextrema() == (255, 255):
+        return image.transform(size, method, data, resample, fillcolor=fillcolor)
+    fill_alpha = fillcolor[3] / 255.0
+    premul_fill = (
+        round(fillcolor[0] * fill_alpha),
+        round(fillcolor[1] * fill_alpha),
+        round(fillcolor[2] * fill_alpha),
+        fillcolor[3],
+    )
+    transformed = premultiply_rgba_image(image).transform(size, method, data, resample, fillcolor=premul_fill)
+    return unpremultiply_rgba_image(transformed)
+
+
 def font_file(fonts: Path, font_name: str, rodin_font: str = "ttf") -> Path:
     if font_name == "FOT-RodinNTLGPro-DB":
         if rodin_font == "otf":
@@ -1803,6 +1871,10 @@ class PNGRenderer:
         clip_canvas_transform: bool = True,
         unity_ui_sprite_dir: Path | None = DEFAULT_UNITY_UI_SPRITE_DIR,
         region: str = "cn",
+        tmp_decorative_face_only: bool = DEFAULT_TMP_DECORATIVE_FACE_ONLY,
+        premultiply_alpha_transforms: bool = DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS,
+        tmp_decorative_direct_raster: bool = DEFAULT_TMP_DECORATIVE_DIRECT_RASTER,
+        tmp_decorative_alpha_harden: float = 1.0,
     ) -> None:
         self.masterdata = masterdata
         self.resources = resources or {}
@@ -1818,6 +1890,10 @@ class PNGRenderer:
         self.parallel_workers = max(1, int(parallel_workers or 1))
         self.parallel_stage = parallel_stage if parallel_stage in {"serial", "transform", "full"} else "transform"
         self.clip_canvas_transform = clip_canvas_transform
+        self.tmp_decorative_face_only = tmp_decorative_face_only
+        self.premultiply_alpha_transforms = premultiply_alpha_transforms
+        self.tmp_decorative_direct_raster = tmp_decorative_direct_raster
+        self.tmp_decorative_alpha_harden = max(1.0, float(tmp_decorative_alpha_harden or 1.0))
         self.text_pivot = text_pivot
         self.tmp_scale_mode = tmp_scale_mode
         self.rotation_sign = rotation_sign
@@ -2256,7 +2332,22 @@ class PNGRenderer:
         self._current_card_ref = card_ref
         try:
             contents = self.build_native_contents(card)
-            if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
+            if self.tmp_decorative_direct_raster:
+                for content in contents:
+                    if self.render_content_direct_on_card(img, content):
+                        self.record_native_audit(card_ref, content, "rendered-direct", None)
+                        continue
+                    rendered = self.render_and_prepare_content_for_card(content)
+                    self.record_native_audit(card_ref, content, rendered.status, rendered.result)
+                    if rendered.prepared is not None:
+                        img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
+                return img
+
+            if (
+                self.parallel_stage == "full"
+                and self.parallel_workers > 1
+                and len(contents) > 1
+            ):
                 for rendered in self.render_contents_for_card_parallel(contents):
                     self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
                     if rendered.prepared is not None:
@@ -2280,6 +2371,17 @@ class PNGRenderer:
         finally:
             self._current_card_ref = previous_card_ref
         return img
+
+    def render_content_direct_on_card(self, canvas: Image.Image, content: NativeContent) -> bool:
+        if not self.tmp_decorative_direct_raster:
+            return False
+        if content.kind != "text" or not content.object_data.get("visible", False):
+            return False
+        if self.text_layout != "tmp" or self.tmp_text_render_mode != "sdf":
+            return False
+        if not self.is_decorative_text_item(content.item):
+            return False
+        return self.render_tmp_decorative_text_direct(canvas, content.item, content.object_data)
 
     def render_content_for_card(self, content: NativeContent) -> RenderedLayer:
         if not content.object_data.get("visible", False):
@@ -2326,12 +2428,23 @@ class PNGRenderer:
         content: NativeContent,
         layer: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
     ) -> PreparedLayer | None:
-        return self.prepare_transformed_layer(
+        prepared = self.prepare_transformed_layer(
             layer,
             content.object_data,
             content.kind,
             self.should_supersample_content_transform(content),
         )
+        if (
+            prepared is not None
+            and content.kind == "text"
+            and self.tmp_decorative_alpha_harden > 1.0
+            and self.is_decorative_text_item(content.item)
+        ):
+            prepared = PreparedLayer(
+                harden_rgba_alpha(prepared.image, self.tmp_decorative_alpha_harden),
+                prepared.xy,
+            )
+        return prepared
 
     def native_card_ref(self, card: dict[str, Any]) -> dict[str, int]:
         return {
@@ -2452,6 +2565,50 @@ class PNGRenderer:
         font_name = self.text_fonts.get(data.font_id, "")
         asset = self.tmp_font_library.active_asset(font_name)
         return asset is not None and asset.atlas_population_mode == 1 and not asset.has_static_glyphs
+
+    def is_decorative_text_item(self, item: dict[str, Any]) -> bool:
+        data = self.generate_text_data(item)
+        raw_text = data.text
+        if "<" not in raw_text:
+            return False
+        font_name = self.text_fonts.get(data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
+        mesh_state = self.update_text_mesh_state(data, font_name)
+        base_style = TextStyle(
+            color=mesh_state.font_color,
+            alpha=1.0,
+            size=mesh_state.font_size,
+            scale_x=1.0,
+            cspace=0.0,
+            mspace=None,
+            indent=0.0,
+            line_indent=0.0,
+            line_height=None,
+            rotate=0.0,
+            voffset=0.0,
+            mark_color=None,
+            bold=False,
+            italic=False,
+            underline=False,
+            strike=False,
+        )
+        tokens = parse_tmp_text(raw_text, base_style)
+        visible_chars = [
+            ch
+            for token in tokens
+            if isinstance(token, TextRun)
+            for ch in token.text
+            if not ch.isspace()
+        ]
+        return bool(visible_chars) and all(ch in TMP_DECORATIVE_TEXT_CHARS for ch in visible_chars)
+
+    def decorative_outline_dilate(self, item: dict[str, Any], outline_dilate: float) -> float:
+        if (
+            self.tmp_decorative_face_only
+            and abs(outline_dilate) > 1.0e-6
+            and self.is_decorative_text_item(item)
+        ):
+            return 0.0
+        return outline_dilate
 
     def draw_order_key(self, element: tuple[int, str, dict[str, Any]]) -> tuple[int, int, int]:
         layer, kind, item = element
@@ -5629,6 +5786,29 @@ class PNGRenderer:
         if prepared is not None:
             canvas.alpha_composite(prepared.image, prepared.xy)
 
+    def resize_layer_for_transform(
+        self, layer: Image.Image, size: tuple[int, int], resample: Image.Resampling
+    ) -> Image.Image:
+        if self.premultiply_alpha_transforms:
+            return resize_rgba_premul(layer, size, resample)
+        return layer.resize(size, resample)
+
+    def affine_transform_layer(
+        self,
+        layer: Image.Image,
+        size: tuple[int, int],
+        data: tuple[float, float, float, float, float, float],
+        resample: Image.Resampling,
+    ) -> Image.Image:
+        if self.premultiply_alpha_transforms:
+            return transform_rgba_premul(layer, size, Image.Transform.AFFINE, data, resample)
+        return layer.transform(size, Image.Transform.AFFINE, data, resample, fillcolor=(0, 0, 0, 0))
+
+    def rotate_layer_for_transform(
+        self, layer: Image.Image, pivot: tuple[float, float], angle: float
+    ) -> tuple[Image.Image, tuple[float, float]]:
+        return rotate_layer_about_pivot(layer, pivot, angle, premultiply_alpha=self.premultiply_alpha_transforms)
+
     def prepare_transformed_layer(
         self,
         local: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
@@ -5646,7 +5826,7 @@ class PNGRenderer:
         if not scale_consumed and (sx != 1.0 or sy != 1.0):
             new_w = max(1, round(layer.width * sx))
             new_h = max(1, round(layer.height * sy))
-            layer = layer.resize((new_w, new_h), Image.Resampling.BICUBIC)
+            layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
             pivot = (pivot[0] * sx, pivot[1] * sy)
 
         # Object positions are stored in the profile card's Unity units, while
@@ -5656,7 +5836,7 @@ class PNGRenderer:
         if abs(self.position_scale_x - 1.0) >= 1.0e-6 or abs(self.position_scale_y - 1.0) >= 1.0e-6:
             new_w = max(1, round(layer.width * self.position_scale_x))
             new_h = max(1, round(layer.height * self.position_scale_y))
-            layer = layer.resize((new_w, new_h), Image.Resampling.BICUBIC)
+            layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
             pivot = (pivot[0] * self.position_scale_x, pivot[1] * self.position_scale_y)
 
         angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
@@ -5679,15 +5859,15 @@ class PNGRenderer:
         if allow_rotation_supersample and rotation_supersample > 1.0 and abs(angle % 360.0) >= 1.0e-6:
             hi_w = max(1, round(layer.width * rotation_supersample))
             hi_h = max(1, round(layer.height * rotation_supersample))
-            hi_layer = layer.resize((hi_w, hi_h), Image.Resampling.BICUBIC)
+            hi_layer = self.resize_layer_for_transform(layer, (hi_w, hi_h), Image.Resampling.BICUBIC)
             hi_pivot = (pivot[0] * rotation_supersample, pivot[1] * rotation_supersample)
-            rotated_hi, rotated_hi_pivot = rotate_layer_about_pivot(hi_layer, hi_pivot, angle)
+            rotated_hi, rotated_hi_pivot = self.rotate_layer_for_transform(hi_layer, hi_pivot, angle)
             out_w = max(1, round(rotated_hi.width / rotation_supersample))
             out_h = max(1, round(rotated_hi.height / rotation_supersample))
-            rotated = rotated_hi.resize((out_w, out_h), Image.Resampling.LANCZOS)
+            rotated = self.resize_layer_for_transform(rotated_hi, (out_w, out_h), Image.Resampling.LANCZOS)
             rotated_pivot = (rotated_hi_pivot[0] / rotation_supersample, rotated_hi_pivot[1] / rotation_supersample)
         else:
-            rotated, rotated_pivot = rotate_layer_about_pivot(layer, pivot, angle)
+            rotated, rotated_pivot = self.rotate_layer_for_transform(layer, pivot, angle)
         paste_x = round(x - rotated_pivot[0])
         paste_y = round(y - rotated_pivot[1])
         return PreparedLayer(rotated, (paste_x, paste_y))
@@ -5756,9 +5936,9 @@ class PNGRenderer:
         if allow_rotation_supersample and rotation_supersample > 1.0:
             hi_w = max(1, round(out_w * rotation_supersample))
             hi_h = max(1, round(out_h * rotation_supersample))
-            hi = layer.transform(
+            hi = self.affine_transform_layer(
+                layer,
                 (hi_w, hi_h),
-                Image.Transform.AFFINE,
                 (
                     a / rotation_supersample,
                     b / rotation_supersample,
@@ -5768,16 +5948,14 @@ class PNGRenderer:
                     f,
                 ),
                 Image.Resampling.BICUBIC,
-                fillcolor=(0, 0, 0, 0),
             )
-            return PreparedLayer(hi.resize((out_w, out_h), Image.Resampling.LANCZOS), (left, top))
+            return PreparedLayer(self.resize_layer_for_transform(hi, (out_w, out_h), Image.Resampling.LANCZOS), (left, top))
 
-        transformed = layer.transform(
+        transformed = self.affine_transform_layer(
+            layer,
             (out_w, out_h),
-            Image.Transform.AFFINE,
             (a, b, c, d, e, f),
             Image.Resampling.BICUBIC,
-            fillcolor=(0, 0, 0, 0),
         )
         return PreparedLayer(transformed, (left, top))
 
@@ -5896,7 +6074,7 @@ class PNGRenderer:
             return self.render_tmp_text_box(item, font_name, font_path, base_style, styled_lines)
         line_spacing = mesh_state.tmp_line_spacing
         outline_color = mesh_state.underlay_color
-        outline_dilate = mesh_state.underlay_dilate
+        outline_dilate = self.decorative_outline_dilate(item, mesh_state.underlay_dilate)
         outline_width = max(0, round(outline_dilate * base_size * self.tmp_pillow_stroke_factor))
 
         metrics: list[tuple[list[tuple[TextRun, float, float]], float, float]] = []
@@ -5978,7 +6156,7 @@ class PNGRenderer:
         base_size = mesh_state.font_size
         line_spacing = mesh_state.tmp_line_spacing
         outline_color = mesh_state.underlay_color
-        outline_dilate = mesh_state.underlay_dilate
+        outline_dilate = self.decorative_outline_dilate(item, mesh_state.underlay_dilate)
         outline_width = max(0, round(outline_dilate * base_size * self.tmp_pillow_stroke_factor))
         dominant_size = max((line.style.size for line in lines), default=base_size)
 
@@ -8913,7 +9091,7 @@ class PNGRenderer:
 
         return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
 
-    def render_tmp_sdf_character_image(
+    def render_tmp_sdf_character_field(
         self,
         font_name: str,
         font_path: Path,
@@ -8923,7 +9101,7 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
         char_info: TMPNativeCharacterInfo | None = None,
-    ) -> tuple[Image.Image, tuple[int, int, int, int], int, int] | None:
+    ) -> tuple[Image.Image, TMPFontAsset | None, tuple[int, int, int, int], int, int] | None:
         run = TextRun(char, style)
         native_quad_sized = False
         glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
@@ -9040,10 +9218,35 @@ class PNGRenderer:
                 Image.Resampling.BICUBIC,
             )
 
+        return field_img, glyph_asset, bbox, pad_x, pad_y
+
+    def render_tmp_sdf_character_image(
+        self,
+        font_name: str,
+        font_path: Path,
+        char: str,
+        style: TextStyle,
+        font_size: float,
+        outline_color: str,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo | None = None,
+    ) -> tuple[Image.Image, tuple[int, int, int, int], int, int] | None:
+        character_field = self.render_tmp_sdf_character_field(
+            font_name,
+            font_path,
+            char,
+            style,
+            font_size,
+            outline_color,
+            outline_dilate,
+            char_info,
+        )
+        if character_field is None:
+            return None
+        field_img, glyph_asset, bbox, pad_x, pad_y = character_field
         import numpy as np
 
         field = np.asarray(field_img, dtype=np.float32) / 255.0
-        sdf_scale = None
         return (
             self.shade_tmp_sdf_field(
                 field,
@@ -9051,7 +9254,7 @@ class PNGRenderer:
                 style,
                 outline_color,
                 outline_dilate,
-                sdf_scale,
+                None,
             ),
             bbox,
             pad_x,
@@ -9186,6 +9389,331 @@ class PNGRenderer:
                 char_info.bottom_right_y,
             )
         target.alpha_composite(glyph_image, (round(left), round(top)))
+
+    def render_tmp_decorative_text_direct(
+        self,
+        canvas: Image.Image,
+        item: dict[str, Any],
+        object_data: dict[str, Any],
+    ) -> bool:
+        text_data = self.generate_text_data(item)
+        if not text_data.text.strip():
+            return False
+        font_name = self.text_fonts.get(text_data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
+        font_path = self.font_path_for(font_name)
+        mesh_state = self.update_text_mesh_state(text_data, font_name)
+        base_size = mesh_state.font_size
+        base_style = TextStyle(
+            color=mesh_state.font_color,
+            alpha=1.0,
+            size=base_size,
+            scale_x=1.0,
+            cspace=0.0,
+            mspace=None,
+            indent=0.0,
+            line_indent=0.0,
+            line_height=None,
+            rotate=0.0,
+            voffset=0.0,
+            mark_color=None,
+            bold=False,
+            italic=False,
+            underline=False,
+            strike=False,
+        )
+        tokens = parse_tmp_text(text_data.text, base_style)
+        lines = split_runs_by_line_with_style(tokens, base_style)
+        if not lines:
+            return False
+
+        line_spacing = mesh_state.tmp_line_spacing
+        outline_color = mesh_state.underlay_color
+        outline_dilate = self.decorative_outline_dilate(item, mesh_state.underlay_dilate)
+        outline_width = max(0, round(outline_dilate * base_size * self.tmp_pillow_stroke_factor))
+        dominant_size = max((line.style.size for line in lines), default=base_size)
+        align_type = mesh_state.align
+        horizontal_align = tmp_horizontal_alignment(align_type)
+        vertical_align = tmp_vertical_alignment(align_type)
+        layout_lines = [line for line in lines if self.include_empty_lines or line.runs]
+
+        native_text_layout = self.tmp_native_text_layout(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            "preferred",
+            outline_dilate,
+            None,
+        )
+        percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            outline_dilate,
+            native_text_layout,
+        )
+        if percent_margin_width is not None:
+            native_text_layout = self.tmp_native_text_layout(
+                layout_lines,
+                font_name,
+                font_path,
+                base_size,
+                line_spacing,
+                dominant_size,
+                "preferred",
+                outline_dilate,
+                percent_margin_width,
+            )
+        if native_text_layout is None:
+            return False
+        mesh_text_layout = self.tmp_native_text_layout(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            "mesh",
+            outline_dilate,
+            percent_margin_width,
+        )
+        if mesh_text_layout is None:
+            return False
+
+        native_layout = (
+            mesh_text_layout.line_layout if self.text_vertical_mode in {"tmp-native", "tmp-native-top"} else None
+        )
+        if native_layout is None:
+            return False
+        total_h = mesh_text_layout.accumulated_line_height
+        content_h = native_text_layout.content_height
+        pad = self.text_pad(base_size, outline_width)
+        box_w, box_h = self.tmp_text_box_size(
+            native_text_layout.dominant_size,
+            native_text_layout.preferred_width,
+            content_h,
+        )
+        native_baselines = self.tmp_native_baseline_downs(
+            native_layout,
+            box_h,
+            "top" if self.text_vertical_mode == "tmp-native-top" else vertical_align,
+        )
+        mesh_bounds = self.tmp_native_mesh_pixel_bounds(
+            mesh_text_layout,
+            native_baselines,
+            horizontal_align,
+            box_w,
+            box_h,
+        )
+        mesh_left, mesh_top, mesh_right, mesh_bottom = mesh_bounds
+        rect_origin_x = pad - mesh_left
+        rect_origin_y = pad - mesh_top
+        metrics = [
+            (
+                line.styled_line,
+                line.run_metrics,
+                line.y_down,
+                line.line_height,
+                line.width,
+            )
+            for line in mesh_text_layout.lines
+        ]
+        self.record_tmp_layout_audit(
+            item,
+            text_data,
+            mesh_state,
+            metrics,
+            font_name,
+            font_path,
+            native_text_layout.preferred_width,
+            native_text_layout.preferred_height,
+            content_h,
+            total_h,
+            box_w,
+            box_h,
+            native_layout,
+            native_baselines,
+            native_text_layout,
+            mesh_text_layout,
+            mesh_bounds,
+            (rect_origin_x, rect_origin_y),
+            (math.ceil(mesh_right - mesh_left + pad * 2), math.ceil(mesh_bottom - mesh_top + pad * 2)),
+        )
+
+        pivot = (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
+        direct_glyphs = self.prepare_tmp_direct_sdf_glyphs(
+            font_name,
+            font_path,
+            mesh_text_layout,
+            native_baselines,
+            horizontal_align,
+            box_w,
+            rect_origin_x,
+            rect_origin_y,
+            outline_color,
+            outline_dilate,
+        )
+        if direct_glyphs is None:
+            return False
+        for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+            self.composite_tmp_sdf_field_direct(
+                canvas,
+                field_img,
+                glyph_asset,
+                style,
+                outline_color,
+                outline_dilate,
+                local_left,
+                local_top,
+                pivot,
+                object_data,
+            )
+        return True
+
+    def prepare_tmp_direct_sdf_glyphs(
+        self,
+        font_name: str,
+        font_path: Path,
+        layout: TMPNativeTextLayout,
+        native_baselines: list[float],
+        horizontal_align: str,
+        box_w: float,
+        rect_origin_x: float,
+        rect_origin_y: float,
+        outline_color: str,
+        outline_dilate: float,
+    ) -> list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] | None:
+        characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
+        for char_info in layout.characters:
+            characters_by_line.setdefault(char_info.line_index, []).append(char_info)
+
+        direct_glyphs: list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] = []
+        for line_info in layout.lines:
+            line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
+            x_origin = rect_origin_x + line_x
+            baseline_y = rect_origin_y + native_baselines[line_info.index]
+            for char_info in characters_by_line.get(line_info.index, []):
+                if not char_info.visible:
+                    continue
+                style = char_info.style
+                if abs(style.rotate) >= 1.0e-6:
+                    return None
+                run = TextRun(char_info.char, style)
+                if self.use_em_block(run):
+                    return None
+                character_field = self.render_tmp_sdf_character_field(
+                    font_name,
+                    font_path,
+                    char_info.char,
+                    style,
+                    self.tmp_run_font_size(style),
+                    outline_color,
+                    outline_dilate,
+                    char_info,
+                )
+                if character_field is None:
+                    return None
+                field_img, glyph_asset, _, _, _ = character_field
+                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                if field_img.size != (quad_w, quad_h):
+                    field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+                local_left = x_origin + min(
+                    char_info.bottom_left_x,
+                    char_info.top_left_x,
+                    char_info.top_right_x,
+                    char_info.bottom_right_x,
+                )
+                local_top = baseline_y - max(
+                    char_info.bottom_left_y,
+                    char_info.top_left_y,
+                    char_info.top_right_y,
+                    char_info.bottom_right_y,
+                )
+                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top))
+        return direct_glyphs
+
+    def transformed_local_point(
+        self,
+        object_data: dict[str, Any],
+        pivot: tuple[float, float],
+        local_x: float,
+        local_y: float,
+    ) -> tuple[float, float]:
+        scale = object_data.get("scale", {})
+        sx = float(scale.get("x") or 1.0) * self.position_scale_x
+        sy = float(scale.get("y") or (scale.get("x") or 1.0)) * self.position_scale_y
+        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
+        theta = math.radians(angle % 360.0)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        x, y = self.unity_point(object_data.get("position", {}))
+        dx = (local_x - pivot[0]) * sx
+        dy = (local_y - pivot[1]) * sy
+        return x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t
+
+    def composite_tmp_sdf_field_direct(
+        self,
+        canvas: Image.Image,
+        field_img: Image.Image,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+    ) -> None:
+        src_w, src_h = field_img.size
+        if src_w <= 0 or src_h <= 0:
+            return
+
+        p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
+        p10 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top)
+        p01 = self.transformed_local_point(object_data, pivot, local_left, local_top + src_h)
+        p11 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top + src_h)
+        corners = (p00, p10, p11, p01)
+        pad = 2
+        left = max(0, math.floor(min(x for x, _ in corners)) - pad)
+        right = min(self.canvas_w, math.ceil(max(x for x, _ in corners)) + pad)
+        top = max(0, math.floor(min(y for _, y in corners)) - pad)
+        bottom = min(self.canvas_h, math.ceil(max(y for _, y in corners)) + pad)
+        if left >= right or top >= bottom:
+            return
+
+        m00 = (p10[0] - p00[0]) / src_w
+        m10 = (p10[1] - p00[1]) / src_w
+        m01 = (p01[0] - p00[0]) / src_h
+        m11 = (p01[1] - p00[1]) / src_h
+        det = m00 * m11 - m01 * m10
+        if abs(det) < 1.0e-9:
+            return
+        inv00 = m11 / det
+        inv01 = -m01 / det
+        inv10 = -m10 / det
+        inv11 = m00 / det
+        c = inv00 * (left - p00[0]) + inv01 * (top - p00[1])
+        f = inv10 * (left - p00[0]) + inv11 * (top - p00[1])
+        out_w = max(1, right - left)
+        out_h = max(1, bottom - top)
+        transformed_field = field_img.transform(
+            (out_w, out_h),
+            Image.Transform.AFFINE,
+            (inv00, inv01, c, inv10, inv11, f),
+            Image.Resampling.BICUBIC,
+            fillcolor=0,
+        )
+
+        import numpy as np
+
+        field = np.asarray(transformed_field, dtype=np.float32) / 255.0
+        patch = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate, None)
+        canvas.alpha_composite(patch, (left, top))
 
     def draw_run(
         self,
@@ -9517,6 +10045,7 @@ def rotate_layer_about_pivot(
     layer: Image.Image,
     pivot: tuple[float, float],
     angle: float,
+    premultiply_alpha: bool = False,
 ) -> tuple[Image.Image, tuple[float, float]]:
     angle = angle % 360.0
     if abs(angle) < 1.0e-9:
@@ -9552,13 +10081,22 @@ def rotate_layer_about_pivot(
     e = math.cos(inv_theta)
     c = pivot[0] + a * min_x + b * min_y
     f = pivot[1] + d * min_x + e * min_y
-    rotated = layer.transform(
-        (out_w, out_h),
-        Image.Transform.AFFINE,
-        (a, b, c, d, e, f),
-        Image.Resampling.BICUBIC,
-        fillcolor=(0, 0, 0, 0),
-    )
+    if premultiply_alpha:
+        rotated = transform_rgba_premul(
+            layer,
+            (out_w, out_h),
+            Image.Transform.AFFINE,
+            (a, b, c, d, e, f),
+            Image.Resampling.BICUBIC,
+        )
+    else:
+        rotated = layer.transform(
+            (out_w, out_h),
+            Image.Transform.AFFINE,
+            (a, b, c, d, e, f),
+            Image.Resampling.BICUBIC,
+            fillcolor=(0, 0, 0, 0),
+        )
     return rotated, (-min_x, -min_y)
 
 
@@ -9646,6 +10184,8 @@ def warn_deprecated_probe_args(args: argparse.Namespace) -> None:
         probes.append(f"--tmp-text-render-mode={args.tmp_text_render_mode}")
     if args.tmp_dynamic_sdf != DEFAULT_TMP_DYNAMIC_SDF:
         probes.append("--tmp-dynamic-sdf")
+    if args.premultiply_alpha_transforms:
+        probes.append("--premultiply-alpha-transforms")
     if args.tmp_pillow_stroke_factor != DEFAULT_TMP_PILLOW_STROKE_FACTOR:
         probes.append("--tmp-pillow-stroke-factor")
     if args.shape_sdf_ratio_scale != SHAPE_SDF_RATIO_SCALE:
@@ -9749,6 +10289,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tmp-text-render-mode", choices=TMP_TEXT_RENDER_MODES, default=DEFAULT_TMP_TEXT_RENDER_MODE)
     parser.add_argument("--tmp-dynamic-sdf", dest="tmp_dynamic_sdf", action="store_true")
     parser.add_argument("--no-tmp-dynamic-sdf", dest="tmp_dynamic_sdf", action="store_false")
+    parser.add_argument(
+        "--tmp-decorative-face-only",
+        dest="tmp_decorative_face_only",
+        action="store_true",
+        default=DEFAULT_TMP_DECORATIVE_FACE_ONLY,
+        help="Render decorative rich-text symbols without TMP underlay/outline.",
+    )
+    parser.add_argument(
+        "--no-tmp-decorative-face-only",
+        dest="tmp_decorative_face_only",
+        action="store_false",
+        help="Debug: keep TMP underlay/outline on decorative rich-text symbols.",
+    )
+    parser.add_argument(
+        "--premultiply-alpha-transforms",
+        action="store_true",
+        help=(
+            "Experimental: resample transformed RGBA layers in premultiplied alpha space. "
+            "This can change semi-transparent artwork colors and is not a global custom-profile fix."
+        ),
+    )
+    parser.add_argument(
+        "--tmp-decorative-direct-raster",
+        dest="tmp_decorative_direct_raster",
+        action="store_true",
+        default=DEFAULT_TMP_DECORATIVE_DIRECT_RASTER,
+        help="Draw decorative TMP symbols by transforming SDF glyphs directly to the final canvas.",
+    )
+    parser.add_argument(
+        "--no-tmp-decorative-direct-raster",
+        dest="tmp_decorative_direct_raster",
+        action="store_false",
+        help="Debug: use the legacy Pillow layer-transform path for decorative TMP symbols.",
+    )
+    parser.add_argument(
+        "--tmp-decorative-alpha-harden",
+        type=float,
+        default=1.0,
+        help="Experimental: strengthen decorative rich-text alpha coverage after transforms; 1 disables it.",
+    )
     parser.add_argument("--tmp-pillow-stroke-factor", type=float, default=DEFAULT_TMP_PILLOW_STROKE_FACTOR)
     parser.add_argument("--shape-sdf-ratio-scale", type=float, default=SHAPE_SDF_RATIO_SCALE)
     parser.add_argument("--shape-sdf-outer-factor", type=float, default=SHAPE_SDF_OUTER_FACTOR)
@@ -9869,6 +10449,14 @@ def build_renderer(
         clip_canvas_transform=args.canvas_clip_transform,
         unity_ui_sprite_dir=getattr(args, "unity_ui_sprite_dir", DEFAULT_UNITY_UI_SPRITE_DIR),
         region=getattr(args, "region", "cn"),
+        tmp_decorative_face_only=getattr(args, "tmp_decorative_face_only", DEFAULT_TMP_DECORATIVE_FACE_ONLY),
+        premultiply_alpha_transforms=getattr(args, "premultiply_alpha_transforms", DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS),
+        tmp_decorative_direct_raster=getattr(
+            args,
+            "tmp_decorative_direct_raster",
+            DEFAULT_TMP_DECORATIVE_DIRECT_RASTER,
+        ),
+        tmp_decorative_alpha_harden=getattr(args, "tmp_decorative_alpha_harden", 1.0),
     )
 
 
