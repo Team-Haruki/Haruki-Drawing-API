@@ -856,6 +856,75 @@ def test_custom_profile_general_deck_card_uses_deck_cutout_art(tmp_path: Path) -
     image = renderer.compose_profile_deck_card(915)
     assert image is not None
     assert image.size == (156, 242)
+    assert image.getpixel((4, 4))[3] == 255
+
+
+def test_custom_profile_general_deck_card_does_not_apply_slanted_mask(tmp_path: Path) -> None:
+    deck_path = (
+        tmp_path
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "character"
+        / "member_cutout"
+        / "res010_no034"
+        / "after_training.png"
+    )
+    _write_png_color(deck_path, (330, 512), (255, 0, 0, 255))
+    mask = Image.new("RGBA", (330, 512), (0, 0, 0, 255))
+    for y in range(mask.height):
+        for x in range(80):
+            mask.putpixel((x, y), (0, 0, 0, 0))
+    mask_path = tmp_path / "static_images" / "customprofile" / "tex_mask_card_s.png"
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    mask.save(mask_path)
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userCards": [
+                {
+                    "cardId": 915,
+                    "level": 60,
+                    "masterRank": 0,
+                    "specialTrainingStatus": "done",
+                    "defaultImage": "special_training",
+                }
+            ],
+        },
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+            "cardAssets": {
+                915: {
+                    "id": 915,
+                    "assetbundleName": "res010_no034",
+                    "deckAfterTrainingPath": (
+                        "asset/cn-assets/startapp/character/member_cutout/res010_no034/after_training.png"
+                    ),
+                }
+            },
+        },
+    )
+
+    image = renderer.compose_profile_deck_card(915)
+
+    assert image is not None
+    assert image.getpixel((4, 4))[3] == 255
+
+
+def test_custom_profile_card_master_rank_zero_is_not_drawn(tmp_path: Path) -> None:
+    _write_png_color(tmp_path / "static_images" / "card" / "train_rank_0.png", (88, 88), (0, 255, 0, 255))
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userCards": [{"cardId": 915, "level": 60, "masterRank": 0}]},
+        resources={
+            "cards": {915: {"id": 915, "assetbundleName": "res010_no034", "cardRarityType": "rarity_4"}},
+        },
+    )
+    image = Image.new("RGBA", (330, 512), (255, 0, 0, 255))
+
+    renderer.draw_deck_card_view_overlays(image, 915)
+
+    assert image.getpixel((250, 8))[:3] == (255, 0, 0)
 
 
 def test_custom_profile_unity_sprite_reuses_static_card_assets(tmp_path: Path) -> None:

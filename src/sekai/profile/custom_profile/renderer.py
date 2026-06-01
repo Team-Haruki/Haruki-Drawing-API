@@ -3970,8 +3970,10 @@ class PNGRenderer:
         return "rarity_star_afterTraining" if self.card_default_after_training(card_id) else "rarity_star_normal"
 
     def card_master_rank_sprite_name(self, card_id: int, size: str) -> str:
-        rank = max(0, min(5, int((self.user_card_for(card_id) or {}).get("masterRank", 0) or 0)))
-        return f"masterRank_{size}_{rank}"
+        return f"masterRank_{size}_{self.card_master_rank(card_id)}"
+
+    def card_master_rank(self, card_id: int) -> int:
+        return max(0, min(5, int((self.user_card_for(card_id) or {}).get("masterRank", 0) or 0)))
 
     def card_overlay_paths(self, card_id: int) -> tuple[Path, Path, Path, Path]:
         card = self.card_master_for(card_id) or {}
@@ -3985,7 +3987,7 @@ class PNGRenderer:
             / "card"
             / ("rare_star_after_training.png" if self.card_default_after_training(card_id) else "rare_star_normal.png")
         )
-        master_rank = max(1, int((self.user_card_for(card_id) or {}).get("masterRank", 0) or 0))
+        master_rank = self.card_master_rank(card_id)
         rank_path = self.static_images / "card" / f"train_rank_{master_rank}.png"
         return frame_path, attr_path, star_path, rank_path
 
@@ -4099,12 +4101,13 @@ class PNGRenderer:
         rank_rect = self.rect_transform_box(
             image.size, (1.0, 0.0), (1.0, 0.0), (1.4, 0.8), (88.0 * 0.95, 88.0 * 0.95), (1.0, 0.0)
         )
-        if (
-            not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "S"), rank_rect)
-            and rank_path.exists()
-        ):
-            rank = Image.open(rank_path).convert("RGBA")
-            self.paste_in_rect(image, rank, rank_rect)
+        if self.card_master_rank(card_id) > 0:
+            if (
+                not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "S"), rank_rect)
+                and rank_path.exists()
+            ):
+                rank = Image.open(rank_path).convert("RGBA")
+                self.paste_in_rect(image, rank, rank_rect)
         if leader:
             self.draw_deck_leader_label(image)
 
@@ -4189,12 +4192,13 @@ class PNGRenderer:
         master_rect = self.rect_transform_box(
             image.size, (1.0, 0.0), (1.0, 0.0), (-24.0, 24.0), (104.0, 104.0), (1.0, 0.0)
         )
-        if (
-            not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "L"), master_rect)
-            and master_path.exists()
-        ):
-            rank_img = Image.open(master_path).convert("RGBA")
-            self.paste_in_rect(image, rank_img, master_rect)
+        if self.card_master_rank(card_id) > 0:
+            if (
+                not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "L"), master_rect)
+                and master_path.exists()
+            ):
+                rank_img = Image.open(master_path).convert("RGBA")
+                self.paste_in_rect(image, rank_img, master_rect)
 
     def compose_profile_small_still_card(
         self,
@@ -4227,6 +4231,7 @@ class PNGRenderer:
             leader=leader,
             show_detail=True,
             attr_x=3.70001220703125,
+            mask_sprite_name=None,
             render_size=GENERAL_DECK_CARD_RENDER_SIZE,
         )
 
