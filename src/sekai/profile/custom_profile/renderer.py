@@ -54,9 +54,7 @@ from src.sekai.profile.custom_profile.split import (
 TMP_EM_BLOCK_CHARS = {"■", "█"}
 TMP_SPACE_EQUIVALENT_CHARS = {" ", "\u00a0"}
 TMP_MISSING_GLYPH_CHAR = "□"
-TMP_DECORATIVE_TEXT_CHARS = frozenset(
-    "●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 "
-)
+TMP_DECORATIVE_TEXT_CHARS = frozenset("●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 ")
 DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
 DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
 DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
@@ -2343,11 +2341,7 @@ class PNGRenderer:
                         img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
                 return img
 
-            if (
-                self.parallel_stage == "full"
-                and self.parallel_workers > 1
-                and len(contents) > 1
-            ):
+            if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
                 for rendered in self.render_contents_for_card_parallel(contents):
                     self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
                     if rendered.prepared is not None:
@@ -2592,21 +2586,11 @@ class PNGRenderer:
             strike=False,
         )
         tokens = parse_tmp_text(raw_text, base_style)
-        visible_chars = [
-            ch
-            for token in tokens
-            if isinstance(token, TextRun)
-            for ch in token.text
-            if not ch.isspace()
-        ]
+        visible_chars = [ch for token in tokens if isinstance(token, TextRun) for ch in token.text if not ch.isspace()]
         return bool(visible_chars) and all(ch in TMP_DECORATIVE_TEXT_CHARS for ch in visible_chars)
 
     def decorative_outline_dilate(self, item: dict[str, Any], outline_dilate: float) -> float:
-        if (
-            self.tmp_decorative_face_only
-            and abs(outline_dilate) > 1.0e-6
-            and self.is_decorative_text_item(item)
-        ):
+        if self.tmp_decorative_face_only and abs(outline_dilate) > 1.0e-6 and self.is_decorative_text_item(item):
             return 0.0
         return outline_dilate
 
@@ -5949,7 +5933,9 @@ class PNGRenderer:
                 ),
                 Image.Resampling.BICUBIC,
             )
-            return PreparedLayer(self.resize_layer_for_transform(hi, (out_w, out_h), Image.Resampling.LANCZOS), (left, top))
+            return PreparedLayer(
+                self.resize_layer_for_transform(hi, (out_w, out_h), Image.Resampling.LANCZOS), (left, top)
+            )
 
         transformed = self.affine_transform_layer(
             layer,
@@ -10450,7 +10436,9 @@ def build_renderer(
         unity_ui_sprite_dir=getattr(args, "unity_ui_sprite_dir", DEFAULT_UNITY_UI_SPRITE_DIR),
         region=getattr(args, "region", "cn"),
         tmp_decorative_face_only=getattr(args, "tmp_decorative_face_only", DEFAULT_TMP_DECORATIVE_FACE_ONLY),
-        premultiply_alpha_transforms=getattr(args, "premultiply_alpha_transforms", DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS),
+        premultiply_alpha_transforms=getattr(
+            args, "premultiply_alpha_transforms", DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS
+        ),
         tmp_decorative_direct_raster=getattr(
             args,
             "tmp_decorative_direct_raster",
