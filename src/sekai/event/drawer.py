@@ -1,4 +1,5 @@
 import asyncio
+from datetime import timedelta
 import logging
 import math
 import time
@@ -55,6 +56,8 @@ from src.settings import ASSETS_BASE_DIR
 logger = logging.getLogger(__name__)
 _perf_logger = logging.getLogger("event.draw.perf")
 _EVENT_LIST_ENTRY_CACHE_NAMESPACE = "event_list_entry"
+_DEFAULT_WL_CHAPTER_COLOR = (75, 75, 75, 255)
+_WL_PROGRESS_BORDER_COLOR = (75, 75, 75, 255)
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -65,6 +68,113 @@ from .model import (
     EventPlannerRequest,
     EventRecordRequest,
 )
+
+
+def _dict_value(data: dict, *keys: str):
+    for key in keys:
+        value = data.get(key)
+        if value is not None:
+            return value
+    return None
+
+
+def _dict_int(data: dict, *keys: str) -> int | None:
+    value = _dict_value(data, *keys)
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _dict_str(data: dict, *keys: str) -> str | None:
+    value = _dict_value(data, *keys)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _resolve_wl_chapter_color(chapter: dict, chapter_index: int) -> tuple[int, int, int, int]:
+    chara_id = _dict_int(chapter, "game_character_id", "character_id")
+    color_code = _dict_str(chapter, "color_code", "character_color_code")
+    if color_code is None and chara_id is not None:
+        color_code = CHARACTER_COLOR_CODE.get(chara_id)
+    if color_code is None:
+        color_code = CHARACTER_COLOR_CODE.get(chapter_index)
+    if color_code is None:
+        return _DEFAULT_WL_CHAPTER_COLOR
+    try:
+        return color_code_to_rgb(color_code)
+    except ValueError:
+        return _DEFAULT_WL_CHAPTER_COLOR
+
+
+def _normalize_wl_chapters(chapters: list[dict] | None, timezone: str | None) -> list[dict]:
+    normalized = []
+    for index, chapter in enumerate(chapters or [], start=1):
+        if not isinstance(chapter, dict):
+            continue
+        start_time = datetime_from_millis(_dict_value(chapter, "chapter_start_at", "start_at"), timezone)
+        aggregate_time = datetime_from_millis(
+            _dict_value(chapter, "chapter_aggregate_at", "aggregate_at"),
+            timezone,
+        )
+        end_raw = _dict_value(chapter, "chapter_end_at", "end_at")
+        end_time = datetime_from_millis(end_raw, timezone) if end_raw is not None else None
+        if end_time is None and aggregate_time is not None:
+            end_time = aggregate_time + timedelta(seconds=1)
+        if start_time is None or end_time is None or end_time <= start_time:
+            continue
+
+        item = dict(chapter)
+        item["start_time"] = start_time
+        item["end_time"] = end_time
+        item["chapter_no"] = _dict_int(chapter, "chapter_no", "chapter_id") or index
+        item["game_character_id"] = _dict_int(chapter, "game_character_id", "character_id")
+        item["character_name"] = _dict_str(chapter, "character_name", "chara_name")
+        item["character_icon_path"] = _dict_str(chapter, "character_icon_path", "chara_icon_path", "icon_path")
+        item["chapter_label"] = (
+            f"{item['character_name']} 章节" if item["character_name"] else f"{item['chapter_no']}章"
+        )
+        item["color"] = _resolve_wl_chapter_color(chapter, index)
+        normalized.append(item)
+
+    normalized.sort(key=lambda item: item["start_time"])
+    return normalized
+
+
+def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return min(max(value, low), high)
+
+
+def _is_wl_chapter_current(chapter: dict, now) -> bool:
+    return chapter["start_time"] <= now <= chapter["end_time"]
+
+
+def _wl_chapter_progress_segments(
+    wl_chapters: list[dict],
+    start_time,
+    end_time,
+    now,
+) -> list[tuple[float, float, tuple]]:
+    event_duration = end_time - start_time
+    if event_duration.total_seconds() <= 0:
+        return []
+
+    visible_until = min(max(now, start_time), end_time)
+    segments = []
+    for chapter in wl_chapters:
+        visible_end_time = min(chapter["end_time"], visible_until)
+        if visible_end_time <= chapter["start_time"]:
+            continue
+        segment_start = _clamp((chapter["start_time"] - start_time) / event_duration)
+        segment_end = _clamp((visible_end_time - start_time) / event_duration)
+        if segment_end <= segment_start:
+            continue
+        segments.append((segment_start, segment_end, chapter["color"]))
+    return segments
 
 
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
@@ -85,12 +195,11 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
 
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
     text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
+    chapter_label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=(50, 50, 50))
+    chapter_time_style = TextStyle(font=DEFAULT_FONT, size=13, color=(70, 70, 70))
+    current_chapter_badge_style = TextStyle(font=DEFAULT_BOLD_FONT, size=11, color=(70, 70, 70))
 
-    wl_chapters = rqd.event_info.wl_time_list
-    if rqd.event_info.is_wl_event:
-        for chapter in wl_chapters:
-            chapter["start_time"] = datetime_from_millis(chapter["start_at"], rqd.timezone)
-            chapter["end_time"] = datetime_from_millis(chapter["aggregate_at"] + 1000, rqd.timezone)
+    wl_chapters = _normalize_wl_chapters(rqd.event_info.wl_time_list, rqd.timezone)
     use_story_bg = detail.event_type != "world_bloom"
 
     # 并行加载所有活动图片
@@ -108,6 +217,11 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
     if rqd.event_assets.bonus_chara_path:
         for i, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
             _event_img_tasks[f"bonus_chara_{i}"] = get_img_from_path(ASSETS_BASE_DIR, chara_path)
+    for i, chapter in enumerate(wl_chapters):
+        if chapter.get("character_icon_path"):
+            key = f"wl_chapter_icon_{i}"
+            chapter["character_icon_key"] = key
+            _event_img_tasks[key] = get_img_from_path(ASSETS_BASE_DIR, chapter["character_icon_path"])
     _ek = list(_event_img_tasks.keys())
     _t0 = time.perf_counter()
     _ev = dict(zip(_ek, await asyncio.gather(*_event_img_tasks.values())))
@@ -175,37 +289,85 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                     if detail.event_type == "world_bloom":
                         cur_chapter = None
                         for chapter in wl_chapters:
-                            if chapter["start_time"] <= now <= chapter["end_time"]:
+                            if _is_wl_chapter_current(chapter, now):
                                 cur_chapter = chapter
                                 break
                         if cur_chapter:
                             TextBox(
                                 f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style
                             )
+                        if wl_chapters:
+                            with VSplit().set_padding(0).set_sep(5).set_item_align("l").set_content_align("l"):
+                                for chapter in wl_chapters:
+                                    with HSplit().set_padding(0).set_sep(6).set_item_align("c").set_content_align("l"):
+                                        icon = _ev.get(chapter.get("character_icon_key"))
+                                        if icon is not None:
+                                            ImageBox(icon, size=(22, 22), image_size_mode="fill")
+                                        else:
+                                            Spacer(w=22, h=22).set_bg(RoundRectBg(chapter["color"], 11))
+                                        is_current = chapter is cur_chapter
+                                        with (
+                                            VSplit()
+                                            .set_padding(0)
+                                            .set_sep(0)
+                                            .set_item_align("l")
+                                            .set_content_align("l")
+                                        ):
+                                            with (
+                                                HSplit()
+                                                .set_padding(0)
+                                                .set_sep(4)
+                                                .set_item_align("c")
+                                                .set_content_align("l")
+                                            ):
+                                                label_box = TextBox(
+                                                    chapter["chapter_label"],
+                                                    chapter_label_style,
+                                                    overflow="shrink",
+                                                    wrap=False,
+                                                )
+                                                if not is_current:
+                                                    label_box.set_w(260)
+                                                if is_current:
+                                                    TextBox(
+                                                        "当前",
+                                                        current_chapter_badge_style,
+                                                        overflow="shrink",
+                                                        wrap=False,
+                                                    ).set_padding((5, 1)).set_bg(RoundRectBg((255, 231, 105, 255), 4))
+                                            TextBox(
+                                                f"{chapter['start_time'].strftime('%m-%d %H:%M')} ~ "
+                                                f"{chapter['end_time'].strftime('%m-%d %H:%M')}",
+                                                chapter_time_style,
+                                                overflow="shrink",
+                                                wrap=False,
+                                            ).set_w(260)
 
                     # 进度条
-                    progress = (now - start_time) / (end_time - start_time)
-                    progress = min(max(progress, 0), 1)
-                    progress_w, progress_h, border = 320, 8, 1
-                    if detail.event_type == "world_bloom" and len(wl_chapters) > 1:
+                    event_duration = end_time - start_time
+                    progress = _clamp((now - start_time) / event_duration) if event_duration.total_seconds() > 0 else 0
+                    progress_w, progress_h, border = 360, 8, 1
+                    if (
+                        detail.event_type == "world_bloom"
+                        and len(wl_chapters) > 0
+                        and event_duration.total_seconds() > 0
+                    ):
+                        chapter_segments = _wl_chapter_progress_segments(wl_chapters, start_time, end_time, now)
                         with Frame().set_padding(8).set_content_align("lt"):
                             Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
-                                RoundRectBg((75, 75, 75, 255), 4)
+                                RoundRectBg(_WL_PROGRESS_BORDER_COLOR, 4)
                             )
-                            for cid, chapter in enumerate(wl_chapters):
-                                cprogress_start = (chapter["start_time"] - start_time) / (end_time - start_time)
-                                cprogress_end = (chapter["end_time"] - start_time) / (end_time - start_time)
-                                chara_color = color_code_to_rgb(CHARACTER_COLOR_CODE.get(cid + 1))
-                                Spacer(w=int(progress_w * (cprogress_end - cprogress_start)), h=progress_h).set_bg(
-                                    RoundRectBg(chara_color, 4)
-                                ).set_offset((border + int(progress_w * cprogress_start), border))
-                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(
-                                RoundRectBg((255, 255, 255, 200), 4)
-                            ).set_offset((border, border))
+                            for segment_start, segment_end, color in chapter_segments:
+                                segment_x = round(progress_w * segment_start)
+                                segment_end_x = round(progress_w * segment_end)
+                                segment_width = max(1, segment_end_x - segment_x)
+                                Spacer(w=segment_width, h=progress_h).set_bg(
+                                    RoundRectBg(color, 0)
+                                ).set_offset((border + segment_x, border))
                     else:
                         with Frame().set_padding(8).set_content_align("lt"):
                             Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
-                                RoundRectBg((75, 75, 75, 255), 4)
+                                RoundRectBg(_WL_PROGRESS_BORDER_COLOR, 4)
                             )
                             Spacer(w=int(progress_w * progress), h=progress_h).set_bg(
                                 RoundRectBg((255, 255, 255, 255), 4)
