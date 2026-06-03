@@ -361,9 +361,9 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                 segment_x = round(progress_w * segment_start)
                                 segment_end_x = round(progress_w * segment_end)
                                 segment_width = max(1, segment_end_x - segment_x)
-                                Spacer(w=segment_width, h=progress_h).set_bg(
-                                    RoundRectBg(color, 0)
-                                ).set_offset((border + segment_x, border))
+                                Spacer(w=segment_width, h=progress_h).set_bg(RoundRectBg(color, 0)).set_offset(
+                                    (border + segment_x, border)
+                                )
                     else:
                         with Frame().set_padding(8).set_content_align("lt"):
                             Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
