@@ -50,7 +50,7 @@ from .model import (
     RankTraceRequest,
     SklRequest,
     SKRequest,
-    SpeedInfo,  # noqa: F401 - used in type annotations via Request classes
+    SpeedInfo,
     SpeedRequest,
     TeamInfo,  # noqa: F401 - used in type annotations via Request classes
     WinRateRequest,
@@ -85,23 +85,6 @@ for path in font_paths:
     except Exception:
         continue
 
-SKL_QUERY_RANKS = [
-    *range(10, 51, 10),
-    *range(100, 501, 100),
-    *range(1000, 5001, 1000),
-    *range(10000, 50001, 10000),
-    *range(100000, 500001, 100000),
-]
-ALL_RANKS = [
-    *range(1, 100),
-    *range(100, 501, 100),
-    *range(1000, 5001, 1000),
-    1500,
-    2500,
-    *range(10000, 50001, 10000),
-    *range(100000, 500001, 100000),
-]
-
 SK_RECORD_TOLERANCE = timedelta(seconds=70)
 SK_CSB_STOP_THRESHOLD = timedelta(minutes=5)
 SK_PLAYCOUNT_MYSEKAI_THRESHOLD = 37
@@ -118,6 +101,20 @@ RANK_TRACE_SCORE_COLORS = [
     "#a16207",
 ]
 PLOT_LABEL_PATH_EFFECTS = [patheffects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
+
+
+def _collect_skl_display_ranks(current_ranks: list[RankInfo], forecast_columns: list) -> list[int]:
+    rank_set = {rank.rank for rank in current_ranks}
+    for column in forecast_columns:
+        rank_set.update(rank.rank for rank in column.ranks)
+    return sorted(rank_set)
+
+
+def _collect_speed_display_rows(ranks: list[SpeedInfo]) -> list[tuple[int, int, int | None, datetime]]:
+    return sorted(
+        ((rank.rank, rank.score, rank.speed, rank.record_time) for rank in ranks),
+        key=lambda row: row[0],
+    )
 
 
 def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> str:
@@ -209,9 +206,6 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
     wl_cid = rqd.wl_cid
     region = rqd.region
 
-    full = rqd.full
-    query_ranks = ALL_RANKS if full else SKL_QUERY_RANKS
-    query_rank_set = set(query_ranks)
     forecast_columns = list(rqd.forecast_columns or [])
     is_predict_mode = len(forecast_columns) > 0
     prediction_notice = rqd.prediction_notice
@@ -219,24 +213,9 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
         prediction_notice = "预测数据仅供参考，请以实际为准规划好冲榜计划"
     current_ranks = list(rqd.current_ranks or rqd.ranks)
 
-    if not full:
-        current_ranks = [r for r in current_ranks if r.rank in query_rank_set]
-        forecast_columns = [
-            col.model_copy(update={"ranks": [r for r in col.ranks if r.rank in query_rank_set]})
-            for col in forecast_columns
-        ]
-
     current_by_rank = {r.rank: r for r in current_ranks}
     forecast_by_rank = [{r.rank: r for r in col.ranks} for col in forecast_columns]
-
-    rank_set: set[int] = set()
-    if is_predict_mode:
-        rank_set.update(current_by_rank.keys())
-        for col_map in forecast_by_rank:
-            rank_set.update(col_map.keys())
-    else:
-        rank_set.update(r.rank for r in current_ranks)
-    ranks = sorted(rank_set)
+    ranks = _collect_skl_display_ranks(current_ranks, forecast_columns)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
@@ -763,14 +742,8 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
     now = request_now(rqd.timezone)
     banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
     is_wl_event = rqd.is_wl_event
-    query_ranks = SKL_QUERY_RANKS
     period = rqd.period
-    ranks = rqd.ranks
-    speeds: list[tuple[int, int, int, datetime]] = []
-    for rank in ranks:
-        if rank.rank in query_ranks:
-            speeds.append((rank.rank, rank.score, rank.speed, rank.record_time))
-    speeds.sort(key=lambda x: x[0])
+    speeds = _collect_speed_display_rows(rqd.ranks)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
             with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):

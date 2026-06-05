@@ -146,7 +146,7 @@ class SklRequest(TimeZoneRequest):
     prediction_notice : str | None
         预测说明
     full : bool
-        是否显示完整榜线 (True: ALL_RANKS, False: SKL_QUERY_RANKS)
+        兼容字段；绘图端按请求中的 ranks 展示
     """
 
     id: int
