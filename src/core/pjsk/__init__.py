@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from . import (
     card,
     chart,
+    costume,
     deck,
     education,
     event,
@@ -21,6 +22,7 @@ from . import (
 router = APIRouter(prefix="/api/pjsk")
 
 router.include_router(card.router, prefix="/card")
+router.include_router(costume.router, prefix="/costume")
 router.include_router(music.router, prefix="/music")
 router.include_router(profile.router, prefix="/profile")
 router.include_router(event.router, prefix="/event")

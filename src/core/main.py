@@ -37,6 +37,7 @@ This API provides endpoints for generating various Project Sekai images.
 
 ### Available Modules:
 - **Card**: Generate card detail, list, and box images
+- **Costume**: Generate costume list and detail images
 - **Music**: Generate music detail, list, progress, and rewards images
 - **Profile**: Generate player profile images
 - **Event**: Generate event detail, record, and list images
