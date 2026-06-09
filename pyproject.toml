@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Drawing-API"
-version = "2.3.12"
+version = "2.3.13"
 description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
