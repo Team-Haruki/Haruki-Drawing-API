@@ -796,6 +796,34 @@ class MysekaiTalkListRequest(TimeZoneRequest):
         self.apply_timezone(self.profile)
 
 
+class MysekaiHousingCompetitionEntry(BaseModel):
+    rank: int
+    review_count: int
+    owner_user_name: str = ""
+    name: str = ""
+    word: str = ""
+    thumbnail_path: str | None = None
+    thumbnail_image_base64: str | None = None
+    previous_review_count: int | None = None
+    previous_delta: int | None = None
+    next_review_count: int | None = None
+    next_delta: int | None = None
+    submitted_at: int | None = None
+
+
+class MysekaiHousingCompetitionRequest(TimeZoneRequest):
+    competition_id: int
+    region: str = "jp"
+    name: str
+    description: str | None = None
+    banner_image_path: str | None = None
+    banner_image_base64: str | None = None
+    sample_count: int = 0
+    unique_count: int = 0
+    sampled_at: int | None = None
+    entries: list[MysekaiHousingCompetitionEntry] = Field(default_factory=list)
+
+
 # 各团代表色，没有VS团！
 UNIT_COLORS = [
     (68, 85, 221, 255),

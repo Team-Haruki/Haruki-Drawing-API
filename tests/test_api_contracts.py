@@ -66,3 +66,41 @@ def test_validation_errors_are_reported_before_rendering():
 
     assert response.status_code == 422
     assert response.headers["content-type"].startswith("application/json")
+
+
+def test_mysekai_housing_competition_endpoint_contract():
+    tiny_png = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+        "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    response = asyncio.run(
+        _request(
+            "POST",
+            "/api/pjsk/mysekai/housing-competition",
+            json={
+                "competition_id": 25,
+                "region": "jp",
+                "name": "烤森百景",
+                "description": "百景投稿列表",
+                "banner_image_base64": tiny_png,
+                "sample_count": 2,
+                "unique_count": 3,
+                "entries": [
+                    {
+                        "rank": 1,
+                        "review_count": 34,
+                        "owner_user_name": "Tester",
+                        "name": "海边小屋",
+                        "word": "欢迎参观",
+                        "thumbnail_image_base64": tiny_png,
+                        "next_review_count": 33,
+                        "next_delta": 1,
+                    }
+                ],
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.content.startswith(b"\x89PNG")

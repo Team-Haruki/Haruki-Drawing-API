@@ -13,10 +13,12 @@ from src.sekai.mysekai.drawer import (
     compose_mysekai_resource_image,
     compose_mysekai_talk_list_image,
 )
+from src.sekai.mysekai.housing_drawer import compose_mysekai_housing_competition_image
 from src.sekai.mysekai.model import (
     MysekaiDoorUpgradeRequest,
     MysekaiFixtureDetailRequest,
     MysekaiFixtureListRequest,
+    MysekaiHousingCompetitionRequest,
     MysekaiMsrMapRequest,
     MysekaiMusicrecordRequest,
     MysekaiResourceRequest,
@@ -141,4 +143,26 @@ async def mysekai_talk_list(request: MysekaiTalkListRequest):
         )
         return resp
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/housing-competition", summary="Generate MySekai housing competition image")
+async def mysekai_housing_competition(request: MysekaiHousingCompetitionRequest):
+    """Generate MySekai housing competition ranking cards."""
+    try:
+        _t0 = time.perf_counter()
+        image = await compose_mysekai_housing_competition_image(request)
+        _t1 = time.perf_counter()
+        resp = await image_to_response(image)
+        _perf_logger.info(
+            "/housing-competition total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d)",
+            time.perf_counter() - _t0,
+            _t1 - _t0,
+            time.perf_counter() - _t1,
+            image.width,
+            image.height,
+        )
+        return resp
+    except Exception as e:
+        _logger.exception("mysekai_housing_competition render failed")
         raise HTTPException(status_code=500, detail=str(e))
