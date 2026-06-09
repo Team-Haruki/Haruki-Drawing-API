@@ -69,10 +69,7 @@ def test_validation_errors_are_reported_before_rendering():
 
 
 def test_mysekai_housing_competition_endpoint_contract():
-    tiny_png = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
-        "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
-    )
+    tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     response = asyncio.run(
         _request(
             "POST",
