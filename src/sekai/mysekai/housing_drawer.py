@@ -19,8 +19,7 @@ HEADER_BANNER_SIZE = (210, 86)
 async def compose_mysekai_housing_competition_image(rqd: MysekaiHousingCompetitionRequest) -> Image.Image:
     banner_task = _load_optional_image(rqd.banner_image_base64, rqd.banner_image_path)
     entry_tasks = [
-        _load_optional_image(entry.thumbnail_image_base64, entry.thumbnail_path)
-        for entry in rqd.entries[:5]
+        _load_optional_image(entry.thumbnail_image_base64, entry.thumbnail_path) for entry in rqd.entries[:5]
     ]
     banner, *entry_images = await asyncio.gather(banner_task, *entry_tasks)
 
