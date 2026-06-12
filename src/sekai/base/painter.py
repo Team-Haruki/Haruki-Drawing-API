@@ -1,11 +1,14 @@
 import asyncio
+from collections import OrderedDict
 from collections.abc import Callable
 import colorsys
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timedelta
 import glob
 import hashlib
+from io import BytesIO
 import logging
 import math
 from multiprocessing import get_context
@@ -13,6 +16,7 @@ import os
 import random
 import threading
 from typing import Any, Literal, Self
+from urllib.request import Request, urlopen
 
 import emoji
 import numpy as np
@@ -20,7 +24,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
 from pilmoji import Pilmoji
 from pilmoji import getsize as getsize_emoji
-from pilmoji.source import GoogleEmojiSource
+from pilmoji.source import BaseSource, GoogleEmojiSource
 
 from src.settings import (
     DEFAULT_BOLD_FONT,  # noqa: F401
@@ -207,6 +211,11 @@ def deterministic_hash(obj: Any) -> str:
 # =========================== 基础定义 =========================== #
 
 PAINTER_CACHE_DIR = "data/utils/painter_cache/"
+PAINTER_EMOJI_CACHE_DIR = "data/utils/painter_emoji_cache/"
+PAINTER_EMOJI_CACHE_MAX_ENTRIES = 512
+PAINTER_EMOJI_SOURCE_TIMEOUT_SECONDS = 3
+_painter_emoji_cache_lock = threading.RLock()
+_painter_emoji_bytes_cache: OrderedDict[str, bytes] = OrderedDict()
 
 Color = tuple[int, int, int, int] | tuple[int, int, int] | list[int]
 Position = tuple[int, int]
@@ -562,6 +571,114 @@ class PainterOperation:
                 self.args[i] = img_dict[img_id]
 
 
+def _emoji_source_cache_key(kind: str, value: str) -> str:
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"google_{kind}_{digest}"
+
+
+def _emoji_source_cache_path(cache_key: str) -> str:
+    return os.path.join(PAINTER_EMOJI_CACHE_DIR, f"{cache_key}.bin")
+
+
+def _get_emoji_source_bytes_cached(cache_key: str) -> bytes | None:
+    with _painter_emoji_cache_lock:
+        cached = _painter_emoji_bytes_cache.get(cache_key)
+        if cached is not None:
+            _painter_emoji_bytes_cache.move_to_end(cache_key)
+            return cached
+
+    path = _emoji_source_cache_path(cache_key)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logging.debug("Failed to read painter emoji cache: %s", path, exc_info=True)
+        return None
+
+    if not data:
+        return None
+
+    with _painter_emoji_cache_lock:
+        _painter_emoji_bytes_cache[cache_key] = data
+        _painter_emoji_bytes_cache.move_to_end(cache_key)
+        while len(_painter_emoji_bytes_cache) > PAINTER_EMOJI_CACHE_MAX_ENTRIES:
+            _painter_emoji_bytes_cache.popitem(last=False)
+    return data
+
+
+def _put_emoji_source_bytes_cached(cache_key: str, data: bytes) -> None:
+    if not data:
+        return
+
+    with _painter_emoji_cache_lock:
+        _painter_emoji_bytes_cache[cache_key] = data
+        _painter_emoji_bytes_cache.move_to_end(cache_key)
+        while len(_painter_emoji_bytes_cache) > PAINTER_EMOJI_CACHE_MAX_ENTRIES:
+            _painter_emoji_bytes_cache.popitem(last=False)
+
+    path = _emoji_source_cache_path(cache_key)
+    tmp_path = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    try:
+        os.makedirs(PAINTER_EMOJI_CACHE_DIR, exist_ok=True)
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+        os.replace(tmp_path, path)
+    except OSError:
+        logging.debug("Failed to write painter emoji cache: %s", path, exc_info=True)
+        with suppress(OSError):
+            os.remove(tmp_path)
+
+
+class _TimeoutGoogleEmojiSource(GoogleEmojiSource):
+    def request(self, url: str) -> bytes:
+        session = getattr(self, "_requests_session", None)
+        if session is not None:
+            with session.get(url, **self.REQUEST_KWARGS, timeout=PAINTER_EMOJI_SOURCE_TIMEOUT_SECONDS) as response:
+                if response.ok:
+                    return response.content
+                response.raise_for_status()
+
+        req = Request(url, **self.REQUEST_KWARGS)
+        with urlopen(req, timeout=PAINTER_EMOJI_SOURCE_TIMEOUT_SECONDS) as response:
+            return response.read()
+
+
+class CachedGoogleEmojiSource(BaseSource):
+    def _get_cached_stream(self, kind: str, value: str, fetch: Callable[[_TimeoutGoogleEmojiSource], BytesIO | None]):
+        cache_key = _emoji_source_cache_key(kind, value)
+        cached = _get_emoji_source_bytes_cached(cache_key)
+        if cached is not None:
+            return BytesIO(cached)
+
+        source = _TimeoutGoogleEmojiSource()
+        stream = None
+        try:
+            stream = fetch(source)
+            if stream is None:
+                return None
+            data = stream.getvalue()
+        except Exception:
+            logging.debug("Failed to fetch painter emoji source: kind=%s value=%s", kind, value, exc_info=True)
+            return None
+        finally:
+            if stream is not None:
+                stream.close()
+            session = getattr(source, "_requests_session", None)
+            if session is not None:
+                session.close()
+
+        _put_emoji_source_bytes_cached(cache_key, data)
+        return BytesIO(data)
+
+    def get_emoji(self, emoji: str, /) -> BytesIO | None:
+        return self._get_cached_stream("emoji", emoji, lambda source: source.get_emoji(emoji))
+
+    def get_discord_emoji(self, id: int, /) -> BytesIO | None:
+        return self._get_cached_stream("discord", str(id), lambda source: source.get_discord_emoji(id))
+
+
 class Painter:
     def __init__(self, img: Image.Image | None = None, size: tuple[int, int] | None = None) -> None:
         self.operations: list[PainterOperation] = []
@@ -587,7 +704,7 @@ class Painter:
             pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
             draw.text(pos, text, font=font, fill=fill, align=align, anchor="ls")
         else:
-            with Pilmoji(self.img, source=GoogleEmojiSource) as pilmoji:
+            with Pilmoji(self.img, source=CachedGoogleEmojiSource) as pilmoji:
                 text_offset = (0, -std_size[1])
                 pos = (pos[0] - text_offset[0] + self.offset[0], pos[1] - text_offset[1] + self.offset[1])
                 pilmoji.text(

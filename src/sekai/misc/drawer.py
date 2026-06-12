@@ -45,6 +45,7 @@ from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAU
 from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest
 
 logger = logging.getLogger(__name__)
+_birthday_perf_logger = logging.getLogger("misc.birthday.perf")
 
 # =========================== 颜色常量 =========================== #
 
@@ -57,6 +58,8 @@ _ALIAS_TRIM_MIN_OVERLAP = 32
 _ALIAS_TRIM_MAX_OVERLAP = 128
 _ALIAS_TRIM_MIN_DISPLAY_H = 460
 _ALIAS_TRIM_BOTTOM_OVERFLOW = 24
+_BIRTHDAY_CARD_THUMB_SIZE = 80
+_BIRTHDAY_CALENDAR_ICON_SIZE = 40
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
@@ -131,6 +134,50 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
     )
     img.putalpha(alpha)
     return img
+
+
+async def _load_chara_birthday_assets(
+    rqd: CharaBirthdayRequest,
+) -> tuple[Image.Image, Image.Image, Image.Image, list[Image.Image], dict[int, Image.Image], float]:
+    tasks = [
+        get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
+        get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path),
+        get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path),
+        *[
+            get_img_resized(
+                ASSETS_BASE_DIR,
+                card.thumbnail_path,
+                _BIRTHDAY_CARD_THUMB_SIZE,
+                _BIRTHDAY_CARD_THUMB_SIZE,
+            )
+            for card in rqd.cards
+        ],
+        *[
+            get_img_resized(
+                ASSETS_BASE_DIR,
+                chara.icon_path,
+                _BIRTHDAY_CALENDAR_ICON_SIZE,
+                _BIRTHDAY_CALENDAR_ICON_SIZE,
+            )
+            for chara in rqd.all_characters
+        ],
+    ]
+    started = time.perf_counter()
+    results = await asyncio.gather(*tasks)
+    elapsed = time.perf_counter() - started
+
+    card_count = len(rqd.cards)
+    card_image, sd_image, title_image = results[0], results[1], results[2]
+    card_thumbs = list(results[3 : 3 + card_count])
+    calendar_icons = {
+        chara.cid: icon
+        for chara, icon in zip(
+            rqd.all_characters,
+            results[3 + card_count :],
+            strict=False,
+        )
+    }
+    return card_image, sd_image, title_image, card_thumbs, calendar_icons, elapsed
 
 
 def _resolve_alias_trim_metrics(
@@ -436,20 +483,10 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
-    # 加载图片（并行）
-    _img_tasks = [
-        get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path),
-        *[get_img_from_path(ASSETS_BASE_DIR, card.thumbnail_path) for card in cards],
-    ]
-    _t0 = time.perf_counter()
-    _img_results = await asyncio.gather(*_img_tasks)
-    logger.debug(
-        "[perf] compose_chara_birthday_image preload %d images: %.3fs", len(_img_tasks), time.perf_counter() - _t0
+    total_started = time.perf_counter()
+    card_image, sd_image, title_image, card_thumbs, calendar_icons, load_elapsed = await _load_chara_birthday_assets(
+        rqd
     )
-    card_image, sd_image, title_image = _img_results[0], _img_results[1], _img_results[2]
-    card_thumbs = list(_img_results[3:])
 
     # 绘制时间范围的辅助函数
     def draw_time_range(label: str, tr: BirthdayEventTime):
@@ -545,7 +582,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
 
                     with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
                         # 使用model中传入的icon_path
-                        chara_icon = await get_img_from_path(ASSETS_BASE_DIR, chara.icon_path)
+                        chara_icon = calendar_icons[chara.cid]
 
                         b = ImageBox(chara_icon, size=(40, 40)).set_padding(4)
                         if chara.cid == cid:
@@ -553,7 +590,22 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    render_started = time.perf_counter()
+    image = await canvas.get_img()
+    render_elapsed = time.perf_counter() - render_started
+    total_elapsed = time.perf_counter() - total_started
+    _birthday_perf_logger.info(
+        "birthday render: cid=%s cards=%d characters=%d load=%.3fs render=%.3fs total=%.3fs image=%dx%d",
+        cid,
+        len(cards),
+        len(all_characters),
+        load_elapsed,
+        render_elapsed,
+        total_elapsed,
+        image.width,
+        image.height,
+    )
+    return image
 
 
 async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
