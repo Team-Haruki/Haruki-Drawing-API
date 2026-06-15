@@ -5,7 +5,7 @@ description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.136.3",
-    "granian>=2.7.5",
+    "granian>=2.7.6",
     "matplotlib>=3.10.8",
     "numpy>=2.4.2",
     "emoji==2.15.0",
