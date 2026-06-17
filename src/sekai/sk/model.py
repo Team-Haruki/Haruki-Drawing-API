@@ -401,6 +401,14 @@ class PlayerTraceRequest(TimeZoneRequest):
         排名历史数据
     ranks2 : list[RankInfo] | None
         对比玩家的排名历史数据（可选）
+    compare_rank : int | None
+        作为参考线显示的排名档线
+    compare_rank_trace : list[RankInfo] | None
+        参考档线的分数线历史数据（可选）
+    compare_rank_latest : RankInfo | None
+        参考档线的最新点（可选）
+    compare_rank_line_score : int | None
+        在图表中绘制水平参考线的分数（可选）
     """
 
     event_id: int
@@ -408,6 +416,10 @@ class PlayerTraceRequest(TimeZoneRequest):
     wl_chara_icon_path: str | None = None
     ranks: list[RankInfo]
     ranks2: list[RankInfo] | None = None
+    compare_rank: int | None = None
+    compare_rank_trace: list[RankInfo] | None = None
+    compare_rank_latest: RankInfo | None = None
+    compare_rank_line_score: int | None = None
 
     def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
@@ -417,6 +429,15 @@ class PlayerTraceRequest(TimeZoneRequest):
         for item in self.ranks2 or []:
             item.time = localize_datetime(item.time, self.timezone)
             item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        for item in self.compare_rank_trace or []:
+            item.time = localize_datetime(item.time, self.timezone)
+            item.record_start_at = localize_datetime(item.record_start_at, self.timezone)
+        if self.compare_rank_latest is not None:
+            self.compare_rank_latest.time = localize_datetime(self.compare_rank_latest.time, self.timezone)
+            self.compare_rank_latest.record_start_at = localize_datetime(
+                self.compare_rank_latest.record_start_at,
+                self.timezone,
+            )
 
 
 class RankTraceRequest(TimeZoneRequest):

@@ -826,6 +826,8 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
 
     ranks = rqd.ranks
     ranks2 = rqd.ranks2
+    compare_ranks = rqd.compare_rank_trace
+    compare_rank = rqd.compare_rank
 
     ranks = [r for r in ranks if r.rank <= 100]
     if not ranks:
@@ -834,6 +836,10 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
         ranks2 = [r for r in ranks2 if r.rank <= 100]
         if not ranks2:
             ranks2 = None
+    if compare_ranks is not None:
+        compare_ranks = [r for r in compare_ranks if r.score is not None]
+        if not compare_ranks:
+            compare_ranks = None
 
     ranks.sort(key=lambda x: x.time)
     name = truncate(ranks[-1].name, 40)
@@ -846,6 +852,30 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
         times2 = [rank.time for rank in ranks2]
         scores2 = [rank.score for rank in ranks2]
         rs2 = [rank.rank for rank in ranks2]
+    if compare_ranks is not None:
+        compare_ranks.sort(key=lambda x: x.time)
+        compare_rank = compare_rank or compare_ranks[-1].rank
+        compare_times = [rank.time for rank in compare_ranks]
+        compare_scores = [rank.score for rank in compare_ranks]
+    compare_line_score = rqd.compare_rank_line_score
+    compare_line_time = None
+    if compare_line_score is None and rqd.compare_rank_latest is not None:
+        compare_line_score = rqd.compare_rank_latest.score
+    if rqd.compare_rank_latest is not None:
+        compare_line_time = rqd.compare_rank_latest.time
+    if compare_line_score is None and compare_ranks is not None:
+        compare_line_score = compare_scores[-1]
+    if compare_line_time is None and compare_ranks is not None:
+        compare_line_time = compare_times[-1]
+    if compare_line_time is None:
+        compare_line_time = times[-1]
+    plot_times = list(times)
+    if ranks2 is not None:
+        plot_times.extend(times2)
+    if compare_ranks is not None:
+        plot_times.extend(compare_times)
+    plot_start = min(plot_times)
+    plot_end = max(plot_times)
 
     def _render_player_trace_plot() -> Image.Image:
         fig = Figure(figsize=(12, 8))
@@ -853,18 +883,25 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
         try:
             fig.subplots_adjust(wspace=0, hspace=0)
 
-            draw_day_night_bg(ax, times[0], times[-1])
+            draw_day_night_bg(ax, plot_start, plot_end)
 
             min_score = min(scores)
             max_score = max(scores)
             if ranks2 is not None:
                 min_score = min(min_score, min(scores2))
                 max_score = max(max_score, max(scores2))
+            if compare_ranks is not None:
+                min_score = min(min_score, min(compare_scores))
+                max_score = max(max_score, max(compare_scores))
+            if compare_line_score is not None:
+                min_score = min(min_score, compare_line_score)
+                max_score = max(max_score, compare_line_score)
 
             lines = []
 
             color_p1 = ("royalblue", "cornflowerblue")
             color_p2 = ("orangered", "coral")
+            color_compare = "dimgray"
 
             # 绘制分数
             (line_score,) = ax.plot(
@@ -901,7 +938,54 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     path_effects=PLOT_LABEL_PATH_EFFECTS,
                 )
 
+            if compare_ranks is not None:
+                compare_label = f"T{compare_rank}分数线" if compare_rank else "参考分数线"
+                (line_compare_score,) = ax.plot(
+                    compare_times,
+                    compare_scores,
+                    "o",
+                    label=compare_label,
+                    color=color_compare,
+                    markersize=1,
+                    linewidth=0.5,
+                    linestyle="--",
+                    alpha=0.85,
+                )
+                lines.append(line_compare_score)
+                ax.annotate(
+                    f"{compare_label} {get_board_score_str(compare_scores[-1])}",
+                    xy=(compare_times[-1], compare_scores[-1]),
+                    xytext=(compare_times[-1], compare_scores[-1]),
+                    color=color_compare,
+                    fontsize=12,
+                    ha="right",
+                    path_effects=PLOT_LABEL_PATH_EFFECTS,
+                )
+
+            if compare_line_score is not None:
+                line_label = f"T{compare_rank}当前" if compare_rank else "参考当前"
+                line_latest = ax.axhline(
+                    y=compare_line_score,
+                    color="gray",
+                    linestyle=":",
+                    linewidth=0.8,
+                    alpha=0.9,
+                    label=line_label,
+                )
+                lines.append(line_latest)
+                ax.text(
+                    compare_line_time,
+                    compare_line_score,
+                    f"{line_label}: {get_board_score_str(compare_line_score)}",
+                    color="gray",
+                    fontsize=12,
+                    ha="right",
+                    va="bottom",
+                    path_effects=PLOT_LABEL_PATH_EFFECTS,
+                )
+
             ax.set_ylim(min_score * 0.95, max_score * 1.05)
+            ax.set_xlim(plot_start, plot_end)
             ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(x)))
             ax.grid(True, linestyle="-", alpha=0.3, color="gray")
             # 绘制排名
@@ -944,7 +1028,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
             ax2.set_ylim(110, -10)
 
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=times[0].tzinfo))
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=plot_start.tzinfo))
             ax.xaxis.set_major_locator(mdates.AutoDateLocator())
             fig.autofmt_xdate()
 
