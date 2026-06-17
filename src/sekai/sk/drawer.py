@@ -893,7 +893,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
             if compare_ranks is not None:
                 min_score = min(min_score, min(compare_scores))
                 max_score = max(max_score, max(compare_scores))
-            if compare_line_score is not None:
+            if compare_line_score is not None and compare_ranks is None:
                 min_score = min(min_score, compare_line_score)
                 max_score = max(max_score, compare_line_score)
 
@@ -962,7 +962,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                     path_effects=PLOT_LABEL_PATH_EFFECTS,
                 )
 
-            if compare_line_score is not None:
+            if compare_line_score is not None and compare_ranks is None:
                 line_label = f"T{compare_rank}当前" if compare_rank else "参考当前"
                 line_latest = ax.axhline(
                     y=compare_line_score,
