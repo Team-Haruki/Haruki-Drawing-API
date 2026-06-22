@@ -1,12 +1,15 @@
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import time
+from typing import Any
 
 from PIL import Image, ImageDraw
 
 from src.sekai.base.draw import (
     BG_PADDING,
+    CHARACTER_COLOR_CODE,
     DIFF_COLORS,
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
@@ -22,6 +25,7 @@ from src.sekai.base.painter import (
     RED,
     WHITE,
     Painter,
+    color_code_to_rgb,
     get_font,
     get_text_size,
     resize_keep_ratio,
@@ -144,12 +148,23 @@ CHARA_ID2NICKNAME = {
     20: "mzk",
 }
 
+MODULAR_DIFF_LABELS = {
+    "easy": "EASY",
+    "normal": "NORM",
+    "hard": "HARD",
+    "expert": "EXPR",
+    "master": "MAST",
+    "append": "APPD",
+}
+
 # =========================== 从.model导入数据类型 =========================== #
 
 from .model import (
     BasicProfile,
     CardFullThumbnailRequest,
     CharacterRank,
+    ModularProfileRenderRequest,
+    ModularProfileWidget,
     MultiLiveTopScoreCount,
     MusicClearCount,
     ProfileBgSettings,
@@ -889,6 +904,912 @@ async def _build_profile_layout_modules(ctx: _ProfileLayoutContext) -> dict[str,
         "play": play_module,
         "growth": growth_module,
     }
+
+
+def _format_modular_number(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _coerce_card_full_thumbnail(value: Any) -> CardFullThumbnailRequest | None:
+    if isinstance(value, CardFullThumbnailRequest):
+        return value
+    if isinstance(value, dict):
+        try:
+            return CardFullThumbnailRequest.model_validate(value)
+        except ValueError:
+            logger.warning("skip invalid modular profile card payload: %s", value)
+    return None
+
+
+def _coerce_music_clear_count(value: Any) -> MusicClearCount | None:
+    if isinstance(value, MusicClearCount):
+        return value
+    if isinstance(value, dict):
+        try:
+            return MusicClearCount.model_validate(value)
+        except ValueError:
+            logger.warning("skip invalid modular profile music count payload: %s", value)
+    return None
+
+
+def _coerce_character_rank(value: Any) -> CharacterRank | None:
+    if isinstance(value, CharacterRank):
+        return value
+    if isinstance(value, dict):
+        try:
+            return CharacterRank.model_validate(value)
+        except ValueError:
+            logger.warning("skip invalid modular profile character rank payload: %s", value)
+    return None
+
+
+def _coerce_honor_request(value: Any) -> HonorRequest | None:
+    if isinstance(value, HonorRequest):
+        return value
+    if isinstance(value, dict):
+        try:
+            return HonorRequest.model_validate(value)
+        except ValueError:
+            logger.warning("skip invalid modular profile honor payload: %s", value)
+    return None
+
+
+def _modular_character_groups(ranks: list[CharacterRank]) -> list[tuple[str, float]]:
+    by_id = {rank.character_id: rank.rank for rank in ranks}
+    groups = [
+        ("VS", [21, 22, 23, 24, 25, 26]),
+        ("LN", [1, 2, 3, 4]),
+        ("MMJ", [5, 6, 7, 8]),
+        ("VBS", [9, 10, 11, 12]),
+        ("WxS", [13, 14, 15, 16]),
+        ("25", [17, 18, 19, 20]),
+    ]
+    values: list[tuple[str, float]] = []
+    for label, ids in groups:
+        group_values = [by_id[cid] for cid in ids if cid in by_id]
+        values.append((label, sum(group_values) / len(group_values) if group_values else 0))
+    return values
+
+
+def _modular_character_label(character_id: int) -> str:
+    return CHARA_ID2NICKNAME.get(character_id, str(character_id)).upper()
+
+
+def _modular_character_color(character_id: int) -> tuple[int, int, int, int]:
+    code = CHARACTER_COLOR_CODE.get(character_id)
+    if not code:
+        return (*PLAY_RESULT_COLORS["fc"][:3], 220)
+    color = color_code_to_rgb(code)
+    return int(color[0]), int(color[1]), int(color[2]), 220
+
+
+def _modular_character_text_color(color: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    brightness = color[0] * 0.299 + color[1] * 0.587 + color[2] * 0.114
+    return BLACK if brightness > 178 else WHITE
+
+
+def _build_modular_character_marker(
+    character_id: int,
+    *,
+    width: int = 66,
+    height: int = 30,
+    font_size: int = 13,
+) -> Widget:
+    color = _modular_character_color(character_id)
+    return (
+        TextBox(
+            _modular_character_label(character_id),
+            TextStyle(font=DEFAULT_BOLD_FONT, size=font_size, color=_modular_character_text_color(color)),
+        )
+        .set_bg(RoundRectBg(fill=color, radius=height // 2))
+        .set_size((width, height))
+        .set_content_align("c")
+        .set_padding(0)
+        .set_wrap(False)
+    )
+
+
+def _modular_chara_icon_path_map(rqd: ModularProfileRenderRequest, widget: ModularProfileWidget | None = None) -> dict:
+    raw_map = None
+    if widget is not None:
+        raw_map = widget.data.get("chara_rank_icon_path_map")
+    if not raw_map:
+        raw_map = rqd.resources.get("chara_rank_icon_path_map")
+    return raw_map if isinstance(raw_map, dict) else {}
+
+
+async def _build_modular_character_icon_marker(
+    character_id: int,
+    icon_map: dict,
+    *,
+    size: tuple[int, int] = (72, 36),
+) -> Widget:
+    path = icon_map.get(character_id) or icon_map.get(str(character_id))
+    if path:
+        try:
+            icon = await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+            return ImageBox(icon, size=size, use_alpha_blend=True)
+        except (FileNotFoundError, OSError, ValueError):
+            logger.warning("skip broken modular character icon: %s", path)
+    return _build_modular_character_marker(character_id, width=size[0], height=size[1])
+
+
+async def _build_modular_character_rank_icon_widget(
+    character_id: int,
+    rank: int,
+    icon_map: dict,
+    *,
+    size: tuple[int, int] = (112, 56),
+) -> Widget:
+    path = icon_map.get(character_id) or icon_map.get(str(character_id))
+    if not path:
+        row = HSplit().set_item_align("c").set_content_align("c").set_sep(8)
+        row.add_item(_build_modular_character_marker(character_id, width=64, height=32))
+        row.add_item(TextBox(str(rank), TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=ADAPTIVE_WB)))
+        return row
+
+    try:
+        icon = await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+    except (FileNotFoundError, OSError, ValueError):
+        logger.warning("skip broken modular character rank icon: %s", path)
+        return await _build_modular_character_icon_marker(character_id, icon_map, size=size)
+
+    width, height = size
+    frame = Frame().set_size(size).set_content_align("c").set_allow_draw_outside(True)
+    frame.add_item(ImageBox(icon, size=size, use_alpha_blend=True))
+    rank_box_x = int(width * 36 / 96)
+    rank_box_w = max(28, int(width * 60 / 96))
+    frame.add_item(
+        TextBox(str(rank), TextStyle(font=DEFAULT_BOLD_FONT, size=max(18, int(height * 0.48)), color=BLACK))
+        .set_size((rank_box_w, height))
+        .set_content_align("c")
+        .set_padding(0)
+        .set_offset((rank_box_x, max(0, int(height * 4 / 48))))
+    )
+    return frame
+
+
+def _modular_card_bundle_name(card_thumbnail_path: str) -> tuple[str, str] | None:
+    filename = card_thumbnail_path.replace("\\", "/").rsplit("/", 1)[-1]
+    for state in ("after_training", "normal"):
+        suffix = f"_{state}.png"
+        if filename.endswith(suffix):
+            return filename[: -len(suffix)], state
+    return None
+
+
+def _modular_card_art_candidates(card: CardFullThumbnailRequest) -> list[str]:
+    normalized = card.card_thumbnail_path.replace("\\", "/").strip()
+    bundle_state = _modular_card_bundle_name(normalized)
+    if bundle_state is None:
+        return []
+
+    bundle, state = bundle_state
+    if card.is_after_training is not None:
+        state = "after_training" if card.is_after_training else "normal"
+    filename = normalized.rsplit("/", 1)[-1]
+    member_file = f"card_{state}.png"
+    candidates: list[str] = []
+    if "/thumbnail/chara/" in normalized:
+        base = normalized.replace("/thumbnail/chara/", "/character/member/")
+        candidates.append(base.replace(filename, f"{bundle}/{member_file}"))
+        base_small = normalized.replace("/thumbnail/chara/", "/character/member_small/")
+        candidates.append(base_small.replace(filename, f"{bundle}/{member_file}"))
+    candidates.extend(
+        [
+            f"asset/cn-assets/startapp/character/member/{bundle}/{member_file}",
+            f"asset/cn-assets/startapp/character/member_small/{bundle}/{member_file}",
+        ]
+    )
+    return candidates
+
+
+async def _load_modular_card_image(card: CardFullThumbnailRequest, *, prefer_full_art: bool) -> Image.Image:
+    if prefer_full_art:
+        for candidate in _modular_card_art_candidates(card):
+            try:
+                return await get_img_from_path(ASSETS_BASE_DIR, candidate, on_missing="raise")
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+    return await get_img_from_path(ASSETS_BASE_DIR, card.card_thumbnail_path)
+
+
+def _modular_widget_rect(
+    widget: ModularProfileWidget,
+    *,
+    cell_width: int,
+    row_height: int,
+    gutter: int,
+    padding: int,
+) -> tuple[int, int, int, int]:
+    frame = widget.frame
+    x = padding + max(0, frame.x) * (cell_width + gutter)
+    y = padding + max(0, frame.y) * (row_height + gutter)
+    width = max(1, frame.w) * cell_width + max(0, frame.w - 1) * gutter
+    height = max(1, frame.h) * row_height + max(0, frame.h - 1) * gutter
+    return x, y, width, height
+
+
+def _round_modular_image(img: Image.Image, radius: int = 10) -> Image.Image:
+    rounded = img.convert("RGBA").copy()
+    mask = Image.new("L", rounded.size, 0)
+    draw = ImageDraw.Draw(mask)
+    draw.rounded_rectangle((0, 0, rounded.width, rounded.height), radius=radius, fill=255)
+    rounded.putalpha(mask)
+    return rounded
+
+
+class _ModularProfileGridCanvas(Widget):
+    def __init__(self, size: tuple[int, int]) -> None:
+        super().__init__()
+        self.canvas_size = size
+        self.positioned_items: list[tuple[Widget, tuple[int, int]]] = []
+        self.set_size(size)
+        self.set_padding(0)
+        self.set_content_align("lt")
+
+    def add_positioned_item(self, item: Widget, offset: tuple[int, int]) -> None:
+        item.set_parent(self)
+        self.positioned_items.append((item, offset))
+
+    def _get_content_size(self) -> tuple[int, int]:
+        return self.canvas_size
+
+    def _draw_content(self, p: Painter) -> None:
+        for item, (x, y) in self.positioned_items:
+            w, h = item._get_self_size()
+            p.move_region((x, y), (w, h))
+            item.draw(p)
+            p.restore_region()
+
+
+def _modular_panel_content_size(size: tuple[int, int], title: str | None) -> tuple[int, int]:
+    width, height = size
+    pad_x = 16 if title else 12
+    pad_y = 12 if title else 10
+    title_h = 22 if title else 0
+    title_gap = 6 if title else 0
+    return max(1, width - pad_x * 2), max(1, height - pad_y * 2 - title_h - title_gap)
+
+
+def _build_modular_profile_panel_widget(
+    title: str | None,
+    content: Widget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    width, height = size
+    content_w, content_h = _modular_panel_content_size(size, title)
+    pad_x = 16 if title else 12
+    pad_y = 12 if title else 10
+    root = (
+        VSplit()
+        .set_bg(ui_bg)
+        .set_size((width, height))
+        .set_padding((pad_x, pad_y))
+        .set_sep(6)
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_allow_draw_outside(True)
+    )
+    if title:
+        root.add_item(
+            TextBox(title, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=ADAPTIVE_WB))
+            .set_size((content_w, 22))
+            .set_content_align("l")
+            .set_padding(0)
+            .set_wrap(False)
+            .set_omit_parent_bg(True)
+        )
+    content_frame = (
+        Frame().set_size((content_w, content_h)).set_content_align("c").set_padding(0).set_allow_draw_outside(True)
+    )
+    content_frame.add_item(content)
+    root.add_item(content_frame)
+    return root
+
+
+async def _build_modular_profile_summary_plot_widget(
+    rqd: ModularProfileRenderRequest,
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    avatar_w = min(112, max(72, content_h - 4))
+    avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
+    avatar = await get_avatar_widget_with_frame(
+        is_frame=bool(rqd.profile.has_frame),
+        frame_paths=None,
+        avatar_img=avatar_img,
+        avatar_w=avatar_w,
+        frame_data=[],
+    )
+
+    identity_w = max(180, content_w - avatar_w - 26)
+    identity = VSplit().set_item_align("l").set_content_align("c").set_sep(8).set_w(identity_w)
+    identity.add_item(
+        colored_text_box(
+            truncate(rqd.profile.nickname, 64),
+            TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=ADAPTIVE_WB, use_shadow=True, shadow_offset=2),
+        )
+    )
+    uid = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
+    identity.add_item(
+        TextBox(
+            f"{rqd.profile.region.upper()}: {uid}",
+            TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
+            line_count=1,
+        )
+        .set_w(identity_w)
+        .set_wrap(False)
+        .set_padding(0)
+    )
+    lv_rank_bg_path = rqd.resources.get("lv_rank_bg_path")
+    if lv_rank_bg_path:
+        try:
+            lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, str(lv_rank_bg_path), on_missing="raise")
+            badge_w = min(190, max(150, identity_w // 2))
+            badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
+            rank_badge = Frame().set_size((badge_w, badge_h))
+            rank_badge.add_item(ImageBox(lv_rank_bg, size=(badge_w, badge_h)))
+            number_box_x = int(badge_w * 104 / 180)
+            number_box_w = max(44, badge_w - number_box_x - 8)
+            rank_badge.add_item(
+                TextBox(
+                    f"{widget.data.get('rank') or 0}",
+                    TextStyle(font=DEFAULT_FONT, size=max(24, int(badge_h * 0.6)), color=WHITE),
+                )
+                .set_size((number_box_w, badge_h))
+                .set_padding(0)
+                .set_wrap(False)
+                .set_content_align("c")
+                .set_offset((number_box_x, 0))
+            )
+            identity.add_item(rank_badge)
+        except (FileNotFoundError, OSError, ValueError):
+            logger.warning("skip broken modular profile rank bg: %s", lv_rank_bg_path)
+            identity.add_item(
+                _build_profile_stats_badge(f"Rank {_format_modular_number(widget.data.get('rank'))}", font_size=16)
+            )
+    else:
+        identity.add_item(
+            _build_profile_stats_badge(f"Rank {_format_modular_number(widget.data.get('rank'))}", font_size=16)
+        )
+
+    row = HSplit().set_content_align("c").set_item_align("c").set_sep(18)
+    row.add_item(avatar)
+    row.add_item(identity)
+    return _build_modular_profile_panel_widget(widget.title, row, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_deck_plot_widget(
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    raw_cards = widget.data.get("cards") or []
+    cards = [_coerce_card_full_thumbnail(raw) for raw in raw_cards]
+    cards = [card for card in cards if card is not None][:5]
+    if not cards:
+        content = TextBox("暂无队伍卡面", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB))
+        return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+    card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in cards], return_exceptions=True)
+    valid_imgs = [img for img in card_imgs if isinstance(img, Image.Image)]
+    card_size = min(104, content_h, max(54, (content_w - 8 * max(0, len(valid_imgs) - 1)) // max(1, len(valid_imgs))))
+    row = HSplit().set_content_align("c").set_item_align("c").set_sep(8)
+    for card_img in valid_imgs:
+        row.add_item(
+            ImageBox(card_img, size=(card_size, card_size), image_size_mode="fill", shadow=True, shadow_width=4)
+        )
+    return _build_modular_profile_panel_widget(widget.title, row, size=size, ui_bg=ui_bg)
+
+
+def _build_modular_fc_ap_plot_widget(
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    raw_counts = widget.data.get("counts") or []
+    counts = [_coerce_music_clear_count(raw) for raw in raw_counts]
+    diff_count = _build_profile_diff_count([count for count in counts if count is not None])
+
+    hs, vs = 5, 6
+    gw = max(34, min(70, (content_w - hs * 5) // 6))
+    gh = max(18, min(24, (content_h - vs * 3) // 4))
+    grid = Grid(col_count=6).set_sep(h_sep=hs, v_sep=vs)
+    for diff, color in DIFF_COLORS.items():
+        grid.add_item(
+            TextBox(
+                MODULAR_DIFF_LABELS.get(diff, diff.upper()[:4]),
+                TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=WHITE),
+            )
+            .set_bg(RoundRectBg(fill=color, radius=3))
+            .set_size((gw, gh))
+            .set_content_align("c")
+        )
+
+    for result_name in ["clear", "fc", "ap"]:
+        for column, diff in enumerate(DIFF_COLORS.keys()):
+            bg_color = (255, 255, 255, 150) if column % 2 == 0 else (255, 255, 255, 100)
+            count = diff_count[diff][result_name]
+            grid.add_item(
+                TextBox(
+                    str(count),
+                    TextStyle(
+                        DEFAULT_FONT,
+                        16,
+                        PLAY_RESULT_COLORS["not_clear"],
+                        use_shadow=True,
+                        shadow_color=PLAY_RESULT_COLORS[result_name],
+                        shadow_offset=1,
+                    ),
+                )
+                .set_bg(RoundRectBg(fill=bg_color, radius=3))
+                .set_size((gw, gh))
+                .set_content_align("c")
+            )
+    return _build_modular_profile_panel_widget(widget.title, grid, size=size, ui_bg=ui_bg)
+
+
+def _build_modular_radar_image(ranks: list[CharacterRank], size: tuple[int, int]) -> Image.Image:
+    width, height = size
+    image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    groups = _modular_character_groups(ranks)
+    values = [value for _, value in groups]
+    max_rank = max(100, int(max(values, default=0)))
+    center = (width * 0.42, height * 0.43)
+    radius = max(20, min(width, height) * 0.25)
+    grid_color = (*PLAY_RESULT_COLORS["not_clear"][:3], 135)
+    label_color = (*PLAY_RESULT_COLORS["not_clear"][:3], 230)
+    fill_color = (*PLAY_RESULT_COLORS["fc"][:3], 80)
+    outline_color = (*PLAY_RESULT_COLORS["fc"][:3], 235)
+    for level in (1, 2, 3):
+        points = []
+        for idx in range(len(groups)):
+            angle = -math.pi / 2 + idx * math.tau / len(groups)
+            points.append(
+                (
+                    center[0] + math.cos(angle) * radius * level / 3,
+                    center[1] + math.sin(angle) * radius * level / 3,
+                )
+            )
+        draw.polygon(points, outline=grid_color)
+    radar_points = []
+    font = get_font(DEFAULT_BOLD_FONT, 12)
+    for idx, (label, value) in enumerate(groups):
+        angle = -math.pi / 2 + idx * math.tau / len(groups)
+        end = (center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius)
+        draw.line((center, end), fill=grid_color, width=1)
+        label_pos = (center[0] + math.cos(angle) * (radius + 15), center[1] + math.sin(angle) * (radius + 15))
+        text_w, text_h = get_text_size(font, label)
+        draw.text((label_pos[0] - text_w / 2, label_pos[1] - text_h / 2), label, font=font, fill=label_color)
+        ratio = min(1, value / max_rank)
+        radar_points.append(
+            (
+                center[0] + math.cos(angle) * radius * ratio,
+                center[1] + math.sin(angle) * radius * ratio,
+            )
+        )
+    if radar_points:
+        draw.polygon(radar_points, fill=fill_color, outline=outline_color)
+    return image
+
+
+def _build_modular_character_rank_marker_image(
+    icon: Image.Image | None,
+    character_id: int,
+    rank: int,
+    *,
+    size: tuple[int, int],
+) -> Image.Image:
+    width, height = size
+    if icon is None:
+        color = _modular_character_color(character_id)
+        marker = Image.new("RGBA", size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(marker)
+        draw.rounded_rectangle((0, 0, width - 1, height - 1), radius=height // 2, fill=(*WHITE[:3], 205))
+        draw.ellipse((1, 1, height - 2, height - 2), fill=color)
+        text_color = _modular_character_text_color(color)
+        label_font = get_font(DEFAULT_BOLD_FONT, max(9, int(height * 0.36)))
+        draw.text(
+            (height * 0.5, height * 0.5),
+            _modular_character_label(character_id)[:2],
+            font=label_font,
+            fill=text_color,
+            anchor="mm",
+        )
+    else:
+        marker = icon.convert("RGBA").resize(size, Image.Resampling.BILINEAR)
+
+    draw = ImageDraw.Draw(marker)
+    rank_text = str(rank)
+    font = get_font(DEFAULT_BOLD_FONT, max(11, int(height * 0.52)))
+    text_w, text_h = get_text_size(font, rank_text)
+    x = int(width * 0.69 - text_w / 2)
+    y = int(height * 0.55 - text_h / 2)
+    draw.text((x + 1, y + 1), rank_text, font=font, fill=(*WHITE[:3], 180))
+    draw.text((x, y), rank_text, font=font, fill=BLACK)
+    return marker
+
+
+def _build_modular_full_character_radar_image(
+    ranks: list[CharacterRank],
+    icon_images: dict[int, Image.Image],
+    size: tuple[int, int],
+) -> Image.Image:
+    width, height = size
+    image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    chara_ids = [cid for _chara, cid in CHARA_LIST if cid is not None]
+    rank_lookup = _build_profile_character_rank_lookup(ranks)
+    values = [rank_lookup.get(cid, 1) for cid in chara_ids]
+    max_rank = max(100, max(values, default=1))
+
+    center = (width / 2, height / 2)
+    icon_w, icon_h = 58, 29
+    label_radius = max(80, min(width, height) * 0.42)
+    radius = max(54, label_radius - 42)
+    grid_color = (*PLAY_RESULT_COLORS["not_clear"][:3], 95)
+    fill_color = (*PLAY_RESULT_COLORS["fc"][:3], 55)
+    outline_color = (*PLAY_RESULT_COLORS["fc"][:3], 225)
+
+    for level in (1, 2, 3, 4):
+        level_radius = radius * level / 4
+        points = []
+        for idx in range(len(chara_ids)):
+            angle = -math.pi / 2 + idx * math.tau / len(chara_ids)
+            points.append(
+                (
+                    center[0] + math.cos(angle) * level_radius,
+                    center[1] + math.sin(angle) * level_radius,
+                )
+            )
+        draw.polygon(points, outline=grid_color)
+
+    radar_points = []
+    for idx, character_id in enumerate(chara_ids):
+        angle = -math.pi / 2 + idx * math.tau / len(chara_ids)
+        axis_end = (center[0] + math.cos(angle) * radius, center[1] + math.sin(angle) * radius)
+        draw.line((center, axis_end), fill=grid_color, width=1)
+        ratio = min(1, rank_lookup.get(character_id, 1) / max_rank)
+        point = (center[0] + math.cos(angle) * radius * ratio, center[1] + math.sin(angle) * radius * ratio)
+        radar_points.append(point)
+
+        marker = _build_modular_character_rank_marker_image(
+            icon_images.get(character_id),
+            character_id,
+            rank_lookup.get(character_id, 1),
+            size=(icon_w, icon_h),
+        )
+        marker_x = int(center[0] + math.cos(angle) * label_radius - icon_w / 2)
+        marker_y = int(center[1] + math.sin(angle) * label_radius - icon_h / 2)
+        image.alpha_composite(marker, (marker_x, marker_y))
+
+    if radar_points:
+        draw.polygon(radar_points, fill=fill_color, outline=outline_color)
+        for idx, point in enumerate(radar_points):
+            point_color = _modular_character_color(chara_ids[idx])
+            draw.ellipse(
+                (point[0] - 4, point[1] - 4, point[0] + 4, point[1] + 4),
+                fill=(*point_color[:3], 245),
+                outline=(*WHITE[:3], 200),
+            )
+    return image
+
+
+async def _build_modular_character_radar_plot_widget(
+    rqd: ModularProfileRenderRequest,
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    raw_ranks = widget.data.get("character_rank") or []
+    ranks = [_coerce_character_rank(raw) for raw in raw_ranks]
+    ranks = [rank for rank in ranks if rank is not None]
+    radar_img = _build_modular_radar_image(ranks, (min(170, content_w), content_h))
+    stats = VSplit().set_item_align("c").set_content_align("c").set_sep(8)
+    avg = int(sum(rank.rank for rank in ranks) / len(ranks)) if ranks else 0
+    highest_rank = max(ranks, key=lambda rank: rank.rank, default=None)
+    stats.add_item(_build_profile_stats_badge(f"AVG {avg}", font_size=16))
+    if highest_rank is not None:
+        stats.add_item(_build_profile_stats_badge("MAX", font_size=14, width=86))
+        stats.add_item(
+            await _build_modular_character_rank_icon_widget(
+                highest_rank.character_id,
+                highest_rank.rank,
+                _modular_chara_icon_path_map(rqd, widget),
+                size=(112, 56),
+            )
+        )
+    else:
+        stats.add_item(_build_profile_stats_badge("MAX 0", font_size=16))
+    row = HSplit().set_content_align("c").set_item_align("c").set_sep(10)
+    row.add_item(ImageBox(radar_img, image_size_mode="original", use_alpha_blend=True))
+    row.add_item(stats)
+    return _build_modular_profile_panel_widget(widget.title, row, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_full_character_radar_plot_widget(
+    rqd: ModularProfileRenderRequest,
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    raw_ranks = widget.data.get("character_rank") or []
+    ranks = [_coerce_character_rank(raw) for raw in raw_ranks]
+    ranks = [rank for rank in ranks if rank is not None]
+    icon_map = _modular_chara_icon_path_map(rqd, widget)
+    chara_ids = [cid for _chara, cid in CHARA_LIST if cid is not None]
+    icon_images: dict[int, Image.Image] = {}
+    for character_id in chara_ids:
+        path = icon_map.get(character_id) or icon_map.get(str(character_id))
+        if not path:
+            continue
+        try:
+            icon_images[character_id] = await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+        except (FileNotFoundError, OSError, ValueError):
+            logger.warning("skip broken modular full radar icon: %s", path)
+    radar_img = _build_modular_full_character_radar_image(ranks, icon_images, (content_w, content_h))
+    content = ImageBox(radar_img, image_size_mode="original", use_alpha_blend=True)
+    return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_single_character_plot_widget(
+    rqd: ModularProfileRenderRequest,
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    rank = _coerce_character_rank(widget.data.get("character_rank"))
+    if rank is None:
+        content = VSplit().set_item_align("c").set_content_align("c").set_sep(8)
+        content.add_item(TextBox("未配置", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB)))
+    else:
+        content_w, content_h = _modular_panel_content_size(size, widget.title)
+        content = Frame().set_size((content_w, content_h)).set_content_align("c").set_allow_draw_outside(True)
+        icon_h = min(content_h, 86)
+        icon_w = min(content_w, icon_h * 2)
+        content.set_items(
+            [
+                await _build_modular_character_rank_icon_widget(
+                    rank.character_id,
+                    rank.rank,
+                    _modular_chara_icon_path_map(rqd, widget),
+                    size=(icon_w, icon_h),
+                )
+            ]
+        )
+    return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_single_card_plot_widget(
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    card = _coerce_card_full_thumbnail(widget.data.get("card"))
+    if card is None:
+        content = TextBox("未配置", TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB))
+    else:
+        prefer_full_art = size[0] >= size[1] or size[1] > size[0] * 1.35
+        card_img = await _load_modular_card_image(card, prefer_full_art=prefer_full_art)
+        if prefer_full_art:
+            content = ImageBox(
+                _round_modular_image(card_img, radius=10),
+                size=(content_w, content_h),
+                image_size_mode="fill",
+                shadow=True,
+                shadow_width=4,
+            )
+        else:
+            card_size = min(104, content_w, content_h)
+            content = ImageBox(
+                card_img, size=(card_size, card_size), image_size_mode="fill", shadow=True, shadow_width=4
+            )
+    return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_event_plot_widget(
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    content_w, content_h = _modular_panel_content_size(size, widget.title)
+    rank = widget.data.get("rank")
+    pt = widget.data.get("pt")
+    banner_path = widget.data.get("banner_path")
+    badge_text = widget.data.get("badge_text")
+    event_honor = _coerce_honor_request(widget.data.get("event_honor") or widget.data.get("honor"))
+    banner_img: Image.Image | None = None
+    if banner_path:
+        try:
+            banner_img = await get_img_from_path(ASSETS_BASE_DIR, str(banner_path), on_missing="raise")
+        except (FileNotFoundError, OSError, ValueError):
+            logger.warning("skip broken modular event banner: %s", banner_path)
+
+    stats = VSplit().set_item_align("l").set_content_align("c").set_sep(8)
+    if event_honor is not None:
+        try:
+            honor_img = await compose_full_honor_image(event_honor)
+            if honor_img is not None:
+                stats.add_item(
+                    ImageBox(
+                        honor_img,
+                        size=(min(200, content_w), None),
+                        image_size_mode="fit",
+                        shadow=True,
+                        shadow_width=4,
+                    )
+                )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            logger.warning("skip broken modular event honor: %s", exc)
+
+    if rank is None and pt is None:
+        stats.add_item(_build_profile_stats_badge("待配置", font_size=18))
+        stats.add_item(
+            TextBox(
+                "活动排名、PT 和结算时间后续从工具箱预设填入。",
+                TextStyle(font=DEFAULT_FONT, size=15, color=ADAPTIVE_WB),
+                line_count=2,
+            )
+            .set_w(max(120, min(content_w, 300)))
+            .set_wrap(True)
+        )
+    else:
+        stat_row = HSplit().set_item_align("c").set_content_align("l").set_sep(10)
+        rank_badge = str(badge_text).strip() if badge_text else ""
+        if not rank_badge and rank is not None:
+            rank_badge = f"T{_format_modular_number(rank)}"
+        if rank_badge:
+            stat_row.add_item(_build_profile_stats_badge(rank_badge, font_size=16))
+        stat_row.add_item(
+            TextBox(
+                f"#{_format_modular_number(rank)}",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=ADAPTIVE_WB),
+            )
+        )
+        stat_row.add_item(
+            TextBox(
+                f"{_format_modular_number(pt)} pt",
+                TextStyle(font=DEFAULT_FONT, size=18, color=ADAPTIVE_WB),
+            )
+        )
+        stats.add_item(stat_row)
+
+    if banner_img is not None and content_w >= 440:
+        stats_w = max(280, min(330, content_w // 2))
+        banner_w = max(180, content_w - stats_w - 18)
+        banner = ImageBox(
+            _round_modular_image(banner_img, radius=8),
+            size=(banner_w, content_h),
+            image_size_mode="fill",
+            shadow=True,
+            shadow_width=4,
+        )
+        stats.set_w(stats_w)
+        content = HSplit().set_item_align("c").set_content_align("c").set_sep(18)
+        content.add_item(banner)
+        content.add_item(stats)
+    else:
+        content = VSplit().set_item_align("l").set_content_align("c").set_sep(8)
+        if banner_img is not None:
+            content.add_item(
+                ImageBox(
+                    _round_modular_image(banner_img, radius=8),
+                    size=(content_w, min(76, max(42, content_h // 2))),
+                    image_size_mode="fill",
+                    shadow=True,
+                    shadow_width=4,
+                )
+            )
+        content.add_item(stats)
+    return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+
+async def _build_modular_plot_widget(
+    rqd: ModularProfileRenderRequest,
+    widget: ModularProfileWidget,
+    *,
+    size: tuple[int, int],
+    ui_bg: RoundRectBg,
+) -> Widget:
+    match widget.type:
+        case "profile_summary":
+            return await _build_modular_profile_summary_plot_widget(rqd, widget, size=size, ui_bg=ui_bg)
+        case "deck_cards":
+            return await _build_modular_deck_plot_widget(widget, size=size, ui_bg=ui_bg)
+        case "fc_ap_clear":
+            return _build_modular_fc_ap_plot_widget(widget, size=size, ui_bg=ui_bg)
+        case "character_rank_radar":
+            return await _build_modular_character_radar_plot_widget(rqd, widget, size=size, ui_bg=ui_bg)
+        case "character_rank_full_radar":
+            return await _build_modular_full_character_radar_plot_widget(rqd, widget, size=size, ui_bg=ui_bg)
+        case "character_rank_board":
+            return await _build_modular_full_character_radar_plot_widget(rqd, widget, size=size, ui_bg=ui_bg)
+        case "single_character_rank":
+            return await _build_modular_single_character_plot_widget(rqd, widget, size=size, ui_bg=ui_bg)
+        case "single_card":
+            return await _build_modular_single_card_plot_widget(widget, size=size, ui_bg=ui_bg)
+        case "event_rank_pt":
+            return await _build_modular_event_plot_widget(widget, size=size, ui_bg=ui_bg)
+        case _:
+            content = TextBox(widget.type, TextStyle(font=DEFAULT_FONT, size=18, color=ADAPTIVE_WB))
+            return _build_modular_profile_panel_widget(widget.title, content, size=size, ui_bg=ui_bg)
+
+
+async def compose_modular_profile_image(rqd: ModularProfileRenderRequest) -> Image.Image:
+    r"""compose_modular_profile_image
+
+    按 preset 中的网格和模块配置合成个人信息图片。
+    """
+    grid = rqd.preset.grid
+    columns = max(1, grid.columns)
+    row_height = max(80, grid.row_height)
+    cell_width = max(80, grid.cell_width or grid.row_height)
+    gutter = max(0, grid.gutter)
+    padding = max(0, grid.padding)
+    widgets = sorted(rqd.preset.widgets, key=lambda item: (item.frame.y, item.frame.x, item.id))
+    rows = max((widget.frame.y + max(1, widget.frame.h) for widget in widgets), default=1)
+    width = padding * 2 + columns * cell_width + max(0, columns - 1) * gutter
+    height = padding * 2 + rows * row_height + max(0, rows - 1) * gutter
+
+    bg_settings = rqd.bg_settings if rqd.bg_settings is not None else ProfileBgSettings()
+    if bg_settings.img_path:
+        try:
+            bg_img = await get_img_from_path(ASSETS_BASE_DIR, bg_settings.img_path, on_missing="raise")
+            bg = ImageBg(bg_img, blur=False, fade=0)
+        except (FileNotFoundError, OSError, ValueError):
+            bg = SEKAI_BLUE_BG
+    else:
+        bg = SEKAI_BLUE_BG
+    ui_bg = roundrect_bg(
+        fill=(255, 255, 255, bg_settings.alpha),
+        blur_glass=True,
+        blur_glass_kwargs={"blur": bg_settings.blur},
+    )
+
+    root = _ModularProfileGridCanvas((width, height))
+    for widget in widgets:
+        rect = _modular_widget_rect(
+            widget,
+            cell_width=cell_width,
+            row_height=row_height,
+            gutter=gutter,
+            padding=padding,
+        )
+        module = await _build_modular_plot_widget(rqd, widget, size=(rect[2], rect[3]), ui_bg=ui_bg)
+        root.add_positioned_item(module, (rect[0], rect[1]))
+
+    canvas = Canvas(bg=bg).set_padding(0)
+    canvas.add_item(root)
+    add_request_watermark(
+        canvas,
+        rqd,
+        extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
+    )
+    return await canvas.get_img(1.5)
 
 
 async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:

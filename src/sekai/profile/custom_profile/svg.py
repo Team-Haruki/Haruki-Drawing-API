@@ -67,6 +67,8 @@ class TextBreak:
 @dataclass(frozen=True)
 class TextStyleMarker:
     style: TextStyle
+    kind: str | None = None
+    opening: bool = True
 
 
 TextToken = TextRun | TextBreak | TextStyleMarker
@@ -393,7 +395,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     stack = stacks.get(kind)
                     previous = stack.pop() if stack else base_style
                     style = restore_tmp_tag_kind(style, previous, kind)
-                    runs.append(TextStyleMarker(style))
+                    runs.append(TextStyleMarker(style, kind, False))
                     i = end + 1
                     continue
                 next_style = apply_tmp_tag(tag, style)
@@ -409,7 +411,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     if kind is not None:
                         stacks.setdefault(kind, []).append(style)
                     style = next_style
-                    runs.append(TextStyleMarker(style))
+                    runs.append(TextStyleMarker(style, kind, True))
                 i = end + 1
                 continue
         buf.append(value[i])

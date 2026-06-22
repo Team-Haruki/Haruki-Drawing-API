@@ -490,6 +490,8 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
 class StyledLine:
     runs: list[TextRun]
     style: TextStyle
+    start_style: TextStyle | None = None
+    markers: list[tuple[int, TextStyleMarker]] | None = None
     trailing_newline_count: int = 0
 
 
@@ -6370,6 +6372,7 @@ class PNGRenderer:
             line_break_adjusted_ascender: float | None = None
 
             for run_index, run in enumerate(line.runs):
+                x_advance = self.tmp_apply_inline_indent_markers(x_advance, line, run_index, native_margin_width)
                 for char in run.text:
                     if char in {"\r", "\n"}:
                         continue
@@ -6438,6 +6441,12 @@ class PNGRenderer:
             line_break_count = line.trailing_newline_count
             line_break_adjusted_ascender: float | None = None
             for break_index in range(line_break_count):
+                x_advance = self.tmp_apply_inline_indent_markers(
+                    x_advance,
+                    line,
+                    len(line.runs),
+                    native_margin_width,
+                )
                 has_line_character = True
                 (
                     char_info,
@@ -6586,6 +6595,7 @@ class PNGRenderer:
         line_max_x: float | None = None
         dominant_size = line.style.size
         for run_index, run in enumerate(line.runs):
+            x = self.tmp_apply_inline_indent_markers(x, line, run_index, margin_width)
             vertex_padding = self.tmp_native_vertex_padding(font_name, run.style, outline_dilate)
             dominant_size = max(dominant_size, run.style.size)
             scaled_size = run.style.size * self.tmp_font_scale
@@ -6898,14 +6908,52 @@ class PNGRenderer:
         return char == "\t" or (not char.isspace() and char not in {"\u200b", "\u00ad", "\x03"})
 
     def tmp_native_line_initial_x(self, line: StyledLine, margin_width: float = 0.0) -> float:
-        return line.style.indent + line.style.line_indent + self.tmp_style_percent_indent(line.style, margin_width)
+        start_style = line.start_style or line.style
+        return self.tmp_style_indent_value(line.style, margin_width) + self.tmp_style_line_indent_value(
+            start_style,
+            margin_width,
+        )
+
+    def tmp_apply_inline_indent_markers(
+        self,
+        x_advance: float,
+        line: StyledLine,
+        run_index: int,
+        margin_width: float = 0.0,
+    ) -> float:
+        if not line.markers:
+            return x_advance
+        for marker_index, marker in line.markers:
+            if marker_index != run_index:
+                continue
+            if not marker.opening:
+                continue
+            if marker.kind == "line-indent":
+                x_advance += self.tmp_style_line_indent_value(marker.style, margin_width)
+        return x_advance
+
+    def tmp_style_indent_value(self, style: TextStyle, margin_width: float) -> float:
+        return style.indent + margin_width * (style.indent_percent or 0.0)
+
+    def tmp_style_line_indent_value(self, style: TextStyle, margin_width: float) -> float:
+        return style.line_indent + margin_width * (style.line_indent_percent or 0.0)
 
     def tmp_style_percent_indent(self, style: TextStyle, margin_width: float) -> float:
         percent = (style.indent_percent or 0.0) + (style.line_indent_percent or 0.0)
         return margin_width * percent
 
     def tmp_line_indent_percent(self, line: StyledLine) -> float:
-        return (line.style.indent_percent or 0.0) + (line.style.line_indent_percent or 0.0)
+        start_style = line.start_style or line.style
+        values = [
+            (line.style.indent_percent or 0.0) + (start_style.line_indent_percent or 0.0),
+        ]
+        if line.markers:
+            values.extend(
+                marker.style.line_indent_percent or 0.0
+                for _, marker in line.markers
+                if marker.opening and marker.kind == "line-indent"
+            )
+        return max(values, key=abs)
 
     def tmp_lines_have_percent_indent(self, lines: list[StyledLine]) -> bool:
         return any(abs(self.tmp_line_indent_percent(line)) > 1.0e-8 for line in lines)
@@ -9933,12 +9981,12 @@ def is_tmp_block_char(run: TextRun) -> bool:
 def split_runs_by_line_with_style(
     tokens: list[TextBreak | TextRun | TextStyleMarker], base_style: TextStyle
 ) -> list[StyledLine]:
-    lines = [StyledLine([], base_style)]
+    lines = [StyledLine([], base_style, base_style, [])]
     current_style = base_style
 
     def add_break(style: TextStyle) -> None:
         lines[-1].trailing_newline_count += 1
-        lines.append(StyledLine([], style))
+        lines.append(StyledLine([], style, style, []))
 
     for token in tokens:
         if isinstance(token, TextBreak):
@@ -9947,6 +9995,8 @@ def split_runs_by_line_with_style(
         if isinstance(token, TextStyleMarker):
             current_style = token.style
             lines[-1].style = token.style
+            lines[-1].markers = lines[-1].markers or []
+            lines[-1].markers.append((len(lines[-1].runs), token))
             continue
         parts = token.text.split("\n")
         for idx, part in enumerate(parts):

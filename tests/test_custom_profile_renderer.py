@@ -13,8 +13,10 @@ from src.sekai.profile.custom_profile.renderer import (
     build_arg_parser,
     harden_rgba_alpha,
     resize_rgba_premul,
+    split_runs_by_line_with_style,
 )
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
+from src.sekai.profile.custom_profile.svg import TextStyle, parse_tmp_text
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:
@@ -55,6 +57,60 @@ def _make_renderer(
         region=region,
         **renderer_kwargs,
     )
+
+
+def _base_tmp_style() -> TextStyle:
+    return TextStyle(
+        color="#000000",
+        alpha=1.0,
+        size=24.0,
+        scale_x=1.0,
+        cspace=0.0,
+        mspace=None,
+        indent=0.0,
+        line_indent=0.0,
+        line_height=None,
+        rotate=0.0,
+        voffset=0.0,
+        mark_color=None,
+        bold=False,
+        italic=False,
+        underline=False,
+        strike=False,
+    )
+
+
+def test_custom_profile_line_indent_applies_from_tag_position(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(parse_tmp_text("前<line-indent=50%>后", base_style), base_style)[0]
+
+    assert [run.text for run in line.runs] == ["前", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 0.0
+    assert renderer.tmp_apply_inline_indent_markers(10.0, line, 1, 1000.0) == 510.0
+
+
+def test_custom_profile_unknown_tag_text_stays_before_line_indent(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(parse_tmp_text("<ratate=45><line-indent=50%>后", base_style), base_style)[0]
+
+    assert [run.text for run in line.runs] == ["<ratate=45>", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 0.0
+    assert renderer.tmp_apply_inline_indent_markers(123.0, line, 1, 1000.0) == 623.0
+
+
+def test_custom_profile_closing_line_indent_does_not_rewind_current_x(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(
+        parse_tmp_text("<line-indent=50%>前</line-indent>后", base_style),
+        base_style,
+    )[0]
+
+    assert [run.text for run in line.runs] == ["前", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 500.0
+    assert renderer.tmp_apply_inline_indent_markers(510.0, line, 1, 1000.0) == 510.0
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:

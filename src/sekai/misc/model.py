@@ -161,3 +161,9 @@ class AliasListRequest(TimeZoneRequest):
     character_trim_path: str | None = None
     character_silhouette_path: str | None = None
     aliases: list[str]
+
+
+class CommandHelpRenderRequest(TimeZoneRequest):
+    path: str = ""
+    title: str = ""
+    markdown: str

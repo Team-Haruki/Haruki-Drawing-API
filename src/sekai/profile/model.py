@@ -313,6 +313,56 @@ class CustomProfileCardRenderRequest(BaseModel):
     )
 
 
+class ModularProfileGrid(BaseModel):
+    columns: int = 4
+    row_height: int = 156
+    gutter: int = 16
+    padding: int = 24
+    cell_width: int | None = None
+
+
+class ModularProfileWidgetFrame(BaseModel):
+    x: int = 0
+    y: int = 0
+    w: int = 1
+    h: int = 1
+
+
+class ModularProfileWidget(BaseModel):
+    id: str
+    type: str
+    family: str = "medium"
+    title: str | None = None
+    frame: ModularProfileWidgetFrame = Field(default_factory=ModularProfileWidgetFrame)
+    options: dict[str, Any] = Field(default_factory=dict)
+    data: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModularProfilePreset(BaseModel):
+    id: str = "default_widgets_v1"
+    name: str = "默认模块个人信息"
+    source: str = "cloud_default"
+    theme: dict[str, Any] = Field(default_factory=dict)
+    grid: ModularProfileGrid = Field(default_factory=ModularProfileGrid)
+    widgets: list[ModularProfileWidget] = Field(default_factory=list)
+
+
+class ModularProfileRenderRequest(TimeZoneRequest):
+    schema_version: int = 1
+    render_version: int = 1
+    kind: Literal["pjsk_modular_profile"] = "pjsk_modular_profile"
+    region: str = "cn"
+    profile: BasicProfile
+    data_sources: list[ProfileDataSource] = Field(default_factory=list)
+    bg_settings: ProfileBgSettings | None = None
+    preset: ModularProfilePreset
+    profile_context: dict[str, Any] = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("profile_context", "profileContext", "context"),
+    )
+    resources: dict[str, Any] = Field(default_factory=dict)
+
+
 class ProfileRequest(TimeZoneRequest):
     r"""ProfileRequest
 

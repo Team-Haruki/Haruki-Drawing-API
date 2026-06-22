@@ -5,8 +5,8 @@ from fastapi import APIRouter, HTTPException
 from src.core.debug import set_request_stage
 from src.core.utils import image_to_response
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
-from src.sekai.profile.drawer import compose_profile_image
-from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileRequest
+from src.sekai.profile.drawer import compose_modular_profile_image, compose_profile_image
+from src.sekai.profile.model import CustomProfileCardRenderRequest, ModularProfileRenderRequest, ProfileRequest
 
 router = APIRouter(tags=["Profile"])
 logger = logging.getLogger(__name__)
@@ -54,6 +54,19 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
         set_request_stage("custom_profile_card:compose_image")
         image = await compose_custom_profile_card_image(request)
         set_request_stage("custom_profile_card:image_to_response")
+        return await image_to_response(image, export_format="png")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/modular", summary="Generate modular profile image")
+async def modular_profile(request: ModularProfileRenderRequest):
+    try:
+        set_request_stage("modular_profile:compose_image")
+        image = await compose_modular_profile_image(request)
+        set_request_stage("modular_profile:image_to_response")
         return await image_to_response(image, export_format="png")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
