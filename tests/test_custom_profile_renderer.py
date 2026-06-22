@@ -16,7 +16,7 @@ from src.sekai.profile.custom_profile.renderer import (
     split_runs_by_line_with_style,
 )
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
-from src.sekai.profile.custom_profile.svg import TextStyle, parse_tmp_text
+from src.sekai.profile.custom_profile.svg import TextRun, TextStyle, parse_tmp_text
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:
@@ -78,6 +78,17 @@ def _base_tmp_style() -> TextStyle:
         underline=False,
         strike=False,
     )
+
+
+def test_custom_profile_scale_tag_uses_first_tmp_attribute_value() -> None:
+    tokens = parse_tmp_text("<scale=3 4><size=300><#9a4d3b>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.scale_x == 3.0
+    assert runs[0].style.size == 300.0
+    assert runs[0].style.color == "#9a4d3b"
 
 
 def test_custom_profile_line_indent_applies_from_tag_position(tmp_path: Path) -> None:

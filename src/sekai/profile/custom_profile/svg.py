@@ -198,6 +198,11 @@ def parse_tmp_scale(value: str, fallback: float) -> float:
     raw = value.strip()
     if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
         raw = raw[1:-1].strip()
+    if not raw:
+        return fallback
+    # TMP treats whitespace inside tags as attribute separators, so
+    # <scale=3 4> behaves like <scale=3> with a stray ignored attribute.
+    raw = re.split(r"[\s,]+", raw, maxsplit=1)[0]
     try:
         if raw.endswith("%"):
             return float(raw[:-1].strip()) / 100.0
