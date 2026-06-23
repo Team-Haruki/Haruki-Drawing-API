@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
@@ -715,12 +716,72 @@ fn encode_surface(
     })
 }
 
-fn load_image(base: &Path, path: &str) -> Result<Image, String> {
-    let full_path = resolve_asset_path(base, path)?;
-    let bytes = fs::read(&full_path)
+fn decode_image_file(full_path: &Path) -> Result<Image, String> {
+    let bytes = fs::read(full_path)
         .map_err(|err| format!("failed to read {}: {err}", full_path.display()))?;
     let data = Data::new_copy(&bytes);
     Image::from_encoded(data).ok_or_else(|| format!("failed to decode {}", full_path.display()))
+}
+
+struct ImageCacheEntry {
+    image: Image,
+    last_used: u64,
+}
+
+static IMAGE_CACHE: OnceLock<Mutex<HashMap<String, ImageCacheEntry>>> = OnceLock::new();
+static IMAGE_CACHE_TICK: AtomicU64 = AtomicU64::new(0);
+/// Bound on distinct decoded images kept process-wide. skia ``Image`` is ref-counted, so a
+/// clone is cheap; the working set per deployment is a few hundred thumbnails plus shared
+/// frames/icons, so this caps memory while spanning many requests. Mirrors the Pillow global
+/// image pool (CLAUDE.md: prefer the persistent pool over per-request caches).
+const IMAGE_CACHE_CAP: usize = 4096;
+
+/// Decode an asset, caching the decoded ``Image`` process-wide so repeated requests reuse it
+/// instead of re-reading and re-decoding from disk. Keyed by ``(full_path, mtime, size)`` so
+/// the entry self-invalidates when the file changes. Eviction is least-recently-used.
+pub(crate) fn load_image_cached(base: &Path, path: &str) -> Result<Image, String> {
+    let full_path = resolve_asset_path(base, path)?;
+    let meta = fs::metadata(&full_path)
+        .map_err(|err| format!("failed to stat {}: {err}", full_path.display()))?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let key = format!("{}\0{}\0{}", full_path.display(), mtime, meta.len());
+    let tick = IMAGE_CACHE_TICK.fetch_add(1, Ordering::Relaxed);
+    let cache = IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(mut guard) = cache.lock()
+        && let Some(entry) = guard.get_mut(&key)
+    {
+        entry.last_used = tick;
+        return Ok(entry.image.clone());
+    }
+
+    // Decode outside the lock; concurrent decodes of the same key just race to insert.
+    let image = decode_image_file(&full_path)?;
+
+    if let Ok(mut guard) = cache.lock() {
+        if guard.len() >= IMAGE_CACHE_CAP
+            && !guard.contains_key(&key)
+            && let Some(evict) = guard
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(k, _)| k.clone())
+        {
+            guard.remove(&evict);
+        }
+        guard.insert(
+            key,
+            ImageCacheEntry {
+                image: image.clone(),
+                last_used: tick,
+            },
+        );
+    }
+    Ok(image)
 }
 
 fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {

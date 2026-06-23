@@ -18,7 +18,7 @@ use skia_safe::{
 use crate::ir::*;
 use crate::{
     RenderedImage, draw_blur_glass_rect, draw_cover_image, draw_sekai_triangle_background,
-    encode_surface, load_image, load_typeface,
+    encode_surface, load_image_cached, load_typeface,
 };
 
 /// Resolved typefaces for the scene's font roles.
@@ -69,7 +69,9 @@ impl Interp {
         if let Some(image) = self.cache.get(path) {
             return Some(image.clone());
         }
-        match load_image(&self.base, path) {
+        // L1 (per-render, path-keyed) misses fall through to the process-wide decoded-image
+        // cache, which validates by mtime/size and persists across requests.
+        match load_image_cached(&self.base, path) {
             Ok(image) => {
                 self.cache.insert(path.to_string(), image.clone());
                 Some(image)
