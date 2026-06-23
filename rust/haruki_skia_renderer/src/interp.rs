@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, FilterMode, Font, IRect, Image, MaskFilter, MipmapMode,
-    Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Surface, TextBlob, TileMode,
-    Typeface, canvas::SrcRectConstraint, gradient, surfaces,
+    BlurStyle, Canvas, ClipOp, Color, Color4f, FilterMode, Font, IRect, Image, MaskFilter,
+    MipmapMode, Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface,
+    TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, gradient, surfaces,
 };
 
 use crate::ir::*;
@@ -250,50 +250,111 @@ fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
     }
 }
 
+/// Resolve a gradient spec to (colors, positions) where positions are strictly increasing.
+/// `fallback` supplies the 2 endpoint colors when `stops` has fewer than 2 entries.
+fn resolve_gradient_stops(stops: &[GradientStop], fallback: [Color4; 2]) -> (Vec<Color4f>, Vec<f32>) {
+    if stops.len() >= 2 {
+        let mut sorted = stops.to_vec();
+        sorted.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap_or(std::cmp::Ordering::Equal));
+        let mut positions = Vec::with_capacity(sorted.len());
+        let mut last = -1.0_f32;
+        for st in &sorted {
+            let mut p = st.pos.clamp(0.0, 1.0);
+            if p <= last {
+                p = (last + 1e-4).min(1.0);
+            }
+            last = p;
+            positions.push(p);
+        }
+        let colors = sorted.iter().map(|st| color_of(st.color).into()).collect();
+        (colors, positions)
+    } else {
+        (
+            vec![color_of(fallback[0]).into(), color_of(fallback[1]).into()],
+            vec![0.0, 1.0],
+        )
+    }
+}
+
+fn gradient_shader(spec: &GradientSpec, off: (f32, f32)) -> Option<Shader> {
+    match spec {
+        // `method` (combine vs separate) is honored as combine — Skia's native projection.
+        GradientSpec::Linear { c1, c2, stops, p1, p2, .. } => {
+            let fallback = [c1.unwrap_or([0, 0, 0, 255]), c2.unwrap_or([0, 0, 0, 255])];
+            let (colors, positions) = resolve_gradient_stops(stops, fallback);
+            let grad_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+            let grad = gradient::Gradient::new(grad_colors, gradient::Interpolation::default());
+            gradient::shaders::linear_gradient(
+                (
+                    Point::new(p1[0] + off.0, p1[1] + off.1),
+                    Point::new(p2[0] + off.0, p2[1] + off.1),
+                ),
+                &grad,
+                None,
+            )
+        }
+        GradientSpec::Radial { c1, c2, stops, center, radius_px } => {
+            // Painter convention: stop 0 = center (c2), stop 1 = edge (c1).
+            let fallback = [c2.unwrap_or([0, 0, 0, 255]), c1.unwrap_or([0, 0, 0, 255])];
+            let (colors, positions) = resolve_gradient_stops(stops, fallback);
+            let grad_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+            let grad = gradient::Gradient::new(grad_colors, gradient::Interpolation::default());
+            gradient::shaders::radial_gradient(
+                (Point::new(center[0] + off.0, center[1] + off.1), radius_px.max(0.01)),
+                &grad,
+                None,
+            )
+        }
+    }
+}
+
+/// Fallback solid color when a gradient shader can't be built.
+fn gradient_fallback_color(spec: &GradientSpec) -> Color {
+    match spec {
+        GradientSpec::Linear { c2, stops, .. } => stops
+            .last()
+            .map(|s| color_of(s.color))
+            .unwrap_or_else(|| color_of(c2.unwrap_or([0, 0, 0, 255]))),
+        GradientSpec::Radial { c2, stops, .. } => stops
+            .first()
+            .map(|s| color_of(s.color))
+            .unwrap_or_else(|| color_of(c2.unwrap_or([0, 0, 0, 255]))),
+    }
+}
+
+/// Configure a paint's color or shader from a fill.
+fn apply_fill(paint: &mut Paint, fill: &Fill, off: (f32, f32)) {
+    match fill {
+        Fill::Solid(c) => {
+            paint.set_color(color_of(*c));
+        }
+        Fill::Gradient(spec) => match gradient_shader(spec, off) {
+            Some(shader) => {
+                paint.set_shader(shader);
+            }
+            None => {
+                paint.set_color(gradient_fallback_color(spec));
+            }
+        },
+    }
+}
+
 /// A paint pre-configured with the node's fill (solid or gradient shader).
 fn fill_paint(fill: &Fill, off: (f32, f32)) -> Paint {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_style(PaintStyle::Fill);
-    match fill {
-        Fill::Solid(c) => {
-            paint.set_color(color_of(*c));
-        }
-        Fill::Gradient(spec) => match spec {
-            GradientSpec::Linear { c1, c2, p1, p2, .. } => {
-                let colors = [color_of(*c1).into(), color_of(*c2).into()];
-                let gradient_colors =
-                    gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
-                let grad =
-                    gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
-                if let Some(shader) = gradient::shaders::linear_gradient(
-                    (
-                        Point::new(p1[0] + off.0, p1[1] + off.1),
-                        Point::new(p2[0] + off.0, p2[1] + off.1),
-                    ),
-                    &grad,
-                    None,
-                ) {
-                    paint.set_shader(shader);
-                } else {
-                    paint.set_color(color_of(*c2));
-                }
-            }
-            // MVP: radial rendered as its center color; full radial shader is a later pass.
-            GradientSpec::Radial { c2, .. } => {
-                paint.set_color(color_of(*c2));
-            }
-        },
-    }
+    apply_fill(&mut paint, fill, off);
     paint
 }
 
-fn stroke_paint(color: Color4, width: f32) -> Paint {
+/// A stroke paint; `stroke` may be a solid color or a gradient.
+fn stroke_paint(stroke: &Fill, width: f32, off: (f32, f32)) -> Paint {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_style(PaintStyle::Stroke);
     paint.set_stroke_width(width);
-    paint.set_color(color_of(color));
+    apply_fill(&mut paint, stroke, off);
     paint
 }
 
@@ -307,8 +368,8 @@ fn render_rect(canvas: &Canvas, node: &RectNode, off: (f32, f32)) {
     if let Some(fill) = &node.fill {
         canvas.draw_rect(rect, &fill_paint(fill, off));
     }
-    if let Some(stroke) = node.stroke {
-        canvas.draw_rect(rect, &stroke_paint(stroke, node.stroke_width));
+    if let Some(stroke) = &node.stroke {
+        canvas.draw_rect(rect, &stroke_paint(stroke, node.stroke_width, off));
     }
 }
 
@@ -319,13 +380,22 @@ fn render_round_rect(canvas: &Canvas, node: &RoundRectNode, off: (f32, f32)) {
         node.size[0],
         node.size[1],
     );
-    let radii = corner_radii(node.radius, &node.corners);
+    // Per-corner distinct radii (UL, UR, LR, LL) override the uniform radius + toggle.
+    let radii = match node.corner_radii {
+        Some(r) => [
+            Point::new(r[0].max(0.0), r[0].max(0.0)),
+            Point::new(r[1].max(0.0), r[1].max(0.0)),
+            Point::new(r[2].max(0.0), r[2].max(0.0)),
+            Point::new(r[3].max(0.0), r[3].max(0.0)),
+        ],
+        None => corner_radii(node.radius, &node.corners),
+    };
     let rrect = RRect::new_rect_radii(rect, &radii);
     if let Some(fill) = &node.fill {
         canvas.draw_rrect(rrect, &fill_paint(fill, off));
     }
-    if let Some(stroke) = node.stroke {
-        canvas.draw_rrect(rrect, &stroke_paint(stroke, node.stroke_width));
+    if let Some(stroke) = &node.stroke {
+        canvas.draw_rrect(rrect, &stroke_paint(stroke, node.stroke_width, off));
     }
 }
 
@@ -341,13 +411,13 @@ fn render_pie_slice(canvas: &Canvas, node: &PieSliceNode, off: (f32, f32)) {
     if let Some(fill) = &node.fill {
         canvas.draw_arc(oval, node.start_angle, sweep, true, &fill_paint(fill, off));
     }
-    if let Some(stroke) = node.stroke {
+    if let Some(stroke) = &node.stroke {
         canvas.draw_arc(
             oval,
             node.start_angle,
             sweep,
             true,
-            &stroke_paint(stroke, node.stroke_width),
+            &stroke_paint(stroke, node.stroke_width, off),
         );
     }
 }
@@ -504,6 +574,33 @@ mod tests {
         assert_eq!(rendered.width, 64);
         assert_eq!(rendered.height, 48);
         // PNG signature.
+        assert_eq!(
+            &rendered.bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+    }
+
+    #[test]
+    fn renders_gradient_variants_scene() {
+        // Multi-stop linear fill, radial fill, and a gradient stroke + per-corner radii.
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [2, 2], "size": [28, 20],
+              "fill": { "kind": "linear", "p1": [2,2], "p2": [30,2],
+                        "stops": [{"color":[255,0,0,255],"pos":0.0},
+                                  {"color":[0,255,0,255],"pos":0.5},
+                                  {"color":[0,0,255,255],"pos":1.0}] } },
+            { "type": "RoundRect", "pos": [34, 2], "size": [24, 24], "radius": 0,
+              "corner_radii": [10, 0, 10, 0],
+              "fill": { "kind": "radial", "c1": [0,0,0,255], "c2": [255,255,255,255],
+                        "center": [46,14], "radius_px": 12 },
+              "stroke": { "kind": "linear", "p1": [34,2], "p2": [58,26],
+                          "c1": [255,255,0,255], "c2": [255,0,255,255] },
+              "stroke_width": 2 }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.width, 64);
         assert_eq!(
             &rendered.bytes[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]

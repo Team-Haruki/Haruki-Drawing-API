@@ -29,9 +29,53 @@ def _vec(v: Vec2) -> list[float]:
     return [v[0], v[1]]
 
 
-def linear_gradient(c1: Color, c2: Color, p1: Vec2, p2: Vec2, method: str = "combine") -> Node:
-    """A linear-gradient fill usable as the ``fill`` of a shape node."""
-    return {"kind": "linear", "c1": _color(c1), "c2": _color(c2), "p1": _vec(p1), "p2": _vec(p2), "method": method}
+def _fill_value(value: Color | Node) -> Node | list[int]:
+    """A fill/stroke is either a gradient dict (passed through) or an (r,g,b,a) color."""
+    return value if isinstance(value, dict) else _color(value)
+
+
+def _stops(stops: Sequence[tuple[Color, float]]) -> list[Node]:
+    return [{"color": _color(c), "pos": float(p)} for c, p in stops]
+
+
+def linear_gradient(
+    c1: Color | None = None,
+    c2: Color | None = None,
+    p1: Vec2 = (0, 0),
+    p2: Vec2 = (1, 1),
+    method: str = "combine",
+    stops: Sequence[tuple[Color, float]] | None = None,
+) -> Node:
+    """A linear-gradient fill usable as the ``fill``/``stroke`` of a shape node.
+
+    Either pass ``c1``/``c2`` for a 2-stop gradient, or ``stops`` for N stops
+    (list of ``(color, pos)`` with ``pos`` in 0..1).
+    """
+    node: Node = {"kind": "linear", "p1": _vec(p1), "p2": _vec(p2), "method": method}
+    if stops is not None:
+        node["stops"] = _stops(stops)
+    else:
+        node["c1"] = _color(c1 if c1 is not None else (0, 0, 0, 255))
+        node["c2"] = _color(c2 if c2 is not None else (0, 0, 0, 255))
+    return node
+
+
+def radial_gradient(
+    c1: Color | None = None,
+    c2: Color | None = None,
+    center: Vec2 = (0.5, 0.5),
+    radius_px: float = 1.0,
+    stops: Sequence[tuple[Color, float]] | None = None,
+) -> Node:
+    """A radial-gradient fill. ``c2`` is the center color, ``c1`` the edge (Painter's
+    convention). With ``stops``, stop 0 is the center and stop 1 the edge."""
+    node: Node = {"kind": "radial", "center": _vec(center), "radius_px": float(radius_px)}
+    if stops is not None:
+        node["stops"] = _stops(stops)
+    else:
+        node["c1"] = _color(c1 if c1 is not None else (0, 0, 0, 255))
+        node["c2"] = _color(c2 if c2 is not None else (0, 0, 0, 255))
+    return node
 
 
 class IRBuilder:
@@ -81,36 +125,39 @@ class IRBuilder:
         finally:
             self._stack.pop()
 
-    def rect(self, pos: Vec2, size: Vec2, fill: Color | Node | None = None, stroke: Color | None = None,
+    def rect(self, pos: Vec2, size: Vec2, fill: Color | Node | None = None, stroke: Color | Node | None = None,
              stroke_width: float = 1) -> Node:
         node: Node = {"type": "Rect", "pos": _vec(pos), "size": _vec(size)}
         if fill is not None:
-            node["fill"] = fill if isinstance(fill, dict) else _color(fill)
+            node["fill"] = _fill_value(fill)
         if stroke is not None:
-            node["stroke"] = _color(stroke)
+            node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
         return self._add(node)
 
     def roundrect(self, pos: Vec2, size: Vec2, radius: float, fill: Color | Node | None = None,
-                  corners: Sequence[bool] = (True, True, True, True), stroke: Color | None = None,
-                  stroke_width: float = 1) -> Node:
+                  corners: Sequence[bool] = (True, True, True, True), stroke: Color | Node | None = None,
+                  stroke_width: float = 1, corner_radii: Sequence[float] | None = None) -> Node:
         node: Node = {"type": "RoundRect", "pos": _vec(pos), "size": _vec(size), "radius": radius,
                       "corners": [bool(c) for c in corners]}
+        if corner_radii is not None:
+            node["corner_radii"] = [float(r) for r in corner_radii]
         if fill is not None:
-            node["fill"] = fill if isinstance(fill, dict) else _color(fill)
+            node["fill"] = _fill_value(fill)
         if stroke is not None:
-            node["stroke"] = _color(stroke)
+            node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
         return self._add(node)
 
     def pieslice(self, pos: Vec2, size: Vec2, start_angle: float, end_angle: float,
-                 fill: Color | Node | None = None, stroke: Color | None = None, stroke_width: float = 1) -> Node:
+                 fill: Color | Node | None = None, stroke: Color | Node | None = None,
+                 stroke_width: float = 1) -> Node:
         node: Node = {"type": "PieSlice", "pos": _vec(pos), "size": _vec(size),
                       "start_angle": start_angle, "end_angle": end_angle}
         if fill is not None:
-            node["fill"] = fill if isinstance(fill, dict) else _color(fill)
+            node["fill"] = _fill_value(fill)
         if stroke is not None:
-            node["stroke"] = _color(stroke)
+            node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
         return self._add(node)
 

@@ -65,27 +65,47 @@ pub enum Fill {
     Gradient(GradientSpec),
 }
 
-// Some fields (`method`, the radial parameters) are accepted from the IR but not yet
-// consumed by the MVP shader; they are part of the v2 contract for the full gradient pass.
+/// A multi-stop entry: `color` at relative position `pos` (0..1 along the gradient).
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct GradientStop {
+    pub color: Color4,
+    #[serde(default)]
+    pub pos: f32,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
-#[allow(dead_code)]
 pub enum GradientSpec {
     #[serde(rename = "linear")]
     Linear {
-        c1: Color4,
-        c2: Color4,
+        /// Simple 2-stop endpoints (c1@0, c2@1). Ignored when `stops` is non-empty.
+        #[serde(default)]
+        c1: Option<Color4>,
+        #[serde(default)]
+        c2: Option<Color4>,
+        /// Optional N-stop list (>= 2 entries) overriding c1/c2.
+        #[serde(default)]
+        stops: Vec<GradientStop>,
         /// Endpoints in local coordinates.
         p1: Vec2,
         p2: Vec2,
+        /// `combine` = standard vector projection (Skia native). `separate` is Painter's
+        /// nonstandard per-axis average; it is approximated by `combine` (differs only for
+        /// diagonal gradients). Accepted for contract completeness but not separately rendered.
         #[serde(default = "default_gradient_method")]
+        #[allow(dead_code)]
         method: String,
     },
     #[serde(rename = "radial")]
     Radial {
-        /// c1 = edge, c2 = center (Painter's inverted convention, preserved).
-        c1: Color4,
-        c2: Color4,
+        /// c1 = edge, c2 = center (Painter's inverted convention, preserved). Ignored when
+        /// `stops` is non-empty (stop 0 = center, stop 1 = edge).
+        #[serde(default)]
+        c1: Option<Color4>,
+        #[serde(default)]
+        c2: Option<Color4>,
+        #[serde(default)]
+        stops: Vec<GradientStop>,
         center: Vec2,
         radius_px: f32,
     },
@@ -201,8 +221,9 @@ pub struct RectNode {
     pub size: Vec2,
     #[serde(default)]
     pub fill: Option<Fill>,
+    /// A JSON array is a solid stroke color; an object is a gradient stroke.
     #[serde(default)]
-    pub stroke: Option<Color4>,
+    pub stroke: Option<Fill>,
     #[serde(default = "default_stroke_width")]
     pub stroke_width: f32,
 }
@@ -212,12 +233,15 @@ pub struct RoundRectNode {
     pub pos: Vec2,
     pub size: Vec2,
     pub radius: f32,
+    /// Optional per-corner radii (UL, UR, LR, LL); overrides `radius` when present.
+    #[serde(default)]
+    pub corner_radii: Option<[f32; 4]>,
     #[serde(default = "all_corners")]
     pub corners: [bool; 4],
     #[serde(default)]
     pub fill: Option<Fill>,
     #[serde(default)]
-    pub stroke: Option<Color4>,
+    pub stroke: Option<Fill>,
     #[serde(default = "default_stroke_width")]
     pub stroke_width: f32,
 }
@@ -231,7 +255,7 @@ pub struct PieSliceNode {
     #[serde(default)]
     pub fill: Option<Fill>,
     #[serde(default)]
-    pub stroke: Option<Color4>,
+    pub stroke: Option<Fill>,
     #[serde(default = "default_stroke_width")]
     pub stroke_width: f32,
 }
