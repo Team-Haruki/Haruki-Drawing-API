@@ -140,10 +140,13 @@ def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedI
         return _encode_image_payload(image)
 
     if kind == "chara_birthday":
-        from src.sekai.misc.drawer import compose_chara_birthday_image
+        from src.sekai.misc.drawer import compose_chara_birthday_image, try_render_chara_birthday_payload
         from src.sekai.misc.model import CharaBirthdayRequest
 
         request = CharaBirthdayRequest.model_validate(payload)
+        skia_payload = asyncio.run(try_render_chara_birthday_payload(request))
+        if skia_payload is not None:
+            return skia_payload
         image = asyncio.run(compose_chara_birthday_image(request))
         return _encode_image_payload(image)
 

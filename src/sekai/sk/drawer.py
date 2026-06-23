@@ -13,6 +13,7 @@ import matplotlib.patheffects as patheffects
 from matplotlib.ticker import FuncFormatter
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -40,6 +41,7 @@ from src.sekai.base.utils import (
     plt_fig_to_image,
     truncate,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE
 
 from .model import (
@@ -190,7 +192,7 @@ def get_board_score_str(score: int, width: int | None = None) -> str:
     return ret
 
 
-async def compose_skl_image(rqd: SklRequest) -> Image.Image:
+async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
     """
     合成通过排名列表图片 (SKL)
 
@@ -352,11 +354,21 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
                 TextBox("暂无榜线数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_skl_image(rqd: SklRequest) -> Image.Image:
+    return await (await _build_skl_canvas(rqd)).get_img()
+
+
+async def try_render_skl_payload(rqd: SklRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_skl_canvas(rqd))
 
 
 # 合成榜线查询图片
-async def compose_sk_image(rqd: SKRequest) -> Image.Image:
+async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
     """
     合成活动排名查询结果图片 (SK/SKK)
 
@@ -430,11 +442,21 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
                     TextBox(text, style)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img(1.5)
+    return canvas
+
+
+async def compose_sk_image(rqd: SKRequest) -> Image.Image:
+    return await (await _build_sk_canvas(rqd)).get_img(1.5)
+
+
+async def try_render_sk_payload(rqd: SKRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_sk_canvas(rqd), scale=1.5)
 
 
 # 合成查房图片
-async def compose_cf_image(rqd: CFRequest) -> Image.Image:
+async def _build_cf_canvas(rqd: CFRequest) -> Canvas:
     """
     合成查房结果图片 (CF)
 
@@ -557,10 +579,20 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
                     TextBox(text, style)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img(1.5)
+    return canvas
 
 
-async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
+async def compose_cf_image(rqd: CFRequest) -> Image.Image:
+    return await (await _build_cf_canvas(rqd)).get_img(1.5)
+
+
+async def try_render_cf_payload(rqd: CFRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_cf_canvas(rqd), scale=1.5)
+
+
+async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
     """
     合成查水表热力图图片 (CSB)
 
@@ -725,10 +757,22 @@ async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
                             TextBox(*text)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img(1.5 if len(stop_texts) < 10 else 1.0)
+    return canvas, (1.5 if len(stop_texts) < 10 else 1.0)
 
 
-async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
+async def compose_csb_image(rqd: CSBRequest) -> Image.Image:
+    canvas, scale = await _build_csb_canvas(rqd)
+    return await canvas.get_img(scale)
+
+
+async def try_render_csb_payload(rqd: CSBRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    canvas, scale = await _build_csb_canvas(rqd)
+    return await render_canvas_payload(canvas, scale=scale)
+
+
+async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
     """
     合成时速分析图片 (SKS)
 
@@ -808,7 +852,17 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
                 TextBox("暂无时速数据", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)).set_padding(32)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
+    return await (await _build_sks_canvas(rqd)).get_img()
+
+
+async def try_render_sks_payload(rqd: SpeedRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_sks_canvas(rqd))
 
 
 async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
@@ -1192,7 +1246,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
     return await canvas.get_img()
 
 
-async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
+async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
     """
     合成团队战胜率预测图片
 
@@ -1277,4 +1331,14 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
                                 )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img(2.0)
+    return canvas
+
+
+async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
+    return await (await _build_winrate_predict_canvas(rqd)).get_img(2.0)
+
+
+async def try_render_winrate_predict_payload(rqd: WinRateRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_winrate_predict_canvas(rqd), scale=2.0)

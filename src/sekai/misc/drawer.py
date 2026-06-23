@@ -4,6 +4,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
@@ -39,6 +40,7 @@ from src.sekai.base.utils import (
     put_composed_image_cache,
     put_composed_image_disk_cache,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
@@ -455,8 +457,8 @@ def _resolve_alias_panel_widths(
     return best_overflow[1], best_overflow[2], best_overflow[3]
 
 
-async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image:
-    r"""compose_chara_birthday_image
+async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
+    r"""_build_chara_birthday_canvas
 
     合成角色生日图片
 
@@ -467,7 +469,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
 
     Returns
     -------
-    PIL.Image.Image
+    Canvas
     """
     cid = rqd.cid
     month = rqd.month
@@ -483,10 +485,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
-    total_started = time.perf_counter()
-    card_image, sd_image, title_image, card_thumbs, calendar_icons, load_elapsed = await _load_chara_birthday_assets(
-        rqd
-    )
+    card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
 
     # 绘制时间范围的辅助函数
     def draw_time_range(label: str, tr: BirthdayEventTime):
@@ -590,22 +589,17 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
     add_request_watermark(canvas, rqd)
-    render_started = time.perf_counter()
-    image = await canvas.get_img()
-    render_elapsed = time.perf_counter() - render_started
-    total_elapsed = time.perf_counter() - total_started
-    _birthday_perf_logger.info(
-        "birthday render: cid=%s cards=%d characters=%d load=%.3fs render=%.3fs total=%.3fs image=%dx%d",
-        cid,
-        len(cards),
-        len(all_characters),
-        load_elapsed,
-        render_elapsed,
-        total_elapsed,
-        image.width,
-        image.height,
-    )
-    return image
+    return canvas
+
+
+async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image:
+    return await (await _build_chara_birthday_canvas(rqd)).get_img()
+
+
+async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_chara_birthday_canvas(rqd))
 
 
 async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
