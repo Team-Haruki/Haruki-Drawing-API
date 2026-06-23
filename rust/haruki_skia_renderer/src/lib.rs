@@ -33,14 +33,23 @@ fn render_scene(
     let scene: ir::Scene = serde_json::from_slice(ir_json).map_err(|err| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid scene IR: {err}"))
     })?;
-    // Runtime in-memory images, referenced from the IR as "mem:<key>" image paths. Extracted
-    // here under the GIL, then decoded lazily during rendering.
-    let mut mem_images: HashMap<String, Vec<u8>> = HashMap::new();
+    // Runtime in-memory images, referenced from the IR as "mem:<key>". A value is either
+    // encoded bytes (PNG/JPEG) or a (width, height, rgba_bytes) tuple of raw pixels (no
+    // encode/decode). Extracted here under the GIL, materialized lazily during rendering.
+    let mut mem_images: HashMap<String, interp::MemImage> = HashMap::new();
     if let Some(dict) = images {
         for (key, value) in dict.iter() {
             let key: String = key.extract()?;
-            let bytes: Vec<u8> = value.extract::<&[u8]>()?.to_vec();
-            mem_images.insert(key, bytes);
+            let mem = if let Ok((width, height, bytes)) = value.extract::<(i32, i32, Vec<u8>)>() {
+                interp::MemImage::Raw {
+                    width,
+                    height,
+                    bytes,
+                }
+            } else {
+                interp::MemImage::Encoded(value.extract::<&[u8]>()?.to_vec())
+            };
+            mem_images.insert(key, mem);
         }
     }
     let rendered = py

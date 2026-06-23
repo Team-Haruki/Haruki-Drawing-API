@@ -115,13 +115,21 @@ fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> 
     if is_emoji_run { emoji.unwrap_or(main) } else { main }
 }
 
+/// A runtime image shipped alongside the IR and referenced as "mem:<key>".
+pub(crate) enum MemImage {
+    /// PNG/JPEG bytes (decoded via `Image::from_encoded`).
+    Encoded(Vec<u8>),
+    /// Straight (un-premultiplied) RGBA8888 pixels — no encode/decode, just a raster wrap.
+    Raw { width: i32, height: i32, bytes: Vec<u8> },
+}
+
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
 struct Interp {
     base: PathBuf,
     fonts: FontRegistry,
     cache: HashMap<String, Image>,
-    /// Runtime PNG/JPEG bytes referenced as "mem:<key>"; decoded lazily into `cache`.
-    mem_images: HashMap<String, Vec<u8>>,
+    /// Runtime images referenced as "mem:<key>"; materialized lazily into `cache`.
+    mem_images: HashMap<String, MemImage>,
     canvas_w: f32,
     canvas_h: f32,
 }
@@ -131,11 +139,28 @@ impl Interp {
         if let Some(image) = self.cache.get(path) {
             return Some(image.clone());
         }
-        // In-memory images: "mem:<key>" decodes the supplied bytes (cached per render).
+        // In-memory images: "mem:<key>" materializes the supplied bytes (cached per render).
         if let Some(key) = path.strip_prefix("mem:") {
-            let bytes = self.mem_images.get(key)?;
-            let data = skia_safe::Data::new_copy(bytes);
-            let image = Image::from_encoded(data)?;
+            let image = match self.mem_images.get(key)? {
+                MemImage::Encoded(bytes) => Image::from_encoded(skia_safe::Data::new_copy(bytes))?,
+                MemImage::Raw {
+                    width,
+                    height,
+                    bytes,
+                } => {
+                    let info = ImageInfo::new(
+                        (*width, *height),
+                        ColorType::RGBA8888,
+                        AlphaType::Unpremul,
+                        None,
+                    );
+                    skia_safe::images::raster_from_data(
+                        &info,
+                        skia_safe::Data::new_copy(bytes),
+                        *width as usize * 4,
+                    )?
+                }
+            };
             self.cache.insert(path.to_string(), image.clone());
             return Some(image);
         }
@@ -156,7 +181,7 @@ impl Interp {
 
 pub(crate) fn render_scene_inner(
     scene: &Scene,
-    mem_images: HashMap<String, Vec<u8>>,
+    mem_images: HashMap<String, MemImage>,
 ) -> Result<RenderedImage, String> {
     if scene.version != 2 {
         return Err(format!("unsupported scene IR version {}", scene.version));
