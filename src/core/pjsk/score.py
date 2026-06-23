@@ -1,11 +1,15 @@
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.score.drawer import (
     compose_custom_room_score_control_image,
     compose_music_board_image,
     compose_music_meta_image,
     compose_score_control_image,
+    try_render_custom_room_score_control_payload,
+    try_render_music_board_payload,
+    try_render_music_meta_payload,
+    try_render_score_control_payload,
 )
 from src.sekai.score.model import (
     CustomRoomScoreRequest,
@@ -25,6 +29,9 @@ async def score_control(request: ScoreControlRequest):
     Shows optimal score ranges for event point control.
     """
     try:
+        payload = await try_render_score_control_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_score_control_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -39,6 +46,9 @@ async def custom_room_score_control(request: CustomRoomScoreRequest):
     Shows valid event bonus and song combinations for small PT targets.
     """
     try:
+        payload = await try_render_custom_room_score_control_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_custom_room_score_control_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -53,6 +63,9 @@ async def music_meta(request: list[MusicMetaRequest]):
     Shows detailed stats (diff, time, efficiency) for one or more songs.
     """
     try:
+        payload = await try_render_music_meta_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_music_meta_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -67,6 +80,9 @@ async def music_board(request: MusicBoardRequest):
     Shows ranking of songs based on score, efficiency, time etc.
     """
     try:
+        payload = await try_render_music_board_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_music_board_image(request)
         return await image_to_response(image)
     except Exception as e:

@@ -4,6 +4,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -24,6 +25,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.utils import get_img_from_path
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
@@ -62,9 +64,9 @@ def _calc_custom_room_title_width(
 
 
 # 合成控分图片
-async def compose_score_control_image(
+async def _build_score_control_canvas(
     rqd: ScoreControlRequest,
-) -> Image.Image:
+) -> Canvas:
     r"""compose_score_control_image
 
     合成控分图片 (普通房间)
@@ -145,11 +147,11 @@ async def compose_score_control_image(
                                 TextBox(f"{score_max}", style2).set_bg(bg).set_size((gw4, gh)).set_content_align("r")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
 # 合成自定义房间控分图片
-async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -> Image.Image:
+async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -> Canvas:
     r"""compose_custom_room_score_control_image
 
     合成自定义房间控分图片
@@ -287,11 +289,11 @@ async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -
                         ).set_bg(bg)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
 # 合成歌曲meta图片
-async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Image:
+async def _build_music_meta_canvas(requests: list[MusicMetaRequest]) -> Canvas:
     r"""compose_music_meta_image
 
     合成歌曲Meta图片，支持多首歌曲对比
@@ -426,13 +428,13 @@ async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Im
                                     TextBox(f" {multi_skill_account * 100:.1f}%", style2)
 
     add_request_watermark(canvas, requests)
-    return await canvas.get_img()
+    return canvas
 
 
 # 合成歌曲排行图片
-async def compose_music_board_image(
+async def _build_music_board_canvas(
     rqd: MusicBoardRequest,
-) -> Image.Image:
+) -> Canvas:
     r"""compose_music_board_image
 
     合成歌曲排行图片
@@ -591,4 +593,46 @@ async def compose_music_board_image(
                 add_text_column("每秒点击", lambda r: f"{r.tps:.1f}")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_score_control_image(rqd: ScoreControlRequest) -> Image.Image:
+    return await (await _build_score_control_canvas(rqd)).get_img()
+
+
+async def try_render_score_control_payload(rqd: ScoreControlRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_score_control_canvas(rqd))
+
+
+async def compose_custom_room_score_control_image(rqd: CustomRoomScoreRequest) -> Image.Image:
+    return await (await _build_custom_room_score_control_canvas(rqd)).get_img()
+
+
+async def try_render_custom_room_score_control_payload(
+    rqd: CustomRoomScoreRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_custom_room_score_control_canvas(rqd))
+
+
+async def compose_music_meta_image(requests: list[MusicMetaRequest]) -> Image.Image:
+    return await (await _build_music_meta_canvas(requests)).get_img()
+
+
+async def try_render_music_meta_payload(requests: list[MusicMetaRequest]) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_music_meta_canvas(requests))
+
+
+async def compose_music_board_image(rqd: MusicBoardRequest) -> Image.Image:
+    return await (await _build_music_board_canvas(rqd)).get_img()
+
+
+async def try_render_music_board_payload(rqd: MusicBoardRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_music_board_canvas(rqd))
