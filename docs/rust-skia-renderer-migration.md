@@ -101,7 +101,8 @@ Rust 解释器骨架（本阶段新增，与既有 `render_card_list`/`render_ca
 - ⑥ 逐节点对拍 harness 已落地（`tests/test_skia_parity.py`）：单节点同时走 Pillow `Painter` 与 `render_scene`，尺寸硬断言 + 填充 alpha-IoU / 文字 ink-bbox 容差，失败输出 `expected|actual|diff` 三联图到 `out/skia-parity/`。已覆盖 rect / roundrect / pieslice / 线性渐变 / CJK 文字。顺带把 `Text` CjkTop 基线对齐 Painter 的 `'哇'` 参考高度。
 - ⑤ Python `IRBuilder`（`src/sekai/skia_renderer/ir_builder.py`，方法名沿用 Painter，发 v2 节点）已落地。**Card List 与 Card Box 布局都已从 Rust 搬到 Python**：`card_list.py` 的 `build_card_list_scene` 与 `card_box.py` 的 `build_card_box_scene`（含 `_build_box_groups` / `_compute_box_layout` 打包算法的 Python 移植），共享 helper 抽到 `card_common.py`；两个 `render_*_payload` 都改为构建 v2 scene 走 `render_scene` —— **Python 建 IR、Rust 纯解释**的终态在两个端点上都成立。
 - A/B（真实 12 卡）：Card List 与 Rust 路径**逐字节一致**（`621539` bytes，`1036x922`）；Card Box 尺寸严格一致（`1316x368`，证明打包算法移植正确），像素仅 32/484288 处差 1 个通道 LSB（Python f64→JSON→serde f32 与 Rust 直接 f32 的表示噪声，视觉无差）。
-- 待办：扩展对拍覆盖（Image/BlurGlass/对齐变体）；补 radial/adaptive 文本；两端点已全走 Python scene，可移除 Rust `card_scene.rs`、`render_card_list`/`render_card_box` 与旧写死路径（`HARUKI_SKIA_CARD_LEGACY`）作收尾。
+- **Rust 收尾已完成**：两端点全走 Python scene 后,删除了 Rust 侧全部写死 card 代码 —— `card_scene.rs`、`render_card_list`/`render_card_box` 及其 `*_inner`、card draw 函数、`CardListIr`/`CardBoxIr` 等 IR 结构、`build_box_groups`/`compute_box_layout`、`HARUKI_SKIA_CARD_LEGACY` 旧路径。`lib.rs` 从 ~1970 行降到 739 行,PyO3 只暴露 `render_scene`;保留的共享渲染 helper(image 解码、`encode_surface`、`load_typeface`、`draw_blur_glass_rect`、三角形背景、`draw_cover_image`、`SimpleRng`)供 `interp` 复用。Rust 现已收敛为**纯 IR 解释器**。
+- 待办：扩展对拍覆盖（Image/BlurGlass/对齐变体）；补 radial/adaptive 文本；把 Card Box 布局从"抄旧 Pillow"重新定义为有意的布局(旧 Pillow box drawer 自身有容器/内容 2× 溢出 bug,不值得对齐)。
 
 ## 进度表
 
