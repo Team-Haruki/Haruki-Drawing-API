@@ -120,17 +120,27 @@ struct Interp {
     base: PathBuf,
     fonts: FontRegistry,
     cache: HashMap<String, Image>,
+    /// Runtime PNG/JPEG bytes referenced as "mem:<key>"; decoded lazily into `cache`.
+    mem_images: HashMap<String, Vec<u8>>,
     canvas_w: f32,
     canvas_h: f32,
 }
 
 impl Interp {
     fn load(&mut self, path: &str) -> Option<Image> {
-        if !is_safe_asset_path(path) {
-            return None;
-        }
         if let Some(image) = self.cache.get(path) {
             return Some(image.clone());
+        }
+        // In-memory images: "mem:<key>" decodes the supplied bytes (cached per render).
+        if let Some(key) = path.strip_prefix("mem:") {
+            let bytes = self.mem_images.get(key)?;
+            let data = skia_safe::Data::new_copy(bytes);
+            let image = Image::from_encoded(data)?;
+            self.cache.insert(path.to_string(), image.clone());
+            return Some(image);
+        }
+        if !is_safe_asset_path(path) {
+            return None;
         }
         // L1 (per-render, path-keyed) misses fall through to the process-wide decoded-image
         // cache, which validates by mtime/size and persists across requests.
@@ -144,7 +154,10 @@ impl Interp {
     }
 }
 
-pub(crate) fn render_scene_inner(scene: &Scene) -> Result<RenderedImage, String> {
+pub(crate) fn render_scene_inner(
+    scene: &Scene,
+    mem_images: HashMap<String, Vec<u8>>,
+) -> Result<RenderedImage, String> {
     if scene.version != 2 {
         return Err(format!("unsupported scene IR version {}", scene.version));
     }
@@ -157,6 +170,7 @@ pub(crate) fn render_scene_inner(scene: &Scene) -> Result<RenderedImage, String>
         base: PathBuf::from(&scene.assets_base_dir),
         fonts: FontRegistry::build(&scene.fonts),
         cache: HashMap::new(),
+        mem_images,
         canvas_w: scene.canvas.width as f32,
         canvas_h: scene.canvas.height as f32,
     };
@@ -873,7 +887,7 @@ mod tests {
 
     fn render(json: &str) -> RenderedImage {
         let scene: Scene = serde_json::from_str(json).expect("scene parses");
-        render_scene_inner(&scene).expect("renders")
+        render_scene_inner(&scene, HashMap::new()).expect("renders")
     }
 
     #[test]
@@ -968,6 +982,6 @@ mod tests {
     fn rejects_wrong_version() {
         let json = scene_json("").replace("\"version\": 2", "\"version\": 1");
         let scene: Scene = serde_json::from_str(&json).expect("scene parses");
-        assert!(render_scene_inner(&scene).is_err());
+        assert!(render_scene_inner(&scene, HashMap::new()).is_err());
     }
 }

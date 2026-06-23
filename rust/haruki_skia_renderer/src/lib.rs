@@ -24,12 +24,27 @@ mod interp;
 mod ir;
 
 #[pyfunction]
-fn render_scene(py: Python<'_>, ir_json: &[u8]) -> PyResult<Py<PyDict>> {
+#[pyo3(signature = (ir_json, images = None))]
+fn render_scene(
+    py: Python<'_>,
+    ir_json: &[u8],
+    images: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyDict>> {
     let scene: ir::Scene = serde_json::from_slice(ir_json).map_err(|err| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid scene IR: {err}"))
     })?;
+    // Runtime in-memory images, referenced from the IR as "mem:<key>" image paths. Extracted
+    // here under the GIL, then decoded lazily during rendering.
+    let mut mem_images: HashMap<String, Vec<u8>> = HashMap::new();
+    if let Some(dict) = images {
+        for (key, value) in dict.iter() {
+            let key: String = key.extract()?;
+            let bytes: Vec<u8> = value.extract::<&[u8]>()?.to_vec();
+            mem_images.insert(key, bytes);
+        }
+    }
     let rendered = py
-        .detach(|| interp::render_scene_inner(&scene))
+        .detach(|| interp::render_scene_inner(&scene, mem_images))
         .map_err(|err| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("scene render failed: {err}"))
         })?;
