@@ -8,8 +8,10 @@
 
 use crate::ir::*;
 use crate::{
-    BG_PADDING, CARD_H, CARD_SEP, CARD_W, CardIr, CardListIr, GRID_COLS, GRID_PADDING, IconsIr,
-    PANEL_WIDTH, RenderedImage, THUMB, TITLE_H, TITLE_SEP, ThumbnailIr, is_non_limited, rare_count,
+    BG_PADDING, BOX_GROUP_SEP, BoxCardIr, CARD_H, CARD_SEP, CARD_W, CardBoxIr, CardIr, CardListIr,
+    GRID_COLS, GRID_PADDING, IconsIr, PANEL_WIDTH, RenderedImage, THUMB, TITLE_H, TITLE_SEP,
+    ThumbnailIr, build_box_groups, compute_box_layout, is_non_limited, parse_color, rare_count,
+    selected_box_thumbnail,
 };
 
 const WATERMARK_FALLBACK: &str = "Haruki Drawing API";
@@ -211,7 +213,7 @@ fn build_card_cell(card: &CardIr, icons: &IconsIr, now_ms: i64) -> Vec<Node> {
             offset: [tx, 16.0],
             size: [THUMB, THUMB],
             clip: None,
-            children: build_thumbnail(thumb),
+            children: build_thumbnail(thumb, THUMB),
         }));
         if let Some(path) = icon_path {
             nodes.push(Node::Image(ImageNode {
@@ -252,12 +254,17 @@ fn build_card_cell(card: &CardIr, icons: &IconsIr, now_ms: i64) -> Vec<Node> {
     nodes
 }
 
-/// Layered thumbnail composite in its own 100x100 local frame.
-fn build_thumbnail(thumb: &ThumbnailIr) -> Vec<Node> {
+/// Layered thumbnail composite in a `size`x`size` local frame.
+///
+/// The legacy path composes at 100x100 then scales the whole composite to the
+/// target size; we reproduce that by scaling every layer offset/size by `s` at
+/// build time (so the result stays in absolute coords — no matrix scale).
+fn build_thumbnail(thumb: &ThumbnailIr, size: f32) -> Vec<Node> {
+    let s = size / 100.0;
     let mut nodes: Vec<Node> = Vec::new();
     nodes.push(Node::Image(ImageNode {
         pos: [0.0, 0.0],
-        size: [100.0, 100.0],
+        size: [size, size],
         path: thumb.card_thumbnail_path.clone(),
         fit: Fit::Cover,
         alpha: 1.0,
@@ -265,8 +272,8 @@ fn build_thumbnail(thumb: &ThumbnailIr) -> Vec<Node> {
 
     if thumb.is_pcard {
         nodes.push(Node::Rect(RectNode {
-            pos: [0.0, 76.0],
-            size: [100.0, 24.0],
+            pos: [0.0, 76.0 * s],
+            size: [100.0 * s, 24.0 * s],
             fill: solid([70, 70, 100, 255]),
             stroke: None,
             stroke_width: 1.0,
@@ -277,10 +284,10 @@ fn build_thumbnail(thumb: &ThumbnailIr) -> Vec<Node> {
             .unwrap_or_else(|| format!("Lv.{}", thumb.level.unwrap_or_default()));
         nodes.push(Node::Text(TextNode {
             text,
-            pos: [6.0, 92.0],
+            pos: [6.0 * s, 92.0 * s],
             font: FontRef {
                 role: FontRole::Bold,
-                size: 20.0,
+                size: 20.0 * s,
             },
             align: HAlign::Left,
             baseline: Baseline::Alphabetic,
@@ -289,27 +296,27 @@ fn build_thumbnail(thumb: &ThumbnailIr) -> Vec<Node> {
     }
 
     if let Some(path) = thumb.frame_img_path.as_deref() {
-        nodes.push(fit_image(path, 0.0, 0.0, 100.0, 100.0));
+        nodes.push(fit_image(path, 0.0, 0.0, size, size));
     }
     if let Some(path) = thumb.attr_img_path.as_deref() {
-        nodes.push(fit_image(path, 1.0, 0.0, 22.0, 25.0));
+        nodes.push(fit_image(path, 1.0 * s, 0.0, 22.0 * s, 25.0 * s));
     }
     if thumb.is_pcard
         && thumb.train_rank.unwrap_or_default() > 0
         && let Some(path) = thumb.train_rank_img_path.as_deref()
     {
-        nodes.push(fit_image(path, 65.0, 65.0, 35.0, 35.0));
+        nodes.push(fit_image(path, 65.0 * s, 65.0 * s, 35.0 * s, 35.0 * s));
     }
 
     let rare_num = rare_count(&thumb.rare);
-    let rare_w = 17.0;
-    let rare_h = 17.0;
-    let voffset = if thumb.is_pcard { 24.0 } else { 6.0 };
+    let rare_w = 17.0 * s;
+    let rare_h = 17.0 * s;
+    let voffset = if thumb.is_pcard { 24.0 * s } else { 6.0 * s };
     for i in 0..rare_num {
         nodes.push(fit_image(
             &thumb.rare_img_path,
-            6.0 + rare_w * i as f32,
-            100.0 - rare_h - voffset,
+            6.0 * s + rare_w * i as f32,
+            size - rare_h - voffset,
             rare_w,
             rare_h,
         ));
@@ -355,4 +362,225 @@ fn center_text(
         baseline: Baseline::Alphabetic,
         fill,
     })
+}
+
+fn push_watermark(children: &mut Vec<Node>, enabled: bool, text: &str, width: f32, height: f32) {
+    if !enabled {
+        return;
+    }
+    let text = if text.is_empty() {
+        WATERMARK_FALLBACK
+    } else {
+        text
+    };
+    children.push(Node::Text(TextNode {
+        text: text.to_string(),
+        pos: [width - 150.0, height - 10.0],
+        font: FontRef {
+            role: FontRole::Default,
+            size: 12.0,
+        },
+        align: HAlign::Left,
+        baseline: Baseline::Alphabetic,
+        fill: [0, 0, 0, 120],
+    }));
+}
+
+pub(crate) fn render_card_box_via_scene(ir: &CardBoxIr) -> Result<RenderedImage, String> {
+    if ir.version != 1 {
+        return Err(format!("unsupported IR version {}", ir.version));
+    }
+    let scene = build_card_box_scene(ir);
+    crate::interp::render_scene_inner(&scene)
+}
+
+fn build_card_box_scene(ir: &CardBoxIr) -> Scene {
+    let groups = build_box_groups(ir);
+    let layout = compute_box_layout(&groups, ir.show_id);
+    let has_title = ir.title.as_ref().is_some_and(|s| !s.is_empty());
+    let title_h = if has_title { TITLE_H + TITLE_SEP } else { 0.0 };
+    let panel_h = layout.panel_height;
+    let width = (layout.panel_width + BG_PADDING * 2.0).ceil() as i32;
+    let height = (BG_PADDING * 2.0 + title_h + panel_h).ceil() as i32;
+
+    let mut children: Vec<Node> = Vec::new();
+    let mut y = BG_PADDING;
+    if has_title {
+        let title = ir.title.as_deref().unwrap_or_default();
+        push_notice_title(&mut children, BG_PADDING, y, layout.panel_width, title);
+        y += TITLE_H + TITLE_SEP;
+    }
+
+    children.push(Node::BlurGlass(BlurGlassNode {
+        pos: [BG_PADDING, y],
+        size: [layout.panel_width, panel_h],
+        radius: 12.0,
+        fill: [255, 255, 255, 80],
+        shadow_alpha: 0.26,
+    }));
+
+    // draw_box_groups: lay out character groups left-to-right within the panel.
+    let mut gx = BG_PADDING + GRID_PADDING;
+    let gy = y + GRID_PADDING;
+    for (idx, group) in groups.iter().enumerate() {
+        let group_w = layout
+            .group_widths
+            .get(idx)
+            .copied()
+            .unwrap_or(layout.thumb_size);
+        push_character_header(
+            &mut children,
+            ir,
+            group.chara_id,
+            gx,
+            gy,
+            layout.thumb_size,
+            group_w,
+            layout.sep,
+        );
+        let item_h = layout.thumb_size + if ir.show_id { 16.0 } else { 0.0 };
+        let grid_y = gy + layout.thumb_size + BOX_GROUP_SEP + layout.sep + BOX_GROUP_SEP;
+        for (card_idx, card) in group.cards.iter().enumerate() {
+            let row = card_idx % layout.best_height;
+            let col = card_idx / layout.best_height;
+            let cx = gx + col as f32 * (layout.thumb_size + layout.sep);
+            let cy = grid_y + row as f32 * (item_h + layout.sep);
+            push_box_card(
+                &mut children,
+                card,
+                &ir.icons,
+                cx,
+                cy,
+                layout.thumb_size,
+                ir.show_id,
+            );
+        }
+        gx += group_w + BOX_GROUP_SEP;
+    }
+
+    push_watermark(
+        &mut children,
+        ir.watermark.enabled,
+        &ir.watermark.text,
+        width as f32,
+        height as f32,
+    );
+
+    let background = match ir.background_img_path.as_deref() {
+        Some(path) => Some(Node::ImageBg(ImageBgNode {
+            path: path.to_string(),
+        })),
+        None => Some(Node::TriangleBg(TriangleBgNode {
+            hour: ir.background_hour.unwrap_or(15.0),
+        })),
+    };
+
+    Scene {
+        version: 2,
+        assets_base_dir: ir.assets_base_dir.clone(),
+        export_format: ir.export_format.clone(),
+        jpg_quality: ir.jpg_quality,
+        fonts: FontsIr {
+            dir: ir.fonts.dir.clone(),
+            default: ir.fonts.default.clone(),
+            bold: ir.fonts.bold.clone(),
+            heavy: None,
+            emoji: None,
+        },
+        canvas: CanvasIr { width, height },
+        background,
+        root: Node::Group(GroupNode {
+            offset: [0.0, 0.0],
+            size: [width as f32, height as f32],
+            clip: None,
+            children,
+        }),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_character_header(
+    children: &mut Vec<Node>,
+    ir: &CardBoxIr,
+    chara_id: i64,
+    x: f32,
+    y: f32,
+    size: f32,
+    width: f32,
+    sep: f32,
+) {
+    let key = chara_id.to_string();
+    let (cr, cg, cb) = parse_color(
+        ir.character_color_codes
+            .get(&key)
+            .map(String::as_str)
+            .unwrap_or("#cccccc"),
+    );
+    match ir.character_icon_paths.get(&key) {
+        Some(path) => children.push(Node::Image(ImageNode {
+            pos: [x, y],
+            size: [size, size],
+            path: path.clone(),
+            fit: Fit::Stretch,
+            alpha: 1.0,
+        })),
+        None => children.push(Node::RoundRect(RoundRectNode {
+            pos: [x, y],
+            size: [size, size],
+            radius: 8.0,
+            corners: [true, true, true, true],
+            fill: solid([cr, cg, cb, 210]),
+            stroke: None,
+            stroke_width: 1.0,
+        })),
+    }
+    // Character color bar under the icon.
+    children.push(Node::Rect(RectNode {
+        pos: [x, y + size + BOX_GROUP_SEP],
+        size: [width, sep],
+        fill: solid([cr, cg, cb, 255]),
+        stroke: None,
+        stroke_width: 1.0,
+    }));
+}
+
+fn push_box_card(
+    children: &mut Vec<Node>,
+    card: &BoxCardIr,
+    icons: &IconsIr,
+    x: f32,
+    y: f32,
+    size: f32,
+    show_id: bool,
+) {
+    if let Some(thumb) = selected_box_thumbnail(card) {
+        children.push(Node::Group(GroupNode {
+            offset: [x, y],
+            size: [size, size],
+            clip: None,
+            children: build_thumbnail(thumb, size),
+        }));
+    }
+    if let Some(path) = limited_icon_path(&card.supply_type, icons) {
+        let icon_w = size * 0.75;
+        children.push(Node::Image(ImageNode {
+            pos: [x + size - icon_w, y],
+            size: [icon_w, 0.0],
+            path: path.to_string(),
+            fit: Fit::Width,
+            alpha: 1.0,
+        }));
+    }
+    if show_id {
+        children.push(center_text(
+            &card.card_id.to_string(),
+            FontRole::Default,
+            12.0,
+            x,
+            y + size,
+            size,
+            16.0,
+            [0, 0, 0, 255],
+        ));
+    }
 }

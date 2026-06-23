@@ -175,9 +175,18 @@ fn render_card_box(py: Python<'_>, ir_json: &[u8]) -> PyResult<Py<PyDict>> {
     let ir: CardBoxIr = serde_json::from_slice(ir_json).map_err(|err| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid card box IR: {err}"))
     })?;
-    let rendered = py.detach(|| render_card_box_inner(&ir)).map_err(|err| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("card box render failed: {err}"))
-    })?;
+    let legacy = env::var_os("HARUKI_SKIA_CARD_LEGACY").is_some();
+    let rendered = py
+        .detach(|| {
+            if legacy {
+                render_card_box_inner(&ir)
+            } else {
+                card_scene::render_card_box_via_scene(&ir)
+            }
+        })
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("card box render failed: {err}"))
+        })?;
 
     let dict = PyDict::new(py);
     dict.set_item("image_bytes", PyBytes::new(py, &rendered.bytes))?;
