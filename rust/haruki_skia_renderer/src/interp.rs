@@ -10,10 +10,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, FilterMode, Font, IRect, Image,
-    MaskFilter, MipmapMode, Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions,
-    Shader, Surface, TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, color_filters,
-    gradient, image_filters, surfaces,
+    AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, FilterMode, Font,
+    IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Point, RRect, Rect,
+    RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode, Typeface,
+    canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint, image_filters, surfaces,
 };
 
 use crate::ir::*;
@@ -133,17 +133,19 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             }
         }
         Node::Text(text) => {
-            draw_one_text(
-                surface.canvas(),
-                &interp.fonts,
-                &text.text,
-                (text.pos[0] + off.0, text.pos[1] + off.1),
-                text.font.role,
-                text.font.size,
-                text.align,
-                text.baseline,
-                color_of(text.fill),
-            );
+            let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
+            // Adaptive color samples the backdrop (needs the surface), so resolve it here and
+            // pass a solid fill down; otherwise use the node's own fill (solid or gradient).
+            let adaptive_fill;
+            let fill: &Fill = if let Some(ad) = &text.adaptive {
+                let color =
+                    resolve_adaptive_color(surface, &interp.fonts, text, abs, ad);
+                adaptive_fill = Fill::Solid(color);
+                &adaptive_fill
+            } else {
+                &text.fill
+            };
+            draw_styled_text(surface.canvas(), &interp.fonts, text, abs, off, fill);
         }
         Node::Shadow(shadow) => render_shadow(surface.canvas(), shadow, off),
         Node::BlurGlass(glass) => {
@@ -194,18 +196,18 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             }
         }
         Node::Watermark(watermark) => {
+            let canvas = surface.canvas();
+            let font = Font::from_typeface(
+                interp.fonts.resolve(watermark.font.role).clone(),
+                watermark.font.size,
+            );
+            let mut paint = Paint::default();
+            paint.set_anti_alias(true);
+            paint.set_color(color_of(watermark.fill));
             for line in &watermark.lines {
-                draw_one_text(
-                    surface.canvas(),
-                    &interp.fonts,
-                    &line.text,
-                    (line.pos[0] + off.0, line.pos[1] + off.1),
-                    watermark.font.role,
-                    watermark.font.size,
-                    line.align,
-                    Baseline::CjkTop,
-                    color_of(watermark.fill),
-                );
+                let abs = (line.pos[0] + off.0, line.pos[1] + off.1);
+                let (x, y) = text_layout(&font, &line.text, abs, line.align, Baseline::CjkTop, 0.0);
+                draw_text_core(canvas, &font, &line.text, x, y, 0.0, &paint);
             }
         }
     }
@@ -615,26 +617,31 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_one_text(
-    canvas: &Canvas,
-    fonts: &FontRegistry,
+/// Total advance of `text` including extra `letter_spacing` between glyphs.
+fn measure_advance(font: &Font, text: &str, letter_spacing: f32) -> f32 {
+    if letter_spacing == 0.0 {
+        return font.measure_str(text, None).0;
+    }
+    let mut total = 0.0;
+    let mut count = 0;
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        total += font.measure_str(ch.encode_utf8(&mut buf), None).0;
+        count += 1;
+    }
+    total + letter_spacing * (count.max(1) - 1) as f32
+}
+
+/// Resolve the draw origin (left x, baseline y) for a text run.
+fn text_layout(
+    font: &Font,
     text: &str,
     abs: (f32, f32),
-    role: FontRole,
-    size: f32,
     align: HAlign,
     baseline: Baseline,
-    color: Color,
-) {
-    if text.is_empty() {
-        return;
-    }
-    let font = Font::from_typeface(fonts.resolve(role).clone(), size);
-    let Some(blob) = TextBlob::new(text, &font) else {
-        return;
-    };
-    let (advance, _bounds) = font.measure_str(text, None);
+    letter_spacing: f32,
+) -> (f32, f32) {
+    let advance = measure_advance(font, text, letter_spacing);
     let x = match align {
         HAlign::Left => abs.0,
         HAlign::Center => abs.0 - advance * 0.5,
@@ -642,18 +649,104 @@ fn draw_one_text(
     };
     let (_, metrics) = font.metrics();
     let baseline_y = match baseline {
-        // Match Painter._text: baseline at pos.y + ink height of the CJK reference
-        // glyph '哇' (a uniform top-anchor, not the text's own bounds).
+        // Match Painter._text: baseline at pos.y + ink height of the CJK reference glyph '哇'.
         Baseline::CjkTop => abs.1 + font.measure_str("哇", None).1.height(),
-        // Align the font ascender line to pos.y (raster-text default).
         Baseline::Ascender => abs.1 - metrics.ascent,
-        // pos.y is the baseline directly (matches raw draw_text_blob placement).
         Baseline::Alphabetic => abs.1,
     };
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color(color);
-    canvas.draw_text_blob(&blob, Point::new(x, baseline_y), &paint);
+    (x, baseline_y)
+}
+
+/// Draw a text run with an arbitrary paint; uses a single blob when un-spaced, else per-glyph.
+fn draw_text_core(canvas: &Canvas, font: &Font, text: &str, x: f32, y: f32, letter_spacing: f32, paint: &Paint) {
+    if letter_spacing == 0.0 {
+        if let Some(blob) = TextBlob::new(text, font) {
+            canvas.draw_text_blob(&blob, Point::new(x, y), paint);
+        }
+        return;
+    }
+    let mut cx = x;
+    for ch in text.chars() {
+        let mut buf = [0u8; 4];
+        let s: &str = ch.encode_utf8(&mut buf);
+        if let Some(blob) = TextBlob::new(s, font) {
+            canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+        }
+        cx += font.measure_str(s, None).0 + letter_spacing;
+    }
+}
+
+/// Draw a `TextNode`: optional outline under the fill (solid or gradient), with letter spacing.
+fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs: (f32, f32), off: (f32, f32), fill: &Fill) {
+    if node.text.is_empty() {
+        return;
+    }
+    let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
+    let (x, y) = text_layout(&font, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+
+    if let Some(stroke) = &node.stroke {
+        let mut sp = Paint::default();
+        sp.set_anti_alias(true);
+        sp.set_style(PaintStyle::Stroke);
+        sp.set_stroke_width(stroke.width);
+        sp.set_color(color_of(stroke.color));
+        draw_text_core(canvas, &font, &node.text, x, y, node.letter_spacing, &sp);
+    }
+
+    let mut fp = Paint::default();
+    fp.set_anti_alias(true);
+    apply_fill(&mut fp, fill, off);
+    draw_text_core(canvas, &font, &node.text, x, y, node.letter_spacing, &fp);
+}
+
+/// Pick the adaptive fill color from the average luminance of the backdrop under the text box.
+fn resolve_adaptive_color(
+    surface: &mut Surface,
+    fonts: &FontRegistry,
+    node: &TextNode,
+    abs: (f32, f32),
+    ad: &AdaptiveColor,
+) -> Color4 {
+    let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
+    let (x, y) = text_layout(&font, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+    let advance = measure_advance(&font, &node.text, node.letter_spacing);
+    let (_, metrics) = font.metrics();
+    // Text ink box: x..x+advance vertically spanning ascent..descent around the baseline.
+    let mut bounds = Rect::new(x, y + metrics.ascent, x + advance, y + metrics.descent);
+    let canvas_rect = Rect::from_xywh(0.0, 0.0, surface.width() as f32, surface.height() as f32);
+    let lum = if bounds.intersect(canvas_rect) {
+        let ibounds: IRect = bounds.round_out();
+        surface
+            .image_snapshot_with_bounds(ibounds)
+            .and_then(|img| average_luminance(&img))
+            .unwrap_or(1.0)
+    } else {
+        1.0
+    };
+    // Dark backdrop (low luminance) -> light text; bright backdrop -> dark text.
+    if lum < ad.threshold { ad.light } else { ad.dark }
+}
+
+/// Average relative luminance (0..1) of an image's pixels, or None if the read fails.
+fn average_luminance(image: &Image) -> Option<f32> {
+    let w = image.width().max(1);
+    let h = image.height().max(1);
+    let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+    let row = (w as usize) * 4;
+    let mut buf = vec![0u8; row * h as usize];
+    if !image.read_pixels(&info, &mut buf, row, (0, 0), CachingHint::Allow) {
+        return None;
+    }
+    let mut sum = 0.0_f64;
+    let mut count = 0u64;
+    for px in buf.chunks_exact(4) {
+        sum += 0.299 * px[0] as f64 + 0.587 * px[1] as f64 + 0.114 * px[2] as f64;
+        count += 1;
+    }
+    if count == 0 {
+        return None;
+    }
+    Some((sum / count as f64 / 255.0) as f32)
 }
 
 #[cfg(test)]
@@ -744,6 +837,27 @@ mod tests {
         );
         let rendered = render(&json);
         assert_eq!(rendered.width, 64);
+    }
+
+    #[test]
+    fn renders_styled_text_scene() {
+        // Gradient fill + outline + letter spacing, and an adaptive-color line.
+        let json = scene_json(
+            r#"
+            { "type": "Text", "text": "Hi", "pos": [4, 10], "font": { "role": "default", "size": 16 },
+              "fill": { "kind": "linear", "p1": [4,10], "p2": [40,10],
+                        "c1": [255,0,0,255], "c2": [0,0,255,255] },
+              "stroke": { "color": [0,0,0,255], "width": 2 }, "letter_spacing": 3 },
+            { "type": "Text", "text": "Yo", "pos": [4, 30], "font": { "role": "default", "size": 14 },
+              "fill": [0,0,0,255], "adaptive": { "light": [255,255,255,255], "dark": [0,0,0,255], "threshold": 0.4 } }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.width, 64);
+        assert_eq!(
+            &rendered.bytes[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
     }
 
     #[test]

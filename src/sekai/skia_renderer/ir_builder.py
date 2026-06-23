@@ -50,6 +50,18 @@ def image_shadow(alpha: float = 0.6, offset: Vec2 = (6, 6), sigma: float = 3.0,
     return {"alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)}
 
 
+def text_stroke(color: Color, width: float = 1.0) -> Node:
+    """An outline for a Text node, drawn under the fill."""
+    return {"color": _color(color), "width": float(width)}
+
+
+def adaptive_color(light: Color = (255, 255, 255, 255), dark: Color = (0, 0, 0, 255),
+                   threshold: float = 0.4) -> Node:
+    """Background-adaptive text color: ``light`` over dark backdrops, ``dark`` over bright
+    ones (chosen by average luminance vs ``threshold``)."""
+    return {"light": _color(light), "dark": _color(dark), "threshold": float(threshold)}
+
+
 def linear_gradient(
     c1: Color | None = None,
     c2: Color | None = None,
@@ -186,9 +198,17 @@ class IRBuilder:
         return self._add(node)
 
     def text(self, text: str, pos: Vec2, role: str, size: float, align: str = "left",
-             baseline: str = "cjk_top", fill: Color = (0, 0, 0, 255)) -> Node:
-        return self._add({"type": "Text", "text": text, "pos": _vec(pos), "font": {"role": role, "size": size},
-                          "align": align, "baseline": baseline, "fill": _color(fill)})
+             baseline: str = "cjk_top", fill: Color | Node = (0, 0, 0, 255), stroke: Node | None = None,
+             letter_spacing: float = 0.0, adaptive: Node | None = None) -> Node:
+        node: Node = {"type": "Text", "text": text, "pos": _vec(pos), "font": {"role": role, "size": size},
+                      "align": align, "baseline": baseline, "fill": _fill_value(fill)}
+        if stroke is not None:
+            node["stroke"] = stroke
+        if letter_spacing:
+            node["letter_spacing"] = float(letter_spacing)
+        if adaptive is not None:
+            node["adaptive"] = adaptive
+        return self._add(node)
 
     def shadow(self, pos: Vec2, size: Vec2, radius: float, alpha: float = 0.35, offset: Vec2 = (2, 4),
                sigma: float = 2.5, color: Color = (0, 0, 0, 255)) -> Node:

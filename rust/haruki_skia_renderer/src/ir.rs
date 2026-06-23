@@ -342,7 +342,48 @@ pub struct TextNode {
     pub align: HAlign,
     #[serde(default)]
     pub baseline: Baseline,
-    pub fill: Color4,
+    /// A JSON array is a solid color; an object is a gradient (gradient text fill).
+    pub fill: Fill,
+    /// Optional outline drawn under the fill.
+    #[serde(default)]
+    pub stroke: Option<TextStroke>,
+    /// Extra spacing (px) between glyphs.
+    #[serde(default)]
+    pub letter_spacing: f32,
+    /// Optional background-adaptive contrast color (overrides `fill` with a solid color
+    /// chosen from the average luminance behind the text — Painter `AdaptiveTextColor`).
+    #[serde(default)]
+    pub adaptive: Option<AdaptiveColor>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TextStroke {
+    pub color: Color4,
+    #[serde(default = "default_stroke_width")]
+    pub width: f32,
+}
+
+/// Average-luminance adaptive text color (MVP: per-text-box average, not per-pixel).
+#[derive(Debug, Deserialize)]
+pub struct AdaptiveColor {
+    #[serde(default = "default_adaptive_light")]
+    pub light: Color4,
+    #[serde(default = "default_adaptive_dark")]
+    pub dark: Color4,
+    #[serde(default = "default_adaptive_threshold")]
+    pub threshold: f32,
+}
+
+fn default_adaptive_light() -> Color4 {
+    [255, 255, 255, 255]
+}
+
+fn default_adaptive_dark() -> Color4 {
+    [0, 0, 0, 255]
+}
+
+fn default_adaptive_threshold() -> f32 {
+    0.4
 }
 
 /// Soft drop shadow for a rounded rect (mirrors Painter's thumbnail contact shadow).
