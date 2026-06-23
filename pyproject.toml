@@ -58,6 +58,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 force-sort-within-sections = true
+combine-as-imports = true
 known-first-party = ["tests/*"]
 extra-standard-library = ["typing_extensions"]
 

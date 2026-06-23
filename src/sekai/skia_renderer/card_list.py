@@ -14,6 +14,18 @@ from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import run_in_pool
 from src.sekai.card.model import CardListRequest
+from src.sekai.skia_renderer.card_common import (
+    BG_PADDING as _BG_PADDING,
+    GRID_PADDING as _GRID_PADDING,
+    THUMB as _THUMB,
+    TITLE_H as _TITLE_H,
+    TITLE_SEP as _TITLE_SEP,
+    WATERMARK_FALLBACK as _WATERMARK_FALLBACK,
+    center_text as _center_text,
+    limited_icon_path as _limited_icon_path,
+    notice_title as _notice_title,
+    thumbnail as _thumbnail,
+)
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.settings import (
     ASSETS_BASE_DIR,
@@ -134,77 +146,21 @@ def build_card_list_ir(rqd: CardListRequest) -> dict[str, Any]:
 
 
 # Card List layout constants (mirror the Rust card_scene.rs / lib.rs values).
-_BG_PADDING = 20.0
+# Shared values (_BG_PADDING/_GRID_PADDING/_THUMB/_TITLE_*) come from card_common.
 _PANEL_WIDTH = 996.0
-_GRID_PADDING = 16.0
 _GRID_COLS = 3
 _CARD_W = 316.0
 _CARD_H = 190.0
 _CARD_SEP = 8.0
-_THUMB = 100.0
-_TITLE_H = 50.0
-_TITLE_SEP = 16.0
-_WATERMARK_FALLBACK = "Haruki Drawing API"
 
 
 def _is_non_limited(supply_type: str) -> bool:
     return supply_type.strip() in NON_LIMITED_SUPPLY_TYPES
 
 
-def _rare_count(rare: str) -> int:
-    if rare == "rarity_birthday":
-        return 1
-    for ch in rare:
-        if ch.isascii() and ch.isdigit():
-            return int(ch)
-    return 0
-
-
-def _limited_icon_path(supply_type: str, icons: dict[str, Any]) -> str | None:
-    if supply_type in ("期间限定", "WL限定", "联动限定"):
-        return icons.get("term_limited")
-    if supply_type in ("Fes限定", "CFes限定", "BFes限定"):
-        return icons.get("fes_limited")
-    return None
-
-
 def build_card_list_scene(rqd: CardListRequest) -> dict[str, Any]:
     """Build a Render IR v2 scene (the layout lives here; Rust only interprets)."""
     return _card_list_scene_from_ir(build_card_list_ir(rqd))
-
-
-def _center_text(b: IRBuilder, text: str, role: str, size: float, rx: float, ry: float, rw: float, rh: float,
-                 fill: tuple[int, int, int, int]) -> None:
-    # Mirror draw_center_text: horizontally centered, baseline at rect.bottom - 5.
-    b.text(text, (rx + rw / 2, ry + rh - 5), role, size, align="center", baseline="alphabetic", fill=fill)
-
-
-def _notice_title(b: IRBuilder, x: float, y: float, width: float, title: str) -> None:
-    b.blurglass((x, y), (width, _TITLE_H), 10, (255, 246, 219, 220), shadow_alpha=0.24)
-    b.text("提示", (x + 14, y + 34), "bold", 22, baseline="alphabetic", fill=(166, 90, 0, 255))
-    b.text(title, (x + 80, y + 34), "default", 22, baseline="alphabetic", fill=(98, 68, 0, 255))
-
-
-def _thumbnail(b: IRBuilder, thumb: dict[str, Any], size: float) -> None:
-    s = size / 100.0
-    if thumb.get("card_thumbnail_path"):
-        b.image(thumb["card_thumbnail_path"], (0, 0), (size, size), fit="cover")
-    if thumb.get("is_pcard"):
-        b.rect((0, 76 * s), (100 * s, 24 * s), fill=(70, 70, 100, 255))
-        text = thumb.get("custom_text") or f"Lv.{thumb.get('level') or 0}"
-        b.text(text, (6 * s, 92 * s), "bold", 20 * s, baseline="alphabetic", fill=(255, 255, 255, 255))
-    if thumb.get("frame_img_path"):
-        b.image(thumb["frame_img_path"], (0, 0), (size, size), fit="stretch")
-    if thumb.get("attr_img_path"):
-        b.image(thumb["attr_img_path"], (1 * s, 0), (22 * s, 25 * s), fit="stretch")
-    if thumb.get("is_pcard") and (thumb.get("train_rank") or 0) > 0 and thumb.get("train_rank_img_path"):
-        b.image(thumb["train_rank_img_path"], (65 * s, 65 * s), (35 * s, 35 * s), fit="stretch")
-    rare_path = thumb.get("rare_img_path")
-    if rare_path:
-        rare_w = rare_h = 17 * s
-        voffset = 24 * s if thumb.get("is_pcard") else 6 * s
-        for i in range(_rare_count(thumb["rare"])):
-            b.image(rare_path, (6 * s + rare_w * i, size - rare_h - voffset), (rare_w, rare_h), fit="stretch")
 
 
 def _card_cell(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], now_ms: int) -> None:

@@ -22,8 +22,7 @@ import emoji
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
-from pilmoji import Pilmoji
-from pilmoji import getsize as getsize_emoji
+from pilmoji import Pilmoji, getsize as getsize_emoji
 from pilmoji.source import BaseSource, GoogleEmojiSource
 
 from src.settings import (

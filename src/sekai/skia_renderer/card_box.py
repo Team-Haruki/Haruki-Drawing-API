@@ -4,6 +4,7 @@ from datetime import datetime
 import importlib
 import json
 import logging
+import math
 import os
 from pathlib import PurePosixPath, PureWindowsPath
 import time
@@ -13,6 +14,20 @@ from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base import CHARACTER_COLOR_CODE
 from src.sekai.base.utils import run_in_pool
 from src.sekai.card.model import CardBoxRequest
+from src.sekai.skia_renderer.card_common import (
+    BG_PADDING as _BG_PADDING,
+    BOX_GROUP_SEP as _BOX_GROUP_SEP,
+    GRID_PADDING as _GRID_PADDING,
+    TITLE_H as _TITLE_H,
+    TITLE_SEP as _TITLE_SEP,
+    WATERMARK_FALLBACK as _WATERMARK_FALLBACK,
+    center_text as _center_text,
+    limited_icon_path as _limited_icon_path,
+    notice_title as _notice_title,
+    parse_color as _parse_color,
+    thumbnail as _thumbnail,
+)
+from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.settings import (
     ASSETS_BASE_DIR,
     DEFAULT_BOLD_FONT,
@@ -130,6 +145,196 @@ def build_card_box_ir(rqd: CardBoxRequest) -> dict[str, Any]:
     }
 
 
+def _round_half_away(v: float) -> int:
+    # Match Rust f32::round (half away from zero) for the positive layout values.
+    return math.floor(v + 0.5)
+
+
+def _selected_box_thumbnail(card: dict[str, Any]) -> dict[str, Any] | None:
+    ti = card["thumbnail_info"]
+    if not ti:
+        return None
+    if len(ti) == 1:
+        return ti[0]
+    if card["is_after_training"]:
+        return ti[1]
+    return ti[0]
+
+
+def _build_box_groups(ir: dict[str, Any]) -> list[dict[str, Any]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for card in ir["cards"]:
+        if ir["show_box"] and not card["has_card"]:
+            continue
+        if _selected_box_thumbnail(card) is None:
+            continue
+        chara_id = card.get("character_id")
+        if chara_id is None:
+            continue
+        grouped.setdefault(chara_id, []).append(card)
+    groups = []
+    for chara_id in sorted(grouped):
+        cards = sorted(grouped[chara_id], key=lambda c: (c["rare"], c["release_at"], c["card_id"]))
+        groups.append({"chara_id": chara_id, "cards": cards})
+    return groups
+
+
+def _compute_box_layout(groups: list[dict[str, Any]], show_id: bool) -> dict[str, Any]:
+    max_card_num = max((len(g["cards"]) for g in groups), default=0)
+    best_height = 1
+    best_value = math.inf
+    for candidate in range(1, max(max_card_num, 1) + 1):
+        max_height = 0
+        for g in groups:
+            max_height = max(max_height, min(len(g["cards"]), candidate))
+        total_width = 0
+        total = 0
+        space = 0
+        for g in groups:
+            n = len(g["cards"])
+            width = max((n + candidate - 1) // candidate, 1)
+            total_width += width
+            total += max_height * width
+            space += max_height * width - n
+        if total_width > 9:
+            value = max(float(total_width), max_height * 0.5)
+        else:
+            value = max(total_width * 0.5, float(max_height))
+        density = total / (total - space) if total > space else 1.0
+        value *= density
+        if value < best_value:
+            best_height = candidate
+            best_value = value
+
+    total_width_cols = sum(max((len(g["cards"]) + best_height - 1) // best_height, 1) for g in groups)
+    area = total_width_cols * (best_height + 4)
+    start_area = 9.0 * 5.0
+    end_area = 26.0 * 50.0
+    interp = min(1.0, max(0.0, (area - start_area) / (end_area - start_area)))
+    sep = float(_round_half_away(8.0 + (4.0 - 8.0) * interp))
+    thumb_size = float(_round_half_away(100.0 + (48.0 - 100.0) * interp))
+    item_height = thumb_size + (16.0 if show_id else 0.0)
+
+    group_widths = []
+    for g in groups:
+        cols = max((len(g["cards"]) + best_height - 1) // best_height, 1)
+        group_widths.append(thumb_size * cols + sep * max(0, cols - 1))
+
+    if not group_widths:
+        content_width = _GRID_PADDING * 2
+    else:
+        content_width = _GRID_PADDING * 2 + sum(group_widths) + _BOX_GROUP_SEP * (len(group_widths) - 1)
+
+    max_group_height = thumb_size
+    for g in groups:
+        rows = max(min(len(g["cards"]), best_height), 1)
+        group_h = thumb_size + _BOX_GROUP_SEP + sep + _BOX_GROUP_SEP + rows * item_height + sep * max(0, rows - 1)
+        max_group_height = max(max_group_height, group_h)
+
+    return {
+        "best_height": best_height,
+        "thumb_size": thumb_size,
+        "sep": sep,
+        "panel_width": max(content_width, 520.0),
+        "panel_height": _GRID_PADDING * 2 + max_group_height,
+        "group_widths": group_widths,
+    }
+
+
+def build_card_box_scene(rqd: CardBoxRequest) -> dict[str, Any]:
+    """Build a Render IR v2 scene (the layout lives here; Rust only interprets)."""
+    return _card_box_scene_from_ir(build_card_box_ir(rqd))
+
+
+def _push_character_header(b: IRBuilder, ir: dict[str, Any], chara_id: int, x: float, y: float, size: float,
+                           width: float, sep: float) -> None:
+    key = str(chara_id)
+    r, g, bl = _parse_color(ir["character_color_codes"].get(key) or "#cccccc")
+    icon_path = ir["character_icon_paths"].get(key)
+    if icon_path:
+        b.image(icon_path, (x, y), (size, size), fit="stretch")
+    else:
+        b.roundrect((x, y), (size, size), 8, fill=(r, g, bl, 210))
+    b.rect((x, y + size + _BOX_GROUP_SEP), (width, sep), fill=(r, g, bl, 255))
+
+
+def _push_box_card(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], x: float, y: float, size: float,
+                   show_id: bool) -> None:
+    thumb = _selected_box_thumbnail(card)
+    if thumb is not None:
+        with b.group((x, y), (size, size)):
+            _thumbnail(b, thumb, size)
+    icon_path = _limited_icon_path(card["supply_type"], icons)
+    if icon_path:
+        icon_w = size * 0.75
+        b.image(icon_path, (x + size - icon_w, y), (icon_w, 0), fit="width")
+    if show_id:
+        _center_text(b, str(card["card_id"]), "default", 12, x, y + size, size, 16, (0, 0, 0, 255))
+
+
+def _card_box_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
+    groups = _build_box_groups(ir)
+    layout = _compute_box_layout(groups, ir["show_id"])
+    has_title = bool(ir.get("title"))
+    title_h = _TITLE_H + _TITLE_SEP if has_title else 0.0
+    panel_width = layout["panel_width"]
+    panel_h = layout["panel_height"]
+    width = math.ceil(panel_width + _BG_PADDING * 2)
+    height = math.ceil(_BG_PADDING * 2 + title_h + panel_h)
+
+    fonts = ir["fonts"]
+    b = IRBuilder(
+        width,
+        height,
+        assets_base_dir=ir["assets_base_dir"],
+        font_dir=fonts["dir"],
+        default_font=fonts["default"],
+        bold_font=fonts["bold"],
+        export_format=ir["export_format"],
+        jpg_quality=ir["jpg_quality"],
+    )
+
+    if ir.get("background_img_path"):
+        b.image_bg(ir["background_img_path"])
+    else:
+        b.triangle_bg(ir.get("background_hour") if ir.get("background_hour") is not None else 15.0)
+
+    y = _BG_PADDING
+    if has_title:
+        _notice_title(b, _BG_PADDING, y, panel_width, ir["title"])
+        y += _TITLE_H + _TITLE_SEP
+
+    b.blurglass((_BG_PADDING, y), (panel_width, panel_h), 12, (255, 255, 255, 80), shadow_alpha=0.26)
+
+    thumb_size = layout["thumb_size"]
+    sep = layout["sep"]
+    best_height = layout["best_height"]
+    show_id = ir["show_id"]
+    icons = ir["icons"]
+    group_widths = layout["group_widths"]
+    gx = _BG_PADDING + _GRID_PADDING
+    gy = y + _GRID_PADDING
+    for idx, group in enumerate(groups):
+        group_w = group_widths[idx] if idx < len(group_widths) else thumb_size
+        _push_character_header(b, ir, group["chara_id"], gx, gy, thumb_size, group_w, sep)
+        item_h = thumb_size + (16.0 if show_id else 0.0)
+        grid_y = gy + thumb_size + _BOX_GROUP_SEP + sep + _BOX_GROUP_SEP
+        for card_idx, card in enumerate(group["cards"]):
+            row = card_idx % best_height
+            col = card_idx // best_height
+            cx = gx + col * (thumb_size + sep)
+            cy = grid_y + row * (item_h + sep)
+            _push_box_card(b, card, icons, cx, cy, thumb_size, show_id)
+        gx += group_w + _BOX_GROUP_SEP
+
+    watermark = ir["watermark"]
+    if watermark["enabled"]:
+        text = watermark["text"] or _WATERMARK_FALLBACK
+        b.text(text, (width - 150, height - 10), "default", 12, baseline="alphabetic", fill=(0, 0, 0, 120))
+
+    return b.build()
+
+
 def _load_native_renderer():
     try:
         return importlib.import_module("haruki_skia_renderer")
@@ -166,8 +371,10 @@ def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
 
 async def render_card_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload:
     native = _load_native_renderer()
-    ir_json = json.dumps(build_card_box_ir(rqd), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    result = await run_in_pool(native.render_card_box, ir_json)
+    # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
+    scene = build_card_box_scene(rqd)
+    ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    result = await run_in_pool(native.render_scene, ir_json)
     if not isinstance(result, dict):
         raise SkiaCardBoxRenderError("native renderer must return a dict")
     return _payload_from_native(result)
