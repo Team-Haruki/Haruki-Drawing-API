@@ -198,9 +198,10 @@ fn color_of(c: Color4) -> Color {
 }
 
 fn image_sampling() -> SamplingOptions {
-    // Bilinear, matching Pillow's BILINEAR resize so downscaled thumbnails/overlays have
-    // the same soft character (cubic resamplers came out noticeably sharper than Pillow).
-    SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+    // Bilinear + mipmaps. For mild downscales (thumbnails ~1.3x) this stays at the base
+    // level and matches Pillow's soft BILINEAR character; for large downscales (skill icon
+    // ~3x) the mipmaps area-average so it doesn't alias the way plain bilinear does.
+    SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
 }
 
 /// Build a [Point; 4] of per-corner radii (UL, UR, LR, LL); disabled corners are 0.
