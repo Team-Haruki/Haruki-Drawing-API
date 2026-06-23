@@ -4,10 +4,12 @@ from io import BytesIO
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.plot import Canvas, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import get_img_from_path, run_in_pool
 from src.sekai.mysekai.model import MysekaiHousingCompetitionEntry, MysekaiHousingCompetitionRequest
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 CARD_WIDTH = 680
@@ -16,7 +18,7 @@ THUMBNAIL_SIZE = (CARD_INNER_WIDTH, 360)
 HEADER_BANNER_SIZE = (210, 86)
 
 
-async def compose_mysekai_housing_competition_image(rqd: MysekaiHousingCompetitionRequest) -> Image.Image:
+async def _build_mysekai_housing_competition_canvas(rqd: MysekaiHousingCompetitionRequest) -> Canvas:
     banner_task = _load_optional_image(rqd.banner_image_base64, rqd.banner_image_path)
     entry_tasks = [
         _load_optional_image(entry.thumbnail_image_base64, entry.thumbnail_path) for entry in rqd.entries[:5]
@@ -53,7 +55,19 @@ async def compose_mysekai_housing_competition_image(rqd: MysekaiHousingCompetiti
                 _entry_block(entry, image, owner_style, name_style, rank_style, meta_style)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_mysekai_housing_competition_image(rqd: MysekaiHousingCompetitionRequest) -> Image.Image:
+    return await (await _build_mysekai_housing_competition_canvas(rqd)).get_img()
+
+
+async def try_render_mysekai_housing_competition_payload(
+    rqd: MysekaiHousingCompetitionRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_mysekai_housing_competition_canvas(rqd))
 
 
 async def _load_optional_image(image_base64: str | None, image_path: str | None) -> Image.Image:
