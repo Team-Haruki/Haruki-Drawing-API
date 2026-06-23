@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, CubicResampler, Font, Image, MaskFilter, Paint, PaintStyle,
-    Point, RRect, Rect, SamplingOptions, Surface, TextBlob, TileMode, Typeface,
+    BlurStyle, Canvas, ClipOp, Color, FilterMode, Font, Image, MaskFilter, MipmapMode, Paint,
+    PaintStyle, Point, RRect, Rect, SamplingOptions, Surface, TextBlob, TileMode, Typeface,
     canvas::SrcRectConstraint, gradient, surfaces,
 };
 
@@ -197,8 +197,10 @@ fn color_of(c: Color4) -> Color {
     Color::from_argb(c[3], c[0], c[1], c[2])
 }
 
-fn cubic_sampling() -> SamplingOptions {
-    SamplingOptions::from(CubicResampler::catmull_rom())
+fn image_sampling() -> SamplingOptions {
+    // Bilinear, matching Pillow's BILINEAR resize so downscaled thumbnails/overlays have
+    // the same soft character (cubic resamplers came out noticeably sharper than Pillow).
+    SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
 }
 
 /// Build a [Point; 4] of per-corner radii (UL, UR, LR, LL); disabled corners are 0.
@@ -361,7 +363,7 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_alpha_f(node.alpha.clamp(0.0, 1.0));
-    let sampling = cubic_sampling();
+    let sampling = image_sampling();
 
     match node.fit {
         Fit::Stretch => {
