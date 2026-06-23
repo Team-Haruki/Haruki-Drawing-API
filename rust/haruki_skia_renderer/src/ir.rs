@@ -3,6 +3,8 @@
 //! Python builds this tree; `interp.rs` renders it with Skia. See
 //! `docs/rust-skia-renderer-migration.md` for the design and constraints.
 
+use std::collections::HashMap;
+
 use serde::Deserialize;
 
 /// Top-level scene envelope. Supersets the v1 card IRs.
@@ -36,7 +38,8 @@ pub struct CanvasIr {
     pub height: i32,
 }
 
-/// Font roles. `heavy`/`emoji` are optional and fall back to bold/regular.
+/// Font roles. `heavy`/`emoji` are optional and fall back to bold/regular. `extra` registers
+/// arbitrary named fonts (name -> font file) addressable via `FontRef.name`.
 #[derive(Debug, Deserialize)]
 pub struct FontsIr {
     pub dir: String,
@@ -44,11 +47,11 @@ pub struct FontsIr {
     pub bold: String,
     #[serde(default)]
     pub heavy: Option<String>,
-    // Reserved for the Skia color-emoji fallback chain (migration doc §8); not yet
-    // wired into the FontRegistry.
+    /// Color-emoji fallback typeface (opt-in).
     #[serde(default)]
-    #[allow(dead_code)]
     pub emoji: Option<String>,
+    #[serde(default)]
+    pub extra: HashMap<String, String>,
 }
 
 /// RGBA, 0-255 per channel.
@@ -168,6 +171,9 @@ pub enum FontRole {
 pub struct FontRef {
     #[serde(default)]
     pub role: FontRole,
+    /// Optional arbitrary font name registered in `FontsIr.extra`; overrides `role`.
+    #[serde(default)]
+    pub name: Option<String>,
     pub size: f32,
 }
 

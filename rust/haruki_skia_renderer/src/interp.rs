@@ -29,6 +29,8 @@ struct FontRegistry {
     heavy: Typeface,
     /// Opt-in color-emoji typeface; emoji codepoints route here when present.
     emoji: Option<Typeface>,
+    /// Arbitrary named fonts (FontsIr.extra), addressable via FontRef.name.
+    extra: HashMap<String, Typeface>,
 }
 
 impl FontRegistry {
@@ -45,11 +47,17 @@ impl FontRegistry {
             .emoji
             .as_ref()
             .map(|name| load_typeface(&fonts.dir, name));
+        let extra = fonts
+            .extra
+            .iter()
+            .map(|(key, file)| (key.clone(), load_typeface(&fonts.dir, file)))
+            .collect();
         Self {
             regular,
             bold,
             heavy,
             emoji,
+            extra,
         }
     }
 
@@ -59,6 +67,16 @@ impl FontRegistry {
             FontRole::Heavy => &self.heavy,
             FontRole::Default => &self.regular,
         }
+    }
+
+    /// Resolve a FontRef: an arbitrary `name` (if registered) wins, else the role.
+    fn resolve_ref(&self, font: &FontRef) -> &Typeface {
+        if let Some(name) = &font.name
+            && let Some(tf) = self.extra.get(name)
+        {
+            return tf;
+        }
+        self.resolve(font.role)
     }
 
     fn emoji_font(&self, size: f32) -> Option<Font> {
@@ -242,7 +260,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         Node::Watermark(watermark) => {
             let canvas = surface.canvas();
             let font = Font::from_typeface(
-                interp.fonts.resolve(watermark.font.role).clone(),
+                interp.fonts.resolve_ref(&watermark.font).clone(),
                 watermark.font.size,
             );
             let emoji = interp.fonts.emoji_font(watermark.font.size);
@@ -763,7 +781,7 @@ fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs:
     if node.text.is_empty() {
         return;
     }
-    let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
+    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
@@ -791,7 +809,7 @@ fn resolve_adaptive_color(
     abs: (f32, f32),
     ad: &AdaptiveColor,
 ) -> Color4 {
-    let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
+    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
