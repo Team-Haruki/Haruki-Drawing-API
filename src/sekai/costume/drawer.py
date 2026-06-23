@@ -3,11 +3,13 @@ import logging
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, get_font, get_font_desc, get_text_size
 from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import get_img_from_path
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
 from .model import CostumeDetailRequest, CostumeListRequest
@@ -102,7 +104,7 @@ def _costume_list_sections(costumes: list) -> list[tuple[str, list]]:
     return [(part, grouped[part]) for part in ordered]
 
 
-async def compose_costume_list_image(rqd: CostumeListRequest) -> Image.Image:
+async def _build_costume_list_canvas(rqd: CostumeListRequest) -> Canvas:
     thumbs = await asyncio.gather(*[_load_image(item.thumbnail_path) for item in rqd.costumes])
     thumbs_by_id = {item.costume_id: thumb for item, thumb in zip(rqd.costumes, thumbs)}
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=BLACK)
@@ -152,10 +154,20 @@ async def compose_costume_list_image(rqd: CostumeListRequest) -> Image.Image:
                                         ).set_w(LIST_ITEM_WIDTH - 12).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image:
+async def compose_costume_list_image(rqd: CostumeListRequest) -> Image.Image:
+    return await (await _build_costume_list_canvas(rqd)).get_img()
+
+
+async def try_render_costume_list_payload(rqd: CostumeListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_costume_list_canvas(rqd))
+
+
+async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
     costume = rqd.costume
     variant_images = await asyncio.gather(*[_load_image(item.thumbnail_path) for item in costume.variants])
     preview = await _load_optional_image(costume.preview_image_path)
@@ -216,4 +228,14 @@ async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image
                 Spacer(h=2)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image:
+    return await (await _build_costume_detail_canvas(rqd)).get_img()
+
+
+async def try_render_costume_detail_payload(rqd: CostumeDetailRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_costume_detail_canvas(rqd))
