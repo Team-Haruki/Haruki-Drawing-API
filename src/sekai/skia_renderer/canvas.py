@@ -1,0 +1,102 @@
+"""Render a built plot.py ``Canvas`` widget tree through the Skia path.
+
+The drawer builds its widget tree as usual; instead of ``canvas.get_img()`` (Pillow), this
+draws the same tree into an :class:`IRPainter` to produce a Render IR scene + any runtime
+images, then calls the native ``render_scene``. Any unsupported op or error returns ``None``
+so the caller falls back to the Pillow composer. See ``docs/skia-pillow-coverage-gaps.md``.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+import importlib
+import json
+import logging
+import os
+from typing import Any
+
+from src.core.heavy_render_pool import EncodedImagePayload
+from src.sekai.base.utils import run_in_pool
+from src.sekai.skia_renderer.ir_painter import IRPainter, SkiaUnsupported
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_EMOJI_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
+    EXPORT_IMAGE_FORMAT,
+    FONT_DIR,
+    JPG_QUALITY,
+    settings,
+)
+
+logger = logging.getLogger("plot.draw.perf")
+
+
+def skia_plot_enabled() -> bool:
+    return bool(settings.drawing.use_skia_plot)
+
+_REQUIRED = {
+    "image_bytes", "media_type", "filename", "image_width", "image_height",
+    "image_mode", "encode_elapsed",
+}
+
+
+def _background_hour() -> float:
+    override = os.getenv("HARUKI_BG_TEST_HOUR")
+    if override is not None:
+        try:
+            return max(0.0, min(23.999, float(override)))
+        except ValueError:
+            pass
+    now = datetime.now()
+    return now.hour + now.minute / 60 + now.second / 3600
+
+
+def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
+    if not isinstance(result, dict) or _REQUIRED.difference(result):
+        raise ValueError("native renderer returned an incomplete payload")
+    image_bytes = result["image_bytes"]
+    if not isinstance(image_bytes, bytes):
+        raise ValueError("native renderer image_bytes must be bytes")
+    return EncodedImagePayload(
+        image_bytes=image_bytes,
+        media_type=str(result["media_type"]),
+        filename=str(result["filename"]),
+        image_width=int(result["image_width"]),
+        image_height=int(result["image_height"]),
+        image_mode=str(result["image_mode"]),
+        encode_elapsed=float(result["encode_elapsed"]),
+    )
+
+
+async def render_canvas_payload(canvas, *, bg_hour: float | None = None) -> EncodedImagePayload | None:
+    """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow."""
+    if not settings.drawing.use_skia_plot:
+        return None
+    try:
+        native = importlib.import_module("haruki_skia_renderer")
+        size = canvas._get_self_size()
+        painter = IRPainter(
+            size,
+            assets_base_dir=str(ASSETS_BASE_DIR),
+            font_dir=str(FONT_DIR),
+            default_font=DEFAULT_FONT,
+            bold_font=DEFAULT_BOLD_FONT,
+            heavy_font=DEFAULT_HEAVY_FONT,
+            emoji_font=DEFAULT_EMOJI_FONT,
+            bg_hour=_background_hour() if bg_hour is None else bg_hour,
+            export_format=EXPORT_IMAGE_FORMAT,
+            jpg_quality=JPG_QUALITY,
+        )
+        canvas.draw(painter)
+        scene, mem_images = painter.build_scene()
+        ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        result = await run_in_pool(native.render_scene, ir_json, mem_images)
+        return _payload_from_native(result)
+    except SkiaUnsupported as exc:
+        logger.info("plot canvas not Skia-expressible (%s); falling back to Pillow", exc)
+        return None
+    except Exception:
+        logger.exception("Skia canvas render failed; falling back to Pillow")
+        return None

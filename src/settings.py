@@ -112,6 +112,7 @@ class DrawingSettings(BaseModel):
     skia_card_list_log_visual_metrics: bool = False  # 是否记录 Skia 视觉验收辅助指标
     use_skia_card_box: bool = False  # 是否启用 Rust + Skia card/box 渲染
     skia_card_fallback_to_pillow: bool = True  # Card 模块 Skia 渲染失败时是否回退 Pillow
+    use_skia_plot: bool = False  # 是否对 plot.py widget 树端点启用 IRPainter → Skia 渲染
     custom_profile_assets_dir: Path | None = None
     custom_profile_fonts_dir: Path | None = None
     custom_profile_tmp_font_metadata: Path | None = None
