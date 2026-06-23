@@ -50,13 +50,29 @@
 helper 已提供文字侧支持）；**动图 GIF/APNG 输出**（无端点需要，按需再做）；`method="separate"`
 渐变（用 `combine` 近似，仅对角渐变略有差异）。
 
-## 端点迁移状态
+## 端点迁移：IRPainter 影子层（2026-06-24）
+
+可行性调查结论：约 16/20 个 drawer 都汇聚到 `plot.py` widget 树 → `Painter` 的 13 个方法。
+因此迁移的杠杆不是逐端点重写，而是 **`IRPainter`(Painter 子类)**:重写那 13 个方法，把 widget 树的
+绘制调用录成 IR 节点而非画像素——**同一棵 widget 树照常跑、布局照常算**(符合 Constraint A),输出变成 IR。
+
+- `src/sekai/skia_renderer/ir_painter.py` —— IRPainter:覆盖 text/paste(_with_alpha_blend)/rect/
+  roundrect/pieslice/blurglass_roundrect/draw_random_triangle_bg + 区域模型;映射 FontDesc→role/
+  命名字体、LinearGradient/RadialGradient/AdaptiveTextColor、paste 阴影→alpha 轮廓阴影。不可表达的
+  op 抛 `SkiaUnsupported` → 回退 Pillow。
+- 运行时内存图(`paste` 收到的是 PIL 对象,无路径)经 **`mem:<key>`** 传输(native `render_scene`
+  接受 `{key: png bytes}`)解决。
+- `src/sekai/skia_renderer/canvas.py::render_canvas_payload(canvas)` —— 把已构建的 Canvas 经 IRPainter
+  → native 渲染;失败/未启用返回 None 回退 Pillow。门控 `drawing.use_skia_plot`(默认关)。
 
 | 端点 | 状态 | 备注 |
 |---|---|---|
-| `POST /api/pjsk/card/list` | ✅ Skia | 布局在 Python，Rust 解释 IR |
-| `POST /api/pjsk/card/box` | ✅ Skia | 同上；`user_info` 分支仍走 Pillow |
-| `profile / music / event / sk / chart / mysekai / gacha / score` | ❌ Pillow only | 渲染原语/富文本现已就绪；迁移主要剩 Python 侧布局求解（splits/grid/flow 预算绝对坐标），少数用动图的端点另需动图输出 |
+| `card/list`、`card/box` | ✅ Skia | 直接用 IRBuilder 手迁(早于影子层) |
+| `stamp/list`、`costume/list`、`costume/detail` | ✅ Skia(影子层) | Wave 1;与 Pillow 布局逐尺寸一致,面板/网格/文字/`add_draw_func` 占位符一致(三角背景因 RNG 略异) |
+| `score / music/detail`(W2–W3) | ⏳ 待迁 | 纯 widget 树,仅需影子层 |
+| `profile / music/list / event / education`(W4) | ⏳ 待迁 | 需先把 `get_profile_card`/卡缩略图等运行时合成产出为 `mem:key` |
+| `deck / gacha / event-list / vlive`(W5–W6) | ⏳ 待迁 | 同上 + 缓存策略 |
+| `profile/custom`、`chart`、`mysekai`、`honor`、`sk` traces | ❌ 排除/特殊 | 详见下方"排除" |
 
 `card/list`、`card/box` 的缩略图与技能图标在 Python 布局层合成（`card_common.py:147-159`、`card_list.py:177-190`），未沉入 IR。
 
