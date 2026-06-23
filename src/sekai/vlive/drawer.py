@@ -1,10 +1,10 @@
 import asyncio
 from datetime import datetime
 import logging
-import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT
 from src.sekai.base.plot import Canvas, Flow, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
@@ -18,6 +18,7 @@ from src.sekai.base.utils import (
     put_composed_image_cache,
     put_composed_image_disk_cache,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
 from .model import VLiveBrief, VLiveListRequest
@@ -183,13 +184,11 @@ async def _get_vlive_list_entry_image(vlive: VLiveBrief, now: datetime) -> Image
     return image
 
 
-async def compose_vlive_list_image(rqd: VLiveListRequest) -> Image.Image:
+async def _build_vlive_list_canvas(rqd: VLiveListRequest) -> Canvas:
     lives = rqd.lives
     now = request_now(rqd.timezone)
 
-    _t0 = time.perf_counter()
     entry_images = await asyncio.gather(*[_get_vlive_list_entry_image(vlive, now) for vlive in lives]) if lives else []
-    _t_entries = time.perf_counter() - _t0
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(16).set_item_align("lt").set_content_align("lt"):
@@ -198,15 +197,14 @@ async def compose_vlive_list_image(rqd: VLiveListRequest) -> Image.Image:
                     ImageBox(entry_image)
 
     add_request_watermark(canvas, rqd)
-    _t0 = time.perf_counter()
-    image = await canvas.get_img()
-    _t_render = time.perf_counter() - _t0
-    _perf_logger.info(
-        "vlive/list total: entries=%.3fs render=%.3fs lives=%d image=%dx%d",
-        _t_entries,
-        _t_render,
-        len(lives),
-        image.width,
-        image.height,
-    )
-    return image
+    return canvas
+
+
+async def compose_vlive_list_image(rqd: VLiveListRequest) -> Image.Image:
+    return await (await _build_vlive_list_canvas(rqd)).get_img()
+
+
+async def try_render_vlive_list_payload(rqd: VLiveListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_vlive_list_canvas(rqd))

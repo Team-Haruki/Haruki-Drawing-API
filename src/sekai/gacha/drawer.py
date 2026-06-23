@@ -5,6 +5,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -21,6 +22,7 @@ from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer,
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
 from src.sekai.profile.drawer import get_card_full_thumbnail
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # 从 model.py 导入数据模型
@@ -126,7 +128,7 @@ GACHA_RARE_NAMES = {
 # ======================= Drawing Functions ======================= #
 
 
-async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
+async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
     """合成卡池一览图片"""
     gachas = list(rqd.gachas)
     pre_paginated = rqd.pre_paginated or (rqd.current_page is not None and rqd.total_page is not None)
@@ -209,10 +211,20 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
+async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
+    return await (await _build_gacha_list_canvas(rqd)).get_img()
+
+
+async def try_render_gacha_list_payload(rqd: GachaListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_gacha_list_canvas(rqd))
+
+
+async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
     """合成卡池详情图片"""
     # 绘图
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
@@ -481,4 +493,14 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                                 TextBox(rate_text, text_style)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
+    return await (await _build_gacha_detail_canvas(rqd)).get_img()
+
+
+async def try_render_gacha_detail_payload(rqd: GachaDetailRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_gacha_detail_canvas(rqd))

@@ -9,6 +9,7 @@ from src.sekai.event.drawer import (
     compose_event_planner_image,
     compose_event_record_image,
     try_render_event_detail_payload,
+    try_render_event_list_payload,
     try_render_event_planner_payload,
     try_render_event_record_payload,
 )
@@ -66,6 +67,9 @@ async def event_list(request: EventListRequest):
     Shows multiple events in a list format.
     """
     try:
+        payload = await try_render_event_list_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_event_list_image(request)
         return await image_to_response(image)
     except Exception as e:

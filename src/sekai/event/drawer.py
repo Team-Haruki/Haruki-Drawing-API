@@ -765,20 +765,18 @@ async def _get_event_list_entry_image(d, now, style1: TextStyle, style2: TextSty
 
 
 # 合成活动列表图片
-async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
+async def _build_event_list_canvas(rqd: EventListRequest) -> Canvas:
     event_list = rqd.event_info
 
     row_count = math.ceil(math.sqrt(len(event_list)))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
     now = request_now(rqd.timezone)
-    _t0 = time.perf_counter()
     entry_images = (
         await asyncio.gather(*[_get_event_list_entry_image(d, now, style1, style2) for d in event_list])
         if event_list
         else []
     )
-    _t_entries = time.perf_counter() - _t0
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
@@ -791,15 +789,14 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
                     ImageBox(entry_image)
 
     add_request_watermark(canvas, rqd)
-    _t0 = time.perf_counter()
-    image = await canvas.get_img()
-    _t_render = time.perf_counter() - _t0
-    _perf_logger.info(
-        "event/list total: entries=%.3fs render=%.3fs events=%d image=%dx%d",
-        _t_entries,
-        _t_render,
-        len(event_list),
-        image.width,
-        image.height,
-    )
-    return image
+    return canvas
+
+
+async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
+    return await (await _build_event_list_canvas(rqd)).get_img()
+
+
+async def try_render_event_list_payload(rqd: EventListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_event_list_canvas(rqd))
