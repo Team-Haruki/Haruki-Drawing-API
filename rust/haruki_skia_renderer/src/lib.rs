@@ -603,14 +603,17 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         .max(1.0);
     let a1 = (255.0 * edge_strength).clamp(0.0, 255.0) as u8;
     let a2 = (255.0 * edge_strength * 0.85).clamp(0.0, 255.0) as u8;
-    let shoulder = (255.0 * edge_strength * 0.16).clamp(0.0, 255.0) as u8;
-    // Evenly spaced at 0, .25, .5, .75, 1: bright corner -> faint shoulder -> transparent
-    // middle -> faint shoulder -> bright corner, concentrating the gloss near the corners.
+    // Evenly spaced at 0, .25, .5, .75, 1: bright corner -> half-bright shoulder ->
+    // transparent middle -> half-bright shoulder -> bright corner. The shoulders are kept
+    // at half strength (not faint) so the gloss reaches well along the edges before fading,
+    // matching how far Pillow's highlight extends from each corner.
+    let s1 = (a1 as f32 * 0.5) as u8;
+    let s2 = (a2 as f32 * 0.5) as u8;
     let colors = [
         Color::from_argb(a1, 255, 255, 255).into(),
-        Color::from_argb(shoulder, 255, 255, 255).into(),
+        Color::from_argb(s1, 255, 255, 255).into(),
         Color::from_argb(0, 255, 255, 255).into(),
-        Color::from_argb(shoulder, 255, 255, 255).into(),
+        Color::from_argb(s2, 255, 255, 255).into(),
         Color::from_argb(a2, 255, 255, 255).into(),
     ];
     let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
@@ -623,23 +626,31 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         &grad,
         None,
     ) {
-        // A wide stroke centered on the rim, clipped to the panel and softened, so the
-        // highlight fades *inward* into the interior (a broad pearly sheen) rather than a
-        // thin hard line.
-        let rrect = RRect::new_rect_xy(rect, radius, radius);
+        // A crisp band hugging the rim (~edge_w wide), matching Pillow's flat highlight
+        // band that drops straight to the interior. A wide inward fade instead reads as a
+        // second inner border ("two layers"). Tiny blur is for soft AA only. Clipped to the
+        // panel so the AA bleed never crosses the edge into the contact shadow.
+        let inset = edge_w * 0.5;
         canvas.save();
-        canvas.clip_rrect(rrect, ClipOp::Intersect, true);
+        canvas.clip_rrect(
+            RRect::new_rect_xy(rect, radius, radius),
+            ClipOp::Intersect,
+            true,
+        );
         let mut edge = Paint::default();
         edge.set_anti_alias(true);
         edge.set_style(PaintStyle::Stroke);
-        edge.set_stroke_width(edge_w * 1.8);
+        edge.set_stroke_width(edge_w);
         edge.set_shader(shader);
-        edge.set_mask_filter(MaskFilter::blur(
-            BlurStyle::Normal,
-            (edge_w * 0.45).max(0.6),
-            true,
-        ));
-        canvas.draw_rrect(rrect, &edge);
+        edge.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 0.6, true));
+        canvas.draw_rrect(
+            RRect::new_rect_xy(
+                rect.with_inset((inset, inset)),
+                (radius - inset).max(0.0),
+                (radius - inset).max(0.0),
+            ),
+            &edge,
+        );
         edge.set_mask_filter(None);
         canvas.restore();
     }
