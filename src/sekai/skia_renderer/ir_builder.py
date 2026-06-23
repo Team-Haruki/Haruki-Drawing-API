@@ -38,6 +38,18 @@ def _stops(stops: Sequence[tuple[Color, float]]) -> list[Node]:
     return [{"color": _color(c), "pos": float(p)} for c, p in stops]
 
 
+def image_tint(color: Color, mode: str = "multiply", strength: float = 1.0) -> Node:
+    """A color tint for an Image node. ``multiply`` = component-wise multiply;
+    ``mix`` = alpha-weighted lerp toward ``color`` by ``strength`` (0..1)."""
+    return {"color": _color(color), "mode": mode, "strength": float(strength)}
+
+
+def image_shadow(alpha: float = 0.6, offset: Vec2 = (6, 6), sigma: float = 3.0,
+                 color: Color = (0, 0, 0, 255)) -> Node:
+    """A drop shadow derived from an Image node's alpha silhouette."""
+    return {"alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)}
+
+
 def linear_gradient(
     c1: Color | None = None,
     c2: Color | None = None,
@@ -162,11 +174,15 @@ class IRBuilder:
         return self._add(node)
 
     def image(self, path: str, pos: Vec2, size: Vec2 = (0, 0), fit: str = "stretch", alpha: float = 1.0,
-              anchor: Vec2 = (0, 0)) -> Node:
+              anchor: Vec2 = (0, 0), tint: Node | None = None, shadow: Node | None = None) -> Node:
         node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path,
                       "fit": fit, "alpha": alpha}
         if anchor[0] or anchor[1]:
             node["anchor"] = _vec(anchor)
+        if tint is not None:
+            node["tint"] = tint
+        if shadow is not None:
+            node["shadow"] = shadow
         return self._add(node)
 
     def text(self, text: str, pos: Vec2, role: str, size: float, align: str = "left",

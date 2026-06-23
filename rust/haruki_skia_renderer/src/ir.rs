@@ -184,6 +184,47 @@ pub enum Fit {
     Contain,
     /// `size[0]` is the target width; height derives from aspect ratio.
     Width,
+    /// Center-crop to `size` WITHOUT scaling (1:1 pixels, mirrors Painter's
+    /// `center_crop_by_aspect_ratio`). If the source is smaller, it is centered.
+    Crop,
+}
+
+/// How an image tint color is combined with the image pixels.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TintMode {
+    /// Component-wise multiply (Painter `multiply_image_by_color`).
+    #[default]
+    Multiply,
+    /// Alpha-weighted lerp toward `color` by `strength` (Painter `mix_image_by_color`).
+    Mix,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct Tint {
+    pub color: Color4,
+    #[serde(default)]
+    pub mode: TintMode,
+    /// Mix weight 0..1 (only used by `mix`).
+    #[serde(default = "default_tint_strength")]
+    pub strength: f32,
+}
+
+fn default_tint_strength() -> f32 {
+    1.0
+}
+
+/// A drop shadow derived from the image's own alpha silhouette (Painter `paste(use_shadow=True)`).
+#[derive(Debug, Deserialize, Clone, Copy)]
+pub struct ImageShadow {
+    #[serde(default = "default_shadow_node_alpha")]
+    pub alpha: f32,
+    #[serde(default = "default_shadow_offset")]
+    pub offset: Vec2,
+    #[serde(default = "default_shadow_sigma")]
+    pub sigma: f32,
+    #[serde(default = "default_shadow_color")]
+    pub color: Color4,
 }
 
 #[derive(Debug, Deserialize)]
@@ -280,6 +321,12 @@ pub struct ImageNode {
     /// content_align), which matters for `width` fit where the height is computed.
     #[serde(default)]
     pub anchor: Vec2,
+    /// Optional color tint applied to the image pixels.
+    #[serde(default)]
+    pub tint: Option<Tint>,
+    /// Optional drop shadow from the image's alpha silhouette, drawn behind the image.
+    #[serde(default)]
+    pub shadow: Option<ImageShadow>,
 }
 
 fn default_alpha() -> f32 {

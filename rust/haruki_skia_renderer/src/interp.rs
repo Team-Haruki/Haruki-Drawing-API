@@ -10,9 +10,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, Color4f, FilterMode, Font, IRect, Image, MaskFilter,
-    MipmapMode, Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface,
-    TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, gradient, surfaces,
+    BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, FilterMode, Font, IRect, Image,
+    MaskFilter, MipmapMode, Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions,
+    Shader, Surface, TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, color_filters,
+    gradient, image_filters, surfaces,
 };
 
 use crate::ir::*;
@@ -452,42 +453,78 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
     // Anchor `pos` within the rect: [0,0] top-left .. [1,1] bottom-right.
     let x = node.pos[0] + off.0 - rw * node.anchor[0];
     let y = node.pos[1] + off.1 - rh * node.anchor[1];
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_alpha_f(node.alpha.clamp(0.0, 1.0));
-    let sampling = image_sampling();
 
-    match node.fit {
-        Fit::Stretch | Fit::Width => {
-            let dst = Rect::from_xywh(x, y, rw, rh);
-            canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
-        }
+    // Resolve the (source, destination) rects for the fit mode.
+    let (src, dst) = match node.fit {
+        Fit::Stretch | Fit::Width => (None, Rect::from_xywh(x, y, rw, rh)),
         Fit::Contain => {
-            let dst = Rect::from_xywh(x, y, rw, rh);
-            let scale = (dst.width() / iw).min(dst.height() / ih);
+            let scale = (rw / iw).min(rh / ih);
             let w = iw * scale;
             let h = ih * scale;
-            let fitted = Rect::from_xywh(
-                dst.left + (dst.width() - w) * 0.5,
-                dst.top + (dst.height() - h) * 0.5,
-                w,
-                h,
-            );
-            canvas.draw_image_rect_with_sampling_options(image, None, fitted, sampling, &paint);
+            (None, Rect::from_xywh(x + (rw - w) * 0.5, y + (rh - h) * 0.5, w, h))
         }
         Fit::Cover => {
-            let dst = Rect::from_xywh(x, y, rw, rh);
-            let scale = (dst.width() / iw).max(dst.height() / ih);
-            let sw = dst.width() / scale;
-            let sh = dst.height() / scale;
-            let src = Rect::from_xywh((iw - sw) * 0.5, (ih - sh) * 0.5, sw, sh);
-            canvas.draw_image_rect_with_sampling_options(
-                image,
-                Some((&src, SrcRectConstraint::Strict)),
-                dst,
-                sampling,
-                &paint,
-            );
+            let scale = (rw / iw).max(rh / ih);
+            let sw = rw / scale;
+            let sh = rh / scale;
+            let s = Rect::from_xywh((iw - sw) * 0.5, (ih - sh) * 0.5, sw, sh);
+            (Some(s), Rect::from_xywh(x, y, rw, rh))
+        }
+        Fit::Crop => {
+            // Center-crop without scaling: take a rw×rh window of the source (clamped), draw 1:1.
+            let cw = rw.min(iw);
+            let ch = rh.min(ih);
+            let s = Rect::from_xywh((iw - cw) * 0.5, (ih - ch) * 0.5, cw, ch);
+            let d = Rect::from_xywh(x + (rw - cw) * 0.5, y + (rh - ch) * 0.5, cw, ch);
+            (Some(s), d)
+        }
+    };
+    let sampling = image_sampling();
+    let src_arg = src.as_ref().map(|s| (s, SrcRectConstraint::Strict));
+    let alpha = node.alpha.clamp(0.0, 1.0);
+
+    // Alpha-silhouette drop shadow, drawn behind the image (mirrors Painter paste shadow).
+    if let Some(sh) = &node.shadow {
+        let mut shadow_paint = Paint::default();
+        shadow_paint.set_anti_alias(true);
+        let strength = (sh.alpha.clamp(0.0, 1.0) * (sh.color[3] as f32 / 255.0) * alpha).clamp(0.0, 1.0);
+        shadow_paint.set_alpha_f(strength);
+        // Recolor every covered pixel to the shadow color, keeping the image's alpha mask.
+        shadow_paint.set_color_filter(color_filters::blend(
+            Color::from_argb(255, sh.color[0], sh.color[1], sh.color[2]),
+            BlendMode::SrcIn,
+        ));
+        shadow_paint.set_image_filter(image_filters::blur(
+            (sh.sigma.max(0.0), sh.sigma.max(0.0)),
+            TileMode::Decal,
+            None,
+            None,
+        ));
+        let sdst = Rect::from_xywh(dst.left + sh.offset[0], dst.top + sh.offset[1], dst.width(), dst.height());
+        canvas.draw_image_rect_with_sampling_options(image, src_arg, sdst, sampling, &shadow_paint);
+    }
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_alpha_f(alpha);
+    if let Some(tint) = &node.tint {
+        paint.set_color_filter(tint_filter(tint));
+    }
+    canvas.draw_image_rect_with_sampling_options(image, src_arg, dst, sampling, &paint);
+}
+
+/// Build a color filter for an image tint (multiply or alpha-weighted mix).
+fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
+    let c = tint.color;
+    match tint.mode {
+        // Modulate = component-wise multiply (image_px * color/255).
+        TintMode::Multiply => {
+            color_filters::blend(Color::from_argb(c[3], c[0], c[1], c[2]), BlendMode::Modulate)
+        }
+        // SrcOver a translucent color over each pixel = lerp toward color by `strength`.
+        TintMode::Mix => {
+            let a = (tint.strength.clamp(0.0, 1.0) * 255.0).round() as u8;
+            color_filters::blend(Color::from_argb(a, c[0], c[1], c[2]), BlendMode::SrcOver)
         }
     }
 }
@@ -605,6 +642,22 @@ mod tests {
             &rendered.bytes[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    #[test]
+    fn parses_image_extensions() {
+        // tint + alpha-silhouette shadow + crop fit must deserialize and render (the asset is
+        // absent in the test base dir, so the image is skipped, but parsing must succeed).
+        let json = scene_json(
+            r#"
+            { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "missing.png",
+              "fit": "crop",
+              "tint": { "color": [255, 128, 0, 255], "mode": "multiply" },
+              "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.width, 64);
     }
 
     #[test]
