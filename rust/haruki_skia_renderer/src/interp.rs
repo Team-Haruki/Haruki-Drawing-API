@@ -423,7 +423,7 @@ fn draw_one_text(
     let Some(blob) = TextBlob::new(text, &font) else {
         return;
     };
-    let (advance, bounds) = font.measure_str(text, None);
+    let (advance, _bounds) = font.measure_str(text, None);
     let x = match align {
         HAlign::Left => abs.0,
         HAlign::Center => abs.0 - advance * 0.5,
@@ -431,8 +431,9 @@ fn draw_one_text(
     };
     let (_, metrics) = font.metrics();
     let baseline_y = match baseline {
-        // Align the visual top of the ink to pos.y (Painter widget behaviour).
-        Baseline::CjkTop => abs.1 - bounds.top,
+        // Match Painter._text: baseline at pos.y + ink height of the CJK reference
+        // glyph '哇' (a uniform top-anchor, not the text's own bounds).
+        Baseline::CjkTop => abs.1 + font.measure_str("哇", None).1.height(),
         // Align the font ascender line to pos.y (raster-text default).
         Baseline::Ascender => abs.1 - metrics.ascent,
         // pos.y is the baseline directly (matches raw draw_text_blob placement).
