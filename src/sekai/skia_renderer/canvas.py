@@ -70,8 +70,13 @@ def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
     )
 
 
-async def render_canvas_payload(canvas, *, bg_hour: float | None = None) -> EncodedImagePayload | None:
-    """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow."""
+async def render_canvas_payload(
+    canvas, *, bg_hour: float | None = None, scale: float | None = None
+) -> EncodedImagePayload | None:
+    """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow.
+
+    ``scale`` mirrors ``Canvas.get_img(scale)`` (render at 1x, resize the final raster).
+    """
     if not settings.drawing.use_skia_plot:
         return None
     try:
@@ -91,6 +96,8 @@ async def render_canvas_payload(canvas, *, bg_hour: float | None = None) -> Enco
         )
         canvas.draw(painter)
         scene, mem_images = painter.build_scene()
+        if scale is not None and abs(scale - 1.0) > 1e-3:
+            scene["scale"] = float(scale)
         ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         result = await run_in_pool(native.render_scene, ir_json, mem_images)
         return _payload_from_native(result)

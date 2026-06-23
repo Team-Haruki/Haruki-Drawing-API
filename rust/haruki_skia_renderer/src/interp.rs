@@ -205,6 +205,29 @@ pub(crate) fn render_scene_inner(
     }
     render_node(&mut surface, &mut interp, (0.0, 0.0), &scene.root);
 
+    // Optional output scaling: render at 1x then resize the raster (linear), matching
+    // plot.py Canvas.get_img(scale) which renders then BILINEAR-resizes the final image.
+    if (scene.scale - 1.0).abs() > 1e-3 && scene.scale > 0.0 {
+        let out_w = ((scene.canvas.width as f32) * scene.scale).round() as i32;
+        let out_h = ((scene.canvas.height as f32) * scene.scale).round() as i32;
+        if out_w > 0
+            && out_h > 0
+            && let Some(mut scaled) = surfaces::raster_n32_premul((out_w, out_h))
+        {
+            let image = surface.image_snapshot();
+            let mut paint = Paint::default();
+            paint.set_anti_alias(true);
+            scaled.canvas().draw_image_rect_with_sampling_options(
+                &image,
+                None,
+                Rect::from_xywh(0.0, 0.0, out_w as f32, out_h as f32),
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+                &paint,
+            );
+            return encode_surface(scaled, &scene.export_format, scene.jpg_quality);
+        }
+    }
+
     encode_surface(surface, &scene.export_format, scene.jpg_quality)
 }
 

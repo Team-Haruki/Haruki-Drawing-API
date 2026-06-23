@@ -18,6 +18,10 @@ pub struct Scene {
     pub jpg_quality: i32,
     pub fonts: FontsIr,
     pub canvas: CanvasIr,
+    /// Output scale: render at canvas size, then resize the final raster to
+    /// (round(w*scale), round(h*scale)) — mirrors plot.py `Canvas.get_img(scale)`.
+    #[serde(default = "default_scale")]
+    pub scale: f32,
     /// Optional flat background painted before the root tree (TriangleBg or cover image).
     #[serde(default)]
     pub background: Option<Node>,
@@ -30,6 +34,10 @@ fn default_export_format() -> String {
 
 fn default_jpg_quality() -> i32 {
     90
+}
+
+fn default_scale() -> f32 {
+    1.0
 }
 
 #[derive(Debug, Deserialize)]
