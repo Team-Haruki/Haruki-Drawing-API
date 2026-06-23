@@ -616,20 +616,25 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         &grad,
         None,
     ) {
-        let inset = edge_w * 0.5;
+        // A wide stroke centered on the rim, clipped to the panel and softened, so the
+        // highlight fades *inward* into the interior (a broad pearly sheen) rather than a
+        // thin hard line. Pillow's super-sampled outline reads this way.
+        let rrect = RRect::new_rect_xy(rect, radius, radius);
+        canvas.save();
+        canvas.clip_rrect(rrect, ClipOp::Intersect, true);
         let mut edge = Paint::default();
         edge.set_anti_alias(true);
         edge.set_style(PaintStyle::Stroke);
-        edge.set_stroke_width(edge_w);
+        edge.set_stroke_width(edge_w * 1.8);
         edge.set_shader(shader);
-        canvas.draw_rrect(
-            RRect::new_rect_xy(
-                rect.with_inset((inset, inset)),
-                (radius - inset).max(0.0),
-                (radius - inset).max(0.0),
-            ),
-            &edge,
-        );
+        edge.set_mask_filter(MaskFilter::blur(
+            BlurStyle::Normal,
+            (edge_w * 0.45).max(0.6),
+            true,
+        ));
+        canvas.draw_rrect(rrect, &edge);
+        edge.set_mask_filter(None);
+        canvas.restore();
     }
 
     // Faint inner contact line just inside the bevel for a subtly recessed feel
