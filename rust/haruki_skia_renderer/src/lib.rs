@@ -550,7 +550,7 @@ fn draw_blur_glass_rect(
         }
     }
 
-    draw_glass_overlay(canvas, rect, radius, fill);
+    draw_glass_overlay(canvas, rect, radius, fill, 0.6);
 }
 
 fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32) {
@@ -578,31 +578,72 @@ fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32
     paint.set_mask_filter(None);
 }
 
-fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color) {
+fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edge_strength: f32) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_color(fill);
     paint.set_style(PaintStyle::Fill);
     canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), &paint);
 
-    // Pillow's blurglass adds soft edge highlights on top of the blurred layer.
-    paint.set_style(PaintStyle::Stroke);
-    paint.set_stroke_width(1.0);
-    paint.set_color(Color::from_argb(34, 104, 86, 132));
-    canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), &paint);
+    if edge_strength <= 0.0 {
+        return;
+    }
 
-    paint.set_stroke_width(1.4);
-    paint.set_color(Color::from_argb(96, 255, 255, 255));
-    canvas.draw_rrect(
-        RRect::new_rect_xy(rect.with_inset((0.8, 0.8)), radius - 0.8, radius - 0.8),
-        &paint,
-    );
+    // Directional glass bevel (mirrors Pillow's _impl_blurglass_roundrect edge pass):
+    // a bright highlight on the top-left rim fading through transparent to a fainter
+    // highlight on the bottom-right rim. This is what gives the panel its depth; the
+    // previous uniform strokes read flat.
+    let edge_w = (radius * 0.5)
+        .min(4.0)
+        .min(rect.width().min(rect.height()) / 16.0)
+        .max(1.0);
+    let a1 = (255.0 * edge_strength).clamp(0.0, 255.0) as u8;
+    let a2 = (255.0 * edge_strength * 0.75).clamp(0.0, 255.0) as u8;
+    let colors = [
+        Color::from_argb(a1, 255, 255, 255).into(),
+        Color::from_argb(0, 255, 255, 255).into(),
+        Color::from_argb(a2, 255, 255, 255).into(),
+    ];
+    let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
+    let grad = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    if let Some(shader) = gradient::shaders::linear_gradient(
+        (
+            Point::new(rect.left, rect.top),
+            Point::new(rect.right, rect.bottom),
+        ),
+        &grad,
+        None,
+    ) {
+        let inset = edge_w * 0.5;
+        let mut edge = Paint::default();
+        edge.set_anti_alias(true);
+        edge.set_style(PaintStyle::Stroke);
+        edge.set_stroke_width(edge_w);
+        edge.set_shader(shader);
+        canvas.draw_rrect(
+            RRect::new_rect_xy(
+                rect.with_inset((inset, inset)),
+                (radius - inset).max(0.0),
+                (radius - inset).max(0.0),
+            ),
+            &edge,
+        );
+    }
 
-    paint.set_stroke_width(2.0);
-    paint.set_color(Color::from_argb(24, 255, 255, 255));
+    // Faint inner contact line just inside the bevel for a subtly recessed feel
+    // (approximates Pillow's soft inner shadow).
+    let mut inner = Paint::default();
+    inner.set_anti_alias(true);
+    inner.set_style(PaintStyle::Stroke);
+    inner.set_stroke_width(1.0);
+    inner.set_color(Color::from_argb(28, 92, 78, 116));
     canvas.draw_rrect(
-        RRect::new_rect_xy(rect.with_inset((2.0, 2.0)), radius - 2.0, radius - 2.0),
-        &paint,
+        RRect::new_rect_xy(
+            rect.with_inset((edge_w, edge_w)),
+            (radius - edge_w).max(0.0),
+            (radius - edge_w).max(0.0),
+        ),
+        &inner,
     );
 }
 
