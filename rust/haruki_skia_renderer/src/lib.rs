@@ -593,19 +593,24 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         return;
     }
 
-    // Directional glass bevel (mirrors Pillow's _impl_blurglass_roundrect edge pass):
-    // a bright highlight on the top-left rim fading through transparent to a fainter
-    // highlight on the bottom-right rim. This is what gives the panel its depth; the
-    // previous uniform strokes read flat.
+    // Glass edge gloss: the light comes from the top-left AND the bottom-right toward the
+    // center, so both of those corners carry a bright sheen that fades along the rim toward
+    // the dim diagonal (top-right / bottom-left). The fade goes straight to transparent in
+    // the middle — no shadow-colored layer — so the transition reads as natural light.
     let edge_w = (radius * 0.5)
         .min(4.0)
         .min(rect.width().min(rect.height()) / 16.0)
         .max(1.0);
     let a1 = (255.0 * edge_strength).clamp(0.0, 255.0) as u8;
-    let a2 = (255.0 * edge_strength * 0.75).clamp(0.0, 255.0) as u8;
+    let a2 = (255.0 * edge_strength * 0.85).clamp(0.0, 255.0) as u8;
+    let shoulder = (255.0 * edge_strength * 0.16).clamp(0.0, 255.0) as u8;
+    // Evenly spaced at 0, .25, .5, .75, 1: bright corner -> faint shoulder -> transparent
+    // middle -> faint shoulder -> bright corner, concentrating the gloss near the corners.
     let colors = [
         Color::from_argb(a1, 255, 255, 255).into(),
+        Color::from_argb(shoulder, 255, 255, 255).into(),
         Color::from_argb(0, 255, 255, 255).into(),
+        Color::from_argb(shoulder, 255, 255, 255).into(),
         Color::from_argb(a2, 255, 255, 255).into(),
     ];
     let gradient_colors = gradient::Colors::new_evenly_spaced(&colors, TileMode::Clamp, None);
@@ -620,7 +625,7 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
     ) {
         // A wide stroke centered on the rim, clipped to the panel and softened, so the
         // highlight fades *inward* into the interior (a broad pearly sheen) rather than a
-        // thin hard line. Pillow's super-sampled outline reads this way.
+        // thin hard line.
         let rrect = RRect::new_rect_xy(rect, radius, radius);
         canvas.save();
         canvas.clip_rrect(rrect, ClipOp::Intersect, true);
@@ -638,22 +643,6 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         edge.set_mask_filter(None);
         canvas.restore();
     }
-
-    // Faint inner contact line just inside the bevel for a subtly recessed feel
-    // (approximates Pillow's soft inner shadow).
-    let mut inner = Paint::default();
-    inner.set_anti_alias(true);
-    inner.set_style(PaintStyle::Stroke);
-    inner.set_stroke_width(1.0);
-    inner.set_color(Color::from_argb(28, 92, 78, 116));
-    canvas.draw_rrect(
-        RRect::new_rect_xy(
-            rect.with_inset((edge_w, edge_w)),
-            (radius - edge_w).max(0.0),
-            (radius - edge_w).max(0.0),
-        ),
-        &inner,
-    );
 }
 
 fn draw_cover_image(canvas: &Canvas, image: &Image, dst: Rect, alpha: f32) {
