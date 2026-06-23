@@ -358,26 +358,26 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
     if iw <= 0.0 || ih <= 0.0 {
         return;
     }
-    let x = node.pos[0] + off.0;
-    let y = node.pos[1] + off.1;
+    // The drawn rect size depends on the fit mode (width fit derives height from aspect).
+    let (rw, rh) = match node.fit {
+        Fit::Width => (node.size[0], node.size[0] * ih / iw),
+        _ => (node.size[0], node.size[1]),
+    };
+    // Anchor `pos` within the rect: [0,0] top-left .. [1,1] bottom-right.
+    let x = node.pos[0] + off.0 - rw * node.anchor[0];
+    let y = node.pos[1] + off.1 - rh * node.anchor[1];
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_alpha_f(node.alpha.clamp(0.0, 1.0));
     let sampling = image_sampling();
 
     match node.fit {
-        Fit::Stretch => {
-            let dst = Rect::from_xywh(x, y, node.size[0], node.size[1]);
-            canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
-        }
-        Fit::Width => {
-            let w = node.size[0];
-            let h = w * ih / iw;
-            let dst = Rect::from_xywh(x, y, w, h);
+        Fit::Stretch | Fit::Width => {
+            let dst = Rect::from_xywh(x, y, rw, rh);
             canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
         }
         Fit::Contain => {
-            let dst = Rect::from_xywh(x, y, node.size[0], node.size[1]);
+            let dst = Rect::from_xywh(x, y, rw, rh);
             let scale = (dst.width() / iw).min(dst.height() / ih);
             let w = iw * scale;
             let h = ih * scale;
@@ -390,7 +390,7 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
             canvas.draw_image_rect_with_sampling_options(image, None, fitted, sampling, &paint);
         }
         Fit::Cover => {
-            let dst = Rect::from_xywh(x, y, node.size[0], node.size[1]);
+            let dst = Rect::from_xywh(x, y, rw, rh);
             let scale = (dst.width() / iw).max(dst.height() / ih);
             let sw = dst.width() / scale;
             let sh = dst.height() / scale;

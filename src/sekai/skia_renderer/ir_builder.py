@@ -114,9 +114,13 @@ class IRBuilder:
             node["stroke_width"] = stroke_width
         return self._add(node)
 
-    def image(self, path: str, pos: Vec2, size: Vec2 = (0, 0), fit: str = "stretch", alpha: float = 1.0) -> Node:
-        return self._add({"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path,
-                          "fit": fit, "alpha": alpha})
+    def image(self, path: str, pos: Vec2, size: Vec2 = (0, 0), fit: str = "stretch", alpha: float = 1.0,
+              anchor: Vec2 = (0, 0)) -> Node:
+        node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path,
+                      "fit": fit, "alpha": alpha}
+        if anchor[0] or anchor[1]:
+            node["anchor"] = _vec(anchor)
+        return self._add(node)
 
     def text(self, text: str, pos: Vec2, role: str, size: float, align: str = "left",
              baseline: str = "cjk_top", fill: Color = (0, 0, 0, 255)) -> Node:

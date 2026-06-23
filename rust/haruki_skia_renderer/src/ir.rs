@@ -251,6 +251,11 @@ pub struct ImageNode {
     pub fit: Fit,
     #[serde(default = "default_alpha")]
     pub alpha: f32,
+    /// Anchor of `pos` within the drawn rect: [0,0]=top-left (default), [1,1]=bottom-right,
+    /// [0.5,0.5]=center. Lets `pos` align the rect's corner/center (mirrors Painter's
+    /// content_align), which matters for `width` fit where the height is computed.
+    #[serde(default)]
+    pub anchor: Vec2,
 }
 
 fn default_alpha() -> f32 {

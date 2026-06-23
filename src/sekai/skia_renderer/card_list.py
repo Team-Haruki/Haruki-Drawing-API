@@ -172,7 +172,9 @@ def _card_cell(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], now_ms
         b.text("未上线", (4, _CARD_H - 8), "bold", 20, baseline="alphabetic", fill=(200, 0, 0, 255))
 
     if card.get("skill_type") and card.get("skill_icon_path"):
-        b.image(card["skill_icon_path"], (_CARD_W - 40, _CARD_H - 40), (32, 32), fit="stretch")
+        # Aspect-preserving (width 32), bottom-right aligned with an 8px margin — mirrors
+        # Pillow's Frame(content_align="rb") + ImageBox(fit).set_w(32).set_margin(8).
+        b.image(card["skill_icon_path"], (_CARD_W - 8, _CARD_H - 8), (32, 0), fit="width", anchor=(1, 1))
 
     thumbs = card["thumbnail_info"][:2]
     total_w = len(thumbs) * _THUMB + max(0, len(thumbs) - 1) * 16
