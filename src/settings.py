@@ -107,6 +107,11 @@ class DrawingSettings(BaseModel):
     screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
+    use_skia_card_list: bool = False  # 是否启用 Rust + Skia card/list 渲染 MVP
+    skia_card_list_fallback_to_pillow: bool = True  # Skia 渲染失败时是否回退 Pillow
+    skia_card_list_log_visual_metrics: bool = False  # 是否记录 Skia 视觉验收辅助指标
+    use_skia_card_box: bool = False  # 是否启用 Rust + Skia card/box 渲染
+    skia_card_fallback_to_pillow: bool = True  # Card 模块 Skia 渲染失败时是否回退 Pillow
     custom_profile_assets_dir: Path | None = None
     custom_profile_fonts_dir: Path | None = None
     custom_profile_tmp_font_metadata: Path | None = None
@@ -249,6 +254,11 @@ COMPOSED_IMAGE_CACHE_TTL_SECONDS = settings.drawing.composed_image_cache_ttl_sec
 SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
+USE_SKIA_CARD_LIST = settings.drawing.use_skia_card_list
+SKIA_CARD_LIST_FALLBACK_TO_PILLOW = settings.drawing.skia_card_list_fallback_to_pillow
+SKIA_CARD_LIST_LOG_VISUAL_METRICS = settings.drawing.skia_card_list_log_visual_metrics
+USE_SKIA_CARD_BOX = settings.drawing.use_skia_card_box
+SKIA_CARD_FALLBACK_TO_PILLOW = settings.drawing.skia_card_fallback_to_pillow
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir
 CUSTOM_PROFILE_FONTS_DIR = settings.drawing.custom_profile_fonts_dir
 CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_metadata
