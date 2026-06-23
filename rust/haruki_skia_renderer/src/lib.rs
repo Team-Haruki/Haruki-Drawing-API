@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use pyo3::prelude::*;
@@ -742,7 +744,25 @@ fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(base.join(relative))
 }
 
+static TYPEFACE_CACHE: OnceLock<Mutex<HashMap<String, Typeface>>> = OnceLock::new();
+
+/// Load a typeface, caching it process-wide by (dir, name) so each render does not
+/// re-read and re-parse the font files (Typeface is cheap to clone — ref-counted).
 fn load_typeface(dir: &str, name: &str) -> Typeface {
+    let key = format!("{dir}\0{name}");
+    let cache = TYPEFACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(mut cache) = cache.lock() {
+        if let Some(typeface) = cache.get(&key) {
+            return typeface.clone();
+        }
+        let typeface = load_typeface_uncached(dir, name);
+        cache.insert(key, typeface.clone());
+        return typeface;
+    }
+    load_typeface_uncached(dir, name)
+}
+
+fn load_typeface_uncached(dir: &str, name: &str) -> Typeface {
     let mgr = FontMgr::default();
     for candidate in font_candidates(dir, name) {
         if candidate.exists()
