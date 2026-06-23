@@ -208,8 +208,9 @@ pub(crate) fn render_scene_inner(
     // Optional output scaling: render at 1x then resize the raster (linear), matching
     // plot.py Canvas.get_img(scale) which renders then BILINEAR-resizes the final image.
     if (scene.scale - 1.0).abs() > 1e-3 && scene.scale > 0.0 {
-        let out_w = ((scene.canvas.width as f32) * scene.scale).round() as i32;
-        let out_h = ((scene.canvas.height as f32) * scene.scale).round() as i32;
+        // Truncate (floor for positives) to match plot.py's int(size * scale).
+        let out_w = ((scene.canvas.width as f32) * scene.scale).floor() as i32;
+        let out_h = ((scene.canvas.height as f32) * scene.scale).floor() as i32;
         if out_w > 0
             && out_h > 0
             && let Some(mut scaled) = surfaces::raster_n32_premul((out_w, out_h))

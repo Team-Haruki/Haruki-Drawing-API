@@ -5,6 +5,7 @@ import time
 
 from PIL import Image, ImageDraw
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -57,6 +58,7 @@ from src.sekai.base.utils import (
     truncate,
 )
 from src.sekai.honor.drawer import HonorRequest, compose_full_honor_image
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -891,19 +893,8 @@ async def _build_profile_layout_modules(ctx: _ProfileLayoutContext) -> dict[str,
     }
 
 
-async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
-    r"""compose_profile_image
-
-    合成个人信息图片
-    Args
-    ----
-    rqd : ProfileRequest
-        合成个人信息图片所必须的数据
-
-    Returns
-    -------
-    PIL.Image.Image
-    """
+async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
+    """Build the profile widget tree (shared by the Pillow and Skia render paths)."""
     # 玩家基本信息
     profile = rqd.profile
     # 个人信息卡组
@@ -971,7 +962,22 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
         rqd,
         extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
     )
-    return await canvas.get_img(1.5)
+    return canvas
+
+
+_PROFILE_SCALE = 1.5
+
+
+async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
+    """合成个人信息图片 (Pillow 路径)。"""
+    return await (await _build_profile_canvas(rqd)).get_img(_PROFILE_SCALE)
+
+
+async def try_render_profile_payload(rqd: ProfileRequest) -> EncodedImagePayload | None:
+    """Skia 路径：经 IRPainter 渲染同一棵 widget 树；不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_profile_canvas(rqd), scale=_PROFILE_SCALE)
 
 
 def _profile_card_data_source_label(name: str | None) -> str:
