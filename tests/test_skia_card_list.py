@@ -111,3 +111,33 @@ async def test_card_list_endpoint_uses_pillow_when_skia_returns_none(monkeypatch
     response = await card_router.card_list(CardListRequest(cards=[], region="jp"))
 
     assert response.media_type == "image/png"
+
+
+@pytest.mark.anyio
+async def test_skia_card_list_caches_payload(monkeypatch):
+    from src.sekai.skia_renderer import card_common
+
+    card_common._skia_payload_cache.clear()
+    calls = {"n": 0}
+
+    class FakeNative:
+        def render_scene(self, _ir_json):
+            calls["n"] += 1
+            return {
+                "image_bytes": b"\x89PNG-fake",
+                "media_type": "image/png",
+                "filename": "image.png",
+                "image_width": 1,
+                "image_height": 1,
+                "image_mode": "RGBA",
+                "encode_elapsed": 0.0,
+            }
+
+    monkeypatch.setattr(card_list, "_load_native_renderer", lambda: FakeNative())
+    request = CardListRequest(cards=[], region="jp")
+
+    first = await card_list.render_card_list_payload(request)
+    second = await card_list.render_card_list_payload(request)
+
+    assert calls["n"] == 1  # second request served from the payload cache
+    assert first is second

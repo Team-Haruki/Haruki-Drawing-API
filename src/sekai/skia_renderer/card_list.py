@@ -13,6 +13,7 @@ from typing import Any
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import run_in_pool
+from src.sekai.card.drawer import _build_card_list_cache_key
 from src.sekai.card.model import CardListRequest
 from src.sekai.skia_renderer.card_common import (
     BG_PADDING as _BG_PADDING,
@@ -22,8 +23,10 @@ from src.sekai.skia_renderer.card_common import (
     TITLE_SEP as _TITLE_SEP,
     WATERMARK_FALLBACK as _WATERMARK_FALLBACK,
     center_text as _center_text,
+    get_skia_payload_cached,
     limited_icon_path as _limited_icon_path,
     notice_title as _notice_title,
+    put_skia_payload_cache,
     thumbnail as _thumbnail,
 )
 from src.sekai.skia_renderer.ir_builder import IRBuilder
@@ -281,7 +284,17 @@ def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
     )
 
 
+def _cache_key(rqd: CardListRequest) -> str:
+    # Reuse Pillow's stable request key (no timestamp) and qualify by output format so the
+    # cached encoded bytes match the current export settings.
+    return f"{_build_card_list_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
+
+
 async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
+    cache_key = _cache_key(rqd)
+    cached = get_skia_payload_cached(cache_key)
+    if cached is not None:
+        return cached
     native = _load_native_renderer()
     # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
     scene = build_card_list_scene(rqd)
@@ -289,7 +302,9 @@ async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
     result = await run_in_pool(native.render_scene, ir_json)
     if not isinstance(result, dict):
         raise SkiaCardListRenderError("native renderer must return a dict")
-    return _payload_from_native(result)
+    payload = _payload_from_native(result)
+    put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
+    return payload
 
 
 async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload | None:
