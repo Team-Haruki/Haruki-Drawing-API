@@ -626,10 +626,11 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         &grad,
         None,
     ) {
-        // A crisp band hugging the rim (~edge_w wide), matching Pillow's flat highlight
-        // band that drops straight to the interior. A wide inward fade instead reads as a
-        // second inner border ("two layers"). Tiny blur is for soft AA only. Clipped to the
-        // panel so the AA bleed never crosses the edge into the contact shadow.
+        // A crisp band hugging the rim (~edge_w wide) that drops straight to the interior
+        // in ~1px, like Pillow. No mask blur: the stroke's own anti-aliasing gives the ~1px
+        // soft inner edge. A blurred inner edge instead ramps over 2-3px and reads as an
+        // intermediate band ("interlayer"). Clipped to the panel so AA never crosses the
+        // edge into the contact shadow.
         let inset = edge_w * 0.5;
         canvas.save();
         canvas.clip_rrect(
@@ -642,7 +643,6 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         edge.set_style(PaintStyle::Stroke);
         edge.set_stroke_width(edge_w);
         edge.set_shader(shader);
-        edge.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, 0.6, true));
         canvas.draw_rrect(
             RRect::new_rect_xy(
                 rect.with_inset((inset, inset)),
@@ -651,7 +651,6 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
             ),
             &edge,
         );
-        edge.set_mask_filter(None);
         canvas.restore();
     }
 }
