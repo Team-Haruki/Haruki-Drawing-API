@@ -98,7 +98,8 @@ Rust 解释器骨架（本阶段新增，与既有 `render_card_list`/`render_ca
 - 通用解释器骨架：`ir.rs`（节点 enum）+ `interp.rs`（绝对坐标 region dispatch）+ `render_scene` PyO3 入口已落地。节点：`Group`、`Rect`、`RoundRect`（逐角半径）、`PieSlice`、`Image`（cubic 采样 + stretch/cover/contain/width）、`Text`（CjkTop / Ascender / Alphabetic baseline + 对齐）、`Shadow`、线性 `Gradient` fill、`BlurGlass`、`TriangleBg`、`ImageBg`、`Watermark`。radial 渐变、separate 方法、emoji fallback 为后续。
 - ④ Card List / Card Box 已切到通用解释器（`card_scene.rs` 从 `CardListIr`/`CardBoxIr` 构建 v2 Scene），默认走解释器，`HARUKI_SKIA_CARD_LEGACY=1` 回退旧的写死绘制路径做 A/B。缩略图合成实现为分层节点子 `Group`（方案 1，无内存图句柄）；Card Box 的可变缩略图尺寸通过 build 时按比例缩放各图层坐标处理。
 - 真实 12 卡 payload A/B：尺寸严格一致（Card List `1036x922`、Card Box `1316x368`），视觉与旧路径等价（cubic 采样更清晰、玻璃 backdrop 为实时快照，故非逐字节一致）。
-- 待办：⑤ Python `IRBuilder` + 首个端点布局搬到 Python；⑥ 逐节点 Pillow-vs-Skia 对拍 harness；之后补 radial/adaptive 文本、移除旧写死路径。
+- ⑥ 逐节点对拍 harness 已落地（`tests/test_skia_parity.py`）：单节点同时走 Pillow `Painter` 与 `render_scene`，尺寸硬断言 + 填充 alpha-IoU / 文字 ink-bbox 容差，失败输出 `expected|actual|diff` 三联图到 `out/skia-parity/`。已覆盖 rect / roundrect / pieslice / 线性渐变 / CJK 文字。顺带把 `Text` CjkTop 基线对齐 Painter 的 `'哇'` 参考高度。
+- 待办：⑤ Python `IRBuilder` + 首个端点布局搬到 Python；扩展对拍覆盖（Image/BlurGlass/对齐变体）；之后补 radial/adaptive 文本、移除旧写死路径。
 
 ## 进度表
 
