@@ -6,10 +6,16 @@ use std::time::Instant;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, Data, EncodedImageFormat, FontMgr, Image, MaskFilter, Paint,
-    PaintStyle, Path as SkPath, Point, RRect, Rect, SamplingOptions, Surface, TileMode, Typeface,
-    gradient, image_filters, surfaces,
+    BlurStyle, Canvas, ClipOp, Color, Data, EncodedImageFormat, FilterMode, FontMgr, Image,
+    MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point, RRect, Rect, SamplingOptions,
+    Surface, TileMode, Typeface, gradient, image_filters, surfaces,
 };
+
+/// Smooth (bilinear) sampling, matching Pillow's BILINEAR down/upscale in the blur
+/// pipeline. `SamplingOptions::default()` is NEAREST, which makes downsampled blurs blocky.
+fn linear_sampling() -> SamplingOptions {
+    SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+}
 
 mod interp;
 mod ir;
@@ -504,7 +510,7 @@ fn draw_blur_glass_rect(
                 backdrop,
                 Some((&sample_rect, skia_safe::canvas::SrcRectConstraint::Strict)),
                 temp_dst,
-                SamplingOptions::default(),
+                linear_sampling(),
                 &copy_paint,
             );
 
@@ -514,7 +520,7 @@ fn draw_blur_glass_rect(
                     let mut blur_paint = Paint::default();
                     blur_paint.set_anti_alias(true);
                     blur_paint.set_image_filter(image_filters::blur(
-                        (5.0 / downsample, 5.0 / downsample),
+                        (4.0 / downsample, 4.0 / downsample),
                         TileMode::Clamp,
                         None,
                         None,
@@ -523,7 +529,7 @@ fn draw_blur_glass_rect(
                         &temp_image,
                         None,
                         temp_dst,
-                        SamplingOptions::default(),
+                        linear_sampling(),
                         &blur_paint,
                     );
                     blur_surface.image_snapshot()
@@ -543,7 +549,7 @@ fn draw_blur_glass_rect(
                 &blurred,
                 None,
                 sample_rect,
-                SamplingOptions::default(),
+                linear_sampling(),
                 &paste_paint,
             );
             canvas.restore();
