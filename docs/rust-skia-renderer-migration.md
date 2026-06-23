@@ -2,6 +2,8 @@
 
 本文档记录 Haruki Drawing API 将 Pillow 绘制热点逐步迁移到 Rust + Skia renderer 的目标、决策和进度。
 
+> 二者的逐功能能力差距与剩余端点迁移前需补的缺口，见 [`skia-pillow-coverage-gaps.md`](./skia-pillow-coverage-gaps.md)。
+
 ## 目标
 
 - 以 Card 模块为第一批迁移范围，尽可能减少 `/api/pjsk/card/*` 的 Pillow 热路径。
