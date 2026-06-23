@@ -27,6 +27,8 @@ struct FontRegistry {
     regular: Typeface,
     bold: Typeface,
     heavy: Typeface,
+    /// Opt-in color-emoji typeface; emoji codepoints route here when present.
+    emoji: Option<Typeface>,
 }
 
 impl FontRegistry {
@@ -37,10 +39,17 @@ impl FontRegistry {
             Some(name) => load_typeface(&fonts.dir, name),
             None => bold.clone(),
         };
+        // Only load an emoji typeface when explicitly configured (otherwise emoji codepoints
+        // keep falling back to the main font, unchanged).
+        let emoji = fonts
+            .emoji
+            .as_ref()
+            .map(|name| load_typeface(&fonts.dir, name));
         Self {
             regular,
             bold,
             heavy,
+            emoji,
         }
     }
 
@@ -51,6 +60,41 @@ impl FontRegistry {
             FontRole::Default => &self.regular,
         }
     }
+
+    fn emoji_font(&self, size: f32) -> Option<Font> {
+        self.emoji
+            .as_ref()
+            .map(|t| Font::from_typeface(t.clone(), size))
+    }
+}
+
+/// Whether a codepoint should route to the emoji font (emoji blocks + ZWJ/variation selectors).
+fn is_emoji(ch: char) -> bool {
+    let c = ch as u32;
+    matches!(c,
+        0x1F000..=0x1FAFF      // emoticons, transport, supplemental + extended-A, regional flags
+        | 0x2600..=0x27BF      // misc symbols + dingbats
+        | 0x2300..=0x23FF      // misc technical (⌚⌛⏰…)
+        | 0x2B00..=0x2BFF      // misc symbols and arrows (⭐…)
+        | 0xFE00..=0xFE0F      // variation selectors
+        | 0x200D)              // zero-width joiner (keep ZWJ sequences together)
+}
+
+/// Split text into consecutive (is_emoji, run) segments for per-font drawing.
+fn classify_runs(text: &str) -> Vec<(bool, String)> {
+    let mut runs: Vec<(bool, String)> = Vec::new();
+    for ch in text.chars() {
+        let e = is_emoji(ch);
+        match runs.last_mut() {
+            Some(last) if last.0 == e => last.1.push(ch),
+            _ => runs.push((e, ch.to_string())),
+        }
+    }
+    runs
+}
+
+fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> &'a Font {
+    if is_emoji_run { emoji.unwrap_or(main) } else { main }
 }
 
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
@@ -201,13 +245,16 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 interp.fonts.resolve(watermark.font.role).clone(),
                 watermark.font.size,
             );
+            let emoji = interp.fonts.emoji_font(watermark.font.size);
+            let emoji_ref = emoji.as_ref();
             let mut paint = Paint::default();
             paint.set_anti_alias(true);
             paint.set_color(color_of(watermark.fill));
             for line in &watermark.lines {
                 let abs = (line.pos[0] + off.0, line.pos[1] + off.1);
-                let (x, y) = text_layout(&font, &line.text, abs, line.align, Baseline::CjkTop, 0.0);
-                draw_text_core(canvas, &font, &line.text, x, y, 0.0, &paint);
+                let (x, y) =
+                    text_layout(&font, emoji_ref, &line.text, abs, line.align, Baseline::CjkTop, 0.0);
+                draw_text_core(canvas, &font, emoji_ref, &line.text, x, y, 0.0, &paint);
             }
         }
     }
@@ -617,72 +664,109 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
     }
 }
 
-/// Total advance of `text` including extra `letter_spacing` between glyphs.
-fn measure_advance(font: &Font, text: &str, letter_spacing: f32) -> f32 {
+/// Total advance of `text` (with the emoji font for emoji runs) including `letter_spacing`.
+fn measure_advance(main: &Font, emoji: Option<&Font>, text: &str, letter_spacing: f32) -> f32 {
+    let has_emoji = emoji.is_some() && text.chars().any(is_emoji);
+    // Fast path: plain text, no spacing, no emoji routing — a single measure_str.
+    if !has_emoji && letter_spacing == 0.0 {
+        return main.measure_str(text, None).0;
+    }
     if letter_spacing == 0.0 {
-        return font.measure_str(text, None).0;
+        return classify_runs(text)
+            .iter()
+            .map(|(e, run)| run_font(*e, main, emoji).measure_str(run, None).0)
+            .sum();
     }
     let mut total = 0.0;
     let mut count = 0;
-    for ch in text.chars() {
-        let mut buf = [0u8; 4];
-        total += font.measure_str(ch.encode_utf8(&mut buf), None).0;
-        count += 1;
+    for (e, run) in classify_runs(text) {
+        let font = run_font(e, main, emoji);
+        for ch in run.chars() {
+            let mut buf = [0u8; 4];
+            total += font.measure_str(ch.encode_utf8(&mut buf), None).0;
+            count += 1;
+        }
     }
     total + letter_spacing * (count.max(1) - 1) as f32
 }
 
 /// Resolve the draw origin (left x, baseline y) for a text run.
 fn text_layout(
-    font: &Font,
+    main: &Font,
+    emoji: Option<&Font>,
     text: &str,
     abs: (f32, f32),
     align: HAlign,
     baseline: Baseline,
     letter_spacing: f32,
 ) -> (f32, f32) {
-    let advance = measure_advance(font, text, letter_spacing);
+    let advance = measure_advance(main, emoji, text, letter_spacing);
     let x = match align {
         HAlign::Left => abs.0,
         HAlign::Center => abs.0 - advance * 0.5,
         HAlign::Right => abs.0 - advance,
     };
-    let (_, metrics) = font.metrics();
+    let (_, metrics) = main.metrics();
     let baseline_y = match baseline {
         // Match Painter._text: baseline at pos.y + ink height of the CJK reference glyph '哇'.
-        Baseline::CjkTop => abs.1 + font.measure_str("哇", None).1.height(),
+        Baseline::CjkTop => abs.1 + main.measure_str("哇", None).1.height(),
         Baseline::Ascender => abs.1 - metrics.ascent,
         Baseline::Alphabetic => abs.1,
     };
     (x, baseline_y)
 }
 
-/// Draw a text run with an arbitrary paint; uses a single blob when un-spaced, else per-glyph.
-fn draw_text_core(canvas: &Canvas, font: &Font, text: &str, x: f32, y: f32, letter_spacing: f32, paint: &Paint) {
-    if letter_spacing == 0.0 {
-        if let Some(blob) = TextBlob::new(text, font) {
+/// Draw a text run with an arbitrary paint; single blob when plain, else per-run/per-glyph
+/// so emoji codepoints route to the emoji font and letter spacing applies.
+#[allow(clippy::too_many_arguments)]
+fn draw_text_core(
+    canvas: &Canvas,
+    main: &Font,
+    emoji: Option<&Font>,
+    text: &str,
+    x: f32,
+    y: f32,
+    letter_spacing: f32,
+    paint: &Paint,
+) {
+    let has_emoji = emoji.is_some() && text.chars().any(is_emoji);
+    if !has_emoji && letter_spacing == 0.0 {
+        if let Some(blob) = TextBlob::new(text, main) {
             canvas.draw_text_blob(&blob, Point::new(x, y), paint);
         }
         return;
     }
     let mut cx = x;
-    for ch in text.chars() {
-        let mut buf = [0u8; 4];
-        let s: &str = ch.encode_utf8(&mut buf);
-        if let Some(blob) = TextBlob::new(s, font) {
-            canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+    for (e, run) in classify_runs(text) {
+        let font = run_font(e, main, emoji);
+        if letter_spacing == 0.0 {
+            if let Some(blob) = TextBlob::new(&run, font) {
+                canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+            }
+            cx += font.measure_str(&run, None).0;
+        } else {
+            for ch in run.chars() {
+                let mut buf = [0u8; 4];
+                let s: &str = ch.encode_utf8(&mut buf);
+                if let Some(blob) = TextBlob::new(s, font) {
+                    canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+                }
+                cx += font.measure_str(s, None).0 + letter_spacing;
+            }
         }
-        cx += font.measure_str(s, None).0 + letter_spacing;
     }
 }
 
-/// Draw a `TextNode`: optional outline under the fill (solid or gradient), with letter spacing.
+/// Draw a `TextNode`: optional outline under the fill (solid or gradient), with letter spacing
+/// and emoji-font routing.
 fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs: (f32, f32), off: (f32, f32), fill: &Fill) {
     if node.text.is_empty() {
         return;
     }
     let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
-    let (x, y) = text_layout(&font, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+    let emoji = fonts.emoji_font(node.font.size);
+    let emoji_ref = emoji.as_ref();
+    let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
 
     if let Some(stroke) = &node.stroke {
         let mut sp = Paint::default();
@@ -690,13 +774,13 @@ fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs:
         sp.set_style(PaintStyle::Stroke);
         sp.set_stroke_width(stroke.width);
         sp.set_color(color_of(stroke.color));
-        draw_text_core(canvas, &font, &node.text, x, y, node.letter_spacing, &sp);
+        draw_text_core(canvas, &font, emoji_ref, &node.text, x, y, node.letter_spacing, &sp);
     }
 
     let mut fp = Paint::default();
     fp.set_anti_alias(true);
     apply_fill(&mut fp, fill, off);
-    draw_text_core(canvas, &font, &node.text, x, y, node.letter_spacing, &fp);
+    draw_text_core(canvas, &font, emoji_ref, &node.text, x, y, node.letter_spacing, &fp);
 }
 
 /// Pick the adaptive fill color from the average luminance of the backdrop under the text box.
@@ -708,8 +792,10 @@ fn resolve_adaptive_color(
     ad: &AdaptiveColor,
 ) -> Color4 {
     let font = Font::from_typeface(fonts.resolve(node.font.role).clone(), node.font.size);
-    let (x, y) = text_layout(&font, &node.text, abs, node.align, node.baseline, node.letter_spacing);
-    let advance = measure_advance(&font, &node.text, node.letter_spacing);
+    let emoji = fonts.emoji_font(node.font.size);
+    let emoji_ref = emoji.as_ref();
+    let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+    let advance = measure_advance(&font, emoji_ref, &node.text, node.letter_spacing);
     let (_, metrics) = font.metrics();
     // Text ink box: x..x+advance vertically spanning ascent..descent around the baseline.
     let mut bounds = Rect::new(x, y + metrics.ascent, x + advance, y + metrics.descent);

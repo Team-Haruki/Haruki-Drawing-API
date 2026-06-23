@@ -227,3 +227,43 @@ def test_node_parity(case):
         if max(deltas) > bound:
             out_dir = _save_triptych(name, ref, act)
             pytest.fail(f"{name}: ink bbox delta {deltas} > {bound}px (ref={rb} act={ab}, artifacts: {out_dir})")
+
+
+_EMOJI_FONT = "TwitterColorEmoji-SVGinOT"
+_EMOJI_FONT_EXISTS = os.path.exists(os.path.join(str(FONT_DIR), _EMOJI_FONT + ".ttf"))
+
+
+@pytest.mark.skipif(not _EMOJI_FONT_EXISTS, reason="color emoji font not present")
+def test_emoji_routes_to_color_emoji_font():
+    """An emoji codepoint renders in color only when an emoji font is configured."""
+
+    def render(emoji_font: str | None) -> np.ndarray:
+        fonts = {"dir": str(FONT_DIR), "default": DEFAULT_FONT, "bold": DEFAULT_BOLD_FONT}
+        if emoji_font:
+            fonts["emoji"] = emoji_font
+        scene = {
+            "version": 2,
+            "assets_base_dir": str(ASSETS_BASE_DIR),
+            "export_format": "png",
+            "fonts": fonts,
+            "canvas": {"width": 80, "height": 60},
+            "root": {
+                "type": "Group", "offset": [0, 0], "size": [80, 60],
+                "children": [
+                    {"type": "Rect", "pos": [0, 0], "size": [80, 60], "fill": [255, 255, 255, 255]},
+                    {"type": "Text", "text": "\U0001F600", "pos": [20, 8],
+                     "font": {"role": "default", "size": 40}, "fill": [0, 0, 0, 255]},
+                ],
+            },
+        }
+        res = _native.render_scene(json.dumps(scene).encode())
+        return np.asarray(Image.open(BytesIO(res["image_bytes"])).convert("RGB"), dtype=np.int16)
+
+    def colored_pixels(img: np.ndarray) -> int:
+        gray = (np.abs(img[:, :, 0] - img[:, :, 1]) < 12) & (np.abs(img[:, :, 1] - img[:, :, 2]) < 12)
+        return int((~gray).sum())
+
+    without = colored_pixels(render(None))
+    with_font = colored_pixels(render(_EMOJI_FONT))
+    assert without == 0
+    assert with_font > 100
