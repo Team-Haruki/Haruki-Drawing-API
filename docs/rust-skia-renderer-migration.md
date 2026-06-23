@@ -99,7 +99,8 @@ Rust 解释器骨架（本阶段新增，与既有 `render_card_list`/`render_ca
 - ④ Card List / Card Box 已切到通用解释器（`card_scene.rs` 从 `CardListIr`/`CardBoxIr` 构建 v2 Scene），默认走解释器，`HARUKI_SKIA_CARD_LEGACY=1` 回退旧的写死绘制路径做 A/B。缩略图合成实现为分层节点子 `Group`（方案 1，无内存图句柄）；Card Box 的可变缩略图尺寸通过 build 时按比例缩放各图层坐标处理。
 - 真实 12 卡 payload A/B：尺寸严格一致（Card List `1036x922`、Card Box `1316x368`），视觉与旧路径等价（cubic 采样更清晰、玻璃 backdrop 为实时快照，故非逐字节一致）。
 - ⑥ 逐节点对拍 harness 已落地（`tests/test_skia_parity.py`）：单节点同时走 Pillow `Painter` 与 `render_scene`，尺寸硬断言 + 填充 alpha-IoU / 文字 ink-bbox 容差，失败输出 `expected|actual|diff` 三联图到 `out/skia-parity/`。已覆盖 rect / roundrect / pieslice / 线性渐变 / CJK 文字。顺带把 `Text` CjkTop 基线对齐 Painter 的 `'哇'` 参考高度。
-- 待办：⑤ Python `IRBuilder` + 首个端点布局搬到 Python；扩展对拍覆盖（Image/BlurGlass/对齐变体）；之后补 radial/adaptive 文本、移除旧写死路径。
+- ⑤ Python `IRBuilder`（`src/sekai/skia_renderer/ir_builder.py`，方法名沿用 Painter，发 v2 节点）已落地，Card List 布局已从 Rust 搬到 Python（`card_list.py` 的 `build_card_list_scene`），`render_card_list_payload` 改为构建 v2 scene 走 `render_scene` —— **Python 建 IR、Rust 纯解释**的终态在 Card List 上成立。A/B：Python 建的 scene 与 Rust `card_scene.rs` 建的 scene 经同一解释器渲染**逐字节一致**（`621539` bytes，`1036x922`）。
+- 待办：把 Card Box 布局也搬到 Python（复用 `IRBuilder`）；扩展对拍覆盖（Image/BlurGlass/对齐变体）；补 radial/adaptive 文本；待两端点全部走 Python scene 后移除 Rust `card_scene.rs` 与旧写死路径。
 
 ## 进度表
 

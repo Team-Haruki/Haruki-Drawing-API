@@ -4,6 +4,7 @@ from datetime import datetime
 import importlib
 import json
 import logging
+import math
 import os
 from pathlib import PurePosixPath, PureWindowsPath
 import time
@@ -13,6 +14,7 @@ from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import run_in_pool
 from src.sekai.card.model import CardListRequest
+from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.settings import (
     ASSETS_BASE_DIR,
     DEFAULT_BOLD_FONT,
@@ -131,6 +133,161 @@ def build_card_list_ir(rqd: CardListRequest) -> dict[str, Any]:
     }
 
 
+# Card List layout constants (mirror the Rust card_scene.rs / lib.rs values).
+_BG_PADDING = 20.0
+_PANEL_WIDTH = 996.0
+_GRID_PADDING = 16.0
+_GRID_COLS = 3
+_CARD_W = 316.0
+_CARD_H = 190.0
+_CARD_SEP = 8.0
+_THUMB = 100.0
+_TITLE_H = 50.0
+_TITLE_SEP = 16.0
+_WATERMARK_FALLBACK = "Haruki Drawing API"
+
+
+def _is_non_limited(supply_type: str) -> bool:
+    return supply_type.strip() in NON_LIMITED_SUPPLY_TYPES
+
+
+def _rare_count(rare: str) -> int:
+    if rare == "rarity_birthday":
+        return 1
+    for ch in rare:
+        if ch.isascii() and ch.isdigit():
+            return int(ch)
+    return 0
+
+
+def _limited_icon_path(supply_type: str, icons: dict[str, Any]) -> str | None:
+    if supply_type in ("期间限定", "WL限定", "联动限定"):
+        return icons.get("term_limited")
+    if supply_type in ("Fes限定", "CFes限定", "BFes限定"):
+        return icons.get("fes_limited")
+    return None
+
+
+def build_card_list_scene(rqd: CardListRequest) -> dict[str, Any]:
+    """Build a Render IR v2 scene (the layout lives here; Rust only interprets)."""
+    return _card_list_scene_from_ir(build_card_list_ir(rqd))
+
+
+def _center_text(b: IRBuilder, text: str, role: str, size: float, rx: float, ry: float, rw: float, rh: float,
+                 fill: tuple[int, int, int, int]) -> None:
+    # Mirror draw_center_text: horizontally centered, baseline at rect.bottom - 5.
+    b.text(text, (rx + rw / 2, ry + rh - 5), role, size, align="center", baseline="alphabetic", fill=fill)
+
+
+def _notice_title(b: IRBuilder, x: float, y: float, width: float, title: str) -> None:
+    b.blurglass((x, y), (width, _TITLE_H), 10, (255, 246, 219, 220), shadow_alpha=0.24)
+    b.text("提示", (x + 14, y + 34), "bold", 22, baseline="alphabetic", fill=(166, 90, 0, 255))
+    b.text(title, (x + 80, y + 34), "default", 22, baseline="alphabetic", fill=(98, 68, 0, 255))
+
+
+def _thumbnail(b: IRBuilder, thumb: dict[str, Any], size: float) -> None:
+    s = size / 100.0
+    if thumb.get("card_thumbnail_path"):
+        b.image(thumb["card_thumbnail_path"], (0, 0), (size, size), fit="cover")
+    if thumb.get("is_pcard"):
+        b.rect((0, 76 * s), (100 * s, 24 * s), fill=(70, 70, 100, 255))
+        text = thumb.get("custom_text") or f"Lv.{thumb.get('level') or 0}"
+        b.text(text, (6 * s, 92 * s), "bold", 20 * s, baseline="alphabetic", fill=(255, 255, 255, 255))
+    if thumb.get("frame_img_path"):
+        b.image(thumb["frame_img_path"], (0, 0), (size, size), fit="stretch")
+    if thumb.get("attr_img_path"):
+        b.image(thumb["attr_img_path"], (1 * s, 0), (22 * s, 25 * s), fit="stretch")
+    if thumb.get("is_pcard") and (thumb.get("train_rank") or 0) > 0 and thumb.get("train_rank_img_path"):
+        b.image(thumb["train_rank_img_path"], (65 * s, 65 * s), (35 * s, 35 * s), fit="stretch")
+    rare_path = thumb.get("rare_img_path")
+    if rare_path:
+        rare_w = rare_h = 17 * s
+        voffset = 24 * s if thumb.get("is_pcard") else 6 * s
+        for i in range(_rare_count(thumb["rare"])):
+            b.image(rare_path, (6 * s + rare_w * i, size - rare_h - voffset), (rare_w, rare_h), fit="stretch")
+
+
+def _card_cell(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], now_ms: int) -> None:
+    limited = not _is_non_limited(card["supply_type"])
+    fill = (255, 250, 220, 200) if limited else (255, 255, 255, 80)
+    b.blurglass((0, 0), (_CARD_W, _CARD_H), 10, fill, shadow_alpha=0.30)
+
+    if card["release_at"] > now_ms:
+        b.text("未上线", (4, _CARD_H - 8), "bold", 20, baseline="alphabetic", fill=(200, 0, 0, 255))
+
+    if card.get("skill_type") and card.get("skill_icon_path"):
+        b.image(card["skill_icon_path"], (_CARD_W - 40, _CARD_H - 40), (32, 32), fit="stretch")
+
+    thumbs = card["thumbnail_info"][:2]
+    total_w = len(thumbs) * _THUMB + max(0, len(thumbs) - 1) * 16
+    tx = (_CARD_W - total_w) / 2
+    icon_path = _limited_icon_path(card["supply_type"], icons)
+    for thumb in thumbs:
+        b.shadow((tx, 16), (_THUMB, _THUMB), 8, alpha=0.35, offset=(2, 4), sigma=2.5)
+        with b.group((tx, 16), (_THUMB, _THUMB)):
+            _thumbnail(b, thumb, _THUMB)
+        if icon_path:
+            b.image(icon_path, (tx + _THUMB - 75, 16), (75, 0), fit="width")
+        tx += _THUMB + 16
+
+    _center_text(b, card["prefix"], "bold", 20, 0, 129, _CARD_W, 24, (0, 0, 0, 255))
+    id_text = f"ID:{card['card_id']}"
+    if limited:
+        id_text += f"【{card['supply_type']}】"
+    _center_text(b, id_text, "default", 20, 0, 158, _CARD_W, 24, (0, 0, 0, 255))
+
+
+def _card_list_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
+    cards = ir["cards"]
+    has_title = bool(ir.get("title"))
+    rows = math.ceil(max(1, len(cards)) / _GRID_COLS)
+    title_h = _TITLE_H + _TITLE_SEP if has_title else 0.0
+    grid_h = _GRID_PADDING * 2 + rows * _CARD_H + max(0, rows - 1) * _CARD_SEP
+    width = math.ceil(_PANEL_WIDTH + _BG_PADDING * 2)
+    height = math.ceil(_BG_PADDING * 2 + title_h + grid_h)
+
+    fonts = ir["fonts"]
+    b = IRBuilder(
+        width,
+        height,
+        assets_base_dir=ir["assets_base_dir"],
+        font_dir=fonts["dir"],
+        default_font=fonts["default"],
+        bold_font=fonts["bold"],
+        export_format=ir["export_format"],
+        jpg_quality=ir["jpg_quality"],
+    )
+
+    if ir.get("background_img_path"):
+        b.image_bg(ir["background_img_path"])
+    else:
+        b.triangle_bg(ir.get("background_hour") if ir.get("background_hour") is not None else 15.0)
+
+    y = _BG_PADDING
+    if has_title:
+        _notice_title(b, _BG_PADDING, y, _PANEL_WIDTH, ir["title"])
+        y += _TITLE_H + _TITLE_SEP
+
+    b.blurglass((_BG_PADDING, y), (_PANEL_WIDTH, grid_h), 12, (255, 255, 255, 80), shadow_alpha=0.26)
+
+    now_ms = ir["now_ms"]
+    icons = ir["icons"]
+    for idx, card in enumerate(cards):
+        row = idx // _GRID_COLS
+        col = idx % _GRID_COLS
+        x = _BG_PADDING + _GRID_PADDING + col * (_CARD_W + _CARD_SEP)
+        cy = y + _GRID_PADDING + row * (_CARD_H + _CARD_SEP)
+        with b.group((x, cy), (_CARD_W, _CARD_H)):
+            _card_cell(b, card, icons, now_ms)
+
+    watermark = ir["watermark"]
+    if watermark["enabled"]:
+        text = watermark["text"] or _WATERMARK_FALLBACK
+        b.text(text, (width - 150, height - 10), "default", 12, baseline="alphabetic", fill=(0, 0, 0, 120))
+
+    return b.build()
+
+
 def _load_native_renderer():
     try:
         return importlib.import_module("haruki_skia_renderer")
@@ -167,8 +324,10 @@ def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
 
 async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
     native = _load_native_renderer()
-    ir_json = json.dumps(build_card_list_ir(rqd), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    result = await run_in_pool(native.render_card_list, ir_json)
+    # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
+    scene = build_card_list_scene(rqd)
+    ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    result = await run_in_pool(native.render_scene, ir_json)
     if not isinstance(result, dict):
         raise SkiaCardListRenderError("native renderer must return a dict")
     return _payload_from_native(result)
