@@ -9,7 +9,7 @@ from src.core.heavy_render_pool import (
     get_heavy_render_worker_pool,
 )
 from src.core.utils import encoded_image_payload_to_response, image_to_response
-from src.sekai.misc.drawer import compose_alias_list_image
+from src.sekai.misc.drawer import compose_alias_list_image, try_render_alias_list_payload
 from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
 
 router = APIRouter(tags=["Misc"])
@@ -46,6 +46,10 @@ async def alias_list(request: AliasListRequest):
     """
     try:
         set_request_stage("misc:alias_list:compose_image")
+        payload = await try_render_alias_list_payload(request)
+        if payload is not None:
+            set_request_stage("misc:alias_list:image_to_response")
+            return encoded_image_payload_to_response(payload)
         image = await compose_alias_list_image(request)
         set_request_stage("misc:alias_list:image_to_response")
         return await image_to_response(image)

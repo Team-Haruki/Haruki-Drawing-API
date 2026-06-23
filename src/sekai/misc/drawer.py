@@ -41,7 +41,15 @@ from src.sekai.base.utils import (
     put_composed_image_disk_cache,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
+from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
+    EXPORT_IMAGE_FORMAT,
+    JPG_QUALITY,
+)
 
 # =========================== 从.model导入数据类型 =========================== #
 from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest
@@ -602,18 +610,8 @@ async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> Encode
     return await render_canvas_payload(await _build_chara_birthday_canvas(rqd))
 
 
-async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
+async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     aliases = [alias.strip() for alias in rqd.aliases if alias and alias.strip()]
-    cache_key = _build_alias_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        return cached
-    disk_cached = get_composed_image_disk_cached(_ALIAS_LIST_CACHE_NAMESPACE, cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        return disk_cached
-
-    _t0 = time.perf_counter()
     accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
     jacket_img = None
     if rqd.music_jacket_path:
@@ -764,15 +762,34 @@ async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
                             ).set_padding((14, 9))
 
     add_request_watermark(canvas, rqd)
-    image = await canvas.get_img()
+    return canvas
+
+
+async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
+    """合成别名列表图片 (Pillow 路径,带最终结果缓存)。"""
+    cache_key = _build_alias_list_cache_key(rqd)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        return cached
+    disk_cached = get_composed_image_disk_cached(_ALIAS_LIST_CACHE_NAMESPACE, cache_key)
+    if disk_cached is not None:
+        put_composed_image_cache(cache_key, disk_cached)
+        return disk_cached
+    image = await (await _build_alias_list_canvas(rqd)).get_img()
     put_composed_image_cache(cache_key, image)
     put_composed_image_disk_cache(_ALIAS_LIST_CACHE_NAMESPACE, cache_key, image)
-    if time.perf_counter() - _t0 >= 0.05:
-        logger.info(
-            "[perf] alias_list miss: entity_label=%s entity_id=%s aliases=%d total=%.3fs",
-            rqd.entity_label,
-            rqd.entity_id,
-            len(aliases),
-            time.perf_counter() - _t0,
-        )
     return image
+
+
+async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePayload | None:
+    """Skia 路径:复用 Skia payload 结果缓存(键同 Pillow 缓存键 + 格式后缀)。"""
+    if not skia_plot_enabled():
+        return None
+    cache_key = f"{_build_alias_list_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
+    cached = get_skia_payload_cached(cache_key)
+    if cached is not None:
+        return cached
+    payload = await render_canvas_payload(await _build_alias_list_canvas(rqd))
+    if payload is not None:
+        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
+    return payload
