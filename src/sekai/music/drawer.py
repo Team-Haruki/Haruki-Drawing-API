@@ -4,6 +4,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -40,6 +41,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import get_img_from_path, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # =========================== 从.model导入常量和数据类型 =========================== #
@@ -298,7 +300,7 @@ def _draw_custom_chart_tags(info: CustomChartInfo | None, width: int):
             ).set_bg(roundrect_bg(fill=(255, 255, 255, 95), radius=10))
 
 
-async def compose_music_detail_image(rqd: MusicDetailRequest):
+async def _build_music_detail_canvas(rqd: MusicDetailRequest) -> Canvas:
     # 数据准备
     mid = rqd.music_info.id
     name = rqd.music_info.title
@@ -696,10 +698,20 @@ async def compose_music_detail_image(rqd: MusicDetailRequest):
                     draw_vocal(964)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Image:
+async def compose_music_detail_image(rqd: MusicDetailRequest) -> Image.Image:
+    return await (await _build_music_detail_canvas(rqd)).get_img()
+
+
+async def try_render_music_detail_payload(rqd: MusicDetailRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_music_detail_canvas(rqd))
+
+
+async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
     profile = rqd.profile
 
     # 预加载封面
@@ -778,10 +790,20 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
                                     )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
+async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Image:
+    return await (await _build_music_brief_list_canvas(rqd)).get_img()
+
+
+async def try_render_music_brief_list_payload(rqd: MusicBriefListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_music_brief_list_canvas(rqd))
+
+
+async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
     jackets = {}
     jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
     _t0 = time.perf_counter()
@@ -856,10 +878,20 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
                                     )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
+async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
+    return await (await _build_music_list_canvas(rqd)).get_img()
+
+
+async def try_render_music_list_payload(rqd: MusicListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_music_list_canvas(rqd))
+
+
+async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
     r"""compose_play_progress_image
 
     合成打歌进度图片
@@ -968,7 +1000,17 @@ async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
                         )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
+    return await (await _build_play_progress_canvas(rqd)).get_img()
+
+
+async def try_render_play_progress_payload(rqd: PlayProgressRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_play_progress_canvas(rqd))
 
 
 def draw_text_icon(text: str, icon: Image.Image, style: TextStyle) -> HSplit:
@@ -997,7 +1039,7 @@ def draw_text_icon(text: str, icon: Image.Image, style: TextStyle) -> HSplit:
     return hs
 
 
-async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> Image.Image:
+async def _build_detail_music_rewards_canvas(rqd: DetailMusicRewardsRequest) -> Canvas:
     r"""compose_detail_music_rewards_image
 
     在有抓包数据的情况下合成歌曲奖励图片
@@ -1082,10 +1124,20 @@ async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> 
                                     TextBox(str(acc), style2, overflow="clip").set_size((gw, gh)).set_content_align("l")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Image.Image:
+async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> Image.Image:
+    return await (await _build_detail_music_rewards_canvas(rqd)).get_img()
+
+
+async def try_render_detail_music_rewards_payload(rqd: DetailMusicRewardsRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_detail_music_rewards_canvas(rqd))
+
+
+async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Canvas:
     r"""compose_basic_music_rewards_image
 
     在仅基础数据的情况下合成歌曲奖励图片
@@ -1159,4 +1211,14 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
                             ).set_size((None, gh))
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Image.Image:
+    return await (await _build_basic_music_rewards_canvas(rqd)).get_img()
+
+
+async def try_render_basic_music_rewards_payload(rqd: BasicMusicRewardsRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_basic_music_rewards_canvas(rqd))

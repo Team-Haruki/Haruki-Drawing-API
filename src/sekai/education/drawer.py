@@ -11,6 +11,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -35,6 +36,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.utils import get_img_from_path
 from src.sekai.profile.drawer import get_profile_card
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 # 从 model.py 导入数据模型
@@ -74,7 +76,7 @@ def _character_mission_card_bg() -> RoundRectBg:
 # ========== 挑战Live详情 ==========
 
 
-async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) -> Image.Image:
+async def _build_challenge_live_detail_canvas(rqd: ChallengeLiveDetailsRequest) -> Canvas:
     """合成挑战Live详情图片
 
     Args:
@@ -229,13 +231,25 @@ async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) 
                         TextBox(shard_text, text_style).set_w(w6).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_challenge_live_detail_image(rqd: ChallengeLiveDetailsRequest) -> Image.Image:
+    return await (await _build_challenge_live_detail_canvas(rqd)).get_img()
+
+
+async def try_render_challenge_live_detail_payload(
+    rqd: ChallengeLiveDetailsRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_challenge_live_detail_canvas(rqd))
 
 
 # ========== 加成详情 ==========
 
 
-async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Image.Image:
+async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canvas:
     """合成加成详情图片
 
     Args:
@@ -333,7 +347,19 @@ async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Imag
                             )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Image.Image:
+    return await (await _build_power_bonus_detail_canvas(rqd)).get_img()
+
+
+async def try_render_power_bonus_detail_payload(
+    rqd: PowerBonusDetailRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_power_bonus_detail_canvas(rqd))
 
 
 # ========== 区域道具升级材料 ==========
@@ -357,7 +383,7 @@ def _get_quant_text(q: int) -> str:
         return str(q)
 
 
-async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterialsRequest) -> Image.Image:
+async def _build_area_item_upgrade_materials_canvas(rqd: AreaItemUpgradeMaterialsRequest) -> Canvas:
     """合成区域道具升级材料图片
 
     Args:
@@ -479,13 +505,25 @@ async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterial
                                             TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color))
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_area_item_upgrade_materials_image(rqd: AreaItemUpgradeMaterialsRequest) -> Image.Image:
+    return await (await _build_area_item_upgrade_materials_canvas(rqd)).get_img()
+
+
+async def try_render_area_item_upgrade_materials_payload(
+    rqd: AreaItemUpgradeMaterialsRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_area_item_upgrade_materials_canvas(rqd))
 
 
 # ========== 羁绊等级 ==========
 
 
-async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
+async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
     """合成羁绊等级图片
 
     Args:
@@ -626,13 +664,23 @@ async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
                         TextBox(need_exp_text, text_style).set_w(w5).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_bonds_image(rqd: BondsRequest) -> Image.Image:
+    return await (await _build_bonds_canvas(rqd)).get_img()
+
+
+async def try_render_bonds_payload(rqd: BondsRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_bonds_canvas(rqd))
 
 
 # ========== 队长次数 ==========
 
 
-async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
+async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
     """合成队长次数图片
 
     Args:
@@ -763,7 +811,17 @@ async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
                                 )
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_leader_count_image(rqd: LeaderCountRequest) -> Image.Image:
+    return await (await _build_leader_count_canvas(rqd)).get_img()
+
+
+async def try_render_leader_count_payload(rqd: LeaderCountRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_leader_count_canvas(rqd))
 
 
 def _education_progress_color(ratio: float) -> tuple[int, int, int, int]:
@@ -907,7 +965,7 @@ def _build_character_mission_dual_card(
     return frame
 
 
-async def compose_character_mission_overview_image(rqd: CharacterMissionOverviewRequest) -> Image.Image:
+async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverviewRequest) -> Canvas:
     chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     sub_header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(35, 35, 35, 255))
@@ -1024,10 +1082,22 @@ async def compose_character_mission_overview_image(rqd: CharacterMissionOverview
     canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -> Image.Image:
+async def compose_character_mission_overview_image(rqd: CharacterMissionOverviewRequest) -> Image.Image:
+    return await (await _build_character_mission_overview_canvas(rqd)).get_img()
+
+
+async def try_render_character_mission_overview_payload(
+    rqd: CharacterMissionOverviewRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_character_mission_overview_canvas(rqd))
+
+
+async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -> Canvas:
     chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path)
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=BLACK)
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
@@ -1145,4 +1215,16 @@ async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -
     canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_character_mission_all_image(rqd: CharacterMissionAllRequest) -> Image.Image:
+    return await (await _build_character_mission_all_canvas(rqd)).get_img()
+
+
+async def try_render_character_mission_all_payload(
+    rqd: CharacterMissionAllRequest,
+) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_character_mission_all_canvas(rqd))

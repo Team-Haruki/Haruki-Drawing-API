@@ -6,6 +6,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
@@ -51,6 +52,7 @@ from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -177,7 +179,7 @@ def _wl_chapter_progress_segments(
     return segments
 
 
-async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
+async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
     detail = rqd.event_info
     now = request_now(rqd.timezone)
     _t0 = time.perf_counter()
@@ -414,13 +416,23 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
                                     ImageBox(image, size=(None, 40))
 
         add_request_watermark(canvas, rqd)
-        return await canvas.get_img()
+        return canvas
 
     return await draw(w, h)
 
 
+async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
+    return await (await _build_event_detail_canvas(rqd)).get_img()
+
+
+async def try_render_event_detail_payload(rqd: EventDetailRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_event_detail_canvas(rqd))
+
+
 # 合成活动记录图片
-async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
+async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
     user_events = rqd.event_info
     user_wl_events = rqd.wl_event_info
 
@@ -519,7 +531,17 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
                     await draw_events("WL单榜", user_wl_events)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
+    return await (await _build_event_record_canvas(rqd)).get_img()
+
+
+async def try_render_event_record_payload(rqd: EventRecordRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_event_record_canvas(rqd))
 
 
 def _event_planner_info(rqd: EventPlannerRequest) -> DeckPlannerInfo:

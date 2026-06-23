@@ -2,12 +2,14 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.event.drawer import (
     compose_event_detail_image,
     compose_event_list_image,
     compose_event_planner_image,
     compose_event_record_image,
+    try_render_event_detail_payload,
+    try_render_event_record_payload,
 )
 from src.sekai.event.model import (
     EventDetailRequest,
@@ -27,6 +29,9 @@ async def event_detail(request: EventDetailRequest):
     Shows event information, banner, and featured cards.
     """
     try:
+        payload = await try_render_event_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_event_detail_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -42,6 +47,9 @@ async def event_record(request: EventRecordRequest):
     Shows user's event history and rankings.
     """
     try:
+        payload = await try_render_event_record_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_event_record_image(request)
         return await image_to_response(image)
     except Exception as e:
