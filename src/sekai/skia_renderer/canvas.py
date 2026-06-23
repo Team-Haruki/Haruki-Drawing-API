@@ -79,8 +79,15 @@ async def render_canvas_payload(
     """
     if not settings.drawing.use_skia_plot:
         return None
-    try:
-        native = importlib.import_module("haruki_skia_renderer")
+    native = importlib.import_module("haruki_skia_renderer")
+    bg = _background_hour() if bg_hour is None else bg_hour
+    eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None
+
+    def _render():
+        # Run ALL the CPU work — layout draw, IR build, JSON encode, mem-image capture, and
+        # native render — in one pool task so it parallelizes under concurrency (the native
+        # render releases the GIL). Doing the draw/json/encode on the event-loop thread would
+        # serialize it across requests and cap throughput.
         size = canvas._get_self_size()
         painter = IRPainter(
             size,
@@ -90,16 +97,19 @@ async def render_canvas_payload(
             bold_font=DEFAULT_BOLD_FONT,
             heavy_font=DEFAULT_HEAVY_FONT,
             emoji_font=DEFAULT_EMOJI_FONT,
-            bg_hour=_background_hour() if bg_hour is None else bg_hour,
+            bg_hour=bg,
             export_format=EXPORT_IMAGE_FORMAT,
             jpg_quality=JPG_QUALITY,
         )
         canvas.draw(painter)
         scene, mem_images = painter.build_scene()
-        if scale is not None and abs(scale - 1.0) > 1e-3:
-            scene["scale"] = float(scale)
+        if eff_scale is not None:
+            scene["scale"] = eff_scale
         ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        result = await run_in_pool(native.render_scene, ir_json, mem_images)
+        return native.render_scene(ir_json, mem_images)
+
+    try:
+        result = await run_in_pool(_render)
         return _payload_from_native(result)
     except SkiaUnsupported as exc:
         logger.info("plot canvas not Skia-expressible (%s); falling back to Pillow", exc)
