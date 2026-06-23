@@ -131,6 +131,8 @@ pub enum Baseline {
     #[default]
     CjkTop,
     Ascender,
+    /// `pos.y` is the text baseline directly (raster-text / `draw_text_blob` default).
+    Alphabetic,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Default)]
@@ -173,6 +175,7 @@ pub enum Node {
     PieSlice(PieSliceNode),
     Image(ImageNode),
     Text(TextNode),
+    Shadow(ShadowNode),
     BlurGlass(BlurGlassNode),
     TriangleBg(TriangleBgNode),
     ImageBg(ImageBgNode),
@@ -264,6 +267,38 @@ pub struct TextNode {
     #[serde(default)]
     pub baseline: Baseline,
     pub fill: Color4,
+}
+
+/// Soft drop shadow for a rounded rect (mirrors Painter's thumbnail contact shadow).
+#[derive(Debug, Deserialize)]
+pub struct ShadowNode {
+    pub pos: Vec2,
+    pub size: Vec2,
+    pub radius: f32,
+    #[serde(default = "default_shadow_node_alpha")]
+    pub alpha: f32,
+    #[serde(default = "default_shadow_offset")]
+    pub offset: Vec2,
+    #[serde(default = "default_shadow_sigma")]
+    pub sigma: f32,
+    #[serde(default = "default_shadow_color")]
+    pub color: Color4,
+}
+
+fn default_shadow_node_alpha() -> f32 {
+    0.35
+}
+
+fn default_shadow_offset() -> Vec2 {
+    [2.0, 4.0]
+}
+
+fn default_shadow_sigma() -> f32 {
+    2.5
+}
+
+fn default_shadow_color() -> Color4 {
+    [0, 0, 0, 255]
 }
 
 #[derive(Debug, Deserialize)]

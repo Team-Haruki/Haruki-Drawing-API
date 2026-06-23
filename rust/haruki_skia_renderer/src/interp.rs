@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    Canvas, ClipOp, Color, CubicResampler, Font, Image, Paint, PaintStyle, Point, RRect, Rect,
-    SamplingOptions, Surface, TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, gradient,
-    surfaces,
+    BlurStyle, Canvas, ClipOp, Color, CubicResampler, Font, Image, MaskFilter, Paint, PaintStyle,
+    Point, RRect, Rect, SamplingOptions, Surface, TextBlob, TileMode, Typeface,
+    canvas::SrcRectConstraint, gradient, surfaces,
 };
 
 use crate::ir::*;
@@ -142,6 +142,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 color_of(text.fill),
             );
         }
+        Node::Shadow(shadow) => render_shadow(surface.canvas(), shadow, off),
         Node::BlurGlass(glass) => {
             let backdrop = surface.image_snapshot();
             let canvas = surface.canvas();
@@ -333,6 +334,22 @@ fn render_pie_slice(canvas: &Canvas, node: &PieSliceNode, off: (f32, f32)) {
     }
 }
 
+fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
+    let rect = Rect::from_xywh(
+        node.pos[0] + off.0 + node.offset[0],
+        node.pos[1] + off.1 + node.offset[1],
+        node.size[0],
+        node.size[1],
+    );
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    let c = node.color;
+    let alpha = (node.alpha.clamp(0.0, 1.0) * c[3] as f32) as u8;
+    paint.set_color(Color::from_argb(alpha, c[0], c[1], c[2]));
+    paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, node.sigma, true));
+    canvas.draw_rrect(RRect::new_rect_xy(rect, node.radius, node.radius), &paint);
+}
+
 fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f32)) {
     let iw = image.width() as f32;
     let ih = image.height() as f32;
@@ -418,6 +435,8 @@ fn draw_one_text(
         Baseline::CjkTop => abs.1 - bounds.top,
         // Align the font ascender line to pos.y (raster-text default).
         Baseline::Ascender => abs.1 - metrics.ascent,
+        // pos.y is the baseline directly (matches raw draw_text_blob placement).
+        Baseline::Alphabetic => abs.1,
     };
     let mut paint = Paint::default();
     paint.set_anti_alias(true);

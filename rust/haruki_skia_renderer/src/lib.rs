@@ -15,6 +15,7 @@ use skia_safe::{
     TileMode, Typeface, gradient, image_filters, surfaces,
 };
 
+mod card_scene;
 mod interp;
 mod ir;
 
@@ -143,9 +144,20 @@ fn render_card_list(py: Python<'_>, ir_json: &[u8]) -> PyResult<Py<PyDict>> {
     let ir: CardListIr = serde_json::from_slice(ir_json).map_err(|err| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid card list IR: {err}"))
     })?;
-    let rendered = py.detach(|| render_card_list_inner(&ir)).map_err(|err| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("card list render failed: {err}"))
-    })?;
+    // Default: the general IR interpreter (port step ④). Set HARUKI_SKIA_CARD_LEGACY
+    // to fall back to the bespoke draw path for A/B parity checks.
+    let legacy = env::var_os("HARUKI_SKIA_CARD_LEGACY").is_some();
+    let rendered = py
+        .detach(|| {
+            if legacy {
+                render_card_list_inner(&ir)
+            } else {
+                card_scene::render_card_list_via_scene(&ir)
+            }
+        })
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("card list render failed: {err}"))
+        })?;
 
     let dict = PyDict::new(py);
     dict.set_item("image_bytes", PyBytes::new(py, &rendered.bytes))?;
