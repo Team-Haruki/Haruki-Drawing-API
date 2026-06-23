@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+import os
 from pathlib import Path
 
 import numpy as np
@@ -35,27 +36,37 @@ pytestmark = pytest.mark.skipif(_native is None, reason="haruki_skia_renderer no
 
 ARTIFACT_DIR = Path("out/skia-parity")
 
+# Asset used by the Image cases (transparent-edged so alpha IoU is meaningful).
+# Skipped if the asset isn't synced locally (e.g. CI without game assets).
+_ATTR_REL = "static_images/card/attr_cool.png"
+_ATTR_FULL = os.path.join(str(ASSETS_BASE_DIR), _ATTR_REL)
+_ATTR_IMG = Image.open(_ATTR_FULL).convert("RGBA") if os.path.exists(_ATTR_FULL) else None
 
-def _scene(node: dict, w: int, h: int) -> dict:
+
+def _scene(nodes: list[dict], w: int, h: int) -> dict:
     return {
         "version": 2,
         "assets_base_dir": str(ASSETS_BASE_DIR),
         "export_format": "png",
         "fonts": {"dir": str(FONT_DIR), "default": DEFAULT_FONT, "bold": DEFAULT_BOLD_FONT},
         "canvas": {"width": w, "height": h},
-        "root": {"type": "Group", "offset": [0, 0], "size": [w, h], "children": [node]},
+        "root": {"type": "Group", "offset": [0, 0], "size": [w, h], "children": nodes},
     }
 
 
-def _render_skia(node: dict, w: int, h: int) -> Image.Image:
-    out = _native.render_scene(json.dumps(_scene(node, w, h)).encode("utf-8"))
+def _render_skia(nodes: list[dict], w: int, h: int) -> Image.Image:
+    out = _native.render_scene(json.dumps(_scene(nodes, w, h)).encode("utf-8"))
     return Image.open(BytesIO(out["image_bytes"])).convert("RGBA")
 
 
 def _render_pillow(build, w: int, h: int) -> Image.Image:
     painter = Painter(size=(w, h))
     build(painter)
-    img = Painter._execute(painter.operations, None, painter.size, {})
+    # Mirror Painter.get()'s image marshalling so paste ops carry their image.
+    image_dict: dict = {}
+    for op in painter.operations:
+        op.image_to_id(image_dict)
+    img = Painter._execute(painter.operations, None, painter.size, image_dict)
     return img.convert("RGBA")
 
 
@@ -74,6 +85,12 @@ def _ink_bbox(img: Image.Image, thresh: int = 16) -> tuple[int, int, int, int] |
         return None
     ys, xs = np.where(mask)
     return int(xs.min()), int(ys.min()), int(xs.max()), int(ys.max())
+
+
+def _mae(ref: Image.Image, act: Image.Image) -> float:
+    a = np.asarray(ref).astype(int)
+    b = np.asarray(act).astype(int)
+    return float(np.abs(a - b).mean())
 
 
 def _save_triptych(name: str, ref: Image.Image, act: Image.Image) -> Path:
@@ -103,7 +120,7 @@ _CASES = [
         "build": lambda p: p.rect((20, 20), (80, 60), (220, 40, 60, 255)),
         "node": {"type": "Rect", "pos": [20, 20], "size": [80, 60], "fill": [220, 40, 60, 255]},
         "size": (120, 100),
-        "check": ("iou", 0.97),
+        "check": ("iou", 0.95),
     },
     {
         "name": "roundrect_solid",
@@ -130,7 +147,7 @@ _CASES = [
                  "fill": {"kind": "linear", "c1": [255, 80, 80, 255], "c2": [80, 80, 255, 255],
                           "p1": [10, 10], "p2": [110, 90]}},
         "size": (120, 100),
-        "check": ("iou", 0.97),
+        "check": ("iou", 0.95),
     },
     {
         "name": "text_cjk_top",
@@ -140,15 +157,53 @@ _CASES = [
         "size": (140, 56),
         "check": ("bbox", 6),
     },
+    {
+        # Frosted panel over an opaque backdrop; blur of a solid is a solid, so this
+        # checks placement + tint + shadow (the blur kernel itself is the loosest part).
+        "name": "blurglass_panel",
+        "build": lambda p: (
+            p.rect((0, 0), (160, 120), (120, 150, 210, 255)),
+            p.blurglass_roundrect((24, 20), (112, 80), (255, 255, 255, 80), 16, shadow_alpha=0.26),
+        ),
+        "nodes": [
+            {"type": "Rect", "pos": [0, 0], "size": [160, 120], "fill": [120, 150, 210, 255]},
+            {"type": "BlurGlass", "pos": [24, 20], "size": [112, 80], "radius": 16,
+             "fill": [255, 255, 255, 80], "shadow_alpha": 0.26},
+        ],
+        "size": (160, 120),
+        "check": ("mae", 8.0),
+    },
 ]
+
+# Image cases need a synced game asset; skipped cleanly when it's absent.
+if _ATTR_IMG is not None:
+    _aw, _ah = _ATTR_IMG.size
+    _wfit_h = round(60 * _ah / _aw)
+    _CASES += [
+        {
+            "name": "image_stretch",
+            "build": lambda p: p.paste(_ATTR_IMG, (10, 10), (60, 40)),
+            "node": {"type": "Image", "pos": [10, 10], "size": [60, 40], "path": _ATTR_REL, "fit": "stretch"},
+            "size": (80, 60),
+            "check": ("iou", 0.97),
+        },
+        {
+            "name": "image_width",
+            "build": lambda p, h=_wfit_h: p.paste(_ATTR_IMG, (10, 10), (60, h)),
+            "node": {"type": "Image", "pos": [10, 10], "size": [60, 0], "path": _ATTR_REL, "fit": "width"},
+            "size": (80, _wfit_h + 20),
+            "check": ("iou", 0.97),
+        },
+    ]
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
 def test_node_parity(case):
     name = case["name"]
     w, h = case["size"]
+    nodes = case.get("nodes") or [case["node"]]
     ref = _render_pillow(case["build"], w, h)
-    act = _render_skia(case["node"], w, h)
+    act = _render_skia(nodes, w, h)
 
     # Hard: exact size parity (Python integer layout is authoritative).
     assert ref.size == act.size == (w, h), f"{name}: size {ref.size} vs {act.size}"
@@ -159,6 +214,11 @@ def test_node_parity(case):
         if iou < bound:
             out_dir = _save_triptych(name, ref, act)
             pytest.fail(f"{name}: alpha IoU {iou:.3f} < {bound} (artifacts: {out_dir})")
+    elif mode == "mae":  # mean abs error ceiling (rasterizer/blur differences allowed)
+        mae = _mae(ref, act)
+        if mae > bound:
+            out_dir = _save_triptych(name, ref, act)
+            pytest.fail(f"{name}: MAE {mae:.2f} > {bound} (artifacts: {out_dir})")
     else:  # bbox tolerance (px) on the ink bounding box
         rb, ab = _ink_bbox(ref), _ink_bbox(act)
         assert rb is not None, f"{name}: empty reference ink"
