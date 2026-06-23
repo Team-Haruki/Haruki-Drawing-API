@@ -554,28 +554,24 @@ fn draw_blur_glass_rect(
 }
 
 fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32) {
+    // Symmetric soft contact shadow on all four sides (mirrors Pillow: the panel shape
+    // dimmed to shadow_alpha, GaussianBlur'd, interior removed). Clipping to the area
+    // OUTSIDE the panel keeps only the outward halo, so the translucent glass fill drawn
+    // afterwards never shows interior darkening. Black, not the old downward-only purple.
+    let rrect = RRect::new_rect_xy(rect, radius, radius);
+    canvas.save();
+    canvas.clip_rrect(rrect, ClipOp::Difference, true);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_style(PaintStyle::Fill);
-
-    for (dx, dy, sigma, alpha) in [
-        (0.0, 1.5, 1.4, shadow_alpha * 0.26),
-        (0.0, 4.5, 3.8, shadow_alpha * 0.23),
-        (0.0, 9.0, 7.5, shadow_alpha * 0.13),
-    ] {
-        paint.set_color(Color::from_argb(
-            (alpha * 255.0).clamp(0.0, 255.0) as u8,
-            96,
-            78,
-            122,
-        ));
+    for (sigma, factor) in [(2.0, 0.55), (5.0, 0.28), (9.0, 0.12)] {
+        let alpha = (shadow_alpha * factor * 255.0).clamp(0.0, 255.0) as u8;
+        paint.set_color(Color::from_argb(alpha, 0, 0, 0));
         paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, sigma, true));
-        canvas.draw_rrect(
-            RRect::new_rect_xy(rect.with_offset((dx, dy)), radius, radius),
-            &paint,
-        );
+        canvas.draw_rrect(rrect, &paint);
     }
     paint.set_mask_filter(None);
+    canvas.restore();
 }
 
 fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edge_strength: f32) {
