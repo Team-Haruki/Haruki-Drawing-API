@@ -18,8 +18,8 @@ use skia_safe::{
 
 use crate::ir::*;
 use crate::{
-    RenderedImage, draw_blur_glass_rect, draw_cover_image, draw_sekai_triangle_background,
-    encode_surface, load_image_cached, load_typeface,
+    RenderedImage, draw_blur_glass_rect, draw_sekai_triangle_background, encode_surface,
+    load_image_cached, load_typeface,
 };
 
 /// Resolved typefaces for the scene's font roles.
@@ -183,12 +183,14 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 interp.canvas_w,
                 interp.canvas_h,
                 bg.hour,
+                bg.time_color,
+                bg.main_hue,
+                bg.size_fixed_rate,
             );
         }
         Node::ImageBg(bg) => {
             if let Some(decoded) = interp.load(&bg.path) {
-                let full = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
-                draw_cover_image(surface.canvas(), &decoded, full, 1.0);
+                draw_image_bg(surface.canvas(), &decoded, interp.canvas_w, interp.canvas_h, bg);
             }
         }
         Node::Watermark(watermark) => {
@@ -511,6 +513,90 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
         paint.set_color_filter(tint_filter(tint));
     }
     canvas.draw_image_rect_with_sampling_options(image, src_arg, dst, sampling, &paint);
+}
+
+/// Parse a Painter-style align string into (h, v) where h ∈ {-1,0,1} (l/c/r) and
+/// v ∈ {-1,0,1} (t/c/b). Unknown chars default to centered.
+fn parse_bg_align(align: &str) -> (i8, i8) {
+    let h = if align.contains('l') {
+        -1
+    } else if align.contains('r') {
+        1
+    } else {
+        0
+    };
+    let v = if align.contains('t') {
+        -1
+    } else if align.contains('b') {
+        1
+    } else {
+        0
+    };
+    (h, v)
+}
+
+fn align_offset(axis: i8, container: f32, content: f32) -> f32 {
+    match axis {
+        -1 => 0.0,
+        1 => container - content,
+        _ => (container - content) * 0.5,
+    }
+}
+
+fn draw_image_bg(canvas: &Canvas, image: &Image, cw: f32, ch: f32, node: &ImageBgNode) {
+    let iw = image.width() as f32;
+    let ih = image.height() as f32;
+    if iw <= 0.0 || ih <= 0.0 {
+        return;
+    }
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    if node.blur {
+        paint.set_image_filter(image_filters::blur((3.0, 3.0), TileMode::Clamp, None, None));
+    }
+    if node.fade > 0.0 {
+        let m = ((1.0 - node.fade).clamp(0.0, 1.0) * 255.0).round() as u8;
+        paint.set_color_filter(color_filters::lighting(
+            Color::from_rgb(m, m, m),
+            Color::from_rgb(0, 0, 0),
+        ));
+    }
+    let (ha, va) = parse_bg_align(&node.align);
+    let sampling = image_sampling();
+    match node.mode {
+        BgMode::Fit => {
+            let scale = (cw / iw).max(ch / ih);
+            let w = iw * scale;
+            let h = ih * scale;
+            let x = align_offset(ha, cw, w);
+            let y = align_offset(va, ch, h);
+            let dst = Rect::from_xywh(x, y, w, h);
+            canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
+        }
+        BgMode::Fill => {
+            let dst = Rect::from_xywh(0.0, 0.0, cw, ch);
+            canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
+        }
+        BgMode::Fixed => {
+            let x = align_offset(ha, cw, iw);
+            let y = align_offset(va, ch, ih);
+            let dst = Rect::from_xywh(x, y, iw, ih);
+            canvas.draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
+        }
+        BgMode::Repeat => {
+            let mut y = 0.0;
+            while y < ch {
+                let mut x = 0.0;
+                while x < cw {
+                    let dst = Rect::from_xywh(x, y, iw, ih);
+                    canvas
+                        .draw_image_rect_with_sampling_options(image, None, dst, sampling, &paint);
+                    x += iw;
+                }
+                y += ih;
+            }
+        }
+    }
 }
 
 /// Build a color filter for an image tint (multiply or alpha-weighted mix).

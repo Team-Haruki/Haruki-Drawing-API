@@ -395,15 +395,58 @@ fn default_shadow_alpha() -> f32 {
 pub struct TriangleBgNode {
     #[serde(default = "default_hour")]
     pub hour: f32,
+    /// `true` = time-of-day pink palette (uses `hour`); `false` = custom `main_hue` palette.
+    #[serde(default = "default_true")]
+    pub time_color: bool,
+    /// Base hue (0..1) for the non-time palette.
+    #[serde(default)]
+    pub main_hue: f32,
+    /// 0 = size scales with canvas (default); 1 = fixed triangle size, density scales instead.
+    #[serde(default)]
+    pub size_fixed_rate: f32,
 }
 
 fn default_hour() -> f32 {
     15.0
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// How an `ImageBg` is placed on the canvas (mirrors plot.py ImageBg modes).
+#[derive(Debug, Deserialize, Clone, Copy, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum BgMode {
+    /// Scale to cover, aligned (default — the legacy full-canvas cover).
+    #[default]
+    Fit,
+    /// Stretch to exactly fill the canvas.
+    Fill,
+    /// Natural size, aligned (no scaling).
+    Fixed,
+    /// Tile at natural size.
+    Repeat,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ImageBgNode {
     pub path: String,
+    #[serde(default)]
+    pub mode: BgMode,
+    /// Alignment string, e.g. "c", "tl", "br" (h in {l,c,r}, v in {t,c,b}).
+    #[serde(default = "default_bg_align")]
+    pub align: String,
+    /// Apply a GaussianBlur(3) (Painter ImageBg blur).
+    #[serde(default)]
+    pub blur: bool,
+    /// Brightness fade 0..1 (multiplies RGB by 1-fade; Painter ImageBg fade).
+    #[serde(default)]
+    pub fade: f32,
+}
+
+fn default_bg_align() -> String {
+    "c".to_string()
 }
 
 /// Pre-laid-out watermark lines (Python owns wrapping/auto-size).

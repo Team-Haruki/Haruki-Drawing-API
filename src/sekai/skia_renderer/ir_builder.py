@@ -199,11 +199,28 @@ class IRBuilder:
         return self._add({"type": "BlurGlass", "pos": _vec(pos), "size": _vec(size), "radius": radius,
                           "fill": _color(fill), "shadow_alpha": shadow_alpha})
 
-    def triangle_bg(self, hour: float) -> None:
-        self._background = {"type": "TriangleBg", "hour": hour}
+    def triangle_bg(self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0,
+                    size_fixed_rate: float = 0.0) -> None:
+        node: Node = {"type": "TriangleBg", "hour": hour}
+        if not time_color:
+            node["time_color"] = False
+            node["main_hue"] = float(main_hue)
+        if size_fixed_rate:
+            node["size_fixed_rate"] = float(size_fixed_rate)
+        self._background = node
 
-    def image_bg(self, path: str) -> None:
-        self._background = {"type": "ImageBg", "path": path}
+    def image_bg(self, path: str, mode: str = "fit", align: str = "c", blur: bool = False,
+                 fade: float = 0.0) -> None:
+        node: Node = {"type": "ImageBg", "path": path}
+        if mode != "fit":
+            node["mode"] = mode
+        if align != "c":
+            node["align"] = align
+        if blur:
+            node["blur"] = True
+        if fade:
+            node["fade"] = float(fade)
+        self._background = node
 
     def build(self) -> Node:
         scene: Node = {

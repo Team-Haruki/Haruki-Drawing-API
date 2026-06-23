@@ -133,11 +133,63 @@ impl SimpleRng {
     }
 }
 
-fn draw_sekai_triangle_background(canvas: &Canvas, width: f32, height: f32, hour: f32) {
+/// (grad1, grad2, overlay1, overlay2, white_veil_alpha, triangle_preset_colors).
+type TrianglePalette = ([u8; 3], [u8; 3], Rgba, Rgba, u8, Vec<[u8; 3]>);
+
+#[allow(clippy::too_many_arguments)]
+fn draw_sekai_triangle_background(
+    canvas: &Canvas,
+    width: f32,
+    height: f32,
+    hour: f32,
+    time_color: bool,
+    main_hue: f32,
+    size_fixed_rate: f32,
+) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
-    let palette = pink_palette(hour);
+
+    // Resolve the base/overlay gradient colors, white veil, and triangle preset colors for
+    // either the time-of-day pink palette or a custom-hue palette (mirrors Painter).
+    let (grad1, grad2, overlay1, overlay2, white_alpha, preset_colors): TrianglePalette = if time_color
+    {
+        let palette = pink_palette(hour);
+        let mid = mix_rgb(palette.grad1, palette.grad2, 0.5);
+        let preset = vec![
+            brighten_rgb(mix_rgb(palette.grad1, [255, 206, 232], 0.72), 0.20),
+            brighten_rgb(mix_rgb(mid, [238, 214, 255], 0.68), 0.18),
+            brighten_rgb(mix_rgb(palette.grad2, [208, 232, 255], 0.66), 0.20),
+            brighten_rgb(mix_rgb(mid, [255, 228, 176], 0.56), 0.18),
+        ];
+        (
+            palette.grad1,
+            palette.grad2,
+            palette.overlay1,
+            palette.overlay2,
+            palette.white_alpha,
+            preset,
+        )
+    } else {
+        let ofs = 0.025;
+        let g1 = hls_to_rgb_trunc(main_hue, 1.0, 0.5);
+        let g2 = hls_to_rgb_trunc(main_hue + ofs, 0.5, 0.9);
+        let ov1 = hls_to_rgb_trunc(main_hue, 0.7, 0.9);
+        let ov2 = hls_to_rgb_trunc(main_hue - ofs, 0.5, 0.5);
+        let preset = vec![
+            brighten_rgb([255, 189, 246], 0.22),
+            brighten_rgb([183, 246, 255], 0.22),
+            brighten_rgb([255, 247, 146], 0.22),
+        ];
+        (
+            g1,
+            g2,
+            Rgba(ov1[0], ov1[1], ov1[2], 100),
+            Rgba(ov2[0], ov2[1], ov2[2], 100),
+            100,
+            preset,
+        )
+    };
 
     draw_linear_gradient(
         canvas,
@@ -145,39 +197,35 @@ fn draw_sekai_triangle_background(canvas: &Canvas, width: f32, height: f32, hour
         height,
         primary_p1,
         primary_p2,
-        Rgba(palette.grad1[0], palette.grad1[1], palette.grad1[2], 255),
-        Rgba(palette.grad2[0], palette.grad2[1], palette.grad2[2], 255),
+        Rgba(grad1[0], grad1[1], grad1[2], 255),
+        Rgba(grad2[0], grad2[1], grad2[2], 255),
     );
     draw_linear_gradient(
-        canvas,
-        width,
-        height,
-        overlay_p1,
-        overlay_p2,
-        palette.overlay1,
-        palette.overlay2,
+        canvas, width, height, overlay_p1, overlay_p2, overlay1, overlay2,
     );
-    paint.set_color(Color::from_argb(palette.white_alpha, 255, 255, 255));
+    paint.set_color(Color::from_argb(white_alpha, 255, 255, 255));
     canvas.draw_rect(Rect::from_xywh(0.0, 0.0, width, height), &paint);
 
     let factor = width.min(height) / 2048.0 * 1.5;
-    let size_factor = factor;
-    let dense_factor = 1.0;
+    // size_fixed_rate=0 keeps the exact legacy expressions (size scales, density fixed).
+    let (size_factor, dense_factor) = if size_fixed_rate == 0.0 {
+        (factor, 1.0)
+    } else {
+        (
+            1.0 + (factor - 1.0) * (1.0 - size_fixed_rate),
+            1.0 + (factor * factor - 1.0) * size_fixed_rate,
+        )
+    };
     let aspect = width / height.max(1.0);
     let aspect_density_boost = 1.55_f32.min(1.15_f32.max(aspect.powf(0.22)));
     let wide_shift = 0.12_f32.min(0.0_f32.max((aspect - 1.0) * 0.08));
 
-    let grad1 = palette.grad1;
-    let grad2 = palette.grad2;
-    let mid = mix_rgb(grad1, grad2, 0.5);
-    let preset_colors = [
-        brighten_rgb(mix_rgb(grad1, [255, 206, 232], 0.72), 0.20),
-        brighten_rgb(mix_rgb(mid, [238, 214, 255], 0.68), 0.18),
-        brighten_rgb(mix_rgb(grad2, [208, 232, 255], 0.66), 0.20),
-        brighten_rgb(mix_rgb(mid, [255, 228, 176], 0.56), 0.18),
-    ];
-
-    let seed = ((width as u64) << 32) ^ (height as u64) ^ ((hour * 1000.0) as u64).rotate_left(17);
+    let seed_extra = if time_color {
+        (hour * 1000.0) as u64
+    } else {
+        ((main_hue * 100000.0) as u64).wrapping_add(7919)
+    };
+    let seed = ((width as u64) << 32) ^ (height as u64) ^ seed_extra.rotate_left(17);
     let mut rng = SimpleRng::new(seed);
     draw_random_triangles(
         canvas,
@@ -226,6 +274,35 @@ fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
 
 fn mix_rgb(a: [u8; 3], b: [u8; 3], ratio: f32) -> [u8; 3] {
     lerp_rgb(a, b, ratio)
+}
+
+/// `colorsys.hls_to_rgb` with Painter's `int(255*c)` truncation and `(h+1)%1` hue wrap.
+fn hls_to_rgb_trunc(h: f32, l: f32, s: f32) -> [u8; 3] {
+    let h = (h + 1.0).rem_euclid(1.0);
+    if s == 0.0 {
+        let v = (l * 255.0) as u8;
+        return [v, v, v];
+    }
+    let m2 = if l <= 0.5 {
+        l * (1.0 + s)
+    } else {
+        l + s - l * s
+    };
+    let m1 = 2.0 * l - m2;
+    let v = |hue: f32| -> u8 {
+        let hue = hue.rem_euclid(1.0);
+        let c = if hue < 1.0 / 6.0 {
+            m1 + (m2 - m1) * hue * 6.0
+        } else if hue < 0.5 {
+            m2
+        } else if hue < 2.0 / 3.0 {
+            m1 + (m2 - m1) * (2.0 / 3.0 - hue) * 6.0
+        } else {
+            m1
+        };
+        (c * 255.0) as u8
+    };
+    [v(h + 1.0 / 3.0), v(h), v(h - 1.0 / 3.0)]
 }
 
 fn brighten_rgb(color: [u8; 3], amount: f32) -> [u8; 3] {
@@ -669,28 +746,6 @@ fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edg
         );
         canvas.restore();
     }
-}
-
-fn draw_cover_image(canvas: &Canvas, image: &Image, dst: Rect, alpha: f32) {
-    let iw = image.width() as f32;
-    let ih = image.height() as f32;
-    if iw <= 0.0 || ih <= 0.0 {
-        return;
-    }
-    let scale = (dst.width() / iw).max(dst.height() / ih);
-    let sw = dst.width() / scale;
-    let sh = dst.height() / scale;
-    let src = Rect::from_xywh((iw - sw) * 0.5, (ih - sh) * 0.5, sw, sh);
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_alpha_f(alpha);
-    canvas.draw_image_rect_with_sampling_options(
-        image,
-        Some((&src, skia_safe::canvas::SrcRectConstraint::Strict)),
-        dst,
-        SamplingOptions::default(),
-        &paint,
-    );
 }
 
 fn encode_surface(
