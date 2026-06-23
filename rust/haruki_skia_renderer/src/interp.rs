@@ -10,9 +10,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, FilterMode, Font, Image, MaskFilter, MipmapMode, Paint,
-    PaintStyle, Point, RRect, Rect, SamplingOptions, Surface, TextBlob, TileMode, Typeface,
-    canvas::SrcRectConstraint, gradient, surfaces,
+    BlurStyle, Canvas, ClipOp, Color, FilterMode, Font, IRect, Image, MaskFilter, MipmapMode,
+    Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Surface, TextBlob, TileMode,
+    Typeface, canvas::SrcRectConstraint, gradient, surfaces,
 };
 
 use crate::ir::*;
@@ -146,17 +146,30 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         }
         Node::Shadow(shadow) => render_shadow(surface.canvas(), shadow, off),
         Node::BlurGlass(glass) => {
-            let backdrop = surface.image_snapshot();
-            let canvas = surface.canvas();
             let rect = Rect::from_xywh(
                 glass.pos[0] + off.0,
                 glass.pos[1] + off.1,
                 glass.size[0],
                 glass.size[1],
             );
+            // The glass only samples its own region (panel + a small blur margin), so snapshot
+            // just that sub-rect instead of the whole canvas. A full-canvas image_snapshot per
+            // panel is forced to a full copy (the shadow write right after breaks copy-on-write),
+            // which is costly when there is one panel per card.
+            let mut bounds = rect.with_outset((12.0, 12.0));
+            let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
+            let backdrop = if bounds.intersect(canvas_rect) {
+                let ibounds: IRect = bounds.round_out();
+                surface
+                    .image_snapshot_with_bounds(ibounds)
+                    .map(|img| (img, (ibounds.left as f32, ibounds.top as f32)))
+            } else {
+                None
+            };
+            let canvas = surface.canvas();
             draw_blur_glass_rect(
                 canvas,
-                &backdrop,
+                backdrop.as_ref().map(|(img, origin)| (img, *origin)),
                 rect,
                 glass.radius,
                 color_of(glass.fill),

@@ -11,7 +11,7 @@ use pyo3::types::{PyBytes, PyDict};
 use skia_safe::{
     BlurStyle, Canvas, ClipOp, Color, Data, EncodedImageFormat, FilterMode, FontMgr, Image,
     MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point, RRect, Rect, SamplingOptions,
-    Surface, TileMode, Typeface, gradient, image_filters, surfaces,
+    Surface, TileMode, Typeface, gradient, image_filters, png_encoder, surfaces,
 };
 
 /// Smooth (bilinear) sampling, matching Pillow's BILINEAR down/upscale in the blur
@@ -491,7 +491,7 @@ fn draw_triangle(
 
 fn draw_blur_glass_rect(
     canvas: &Canvas,
-    backdrop: &Image,
+    backdrop: Option<(&Image, (f32, f32))>,
     rect: Rect,
     radius: f32,
     fill: Color,
@@ -499,63 +499,78 @@ fn draw_blur_glass_rect(
 ) {
     draw_glass_shadow(canvas, rect, radius, shadow_alpha);
 
-    let full_rect = Rect::from_xywh(0.0, 0.0, backdrop.width() as f32, backdrop.height() as f32);
-    let mut sample_rect = rect.with_outset((10.0, 10.0));
-    if sample_rect.intersect(full_rect) {
-        let downsample = 2.0;
-        let temp_w = (sample_rect.width() / downsample).ceil().max(1.0) as i32;
-        let temp_h = (sample_rect.height() / downsample).ceil().max(1.0) as i32;
-        if let Some(mut temp_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
-            let temp_dst = Rect::from_xywh(0.0, 0.0, temp_w as f32, temp_h as f32);
-            let mut copy_paint = Paint::default();
-            copy_paint.set_anti_alias(true);
-            temp_surface.canvas().draw_image_rect_with_sampling_options(
-                backdrop,
-                Some((&sample_rect, skia_safe::canvas::SrcRectConstraint::Strict)),
-                temp_dst,
-                linear_sampling(),
-                &copy_paint,
+    // `backdrop` is a snapshot of just the panel's region; `origin` is its top-left in canvas
+    // space, so absolute sample coordinates map to the sub-image by subtracting it.
+    if let Some((backdrop, origin)) = backdrop {
+        let full_rect = Rect::from_xywh(
+            origin.0,
+            origin.1,
+            backdrop.width() as f32,
+            backdrop.height() as f32,
+        );
+        let mut sample_rect = rect.with_outset((10.0, 10.0));
+        if sample_rect.intersect(full_rect) {
+            let src_local = Rect::from_xywh(
+                sample_rect.left - origin.0,
+                sample_rect.top - origin.1,
+                sample_rect.width(),
+                sample_rect.height(),
             );
+            let downsample = 2.0;
+            let temp_w = (sample_rect.width() / downsample).ceil().max(1.0) as i32;
+            let temp_h = (sample_rect.height() / downsample).ceil().max(1.0) as i32;
+            if let Some(mut temp_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
+                let temp_dst = Rect::from_xywh(0.0, 0.0, temp_w as f32, temp_h as f32);
+                let mut copy_paint = Paint::default();
+                copy_paint.set_anti_alias(true);
+                temp_surface.canvas().draw_image_rect_with_sampling_options(
+                    backdrop,
+                    Some((&src_local, skia_safe::canvas::SrcRectConstraint::Strict)),
+                    temp_dst,
+                    linear_sampling(),
+                    &copy_paint,
+                );
 
-            let blurred =
-                if let Some(mut blur_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
-                    let temp_image = temp_surface.image_snapshot();
-                    let mut blur_paint = Paint::default();
-                    blur_paint.set_anti_alias(true);
-                    blur_paint.set_image_filter(image_filters::blur(
-                        (4.0 / downsample, 4.0 / downsample),
-                        TileMode::Clamp,
-                        None,
-                        None,
-                    ));
-                    blur_surface.canvas().draw_image_rect_with_sampling_options(
-                        &temp_image,
-                        None,
-                        temp_dst,
-                        linear_sampling(),
-                        &blur_paint,
-                    );
-                    blur_surface.image_snapshot()
-                } else {
-                    temp_surface.image_snapshot()
-                };
+                let blurred =
+                    if let Some(mut blur_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
+                        let temp_image = temp_surface.image_snapshot();
+                        let mut blur_paint = Paint::default();
+                        blur_paint.set_anti_alias(true);
+                        blur_paint.set_image_filter(image_filters::blur(
+                            (4.0 / downsample, 4.0 / downsample),
+                            TileMode::Clamp,
+                            None,
+                            None,
+                        ));
+                        blur_surface.canvas().draw_image_rect_with_sampling_options(
+                            &temp_image,
+                            None,
+                            temp_dst,
+                            linear_sampling(),
+                            &blur_paint,
+                        );
+                        blur_surface.image_snapshot()
+                    } else {
+                        temp_surface.image_snapshot()
+                    };
 
-            canvas.save();
-            canvas.clip_rrect(
-                RRect::new_rect_xy(rect, radius, radius),
-                ClipOp::Intersect,
-                true,
-            );
-            let mut paste_paint = Paint::default();
-            paste_paint.set_anti_alias(true);
-            canvas.draw_image_rect_with_sampling_options(
-                &blurred,
-                None,
-                sample_rect,
-                linear_sampling(),
-                &paste_paint,
-            );
-            canvas.restore();
+                canvas.save();
+                canvas.clip_rrect(
+                    RRect::new_rect_xy(rect, radius, radius),
+                    ClipOp::Intersect,
+                    true,
+                );
+                let mut paste_paint = Paint::default();
+                paste_paint.set_anti_alias(true);
+                canvas.draw_image_rect_with_sampling_options(
+                    &blurred,
+                    None,
+                    sample_rect,
+                    linear_sampling(),
+                    &paste_paint,
+                );
+                canvas.restore();
+            }
         }
     }
 
@@ -685,19 +700,23 @@ fn encode_surface(
 ) -> Result<RenderedImage, String> {
     let started = Instant::now();
     let image = surface.image_snapshot();
-    let format = if export_format == "jpg" {
-        EncodedImageFormat::JPEG
+    let data = if export_format == "jpg" {
+        let quality = jpg_quality.clamp(1, 100) as u32;
+        image
+            .encode(None, EncodedImageFormat::JPEG, Some(quality))
+            .ok_or_else(|| "failed to encode image".to_string())?
     } else {
-        EncodedImageFormat::PNG
+        // PNG is lossless, so deflate settings only trade encode speed vs file size, never
+        // pixels. skia's default (used by Image::encode) is z_lib_level=6 + FilterFlag::ALL,
+        // which runs the full 5-filter per-row search — the single biggest cost of the render.
+        // Level 3 with just SUB|UP filters cuts that CPU substantially; output is byte-identical
+        // when decoded, only the encoded size grows modestly.
+        let mut opts = png_encoder::Options::default();
+        opts.z_lib_level = 3;
+        opts.filter_flags = png_encoder::FilterFlag::SUB | png_encoder::FilterFlag::UP;
+        png_encoder::encode_image(None, &image, &opts)
+            .ok_or_else(|| "failed to encode image".to_string())?
     };
-    let quality = if export_format == "jpg" {
-        jpg_quality.clamp(1, 100) as u32
-    } else {
-        100
-    };
-    let data = image
-        .encode(None, format, Some(quality))
-        .ok_or_else(|| "failed to encode image".to_string())?;
     let bytes = data.as_bytes().to_vec();
     let width = image.width();
     let height = image.height();
