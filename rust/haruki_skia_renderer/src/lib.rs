@@ -15,6 +15,9 @@ use skia_safe::{
     TileMode, Typeface, gradient, image_filters, surfaces,
 };
 
+mod interp;
+mod ir;
+
 const BG_PADDING: f32 = 20.0;
 const PANEL_WIDTH: f32 = 996.0;
 const GRID_PADDING: f32 = 16.0;
@@ -175,10 +178,33 @@ fn render_card_box(py: Python<'_>, ir_json: &[u8]) -> PyResult<Py<PyDict>> {
     Ok(dict.unbind())
 }
 
+#[pyfunction]
+fn render_scene(py: Python<'_>, ir_json: &[u8]) -> PyResult<Py<PyDict>> {
+    let scene: ir::Scene = serde_json::from_slice(ir_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid scene IR: {err}"))
+    })?;
+    let rendered = py
+        .detach(|| interp::render_scene_inner(&scene))
+        .map_err(|err| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!("scene render failed: {err}"))
+        })?;
+
+    let dict = PyDict::new(py);
+    dict.set_item("image_bytes", PyBytes::new(py, &rendered.bytes))?;
+    dict.set_item("media_type", rendered.media_type)?;
+    dict.set_item("filename", rendered.filename)?;
+    dict.set_item("image_width", rendered.width)?;
+    dict.set_item("image_height", rendered.height)?;
+    dict.set_item("image_mode", "RGBA")?;
+    dict.set_item("encode_elapsed", rendered.encode_elapsed)?;
+    Ok(dict.unbind())
+}
+
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_card_list, m)?)?;
     m.add_function(wrap_pyfunction!(render_card_box, m)?)?;
+    m.add_function(wrap_pyfunction!(render_scene, m)?)?;
     Ok(())
 }
 
