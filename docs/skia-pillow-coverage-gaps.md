@@ -17,12 +17,38 @@
 
 ## 覆盖度总览
 
-| 口径 | 覆盖率 | 说明 |
-|---|---|---|
-| 仅 Painter 基础绘图原语 | **~70–75%** | 几何/线性渐变/图片 fit/两大签名特效齐全；通病是 stroke 不能渐变、径向是 stub、文字仅单行纯色、图片无 tint |
-| 完整组件库（含 `plot.py` 布局 + 富文本） | **~45–50%** | 整个 flexbox 式布局层与富文本层无 IR 对应物，全部压到 Python |
+> **2026-06-24 更新**：下表的多数缺口已在「大规模补齐」批次中实现，详见
+> [本批次已实现](#本批次已实现2026-06-24)。下方矩阵保留了原始审计结论作为对照，
+> 状态标注已就地更新。
 
-**核心判断**：IR 是忠实的**低层 draw list**，不是 **widget tree**。画原语基本齐了，瓶颈在于没有布局引擎和富文本层。
+| 口径 | 原始 | 当前 | 说明 |
+|---|---|---|---|
+| 仅 Painter 基础绘图原语 | ~70–75% | **~95%** | 多 stop/径向渐变、stroke 渐变、per-corner 半径、图片 tint/crop/轮廓阴影、ImageBg 模糊对齐、TriangleBg 自定义色相均已补；仅 `method="separate"` 近似 |
+| 完整组件库（含 `plot.py` 布局 + 富文本） | ~45–50% | **~75%** | 富文本（换行/多行/省略/inline 多色/描边/渐变/自适应/emoji）已由 IR 原语 + Python helper 覆盖；剩布局引擎（按架构留在 Python）与动图输出 |
+
+**核心判断**：IR 是忠实的**低层 draw list**，不是 **widget tree**。画原语与富文本现已基本齐全；
+剩余的是**布局引擎**（按 Constraint A 刻意留在 Python，由 helper 预算绝对坐标）与**动图输出**（按需再做）。
+
+## 本批次已实现（2026-06-24）
+
+一次性补齐了核心渲染原语、文字增强、富文本 helper 与彩色 emoji；全程卡牌端点**逐像素一致**
+（`max|Δ|=0`，12/60 卡）。提交序列 `124fca4..b700d5a`。
+
+| 分组 | 内容 |
+|---|---|
+| 渐变/填充 | N-stop 线性渐变、真实径向渐变（替换 stub）、stroke 可用渐变 |
+| 形状 | RoundRect 四角独立半径（`corner_radii`） |
+| 图片 | tint（multiply/mix）、`fit=crop`（纯裁剪不缩放）、alpha 轮廓投影阴影 |
+| 背景 | ImageBg fit/fill/fixed/repeat + 9 向对齐 + `GaussianBlur(3)` + 压暗（采样改 bilinear+mipmap）；TriangleBg `main_hue` 自定义色相 + `size_fixed_rate` |
+| 文字 | 渐变文字、描边/outline、`letter_spacing`、自适应对比色（背景平均亮度采样） |
+| Emoji | 彩色 emoji 字体 fallback（emoji run 路由到 emoji 字体；opt-in，未配置则不变） |
+| 字体 | 任意命名字体（`FontsIr.extra` + `FontRef.name`），不再限 3 role |
+| 水印 | `IRBuilder.watermark()` 接线（启用既有 Watermark 节点） |
+| 富文本 helper（Python） | `wrap_text` / `multiline_text`（换行+省略号）/ `colored_text` + `parse_colored_segments`（inline `<#hex>`）/ `shadowed_text` / `measure_text` |
+
+仍未做（刻意）：**布局引擎**（HSplit/VSplit/Grid/Flow —— 按架构由 Python 预算绝对坐标，
+helper 已提供文字侧支持）；**动图 GIF/APNG 输出**（无端点需要，按需再做）；`method="separate"`
+渐变（用 `combine` 近似，仅对角渐变略有差异）。
 
 ## 端点迁移状态
 
@@ -30,7 +56,7 @@
 |---|---|---|
 | `POST /api/pjsk/card/list` | ✅ Skia | 布局在 Python，Rust 解释 IR |
 | `POST /api/pjsk/card/box` | ✅ Skia | 同上；`user_info` 分支仍走 Pillow |
-| `profile / music / event / sk / chart / mysekai / gacha / score` | ❌ Pillow only | 迁移前需补下方缺口（布局引擎、富文本、图片 tint、径向渐变、ImageBg 模糊、动图等） |
+| `profile / music / event / sk / chart / mysekai / gacha / score` | ❌ Pillow only | 渲染原语/富文本现已就绪；迁移主要剩 Python 侧布局求解（splits/grid/flow 预算绝对坐标），少数用动图的端点另需动图输出 |
 
 `card/list`、`card/box` 的缩略图与技能图标在 Python 布局层合成（`card_common.py:147-159`、`card_list.py:177-190`），未沉入 IR。
 
@@ -128,14 +154,15 @@
 
 ## 建议新增的 IR 原语（按优先级）
 
-迁移其余端点前,按性价比排序的候选(① 影响面最广,⑥ 最局部):
+原始候选清单与现状（✅ 已在 2026-06-24 批次完成）:
 
-1. **布局求解策略落地** —— 决定走「Python 预算绝对坐标」还是「IR 加布局原语」;这是其它一切的前提。
-2. **富文本节点** —— 多行/换行/省略号 + 逐行 Text 发射约定;`ColoredTextBox` 的 inline 多色。
-3. **Image tint 字段** —— `multiply` / `mix` 颜色,解锁属性/角色 sprite 上色。
-4. **ImageBg 增强** —— `GaussianBlur(3)` + 压暗 + align/repeat,解锁站点背景类布局。
-5. **径向渐变 + stroke 渐变 + mask 填充** —— 解锁渐变文字与更丰富的主题色。
-6. **动图输出 + Watermark 接线 + 任意字体 role** —— 按具体端点需要再补。
+1. **布局求解策略落地** —— ✅ 定调：按 Constraint A 留在 Python（预算绝对坐标）；文字侧已提供
+   `wrap_text`/`multiline_text`/`colored_text` 等 helper。容器级（splits/grid/flow）仍待具体端点迁移时按需在 Python 实现。
+2. **富文本节点** —— ✅ 多行/换行/省略号（`multiline_text`）、inline 多色（`colored_text` + `parse_colored_segments`）、描边/渐变/自适应（IR 原语）。
+3. **Image tint 字段** —— ✅ `multiply` / `mix`。
+4. **ImageBg 增强** —— ✅ `GaussianBlur(3)` + 压暗 + align/repeat。
+5. **径向渐变 + stroke 渐变 + mask 填充** —— ✅ 径向 + stroke 渐变 + 渐变文字（穿字形）；任意 mask 填充仍未做（很少需要）。
+6. **动图输出 + Watermark 接线 + 任意字体** —— Watermark 接线 ✅、任意字体 ✅；**动图 GIF/APNG 仍未做**（无端点需要）。
 
 ## 已知非目标 / 不适用（➖）
 
