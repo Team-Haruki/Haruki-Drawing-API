@@ -39,7 +39,7 @@ from src.sekai.base.utils import (
     put_composed_image_cache,
     put_composed_image_disk_cache,
 )
-from src.sekai.deck.drawer import compose_deck_recommend_image
+from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
 from src.sekai.deck.model import (
     DeckCardData,
     DeckData,
@@ -617,7 +617,7 @@ def _event_planner_fallback_deck_request(rqd: EventPlannerRequest) -> DeckReques
     )
 
 
-async def compose_event_planner_image(rqd: EventPlannerRequest) -> Image.Image:
+def _build_event_planner_deck_request(rqd: EventPlannerRequest) -> DeckRequest:
     deck_request = (
         rqd.deck_request.model_copy(deep=True)
         if rqd.deck_request is not None
@@ -636,7 +636,18 @@ async def compose_event_planner_image(rqd: EventPlannerRequest) -> Image.Image:
     deck_request.live_type = deck_request.live_type or "multi"
     deck_request.live_name = deck_request.live_name or rqd.live_name or "协力"
     deck_request.recommend_type = deck_request.recommend_type or "event"
-    return await compose_deck_recommend_image(deck_request)
+    return deck_request
+
+
+async def compose_event_planner_image(rqd: EventPlannerRequest) -> Image.Image:
+    return await compose_deck_recommend_image(_build_event_planner_deck_request(rqd))
+
+
+async def try_render_event_planner_payload(rqd: EventPlannerRequest) -> EncodedImagePayload | None:
+    """Skia 路径：planner 委托 deck 渲染,直接走 deck 的 Skia 路径。"""
+    if not skia_plot_enabled():
+        return None
+    return await try_render_deck_recommend_payload(_build_event_planner_deck_request(rqd))
 
 
 def _resolve_event_list_entry_phase(start_at, end_at, now) -> str:

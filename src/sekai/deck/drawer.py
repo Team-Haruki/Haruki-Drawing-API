@@ -4,6 +4,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -29,6 +30,7 @@ from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 logger = logging.getLogger(__name__)
@@ -328,7 +330,7 @@ def build_recommend_title(
     return title
 
 
-async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
+async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
     music_compare = rqd.music_compare
@@ -895,4 +897,16 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                         ).set_w(note_text_width)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
+    """合成组队推荐图片 (Pillow 路径)。"""
+    return await (await _build_deck_recommend_canvas(rqd)).get_img()
+
+
+async def try_render_deck_recommend_payload(rqd: DeckRequest) -> EncodedImagePayload | None:
+    """Skia 路径：经 IRPainter 渲染同一棵 widget 树；不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_deck_recommend_canvas(rqd))

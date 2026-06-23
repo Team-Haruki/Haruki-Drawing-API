@@ -129,10 +129,13 @@ def _configure_worker_render_environment() -> None:
 def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
     _configure_worker_render_environment()
     if kind == "deck_recommend":
-        from src.sekai.deck.drawer import compose_deck_recommend_image
+        from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
         from src.sekai.deck.model import DeckRequest
 
         request = DeckRequest.model_validate(payload)
+        skia_payload = asyncio.run(try_render_deck_recommend_payload(request))
+        if skia_payload is not None:
+            return skia_payload
         image = asyncio.run(compose_deck_recommend_image(request))
         return _encode_image_payload(image)
 

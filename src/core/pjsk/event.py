@@ -9,6 +9,7 @@ from src.sekai.event.drawer import (
     compose_event_planner_image,
     compose_event_record_image,
     try_render_event_detail_payload,
+    try_render_event_planner_payload,
     try_render_event_record_payload,
 )
 from src.sekai.event.model import (
@@ -80,6 +81,9 @@ async def event_planner(request: EventPlannerRequest):
     Shows target points, selected deck, and estimated plays/energy per song.
     """
     try:
+        payload = await try_render_event_planner_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_event_planner_image(request)
         return await image_to_response(image)
     except Exception as e:
