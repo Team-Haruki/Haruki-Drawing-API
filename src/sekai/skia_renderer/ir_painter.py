@@ -158,13 +158,24 @@ class IRPainter(Painter):
             adaptive = adaptive_color(_rgba(fill.light), _rgba(fill.dark), fill.threshold)
             fillval: Any = (0, 0, 0, 255)
         elif isinstance(fill, (LinearGradient, RadialGradient)):
-            # Gradient text needs glyph-bbox endpoint mapping; defer to Pillow for now.
-            raise SkiaUnsupported("gradient text fill not yet mapped")
+            # Gradient text: map the gradient endpoints (fractions of the glyph overlay) to
+            # absolute coords over the text bbox, mirroring Painter's gradient-overlay path
+            # (overlay = text_size + 10px, composited at pos). The Rust Text node renders the
+            # gradient as a glyph-masked shader.
+            fillval = self._gradient_text_fill(fill, text, role, size, font_name, apos)
         else:
             fillval = _rgba(fill)
         self._b.text(text, apos, role, size, align=align, baseline="cjk_top",
                      fill=fillval, adaptive=adaptive, font_name=font_name)
         return self
+
+    def _gradient_text_fill(self, fill, text, role, size, font_name, apos):
+        """Map a Painter gradient text fill to an absolute-coord IR gradient over the glyph
+        overlay (text ink size + 10px padding, anchored at the draw position)."""
+        pil_font = self._b._pil_font(role, size, font_name)
+        x0, y0, x1, y1 = pil_font.getbbox(text)
+        overlay_size = ((x1 - x0) + 10, (y1 - y0) + 10)
+        return self._fill(fill, apos, overlay_size)
 
     def _paste(self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha):
         apos = self._abs(pos)
