@@ -8,6 +8,7 @@ from src.sekai.card.drawer import (
     compose_box_image,
     compose_card_detail_image,
     compose_card_list_image,
+    try_render_card_detail_payload,
 )
 from src.sekai.card.model import (
     CardBoxRequest,
@@ -29,6 +30,9 @@ async def card_detail(request: CardDetailRequest):
     The image includes card information, power stats, skills, and related event/gacha info.
     """
     try:
+        payload = await try_render_card_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_card_detail_image(request)
         return await image_to_response(image)
     except Exception as e:

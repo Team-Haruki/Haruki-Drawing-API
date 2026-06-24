@@ -3,6 +3,7 @@ import logging
 import math
 import time
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base import (
     ASSETS_BASE_DIR,
     BG_PADDING,
@@ -39,6 +40,7 @@ from src.sekai.profile.drawer import (
     get_card_full_thumbnail,
     get_profile_card,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -140,11 +142,11 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
 # ========== 主要函数 ==========
 
 
-async def compose_card_detail_image(
+async def _build_card_detail_canvas(
     rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
-):
+) -> Canvas:
     """
-    合成卡牌详情图片
+    合成卡牌详情图片（构建 plot.py widget 树，供 Pillow 与 Skia 影子层共用）
     """
     card_info = rqd.card_info
     region = rqd.region
@@ -392,7 +394,24 @@ async def compose_card_detail_image(
                                     ImageBox(img, size=(80, None))
 
     add_request_watermark(canvas, rqd)
+    return canvas
+
+
+async def compose_card_detail_image(
+    rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+):
+    """合成卡牌详情图片（Pillow 路径）"""
+    canvas = await _build_card_detail_canvas(rqd, title, title_style, title_shadow)
     return await canvas.get_img()
+
+
+async def try_render_card_detail_payload(
+    rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+) -> EncodedImagePayload | None:
+    """Skia 影子层路径；未启用或不可表达时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_card_detail_canvas(rqd, title, title_style, title_shadow))
 
 
 async def compose_card_list_image(
