@@ -572,8 +572,21 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
 }
 
 fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f32)) {
-    let iw = image.width() as f32;
-    let ih = image.height() as f32;
+    // Optional source-pixel crop window applied before fit: only this sub-rect participates.
+    // All fit math below runs in crop-local coords (origin 0,0, size iw×ih); the resulting
+    // source rect is translated back into the original image by (base_x, base_y) at the end.
+    let img_w = image.width() as f32;
+    let img_h = image.height() as f32;
+    let (base_x, base_y, iw, ih) = match node.source_rect {
+        Some([x0, y0, x1, y1]) => {
+            let cx0 = x0.clamp(0.0, img_w);
+            let cy0 = y0.clamp(0.0, img_h);
+            let cx1 = x1.clamp(cx0, img_w);
+            let cy1 = y1.clamp(cy0, img_h);
+            (cx0, cy0, cx1 - cx0, cy1 - cy0)
+        }
+        None => (0.0, 0.0, img_w, img_h),
+    };
     if iw <= 0.0 || ih <= 0.0 {
         return;
     }
@@ -610,6 +623,13 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
             let d = Rect::from_xywh(x + (rw - cw) * 0.5, y + (rh - ch) * 0.5, cw, ch);
             (Some(s), d)
         }
+    };
+    // Translate the crop-local source rect back into the original image. With a crop and a
+    // whole-source fit (src == None), the crop window itself becomes the explicit source rect.
+    let src = match (src, node.source_rect) {
+        (Some(s), _) => Some(Rect::from_xywh(s.left + base_x, s.top + base_y, s.width(), s.height())),
+        (None, Some(_)) => Some(Rect::from_xywh(base_x, base_y, iw, ih)),
+        (None, None) => None,
     };
     let sampling = image_sampling();
     let src_arg = src.as_ref().map(|s| (s, SrcRectConstraint::Strict));
@@ -742,6 +762,9 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
             let a = (tint.strength.clamp(0.0, 1.0) * 255.0).round() as u8;
             color_filters::blend(Color::from_argb(a, c[0], c[1], c[2]), BlendMode::SrcOver)
         }
+        // SrcIn = keep the source alpha as a stencil, replace RGB with `color`. `color`'s
+        // alpha scales the result alpha (255 keeps the source mask unchanged).
+        TintMode::Recolor => color_filters::blend(Color::from_argb(c[3], c[0], c[1], c[2]), BlendMode::SrcIn),
     }
 }
 
@@ -992,14 +1015,19 @@ mod tests {
 
     #[test]
     fn parses_image_extensions() {
-        // tint + alpha-silhouette shadow + crop fit must deserialize and render (the asset is
-        // absent in the test base dir, so the image is skipped, but parsing must succeed).
+        // tint + alpha-silhouette shadow + crop fit + source-rect + recolor tint must
+        // deserialize and render (the asset is absent in the test base dir, so the image is
+        // skipped, but parsing must succeed).
         let json = scene_json(
             r#"
             { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "missing.png",
               "fit": "crop",
+              "source_rect": [2, 2, 40, 40],
               "tint": { "color": [255, 128, 0, 255], "mode": "multiply" },
-              "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } }
+              "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } },
+            { "type": "Image", "pos": [30, 4], "size": [20, 20], "path": "missing.png",
+              "fit": "width", "source_rect": [0, 0, 16, 16],
+              "tint": { "color": [255, 32, 32, 255], "mode": "recolor" } }
             "#,
         );
         let rendered = render(&json);

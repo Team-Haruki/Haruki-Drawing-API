@@ -68,6 +68,9 @@ pub type Color4 = [u8; 4];
 /// A point/size pair in the current group's local coordinate space.
 pub type Vec2 = [f32; 2];
 
+/// An axis-aligned rectangle `[x0, y0, x1, y1]` (used for source-pixel crop windows).
+pub type Rect4 = [f32; 4];
+
 /// Fill for shapes and text. A JSON array is a solid color; an object is a gradient.
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -212,6 +215,11 @@ pub enum TintMode {
     Multiply,
     /// Alpha-weighted lerp toward `color` by `strength` (Painter `mix_image_by_color`).
     Mix,
+    /// Replace RGB with `color`, keeping the source alpha as a mask (`SrcIn`). Mirrors
+    /// "treat the image's alpha as a stencil and fill it with a solid color" — e.g. the
+    /// mysekai red spawn marker recolouring a grayscale source. `color`'s own alpha
+    /// scales the resulting alpha (255 keeps the source alpha unchanged).
+    Recolor,
 }
 
 #[derive(Debug, Deserialize, Clone, Copy)]
@@ -328,6 +336,11 @@ pub struct ImageNode {
     pub path: String,
     #[serde(default)]
     pub fit: Fit,
+    /// Optional source-pixel crop window `[x0, y0, x1, y1]` applied BEFORE the fit logic:
+    /// only this sub-rect of the source participates (mirrors a Pillow `img.crop(box)`
+    /// before placement). Out-of-range coords are clamped. `None` = whole image.
+    #[serde(default)]
+    pub source_rect: Option<Rect4>,
     #[serde(default = "default_alpha")]
     pub alpha: f32,
     /// Anchor of `pos` within the drawn rect: [0,0]=top-left (default), [1,1]=bottom-right,

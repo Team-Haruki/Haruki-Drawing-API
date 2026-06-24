@@ -42,7 +42,9 @@ def _stops(stops: Sequence[tuple[Color, float]]) -> list[Node]:
 
 def image_tint(color: Color, mode: str = "multiply", strength: float = 1.0) -> Node:
     """A color tint for an Image node. ``multiply`` = component-wise multiply;
-    ``mix`` = alpha-weighted lerp toward ``color`` by ``strength`` (0..1)."""
+    ``mix`` = alpha-weighted lerp toward ``color`` by ``strength`` (0..1);
+    ``recolor`` = keep the source alpha as a stencil and replace RGB with ``color``
+    (``color``'s own alpha scales the result alpha; 255 keeps the source mask)."""
     return {"color": _color(color), "mode": mode, "strength": float(strength)}
 
 
@@ -217,7 +219,8 @@ class IRBuilder:
         return self._add(node)
 
     def image(self, path: str, pos: Vec2, size: Vec2 = (0, 0), fit: str = "stretch", alpha: float = 1.0,
-              anchor: Vec2 = (0, 0), tint: Node | None = None, shadow: Node | None = None) -> Node:
+              anchor: Vec2 = (0, 0), tint: Node | None = None, shadow: Node | None = None,
+              source_rect: tuple[float, float, float, float] | None = None) -> Node:
         node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path,
                       "fit": fit, "alpha": alpha}
         if anchor[0] or anchor[1]:
@@ -226,6 +229,9 @@ class IRBuilder:
             node["tint"] = tint
         if shadow is not None:
             node["shadow"] = shadow
+        if source_rect is not None:
+            # Source-pixel crop window [x0, y0, x1, y1] applied before the fit (Pillow img.crop).
+            node["source_rect"] = [float(v) for v in source_rect]
         return self._add(node)
 
     # ---- rich-text layout helpers (Python owns wrapping/measuring; emit Text nodes) ----
