@@ -865,13 +865,17 @@ async def try_render_sks_payload(rqd: SpeedRequest) -> EncodedImagePayload | Non
     return await render_canvas_payload(await _build_sks_canvas(rqd))
 
 
-async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
+async def _build_player_trace_canvas(rqd: PlayerTraceRequest) -> Canvas:
     """
     合成玩家排名追踪图表 (Rating Trace)
 
     使用 Matplotlib 绘制双轴图表：
     - 左轴: 分数折线图
     - 右轴: 排名散点图
+
+    matplotlib renders the plot bitmap; the surrounding chrome (rounded card, WL
+    icon column, watermark) is a plot.py widget tree the Skia/IRPainter path can
+    render, shipping the bitmap as a mem-image.
     """
     eid = rqd.event_id
     wl_chara_icon = None
@@ -1114,11 +1118,21 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
+    return await (await _build_player_trace_canvas(rqd)).get_img()
+
+
+async def try_render_player_trace_payload(rqd: PlayerTraceRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_player_trace_canvas(rqd))
 
 
 # 合成排名追踪图片
-async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
+async def _build_rank_trace_canvas(rqd: RankTraceRequest) -> Canvas:
     """
     合成排名档位追踪与预测图表
 
@@ -1243,7 +1257,17 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
+    return await (await _build_rank_trace_canvas(rqd)).get_img()
+
+
+async def try_render_rank_trace_payload(rqd: RankTraceRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_rank_trace_canvas(rqd))
 
 
 async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:

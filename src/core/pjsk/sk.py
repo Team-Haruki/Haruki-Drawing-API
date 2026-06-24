@@ -20,6 +20,8 @@ from src.sekai.sk.drawer import (
     compose_winrate_predict_image,
     try_render_cf_payload,
     try_render_csb_payload,
+    try_render_player_trace_payload,
+    try_render_rank_trace_payload,
     try_render_sk_payload,
     try_render_skl_payload,
     try_render_sks_payload,
@@ -98,6 +100,9 @@ async def sk_speed(request: SpeedRequest):
 async def sk_player_trace(request: PlayerTraceRequest):
     """Generate player point trace chart image."""
     try:
+        payload = await try_render_player_trace_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_player_trace_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -108,6 +113,9 @@ async def sk_player_trace(request: PlayerTraceRequest):
 async def sk_rank_trace(request: RankTraceRequest):
     """Generate ranking line trace and prediction chart image."""
     try:
+        payload = await try_render_rank_trace_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_rank_trace_image(request)
         return await image_to_response(image)
     except Exception as e:
