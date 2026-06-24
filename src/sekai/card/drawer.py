@@ -733,25 +733,31 @@ async def compose_box_image(
 
     # 绘制单张卡
     def draw_card(card_data):
-        with Frame().set_content_align("rt"):
-            ImageBox(card_data["img"], size=(sz, sz))
+        # 卡图与卡号 ID 必须包裹在同一个容器里，否则 show_id 为真时 ID 文本会被注册成 Grid
+        # 的独立单元，导致每张卡占两格、列数与整体宽度翻倍（触发 watermark 的尺寸越界报错）。
+        with VSplit().set_content_align("rt").set_sep(0):
+            with Frame().set_content_align("rt"):
+                ImageBox(card_data["img"], size=(sz, sz))
 
-            # 限定类型图标
-            supply_name = card_data["card"].get("supply_type", "")
-            limited_icon_width = int(sz * 0.75)
-            if supply_name in TERM_LIMITED_SUPPLY_TYPES:
-                if term_img:
-                    ImageBox(term_img, size=(limited_icon_width, None))
-            elif supply_name in FES_LIMITED_SUPPLY_TYPES:
-                if fes_img:
-                    ImageBox(fes_img, size=(limited_icon_width, None))
+                # 限定类型图标
+                supply_name = card_data["card"].get("supply_type", "")
+                limited_icon_width = int(sz * 0.75)
+                if supply_name in TERM_LIMITED_SUPPLY_TYPES:
+                    if term_img:
+                        ImageBox(term_img, size=(limited_icon_width, None))
+                elif supply_name in FES_LIMITED_SUPPLY_TYPES:
+                    if fes_img:
+                        ImageBox(fes_img, size=(limited_icon_width, None))
 
-            # 如果用户没有此卡牌，添加遮罩
-            if not card_data["has"] and user_info:
-                Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
+                # 如果用户没有此卡牌，添加遮罩
+                if not card_data["has"] and user_info:
+                    Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
 
-        if show_id:
-            TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
+            if show_id:
+                TextBox(
+                    f"{card_data['card']['card_id']}",
+                    TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0)),
+                ).set_w(sz)
 
     profile_card = None
     if user_info:
