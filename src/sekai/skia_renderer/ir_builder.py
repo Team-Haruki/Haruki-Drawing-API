@@ -382,9 +382,10 @@ class IRBuilder:
         return self._add({"type": "Shadow", "pos": _vec(pos), "size": _vec(size), "radius": radius,
                           "alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)})
 
-    def blurglass(self, pos: Vec2, size: Vec2, radius: float, fill: Color, shadow_alpha: float = 0.26) -> Node:
+    def blurglass(self, pos: Vec2, size: Vec2, radius: float, fill: Color | Node,
+                  shadow_alpha: float = 0.26) -> Node:
         return self._add({"type": "BlurGlass", "pos": _vec(pos), "size": _vec(size), "radius": radius,
-                          "fill": _color(fill), "shadow_alpha": shadow_alpha})
+                          "fill": _fill_value(fill), "shadow_alpha": shadow_alpha})
 
     def triangle_bg(self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0,
                     size_fixed_rate: float = 0.0) -> None:

@@ -294,13 +294,16 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             } else {
                 None
             };
+            // Panel tint paint (solid or gradient shader), positioned in absolute coords like
+            // every other fill so a gradient lands identically to a RoundRect of the same fill.
+            let panel_paint = fill_paint(&glass.fill, off);
             let canvas = surface.canvas();
             draw_blur_glass_rect(
                 canvas,
                 backdrop.as_ref().map(|(img, origin)| (img, *origin)),
                 rect,
                 glass.radius,
-                color_of(glass.fill),
+                &panel_paint,
                 glass.shadow_alpha,
             );
         }

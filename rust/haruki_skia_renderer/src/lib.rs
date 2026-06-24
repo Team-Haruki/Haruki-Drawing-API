@@ -595,7 +595,7 @@ fn draw_blur_glass_rect(
     backdrop: Option<(&Image, (f32, f32))>,
     rect: Rect,
     radius: f32,
-    fill: Color,
+    panel_paint: &Paint,
     shadow_alpha: f32,
 ) {
     draw_glass_shadow(canvas, rect, radius, shadow_alpha);
@@ -675,7 +675,7 @@ fn draw_blur_glass_rect(
         }
     }
 
-    draw_glass_overlay(canvas, rect, radius, fill, 0.6);
+    draw_glass_overlay(canvas, rect, radius, panel_paint, 0.6);
 }
 
 fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32) {
@@ -699,12 +699,9 @@ fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32
     canvas.restore();
 }
 
-fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, fill: Color, edge_strength: f32) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    paint.set_color(fill);
-    paint.set_style(PaintStyle::Fill);
-    canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), &paint);
+fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, panel_paint: &Paint, edge_strength: f32) {
+    // `panel_paint` is pre-built (anti-alias + Fill style + solid color or gradient shader).
+    canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), panel_paint);
 
     if edge_strength <= 0.0 {
         return;

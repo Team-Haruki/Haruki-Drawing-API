@@ -173,6 +173,29 @@ _CASES = [
         "size": (160, 120),
         "check": ("mae", 8.0),
     },
+    {
+        # Opaque gradient-tinted frosted panel: the tint covers the backdrop so this checks
+        # that a BlurGlass fill accepts a gradient (regression for the music-rewards header
+        # that used to TypeError and silently fall back to Pillow). LinearGradient p1/p2 are
+        # panel-fractional; the IR node carries the equivalent absolute endpoints.
+        "name": "blurglass_gradient",
+        "build": lambda p: (
+            p.rect((0, 0), (160, 120), (120, 150, 210, 255)),
+            p.blurglass_roundrect(
+                (24, 20), (112, 80),
+                LinearGradient((182, 144, 247, 255), (243, 132, 220, 255), (0, 0), (1, 1)),
+                16, shadow_alpha=0.26,
+            ),
+        ),
+        "nodes": [
+            {"type": "Rect", "pos": [0, 0], "size": [160, 120], "fill": [120, 150, 210, 255]},
+            {"type": "BlurGlass", "pos": [24, 20], "size": [112, 80], "radius": 16,
+             "fill": {"kind": "linear", "c1": [182, 144, 247, 255], "c2": [243, 132, 220, 255],
+                      "p1": [24, 20], "p2": [136, 100]}, "shadow_alpha": 0.26},
+        ],
+        "size": (160, 120),
+        "check": ("mae", 12.0),
+    },
 ]
 
 # Image cases need a synced game asset; skipped cleanly when it's absent.

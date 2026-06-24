@@ -450,7 +450,9 @@ pub struct BlurGlassNode {
     pub pos: Vec2,
     pub size: Vec2,
     pub radius: f32,
-    pub fill: Color4,
+    /// Panel tint: a solid color or a gradient (untagged `Fill`, so a bare `[r,g,b,a]`
+    /// array still deserializes as `Solid` for backward compatibility).
+    pub fill: Fill,
     #[serde(default = "default_shadow_alpha")]
     pub shadow_alpha: f32,
 }
