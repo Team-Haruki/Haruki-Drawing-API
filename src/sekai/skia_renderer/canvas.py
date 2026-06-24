@@ -36,13 +36,18 @@ logger = logging.getLogger("plot.draw.perf")
 def skia_plot_enabled() -> bool:
     return bool(settings.drawing.use_skia_plot)
 
+
+def load_native_renderer():
+    """Import the native Skia renderer module (shared by the shim and card paths)."""
+    return importlib.import_module("haruki_skia_renderer")
+
 _REQUIRED = {
     "image_bytes", "media_type", "filename", "image_width", "image_height",
     "image_mode", "encode_elapsed",
 }
 
 
-def _background_hour() -> float:
+def background_hour() -> float:
     override = os.getenv("HARUKI_BG_TEST_HOUR")
     if override is not None:
         try:
@@ -53,7 +58,7 @@ def _background_hour() -> float:
     return now.hour + now.minute / 60 + now.second / 3600
 
 
-def _payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
+def payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
     if not isinstance(result, dict) or _REQUIRED.difference(result):
         raise ValueError("native renderer returned an incomplete payload")
     image_bytes = result["image_bytes"]
@@ -79,8 +84,8 @@ async def render_canvas_payload(
     """
     if not settings.drawing.use_skia_plot:
         return None
-    native = importlib.import_module("haruki_skia_renderer")
-    bg = _background_hour() if bg_hour is None else bg_hour
+    native = load_native_renderer()
+    bg = background_hour() if bg_hour is None else bg_hour
     eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None
 
     def _render():
@@ -110,7 +115,7 @@ async def render_canvas_payload(
 
     try:
         result = await run_in_pool(_render)
-        return _payload_from_native(result)
+        return payload_from_native(result)
     except SkiaUnsupported as exc:
         logger.info("plot canvas not Skia-expressible (%s); falling back to Pillow", exc)
         return None

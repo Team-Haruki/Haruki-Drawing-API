@@ -4,7 +4,7 @@ from src.core.heavy_render_pool import EncodedImagePayload
 from src.core.pjsk import card as card_router
 from src.sekai.card.model import CardBasic, CardBoxRequest, UserCard
 from src.sekai.profile.model import CardFullThumbnailRequest
-from src.sekai.skia_renderer import card_box
+from src.sekai.skia_renderer import card_render as card_box  # merged module (card/list + card/box)
 
 
 def _thumbnail(card_id: int, path: str = "cards/card.png") -> CardFullThumbnailRequest:
@@ -105,7 +105,7 @@ async def test_skia_card_box_falls_back_to_pillow_on_native_error(monkeypatch):
     monkeypatch.setattr(
         card_box,
         "_load_native_renderer",
-        lambda: (_ for _ in ()).throw(card_box.SkiaCardBoxRenderError("missing native")),
+        lambda: (_ for _ in ()).throw(card_box.SkiaCardRenderError("missing native")),
     )
 
     payload = await card_box.try_render_card_box_payload(_request())

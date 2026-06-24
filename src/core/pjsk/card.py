@@ -15,8 +15,7 @@ from src.sekai.card.model import (
     CardDetailRequest,
     CardListRequest,
 )
-from src.sekai.skia_renderer.card_box import try_render_card_box_payload
-from src.sekai.skia_renderer.card_list import try_render_card_list_payload
+from src.sekai.skia_renderer.card_render import try_render_card_box_payload, try_render_card_list_payload
 
 router = APIRouter(tags=["Card"])
 _perf_logger = logging.getLogger("card.endpoint.perf")

@@ -7,6 +7,7 @@ List and Card Box scene builders. Values mirror the Rust ``card_scene.rs``.
 from __future__ import annotations
 
 from collections import OrderedDict
+from pathlib import PurePosixPath, PureWindowsPath
 import threading
 import time
 from typing import Any
@@ -101,6 +102,40 @@ BOX_GROUP_SEP = 4.0
 WATERMARK_FALLBACK = "Haruki Drawing API"
 
 Color4 = tuple[int, int, int, int]
+
+
+def validate_asset_path(path: str | None, *, field: str) -> str | None:
+    """Reject absolute / backslash / ``..`` asset paths (shared by both card renderers)."""
+    if path is None or path == "":
+        return None
+    if "\\" in path:
+        raise ValueError(f"{field} must use forward slash asset paths")
+    posix = PurePosixPath(path)
+    windows = PureWindowsPath(path)
+    if posix.is_absolute() or windows.is_absolute():
+        raise ValueError(f"{field} must be relative to assets_base_dir")
+    if ".." in posix.parts:
+        raise ValueError(f"{field} must not contain '..'")
+    return path
+
+
+def thumbnail_to_ir(thumbnail: Any) -> dict[str, Any]:
+    """Serialize a card thumbnail request to the v1 IR dict (shared by list + box)."""
+    rare_img_path = thumbnail.birthday_icon_path if thumbnail.rare == "rarity_birthday" else thumbnail.rare_img_path
+    return {
+        "card_id": thumbnail.card_id,
+        "card_thumbnail_path": validate_asset_path(thumbnail.card_thumbnail_path, field="card_thumbnail_path"),
+        "rare": thumbnail.rare,
+        "frame_img_path": validate_asset_path(thumbnail.frame_img_path, field="frame_img_path"),
+        "attr_img_path": validate_asset_path(thumbnail.attr_img_path, field="attr_img_path"),
+        "rare_img_path": validate_asset_path(rare_img_path, field="rare_img_path"),
+        "train_rank": thumbnail.train_rank,
+        "train_rank_img_path": validate_asset_path(thumbnail.train_rank_img_path, field="train_rank_img_path"),
+        "level": thumbnail.level,
+        "custom_text": thumbnail.custom_text,
+        "is_after_training": thumbnail.is_after_training,
+        "is_pcard": thumbnail.is_pcard,
+    }
 
 
 def rare_count(rare: str) -> int:

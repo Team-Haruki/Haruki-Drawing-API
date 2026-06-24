@@ -4,7 +4,7 @@ import pytest
 from src.core.pjsk import card as card_router
 from src.sekai.card.model import CardBasic, CardListRequest, CardSkill
 from src.sekai.profile.model import CardFullThumbnailRequest
-from src.sekai.skia_renderer import card_list
+from src.sekai.skia_renderer import card_render as card_list  # merged module (card/list + card/box)
 
 
 def _thumbnail(card_id: int, path: str = "cards/card.png") -> CardFullThumbnailRequest:
@@ -89,7 +89,7 @@ async def test_skia_card_list_falls_back_to_pillow_on_native_error(monkeypatch):
     monkeypatch.setattr(
         card_list,
         "_load_native_renderer",
-        lambda: (_ for _ in ()).throw(card_list.SkiaCardListRenderError("missing native")),
+        lambda: (_ for _ in ()).throw(card_list.SkiaCardRenderError("missing native")),
     )
 
     payload = await card_list.try_render_card_list_payload(CardListRequest(cards=[], region="jp"))
