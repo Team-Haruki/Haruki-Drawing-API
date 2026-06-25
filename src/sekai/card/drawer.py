@@ -169,7 +169,7 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
             else None
         ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 19})
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 20})
 
 
 def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):
@@ -1089,15 +1089,26 @@ async def compose_box_image(
     sep = int(start_sep + (end_sep - start_sep) * interp)
     sz = int(start_sz + (end_sz - start_sz) * interp)
 
-    box_content_width = 16 * 2
-    if chara_cards:
-        group_widths = []
-        for _, cards in chara_cards:
-            col_num = max(1, math.ceil(len(cards) / best_height))
-            group_widths.append(sz * col_num + sep * (col_num - 1))
-        box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
+    def card_group_width(card_count: int) -> int:
+        col_num = max(1, math.ceil(card_count / best_height))
+        return sz * col_num + sep * (col_num - 1)
+
+    def card_group_row_width(groups) -> int:
+        widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
+        return sum(widths) + max(0, len(widths) - 1) * 4
+
+    attr_header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
     if group_by_attr:
-        box_content_width += 260
+        attr_row_widths = [
+            card_group_row_width(groups)
+            for attr, groups in attr_chara_cards.items()
+            if attr in CARD_BOX_ATTR_ORDER and groups
+        ]
+        box_content_width = 16 * 2 + max(attr_row_widths or [0], attr_header_min_width)
+    else:
+        box_content_width = 16 * 2
+        if chara_cards:
+            box_content_width += card_group_row_width(chara_cards)
     panel_width, panel_text_width = get_notice_dimensions(box_content_width)
 
     preload_tasks: dict[str, asyncio.Future] = {}
@@ -1304,7 +1315,7 @@ async def compose_box_image(
                 for card_data in group_cards:
                     draw_card(card_data)
 
-    def draw_attribute_stat_bar(attr_stat: CardDistributionAttributeStat, width: int = 220):
+    def attribute_progress_values(attr_stat: CardDistributionAttributeStat):
         color = _safe_color(attr_stat.color_code or _card_box_attr_color(attr_stat.attr))
         if unowned_only and distribution.owned_data:
             missing_count = max(0, attr_stat.count - attr_stat.owned_count)
@@ -1313,12 +1324,31 @@ async def compose_box_image(
         else:
             count_text = _stat_count_text(attr_stat.count, attr_stat.owned_count, distribution.owned_data)
             progress_ratio = _collection_ratio(attr_stat, distribution.owned_data)
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(7).set_w(width):
+        return count_text, progress_ratio, color
+
+    def draw_attribute_header(attr_stat: CardDistributionAttributeStat, content_width: int):
+        count_text, progress_ratio, color = attribute_progress_values(attr_stat)
+        label_width = 64
+        count_width = 86
+        fixed_width = 24 + 8 + label_width + 10 + count_width + 10
+        bar_width = max(120, min(260, content_width - fixed_width))
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_w(content_width):
+            attr_icon = attr_icons.get(attr_stat.attr)
+            if attr_icon is not None:
+                ImageBox(attr_icon, size=(24, 24))
+            else:
+                Spacer(w=8, h=22).set_bg(RoundRectBg(color, 4))
+            TextBox(
+                attr_stat.label or _card_box_attr_label(attr_stat.attr),
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(45, 52, 62)),
+                overflow="shrink",
+            ).set_w(label_width)
             TextBox(
                 count_text,
-                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=color),
-            ).set_w(width).set_content_align("r")
-            _stat_bar(width, 12, progress_ratio, color)
+                TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=color),
+                overflow="shrink",
+            ).set_w(count_width).set_content_align("r")
+            _stat_bar(bar_width, 12, progress_ratio, color)
 
     def draw_normal_card_box_grid():
         with (
@@ -1334,8 +1364,8 @@ async def compose_box_image(
                 draw_character_column(chara_id, group_cards, best_height)
 
     def draw_attribute_card_box_grid():
-        stats_width = 220
-        cards_area_width = max(240, panel_width - stats_width - 12 - 32)
+        attr_panel_width = max(360, box_content_width)
+        attr_content_width = max(240, attr_panel_width - 32)
         ordered_attr_stats = [stat for stat in distribution.attribute_stats if stat.count > 0]
         if not ordered_attr_stats:
             ordered_attr_stats = [
@@ -1368,22 +1398,11 @@ async def compose_box_image(
                     .set_content_align("lt")
                     .set_item_align("lt")
                     .set_padding(16)
-                    .set_sep(12)
-                    .set_w(panel_width)
+                    .set_sep(8)
+                    .set_w(attr_panel_width)
                 ):
-                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_w(cards_area_width):
-                        with (
-                            HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_w(cards_area_width - 32)
-                        ):
-                            attr_icon = attr_icons.get(attr)
-                            if attr_icon is not None:
-                                ImageBox(attr_icon, size=(24, 24))
-                            else:
-                                Spacer(w=8, h=22).set_bg(RoundRectBg(attr_color, 4))
-                            TextBox(
-                                attr_stat.label or _card_box_attr_label(attr),
-                                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(45, 52, 62)),
-                            )
+                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_w(attr_content_width):
+                        draw_attribute_header(attr_stat, attr_content_width)
                         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
                             for chara_id, group_cards in group_cards_by_chara:
                                 draw_character_column(
@@ -1392,7 +1411,6 @@ async def compose_box_image(
                                     best_height,
                                     attr_character_stats.get(chara_id),
                                 )
-                    draw_attribute_stat_bar(attr_stat, stats_width)
 
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
