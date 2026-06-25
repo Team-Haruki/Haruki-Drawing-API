@@ -78,6 +78,7 @@ CARD_BOX_RARITY_STAR_PATH = "static_images/card/rare_star_normal.png"
 CARD_BOX_BIRTHDAY_RARITY_PATH = "static_images/card/rare_birthday.png"
 CARD_BOX_ATTR_LABEL_WIDTH = 90
 CARD_BOX_ATTR_COUNT_MIN_WIDTH = 72
+CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING = 18
 CARD_BOX_ATTR_BAR_MIN_WIDTH = 170
 CARD_BOX_PROGRESS_BUCKETS = [
     ("rarity_1", "1"),
@@ -389,8 +390,8 @@ def _card_box_attr_count_width(count_texts: list[str] | tuple[str, ...] | None =
     if not count_texts:
         return CARD_BOX_ATTR_COUNT_MIN_WIDTH
     font = get_font(DEFAULT_BOLD_FONT, 18)
-    measured_width = max(get_text_size(font, text)[0] for text in count_texts if text)
-    return max(CARD_BOX_ATTR_COUNT_MIN_WIDTH, measured_width + 10)
+    measured_width = max((get_text_size(font, text)[0] for text in count_texts if text), default=0)
+    return max(CARD_BOX_ATTR_COUNT_MIN_WIDTH, measured_width + CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING)
 
 
 def _collection_ratio(stat: CardDistributionCharacterStat | CardDistributionAttributeStat, owned_data: bool) -> float:

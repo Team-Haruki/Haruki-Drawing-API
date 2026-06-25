@@ -1,4 +1,7 @@
+from src.sekai.base import DEFAULT_BOLD_FONT
+from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.card.drawer import (
+    CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING,
     CARD_BOX_GROUP_BY_ATTR,
     _card_box_attr_content_width,
     _card_box_attr_count_width,
@@ -186,4 +189,9 @@ def test_attribute_group_content_width_uses_longest_group_and_header_minimum():
     cool_width = (48 * 2 + 4) + 4 + 48
     header_min_width = 24 + 8 + 90 + 10 + _card_box_attr_count_width(["100/1000"]) + 10 + 170
     assert width == 16 * 2 + max(cool_width, header_min_width)
-    assert _card_box_attr_count_width(["100/1000"]) > 72
+
+    font = get_font(DEFAULT_BOLD_FONT, 18)
+    long_count = "100/1000"
+    assert _card_box_attr_count_width([long_count]) >= (
+        get_text_size(font, long_count)[0] + CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING
+    )
