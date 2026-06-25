@@ -204,6 +204,46 @@ class UserCard(BaseModel):
     has_card: bool
 
 
+class CardDistributionCharacterStat(BaseModel):
+    """角色维度卡牌统计"""
+
+    character_id: int
+    count: int = 0
+    owned_count: int = 0
+    bar_count: int = 0
+    bar_ratio: float = 0.0
+    share: float = 0.0
+    color_code: str | None = None
+    icon_path: str | None = None
+
+
+class CardDistributionAttributeStat(BaseModel):
+    """属性维度卡牌统计"""
+
+    attr: str
+    label: str = ""
+    count: int = 0
+    owned_count: int = 0
+    bar_count: int = 0
+    bar_ratio: float = 0.0
+    share: float = 0.0
+    color_code: str | None = None
+    attr_icon_path: str | None = None
+    character_stats: list[CardDistributionCharacterStat] = Field(default_factory=list)
+
+
+class CardBoxDistribution(BaseModel):
+    """卡牌一览分布统计"""
+
+    total_count: int = 0
+    owned_count: int = 0
+    owned_data: bool = False
+    max_character_bar_count: int = 0
+    max_attribute_bar_count: int = 0
+    character_stats: list[CardDistributionCharacterStat] = Field(default_factory=list)
+    attribute_stats: list[CardDistributionAttributeStat] = Field(default_factory=list)
+
+
 # ========== 请求模型 ==========
 
 
@@ -337,6 +377,9 @@ class CardBoxRequest(TimeZoneRequest):
     title: str | None = None
     show_id: bool = False
     show_box: bool = False
+    unowned_only: bool = False
+    group_by: str | None = None
+    distribution: CardBoxDistribution | None = None
     background_img_path: str | None = None
     character_icon_paths: dict[int, str]
     character_color_codes: dict[int, str] = Field(default_factory=dict)

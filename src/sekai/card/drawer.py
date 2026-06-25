@@ -3,10 +3,11 @@ import logging
 import math
 import time
 
+from PIL import Image, ImageDraw
+
 from src.sekai.base import (
     ASSETS_BASE_DIR,
     BG_PADDING,
-    CHARACTER_COLOR_CODE,
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     SEKAI_BLUE_BG,
@@ -15,6 +16,7 @@ from src.sekai.base import (
     get_img_from_path,
     roundrect_bg,
 )
+from src.sekai.base.draw import CHARACTER_COLOR_CODE
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -42,14 +44,44 @@ from src.sekai.profile.drawer import (
 
 # 从 model.py 导入数据模型
 from .model import (
+    CardBoxDistribution,
     CardBoxRequest,
     CardDetailRequest,
+    CardDistributionAttributeStat,
+    CardDistributionCharacterStat,
     CardListRequest,
 )
 
 NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
 TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
 FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
+CARD_BOX_GROUP_BY_ATTR = "attr"
+CARD_BOX_ATTR_ORDER = ["cute", "cool", "pure", "happy", "mysterious"]
+CARD_BOX_ATTR_LABELS = {
+    "cute": "可爱",
+    "cool": "帅气",
+    "pure": "纯真",
+    "happy": "快乐",
+    "mysterious": "神秘",
+    "unknown": "未分类",
+}
+CARD_BOX_ATTR_COLORS = {
+    "cute": "#FF66AA",
+    "cool": "#3D8BFF",
+    "pure": "#49C878",
+    "happy": "#FFB02E",
+    "mysterious": "#9B72FF",
+    "unknown": "#9AA0A6",
+}
+CARD_BOX_RARITY_STAR_PATH = "static_images/card/rare_star_normal.png"
+CARD_BOX_BIRTHDAY_RARITY_PATH = "static_images/card/rare_birthday.png"
+CARD_BOX_PROGRESS_BUCKETS = [
+    ("rarity_1", "1"),
+    ("rarity_2", "2"),
+    ("rarity_3", "3"),
+    ("rarity_4", "4"),
+    ("birthday", "生日"),
+]
 
 logger = logging.getLogger(__name__)
 _perf_logger = logging.getLogger("card.draw.perf")
@@ -112,6 +144,9 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
         "timezone": rqd.timezone,
         "show_id": rqd.show_id,
         "show_box": rqd.show_box,
+        "unowned_only": rqd.unowned_only,
+        "group_by": rqd.group_by,
+        "distribution": rqd.distribution.model_dump(mode="json") if rqd.distribution else None,
         "background_img_path": rqd.background_img_path,
         "character_icon_paths": rqd.character_icon_paths,
         "character_color_codes": rqd.character_color_codes,
@@ -134,7 +169,375 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
             else None
         ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 7})
+    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 19})
+
+
+def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):
+    if not code:
+        return fallback
+    try:
+        return color_code_to_rgb(code)
+    except ValueError:
+        return fallback
+
+
+def _with_alpha(color: tuple[int, ...], alpha: int) -> tuple[int, int, int, int]:
+    return int(color[0]), int(color[1]), int(color[2]), alpha
+
+
+def _normalize_card_box_attr(attr: str | None) -> str:
+    attr = (attr or "").strip().lower()
+    if attr in CARD_BOX_ATTR_ORDER:
+        return attr
+    return "unknown"
+
+
+def _card_box_attr_label(attr: str) -> str:
+    return CARD_BOX_ATTR_LABELS.get(attr, attr)
+
+
+def _card_box_attr_color(attr: str) -> str:
+    return CARD_BOX_ATTR_COLORS.get(attr, CARD_BOX_ATTR_COLORS["unknown"])
+
+
+def _stat_bar(width: int, height: int, ratio: float, color: tuple[int, int, int, int]) -> Frame:
+    ratio = max(0.0, min(1.0, ratio or 0.0))
+    frame = Frame().set_size((width, height))
+
+    def draw(_widget, p):
+        radius = max(1, height // 2)
+        p.roundrect((0, 0), (width, height), (214, 218, 226, 180), radius)
+        fill_width = int(width * ratio)
+        if fill_width <= 0:
+            return
+        fill = _with_alpha(color, 255)
+        p.roundrect((0, 0), (max(2, fill_width), height), fill, radius)
+
+    return frame.add_draw_func(draw)
+
+
+def _full_color_bar(width: int, height: int, color: tuple[int, int, int, int]) -> Frame:
+    frame = Frame().set_size((width, height))
+
+    def draw(_widget, p):
+        radius = max(1, height // 2)
+        p.roundrect((0, 0), (width, height), _with_alpha(color, 235), radius)
+        if height >= 8:
+            p.roundrect((1, 1), (max(1, width - 2), max(1, height // 3)), (255, 255, 255, 60), radius)
+
+    return frame.add_draw_func(draw)
+
+
+def _mini_vertical_bar(width: int, height: int, ratio: float, color: tuple[int, int, int, int]) -> Frame:
+    ratio = max(0.0, min(1.0, ratio or 0.0))
+    frame = Frame().set_size((width, height))
+
+    def draw(_widget, p):
+        radius = max(2, width // 2)
+        p.roundrect((0, 0), (width, height), (214, 218, 226, 175), radius)
+        fill_height = int(height * ratio)
+        if fill_height <= 0:
+            return
+        p.roundrect((0, height - fill_height), (width, max(2, fill_height)), _with_alpha(color, 235), radius)
+        if fill_height >= 6:
+            p.roundrect(
+                (1, height - fill_height + 1),
+                (max(1, width - 2), max(1, fill_height // 3)),
+                (255, 255, 255, 70),
+                radius,
+            )
+
+    return frame.add_draw_func(draw)
+
+
+def _circular_progress_avatar(
+    avatar_img: Image.Image | None,
+    size: int,
+    ratio: float,
+    color: tuple[int, int, int, int],
+) -> Frame:
+    ratio = max(0.0, min(1.0, ratio or 0.0))
+    ring_width = max(4, size // 12)
+    padding = ring_width + max(2, size // 28)
+    inner_size = max(1, size - padding * 2)
+    frame = Frame().set_size((size, size)).set_content_align("c")
+
+    def draw(_widget, p):
+        avatar = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        d = ImageDraw.Draw(avatar)
+        avatar_pos = (padding, padding)
+        if avatar_img is not None:
+            cropped_avatar = avatar_img.convert("RGBA").resize((inner_size, inner_size), Image.Resampling.LANCZOS)
+            mask = Image.new("L", (inner_size, inner_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, inner_size - 1, inner_size - 1), fill=255)
+            avatar.paste(cropped_avatar, avatar_pos, mask)
+        else:
+            d.ellipse(
+                (
+                    avatar_pos[0],
+                    avatar_pos[1],
+                    avatar_pos[0] + inner_size - 1,
+                    avatar_pos[1] + inner_size - 1,
+                ),
+                fill=(218, 218, 218, 255),
+            )
+        box = (
+            ring_width // 2,
+            ring_width // 2,
+            size - ring_width // 2 - 1,
+            size - ring_width // 2 - 1,
+        )
+        d.arc(box, start=-90, end=270, fill=(183, 188, 198, 190), width=ring_width)
+        if ratio > 0:
+            d.arc(box, start=-90, end=-90 + 360 * ratio, fill=color, width=ring_width)
+        p.paste(avatar, (0, 0))
+
+    frame.add_draw_func(draw)
+    return frame
+
+
+def _vertical_stat_bar(width: int, height: int, ratio: float, color: tuple[int, int, int, int]) -> Frame:
+    ratio = max(0.0, min(1.0, ratio or 0.0))
+    frame = Frame().set_size((width, height)).set_bg(RoundRectBg((255, 255, 255, 145), max(2, width // 2)))
+
+    def draw(_widget, p):
+        fill_height = int(height * ratio)
+        if fill_height <= 0:
+            return
+        p.roundrect((0, height - fill_height), (width, max(2, fill_height)), color, max(2, width // 2))
+
+    return frame.add_draw_func(draw)
+
+
+def _attribute_bar_chart_frame(
+    width: int,
+    height: int,
+    stats: list[CardDistributionAttributeStat],
+) -> Frame:
+    frame = Frame().set_size((width, height)).set_bg(RoundRectBg((255, 255, 255, 120), 8))
+
+    def draw(_widget, p):
+        useful_stats = [stat for stat in stats if stat.count > 0]
+        if not useful_stats:
+            return
+        slot_width = width / len(useful_stats)
+        bar_width = max(10, int(slot_width * 0.48))
+        for index, stat in enumerate(useful_stats):
+            color = _safe_color(stat.color_code or _card_box_attr_color(stat.attr))
+            x = int(index * slot_width + (slot_width - bar_width) / 2)
+            track_height = height - 8
+            p.roundrect((x, 4), (bar_width, track_height), (255, 255, 255, 150), max(3, bar_width // 3))
+            fill_height = int(track_height * max(0.0, min(1.0, stat.bar_ratio or 0.0)))
+            if fill_height <= 0:
+                continue
+            p.roundrect(
+                (x, 4 + track_height - fill_height),
+                (bar_width, max(2, fill_height)),
+                color,
+                max(3, bar_width // 3),
+            )
+
+    return frame.add_draw_func(draw)
+
+
+def _stacked_character_bar(
+    width: int,
+    height: int,
+    stats: list[CardDistributionCharacterStat],
+    fallback_color: tuple[int, int, int, int],
+) -> Frame:
+    frame = Frame().set_size((width, height)).set_bg(RoundRectBg((255, 255, 255, 145), max(1, height // 2)))
+
+    def draw(_widget, p):
+        useful_stats = [stat for stat in stats if stat.bar_count > 0]
+        total = sum(stat.bar_count for stat in useful_stats)
+        if total <= 0:
+            return
+        x = 0
+        for index, stat in enumerate(useful_stats):
+            if index == len(useful_stats) - 1:
+                seg_width = width - x
+            else:
+                seg_width = max(1, int(width * stat.bar_count / total))
+            color = _safe_color(stat.color_code, fallback_color)
+            p.rect((x, 0), (seg_width, height), color)
+            x += seg_width
+            if x >= width:
+                break
+
+    return frame.add_draw_func(draw)
+
+
+def _stat_count_text(count: int, owned_count: int, owned_data: bool) -> str:
+    if owned_data:
+        return f"{owned_count}/{count}"
+    return str(count)
+
+
+def _collection_ratio(stat: CardDistributionCharacterStat | CardDistributionAttributeStat, owned_data: bool) -> float:
+    if stat.count <= 0:
+        return 0.0
+    if not owned_data:
+        return 1.0
+    return max(0.0, min(1.0, stat.owned_count / stat.count))
+
+
+def _rarity_progress_bucket(rare: str | None, supply_type: str | None = None) -> str | None:
+    rare = (rare or "").strip().lower()
+    supply_type = (supply_type or "").strip().lower()
+    if rare == "rarity_birthday" or supply_type == "birthday":
+        return "birthday"
+    if rare in {"rarity_1", "rarity_2", "rarity_3", "rarity_4"}:
+        return rare
+    return None
+
+
+def _single_character_progress(rqd: CardBoxRequest) -> dict | None:
+    distribution = rqd.distribution or _fallback_card_box_distribution(rqd)
+    if not distribution.owned_data:
+        return None
+    character_ids = {user_card.card.character_id for user_card in rqd.cards if user_card.card.character_id is not None}
+    if len(character_ids) != 1:
+        return None
+
+    stats = {"total": {"owned": 0, "total": 0}}
+    stats.update({bucket: {"owned": 0, "total": 0} for bucket, _ in CARD_BOX_PROGRESS_BUCKETS})
+    for user_card in rqd.cards:
+        bucket = _rarity_progress_bucket(user_card.card.rare, user_card.card.supply_type)
+        if bucket is None:
+            continue
+        stats[bucket]["total"] += 1
+        stats["total"]["total"] += 1
+        if user_card.has_card:
+            stats[bucket]["owned"] += 1
+            stats["total"]["owned"] += 1
+    if stats["total"]["total"] <= 0:
+        return None
+    visible_buckets = [(bucket, label) for bucket, label in CARD_BOX_PROGRESS_BUCKETS if stats[bucket]["total"] > 0]
+    show_total = len(visible_buckets) == len(CARD_BOX_PROGRESS_BUCKETS)
+    return {
+        "character_id": next(iter(character_ids)),
+        "stats": stats,
+        "visible_buckets": visible_buckets,
+        "show_total": show_total,
+    }
+
+
+def _character_stat_map(distribution: CardBoxDistribution | None) -> dict[int, CardDistributionCharacterStat]:
+    if distribution is None:
+        return {}
+    return {stat.character_id: stat for stat in distribution.character_stats}
+
+
+def _attribute_stat_map(distribution: CardBoxDistribution | None) -> dict[str, CardDistributionAttributeStat]:
+    if distribution is None:
+        return {}
+    return {stat.attr: stat for stat in distribution.attribute_stats}
+
+
+def _fallback_card_box_distribution(rqd: CardBoxRequest) -> CardBoxDistribution:
+    owned_data = rqd.user_info is not None
+    character_buckets: dict[int, dict[str, int]] = {}
+    attribute_buckets: dict[str, dict[str, int]] = {
+        attr: {"count": 0, "owned_count": 0} for attr in CARD_BOX_ATTR_ORDER
+    }
+    attribute_character_buckets: dict[str, dict[int, dict[str, int]]] = {}
+    total_count = 0
+    owned_count = 0
+
+    for user_card in rqd.cards:
+        total_count += 1
+        has_card = bool(user_card.has_card)
+        if has_card:
+            owned_count += 1
+        character_id = user_card.card.character_id
+        if character_id is not None:
+            bucket = character_buckets.setdefault(character_id, {"count": 0, "owned_count": 0})
+            bucket["count"] += 1
+            bucket["owned_count"] += int(has_card)
+
+        attr = _normalize_card_box_attr(user_card.card.attr)
+        bucket = attribute_buckets.setdefault(attr, {"count": 0, "owned_count": 0})
+        bucket["count"] += 1
+        bucket["owned_count"] += int(has_card)
+        if character_id is not None:
+            char_bucket = attribute_character_buckets.setdefault(attr, {}).setdefault(
+                character_id, {"count": 0, "owned_count": 0}
+            )
+            char_bucket["count"] += 1
+            char_bucket["owned_count"] += int(has_card)
+
+    denominator = owned_count if owned_data else total_count
+
+    character_stats: list[CardDistributionCharacterStat] = []
+    max_character_bar_count = 0
+    for character_id in sorted(character_buckets):
+        bucket = character_buckets[character_id]
+        bar_count = bucket["owned_count"] if owned_data else bucket["count"]
+        max_character_bar_count = max(max_character_bar_count, bar_count)
+        character_stats.append(
+            CardDistributionCharacterStat(
+                character_id=character_id,
+                count=bucket["count"],
+                owned_count=bucket["owned_count"],
+                bar_count=bar_count,
+                color_code=rqd.character_color_codes.get(character_id),
+                icon_path=rqd.character_icon_paths.get(character_id),
+            )
+        )
+    for stat in character_stats:
+        stat.bar_ratio = stat.bar_count / max_character_bar_count if max_character_bar_count > 0 else 0.0
+        stat.share = stat.bar_count / denominator if denominator > 0 else 0.0
+
+    attribute_stats: list[CardDistributionAttributeStat] = []
+    max_attribute_bar_count = 0
+    for attr in [*CARD_BOX_ATTR_ORDER, *sorted(k for k in attribute_buckets if k not in CARD_BOX_ATTR_ORDER)]:
+        bucket = attribute_buckets[attr]
+        bar_count = bucket["owned_count"] if owned_data else bucket["count"]
+        max_attribute_bar_count = max(max_attribute_bar_count, bar_count)
+        group_character_stats: list[CardDistributionCharacterStat] = []
+        group_max = 0
+        for character_id in sorted(attribute_character_buckets.get(attr, {})):
+            char_bucket = attribute_character_buckets[attr][character_id]
+            char_bar_count = char_bucket["owned_count"] if owned_data else char_bucket["count"]
+            group_max = max(group_max, char_bar_count)
+            group_character_stats.append(
+                CardDistributionCharacterStat(
+                    character_id=character_id,
+                    count=char_bucket["count"],
+                    owned_count=char_bucket["owned_count"],
+                    bar_count=char_bar_count,
+                    color_code=rqd.character_color_codes.get(character_id),
+                    icon_path=rqd.character_icon_paths.get(character_id),
+                )
+            )
+        for stat in group_character_stats:
+            stat.bar_ratio = stat.bar_count / group_max if group_max > 0 else 0.0
+            stat.share = stat.bar_count / bar_count if bar_count > 0 else 0.0
+        attribute_stats.append(
+            CardDistributionAttributeStat(
+                attr=attr,
+                label=_card_box_attr_label(attr),
+                count=bucket["count"],
+                owned_count=bucket["owned_count"],
+                bar_count=bar_count,
+                color_code=_card_box_attr_color(attr),
+                character_stats=group_character_stats,
+            )
+        )
+    for stat in attribute_stats:
+        stat.bar_ratio = stat.bar_count / max_attribute_bar_count if max_attribute_bar_count > 0 else 0.0
+        stat.share = stat.bar_count / denominator if denominator > 0 else 0.0
+
+    return CardBoxDistribution(
+        total_count=total_count,
+        owned_count=owned_count,
+        owned_data=owned_data,
+        max_character_bar_count=max_character_bar_count,
+        max_attribute_bar_count=max_attribute_bar_count,
+        character_stats=character_stats,
+        attribute_stats=attribute_stats,
+    )
 
 
 # ========== 主要函数 ==========
@@ -596,6 +999,11 @@ async def compose_box_image(
     user_info = rqd.user_info
     show_id = rqd.show_id
     show_box = rqd.show_box
+    unowned_only = rqd.unowned_only
+    group_by_attr = (rqd.group_by or "").strip().lower() == CARD_BOX_GROUP_BY_ATTR
+    distribution = rqd.distribution or _fallback_card_box_distribution(rqd)
+    character_stats = _character_stat_map(distribution)
+    single_progress = _single_character_progress(rqd)
 
     async def get_box_thumb(card):
         thumbnails = card.card.thumbnail_info or []
@@ -611,33 +1019,42 @@ async def compose_box_image(
     thumbs = await asyncio.gather(*[get_box_thumb(card) for card in cards])
     _t_thumbs = time.perf_counter() - _t0
 
-    # 按角色收集卡牌
-    chara_cards = {}
+    card_records = []
     for card, img in zip(cards, thumbs):
         if not img:
             continue
-        chara_id = card.card.character_id
-        if chara_id not in chara_cards:
-            chara_cards[chara_id] = []
-
-        # 添加卡牌图片和拥有状态
         card_data = {
             **card.model_dump(),
             "img": img,
             "has": card.has_card,  # 恢复拥有状态判断
         }
-
-        # 如果只显示拥有卡牌且用户没有此卡，跳过
         if show_box and not card_data["has"]:
             continue
+        if unowned_only and card_data["has"]:
+            continue
+        card_records.append(card_data)
 
-        chara_cards[chara_id].append(card_data)
+    def sort_card_records(group_cards):
+        group_cards.sort(key=lambda x: (x["card"]["rare"], x["card"]["release_at"], x["card"]["card_id"]))
+        return group_cards
 
-    # 按角色ID和稀有度排序
-    chara_cards = list(chara_cards.items())
-    chara_cards.sort(key=lambda x: x[0])
-    for i in range(len(chara_cards)):
-        chara_cards[i][1].sort(key=lambda x: (x["card"]["rare"], x["card"]["release_at"], x["card"]["card_id"]))
+    # 按角色收集卡牌
+    chara_cards_by_id = {}
+    attr_chara_cards_by_attr = {}
+    for card_data in card_records:
+        chara_id = card_data["card"]["character_id"] or 0
+        attr = _normalize_card_box_attr(card_data["card"].get("attr"))
+        chara_cards_by_id.setdefault(chara_id, []).append(card_data)
+        attr_chara_cards_by_attr.setdefault(attr, {}).setdefault(chara_id, []).append(card_data)
+
+    chara_cards = sorted(
+        (chara_id, sort_card_records(group_cards)) for chara_id, group_cards in chara_cards_by_id.items()
+    )
+    attr_chara_cards = {}
+    for attr, attr_groups in attr_chara_cards_by_attr.items():
+        attr_chara_cards[attr] = sorted(
+            (chara_id, sort_card_records(group_cards)) for chara_id, group_cards in attr_groups.items()
+        )
 
     # 计算最佳高度限制以优化布局
     max_card_num = max([len(cards) for _, cards in chara_cards]) if chara_cards else 0
@@ -679,6 +1096,8 @@ async def compose_box_image(
             col_num = max(1, math.ceil(len(cards) / best_height))
             group_widths.append(sz * col_num + sep * (col_num - 1))
         box_content_width += sum(group_widths) + max(0, len(group_widths) - 1) * 4
+    if group_by_attr:
+        box_content_width += 260
     panel_width, panel_text_width = get_notice_dimensions(box_content_width)
 
     preload_tasks: dict[str, asyncio.Future] = {}
@@ -689,6 +1108,12 @@ async def compose_box_image(
     if rqd.character_icon_paths:
         for chara_id, path in rqd.character_icon_paths.items():
             preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
+    for attr_stat in distribution.attribute_stats:
+        if attr_stat.attr_icon_path:
+            preload_tasks[f"attr::{attr_stat.attr}"] = get_img_from_path(ASSETS_BASE_DIR, attr_stat.attr_icon_path)
+    if single_progress is not None:
+        preload_tasks["rarity_star"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_RARITY_STAR_PATH)
+        preload_tasks["rarity_birthday"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_BIRTHDAY_RARITY_PATH)
 
     _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
@@ -711,6 +1136,17 @@ async def compose_box_image(
             img = preloaded.get(f"chara::{chara_id}")
             if img is not None and not isinstance(img, BaseException):
                 chara_icons[chara_id] = img
+    attr_icons = {}
+    for attr_stat in distribution.attribute_stats:
+        img = preloaded.get(f"attr::{attr_stat.attr}")
+        if img is not None and not isinstance(img, BaseException):
+            attr_icons[attr_stat.attr] = img
+    rarity_star_img = preloaded.get("rarity_star")
+    if isinstance(rarity_star_img, BaseException):
+        rarity_star_img = None
+    birthday_rarity_img = preloaded.get("rarity_birthday")
+    if isinstance(birthday_rarity_img, BaseException):
+        birthday_rarity_img = None
 
     # 绘制单张卡
     def draw_card(card_data):
@@ -750,6 +1186,224 @@ async def compose_box_image(
     else:
         bg = SEKAI_BLUE_BG
 
+    def get_character_color(chara_id: int):
+        color_code = rqd.character_color_codes.get(chara_id) or CHARACTER_COLOR_CODE.get(chara_id, "#7C8DA5")
+        return _safe_color(color_code)
+
+    def draw_single_character_progress_panel(progress: dict):
+        chara_id = progress["character_id"]
+        stats = progress["stats"]
+        color = get_character_color(chara_id)
+        avatar_size = 56
+        content_width = panel_width - 32
+        detail_width = max(260, content_width - avatar_size - 16)
+        cell_sep = 8
+        visible_buckets = progress.get("visible_buckets") or CARD_BOX_PROGRESS_BUCKETS
+        bucket_count = len(visible_buckets)
+        cell_width = max(54, (detail_width - cell_sep * (bucket_count - 1)) // bucket_count)
+        label_height = 24
+        total = stats["total"]
+        bucket_icons = {
+            "rarity_1": 1,
+            "rarity_2": 2,
+            "rarity_3": 3,
+            "rarity_4": 4,
+        }
+
+        def draw_bucket_label(bucket: str, label: str):
+            with Frame().set_w(cell_width).set_h(label_height).set_content_align("c"):
+                if bucket in bucket_icons and rarity_star_img is not None:
+                    icon_size = max(10, min(14, (cell_width - 4) // bucket_icons[bucket]))
+                    with HSplit().set_content_align("c").set_item_align("c").set_sep(0).set_w(cell_width):
+                        for _ in range(bucket_icons[bucket]):
+                            ImageBox(rarity_star_img, size=(icon_size, icon_size))
+                    return
+                if bucket == "birthday" and birthday_rarity_img is not None:
+                    icon_size = max(16, min(22, cell_width // 2))
+                    with HSplit().set_content_align("c").set_item_align("c").set_w(cell_width):
+                        ImageBox(birthday_rarity_img, size=(icon_size, icon_size))
+                    return
+                TextBox(
+                    label,
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(68, 76, 88)),
+                ).set_w(cell_width).set_content_align("c")
+
+        with (
+            HSplit()
+            .set_bg(roundrect_bg(alpha=80))
+            .set_content_align("l")
+            .set_item_align("c")
+            .set_padding(16)
+            .set_sep(16)
+            .set_w(panel_width)
+        ):
+            chara_icon = chara_icons.get(chara_id)
+            if chara_icon is not None:
+                ImageBox(chara_icon, size=(avatar_size, avatar_size))
+            else:
+                Spacer(w=avatar_size, h=avatar_size).set_bg(RoundRectBg(_with_alpha(color, 160), avatar_size // 2))
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_w(detail_width):
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(10).set_w(detail_width):
+                    TextBox(
+                        "收集进度",
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(45, 52, 62)),
+                    )
+                    if progress.get("show_total", True):
+                        TextBox(
+                            f"全卡 {total['owned']}/{total['total']}",
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(68, 76, 88)),
+                        )
+                with HSplit().set_content_align("lt").set_item_align("lt").set_sep(cell_sep):
+                    for bucket, label in visible_buckets:
+                        item = stats[bucket]
+                        ratio = item["owned"] / item["total"] if item["total"] > 0 else 0.0
+                        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4).set_w(cell_width):
+                            draw_bucket_label(bucket, label)
+                            TextBox(
+                                f"{item['owned']}/{item['total']}",
+                                TextStyle(font=DEFAULT_FONT, size=12, color=(68, 76, 88)),
+                            ).set_w(cell_width).set_content_align("c")
+                            _stat_bar(cell_width, 8, ratio, color)
+
+    def draw_character_column(
+        chara_id: int,
+        group_cards,
+        height_limit: int,
+        stat: CardDistributionCharacterStat | None = None,
+    ):
+        chara_icon = chara_icons.get(chara_id)
+        color = get_character_color(chara_id)
+        col_num = max(1, len(range(0, len(group_cards), height_limit)))
+        row_num = max(1, min(height_limit, len(group_cards)))
+        group_width = sz * col_num + sep * (col_num - 1)
+        stat = stat or character_stats.get(chara_id)
+        if stat is None:
+            count_value = len(group_cards)
+        elif unowned_only or show_box:
+            count_value = len(group_cards)
+        elif distribution.owned_data:
+            count_value = stat.owned_count
+        else:
+            count_value = stat.count
+        count_text = str(count_value)
+        progress_ratio = _collection_ratio(stat, distribution.owned_data) if stat else 1.0
+        with VSplit().set_content_align("t").set_item_align("c").set_sep(3):
+            if single_progress is None:
+                TextBox(
+                    count_text,
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=max(11, int(sz * 0.2)), color=(45, 52, 62)),
+                ).set_w(group_width).set_content_align("c")
+            _circular_progress_avatar(chara_icon, sz, progress_ratio, color)
+            Spacer(w=group_width, h=max(4, sep)).set_bg(FillBg(_with_alpha(color, 235)))
+            with (
+                Grid(row_count=row_num, vertical=row_num > col_num)
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(sep, sep)
+            ):
+                for card_data in group_cards:
+                    draw_card(card_data)
+
+    def draw_attribute_stat_bar(attr_stat: CardDistributionAttributeStat, width: int = 220):
+        color = _safe_color(attr_stat.color_code or _card_box_attr_color(attr_stat.attr))
+        if unowned_only and distribution.owned_data:
+            missing_count = max(0, attr_stat.count - attr_stat.owned_count)
+            count_text = f"{missing_count}/{attr_stat.count}"
+            progress_ratio = missing_count / attr_stat.count if attr_stat.count > 0 else 0.0
+        else:
+            count_text = _stat_count_text(attr_stat.count, attr_stat.owned_count, distribution.owned_data)
+            progress_ratio = _collection_ratio(attr_stat, distribution.owned_data)
+        with (
+            VSplit()
+            .set_content_align("lt")
+            .set_item_align("lt")
+            .set_sep(7)
+            .set_w(width)
+        ):
+            TextBox(
+                count_text,
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=color),
+            ).set_w(width).set_content_align("r")
+            _stat_bar(width, 12, progress_ratio, color)
+
+    def draw_normal_card_box_grid():
+        with (
+            HSplit()
+            .set_bg(roundrect_bg(alpha=80))
+            .set_content_align("lt")
+            .set_item_align("lt")
+            .set_padding(16)
+            .set_sep(4)
+            .set_w(panel_width)
+        ):
+            for chara_id, group_cards in chara_cards:
+                draw_character_column(chara_id, group_cards, best_height)
+
+    def draw_attribute_card_box_grid():
+        stats_width = 220
+        cards_area_width = max(240, panel_width - stats_width - 12 - 32)
+        ordered_attr_stats = [stat for stat in distribution.attribute_stats if stat.count > 0]
+        if not ordered_attr_stats:
+            ordered_attr_stats = [
+                CardDistributionAttributeStat(
+                    attr=attr,
+                    label=_card_box_attr_label(attr),
+                    count=sum(len(group_cards) for _, group_cards in attr_chara_cards.get(attr, [])),
+                    color_code=_card_box_attr_color(attr),
+                )
+                for attr in CARD_BOX_ATTR_ORDER
+                if attr in attr_chara_cards
+            ]
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(12):
+            for attr_stat in ordered_attr_stats:
+                attr = attr_stat.attr
+                group_cards_by_chara = attr_chara_cards.get(attr, [])
+                if not group_cards_by_chara:
+                    continue
+                attr_color = _safe_color(attr_stat.color_code or _card_box_attr_color(attr))
+                attr_character_stats = {stat.character_id: stat for stat in attr_stat.character_stats}
+                with (
+                    HSplit()
+                    .set_bg(
+                        roundrect_bg(
+                            fill=_with_alpha(attr_color, 38),
+                            radius=10,
+                            blur_glass_kwargs={"shadow_alpha": 0.18},
+                        )
+                    )
+                    .set_content_align("lt")
+                    .set_item_align("lt")
+                    .set_padding(16)
+                    .set_sep(12)
+                    .set_w(panel_width)
+                ):
+                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_w(cards_area_width):
+                        with (
+                            HSplit()
+                            .set_content_align("l")
+                            .set_item_align("c")
+                            .set_sep(8)
+                            .set_w(cards_area_width - 32)
+                        ):
+                            attr_icon = attr_icons.get(attr)
+                            if attr_icon is not None:
+                                ImageBox(attr_icon, size=(24, 24))
+                            else:
+                                Spacer(w=8, h=22).set_bg(RoundRectBg(attr_color, 4))
+                            TextBox(
+                                attr_stat.label or _card_box_attr_label(attr),
+                                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(45, 52, 62)),
+                            )
+                        with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+                            for chara_id, group_cards in group_cards_by_chara:
+                                draw_character_column(
+                                    chara_id,
+                                    group_cards,
+                                    best_height,
+                                    attr_character_stats.get(chara_id),
+                                )
+                    draw_attribute_stat_bar(attr_stat, stats_width)
+
     with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if rqd.title:
@@ -771,35 +1425,13 @@ async def compose_box_image(
             if profile_card:
                 with HSplit().set_content_align("l").set_item_align("l").set_w(panel_width) as profile_panel:
                     profile_panel.add_item(profile_card)
+            if single_progress is not None:
+                draw_single_character_progress_panel(single_progress)
             # 卡牌网格
-            with (
-                HSplit()
-                .set_bg(roundrect_bg(alpha=80))
-                .set_content_align("lt")
-                .set_item_align("lt")
-                .set_padding(16)
-                .set_sep(4)
-                .set_w(panel_width)
-            ):
-                for chara_id, cards in chara_cards:
-                    with VSplit().set_content_align("t").set_item_align("t").set_sep(4):
-                        # 角色图标
-                        chara_icon = chara_icons.get(chara_id)
-                        ImageBox(chara_icon, size=(sz, sz))
-                        color_code = rqd.character_color_codes.get(chara_id) or CHARACTER_COLOR_CODE[chara_id]
-                        chara_color = color_code_to_rgb(color_code)
-                        col_num = max(1, len(range(0, len(cards), best_height)))
-                        row_num = max(1, min(best_height, len(cards)))
-                        Spacer(w=sz * col_num + sep * (col_num - 1), h=sep).set_bg(FillBg(chara_color))
-                        # 卡牌列表
-                        with (
-                            Grid(row_count=row_num, vertical=row_num > col_num)
-                            .set_content_align("lt")
-                            .set_item_align("lt")
-                            .set_sep(sep, sep)
-                        ):
-                            for card_data in cards:
-                                draw_card(card_data)
+            if group_by_attr:
+                draw_attribute_card_box_grid()
+            else:
+                draw_normal_card_box_grid()
 
     add_request_watermark(canvas, rqd)
     _t0 = time.perf_counter()
