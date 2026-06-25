@@ -1313,13 +1313,7 @@ async def compose_box_image(
         else:
             count_text = _stat_count_text(attr_stat.count, attr_stat.owned_count, distribution.owned_data)
             progress_ratio = _collection_ratio(attr_stat, distribution.owned_data)
-        with (
-            VSplit()
-            .set_content_align("lt")
-            .set_item_align("lt")
-            .set_sep(7)
-            .set_w(width)
-        ):
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(7).set_w(width):
             TextBox(
                 count_text,
                 TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=color),
@@ -1379,11 +1373,7 @@ async def compose_box_image(
                 ):
                     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_w(cards_area_width):
                         with (
-                            HSplit()
-                            .set_content_align("l")
-                            .set_item_align("c")
-                            .set_sep(8)
-                            .set_w(cards_area_width - 32)
+                            HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_w(cards_area_width - 32)
                         ):
                             attr_icon = attr_icons.get(attr)
                             if attr_icon is not None:

@@ -29,9 +29,7 @@ def test_card_box_request_accepts_distribution_contract():
             owned_data=True,
             max_character_bar_count=1,
             max_attribute_bar_count=1,
-            character_stats=[
-                CardDistributionCharacterStat(character_id=5, count=1, owned_count=1, bar_count=1)
-            ],
+            character_stats=[CardDistributionCharacterStat(character_id=5, count=1, owned_count=1, bar_count=1)],
             attribute_stats=[
                 CardDistributionAttributeStat(
                     attr="cute",
