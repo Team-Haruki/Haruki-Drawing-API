@@ -382,6 +382,24 @@ def _collection_ratio(stat: CardDistributionCharacterStat | CardDistributionAttr
     return max(0.0, min(1.0, stat.owned_count / stat.count))
 
 
+def _card_box_attr_content_width(attr_chara_cards: dict, best_height: int, sz: int, sep: int) -> int:
+    def card_group_width(card_count: int) -> int:
+        col_num = max(1, math.ceil(card_count / best_height))
+        return sz * col_num + sep * (col_num - 1)
+
+    def card_group_row_width(groups) -> int:
+        widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
+        return sum(widths) + max(0, len(widths) - 1) * 4
+
+    attr_header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
+    attr_row_widths = [
+        card_group_row_width(groups)
+        for attr, groups in attr_chara_cards.items()
+        if attr in CARD_BOX_ATTR_ORDER and groups
+    ]
+    return 16 * 2 + max(max(attr_row_widths or [0]), attr_header_min_width)
+
+
 def _rarity_progress_bucket(rare: str | None, supply_type: str | None = None) -> str | None:
     rare = (rare or "").strip().lower()
     supply_type = (supply_type or "").strip().lower()
@@ -1097,14 +1115,8 @@ async def compose_box_image(
         widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
         return sum(widths) + max(0, len(widths) - 1) * 4
 
-    attr_header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
     if group_by_attr:
-        attr_row_widths = [
-            card_group_row_width(groups)
-            for attr, groups in attr_chara_cards.items()
-            if attr in CARD_BOX_ATTR_ORDER and groups
-        ]
-        box_content_width = 16 * 2 + max(attr_row_widths or [0], attr_header_min_width)
+        box_content_width = _card_box_attr_content_width(attr_chara_cards, best_height, sz, sep)
     else:
         box_content_width = 16 * 2
         if chara_cards:

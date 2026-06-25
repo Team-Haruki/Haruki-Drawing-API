@@ -1,4 +1,9 @@
-from src.sekai.card.drawer import CARD_BOX_GROUP_BY_ATTR, _fallback_card_box_distribution, _single_character_progress
+from src.sekai.card.drawer import (
+    CARD_BOX_GROUP_BY_ATTR,
+    _card_box_attr_content_width,
+    _fallback_card_box_distribution,
+    _single_character_progress,
+)
 from src.sekai.card.model import (
     CardBasic,
     CardBoxDistribution,
@@ -162,3 +167,20 @@ def test_single_character_progress_uses_only_filtered_rarity_bucket():
     assert progress["visible_buckets"] == [("rarity_4", "4")]
     assert progress["stats"]["rarity_4"] == {"owned": 1, "total": 2}
     assert progress["stats"]["total"] == {"owned": 1, "total": 2}
+
+
+def test_attribute_group_content_width_uses_longest_group_and_header_minimum():
+    width = _card_box_attr_content_width(
+        {
+            "cute": [(20, [1, 2])],
+            "cool": [(20, [1, 2, 3, 4]), (19, [1])],
+            "unknown": [(1, list(range(20)))],
+        },
+        best_height=2,
+        sz=48,
+        sep=4,
+    )
+
+    cool_width = (48 * 2 + 4) + 4 + 48
+    header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
+    assert width == 16 * 2 + max(cool_width, header_min_width)
