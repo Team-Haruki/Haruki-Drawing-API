@@ -391,7 +391,7 @@ def _card_box_attr_content_width(attr_chara_cards: dict, best_height: int, sz: i
         widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
         return sum(widths) + max(0, len(widths) - 1) * 4
 
-    attr_header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
+    attr_header_min_width = 24 + 8 + 90 + 10 + 72 + 10 + 170
     attr_row_widths = [
         card_group_row_width(groups)
         for attr, groups in attr_chara_cards.items()
@@ -1340,8 +1340,8 @@ async def compose_box_image(
 
     def draw_attribute_header(attr_stat: CardDistributionAttributeStat, content_width: int):
         count_text, progress_ratio, color = attribute_progress_values(attr_stat)
-        label_width = 64
-        count_width = 86
+        label_width = 90
+        count_width = 72
         fixed_width = 24 + 8 + label_width + 10 + count_width + 10
         bar_width = max(120, min(260, content_width - fixed_width))
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_w(content_width):

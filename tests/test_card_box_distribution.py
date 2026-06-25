@@ -182,5 +182,5 @@ def test_attribute_group_content_width_uses_longest_group_and_header_minimum():
     )
 
     cool_width = (48 * 2 + 4) + 4 + 48
-    header_min_width = 24 + 8 + 64 + 10 + 86 + 10 + 170
+    header_min_width = 24 + 8 + 90 + 10 + 72 + 10 + 170
     assert width == 16 * 2 + max(cool_width, header_min_width)
