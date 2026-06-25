@@ -1,6 +1,7 @@
 from src.sekai.card.drawer import (
     CARD_BOX_GROUP_BY_ATTR,
     _card_box_attr_content_width,
+    _card_box_attr_count_width,
     _fallback_card_box_distribution,
     _single_character_progress,
 )
@@ -179,8 +180,10 @@ def test_attribute_group_content_width_uses_longest_group_and_header_minimum():
         best_height=2,
         sz=48,
         sep=4,
+        count_texts=["100/1000"],
     )
 
     cool_width = (48 * 2 + 4) + 4 + 48
-    header_min_width = 24 + 8 + 90 + 10 + 72 + 10 + 170
+    header_min_width = 24 + 8 + 90 + 10 + _card_box_attr_count_width(["100/1000"]) + 10 + 170
     assert width == 16 * 2 + max(cool_width, header_min_width)
+    assert _card_box_attr_count_width(["100/1000"]) > 72

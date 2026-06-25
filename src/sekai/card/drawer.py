@@ -17,6 +17,7 @@ from src.sekai.base import (
     roundrect_bg,
 )
 from src.sekai.base.draw import CHARACTER_COLOR_CODE
+from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -75,6 +76,9 @@ CARD_BOX_ATTR_COLORS = {
 }
 CARD_BOX_RARITY_STAR_PATH = "static_images/card/rare_star_normal.png"
 CARD_BOX_BIRTHDAY_RARITY_PATH = "static_images/card/rare_birthday.png"
+CARD_BOX_ATTR_LABEL_WIDTH = 90
+CARD_BOX_ATTR_COUNT_MIN_WIDTH = 72
+CARD_BOX_ATTR_BAR_MIN_WIDTH = 170
 CARD_BOX_PROGRESS_BUCKETS = [
     ("rarity_1", "1"),
     ("rarity_2", "2"),
@@ -374,6 +378,21 @@ def _stat_count_text(count: int, owned_count: int, owned_data: bool) -> str:
     return str(count)
 
 
+def _card_box_attr_count_text(attr_stat: CardDistributionAttributeStat, owned_data: bool, unowned_only: bool) -> str:
+    if unowned_only and owned_data:
+        missing_count = max(0, attr_stat.count - attr_stat.owned_count)
+        return f"{missing_count}/{attr_stat.count}"
+    return _stat_count_text(attr_stat.count, attr_stat.owned_count, owned_data)
+
+
+def _card_box_attr_count_width(count_texts: list[str] | tuple[str, ...] | None = None) -> int:
+    if not count_texts:
+        return CARD_BOX_ATTR_COUNT_MIN_WIDTH
+    font = get_font(DEFAULT_BOLD_FONT, 18)
+    measured_width = max(get_text_size(font, text)[0] for text in count_texts if text)
+    return max(CARD_BOX_ATTR_COUNT_MIN_WIDTH, measured_width + 10)
+
+
 def _collection_ratio(stat: CardDistributionCharacterStat | CardDistributionAttributeStat, owned_data: bool) -> float:
     if stat.count <= 0:
         return 0.0
@@ -382,7 +401,13 @@ def _collection_ratio(stat: CardDistributionCharacterStat | CardDistributionAttr
     return max(0.0, min(1.0, stat.owned_count / stat.count))
 
 
-def _card_box_attr_content_width(attr_chara_cards: dict, best_height: int, sz: int, sep: int) -> int:
+def _card_box_attr_content_width(
+    attr_chara_cards: dict,
+    best_height: int,
+    sz: int,
+    sep: int,
+    count_texts: list[str] | tuple[str, ...] | None = None,
+) -> int:
     def card_group_width(card_count: int) -> int:
         col_num = max(1, math.ceil(card_count / best_height))
         return sz * col_num + sep * (col_num - 1)
@@ -391,7 +416,15 @@ def _card_box_attr_content_width(attr_chara_cards: dict, best_height: int, sz: i
         widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
         return sum(widths) + max(0, len(widths) - 1) * 4
 
-    attr_header_min_width = 24 + 8 + 90 + 10 + 72 + 10 + 170
+    attr_header_min_width = (
+        24
+        + 8
+        + CARD_BOX_ATTR_LABEL_WIDTH
+        + 10
+        + _card_box_attr_count_width(count_texts)
+        + 10
+        + CARD_BOX_ATTR_BAR_MIN_WIDTH
+    )
     attr_row_widths = [
         card_group_row_width(groups)
         for attr, groups in attr_chara_cards.items()
@@ -1115,8 +1148,14 @@ async def compose_box_image(
         widths = [card_group_width(len(group_cards)) for _, group_cards in groups]
         return sum(widths) + max(0, len(widths) - 1) * 4
 
+    attr_count_texts = [
+        _card_box_attr_count_text(stat, distribution.owned_data, unowned_only)
+        for stat in distribution.attribute_stats
+        if stat.count > 0
+    ]
+    attr_count_width = _card_box_attr_count_width(attr_count_texts)
     if group_by_attr:
-        box_content_width = _card_box_attr_content_width(attr_chara_cards, best_height, sz, sep)
+        box_content_width = _card_box_attr_content_width(attr_chara_cards, best_height, sz, sep, attr_count_texts)
     else:
         box_content_width = 16 * 2
         if chara_cards:
@@ -1331,17 +1370,17 @@ async def compose_box_image(
         color = _safe_color(attr_stat.color_code or _card_box_attr_color(attr_stat.attr))
         if unowned_only and distribution.owned_data:
             missing_count = max(0, attr_stat.count - attr_stat.owned_count)
-            count_text = f"{missing_count}/{attr_stat.count}"
+            count_text = _card_box_attr_count_text(attr_stat, distribution.owned_data, unowned_only)
             progress_ratio = missing_count / attr_stat.count if attr_stat.count > 0 else 0.0
         else:
-            count_text = _stat_count_text(attr_stat.count, attr_stat.owned_count, distribution.owned_data)
+            count_text = _card_box_attr_count_text(attr_stat, distribution.owned_data, unowned_only)
             progress_ratio = _collection_ratio(attr_stat, distribution.owned_data)
         return count_text, progress_ratio, color
 
     def draw_attribute_header(attr_stat: CardDistributionAttributeStat, content_width: int):
         count_text, progress_ratio, color = attribute_progress_values(attr_stat)
-        label_width = 90
-        count_width = 72
+        label_width = CARD_BOX_ATTR_LABEL_WIDTH
+        count_width = attr_count_width
         fixed_width = 24 + 8 + label_width + 10 + count_width + 10
         bar_width = max(120, min(260, content_width - fixed_width))
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_w(content_width):
