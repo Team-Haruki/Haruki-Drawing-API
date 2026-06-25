@@ -77,8 +77,8 @@ CARD_BOX_ATTR_COLORS = {
 CARD_BOX_RARITY_STAR_PATH = "static_images/card/rare_star_normal.png"
 CARD_BOX_BIRTHDAY_RARITY_PATH = "static_images/card/rare_birthday.png"
 CARD_BOX_ATTR_LABEL_WIDTH = 90
-CARD_BOX_ATTR_COUNT_MIN_WIDTH = 72
-CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING = 18
+CARD_BOX_ATTR_COUNT_MIN_WIDTH = 96
+CARD_BOX_ATTR_COUNT_HORIZONTAL_PADDING = 40
 CARD_BOX_ATTR_BAR_MIN_WIDTH = 170
 CARD_BOX_PROGRESS_BUCKETS = [
     ("rarity_1", "1"),
@@ -122,7 +122,7 @@ def _build_card_list_cache_key(rqd: CardListRequest) -> str:
         "term_limited_icon_path": rqd.term_limited_icon_path,
         "fes_limited_icon_path": rqd.fes_limited_icon_path,
     }
-    return build_rendered_image_cache_key("card_list", request_payload, extra={"version": 3})
+    return build_rendered_image_cache_key("card_list", request_payload)
 
 
 def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
@@ -174,7 +174,7 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
             else None
         ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload, extra={"version": 20})
+    return build_rendered_image_cache_key("card_box", request_payload)
 
 
 def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):
@@ -1397,8 +1397,7 @@ async def compose_box_image(
             ).set_w(label_width)
             TextBox(
                 count_text,
-                TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=color),
-                overflow="shrink",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(0, 0, 0)),
             ).set_w(count_width).set_content_align("r")
             _stat_bar(bar_width, 12, progress_ratio, color)
 

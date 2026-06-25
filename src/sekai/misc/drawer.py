@@ -89,7 +89,6 @@ def _build_alias_list_cache_key(rqd: AliasListRequest) -> str:
     return build_rendered_image_cache_key(
         _ALIAS_LIST_CACHE_NAMESPACE,
         request_payload,
-        extra={"version": 12},
         asset_signatures={
             "music_jacket": get_image_asset_signature(ASSETS_BASE_DIR, rqd.music_jacket_path),
             "character_trim": get_image_asset_signature(ASSETS_BASE_DIR, trim_path),

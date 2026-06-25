@@ -638,7 +638,7 @@ def _build_event_list_entry_cache_key(d, phase: str) -> str:
         "event": d.model_dump(mode="json"),
         "phase": phase,
     }
-    return build_rendered_image_cache_key("event_list_entry", request_payload, extra={"version": 1})
+    return build_rendered_image_cache_key("event_list_entry", request_payload)
 
 
 async def _preload_event_entry_assets(d) -> dict[str, object]:
