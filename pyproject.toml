@@ -6,7 +6,7 @@ requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.136.3",
     "granian>=2.7.6",
-    "matplotlib>=3.10.8",
+    "matplotlib>=3.11.0",
     "numpy>=2.4.2",
     "emoji==2.15.0",
     "pillow>=12.1.1",
