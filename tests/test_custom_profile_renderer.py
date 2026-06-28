@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 
 from PIL import Image
@@ -5,16 +6,23 @@ from PIL import Image
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
 from src.sekai.profile.custom_profile.renderer import (
+    DEFAULT_SHAPE_SPRITE_DIR,
+    DEFAULT_TMP_FONT_METADATA,
+    DEFAULT_UNITY_UI_SPRITE_DIR,
     NativeContent,
     NativeUnresolvedContent,
     PNGRenderer,
     PreparedLayer,
     RenderedLayer,
+    TMPGlyphMetrics,
+    TMPNativeCharacterInfo,
     build_arg_parser,
     harden_rgba_alpha,
     resize_rgba_premul,
+    split_runs_by_line_with_style,
 )
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
+from src.sekai.profile.custom_profile.svg import TextRun, TextStyle, parse_tmp_text
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:
@@ -43,6 +51,7 @@ def _make_renderer(
     assets = tmp_path / "asset" / f"{region}-assets" / "startapp" / "custom_profile"
     fonts.mkdir(exist_ok=True)
     assets.mkdir(parents=True, exist_ok=True)
+    unity_ui_sprite_dir = renderer_kwargs.pop("unity_ui_sprite_dir", tmp_path / "static_images" / "customprofile")
     return PNGRenderer(
         masterdata=None,
         assets=assets,
@@ -50,11 +59,114 @@ def _make_renderer(
         resources=resources or {},
         tmp_font_metadata=None,
         shape_sprite_dir=None,
-        unity_ui_sprite_dir=None,
+        unity_ui_sprite_dir=unity_ui_sprite_dir,
         profile_context=profile_context or {},
         region=region,
         **renderer_kwargs,
     )
+
+
+def _base_tmp_style() -> TextStyle:
+    return TextStyle(
+        color="#000000",
+        alpha=1.0,
+        size=24.0,
+        scale_x=1.0,
+        cspace=0.0,
+        mspace=None,
+        indent=0.0,
+        line_indent=0.0,
+        line_height=None,
+        rotate=0.0,
+        voffset=0.0,
+        mark_color=None,
+        bold=False,
+        italic=False,
+        underline=False,
+        strike=False,
+    )
+
+
+def test_custom_profile_scale_tag_uses_first_tmp_attribute_value() -> None:
+    tokens = parse_tmp_text("<scale=3 4><size=300><#9a4d3b>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.scale_x == 3.0
+    assert runs[0].style.size == 300.0
+    assert runs[0].style.color == "#9a4d3b"
+
+
+def test_custom_profile_tmp_parser_tolerates_real_profile_tag_typos() -> None:
+    tokens = parse_tmp_text("<scale=1.8.><#FDECEI><pos=35><alpha=61#>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.scale_x == 1.8
+    assert runs[0].style.color == "#fdecef"
+    assert runs[0].style.pos == 35.0
+    assert 0.37 < runs[0].style.alpha < 0.39
+
+
+def test_custom_profile_tmp_parser_consumes_pos_tag_between_symbols() -> None:
+    tokens = parse_tmp_text("<size=80><scale=0.7><#D56844>▲<pos=35><voffset=-14>▲", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert "".join(run.text for run in runs) == "▲▲"
+    assert not any("<" in run.text or ">" in run.text for run in runs)
+
+
+def test_custom_profile_tmp_parser_tolerates_o_in_hex_color() -> None:
+    tokens = parse_tmp_text("<size=56><#FOBDBA><scale=6>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.color == "#ffbdba"
+
+
+def test_custom_profile_pos_tag_moves_x_advance(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(parse_tmp_text("前<pos=35>后", base_style), base_style)[0]
+
+    assert [run.text for run in line.runs] == ["前", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(10.0, line, 1, 1000.0) == 35.0
+
+
+def test_custom_profile_line_indent_applies_from_tag_position(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(parse_tmp_text("前<line-indent=50%>后", base_style), base_style)[0]
+
+    assert [run.text for run in line.runs] == ["前", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 0.0
+    assert renderer.tmp_apply_inline_indent_markers(10.0, line, 1, 1000.0) == 510.0
+
+
+def test_custom_profile_unknown_tag_text_stays_before_line_indent(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(parse_tmp_text("<ratate=45><line-indent=50%>后", base_style), base_style)[0]
+
+    assert [run.text for run in line.runs] == ["<ratate=45>", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 0.0
+    assert renderer.tmp_apply_inline_indent_markers(123.0, line, 1, 1000.0) == 623.0
+
+
+def test_custom_profile_closing_line_indent_does_not_rewind_current_x(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    line = split_runs_by_line_with_style(
+        parse_tmp_text("<line-indent=50%>前</line-indent>后", base_style),
+        base_style,
+    )[0]
+
+    assert [run.text for run in line.runs] == ["前", "后"]
+    assert renderer.tmp_apply_inline_indent_markers(0.0, line, 0, 1000.0) == 500.0
+    assert renderer.tmp_apply_inline_indent_markers(510.0, line, 1, 1000.0) == 510.0
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:
@@ -105,10 +217,24 @@ def test_custom_profile_decorative_direct_raster_is_default(tmp_path: Path) -> N
     }
 
     assert renderer.is_decorative_text_item(decorative)
-    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == 0.0
-    assert renderer.tmp_decorative_face_only
+    assert renderer.decorative_outline_dilate(decorative, decorative["outlineSize"]) == decorative["outlineSize"]
+    assert not renderer.tmp_decorative_face_only
     assert renderer.tmp_decorative_direct_raster
     assert not renderer.premultiply_alpha_transforms
+
+
+def test_custom_profile_decorative_direct_raster_includes_multiline_blocks(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    decorative = {
+        "text": "<line-height=50><#F8D9D0><alpha=#20><scale=2><size=140>■\n■\n■",
+        "outlineSize": 0.0,
+        "fontId": 1,
+        "colorId": 1,
+        "outlineColorId": 1,
+    }
+
+    assert renderer.is_decorative_text_item(decorative)
+    assert renderer.tmp_decorative_direct_raster
 
 
 def test_custom_profile_decorative_face_only_can_be_disabled(tmp_path: Path) -> None:
@@ -131,13 +257,20 @@ def test_custom_profile_cli_uses_decorative_tmp_main_logic_by_default() -> None:
     parser = build_arg_parser()
     args = parser.parse_args([])
 
-    assert args.tmp_decorative_face_only
+    assert not args.tmp_decorative_face_only
     assert args.tmp_decorative_direct_raster
     assert not args.premultiply_alpha_transforms
+    assert args.tmp_font_metadata == DEFAULT_TMP_FONT_METADATA
+    assert args.shape_sprite_dir == DEFAULT_SHAPE_SPRITE_DIR
+    assert args.unity_ui_sprite_dir == DEFAULT_UNITY_UI_SPRITE_DIR
 
-    disabled = parser.parse_args(["--no-tmp-decorative-face-only", "--no-tmp-decorative-direct-raster"])
+    enabled = parser.parse_args(["--tmp-decorative-face-only", "--no-tmp-decorative-direct-raster"])
+    assert enabled.tmp_decorative_face_only
+    assert not enabled.tmp_decorative_direct_raster
+
+    disabled = parser.parse_args(["--no-tmp-decorative-face-only"])
     assert not disabled.tmp_decorative_face_only
-    assert not disabled.tmp_decorative_direct_raster
+    assert disabled.tmp_decorative_direct_raster
 
 
 def test_custom_profile_premul_resize_does_not_bleed_transparent_rgb() -> None:
@@ -165,6 +298,69 @@ def test_custom_profile_harden_alpha_preserves_layer_opacity() -> None:
     assert hardened.getpixel((0, 0))[3] == 0
     assert hardened.getpixel((1, 0))[3] > 32
     assert hardened.getpixel((2, 0))[3] == 64
+
+
+def test_custom_profile_native_negative_scale_mirrors_glyph_texture(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    glyph = Image.new("RGBA", (2, 1))
+    glyph.putpixel((0, 0), (255, 0, 0, 255))
+    glyph.putpixel((1, 0), (0, 0, 255, 255))
+
+    def fake_render_tmp_sdf_character_image(*_args: object) -> tuple[Image.Image, tuple[int, int, int, int], int, int]:
+        return glyph.copy(), (0, 0, 2, 1), 0, 0
+
+    renderer.render_tmp_sdf_character_image = fake_render_tmp_sdf_character_image  # type: ignore[method-assign]
+
+    metrics = TMPGlyphMetrics(
+        width=2.0,
+        height=1.0,
+        bearing_x=0.0,
+        bearing_y=1.0,
+        advance=2.0,
+        rect_x=0,
+        rect_y=0,
+        rect_w=2,
+        rect_h=1,
+        glyph_scale=1.0,
+        atlas_index=0,
+    )
+    style = replace(_base_tmp_style(), scale_x=-1.0)
+    char_info = TMPNativeCharacterInfo(
+        index=0,
+        char="X",
+        line_index=0,
+        x_origin=0.0,
+        x_advance=2.0,
+        glyph_origin_x=0.0,
+        bottom_left_x=2.0,
+        bottom_left_y=0.0,
+        top_left_x=2.0,
+        top_left_y=1.0,
+        top_right_x=0.0,
+        top_right_y=1.0,
+        bottom_right_x=0.0,
+        bottom_right_y=0.0,
+        vertex_padding=0.0,
+        raw_left_x=0.0,
+        raw_right_x=2.0,
+        raw_top_y=1.0,
+        raw_bottom_y=0.0,
+        baseline=0.0,
+        ascender=1.0,
+        descender=0.0,
+        adjusted_ascender=1.0,
+        adjusted_descender=0.0,
+        visible=True,
+        style=style,
+        metrics=metrics,
+        sdf_scale=1.0,
+    )
+    target = Image.new("RGBA", (2, 1), (0, 0, 0, 0))
+
+    renderer.draw_tmp_native_character(target, "font", tmp_path / "font.otf", char_info, 0.0, 1.0, "#000000", 0, 0.0)
+
+    assert target.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert target.getpixel((1, 0)) == (255, 0, 0, 255)
 
 
 def test_custom_profile_direct_raster_preserves_mixed_layer_order(tmp_path: Path) -> None:

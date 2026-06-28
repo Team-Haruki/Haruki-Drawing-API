@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 Image.MAX_IMAGE_PIXELS = None
 
@@ -23,6 +23,7 @@ from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
     DEFAULT_ASSETS,
+    DEFAULT_DATA_DIR,
     DEFAULT_FONTS,
     DEFAULT_MASTERDATA,
     DEFAULT_PROFILE,
@@ -55,7 +56,7 @@ TMP_EM_BLOCK_CHARS = {"■", "█"}
 TMP_SPACE_EQUIVALENT_CHARS = {" ", "\u00a0"}
 TMP_MISSING_GLYPH_CHAR = "□"
 TMP_DECORATIVE_TEXT_CHARS = frozenset("●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 ")
-DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
+DEFAULT_TMP_DECORATIVE_FACE_ONLY = False
 DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
 DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
 TMP_DEFAULT_TEXT_BOX_W = 108.0
@@ -177,10 +178,10 @@ TEXT_VERTICAL_MODES = (
 TMP_METRIC_MODES = ("pil", "asset", "asset-fallback")
 DEFAULT_TMP_LINE_MODE = "asset-face-scale"
 DEFAULT_TMP_METRICS_MODE = "asset-fallback"
-DEFAULT_TMP_FONT_METADATA = Path(__file__).resolve().parent / "out" / "tmp-font-assets" / "cn" / "metadata.json"
-DEFAULT_TMP_BASE_FONT_METADATA = Path(__file__).resolve().parent / "out" / "tmp-font-assets" / "cn" / "metadata.json"
-DEFAULT_SHAPE_SPRITE_DIR = Path(__file__).resolve().parent / "out" / "shape-bundle" / "sprites-native"
-DEFAULT_UNITY_UI_SPRITE_DIR = Path(__file__).resolve().parent / "out" / "unity-ui-sprites-cn" / "sprites-native"
+DEFAULT_TMP_FONT_METADATA = DEFAULT_DATA_DIR / "custom_profile" / "tmp-font-assets" / "cn" / "metadata.json"
+DEFAULT_TMP_BASE_FONT_METADATA = DEFAULT_TMP_FONT_METADATA
+DEFAULT_SHAPE_SPRITE_DIR = DEFAULT_ASSETS / "shape"
+DEFAULT_UNITY_UI_SPRITE_DIR = DEFAULT_DATA_DIR / "drawing" / "static_images" / "customprofile"
 DEFAULT_TRIANGLE_MODE = "asset"
 DEFAULT_PARALLEL_WORKERS = 1
 
@@ -490,6 +491,8 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
 class StyledLine:
     runs: list[TextRun]
     style: TextStyle
+    start_style: TextStyle | None = None
+    markers: list[tuple[int, TextStyleMarker]] | None = None
     trailing_newline_count: int = 0
 
 
@@ -1655,6 +1658,19 @@ def transform_rgba_premul(
     )
     transformed = premultiply_rgba_image(image).transform(size, method, data, resample, fillcolor=premul_fill)
     return unpremultiply_rgba_image(transformed)
+
+
+def resize_tmp_x_scaled_image(
+    image: Image.Image,
+    scale_x: float,
+    resample: Image.Resampling = Image.Resampling.BICUBIC,
+) -> Image.Image:
+    scaled_width = max(1, round(image.width * abs(scale_x)))
+    if scaled_width != image.width:
+        image = image.resize((scaled_width, image.height), resample)
+    if scale_x < 0:
+        image = ImageOps.mirror(image)
+    return image
 
 
 def font_file(fonts: Path, font_name: str, rodin_font: str = "ttf") -> Path:
@@ -6316,7 +6332,11 @@ class PNGRenderer:
                             outline_dilate,
                         )
 
-        return img, (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
+        if self.text_pivot == "left":
+            pivot = (rect_origin_x, rect_origin_y + box_h / 2)
+        else:
+            pivot = (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
+        return img, pivot
 
     def tmp_native_text_layout(
         self,
@@ -6818,9 +6838,9 @@ class PNGRenderer:
             metrics = self.tmp_source_block_metrics(font_name, run, font_size)
             advance = metrics.advance if metrics is not None else font_size
             if not run.text:
-                return max(0.0, advance * advance_scale_x)
+                return advance * advance_scale_x
             spacing = self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
-            return max(0.0, len(run.text) * advance * advance_scale_x + max(0, len(run.text) - 1) * spacing)
+            return len(run.text) * advance * advance_scale_x + max(0, len(run.text) - 1) * spacing
 
         x = 0.0
         last_index = len(run.text) - 1
@@ -6843,7 +6863,7 @@ class PNGRenderer:
                     current_em_scale,
                 )
             x = next_x
-        return max(0.0, x)
+        return x
 
     def tmp_inter_run_spacing_advance(
         self,
@@ -6898,7 +6918,42 @@ class PNGRenderer:
         return char == "\t" or (not char.isspace() and char not in {"\u200b", "\u00ad", "\x03"})
 
     def tmp_native_line_initial_x(self, line: StyledLine, margin_width: float = 0.0) -> float:
-        return line.style.indent + line.style.line_indent + self.tmp_style_percent_indent(line.style, margin_width)
+        start_style = line.start_style or line.style
+        return self.tmp_style_indent_value(line.style, margin_width) + self.tmp_style_line_indent_value(
+            start_style,
+            margin_width,
+        )
+
+    def tmp_apply_inline_indent_markers(
+        self,
+        x_advance: float,
+        line: StyledLine,
+        run_index: int,
+        margin_width: float = 0.0,
+    ) -> float:
+        if not line.markers:
+            return x_advance
+        for marker_index, marker in line.markers:
+            if marker_index != run_index:
+                continue
+            if not marker.opening:
+                continue
+            if marker.kind == "line-indent":
+                x_advance += self.tmp_style_line_indent_value(marker.style, margin_width)
+            elif marker.kind == "pos":
+                x_advance = self.tmp_style_pos_value(marker.style, margin_width)
+        return x_advance
+
+    def tmp_style_indent_value(self, style: TextStyle, margin_width: float) -> float:
+        return style.indent + margin_width * (style.indent_percent or 0.0)
+
+    def tmp_style_line_indent_value(self, style: TextStyle, margin_width: float) -> float:
+        return style.line_indent + margin_width * (style.line_indent_percent or 0.0)
+
+    def tmp_style_pos_value(self, style: TextStyle, margin_width: float) -> float:
+        if style.pos_percent is not None:
+            return margin_width * style.pos_percent
+        return style.pos or 0.0
 
     def tmp_style_percent_indent(self, style: TextStyle, margin_width: float) -> float:
         percent = (style.indent_percent or 0.0) + (style.line_indent_percent or 0.0)
@@ -7196,6 +7251,7 @@ class PNGRenderer:
         mesh_bounds: tuple[float, float, float, float] | None = None,
         rect_origin: tuple[float, float] | None = None,
         local_image_size: tuple[int, int] | None = None,
+        direct_raster: bool = False,
     ) -> None:
         object_data = item.get("objectData", {}) or {}
         line_entries: list[dict[str, Any]] = []
@@ -7245,6 +7301,13 @@ class PNGRenderer:
                 "generatedTextData": self.tmp_generated_text_data_dict(text_data),
                 "updateMeshState": self.tmp_update_mesh_state_dict(mesh_state),
                 "fontAsset": self.tmp_font_asset_audit_dict(font_name),
+                "renderPath": {
+                    "directRaster": direct_raster,
+                    "decorative": self.is_decorative_text_item(item),
+                    "decorativeFaceOnly": self.tmp_decorative_face_only,
+                    "decorativeDirectRaster": self.tmp_decorative_direct_raster,
+                    "tmpTextRenderMode": self.tmp_text_render_mode,
+                },
                 "align": {
                     "raw": mesh_state.align,
                     "horizontal": tmp_horizontal_alignment(mesh_state.align),
@@ -7465,8 +7528,8 @@ class PNGRenderer:
 
     def tmp_explicit_line_height(self, value: float) -> float:
         if self.tmp_line_mode in {"face", "face-scale", "asset-face", "asset-face-scale"}:
-            return max(0.0, value)
-        return max(0.0, value * self.tmp_font_scale)
+            return value
+        return value * self.tmp_font_scale
 
     def tmp_line_spacing_pixels(self, font_name: str, style_size: float, tmp_line_spacing: float) -> float:
         # TextContentView.UpdateTextMesh first writes TMP_Text.lineSpacing as
@@ -7705,7 +7768,7 @@ class PNGRenderer:
         scale_y = self.tmp_layout_scale_y(style)
         metrics = self.tmp_source_block_metrics(font_name, run, base_font_size)
         if metrics is None:
-            w = max(1, round(base_font_size * scale_x + outline_width * 2))
+            w = max(1, round(base_font_size * abs(scale_x) + outline_width * 2))
             h = max(1, round(base_font_size * scale_y + outline_width * 2))
             x_offset = (
                 (base_font_size - base_font_size * scale_x) * 0.5 - outline_width
@@ -7713,7 +7776,7 @@ class PNGRenderer:
                 else -outline_width
             )
         else:
-            w = max(1, round(metrics.width * scale_x + outline_width * 2))
+            w = max(1, round(metrics.width * abs(scale_x) + outline_width * 2))
             h = max(1, round(metrics.height * scale_y + outline_width * 2))
             if self.tmp_scale_mode in {"fx-center", "fx-native"}:
                 x_offset = metrics.bearing_x + (metrics.width - metrics.width * scale_x) * 0.5 - outline_width
@@ -7729,6 +7792,8 @@ class PNGRenderer:
                 draw.rectangle((inset, inset, w - inset - 1, h - inset - 1), fill=hex_to_rgba(style.color, style.alpha))
         else:
             draw.rectangle((0, 0, w - 1, h - 1), fill=hex_to_rgba(style.color, style.alpha))
+        if scale_x < 0:
+            glyph = ImageOps.mirror(glyph)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
         return glyph, x_offset, metrics
@@ -8206,9 +8271,7 @@ class PNGRenderer:
                 glyph = Image.new("L", (raw_w, raw_h), 0)
                 glyph_draw = ImageDraw.Draw(glyph)
                 glyph_draw.text((-bbox[0], -bbox[1]), metric_char, font=font, fill=255)
-                scaled_w = max(1, round(raw_w * scale_x))
-                if scaled_w != raw_w:
-                    glyph = glyph.resize((scaled_w, raw_h), Image.Resampling.BICUBIC)
+                glyph = resize_tmp_x_scaled_image(glyph, scale_x)
                 raw_left = base_x + cursor + bbox[0]
                 raw_right = base_x + cursor + bbox[2]
                 center_x = (raw_left + raw_right) * 0.5
@@ -8449,7 +8512,7 @@ class PNGRenderer:
         if asset is None:
             return None
         style = run.style
-        placements: list[tuple[TMPGlyphMetrics, float, float, float, float]] = []
+        placements: list[tuple[TMPGlyphMetrics, float, float, float, float, bool]] = []
         font_scale = font_size / max(1.0, asset.point_size)
         cursor = 0.0
         min_x = 0.0
@@ -8470,9 +8533,10 @@ class PNGRenderer:
                 w = metrics.rect_w * scale
                 h = metrics.rect_h * scale
                 center_x = x + w * 0.5
-                x = center_x - w * fx_scale_x * 0.5
-                w *= fx_scale_x
-                placements.append((metrics, x, y, w, h))
+                flip_x = fx_scale_x < 0
+                w *= abs(fx_scale_x)
+                x = center_x - w * 0.5
+                placements.append((metrics, x, y, w, h, flip_x))
                 min_x = min(min_x, x)
                 min_y = min(min_y, y)
                 max_x = max(max_x, x + w)
@@ -8491,22 +8555,22 @@ class PNGRenderer:
         bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
         pad = self.tmp_display_padding(asset, outline_dilate, font_size)
         field_img = Image.new("L", (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)), 0)
-        for metrics, x, y, w, h in placements:
+        for metrics, x, y, w, h, flip_x in placements:
             atlas_path = asset.atlas_paths[min(metrics.atlas_index, len(asset.atlas_paths) - 1)]
             atlas = self.tmp_atlas_alpha(atlas_path)
             top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
             left = max(0, metrics.rect_x)
             crop = atlas.crop((left, top, left + metrics.rect_w, top + metrics.rect_h))
             glyph = crop.resize((max(1, round(w)), max(1, round(h))), Image.Resampling.BICUBIC)
+            if flip_x:
+                glyph = ImageOps.mirror(glyph)
             px = round(pad + x - bbox[0])
             py = round(pad + y - bbox[1])
             region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
 
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            field_img = field_img.resize(
-                (max(1, round(field_img.width * style.scale_x)), field_img.height), Image.Resampling.BICUBIC
-            )
+            field_img = resize_tmp_x_scaled_image(field_img, style.scale_x)
 
         import numpy as np
 
@@ -8580,16 +8644,20 @@ class PNGRenderer:
         field_img = Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
         field_img = field_img.resize(
             (
-                max(1, round(field_img.width * display_scale * scale_x)),
+                max(1, round(field_img.width * display_scale * abs(scale_x))),
                 max(1, round(field_img.height * display_scale)),
             ),
             Image.Resampling.BICUBIC,
         )
+        if scale_x < 0:
+            field_img = ImageOps.mirror(field_img)
         field = np.asarray(field_img, dtype=np.float32) / 255.0
+        scaled_left = sample_bbox[0] * display_scale * scale_x
+        scaled_right = sample_bbox[2] * display_scale * scale_x
         bbox = (
-            math.floor(sample_bbox[0] * display_scale * scale_x),
+            math.floor(min(scaled_left, scaled_right)),
             math.floor(sample_bbox[1] * display_scale),
-            math.ceil(sample_bbox[2] * display_scale * scale_x),
+            math.ceil(max(scaled_left, scaled_right)),
             math.ceil(sample_bbox[3] * display_scale),
         )
         pad = max(1, round(sample_pad * display_scale))
@@ -8971,13 +9039,7 @@ class PNGRenderer:
                         math.ceil(scaled_right),
                         bbox[3],
                     )
-                    field_img = field_img.resize(
-                        (
-                            max(1, round(field_img.width * fx_scale_x)),
-                            field_img.height,
-                        ),
-                        Image.Resampling.BICUBIC,
-                    )
+                    field_img = resize_tmp_x_scaled_image(field_img, fx_scale_x)
                 import numpy as np
 
                 field = np.asarray(field_img, dtype=np.float32) / 255.0
@@ -9007,11 +9069,13 @@ class PNGRenderer:
             image.alpha_composite(glyph, (px, py))
 
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            image = image.resize((max(1, round(image.width * style.scale_x)), image.height), Image.Resampling.BICUBIC)
+            image = resize_tmp_x_scaled_image(image, style.scale_x)
+            scaled_left = bbox[0] * style.scale_x
+            scaled_right = bbox[2] * style.scale_x
             bbox = (
-                math.floor(bbox[0] * style.scale_x),
+                math.floor(min(scaled_left, scaled_right)),
                 bbox[1],
-                math.ceil(bbox[2] * style.scale_x),
+                math.ceil(max(scaled_left, scaled_right)),
                 bbox[3],
             )
         return image, bbox, max_pad
@@ -9067,8 +9131,7 @@ class PNGRenderer:
                 ImageDraw.Draw(mask), (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size
             )
             if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-                new_w = max(1, round(mask.width * style.scale_x))
-                mask = mask.resize((new_w, mask.height), Image.Resampling.BICUBIC)
+                mask = resize_tmp_x_scaled_image(mask, style.scale_x)
 
         try:
             field = alpha_mask_to_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
@@ -9196,13 +9259,7 @@ class PNGRenderer:
                 bbox[3],
             )
             pad_x = max(1, round(pad_x * abs(scale_x)))
-            field_img = field_img.resize(
-                (
-                    max(1, round(field_img.width * abs(scale_x))),
-                    field_img.height,
-                ),
-                Image.Resampling.BICUBIC,
-            )
+            field_img = resize_tmp_x_scaled_image(field_img, scale_x)
 
         return field_img, glyph_asset, bbox, pad_x, pad_y
 
@@ -9349,6 +9406,8 @@ class PNGRenderer:
         quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
         if glyph_image.size != (quad_w, quad_h):
             glyph_image = glyph_image.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+        if self.tmp_native_vertex_scale_x(style) < 0:
+            glyph_image = ImageOps.mirror(glyph_image)
         if style.rotate:
             center_local_x = (
                 char_info.bottom_left_x + char_info.top_left_x + char_info.top_right_x + char_info.bottom_right_x
@@ -9529,9 +9588,13 @@ class PNGRenderer:
             mesh_bounds,
             (rect_origin_x, rect_origin_y),
             (math.ceil(mesh_right - mesh_left + pad * 2), math.ceil(mesh_bottom - mesh_top + pad * 2)),
+            direct_raster=True,
         )
 
-        pivot = (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
+        if self.text_pivot == "left":
+            pivot = (rect_origin_x, rect_origin_y + box_h / 2)
+        else:
+            pivot = (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
         direct_glyphs = self.prepare_tmp_direct_sdf_glyphs(
             font_name,
             font_path,
@@ -9546,7 +9609,7 @@ class PNGRenderer:
         )
         if direct_glyphs is None:
             return False
-        for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+        for field_img, glyph_asset, style, top_left, top_right, bottom_left, bottom_right in direct_glyphs:
             self.composite_tmp_sdf_field_direct(
                 canvas,
                 field_img,
@@ -9554,8 +9617,10 @@ class PNGRenderer:
                 style,
                 outline_color,
                 outline_dilate,
-                local_left,
-                local_top,
+                top_left,
+                top_right,
+                bottom_left,
+                bottom_right,
                 pivot,
                 object_data,
             )
@@ -9573,12 +9638,35 @@ class PNGRenderer:
         rect_origin_y: float,
         outline_color: str,
         outline_dilate: float,
-    ) -> list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] | None:
+    ) -> (
+        list[
+            tuple[
+                Image.Image,
+                TMPFontAsset | None,
+                TextStyle,
+                tuple[float, float],
+                tuple[float, float],
+                tuple[float, float],
+                tuple[float, float],
+            ]
+        ]
+        | None
+    ):
         characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
         for char_info in layout.characters:
             characters_by_line.setdefault(char_info.line_index, []).append(char_info)
 
-        direct_glyphs: list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] = []
+        direct_glyphs: list[
+            tuple[
+                Image.Image,
+                TMPFontAsset | None,
+                TextStyle,
+                tuple[float, float],
+                tuple[float, float],
+                tuple[float, float],
+                tuple[float, float],
+            ]
+        ] = []
         for line_info in layout.lines:
             line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
             x_origin = rect_origin_x + line_x
@@ -9608,19 +9696,11 @@ class PNGRenderer:
                 quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
                 if field_img.size != (quad_w, quad_h):
                     field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-                local_left = x_origin + min(
-                    char_info.bottom_left_x,
-                    char_info.top_left_x,
-                    char_info.top_right_x,
-                    char_info.bottom_right_x,
-                )
-                local_top = baseline_y - max(
-                    char_info.bottom_left_y,
-                    char_info.top_left_y,
-                    char_info.top_right_y,
-                    char_info.bottom_right_y,
-                )
-                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top))
+                top_left = (x_origin + char_info.top_left_x, baseline_y - char_info.top_left_y)
+                top_right = (x_origin + char_info.top_right_x, baseline_y - char_info.top_right_y)
+                bottom_left = (x_origin + char_info.bottom_left_x, baseline_y - char_info.bottom_left_y)
+                bottom_right = (x_origin + char_info.bottom_right_x, baseline_y - char_info.bottom_right_y)
+                direct_glyphs.append((field_img, glyph_asset, style, top_left, top_right, bottom_left, bottom_right))
         return direct_glyphs
 
     def transformed_local_point(
@@ -9650,8 +9730,10 @@ class PNGRenderer:
         style: TextStyle,
         outline_color: str,
         outline_dilate: float,
-        local_left: float,
-        local_top: float,
+        local_top_left: tuple[float, float],
+        local_top_right: tuple[float, float],
+        local_bottom_left: tuple[float, float],
+        local_bottom_right: tuple[float, float],
         pivot: tuple[float, float],
         object_data: dict[str, Any],
     ) -> None:
@@ -9659,10 +9741,10 @@ class PNGRenderer:
         if src_w <= 0 or src_h <= 0:
             return
 
-        p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
-        p10 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top)
-        p01 = self.transformed_local_point(object_data, pivot, local_left, local_top + src_h)
-        p11 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top + src_h)
+        p00 = self.transformed_local_point(object_data, pivot, local_top_left[0], local_top_left[1])
+        p10 = self.transformed_local_point(object_data, pivot, local_top_right[0], local_top_right[1])
+        p01 = self.transformed_local_point(object_data, pivot, local_bottom_left[0], local_bottom_left[1])
+        p11 = self.transformed_local_point(object_data, pivot, local_bottom_right[0], local_bottom_right[1])
         corners = (p00, p10, p11, p01)
         pad = 2
         left = max(0, math.floor(min(x for x, _ in corners)) - pad)
@@ -9778,7 +9860,7 @@ class PNGRenderer:
             font_size,
         )
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
+            glyph = resize_tmp_x_scaled_image(glyph, style.scale_x)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
         target.alpha_composite(
@@ -9864,7 +9946,7 @@ class PNGRenderer:
             font_size,
         )
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
+            glyph = resize_tmp_x_scaled_image(glyph, style.scale_x)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
         target.alpha_composite(
@@ -9933,12 +10015,12 @@ def is_tmp_block_char(run: TextRun) -> bool:
 def split_runs_by_line_with_style(
     tokens: list[TextBreak | TextRun | TextStyleMarker], base_style: TextStyle
 ) -> list[StyledLine]:
-    lines = [StyledLine([], base_style)]
+    lines = [StyledLine([], base_style, base_style, [])]
     current_style = base_style
 
     def add_break(style: TextStyle) -> None:
         lines[-1].trailing_newline_count += 1
-        lines.append(StyledLine([], style))
+        lines.append(StyledLine([], style, style, []))
 
     for token in tokens:
         if isinstance(token, TextBreak):
@@ -9947,6 +10029,8 @@ def split_runs_by_line_with_style(
         if isinstance(token, TextStyleMarker):
             current_style = token.style
             lines[-1].style = token.style
+            lines[-1].markers = lines[-1].markers or []
+            lines[-1].markers.append((len(lines[-1].runs), token))
             continue
         parts = token.text.split("\n")
         for idx, part in enumerate(parts):
@@ -10011,6 +10095,8 @@ def scale_tmp_spacing(run: TextRun, factor: float) -> TextRun:
             strike=style.strike,
             indent_percent=style.indent_percent,
             line_indent_percent=style.line_indent_percent,
+            pos=None if style.pos is None else style.pos * factor,
+            pos_percent=style.pos_percent,
         ),
     )
 
@@ -10330,6 +10416,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-tmp-native-line-gap", dest="tmp_native_line_gap", action="store_false")
     parser.add_argument("--shape-sprite-dir", type=Path, default=DEFAULT_SHAPE_SPRITE_DIR)
+    parser.add_argument("--unity-ui-sprite-dir", type=Path, default=DEFAULT_UNITY_UI_SPRITE_DIR)
     parser.add_argument("--no-shape-sprites", action="store_true")
     parser.add_argument("--parallel-workers", type=int, default=DEFAULT_PARALLEL_WORKERS)
     parser.add_argument("--parallel-stage", choices=["serial", "transform", "full"], default="transform")

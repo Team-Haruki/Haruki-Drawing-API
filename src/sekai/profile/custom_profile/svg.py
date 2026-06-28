@@ -16,8 +16,9 @@ from urllib.parse import quote
 
 DEFAULT_PROFILE = Path("/Users/deseer/PycharmProjects/metadata/profile.json")
 DEFAULT_MASTERDATA = Path("/Users/deseer/PycharmProjects/haruki-sekai-sc-master/master")
-DEFAULT_ASSETS = Path("/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/cn-assets/startapp/custom_profile")
-DEFAULT_FONTS = Path("/Users/deseer/Downloads/sekai-custom-profile-fonts/cn/fonts")
+DEFAULT_DATA_DIR = Path(__file__).resolve().parents[4] / "data"
+DEFAULT_ASSETS = DEFAULT_DATA_DIR / "asset" / "cn-assets" / "startapp" / "custom_profile"
+DEFAULT_FONTS = DEFAULT_ASSETS / "font"
 
 CANVAS_W = 2048
 CANVAS_H = 1024
@@ -29,6 +30,7 @@ TMP_SUPERSCRIPT_SIZE = 0.5
 TMP_SUPERSCRIPT_OFFSET_FACTOR = 0.88
 TMP_SUBSCRIPT_SIZE = 0.5
 TMP_SUBSCRIPT_OFFSET_FACTOR = -0.12
+TMP_FLOAT_PREFIX_RE = re.compile(r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)")
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,8 @@ class TextStyle:
     strike: bool
     indent_percent: float | None = None
     line_indent_percent: float | None = None
+    pos: float | None = None
+    pos_percent: float | None = None
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,8 @@ class TextBreak:
 @dataclass(frozen=True)
 class TextStyleMarker:
     style: TextStyle
+    kind: str | None = None
+    opening: bool = True
 
 
 TextToken = TextRun | TextBreak | TextStyleMarker
@@ -100,60 +106,110 @@ def svg_escape(value: str) -> str:
     return html.escape(value, quote=True)
 
 
+def strip_tmp_quotes(value: str) -> str:
+    value = (value or "").strip()
+    if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+        value = value[1:-1].strip()
+    return value
+
+
+def tmp_hex_to_int(hex_char: str) -> int:
+    if "0" <= hex_char <= "9":
+        return ord(hex_char) - ord("0")
+    if "A" <= hex_char <= "F":
+        return ord(hex_char) - ord("A") + 10
+    if "a" <= hex_char <= "f":
+        return ord(hex_char) - ord("a") + 10
+    return 15
+
+
+def tmp_hex_byte(high: str, low: str) -> int:
+    return tmp_hex_to_int(high) * 16 + tmp_hex_to_int(low)
+
+
+def tmp_hex_pair_to_float(high: str, low: str) -> float:
+    return max(0.0, min(1.0, tmp_hex_byte(high, low) / 255.0))
+
+
+def normalize_color_hex(value: str, *, allow_tmp_invalid: bool) -> str | None:
+    raw = strip_tmp_quotes(value)
+    if raw.startswith("#"):
+        raw = raw[1:]
+    raw = raw.strip()
+    if not raw:
+        return None
+    if len(raw) not in {3, 4, 6, 8}:
+        return None
+    if not allow_tmp_invalid and not re.fullmatch(r"[0-9a-fA-F]+", raw):
+        return None
+    if len(raw) in {3, 4}:
+        return "".join(f"{tmp_hex_to_int(ch):x}" * 2 for ch in raw[:3])
+    return "".join(f"{tmp_hex_to_int(ch):x}" for ch in raw[:6])
+
+
+def tmp_color_alpha(value: str) -> float | None:
+    raw = strip_tmp_quotes(value)
+    if raw.startswith("#"):
+        raw = raw[1:]
+    raw = raw.strip()
+    if len(raw) == 4:
+        return tmp_hex_pair_to_float(raw[3], raw[3])
+    if len(raw) == 8:
+        return tmp_hex_pair_to_float(raw[6], raw[7])
+    return None
+
+
+def is_tmp_hash_color(value: str) -> bool:
+    raw = strip_tmp_quotes(value)
+    if not raw.startswith("#"):
+        return False
+    raw = raw[1:].strip()
+    return len(raw) in {3, 4, 6, 8} and not any(ch.isspace() for ch in raw)
+
+
+def parse_relaxed_float(raw: str) -> float:
+    try:
+        return float(raw)
+    except ValueError:
+        match = TMP_FLOAT_PREFIX_RE.match(raw.strip())
+        if match is None:
+            raise
+        return float(match.group(0))
+
+
 def color_or(default: str, value: str | None) -> str:
     value = (value or "").strip()
     if not value:
         return default
-    if value.startswith("#"):
-        raw = value[1:]
-        if re.fullmatch(r"[0-9a-fA-F]{3,4}", raw):
-            return "#" + "".join(ch * 2 for ch in raw[:3])
-        if re.fullmatch(r"[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", raw):
-            return "#" + raw[:6]
-        return default
-    if re.fullmatch(r"[0-9a-fA-F]{3,4}", value):
-        return "#" + "".join(ch * 2 for ch in value[:3])
-    if re.fullmatch(r"[0-9a-fA-F]{6}([0-9a-fA-F]{2})?", value):
-        return "#" + value[:6]
+    raw = strip_tmp_quotes(value)
+    allow_tmp_invalid = raw.startswith("#")
+    normalized = normalize_color_hex(raw, allow_tmp_invalid=allow_tmp_invalid)
+    if normalized is not None:
+        return "#" + normalized
     return default
 
 
 def parse_hex_alpha(value: str) -> float:
-    value = value.strip()
-    if value.startswith("#"):
-        value = value[1:]
-    if not value:
+    raw = strip_tmp_quotes(value)
+    if raw.startswith("#"):
+        raw = raw[1:]
+    raw = raw.strip()
+    if not raw:
         return 1.0
-    try:
-        if len(value) <= 2:
-            return max(0.0, min(1.0, int(value, 16) / 255.0))
-        return max(0.0, min(1.0, int(value[-2:], 16) / 255.0))
-    except ValueError:
-        return 1.0
+    if len(raw) == 1:
+        return tmp_hex_pair_to_float(raw[0], raw[0])
+    return tmp_hex_pair_to_float(raw[0], raw[1])
 
 
 def parse_tmp_color_alpha(value: str, fallback: float) -> float:
-    raw = value.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1].strip()
-    if raw.startswith("#"):
-        raw = raw[1:]
-    try:
-        if re.fullmatch(r"[0-9a-fA-F]{4}", raw):
-            return max(0.0, min(1.0, int(raw[3] * 2, 16) / 255.0))
-        if re.fullmatch(r"[0-9a-fA-F]{8}", raw):
-            return max(0.0, min(1.0, int(raw[6:8], 16) / 255.0))
-    except ValueError:
-        return fallback
-    return fallback
+    alpha = tmp_color_alpha(value)
+    return fallback if alpha is None else alpha
 
 
 def parse_float(value: str, fallback: float) -> float:
     try:
-        raw = value.strip()
-        if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-            raw = raw[1:-1].strip()
-        return float(raw.rstrip("%"))
+        raw = strip_tmp_quotes(value)
+        return parse_relaxed_float(raw.rstrip("%"))
     except ValueError:
         return fallback
 
@@ -161,47 +217,53 @@ def parse_float(value: str, fallback: float) -> float:
 def parse_tmp_numeric(
     value: str, fallback: float, font_size: float | None = None, percent_base: float | None = None
 ) -> float:
-    raw = value.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1].strip()
+    raw = strip_tmp_quotes(value)
     lower = raw.lower()
     try:
         if lower.endswith("em"):
-            number = float(lower[:-2].strip())
+            number = parse_relaxed_float(lower[:-2].strip())
             return number * (font_size if font_size is not None else fallback)
         if lower.endswith("px"):
-            return float(lower[:-2].strip())
+            return parse_relaxed_float(lower[:-2].strip())
         if lower.endswith("%"):
-            number = float(lower[:-1].strip())
+            number = parse_relaxed_float(lower[:-1].strip())
             base = percent_base if percent_base is not None else (font_size if font_size is not None else fallback)
             return base * number / 100.0
-        return float(raw)
+        return parse_relaxed_float(raw)
     except ValueError:
         return fallback
 
 
 def parse_tmp_percent(value: str) -> float | None:
-    raw = value.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1].strip()
+    raw = strip_tmp_quotes(value)
     if not raw.endswith("%"):
         return None
     try:
-        return float(raw[:-1].strip()) / 100.0
+        return parse_relaxed_float(raw[:-1].strip()) / 100.0
     except ValueError:
         return None
 
 
 def parse_tmp_scale(value: str, fallback: float) -> float:
-    raw = value.strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1].strip()
+    raw = strip_tmp_quotes(value)
+    if not raw:
+        return fallback
+    # TMP treats whitespace inside tags as attribute separators, so
+    # <scale=3 4> behaves like <scale=3> with a stray ignored attribute.
+    raw = re.split(r"[\s,]+", raw, maxsplit=1)[0]
     try:
         if raw.endswith("%"):
-            return float(raw[:-1].strip()) / 100.0
-        return float(raw)
+            return parse_relaxed_float(raw[:-1].strip()) / 100.0
+        return parse_relaxed_float(raw)
     except ValueError:
         return fallback
+
+
+def parse_tmp_position(value: str, fallback: float) -> tuple[float, float | None]:
+    percent = parse_tmp_percent(value)
+    if percent is not None:
+        return 0.0, percent
+    return parse_tmp_numeric(value, fallback), None
 
 
 def parse_tmp_tag_value(raw: str) -> str:
@@ -224,7 +286,7 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
     tag_l = raw.lower()
     if tag_l.startswith("/"):
         return None
-    if tag_l.startswith("#") and re.fullmatch(r"#[0-9a-f]{3,4}([0-9a-f]{3,4})?", tag_l):
+    if tag_l.startswith("#") and is_tmp_hash_color(raw):
         return apply_tmp_color(raw, style)
     if tag_l.startswith("color="):
         return apply_tmp_color(parse_tmp_tag_value(raw), style)
@@ -233,7 +295,7 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
     if tag_l.startswith("size="):
         return replace(style, size=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size))
     if tag_l.startswith("scale="):
-        return replace(style, scale_x=parse_tmp_scale(parse_tmp_tag_value(raw), style.scale_x), rotate=0.0)
+        return replace(style, scale_x=parse_tmp_scale(parse_tmp_tag_value(raw), style.scale_x))
     if tag_l.startswith("cspace="):
         return replace(style, cspace=parse_tmp_numeric(parse_tmp_tag_value(raw), style.cspace, style.size, style.size))
     if tag_l.startswith("mspace="):
@@ -261,11 +323,14 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
             style, line_height=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size)
         )
     if tag_l.startswith("rotate="):
-        return replace(style, rotate=parse_float(parse_tmp_tag_value(raw), style.rotate), scale_x=1.0)
+        return replace(style, rotate=parse_float(parse_tmp_tag_value(raw), style.rotate))
     if tag_l.startswith("voffset="):
         return replace(
             style, voffset=parse_tmp_numeric(parse_tmp_tag_value(raw), style.voffset, style.size, style.size)
         )
+    if tag_l.startswith("pos="):
+        pos, percent = parse_tmp_position(parse_tmp_tag_value(raw), style.pos or 0.0)
+        return replace(style, pos=pos, pos_percent=percent)
     if tag_l.startswith("mark="):
         return replace(style, mark_color=color_or(style.color, parse_tmp_tag_value(raw)))
     if tag_l == "sup":
@@ -288,6 +353,14 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
         return replace(style, underline=True)
     if tag_l == "s":
         return replace(style, strike=True)
+    if tag_l in {"nobr", "noparse"}:
+        return style
+    if tag_l.startswith(("align=", "width=", "margin=", "margin-left=", "margin-right=", "link=", "style=", "font=")):
+        return style
+    if tag_l.startswith(("font-weight=", "space=")):
+        return style
+    if tag_l in {"uppercase", "allcaps", "lowercase", "smallcaps"}:
+        return style
     return INVALID_TMP_TAG
 
 
@@ -297,7 +370,7 @@ def tmp_tag_kind(tag: str) -> str | None:
     if tag_l.startswith("/"):
         tag_l = tag_l[1:].strip()
     name = tag_l.split("=", 1)[0].strip()
-    if name.startswith("#") and re.fullmatch(r"#[0-9a-f]{3,4}([0-9a-f]{3,4})?", name):
+    if name.startswith("#") and is_tmp_hash_color(name):
         return "color"
     if name in {
         "color",
@@ -311,6 +384,7 @@ def tmp_tag_kind(tag: str) -> str | None:
         "line-height",
         "rotate",
         "voffset",
+        "pos",
         "mark",
         "b",
         "i",
@@ -318,6 +392,22 @@ def tmp_tag_kind(tag: str) -> str | None:
         "s",
         "sup",
         "sub",
+        "nobr",
+        "noparse",
+        "align",
+        "width",
+        "margin",
+        "margin-left",
+        "margin-right",
+        "link",
+        "style",
+        "font",
+        "font-weight",
+        "space",
+        "uppercase",
+        "allcaps",
+        "lowercase",
+        "smallcaps",
     }:
         return name
     return None
@@ -331,7 +421,7 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
     if kind == "size":
         return replace(style, size=previous.size)
     if kind == "scale":
-        return replace(style, scale_x=1.0, rotate=0.0)
+        return replace(style, scale_x=1.0)
     if kind == "cspace":
         return replace(style, cspace=0.0)
     if kind == "mspace":
@@ -343,7 +433,7 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
     if kind == "line-height":
         return replace(style, line_height=None)
     if kind == "rotate":
-        return replace(style, scale_x=1.0, rotate=0.0)
+        return replace(style, rotate=0.0)
     if kind == "voffset":
         return replace(style, voffset=0.0)
     if kind == "mark":
@@ -358,6 +448,27 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
         return replace(style, strike=previous.strike)
     if kind in {"sup", "sub"}:
         return replace(style, size=previous.size, voffset=previous.voffset)
+    if kind == "pos":
+        return replace(style, pos=previous.pos, pos_percent=previous.pos_percent)
+    if kind in {
+        "nobr",
+        "noparse",
+        "align",
+        "width",
+        "margin",
+        "margin-left",
+        "margin-right",
+        "link",
+        "style",
+        "font",
+        "font-weight",
+        "space",
+        "uppercase",
+        "allcaps",
+        "lowercase",
+        "smallcaps",
+    }:
+        return style
     return previous
 
 
@@ -393,7 +504,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     stack = stacks.get(kind)
                     previous = stack.pop() if stack else base_style
                     style = restore_tmp_tag_kind(style, previous, kind)
-                    runs.append(TextStyleMarker(style))
+                    runs.append(TextStyleMarker(style, kind, False))
                     i = end + 1
                     continue
                 next_style = apply_tmp_tag(tag, style)
@@ -409,7 +520,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     if kind is not None:
                         stacks.setdefault(kind, []).append(style)
                     style = next_style
-                    runs.append(TextStyleMarker(style))
+                    runs.append(TextStyleMarker(style, kind, True))
                 i = end + 1
                 continue
         buf.append(value[i])
