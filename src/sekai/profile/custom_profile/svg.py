@@ -16,9 +16,8 @@ from urllib.parse import quote
 
 DEFAULT_PROFILE = Path("/Users/deseer/PycharmProjects/metadata/profile.json")
 DEFAULT_MASTERDATA = Path("/Users/deseer/PycharmProjects/haruki-sekai-sc-master/master")
-DEFAULT_DATA_DIR = Path(__file__).resolve().parents[4] / "data"
-DEFAULT_ASSETS = DEFAULT_DATA_DIR / "asset" / "cn-assets" / "startapp" / "custom_profile"
-DEFAULT_FONTS = DEFAULT_ASSETS / "font"
+DEFAULT_ASSETS = Path("/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/cn-assets/startapp/custom_profile")
+DEFAULT_FONTS = Path("/Users/deseer/Downloads/sekai-custom-profile-fonts/cn/fonts")
 
 CANVAS_W = 2048
 CANVAS_H = 1024
@@ -71,8 +70,6 @@ class TextBreak:
 @dataclass(frozen=True)
 class TextStyleMarker:
     style: TextStyle
-    kind: str | None = None
-    opening: bool = True
 
 
 TextToken = TextRun | TextBreak | TextStyleMarker
@@ -295,7 +292,7 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
     if tag_l.startswith("size="):
         return replace(style, size=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size))
     if tag_l.startswith("scale="):
-        return replace(style, scale_x=parse_tmp_scale(parse_tmp_tag_value(raw), style.scale_x))
+        return replace(style, scale_x=parse_tmp_scale(parse_tmp_tag_value(raw), style.scale_x), rotate=0.0)
     if tag_l.startswith("cspace="):
         return replace(style, cspace=parse_tmp_numeric(parse_tmp_tag_value(raw), style.cspace, style.size, style.size))
     if tag_l.startswith("mspace="):
@@ -323,7 +320,7 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
             style, line_height=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size)
         )
     if tag_l.startswith("rotate="):
-        return replace(style, rotate=parse_float(parse_tmp_tag_value(raw), style.rotate))
+        return replace(style, rotate=parse_float(parse_tmp_tag_value(raw), style.rotate), scale_x=1.0)
     if tag_l.startswith("voffset="):
         return replace(
             style, voffset=parse_tmp_numeric(parse_tmp_tag_value(raw), style.voffset, style.size, style.size)
@@ -421,7 +418,7 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
     if kind == "size":
         return replace(style, size=previous.size)
     if kind == "scale":
-        return replace(style, scale_x=1.0)
+        return replace(style, scale_x=1.0, rotate=0.0)
     if kind == "cspace":
         return replace(style, cspace=0.0)
     if kind == "mspace":
@@ -433,7 +430,7 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
     if kind == "line-height":
         return replace(style, line_height=None)
     if kind == "rotate":
-        return replace(style, rotate=0.0)
+        return replace(style, scale_x=1.0, rotate=0.0)
     if kind == "voffset":
         return replace(style, voffset=0.0)
     if kind == "mark":
@@ -504,7 +501,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     stack = stacks.get(kind)
                     previous = stack.pop() if stack else base_style
                     style = restore_tmp_tag_kind(style, previous, kind)
-                    runs.append(TextStyleMarker(style, kind, False))
+                    runs.append(TextStyleMarker(style))
                     i = end + 1
                     continue
                 next_style = apply_tmp_tag(tag, style)
@@ -520,7 +517,7 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
                     if kind is not None:
                         stacks.setdefault(kind, []).append(style)
                     style = next_style
-                    runs.append(TextStyleMarker(style, kind, True))
+                    runs.append(TextStyleMarker(style))
                 i = end + 1
                 continue
         buf.append(value[i])
