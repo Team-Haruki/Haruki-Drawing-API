@@ -1134,7 +1134,10 @@ class Painter:
             sw = shadow_width
             lw, lh = w + sw * 2, h + sw * 2
             # 获取和图像相同形状的阴影mask
-            shadow_source_mask = sub_img.getchannel("A") if sub_img.mode == "RGBA" else Image.new("L", sub_img.size, 255)
+            if sub_img.mode == "RGBA":
+                shadow_source_mask = sub_img.getchannel("A")
+            else:
+                shadow_source_mask = Image.new("L", sub_img.size, 255)
             shadow_mask = Image.new("L", (lw, lh), 0)
             shadow_mask.paste(Image.new("L", sub_img.size, int(255 * shadow_alpha)), (sw, sw), shadow_source_mask)
             # 模糊获取阴影
