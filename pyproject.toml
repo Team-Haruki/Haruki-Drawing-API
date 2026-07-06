@@ -4,7 +4,7 @@ version = "2.4.8"
 description = "Add your description here"
 requires-python = ">=3.14"
 dependencies = [
-    "fastapi>=0.136.3",
+    "fastapi>=0.138.0",
     "granian>=2.7.6",
     "matplotlib>=3.11.0",
     "numpy>=2.4.2",
