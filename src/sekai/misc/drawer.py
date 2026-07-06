@@ -1,8 +1,11 @@
 import asyncio
+from dataclasses import dataclass
+from functools import partial
 import logging
+import re
 import time
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from src.sekai.base.draw import (
     BG_PADDING,
@@ -13,7 +16,7 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import ADAPTIVE_WB, WHITE, color_code_to_rgb
+from src.sekai.base.painter import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font, get_text_size
 from src.sekai.base.plot import (
     Flow,
     Frame,
@@ -38,11 +41,12 @@ from src.sekai.base.utils import (
     get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
+    run_in_pool,
 )
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 # =========================== 从.model导入数据类型 =========================== #
-from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest
+from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest, CommandHelpRenderRequest
 
 logger = logging.getLogger(__name__)
 _birthday_perf_logger = logging.getLogger("misc.birthday.perf")
@@ -50,6 +54,11 @@ _birthday_perf_logger = logging.getLogger("misc.birthday.perf")
 # =========================== 颜色常量 =========================== #
 
 BLACK = (0, 0, 0, 255)
+_HELP_IMAGE_WIDTH = 1080
+_HELP_MARGIN = 48
+_HELP_CARD_MARGIN = 28
+_HELP_MAX_TEXT_WIDTH = _HELP_IMAGE_WIDTH - _HELP_MARGIN * 2
+_HELP_LINK_RE = re.compile(r"\[([^\]]+)]\([^)]+\)")
 _ALIAS_LIST_CACHE_NAMESPACE = "alias_list"
 _ALIAS_TRIM_ALPHA_FLOOR = 36
 _ALIAS_TRIM_MIN_FRAME_W = 260
@@ -60,6 +69,268 @@ _ALIAS_TRIM_MIN_DISPLAY_H = 460
 _ALIAS_TRIM_BOTTOM_OVERFLOW = 24
 _BIRTHDAY_CARD_THUMB_SIZE = 80
 _BIRTHDAY_CALENDAR_ICON_SIZE = 40
+
+
+@dataclass(frozen=True)
+class _CommandHelpLine:
+    text: str
+    font_name: str
+    size: int
+    indent: int = 0
+    fill: tuple[int, int, int, int] = (50, 61, 78, 255)
+    bg: tuple[int, int, int, int] | None = None
+    gap_before: int = 0
+
+
+def _command_help_line_height(size: int) -> int:
+    return max(18, int(size * 1.42))
+
+
+def _clean_command_help_inline(text: str) -> str:
+    text = _HELP_LINK_RE.sub(r"\1", text)
+    text = text.replace("`", "")
+    text = text.replace("**", "").replace("__", "")
+    text = text.replace("\\", "")
+    return text.strip()
+
+
+def _command_help_heading(line: str) -> tuple[str, int] | None:
+    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    if not match:
+        return None
+    return match.group(2), len(match.group(1))
+
+
+def _command_help_bullet(line: str) -> str | None:
+    match = re.match(r"^[-*+]\s+(.+?)\s*$", line)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _command_help_numbered(line: str) -> str | None:
+    match = re.match(r"^(\d+[.)])\s+(.+?)\s*$", line)
+    if not match:
+        return None
+    return f"{match.group(1)} {match.group(2)}"
+
+
+def _wrap_command_help_text(font_name: str, size: int, text: str, max_width: int) -> list[str]:
+    text = text.strip()
+    if not text:
+        return [""]
+
+    font = get_font(font_name, size)
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        if char == "\t":
+            char = " "
+        candidate = current + char
+        if current and get_text_size(font, candidate)[0] > max_width:
+            lines.append(current.rstrip())
+            current = "" if char == " " else char
+            continue
+        current = candidate
+    if current.strip():
+        lines.append(current.rstrip())
+    return lines or [text]
+
+
+def _append_command_help_wrapped_line(
+    lines: list[_CommandHelpLine],
+    text: str,
+    *,
+    font_name: str,
+    size: int,
+    indent: int = 0,
+    fill: tuple[int, int, int, int],
+    bg: tuple[int, int, int, int] | None = None,
+    gap_before: int = 0,
+) -> None:
+    text = text.rstrip()
+    if not text:
+        lines.append(_CommandHelpLine("", font_name, size, indent, fill, bg, gap_before))
+        return
+    for idx, part in enumerate(_wrap_command_help_text(font_name, size, text, _HELP_MAX_TEXT_WIDTH - indent)):
+        lines.append(
+            _CommandHelpLine(
+                part,
+                font_name,
+                size,
+                indent,
+                fill,
+                bg,
+                gap_before if idx == 0 else 0,
+            )
+        )
+
+
+def _strip_command_help_frontmatter(markdown: str) -> str:
+    lines = markdown.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return markdown
+    for idx, line in enumerate(lines[1:], start=1):
+        if line.strip() == "---":
+            return "\n".join(lines[idx + 1 :])
+    return markdown
+
+
+def _layout_command_help_markdown(markdown: str) -> list[_CommandHelpLine]:
+    markdown = _strip_command_help_frontmatter(markdown or "")
+    lines: list[_CommandHelpLine] = []
+    in_code = False
+
+    for raw in markdown.splitlines():
+        trimmed_right = raw.rstrip("\r\t ")
+        trimmed = trimmed_right.strip()
+        if trimmed.startswith("```"):
+            in_code = not in_code
+            continue
+        if in_code:
+            _append_command_help_wrapped_line(
+                lines,
+                trimmed_right,
+                font_name=DEFAULT_FONT,
+                size=20,
+                indent=24,
+                fill=(42, 52, 68, 255),
+                bg=(239, 243, 248, 255),
+                gap_before=2,
+            )
+            continue
+        if not trimmed:
+            lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
+            continue
+        if trimmed.startswith(("import ", "const ", "<")):
+            continue
+
+        heading = _command_help_heading(trimmed)
+        if heading is not None:
+            text, level = heading
+            _append_command_help_wrapped_line(
+                lines,
+                _clean_command_help_inline(text),
+                font_name=DEFAULT_HEAVY_FONT if level == 1 else DEFAULT_BOLD_FONT,
+                size=32 if level == 1 else 25,
+                fill=(26, 38, 58, 255),
+                gap_before=20 if level == 1 else 16,
+            )
+            continue
+
+        bullet = _command_help_bullet(trimmed)
+        if bullet is not None:
+            _append_command_help_wrapped_line(
+                lines,
+                "• " + _clean_command_help_inline(bullet),
+                font_name=DEFAULT_FONT,
+                size=22,
+                indent=30,
+                fill=(50, 61, 78, 255),
+                gap_before=4,
+            )
+            continue
+
+        numbered = _command_help_numbered(trimmed)
+        if numbered is not None:
+            _append_command_help_wrapped_line(
+                lines,
+                _clean_command_help_inline(numbered),
+                font_name=DEFAULT_FONT,
+                size=22,
+                indent=30,
+                fill=(50, 61, 78, 255),
+                gap_before=4,
+            )
+            continue
+
+        if trimmed.startswith(">"):
+            _append_command_help_wrapped_line(
+                lines,
+                _clean_command_help_inline(trimmed.lstrip(">").strip()),
+                font_name=DEFAULT_FONT,
+                size=20,
+                indent=24,
+                fill=(87, 103, 126, 255),
+                bg=(242, 245, 250, 255),
+                gap_before=8,
+            )
+            continue
+
+        if trimmed.startswith("|") and "|" in trimmed[1:]:
+            _append_command_help_wrapped_line(
+                lines,
+                _clean_command_help_inline(trimmed),
+                font_name=DEFAULT_FONT,
+                size=18,
+                indent=20,
+                fill=(42, 52, 68, 255),
+                bg=(239, 243, 248, 255),
+                gap_before=4,
+            )
+            continue
+
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed),
+            font_name=DEFAULT_FONT,
+            size=22,
+            fill=(50, 61, 78, 255),
+            gap_before=4,
+        )
+
+    while lines and not lines[0].text:
+        lines.pop(0)
+    while lines and not lines[-1].text:
+        lines.pop()
+    return lines
+
+
+def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
+    lines = _layout_command_help_markdown(rqd.markdown)
+    if not lines:
+        lines = [
+            _CommandHelpLine(
+                (rqd.title or "指令帮助").strip(),
+                DEFAULT_HEAVY_FONT,
+                32,
+                fill=(26, 38, 58, 255),
+                gap_before=20,
+            )
+        ]
+
+    height = _HELP_MARGIN
+    for line in lines:
+        height += line.gap_before + _command_help_line_height(line.size)
+    height = max(360, height + _HELP_MARGIN)
+
+    img = Image.new("RGBA", (_HELP_IMAGE_WIDTH, height), (246, 248, 252, 255))
+    draw = ImageDraw.Draw(img)
+    card_box = (_HELP_CARD_MARGIN, _HELP_CARD_MARGIN, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, height - _HELP_CARD_MARGIN)
+    draw.rounded_rectangle(card_box, radius=22, fill=(255, 255, 255, 255), outline=(224, 229, 237, 255), width=2)
+
+    y = _HELP_MARGIN
+    for line in lines:
+        y += line.gap_before
+        line_height = _command_help_line_height(line.size)
+        if line.bg is not None:
+            bg_box = (
+                _HELP_MARGIN + line.indent - 14,
+                y - 4,
+                _HELP_IMAGE_WIDTH - _HELP_MARGIN + 14,
+                y + line_height - 2,
+            )
+            draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
+        if line.text:
+            font = get_font(line.font_name, line.size)
+            draw.text((_HELP_MARGIN + line.indent, y), line.text, font=font, fill=line.fill)
+        y += line_height
+
+    return img
+
+
+async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Image:
+    return await run_in_pool(partial(_compose_command_help_image_sync, rqd))
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
