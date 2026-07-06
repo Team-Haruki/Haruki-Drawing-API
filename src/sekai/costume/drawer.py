@@ -58,6 +58,12 @@ def _source_cards_text(ids: list[int]) -> str:
     return ", ".join(str(i) for i in ids[:6]) + f" 等{len(ids)}张"
 
 
+def _published_time_text(costume, timezone: str) -> str:
+    if not costume.published_at:
+        return "-"
+    return _format_time(costume.published_at, timezone)
+
+
 def _preview_placeholder(label: str, size: tuple[int, int] = (420, 520)) -> None:
     def draw(_, p):
         text_style = get_font_desc(DEFAULT_BOLD_FONT, 28)
@@ -184,9 +190,7 @@ async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image
                     _draw_info_row("获得", costume.how_to_obtain or "-")
                     _draw_info_row("设计", costume.designer or "-")
                     _draw_info_row("来源卡", _source_cards_text(costume.source_card_ids))
-                    _draw_info_row(
-                        "发布", _format_time(costume.published_at or costume.archive_published_at, rqd.timezone)
-                    )
+                    _draw_info_row("发布", _published_time_text(costume, rqd.timezone))
 
                 with VSplit().set_padding(16).set_sep(10).set_bg(roundrect_bg(alpha=80)).set_item_align("lt"):
                     TextBox("颜色缩略图 / 指定 ID", label_style)
