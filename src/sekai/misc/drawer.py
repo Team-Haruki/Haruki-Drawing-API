@@ -371,7 +371,7 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
             size=21,
             fill=(50, 61, 78, 255),
             gap_before=7,
-            )
+        )
 
     flush_section()
     return title, sections
