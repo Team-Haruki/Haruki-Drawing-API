@@ -32,6 +32,8 @@ LIST_THUMB_SIZE = 34
 LIST_GRID_PADDING = 10
 LIST_GRID_SEP = 4
 LIST_PANEL_WIDTH = LIST_COL_COUNT * LIST_ITEM_WIDTH + (LIST_COL_COUNT - 1) * LIST_GRID_SEP + LIST_GRID_PADDING * 2
+COSTUME_DETAIL_PREVIEW_SIZE = (420, 520)
+PREVIEW_FOREGROUND_DETECT_WIDTH = 700
 
 
 async def _load_image(path: str | None) -> Image.Image:
@@ -42,6 +44,87 @@ async def _load_optional_image(path: str | None) -> Image.Image | None:
     if not path:
         return None
     return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="placeholder")
+
+
+def _preview_foreground_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:
+    source = image.convert("RGBA")
+    alpha_bbox = source.getchannel("A").getbbox()
+    if alpha_bbox and alpha_bbox != (0, 0, source.width, source.height):
+        return alpha_bbox
+
+    scale = min(1.0, PREVIEW_FOREGROUND_DETECT_WIDTH / source.width)
+    small_size = (max(1, round(source.width * scale)), max(1, round(source.height * scale)))
+    sample = source.resize(small_size, Image.Resampling.BILINEAR) if small_size != source.size else source
+    pixels = sample.load()
+    width, height = sample.size
+    edge_width = max(2, round(width * 0.02))
+    threshold = 36
+    min_col_hits = max(2, round(height * 0.015))
+    min_row_hits = max(2, round(width * 0.015))
+    col_hits = [0] * width
+    row_hits = [0] * height
+
+    for y in range(height):
+        edge_pixels = []
+        for x in range(edge_width):
+            edge_pixels.append(pixels[x, y])
+            edge_pixels.append(pixels[width - 1 - x, y])
+        bg_r = sum(item[0] for item in edge_pixels) // len(edge_pixels)
+        bg_g = sum(item[1] for item in edge_pixels) // len(edge_pixels)
+        bg_b = sum(item[2] for item in edge_pixels) // len(edge_pixels)
+
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            if a > 16 and max(abs(r - bg_r), abs(g - bg_g), abs(b - bg_b)) > threshold:
+                col_hits[x] += 1
+                row_hits[y] += 1
+
+    xs = [idx for idx, hits in enumerate(col_hits) if hits >= min_col_hits]
+    ys = [idx for idx, hits in enumerate(row_hits) if hits >= min_row_hits]
+    if not xs or not ys:
+        return None
+
+    inv_scale = 1.0 / scale
+    return (
+        max(0, round(min(xs) * inv_scale)),
+        max(0, round(min(ys) * inv_scale)),
+        min(source.width, round((max(xs) + 1) * inv_scale)),
+        min(source.height, round((max(ys) + 1) * inv_scale)),
+    )
+
+
+def _costume_preview_cover_crop_box(
+    image: Image.Image,
+    target_size: tuple[int, int] = COSTUME_DETAIL_PREVIEW_SIZE,
+) -> tuple[int, int, int, int]:
+    width, height = image.size
+    target_w, target_h = target_size
+    target_aspect = target_w / target_h
+    source_aspect = width / height
+    bbox = _preview_foreground_bbox(image)
+
+    if source_aspect > target_aspect:
+        crop_h = height
+        crop_w = min(width, max(1, round(height * target_aspect)))
+        center_x = (bbox[0] + bbox[2]) / 2 if bbox else width / 2
+        left = round(center_x - crop_w / 2)
+        left = max(0, min(left, width - crop_w))
+        return (left, 0, left + crop_w, height)
+
+    crop_w = width
+    crop_h = min(height, max(1, round(width / target_aspect)))
+    center_y = (bbox[1] + bbox[3]) / 2 if bbox else height / 2
+    top = round(center_y - crop_h / 2)
+    top = max(0, min(top, height - crop_h))
+    return (0, top, width, top + crop_h)
+
+
+def _prepare_costume_preview_image(
+    image: Image.Image,
+    target_size: tuple[int, int] = COSTUME_DETAIL_PREVIEW_SIZE,
+) -> Image.Image:
+    crop_box = _costume_preview_cover_crop_box(image, target_size)
+    return image.convert("RGBA").crop(crop_box).resize(target_size, Image.Resampling.LANCZOS)
 
 
 def _format_time(value: int | None, timezone: str) -> str:
@@ -176,9 +259,9 @@ async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image
         with HSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             with VSplit().set_padding(16).set_sep(0).set_bg(roundrect_bg(alpha=80)).set_item_align("c"):
                 if preview:
-                    ImageBox(preview, size=(420, 520), image_size_mode="fit", shadow=True)
+                    ImageBox(_prepare_costume_preview_image(preview), size=COSTUME_DETAIL_PREVIEW_SIZE, shadow=True)
                 else:
-                    _preview_placeholder(f"costume_id={costume.costume_id}")
+                    _preview_placeholder(f"costume_id={costume.costume_id}", COSTUME_DETAIL_PREVIEW_SIZE)
 
             with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
                 with VSplit().set_padding(16).set_sep(8).set_bg(roundrect_bg(alpha=80)).set_item_align("lt"):
