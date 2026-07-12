@@ -1,7 +1,18 @@
+import os
+
 from pydantic import ValidationError
 import pytest
 
 from src.settings import PROJECT_ROOT, DrawingSettings, Settings
+
+
+@pytest.fixture(autouse=True)
+def _clear_ambient_haruki_env(monkeypatch):
+    """Settings construction reads HARUKI_* env (env > yaml by design), so ambient
+    variables — e.g. CI's HARUKI_FONT__EMOJI — would leak into these tests."""
+    for key in list(os.environ):
+        if key.startswith("HARUKI_"):
+            monkeypatch.delenv(key, raising=False)
 
 
 def test_settings_from_yaml_maps_legacy_config_and_resolves_paths(tmp_path):
