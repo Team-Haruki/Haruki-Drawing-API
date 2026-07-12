@@ -3,12 +3,14 @@ from fastapi import APIRouter
 from . import (
     card,
     chart,
+    command_help,
     costume,
     deck,
     education,
     event,
     gacha,
     honor,
+    inventory,
     misc,
     music,
     mysekai,
@@ -32,8 +34,10 @@ router.include_router(score.router, prefix="/score")
 router.include_router(stamp.router, prefix="/stamp")
 router.include_router(misc.router, prefix="/misc")
 router.include_router(education.router, prefix="/education")
+router.include_router(inventory.router, prefix="/inventory")
 router.include_router(deck.router, prefix="/deck")
 router.include_router(mysekai.router, prefix="/mysekai")
 router.include_router(sk.router, prefix="/sk")
 router.include_router(chart.router, prefix="/chart")
 router.include_router(vlive.router, prefix="/vlive")
+router.include_router(command_help.router, prefix="/help")

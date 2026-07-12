@@ -97,7 +97,7 @@ def test_image_and_thumbnail_caches_record_hits(monkeypatch):
 def test_rendered_image_cache_key_is_stable_for_dict_ordering():
     first = utils.build_rendered_image_cache_key("sample", {"b": 2, "a": 1})
     second = utils.build_rendered_image_cache_key("sample", {"a": 1, "b": 2})
-    changed = utils.build_rendered_image_cache_key("sample", {"a": 1, "b": 2}, extra={"version": 2})
+    changed = utils.build_rendered_image_cache_key("sample", {"a": 1, "b": 2}, extra={"state": "changed"})
 
     assert first == second
     assert first != changed

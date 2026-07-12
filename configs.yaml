@@ -44,11 +44,11 @@ drawing:
   skia_card_list_log_visual_metrics: false
   use_skia_card_box: false
   skia_card_fallback_to_pillow: true
-  custom_profile_assets_dir: data/cn-assets/startapp/custom_profile
-  custom_profile_fonts_dir: /Users/deseer/Downloads/sekai-custom-profile-fonts/cn/fonts
-  custom_profile_tmp_font_metadata: ../custom-profile-render-lab/out/tmp-font-assets/cn/metadata.json
-  custom_profile_shape_sprite_dir: ../custom-profile-render-lab/out/shape-bundle/sprites-native
-  custom_profile_unity_ui_sprite_dir: data/static_images/customprofile
+  custom_profile_assets_dir: data/asset/{region}-assets/startapp/custom_profile
+  custom_profile_fonts_dir: data/asset/{region}-assets/startapp/custom_profile/font
+  custom_profile_tmp_font_metadata: data/custom_profile/tmp-font-assets/{region}/metadata.json
+  custom_profile_shape_sprite_dir: data/asset/{region}-assets/startapp/custom_profile/shape
+  custom_profile_unity_ui_sprite_dir: data/drawing/static_images/customprofile
   custom_profile_parallel_workers: 1
 
 server:

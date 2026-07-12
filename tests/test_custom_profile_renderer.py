@@ -15,6 +15,68 @@ from src.sekai.profile.custom_profile.renderer import (
     resize_rgba_premul,
 )
 from src.sekai.profile.custom_profile.split import decode_custom_profile_render_request
+from src.sekai.profile.custom_profile.svg import TextRun, TextStyle, parse_tmp_text
+
+
+def _base_tmp_style() -> TextStyle:
+    return TextStyle(
+        color="#000000",
+        alpha=1.0,
+        size=24.0,
+        scale_x=1.0,
+        cspace=0.0,
+        mspace=None,
+        indent=0.0,
+        line_indent=0.0,
+        line_height=None,
+        rotate=0.0,
+        voffset=0.0,
+        mark_color=None,
+        bold=False,
+        italic=False,
+        underline=False,
+        strike=False,
+    )
+
+
+def test_custom_profile_scale_tag_uses_first_tmp_attribute_value() -> None:
+    tokens = parse_tmp_text("<scale=3 4><size=300><#9a4d3b>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.scale_x == 3.0
+    assert runs[0].style.size == 300.0
+    assert runs[0].style.color == "#9a4d3b"
+
+
+def test_custom_profile_tmp_parser_tolerates_real_profile_tag_typos() -> None:
+    tokens = parse_tmp_text("<scale=1.8.><#FDECEI><pos=35><alpha=61#>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.scale_x == 1.8
+    assert runs[0].style.color == "#fdecef"
+    assert runs[0].style.pos == 35.0
+    assert 0.37 < runs[0].style.alpha < 0.39
+
+
+def test_custom_profile_tmp_parser_consumes_pos_tag_between_symbols() -> None:
+    tokens = parse_tmp_text("<size=80><scale=0.7><#D56844>▲<pos=35><voffset=-14>▲", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert "".join(run.text for run in runs) == "▲▲"
+    assert not any("<" in run.text or ">" in run.text for run in runs)
+
+
+def test_custom_profile_tmp_parser_tolerates_o_in_hex_color() -> None:
+    tokens = parse_tmp_text("<size=56><#FOBDBA><scale=6>●", _base_tmp_style())
+    runs = [token for token in tokens if isinstance(token, TextRun)]
+
+    assert len(runs) == 1
+    assert runs[0].text == "●"
+    assert runs[0].style.color == "#ffbdba"
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:

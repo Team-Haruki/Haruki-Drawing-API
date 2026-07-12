@@ -68,6 +68,31 @@ def test_validation_errors_are_reported_before_rendering():
     assert response.headers["content-type"].startswith("application/json")
 
 
+def test_inventory_endpoint_is_registered():
+    response = asyncio.run(_request("POST", "/api/pjsk/inventory/list", json={}))
+
+    assert response.status_code == 422
+    assert response.headers["content-type"].startswith("application/json")
+
+
+def test_command_help_render_endpoint_contract():
+    response = asyncio.run(
+        _request(
+            "POST",
+            "/api/pjsk/help/render",
+            json={
+                "path": "music",
+                "title": "音乐与乐曲",
+                "markdown": "# 音乐与乐曲\n\n- `/查曲 Tell Your World` 查询歌曲\n- `/查BPM 193 expert` 查询 BPM",
+            },
+        )
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.content.startswith(b"\x89PNG")
+
+
 def test_mysekai_housing_competition_endpoint_contract():
     tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     response = asyncio.run(

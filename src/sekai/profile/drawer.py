@@ -458,7 +458,7 @@ async def _build_cached_profile_module_image(
         namespace,
         request_payload,
         asset_signatures=asset_signatures,
-        extra=extra or {"version": 1},
+        extra=extra,
     )
     cached = get_composed_image_cached(cache_key)
     if cached is not None:

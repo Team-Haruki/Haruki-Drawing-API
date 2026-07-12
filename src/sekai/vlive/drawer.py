@@ -72,7 +72,6 @@ def _build_vlive_entry_cache_key(vlive: VLiveBrief, now: datetime) -> str:
         "vlive_list_entry",
         vlive,
         extra={
-            "version": 9,
             "state": "living" if vlive.living else "upcoming",
             "bucket": now.strftime("%Y%m%d%H%M"),
         },
