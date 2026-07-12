@@ -1,6 +1,6 @@
 # Skia 迁移剩余工作清单
 
-> 2026-07-12 盘点。迁移本体已完成:**59 用例对拍 58 ok / 1 pillow-only(honor)/ 0 失败**,
+> 2026-07-12 盘点,2026-07-13 更新。迁移本体已完成:**63 用例对拍 63 ok / 0 失败(pillow-only 已归零)**,
 > `use_skia_plot`/`use_skia_card_list` 默认开,card/box shim-first 与 chart 一进一出均已落地。
 > 本清单是切换后的收尾与生产化工作,按"挡在生产收益前面 → 端点残余 → 质量项 → 性能 → 收尾"排序。
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
@@ -8,23 +8,17 @@
 
 ## 🔴 挡在生产收益前面(不做这些,生产永远 fail-open 回退 Pillow)
 
-- [ ] **CI wheel 流水线**(D2:仓库 GitHub Actions 构建 artifact,不发 index):maturin 出 cp314t wheel
-      (生产 linux 架构 + macOS arm64 开发机),cargo/sccache 缓存,CI 断言 wheel tag ↔ Python 小版本。
-- [ ] **CI 跑 native 测试**:装 wheel 后 parity/ir_painter/safety 测试不再 skipif 全跳;cargo fmt/clippy/test
-      进 CI。前置:CI 字体供给(入库 OFL 思源子集或下载+cache);游戏资产类对拍仅本机跑。
-- [ ] **Docker 集成**:docker workflow 取 wheel artifact → 镜像 pip install → import 自检
-      (仿 pjsekai_scores_rs 模式);确认 libfreetype6/fontconfig/libgl1 覆盖 skia-safe 动态依赖。
-- [ ] **IR capability 版本握手**:IR JSON 带版本号,旧 wheel 遇新 IR 抛显式错误进回退计数
-      (wheel 与代码不经锁文件耦合,错配否则只表现为回退率飙升)。
+- [x] **CI wheel 流水线**(2026-07-13,skia-wheels.yml:linux-x86_64 + macos-arm64 矩阵、rust-cache、wheel tag 断言、IR_CAPABILITY 冒烟、artifact 上传)。
+- [x] **CI 跑 native 测试**(2026-07-13,quick-check native-tests job:maturin develop + OFL 字体下载缓存 + 全量 pytest;素材类 parity 自动跳过)。
+- [x] **Docker 集成**(2026-07-13,docker.yml 先构 wheel → docker/skia-wheels → 镜像条件安装 + 构建期自检;无 wheel 时 fail-open 构建仍绿,双分支本地实测)。
+- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY=3,load_native_renderer 校验不足抛 ImportError 走 fail-open)。
 - [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开;
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
 
 ## 🟡 端点残余
 
-- [ ] **honor 迁移**(M):① Group 级 image-alpha-mask 原语(saveLayer + DstIn,pixelwise 自适应的
-      分层结构可照搬);② honor 场景构建器(~135 行绝对坐标合成);③ bonds/生日/活动/fc_ap 变体
-      payload(生成器逻辑已写好,fixture 无对应称号,需合成);④ 水印壳照抄 chart 模式。
+- [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
 - [ ] **custom profile**(见可行性文档,渐进 0→2):
   - [ ] Phase 0(S,纯 Python):进程级 TMP metadata/字形 SDF/load_font 缓存——冷 1.7s → ~0.2-0.5s。
   - [ ] Phase 1(S~M):IR 加 Transform(矩阵)节点,合成层搬 Skia(mem 图 + 原生仿射)。
