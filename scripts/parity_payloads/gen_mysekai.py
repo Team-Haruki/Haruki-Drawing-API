@@ -780,7 +780,7 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
     return drops_out
 
 
-def build_map() -> dict:
+def _build_map_body() -> dict:
     merged = _raw_mysekai()
     harvest_by_site = {int(m.get("mysekaiSiteId", 0)): m
                        for m in _nested_list(merged, "userMysekaiHarvestMaps") if int(m.get("mysekaiSiteId", 0))}
@@ -834,6 +834,22 @@ def build_map() -> dict:
     )
     if ground:
         body["phenomena_ground_color"] = ground
+    return body
+
+
+def build_map() -> dict:
+    """Single-site map request: exercises the drawer's single-map (no-grid) branch."""
+    body = _build_map_body()
+    body["maps"] = body["maps"][:1]
+    return body
+
+
+def build_map_multi() -> dict:
+    """All harvest sites in one request (mysekaiMapSiteOrder, 4 sites) — the
+    production request-builder shape exercising the 2-column grid branch."""
+    body = _build_map_body()
+    if len(body["maps"]) < 4:
+        ISSUES.append(f"mysekai_map_multi: expected >=4 site maps, got {len(body['maps'])}")
     return body
 
 
@@ -1694,6 +1710,7 @@ def generate() -> list[str]:
     for name, builder, model in (
         ("mysekai_resource", build_resource, MysekaiResourceRequest),
         ("mysekai_map", build_map, MysekaiMsrMapRequest),
+        ("mysekai_map_multi", build_map_multi, MysekaiMsrMapRequest),
         ("mysekai_fixture_list", build_fixture_list, MysekaiFixtureListRequest),
         ("mysekai_door_upgrade", build_door_upgrade, MysekaiDoorUpgradeRequest),
         ("mysekai_music_record", build_music_record, MysekaiMusicrecordRequest),
