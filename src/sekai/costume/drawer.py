@@ -164,6 +164,8 @@ def _costume_lookup_text(costume) -> str:
         return f"服{costume.outfit_id} 角{role_text}"
     if costume.accessory_id:
         return f"饰{costume.accessory_id} 角{role_text}"
+    if costume.hair_id:
+        return f"发{costume.hair_id} 角{role_text}"
     return f"ID:{costume.costume_id}"
 
 
@@ -290,6 +292,8 @@ async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image
                         _draw_info_row("服装ID", str(costume.outfit_id))
                     elif costume.accessory_id:
                         _draw_info_row("饰品ID", str(costume.accessory_id))
+                    elif costume.hair_id:
+                        _draw_info_row("发型ID", str(costume.hair_id))
                     else:
                         _draw_info_row("ID", str(costume.costume_id))
                     role_ids = costume.character_3d_ids

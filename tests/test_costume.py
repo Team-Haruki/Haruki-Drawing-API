@@ -38,3 +38,9 @@ def test_costume_lookup_text_uses_accessory_id_and_role_range():
     costume = _costume(part_type="head", accessory_id=20, character_3d_ids=[21, 22, 23, 24, 25, 26])
 
     assert _costume_lookup_text(costume) == "饰20 角21-26"
+
+
+def test_costume_lookup_text_uses_role_local_hair_id():
+    costume = _costume(part_type="hair", hair_id=2, character_3d_id=23)
+
+    assert _costume_lookup_text(costume) == "发2 角23"
