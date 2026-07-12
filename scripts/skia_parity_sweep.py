@@ -17,8 +17,6 @@ pillow-only / pillow-none / pillow-error / skia-error / build-error /
 harness-error / skipped / no-payload.
 
 Known deviations (not failures):
-- ``card_box``: the Skia scene builder is fenced by ``_CARD_BOX_SCENE_STALE``
-  and always falls back to Pillow -> expected ``skia-none`` (known-blocked).
 - ``honor``: Skia is excluded by design -> Pillow baseline only.
 - ``mysekai_*`` (except housing-competition): needs the gitignored
   ``src/sekai/mysekai/drawer.real.py``; the whole domain is ``skipped`` when absent.
@@ -124,15 +122,7 @@ CASES: tuple[Case, ...] = (
     # ---- card ----
     _case("card_detail", "card", "card_detail", "CardDetailRequest"),
     _case("card_list", "card", "card_list", "CardListRequest", try_render_module=_SKIA_CARD_RENDER),
-    _case(
-        "card_box",
-        "card",
-        "box",
-        "CardBoxRequest",
-        try_render="try_render_card_box_payload",
-        try_render_module=_SKIA_CARD_RENDER,
-        note=f"{_KNOWN_BLOCKED_PREFIX}: _CARD_BOX_SCENE_STALE forces Pillow fallback (expected skia-none)",
-    ),
+    _case("card_box", "card", "box", "CardBoxRequest", try_render="try_render_box_payload"),
     # ---- costume ----
     _case("costume_list", "costume", "costume_list", "CostumeListRequest"),
     _case("costume_detail", "costume", "costume_detail", "CostumeDetailRequest"),
@@ -232,7 +222,7 @@ CASES: tuple[Case, ...] = (
 def setup() -> None:
     """Disable the process pool and force every Skia gate on. Call once at start."""
     settings.drawing.use_process_pool = False
-    for flag in ("use_skia_plot", "use_skia_card_list", "use_skia_card_box"):
+    for flag in ("use_skia_plot", "use_skia_card_list"):
         if hasattr(settings.drawing, flag):
             setattr(settings.drawing, flag, True)
 

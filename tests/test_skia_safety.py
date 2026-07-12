@@ -62,8 +62,3 @@ def test_skia_gates_default_on(flag):
 
     assert getattr(DrawingSettings(), flag) is True
 
-
-def test_card_box_gate_defaults_off_while_stale():
-    from src.settings import DrawingSettings
-
-    assert DrawingSettings().use_skia_card_box is False

@@ -45,8 +45,6 @@ server:
     assert settings.drawing.jpg_quality == 77
     assert settings.drawing.use_skia_card_list is True
     assert settings.drawing.skia_card_list_fallback_to_pillow is True
-    assert settings.drawing.use_skia_card_box is False
-    assert settings.drawing.skia_card_fallback_to_pillow is True
     assert settings.drawing.use_skia_plot is True
     assert (
         settings.drawing.custom_profile_assets_dir
@@ -86,8 +84,6 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     monkeypatch.setenv("HARUKI_DRAWING__JPG_QUALITY", "91")
     monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_LIST", "false")
     monkeypatch.setenv("HARUKI_DRAWING__SKIA_CARD_LIST_FALLBACK_TO_PILLOW", "false")
-    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_BOX", "true")
-    monkeypatch.setenv("HARUKI_DRAWING__SKIA_CARD_FALLBACK_TO_PILLOW", "false")
     monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_PLOT", "false")
 
     settings = Settings()
@@ -99,8 +95,6 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     assert settings.drawing.jpg_quality == 91
     assert settings.drawing.use_skia_card_list is False
     assert settings.drawing.skia_card_list_fallback_to_pillow is False
-    assert settings.drawing.use_skia_card_box is True
-    assert settings.drawing.skia_card_fallback_to_pillow is False
     assert settings.drawing.use_skia_plot is False
 
 

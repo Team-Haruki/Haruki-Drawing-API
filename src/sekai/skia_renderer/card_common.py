@@ -98,7 +98,6 @@ GRID_PADDING = 16.0
 THUMB = 100.0
 TITLE_H = 50.0
 TITLE_SEP = 16.0
-BOX_GROUP_SEP = 4.0
 WATERMARK_FALLBACK = "Haruki Drawing API"
 
 Color4 = tuple[int, int, int, int]

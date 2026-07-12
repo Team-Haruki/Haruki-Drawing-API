@@ -111,8 +111,6 @@ class DrawingSettings(BaseModel):
     # 回退 Pillow 并打 ERROR。开关一律不写入 configs.yaml,生产用 HARUKI_DRAWING__* 环境变量覆盖。
     use_skia_card_list: bool = True  # Rust + Skia card/list 渲染
     skia_card_list_fallback_to_pillow: bool = True  # Skia 渲染失败时是否回退 Pillow
-    use_skia_card_box: bool = False  # card/box scene 构建器落后 main 新布局,重做前保持关闭(有防呆)
-    skia_card_fallback_to_pillow: bool = True  # Card 模块 Skia 渲染失败时是否回退 Pillow
     use_skia_plot: bool = True  # plot.py widget 树端点的 IRPainter → Skia 渲染
     custom_profile_assets_dir: Path | None = None
     custom_profile_fonts_dir: Path | None = None
@@ -267,8 +265,6 @@ EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
 USE_SKIA_CARD_LIST = settings.drawing.use_skia_card_list
 SKIA_CARD_LIST_FALLBACK_TO_PILLOW = settings.drawing.skia_card_list_fallback_to_pillow
-USE_SKIA_CARD_BOX = settings.drawing.use_skia_card_box
-SKIA_CARD_FALLBACK_TO_PILLOW = settings.drawing.skia_card_fallback_to_pillow
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir
 CUSTOM_PROFILE_FONTS_DIR = settings.drawing.custom_profile_fonts_dir
 CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_metadata

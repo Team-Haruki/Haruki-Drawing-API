@@ -8,6 +8,7 @@ from src.sekai.card.drawer import (
     compose_box_image,
     compose_card_detail_image,
     compose_card_list_image,
+    try_render_box_payload,
     try_render_card_detail_payload,
 )
 from src.sekai.card.model import (
@@ -15,7 +16,7 @@ from src.sekai.card.model import (
     CardDetailRequest,
     CardListRequest,
 )
-from src.sekai.skia_renderer.card_render import try_render_card_box_payload, try_render_card_list_payload
+from src.sekai.skia_renderer.card_render import try_render_card_list_payload
 
 router = APIRouter(tags=["Card"])
 _perf_logger = logging.getLogger("card.endpoint.perf")
@@ -87,7 +88,7 @@ async def card_box(request: CardBoxRequest):
     """
     try:
         _t0 = time.perf_counter()
-        payload = await try_render_card_box_payload(request)
+        payload = await try_render_box_payload(request)
         if payload is not None:
             resp = encoded_image_payload_to_response(payload)
             _perf_logger.info(

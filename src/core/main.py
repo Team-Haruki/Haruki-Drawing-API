@@ -124,13 +124,7 @@ async def lifespan(app: FastAPI):
         _cleanup_disk_caches()
     except Exception:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
-    if settings.drawing.use_skia_card_box:
-        logger.error(
-            "use_skia_card_box is enabled but the Skia card/box scene builder is stale "
-            "against main's collection-stats layout; card/box requests will fall back to "
-            "Pillow (see docs/skia-migration-restart-plan.md)"
-        )
-    if settings.drawing.use_skia_plot or settings.drawing.use_skia_card_list or settings.drawing.use_skia_card_box:
+    if settings.drawing.use_skia_plot or settings.drawing.use_skia_card_list:
         try:
             import haruki_skia_renderer  # noqa: F401
         except ImportError:
