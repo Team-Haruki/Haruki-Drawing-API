@@ -15,7 +15,7 @@ except ImportError:  # pragma: no cover - extension not built
 
 from src.sekai.base.draw import Canvas, TextBox, roundrect_bg
 from src.sekai.base.plot import TextStyle, VSplit
-from src.sekai.skia_renderer.ir_painter import IRPainter, SkiaUnsupported
+from src.sekai.skia_renderer.ir_painter import IRPainter
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 DEF = DEFAULT_FONT
@@ -63,11 +63,19 @@ def test_irpainter_mem_image_renders():
     assert img.getpixel((20, 20))[0] > 200  # red present
 
 
-def test_irpainter_gradient_text_unsupported():
+def test_irpainter_gradient_text_maps_to_glyph_overlay_fill():
+    # Gradient text no longer raises SkiaUnsupported: the gradient endpoints are mapped
+    # onto the glyph overlay (ink bbox + 10px) and the Rust Text node renders the
+    # gradient as a glyph-masked shader.
     from src.sekai.base.painter import FontDesc, LinearGradient
 
     p = IRPainter((40, 40), assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR),
                   default_font=DEF, bold_font=DEFAULT_BOLD_FONT)
     grad = LinearGradient((255, 0, 0, 255), (0, 0, 255, 255), (0, 0), (1, 0))
-    with pytest.raises(SkiaUnsupported):
-        p.text("hi", (0, 0), FontDesc(DEF, 20), fill=grad)
+    p.text("hi", (0, 0), FontDesc(DEF, 20), fill=grad)
+    scene, _mem = p.build_scene()
+    texts = [n for n in scene["root"]["children"] if n.get("type") == "Text"]
+    assert texts, "expected a text node in the scene"
+    fill = texts[0]["fill"]
+    assert isinstance(fill, dict)
+    assert fill.get("kind") == "linear"
