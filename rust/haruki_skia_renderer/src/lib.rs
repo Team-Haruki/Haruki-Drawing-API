@@ -176,44 +176,44 @@ fn draw_sekai_triangle_background(
 
     // Resolve the base/overlay gradient colors, white veil, and triangle preset colors for
     // either the time-of-day pink palette or a custom-hue palette (mirrors Painter).
-    let (grad1, grad2, overlay1, overlay2, white_alpha, preset_colors): TrianglePalette = if time_color
-    {
-        let palette = pink_palette(hour);
-        let mid = mix_rgb(palette.grad1, palette.grad2, 0.5);
-        let preset = vec![
-            brighten_rgb(mix_rgb(palette.grad1, [255, 206, 232], 0.72), 0.20),
-            brighten_rgb(mix_rgb(mid, [238, 214, 255], 0.68), 0.18),
-            brighten_rgb(mix_rgb(palette.grad2, [208, 232, 255], 0.66), 0.20),
-            brighten_rgb(mix_rgb(mid, [255, 228, 176], 0.56), 0.18),
-        ];
-        (
-            palette.grad1,
-            palette.grad2,
-            palette.overlay1,
-            palette.overlay2,
-            palette.white_alpha,
-            preset,
-        )
-    } else {
-        let ofs = 0.025;
-        let g1 = hls_to_rgb_trunc(main_hue, 1.0, 0.5);
-        let g2 = hls_to_rgb_trunc(main_hue + ofs, 0.5, 0.9);
-        let ov1 = hls_to_rgb_trunc(main_hue, 0.7, 0.9);
-        let ov2 = hls_to_rgb_trunc(main_hue - ofs, 0.5, 0.5);
-        let preset = vec![
-            brighten_rgb([255, 189, 246], 0.22),
-            brighten_rgb([183, 246, 255], 0.22),
-            brighten_rgb([255, 247, 146], 0.22),
-        ];
-        (
-            g1,
-            g2,
-            Rgba(ov1[0], ov1[1], ov1[2], 100),
-            Rgba(ov2[0], ov2[1], ov2[2], 100),
-            100,
-            preset,
-        )
-    };
+    let (grad1, grad2, overlay1, overlay2, white_alpha, preset_colors): TrianglePalette =
+        if time_color {
+            let palette = pink_palette(hour);
+            let mid = mix_rgb(palette.grad1, palette.grad2, 0.5);
+            let preset = vec![
+                brighten_rgb(mix_rgb(palette.grad1, [255, 206, 232], 0.72), 0.20),
+                brighten_rgb(mix_rgb(mid, [238, 214, 255], 0.68), 0.18),
+                brighten_rgb(mix_rgb(palette.grad2, [208, 232, 255], 0.66), 0.20),
+                brighten_rgb(mix_rgb(mid, [255, 228, 176], 0.56), 0.18),
+            ];
+            (
+                palette.grad1,
+                palette.grad2,
+                palette.overlay1,
+                palette.overlay2,
+                palette.white_alpha,
+                preset,
+            )
+        } else {
+            let ofs = 0.025;
+            let g1 = hls_to_rgb_trunc(main_hue, 1.0, 0.5);
+            let g2 = hls_to_rgb_trunc(main_hue + ofs, 0.5, 0.9);
+            let ov1 = hls_to_rgb_trunc(main_hue, 0.7, 0.9);
+            let ov2 = hls_to_rgb_trunc(main_hue - ofs, 0.5, 0.5);
+            let preset = vec![
+                brighten_rgb([255, 189, 246], 0.22),
+                brighten_rgb([183, 246, 255], 0.22),
+                brighten_rgb([255, 247, 146], 0.22),
+            ];
+            (
+                g1,
+                g2,
+                Rgba(ov1[0], ov1[1], ov1[2], 100),
+                Rgba(ov2[0], ov2[1], ov2[2], 100),
+                100,
+                preset,
+            )
+        };
 
     draw_linear_gradient(
         canvas,
@@ -250,6 +250,11 @@ fn draw_sekai_triangle_background(
         ((main_hue * 100000.0) as u64).wrapping_add(7919)
     };
     let seed = ((width as u64) << 32) ^ (height as u64) ^ seed_extra.rotate_left(17);
+    let ml = if time_color {
+        time_lightness(hour)
+    } else {
+        1.0
+    };
     let mut rng = SimpleRng::new(seed);
     draw_random_triangles(
         canvas,
@@ -261,6 +266,7 @@ fn draw_sekai_triangle_background(
         size_factor,
         wide_shift,
         &preset_colors,
+        ml,
     );
     draw_random_triangles(
         canvas,
@@ -272,7 +278,31 @@ fn draw_sekai_triangle_background(
         size_factor,
         wide_shift,
         &preset_colors,
+        ml,
     );
+}
+
+/// Painter's time-of-day lightness (timecolors "l" column, painter.py:1447-1455): triangles
+/// are damped by ml**0.5 at night so they fade with the palette. Piecewise-linear over the
+/// fractional hour; the custom-hue path uses ml = 1.0.
+fn time_lightness(hour: f32) -> f32 {
+    const STOPS: [(f32, f32); 7] = [
+        (0.0, 0.1),
+        (5.0, 0.2),
+        (9.0, 0.8),
+        (12.0, 1.0),
+        (15.0, 0.8),
+        (19.0, 0.2),
+        (24.0, 0.1),
+    ];
+    let h = hour.clamp(0.0, 24.0);
+    for w in STOPS.windows(2) {
+        let ((h1, l1), (h2, l2)) = (w[0], w[1]);
+        if h >= h1 && h < h2 {
+            return l1 + (l2 - l1) * ((h - h1) / (h2 - h1));
+        }
+    }
+    STOPS[STOPS.len() - 1].1
 }
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
@@ -476,6 +506,7 @@ fn draw_random_triangles(
     size_factor: f32,
     wide_shift: f32,
     preset_colors: &[[u8; 3]],
+    ml: f32,
 ) {
     let std_size_lower = 64.0 * size_factor;
     let std_size_upper = 128.0 * size_factor;
@@ -528,7 +559,8 @@ fn draw_random_triangles(
         if size > std_size_upper {
             size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5);
         }
-        let mut alpha = rng.normal(122.0, 138.0) * 0.0_f32.max(1.5_f32.min(size_alpha_factor));
+        let mut alpha =
+            rng.normal(122.0, 138.0) * 0.0_f32.max(1.5_f32.min(size_alpha_factor) * ml.sqrt());
         if rng.next_f32() < 0.05 && size > std_size_lower {
             alpha = 255.0;
         }
@@ -597,6 +629,7 @@ fn draw_blur_glass_rect(
     radius: f32,
     panel_paint: &Paint,
     shadow_alpha: f32,
+    blur: f32,
 ) {
     draw_glass_shadow(canvas, rect, radius, shadow_alpha);
 
@@ -617,7 +650,9 @@ fn draw_blur_glass_rect(
                 sample_rect.width(),
                 sample_rect.height(),
             );
-            let downsample = 2.0;
+            // Mirror Painter's blur math (painter.py:1355-1363): downsample by
+            // max(1, floor(blur/2)) then blur with sigma = blur / downsample.
+            let downsample = (blur / 2.0).floor().max(1.0);
             let temp_w = (sample_rect.width() / downsample).ceil().max(1.0) as i32;
             let temp_h = (sample_rect.height() / downsample).ceil().max(1.0) as i32;
             if let Some(mut temp_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
@@ -637,8 +672,9 @@ fn draw_blur_glass_rect(
                         let temp_image = temp_surface.image_snapshot();
                         let mut blur_paint = Paint::default();
                         blur_paint.set_anti_alias(true);
+                        let sigma = (blur / downsample).max(0.01);
                         blur_paint.set_image_filter(image_filters::blur(
-                            (4.0 / downsample, 4.0 / downsample),
+                            (sigma, sigma),
                             TileMode::Clamp,
                             None,
                             None,
@@ -699,7 +735,13 @@ fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32
     canvas.restore();
 }
 
-fn draw_glass_overlay(canvas: &Canvas, rect: Rect, radius: f32, panel_paint: &Paint, edge_strength: f32) {
+fn draw_glass_overlay(
+    canvas: &Canvas,
+    rect: Rect,
+    radius: f32,
+    panel_paint: &Paint,
+    edge_strength: f32,
+) {
     // `panel_paint` is pre-built (anti-alias + Fill style + solid color or gradient shader).
     canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), panel_paint);
 

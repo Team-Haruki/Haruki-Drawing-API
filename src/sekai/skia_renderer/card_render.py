@@ -221,7 +221,7 @@ def _card_list_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
     )
 
     if ir.get("background_img_path"):
-        b.image_bg(ir["background_img_path"])
+        b.image_bg(ir["background_img_path"], fade=0.1)
     else:
         b.triangle_bg(ir.get("background_hour") if ir.get("background_hour") is not None else 15.0)
 
@@ -529,7 +529,7 @@ def _card_box_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
     )
 
     if ir.get("background_img_path"):
-        b.image_bg(ir["background_img_path"])
+        b.image_bg(ir["background_img_path"], fade=0.1)
     else:
         b.triangle_bg(ir.get("background_hour") if ir.get("background_hour") is not None else 15.0)
 

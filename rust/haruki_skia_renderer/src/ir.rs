@@ -455,6 +455,14 @@ pub struct BlurGlassNode {
     pub fill: Fill,
     #[serde(default = "default_shadow_alpha")]
     pub shadow_alpha: f32,
+    /// Backdrop blur strength (Painter's `blur` kwarg): downsample = max(1, floor(blur/2)),
+    /// gaussian sigma = blur / downsample on the downsampled snapshot.
+    #[serde(default = "default_glass_blur")]
+    pub blur: f32,
+}
+
+fn default_glass_blur() -> f32 {
+    4.0
 }
 
 fn default_shadow_alpha() -> f32 {

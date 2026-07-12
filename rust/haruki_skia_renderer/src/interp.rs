@@ -13,7 +13,8 @@ use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, FilterMode, Font,
     IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Point, RRect, Rect,
     RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode, Typeface,
-    canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint, image_filters, surfaces,
+    canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint, image_filters,
+    surfaces,
 };
 
 use crate::ir::*;
@@ -95,14 +96,33 @@ fn is_emoji(ch: char) -> bool {
         | 0x2300..=0x23FF      // misc technical (⌚⌛⏰…)
         | 0x2B00..=0x2BFF      // misc symbols and arrows (⭐…)
         | 0xFE00..=0xFE0F      // variation selectors
-        | 0x200D)              // zero-width joiner (keep ZWJ sequences together)
+        | 0x200D) // zero-width joiner (keep ZWJ sequences together)
 }
 
-/// Split text into consecutive (is_emoji, run) segments for per-font drawing.
-fn classify_runs(text: &str) -> Vec<(bool, String)> {
+/// Whether `ch` should actually draw with the emoji font: it must be in an emoji block AND
+/// the emoji typeface must cover it. Twemoji's cmap lacks many misc symbols the blocks
+/// include (\u{2661} \u{2606} \u{2605} \u{266a} \u{2713} ...) and its .notdef advance is 0,
+/// so routing an uncovered char would render a zero-width hole and shift the rest of the
+/// line left; those chars fall back to the main font (matching the Pillow path, where
+/// emoji.emoji_count treats them as plain text). ZWJ/variation selectors stay with the
+/// emoji run so sequences hold together.
+fn routes_to_emoji(ch: char, emoji: Option<&Font>) -> bool {
+    if !is_emoji(ch) {
+        return false;
+    }
+    let Some(font) = emoji else { return false };
+    let c = ch as u32;
+    if c == 0x200D || (0xFE00..=0xFE0F).contains(&c) {
+        return true;
+    }
+    font.unichar_to_glyph(ch as i32) != 0
+}
+
+/// Split text into consecutive (emoji-routed, run) segments for per-font drawing.
+fn classify_runs(text: &str, emoji: Option<&Font>) -> Vec<(bool, String)> {
     let mut runs: Vec<(bool, String)> = Vec::new();
     for ch in text.chars() {
-        let e = is_emoji(ch);
+        let e = routes_to_emoji(ch, emoji);
         match runs.last_mut() {
             Some(last) if last.0 == e => last.1.push(ch),
             _ => runs.push((e, ch.to_string())),
@@ -112,7 +132,11 @@ fn classify_runs(text: &str) -> Vec<(bool, String)> {
 }
 
 fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> &'a Font {
-    if is_emoji_run { emoji.unwrap_or(main) } else { main }
+    if is_emoji_run {
+        emoji.unwrap_or(main)
+    } else {
+        main
+    }
 }
 
 /// A runtime image shipped alongside the IR and referenced as "mem:<key>".
@@ -120,7 +144,11 @@ pub(crate) enum MemImage {
     /// PNG/JPEG bytes (decoded via `Image::from_encoded`).
     Encoded(Vec<u8>),
     /// Straight (un-premultiplied) RGBA8888 pixels — no encode/decode, just a raster wrap.
-    Raw { width: i32, height: i32, bytes: Vec<u8> },
+    Raw {
+        width: i32,
+        height: i32,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
@@ -165,6 +193,7 @@ impl Interp {
             return Some(image);
         }
         if !is_safe_asset_path(path) {
+            eprintln!("haruki_skia_renderer: rejected unsafe asset path, node skipped: {path}");
             return None;
         }
         // L1 (per-render, path-keyed) misses fall through to the process-wide decoded-image
@@ -174,7 +203,12 @@ impl Interp {
                 self.cache.insert(path.to_string(), image.clone());
                 Some(image)
             }
-            Err(_) => None,
+            Err(err) => {
+                // The Pillow path raises on missing assets; here the node is skipped, so at
+                // least leave a trace instead of silently dropping content from the output.
+                eprintln!("haruki_skia_renderer: asset load failed, node skipped: {path} ({err})");
+                None
+            }
         }
     }
 }
@@ -263,8 +297,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             // pass a solid fill down; otherwise use the node's own fill (solid or gradient).
             let adaptive_fill;
             let fill: &Fill = if let Some(ad) = &text.adaptive {
-                let color =
-                    resolve_adaptive_color(surface, &interp.fonts, text, abs, ad);
+                let color = resolve_adaptive_color(surface, &interp.fonts, text, abs, ad);
                 adaptive_fill = Fill::Solid(color);
                 &adaptive_fill
             } else {
@@ -305,6 +338,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 glass.radius,
                 &panel_paint,
                 glass.shadow_alpha,
+                glass.blur,
             );
         }
         Node::TriangleBg(bg) => {
@@ -320,7 +354,13 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         }
         Node::ImageBg(bg) => {
             if let Some(decoded) = interp.load(&bg.path) {
-                draw_image_bg(surface.canvas(), &decoded, interp.canvas_w, interp.canvas_h, bg);
+                draw_image_bg(
+                    surface.canvas(),
+                    &decoded,
+                    interp.canvas_w,
+                    interp.canvas_h,
+                    bg,
+                );
             }
         }
         Node::Watermark(watermark) => {
@@ -336,8 +376,15 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             paint.set_color(color_of(watermark.fill));
             for line in &watermark.lines {
                 let abs = (line.pos[0] + off.0, line.pos[1] + off.1);
-                let (x, y) =
-                    text_layout(&font, emoji_ref, &line.text, abs, line.align, Baseline::CjkTop, 0.0);
+                let (x, y) = text_layout(
+                    &font,
+                    emoji_ref,
+                    &line.text,
+                    abs,
+                    line.align,
+                    Baseline::CjkTop,
+                    0.0,
+                );
                 draw_text_core(canvas, &font, emoji_ref, &line.text, x, y, 0.0, &paint);
             }
         }
@@ -388,10 +435,17 @@ fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
 
 /// Resolve a gradient spec to (colors, positions) where positions are strictly increasing.
 /// `fallback` supplies the 2 endpoint colors when `stops` has fewer than 2 entries.
-fn resolve_gradient_stops(stops: &[GradientStop], fallback: [Color4; 2]) -> (Vec<Color4f>, Vec<f32>) {
+fn resolve_gradient_stops(
+    stops: &[GradientStop],
+    fallback: [Color4; 2],
+) -> (Vec<Color4f>, Vec<f32>) {
     if stops.len() >= 2 {
         let mut sorted = stops.to_vec();
-        sorted.sort_by(|a, b| a.pos.partial_cmp(&b.pos).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.pos
+                .partial_cmp(&b.pos)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         let mut positions = Vec::with_capacity(sorted.len());
         let mut last = -1.0_f32;
         for st in &sorted {
@@ -415,10 +469,18 @@ fn resolve_gradient_stops(stops: &[GradientStop], fallback: [Color4; 2]) -> (Vec
 fn gradient_shader(spec: &GradientSpec, off: (f32, f32)) -> Option<Shader> {
     match spec {
         // `method` (combine vs separate) is honored as combine — Skia's native projection.
-        GradientSpec::Linear { c1, c2, stops, p1, p2, .. } => {
+        GradientSpec::Linear {
+            c1,
+            c2,
+            stops,
+            p1,
+            p2,
+            ..
+        } => {
             let fallback = [c1.unwrap_or([0, 0, 0, 255]), c2.unwrap_or([0, 0, 0, 255])];
             let (colors, positions) = resolve_gradient_stops(stops, fallback);
-            let grad_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+            let grad_colors =
+                gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
             let grad = gradient::Gradient::new(grad_colors, gradient::Interpolation::default());
             gradient::shaders::linear_gradient(
                 (
@@ -429,14 +491,24 @@ fn gradient_shader(spec: &GradientSpec, off: (f32, f32)) -> Option<Shader> {
                 None,
             )
         }
-        GradientSpec::Radial { c1, c2, stops, center, radius_px } => {
+        GradientSpec::Radial {
+            c1,
+            c2,
+            stops,
+            center,
+            radius_px,
+        } => {
             // Painter convention: stop 0 = center (c2), stop 1 = edge (c1).
             let fallback = [c2.unwrap_or([0, 0, 0, 255]), c1.unwrap_or([0, 0, 0, 255])];
             let (colors, positions) = resolve_gradient_stops(stops, fallback);
-            let grad_colors = gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
+            let grad_colors =
+                gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
             let grad = gradient::Gradient::new(grad_colors, gradient::Interpolation::default());
             gradient::shaders::radial_gradient(
-                (Point::new(center[0] + off.0, center[1] + off.1), radius_px.max(0.01)),
+                (
+                    Point::new(center[0] + off.0, center[1] + off.1),
+                    radius_px.max(0.01),
+                ),
                 &grad,
                 None,
             )
@@ -609,7 +681,10 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
             let scale = (rw / iw).min(rh / ih);
             let w = iw * scale;
             let h = ih * scale;
-            (None, Rect::from_xywh(x + (rw - w) * 0.5, y + (rh - h) * 0.5, w, h))
+            (
+                None,
+                Rect::from_xywh(x + (rw - w) * 0.5, y + (rh - h) * 0.5, w, h),
+            )
         }
         Fit::Cover => {
             let scale = (rw / iw).max(rh / ih);
@@ -630,7 +705,12 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
     // Translate the crop-local source rect back into the original image. With a crop and a
     // whole-source fit (src == None), the crop window itself becomes the explicit source rect.
     let src = match (src, node.source_rect) {
-        (Some(s), _) => Some(Rect::from_xywh(s.left + base_x, s.top + base_y, s.width(), s.height())),
+        (Some(s), _) => Some(Rect::from_xywh(
+            s.left + base_x,
+            s.top + base_y,
+            s.width(),
+            s.height(),
+        )),
         (None, Some(_)) => Some(Rect::from_xywh(base_x, base_y, iw, ih)),
         (None, None) => None,
     };
@@ -642,7 +722,8 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
     if let Some(sh) = &node.shadow {
         let mut shadow_paint = Paint::default();
         shadow_paint.set_anti_alias(true);
-        let strength = (sh.alpha.clamp(0.0, 1.0) * (sh.color[3] as f32 / 255.0) * alpha).clamp(0.0, 1.0);
+        let strength =
+            (sh.alpha.clamp(0.0, 1.0) * (sh.color[3] as f32 / 255.0) * alpha).clamp(0.0, 1.0);
         shadow_paint.set_alpha_f(strength);
         // Recolor every covered pixel to the shadow color, keeping the image's alpha mask.
         shadow_paint.set_color_filter(color_filters::blend(
@@ -655,7 +736,12 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
             None,
             None,
         ));
-        let sdst = Rect::from_xywh(dst.left + sh.offset[0], dst.top + sh.offset[1], dst.width(), dst.height());
+        let sdst = Rect::from_xywh(
+            dst.left + sh.offset[0],
+            dst.top + sh.offset[1],
+            dst.width(),
+            dst.height(),
+        );
         canvas.draw_image_rect_with_sampling_options(image, src_arg, sdst, sampling, &shadow_paint);
     }
 
@@ -757,9 +843,10 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
     let c = tint.color;
     match tint.mode {
         // Modulate = component-wise multiply (image_px * color/255).
-        TintMode::Multiply => {
-            color_filters::blend(Color::from_argb(c[3], c[0], c[1], c[2]), BlendMode::Modulate)
-        }
+        TintMode::Multiply => color_filters::blend(
+            Color::from_argb(c[3], c[0], c[1], c[2]),
+            BlendMode::Modulate,
+        ),
         // SrcOver a translucent color over each pixel = lerp toward color by `strength`.
         TintMode::Mix => {
             let a = (tint.strength.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -767,26 +854,28 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
         }
         // SrcIn = keep the source alpha as a stencil, replace RGB with `color`. `color`'s
         // alpha scales the result alpha (255 keeps the source mask unchanged).
-        TintMode::Recolor => color_filters::blend(Color::from_argb(c[3], c[0], c[1], c[2]), BlendMode::SrcIn),
+        TintMode::Recolor => {
+            color_filters::blend(Color::from_argb(c[3], c[0], c[1], c[2]), BlendMode::SrcIn)
+        }
     }
 }
 
 /// Total advance of `text` (with the emoji font for emoji runs) including `letter_spacing`.
 fn measure_advance(main: &Font, emoji: Option<&Font>, text: &str, letter_spacing: f32) -> f32 {
-    let has_emoji = emoji.is_some() && text.chars().any(is_emoji);
+    let has_emoji = text.chars().any(|ch| routes_to_emoji(ch, emoji));
     // Fast path: plain text, no spacing, no emoji routing — a single measure_str.
     if !has_emoji && letter_spacing == 0.0 {
         return main.measure_str(text, None).0;
     }
     if letter_spacing == 0.0 {
-        return classify_runs(text)
+        return classify_runs(text, emoji)
             .iter()
             .map(|(e, run)| run_font(*e, main, emoji).measure_str(run, None).0)
             .sum();
     }
     let mut total = 0.0;
     let mut count = 0;
-    for (e, run) in classify_runs(text) {
+    for (e, run) in classify_runs(text, emoji) {
         let font = run_font(e, main, emoji);
         for ch in run.chars() {
             let mut buf = [0u8; 4];
@@ -836,7 +925,7 @@ fn draw_text_core(
     letter_spacing: f32,
     paint: &Paint,
 ) {
-    let has_emoji = emoji.is_some() && text.chars().any(is_emoji);
+    let has_emoji = text.chars().any(|ch| routes_to_emoji(ch, emoji));
     if !has_emoji && letter_spacing == 0.0 {
         if let Some(blob) = TextBlob::new(text, main) {
             canvas.draw_text_blob(&blob, Point::new(x, y), paint);
@@ -844,7 +933,7 @@ fn draw_text_core(
         return;
     }
     let mut cx = x;
-    for (e, run) in classify_runs(text) {
+    for (e, run) in classify_runs(text, emoji) {
         let font = run_font(e, main, emoji);
         if letter_spacing == 0.0 {
             if let Some(blob) = TextBlob::new(&run, font) {
@@ -866,14 +955,29 @@ fn draw_text_core(
 
 /// Draw a `TextNode`: optional outline under the fill (solid or gradient), with letter spacing
 /// and emoji-font routing.
-fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs: (f32, f32), off: (f32, f32), fill: &Fill) {
+fn draw_styled_text(
+    canvas: &Canvas,
+    fonts: &FontRegistry,
+    node: &TextNode,
+    abs: (f32, f32),
+    off: (f32, f32),
+    fill: &Fill,
+) {
     if node.text.is_empty() {
         return;
     }
     let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
-    let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+    let (x, y) = text_layout(
+        &font,
+        emoji_ref,
+        &node.text,
+        abs,
+        node.align,
+        node.baseline,
+        node.letter_spacing,
+    );
 
     if let Some(stroke) = &node.stroke {
         let mut sp = Paint::default();
@@ -881,13 +985,31 @@ fn draw_styled_text(canvas: &Canvas, fonts: &FontRegistry, node: &TextNode, abs:
         sp.set_style(PaintStyle::Stroke);
         sp.set_stroke_width(stroke.width);
         sp.set_color(color_of(stroke.color));
-        draw_text_core(canvas, &font, emoji_ref, &node.text, x, y, node.letter_spacing, &sp);
+        draw_text_core(
+            canvas,
+            &font,
+            emoji_ref,
+            &node.text,
+            x,
+            y,
+            node.letter_spacing,
+            &sp,
+        );
     }
 
     let mut fp = Paint::default();
     fp.set_anti_alias(true);
     apply_fill(&mut fp, fill, off);
-    draw_text_core(canvas, &font, emoji_ref, &node.text, x, y, node.letter_spacing, &fp);
+    draw_text_core(
+        canvas,
+        &font,
+        emoji_ref,
+        &node.text,
+        x,
+        y,
+        node.letter_spacing,
+        &fp,
+    );
 }
 
 /// Pick the adaptive fill color from the average luminance of the backdrop under the text box.
@@ -901,7 +1023,15 @@ fn resolve_adaptive_color(
     let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
-    let (x, y) = text_layout(&font, emoji_ref, &node.text, abs, node.align, node.baseline, node.letter_spacing);
+    let (x, y) = text_layout(
+        &font,
+        emoji_ref,
+        &node.text,
+        abs,
+        node.align,
+        node.baseline,
+        node.letter_spacing,
+    );
     let advance = measure_advance(&font, emoji_ref, &node.text, node.letter_spacing);
     let (_, metrics) = font.metrics();
     // Text ink box: x..x+advance vertically spanning ascent..descent around the baseline.
@@ -917,7 +1047,11 @@ fn resolve_adaptive_color(
         1.0
     };
     // Dark backdrop (low luminance) -> light text; bright backdrop -> dark text.
-    if lum < ad.threshold { ad.light } else { ad.dark }
+    if lum < ad.threshold {
+        ad.light
+    } else {
+        ad.dark
+    }
 }
 
 /// Average relative luminance (0..1) of an image's pixels, or None if the read fails.
