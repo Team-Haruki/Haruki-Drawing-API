@@ -24,6 +24,18 @@ RUN --mount=type=cache,target=$UV_CACHE_DIR \
     && uv venv ${UV_PROJECT_ENVIRONMENT} --python ${UV_PYTHON} \
     && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python
 
+# 可选的 haruki_skia_renderer 原生渲染 wheel(D2:不发 index,CI 在 docker workflow 里
+# 预构建后放进 docker/skia-wheels/)。目录为空时跳过安装,镜像照常构建,运行时 fail-open 回退 Pillow。
+COPY docker/skia-wheels/ /tmp/skia-wheels/
+RUN --mount=type=cache,target=$UV_CACHE_DIR \
+    set -eux; \
+    if ls /tmp/skia-wheels/*.whl >/dev/null 2>&1; then \
+        uv pip install --python ${UV_PROJECT_ENVIRONMENT}/bin/python /tmp/skia-wheels/*.whl; \
+    else \
+        echo "no haruki_skia_renderer wheel bundled; skipping native Skia renderer install"; \
+    fi; \
+    rm -rf /tmp/skia-wheels
+
 # 运行阶段
 FROM python:3.14-slim-trixie AS runtime
 
@@ -77,6 +89,21 @@ RUN set -eux; \
     ln -s "$system_freetype" "$bundled_freetype"; \
     /app/haruki_drawing_api/.venv/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
 
+# haruki_skia_renderer 自检(仿上方 pjsekai_scores_rs 模式,但条件执行):
+# 装了 wheel 就必须能导入且通过 IR capability 握手,失败让镜像构建尽早报错;
+# 没装 wheel 仅提示,运行时 fail-open 回退 Pillow。
+RUN /app/haruki_drawing_api/.venv/bin/python - <<'PY'
+import importlib.util
+
+if importlib.util.find_spec("haruki_skia_renderer") is None:
+    print("haruki_skia_renderer not bundled; Skia IR rendering will fail-open to Pillow")
+else:
+    import haruki_skia_renderer as m
+
+    capability = getattr(m, "IR_CAPABILITY", 0)
+    assert capability >= 3, f"stale haruki_skia_renderer wheel: IR_CAPABILITY={capability} < 3"
+    print(f"haruki_skia_renderer self-check passed (IR_CAPABILITY={capability})")
+PY
 
 # 复制项目代码
 COPY . .

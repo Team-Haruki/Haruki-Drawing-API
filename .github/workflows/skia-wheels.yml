@@ -1,0 +1,94 @@
+name: Skia Renderer Wheels
+
+# D2: wheels are never published to an index. This workflow builds cp314t wheels
+# for the platforms we deploy/develop on and uploads them as workflow artifacts.
+
+on:
+  push:
+    branches:
+      - main
+      - feat/rust-skia-render-ir
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: skia-wheels-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build wheel (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: macos-14
+            platform: macos-arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install skia-safe link dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+
+      - name: Setup free-threaded Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14t"
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      # skia-safe downloads the prebuilt Skia binaries archive into the crate's
+      # OUT_DIR (under rust/haruki_skia_renderer/target/), which rust-cache
+      # persists together with ~/.cargo, so the download only happens on a cold
+      # cache or a skia-bindings version bump.
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/haruki_skia_renderer
+          shared-key: skia-renderer
+
+      - name: Install maturin
+        run: pip install maturin
+
+      - name: Build wheel
+        run: maturin build --release --manifest-path rust/haruki_skia_renderer/Cargo.toml -o dist
+
+      - name: Assert wheel ABI tag matches interpreter
+        run: |
+          python - <<'PY'
+          import glob
+          import sys
+          import sysconfig
+
+          wheels = glob.glob("dist/*.whl")
+          assert len(wheels) == 1, wheels
+          interp = f"cp{sys.version_info.major}{sys.version_info.minor}"
+          abi = interp + ("t" if sysconfig.get_config_var("Py_GIL_DISABLED") else "")
+          wheel = wheels[0]
+          assert f"-{interp}-{abi}-" in wheel, (wheel, interp, abi)
+          print(f"wheel tag OK: {wheel} matches {interp}/{abi}")
+          PY
+
+      - name: Smoke test wheel (import + IR capability handshake)
+        run: |
+          pip install dist/*.whl
+          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 3, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: haruki-skia-renderer-${{ matrix.platform }}
+          path: dist/*.whl
+          if-no-files-found: error
