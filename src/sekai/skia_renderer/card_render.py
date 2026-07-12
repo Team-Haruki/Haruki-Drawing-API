@@ -17,6 +17,14 @@ from typing import Any
 
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base import CHARACTER_COLOR_CODE
+from src.sekai.base.draw import (
+    WATERMARK_BOTTOM_OFFSET,
+    WATERMARK_LINE_SEP,
+    WATERMARK_SHADOW_OFFSET,
+    WATERMARK_TOP_OFFSET,
+    build_request_watermark_text,
+    get_watermark_render_spec,
+)
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import run_in_pool
 from src.sekai.card.drawer import _build_card_box_cache_key, _build_card_list_cache_key
@@ -95,7 +103,8 @@ def build_card_list_ir(rqd: CardListRequest) -> dict[str, Any]:
         "background_img_path": _validate_asset_path(rqd.background_img_path, field="background_img_path"),
         "watermark": {
             "enabled": True,
-            "text": getattr(rqd, "watermark", None) or "",
+            # Mirror Pillow's add_request_watermark(): "DT: <dt> (<tz>)  <default watermark>".
+            "text": build_request_watermark_text(rqd),
         },
         "fonts": {
             "dir": str(FONT_DIR),
@@ -182,8 +191,22 @@ def _card_list_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
     rows = math.ceil(max(1, len(cards)) / _GRID_COLS)
     title_h = _TITLE_H + _TITLE_SEP if has_title else 0.0
     grid_h = _GRID_PADDING * 2 + rows * _CARD_H + max(0, rows - 1) * _CARD_SEP
+
+    # Pillow's add_watermark() (src/sekai/base/draw.py) swaps the canvas' bottom BG_PADDING
+    # for a footer of TOP_OFFSET + wrapped watermark text height + SHADOW + BOTTOM_OFFSET.
+    watermark = ir["watermark"]
+    wm_font_size = 12
+    wm_lines: list[str] = []
+    if watermark["enabled"]:
+        wm_text = watermark["text"] or _WATERMARK_FALLBACK
+        wm_max_width = max(1, int(_PANEL_WIDTH) - WATERMARK_SHADOW_OFFSET)
+        wm_font_size, wm_lines, _wm_w, wm_text_h = get_watermark_render_spec(wm_text, wm_max_width, 12)
+        bottom_h = float(WATERMARK_TOP_OFFSET + wm_text_h + WATERMARK_SHADOW_OFFSET + WATERMARK_BOTTOM_OFFSET)
+    else:
+        bottom_h = _BG_PADDING
+
     width = math.ceil(_PANEL_WIDTH + _BG_PADDING * 2)
-    height = math.ceil(_BG_PADDING * 2 + title_h + grid_h)
+    height = math.ceil(_BG_PADDING + title_h + grid_h + bottom_h)
 
     fonts = ir["fonts"]
     b = IRBuilder(
@@ -219,10 +242,21 @@ def _card_list_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
         with b.group((x, cy), (_CARD_W, _CARD_H)):
             _card_cell(b, card, icons, now_ms)
 
-    watermark = ir["watermark"]
-    if watermark["enabled"]:
-        text = watermark["text"] or _WATERMARK_FALLBACK
-        b.text(text, (width - 150, height - 10), "default", 12, baseline="alphabetic", fill=(0, 0, 0, 120))
+    # Footer watermark: each line right-aligned to the content edge, white with a
+    # (1, 1) grey shadow, starting TOP_OFFSET below the content (mirrors add_watermark()).
+    wm_y = _BG_PADDING + title_h + grid_h + WATERMARK_TOP_OFFSET
+    for i, line in enumerate(wm_lines):
+        b.shadowed_text(
+            line,
+            (width - _BG_PADDING, wm_y + i * (wm_font_size + WATERMARK_LINE_SEP)),
+            "default",
+            float(wm_font_size),
+            shadow_offset=(WATERMARK_SHADOW_OFFSET, WATERMARK_SHADOW_OFFSET),
+            shadow_color=(75, 75, 75, 255),
+            align="right",
+            baseline="cjk_top",
+            fill=(255, 255, 255, 255),
+        )
 
     return b.build()
 
