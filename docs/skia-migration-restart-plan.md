@@ -186,3 +186,35 @@ TYPEFACE_CACHE 锁外加载。
 
 阶段 0–5 约两周完成后,波次 1(card/list、vlive、gacha、event/list、score)在第 3 周吃到实测 1.4×–4× 收益;
 收益主体随 profile(第 4–5 周)落地。
+
+## 执行日志
+
+### 2026-07-12:一次性替换(所有者改道:跳过分波,真实数据全量验证后直接切换)
+
+所有者决定不走分波放量,改为"真实数据一次性验证 + 全量切换"。当日完成:
+
+- **真实 payload 生成器**(`scripts/parity_payloads/`,8 个模块):离线复刻 Haruki-Cloud
+  `internal/pjsk/render/*` 的 request body 构造(7 路 agent 提取的逐字段规范存于 `out/payload-specs/`),
+  数据源 = haruki-sekai-master(jp)+ collections.suite.json(7/12 导出,903 卡)+ collections.mysekai.json。
+  58 个 payload 全部通过 pydantic 校验;AssetResolver 复刻 startapp/ondemand 探测序并产出 rsync 清单。
+- **资产同步**:按清单从主云 rsync 607MB 区服资产 + 静态资产,两轮收敛;剩余 28 个缺失为生产同样不存在
+  (vlive 留言板横幅等),走占位渲染,与生产行为一致。
+- **对拍 harness 入库**(`scripts/skia_parity_sweep.py`):58 payload 全覆盖,尺寸断言 + 像素 diff + 双路计时,
+  处理 card 直构/heavy/mysekai(drawer.real.py 动态加载)/list-body 等特殊路径。
+- **全量对拍结果:56 ok / 0 失败**(card/box 为 stale 防呆 known-blocked;honor 设计上 pillow-only)。
+  Skia 普遍 2× 提速(mysekai_music_record 5.8×、fixture_detail 4.7×);仅 music_list 与 mysekai_map
+  略慢于 Pillow(PNG encode / mem 图传输主导,对应"放量后可做"的 fpnge 项)。
+- **修复三个真实问题**:card/list scene 高度未跟上 Pillow 水印 footer 重构(4px);
+  **winrate 构建函数原地修改请求对象**(Skia 失败回退 Pillow 时会重复拼接 CN 队名,生产级 bug);
+  area_item 生成器误用无筛选分支(生产筛选参数必填)。
+- **阶段 2 关键项落地**:canvas.py fail-open(扩展缺失回退 Pillow + lifespan 启动 ERROR 自检)、
+  N1 mem 图强引用(id 复用错图隐患)、N2 card_render scene 构建/JSON 序列化进线程池、
+  `settings_customise_sources` 使 **env > yaml**(附回归测试)、mem 图跳过冗余 RGBA convert。
+- **切换**:`use_skia_plot` / `use_skia_card_list` 代码默认值改 **true**,configs 中删除全部写死的
+  skia 键(开关只经代码默认 + env);`use_skia_card_box` 保持 false(stale 防呆)。
+  删除死配置 `skia_card_list_log_visual_metrics`。
+- 新增 `tests/test_skia_safety.py`(fail-open / mem 图强引用 / 默认值回归)。
+
+仍悬:card/box shim-first 重做(阶段 7/D5)、honor alpha-mask 原语、chart 水印壳、CI wheel 流水线
+(阶段 3,按 D2 仓库 CI 构建 artifact)、生产镜像集成与部署验收。**生产环境在 wheel/Docker 链路
+完成前不受本次默认值影响**(镜像里没有扩展 → fail-open 回退 Pillow 并打 ERROR)。
