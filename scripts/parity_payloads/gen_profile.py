@@ -622,6 +622,48 @@ def build_honor_body() -> dict:
     raise RuntimeError("no buildable honor found in suite snapshot")
 
 
+# The fixture user owns no bonds/birthday/fc_ap honor, so the branch-coverage payloads below
+# synthesize plausible ones straight from masterdata (deterministic lowest-id picks); every
+# asset path still flows through common.ASSETS so the rsync manifest stays complete.
+
+
+def build_bonds_honor_body() -> dict:
+    """Synthetic bonds-branch payload: lowest bondsHonors entry as the main honor at level 8
+    (5 base stars + 3 upgraded stars exercises both star assets, main -> word overlay too)."""
+    for hid in sorted(_bonds_honor_by_id()):
+        if hid in _honor_by_id():  # normal wins in builder.go; skip ambiguous ids
+            continue
+        req = build_honor_request(hid, 8, is_main=True)
+        if req:
+            return req
+    raise RuntimeError("no buildable bonds honor in masterdata")
+
+
+def build_birthday_honor_body() -> dict:
+    """Synthetic birthday-branch payload: lowest birthday-group honor whose rarity carries a
+    frame (rank >= 2), level 3 so the frame_degree_level icon row is exercised."""
+    for info in sorted(common.MD.get("honors"), key=lambda h: h.get("id", 0)):
+        group = _honor_group(info.get("groupId", 0))
+        if group is None or group.get("honorType") != "birthday":
+            continue
+        if _RARITY_RANK.get(info.get("honorRarity", ""), 1) < 2:
+            continue
+        req = build_honor_request(info["id"], 3, is_main=True)
+        if req and req.get("honor_type") == "birthday":
+            return req
+    raise RuntimeError("no buildable birthday honor in masterdata")
+
+
+def build_fcap_honor_body() -> dict:
+    """Synthetic fc_ap-branch payload: the master-difficulty FC-count honor (id 3013) at
+    level 10, scroll number taken from the fixture user's real master FC count."""
+    fc_ap = _build_fc_ap_levels(_build_music_counts(common.load_suite()))
+    req = build_honor_request(3013, 10, is_main=True, fc_ap_override=fc_ap.get(3013) or 137)
+    if not req:
+        raise RuntimeError("honor 3013 (master FC count) not buildable from masterdata")
+    return req
+
+
 # ---------------------------------------------------------------------------
 # Inventory builder (render/inventory/controller.go + categories.go)
 # ---------------------------------------------------------------------------
@@ -983,6 +1025,15 @@ def generate() -> list[str]:
     HonorRequest.model_validate(honor_body)
     common.write_payload("honor", honor_body)
     written.append("honor")
+
+    for name, body in (
+        ("honor_bonds", build_bonds_honor_body()),
+        ("honor_birthday", build_birthday_honor_body()),
+        ("honor_fcap", build_fcap_honor_body()),
+    ):
+        HonorRequest.model_validate(body)
+        common.write_payload(name, body)
+        written.append(name)
 
     inventory_body = build_inventory_body()
     InventoryListRequest.model_validate(inventory_body)

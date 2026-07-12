@@ -356,3 +356,8 @@ async def compose_full_honor_image(rqd: HonorRequest):
     if composed is not None:
         put_composed_image_cache(cache_key, composed)
     return composed
+
+
+# Skia shadow path (skia.py) re-exported so the route and the parity harness resolve it from
+# the drawer namespace; kept in its own module so this file stays the pure-Pillow ground truth.
+from .skia import try_render_full_honor_payload as try_render_full_honor_payload

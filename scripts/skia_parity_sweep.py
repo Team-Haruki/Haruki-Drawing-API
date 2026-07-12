@@ -17,7 +17,6 @@ pillow-only / pillow-none / pillow-error / skia-error / build-error /
 harness-error / skipped / no-payload.
 
 Known deviations (not failures):
-- ``honor``: Skia is excluded by design -> Pillow baseline only.
 - ``mysekai_*`` (except housing-competition): needs the gitignored
   ``src/sekai/mysekai/drawer.real.py``; the whole domain is ``skipped`` when absent.
 
@@ -88,6 +87,7 @@ class Case:
     try_render: str | None
     try_render_module: str | None = None  # defaults to `drawer`
     is_list: bool = False
+    route_watermark: bool = False  # the route appends a raster watermark footer after compose
     note: str | None = None
 
 
@@ -101,6 +101,7 @@ def _case(
     try_render_module: str | None = None,
     drawer: str | None = None,
     is_list: bool = False,
+    route_watermark: bool = False,
     note: str | None = None,
 ) -> Case:
     return Case(
@@ -112,6 +113,7 @@ def _case(
         try_render=f"try_render_{stem}_payload" if try_render == "" else try_render,
         try_render_module=try_render_module,
         is_list=is_list,
+        route_watermark=route_watermark,
         note=note,
     )
 
@@ -151,8 +153,13 @@ CASES: tuple[Case, ...] = (
     # ---- gacha ----
     _case("gacha_list", "gacha", "gacha_list", "GachaListRequest"),
     _case("gacha_detail", "gacha", "gacha_detail", "GachaDetailRequest"),
-    # ---- honor (Skia excluded by design -> Pillow baseline only) ----
-    _case("honor", "honor", "full_honor", "HonorRequest", try_render=None, note="pillow-only by design"),
+    # ---- honor (migrated via IRBuilder scene + group alpha-mask; variants cover branches).
+    # The /honor route rasters its watermark footer AFTER compose, so the harness applies the
+    # same footer to the Pillow side (route_watermark) for full-image parity with the payload.
+    _case("honor", "honor", "full_honor", "HonorRequest", route_watermark=True),
+    _case("honor_bonds", "honor", "full_honor", "HonorRequest", route_watermark=True),
+    _case("honor_birthday", "honor", "full_honor", "HonorRequest", route_watermark=True),
+    _case("honor_fcap", "honor", "full_honor", "HonorRequest", route_watermark=True),
     # ---- inventory ----
     _case("inventory_list", "inventory", "inventory_list", "InventoryListRequest"),
     # ---- misc (chara_birthday is a direct in-process call, no heavy worker) ----
@@ -170,6 +177,7 @@ CASES: tuple[Case, ...] = (
     # ---- mysekai (drawer.real.py; housing-competition lives in the public housing_drawer) ----
     _case("mysekai_resource", "mysekai", "mysekai_resource", "MysekaiResourceRequest", drawer=MYSEKAI_REAL),
     _case("mysekai_map", "mysekai", "mysekai_msr_map", "MysekaiMsrMapRequest", drawer=MYSEKAI_REAL),
+    _case("mysekai_map_multi", "mysekai", "mysekai_msr_map", "MysekaiMsrMapRequest", drawer=MYSEKAI_REAL),
     _case("mysekai_fixture_list", "mysekai", "mysekai_fixture_list", "MysekaiFixtureListRequest", drawer=MYSEKAI_REAL),
     _case(
         "mysekai_fixture_detail",
@@ -327,10 +335,15 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
     if case.note:
         row["note"] = case.note
 
-    # Pillow ground truth
+    # Pillow ground truth (plus the route's raster watermark footer where the route adds one,
+    # so both sides compare as the full route output)
     t0 = time.perf_counter()
     try:
         pil = await compose(req)
+        if pil is not None and case.route_watermark:
+            from src.sekai.base.draw import add_request_watermark_to_image
+
+            pil = await add_request_watermark_to_image(pil, req)
     except Exception as exc:
         row["status"] = "pillow-error"
         row["elapsed_pillow"] = round(time.perf_counter() - t0, 3)
