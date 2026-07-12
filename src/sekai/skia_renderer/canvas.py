@@ -41,9 +41,15 @@ def load_native_renderer():
     """Import the native Skia renderer module (shared by the shim and card paths)."""
     return importlib.import_module("haruki_skia_renderer")
 
+
 _REQUIRED = {
-    "image_bytes", "media_type", "filename", "image_width", "image_height",
-    "image_mode", "encode_elapsed",
+    "image_bytes",
+    "media_type",
+    "filename",
+    "image_width",
+    "image_height",
+    "image_mode",
+    "encode_elapsed",
 }
 
 
@@ -76,17 +82,20 @@ def payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
 
 
 async def render_canvas_payload(
-    canvas, *, bg_hour: float | None = None, scale: float | None = None
+    canvas, *, bg_hour: float | None = None, scale: float | None = None, export_format: str | None = None
 ) -> EncodedImagePayload | None:
     """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow.
 
     ``scale`` mirrors ``Canvas.get_img(scale)`` (render at 1x, resize the final raster).
+    ``export_format`` overrides the global export format for endpoints that pin one
+    (mirrors ``image_to_response(..., export_format=...)``).
     """
     if not settings.drawing.use_skia_plot:
         return None
     native = load_native_renderer()
     bg = background_hour() if bg_hour is None else bg_hour
     eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None
+    eff_format = EXPORT_IMAGE_FORMAT if export_format is None else export_format
 
     def _render():
         # Run ALL the CPU work — layout draw, IR build, JSON encode, mem-image capture, and
@@ -103,7 +112,7 @@ async def render_canvas_payload(
             heavy_font=DEFAULT_HEAVY_FONT,
             emoji_font=DEFAULT_EMOJI_FONT,
             bg_hour=bg,
-            export_format=EXPORT_IMAGE_FORMAT,
+            export_format=eff_format,
             jpg_quality=JPG_QUALITY,
         )
         canvas.draw(painter)

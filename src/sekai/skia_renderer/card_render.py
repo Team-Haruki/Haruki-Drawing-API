@@ -291,8 +291,7 @@ def build_card_box_ir(rqd: CardBoxRequest) -> dict[str, Any]:
         for chara_id, path in rqd.character_icon_paths.items()
     }
     character_color_codes = {
-        str(chara_id): rqd.character_color_codes.get(chara_id)
-        or CHARACTER_COLOR_CODE.get(chara_id, "#cccccc")
+        str(chara_id): rqd.character_color_codes.get(chara_id) or CHARACTER_COLOR_CODE.get(chara_id, "#cccccc")
         for chara_id in rqd.character_icon_paths
     }
 
@@ -331,9 +330,7 @@ def build_card_box_ir(rqd: CardBoxRequest) -> dict[str, Any]:
                 "rare": user_card.card.rare or "",
                 "is_after_training": bool(user_card.card.is_after_training),
                 "has_card": user_card.has_card,
-                "thumbnail_info": [
-                    _thumbnail_to_ir(thumbnail) for thumbnail in (user_card.card.thumbnail_info or [])
-                ],
+                "thumbnail_info": [_thumbnail_to_ir(thumbnail) for thumbnail in (user_card.card.thumbnail_info or [])],
             }
             for user_card in rqd.cards
         ],
@@ -441,8 +438,9 @@ def build_card_box_scene(rqd: CardBoxRequest) -> dict[str, Any]:
     return _card_box_scene_from_ir(build_card_box_ir(rqd))
 
 
-def _push_character_header(b: IRBuilder, ir: dict[str, Any], chara_id: int, x: float, y: float, size: float,
-                           width: float, sep: float) -> None:
+def _push_character_header(
+    b: IRBuilder, ir: dict[str, Any], chara_id: int, x: float, y: float, size: float, width: float, sep: float
+) -> None:
     key = str(chara_id)
     r, g, bl = _parse_color(ir["character_color_codes"].get(key) or "#cccccc")
     icon_path = ir["character_icon_paths"].get(key)
@@ -453,8 +451,9 @@ def _push_character_header(b: IRBuilder, ir: dict[str, Any], chara_id: int, x: f
     b.rect((x, y + size + _BOX_GROUP_SEP), (width, sep), fill=(r, g, bl, 255))
 
 
-def _push_box_card(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], x: float, y: float, size: float,
-                   show_id: bool) -> None:
+def _push_box_card(
+    b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], x: float, y: float, size: float, show_id: bool
+) -> None:
     thumb = _selected_box_thumbnail(card)
     if thumb is not None:
         with b.group((x, y), (size, size)):
@@ -551,8 +550,23 @@ async def render_card_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload:
     return payload
 
 
+# The card/box scene builder below predates main's collection-stats layout rework
+# (commits 4a47140..2c2a008, +744 lines in card/drawer.py) and would render the old
+# layout with the new stats silently missing. Enabling it is refused until the builder
+# is reworked — plan: shim-first via the IRPainter shadow layer, see
+# docs/skia-migration-restart-plan.md phase 7 (decision D5).
+_CARD_BOX_SCENE_STALE = True
+
+
 async def try_render_card_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | None:
     if not settings.drawing.use_skia_card_box:
+        return None
+    if _CARD_BOX_SCENE_STALE:
+        logger.error(
+            "use_skia_card_box is enabled but the Skia card/box scene builder is stale "
+            "against main's collection-stats layout; refusing to render, falling back to "
+            "Pillow (see docs/skia-migration-restart-plan.md)"
+        )
         return None
     if rqd.user_info is not None:
         logger.info("card/box backend=skia skipped reason=user_info")

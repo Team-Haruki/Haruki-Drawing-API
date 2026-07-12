@@ -491,14 +491,28 @@ def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Ima
     return img
 
 
-async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Image:
+async def _build_command_help_canvas(rqd: CommandHelpRenderRequest) -> Canvas:
     panel = await run_in_pool(partial(_compose_command_help_image_sync, rqd))
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         Frame().set_size(panel.size).add_draw_func(
             lambda _widget, painter: painter.paste_with_alpha_blend(panel, (0, 0), exclude_on_hash=True)
         )
     add_request_watermark(canvas, rqd)
+    return canvas
+
+
+async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Image:
+    canvas = await _build_command_help_canvas(rqd)
     return await canvas.get_img()
+
+
+async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> EncodedImagePayload | None:
+    """Skia 路径：帮助面板位图经 mem 图传输,外壳走 IRPainter;不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_command_help_canvas(rqd)
+    # The /help route pins PNG output regardless of the global export format.
+    return await render_canvas_payload(canvas, export_format="png")
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
