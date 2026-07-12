@@ -297,6 +297,11 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             // pass a solid fill down; otherwise use the node's own fill (solid or gradient).
             let adaptive_fill;
             let fill: &Fill = if let Some(ad) = &text.adaptive {
+                if ad.pixelwise {
+                    // Per-pixel light/dark selection needs its own masked draw path.
+                    draw_pixelwise_adaptive_text(surface, &interp.fonts, text, abs, off, ad);
+                    return;
+                }
                 let color = resolve_adaptive_color(surface, &interp.fonts, text, abs, ad);
                 adaptive_fill = Fill::Solid(color);
                 &adaptive_fill
@@ -339,6 +344,8 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 &panel_paint,
                 glass.shadow_alpha,
                 glass.blur,
+                glass.corners,
+                glass.shadow_width,
             );
         }
         Node::TriangleBg(bg) => {
@@ -466,26 +473,56 @@ fn resolve_gradient_stops(
     }
 }
 
+/// Painter's `method="separate"` gradient field is the average of the per-axis normalized
+/// offsets: t(p) = mean over axes with delta != 0 of (p_axis - p1_axis) / delta_axis. That is
+/// still an affine scalar field, so it renders as a plain linear gradient along its own
+/// direction: t(p) = g . (p - p1) with g = (1/(n*dx), 1/(n*dy)) (dropped axes contribute 0),
+/// i.e. endpoints p1 -> p1 + g / |g|^2 (painter.py:496-503).
+fn separate_endpoints(p1: [f32; 2], p2: [f32; 2]) -> ([f32; 2], [f32; 2]) {
+    let dx = p2[0] - p1[0];
+    let dy = p2[1] - p1[1];
+    let n = (dx != 0.0) as u32 + (dy != 0.0) as u32;
+    if n == 0 {
+        return (p1, p2); // degenerate either way
+    }
+    let gx = if dx != 0.0 {
+        1.0 / (n as f32 * dx)
+    } else {
+        0.0
+    };
+    let gy = if dy != 0.0 {
+        1.0 / (n as f32 * dy)
+    } else {
+        0.0
+    };
+    let len_sq = gx * gx + gy * gy;
+    ([p1[0], p1[1]], [p1[0] + gx / len_sq, p1[1] + gy / len_sq])
+}
+
 fn gradient_shader(spec: &GradientSpec, off: (f32, f32)) -> Option<Shader> {
     match spec {
-        // `method` (combine vs separate) is honored as combine — Skia's native projection.
         GradientSpec::Linear {
             c1,
             c2,
             stops,
             p1,
             p2,
-            ..
+            method,
         } => {
             let fallback = [c1.unwrap_or([0, 0, 0, 255]), c2.unwrap_or([0, 0, 0, 255])];
             let (colors, positions) = resolve_gradient_stops(stops, fallback);
             let grad_colors =
                 gradient::Colors::new(&colors, Some(&positions), TileMode::Clamp, None);
             let grad = gradient::Gradient::new(grad_colors, gradient::Interpolation::default());
+            let (q1, q2) = if method == "separate" {
+                separate_endpoints(*p1, *p2)
+            } else {
+                (*p1, *p2)
+            };
             gradient::shaders::linear_gradient(
                 (
-                    Point::new(p1[0] + off.0, p1[1] + off.1),
-                    Point::new(p2[0] + off.0, p2[1] + off.1),
+                    Point::new(q1[0] + off.0, q1[1] + off.1),
+                    Point::new(q2[0] + off.0, q2[1] + off.1),
                 ),
                 &grad,
                 None,
@@ -847,10 +884,20 @@ fn tint_filter(tint: &Tint) -> Option<skia_safe::ColorFilter> {
             Color::from_argb(c[3], c[0], c[1], c[2]),
             BlendMode::Modulate,
         ),
-        // SrcOver a translucent color over each pixel = lerp toward color by `strength`.
+        // Lerp RGB toward the color by `strength`, alpha untouched (img_utils.mix_image_by_color:
+        // RGB' = RGB*(1-f) + C*f). A color matrix on unpremul RGBA does exactly this and, unlike
+        // a SrcOver blend filter, leaves fully-transparent pixels transparent.
         TintMode::Mix => {
-            let a = (tint.strength.clamp(0.0, 1.0) * 255.0).round() as u8;
-            color_filters::blend(Color::from_argb(a, c[0], c[1], c[2]), BlendMode::SrcOver)
+            let f = tint.strength.clamp(0.0, 1.0);
+            let k = 1.0 - f;
+            #[rustfmt::skip]
+            let m = skia_safe::ColorMatrix::new(
+                k, 0.0, 0.0, 0.0, f * c[0] as f32 / 255.0,
+                0.0, k, 0.0, 0.0, f * c[1] as f32 / 255.0,
+                0.0, 0.0, k, 0.0, f * c[2] as f32 / 255.0,
+                0.0, 0.0, 0.0, 1.0, 0.0,
+            );
+            Some(color_filters::matrix(&m, None))
         }
         // SrcIn = keep the source alpha as a stencil, replace RGB with `color`. `color`'s
         // alpha scales the result alpha (255 keeps the source mask unchanged).
@@ -1052,6 +1099,101 @@ fn resolve_adaptive_color(
     } else {
         ad.dark
     }
+}
+
+/// Painter's pixelwise adaptive text (painter.py:1099-1107): box-blur the backdrop, threshold
+/// its luma per pixel, and paste the dark-text overlay over the light-text overlay through the
+/// resulting mask (mask semantics replace pixels, they do not blend). Implemented with layers:
+/// draw light text into a layer, punch out the mask region (DstOut), then composite dark text
+/// clipped to the mask (nested layer + DstIn).
+fn draw_pixelwise_adaptive_text(
+    surface: &mut Surface,
+    fonts: &FontRegistry,
+    node: &TextNode,
+    abs: (f32, f32),
+    off: (f32, f32),
+    ad: &AdaptiveColor,
+) {
+    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
+    let emoji = fonts.emoji_font(node.font.size);
+    let emoji_ref = emoji.as_ref();
+    let (x, y) = text_layout(
+        &font,
+        emoji_ref,
+        &node.text,
+        abs,
+        node.align,
+        node.baseline,
+        node.letter_spacing,
+    );
+    let advance = measure_advance(&font, emoji_ref, &node.text, node.letter_spacing);
+    let (_, metrics) = font.metrics();
+    let mut bounds = Rect::new(x, y + metrics.ascent, x + advance, y + metrics.descent);
+    let canvas_rect = Rect::from_xywh(0.0, 0.0, surface.width() as f32, surface.height() as f32);
+    let mask = if bounds.intersect(canvas_rect) {
+        let ibounds: IRect = bounds.round_out();
+        surface
+            .image_snapshot_with_bounds(ibounds)
+            .and_then(|img| pixelwise_dark_mask(&img, ad.threshold))
+            .map(|mask| (mask, ibounds))
+    } else {
+        None
+    };
+    let Some((mask, ibounds)) = mask else {
+        // No usable backdrop: fall back to the whole-run average path.
+        let color = resolve_adaptive_color(surface, fonts, node, abs, ad);
+        draw_styled_text(surface.canvas(), fonts, node, abs, off, &Fill::Solid(color));
+        return;
+    };
+    let mask_rect = Rect::from_irect(ibounds);
+    let canvas = surface.canvas();
+    let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&mask_rect);
+    canvas.save_layer(&layer);
+    draw_styled_text(canvas, fonts, node, abs, off, &Fill::Solid(ad.light));
+    let mut erase = Paint::default();
+    erase.set_blend_mode(BlendMode::DstOut);
+    canvas.draw_image_rect(&mask, None, mask_rect, &erase);
+    canvas.save_layer(&layer);
+    draw_styled_text(canvas, fonts, node, abs, off, &Fill::Solid(ad.dark));
+    let mut keep = Paint::default();
+    keep.set_blend_mode(BlendMode::DstIn);
+    canvas.draw_image_rect(&mask, None, mask_rect, &keep);
+    canvas.restore();
+    canvas.restore();
+}
+
+/// Opaque-white-where-dark-text-applies mask: blur the backdrop like PIL BoxBlur(8)
+/// (equivalent gaussian sigma ~= sqrt((17^2 - 1) / 12)) and threshold its 601 luma.
+fn pixelwise_dark_mask(backdrop: &Image, threshold: f32) -> Option<Image> {
+    let w = backdrop.width().max(1);
+    let h = backdrop.height().max(1);
+    let mut blur_surface = surfaces::raster_n32_premul((w, h))?;
+    let mut blur_paint = Paint::default();
+    let sigma = (17.0_f32 * 17.0 - 1.0).sqrt() / 12.0_f32.sqrt();
+    blur_paint.set_image_filter(image_filters::blur(
+        (sigma, sigma),
+        TileMode::Clamp,
+        None,
+        None,
+    ));
+    blur_surface
+        .canvas()
+        .draw_image(backdrop, (0, 0), Some(&blur_paint));
+    let blurred = blur_surface.image_snapshot();
+    let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+    let row = (w as usize) * 4;
+    let mut buf = vec![0u8; row * h as usize];
+    if !blurred.read_pixels(&info, &mut buf, row, (0, 0), CachingHint::Allow) {
+        return None;
+    }
+    let cut = threshold * 255.0;
+    for px in buf.chunks_exact_mut(4) {
+        let lum = 0.299 * px[0] as f32 + 0.587 * px[1] as f32 + 0.114 * px[2] as f32;
+        let v = if lum > cut { 255 } else { 0 };
+        px.copy_from_slice(&[v, v, v, v]);
+    }
+    let mask_info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Premul, None);
+    skia_safe::images::raster_from_data(&mask_info, skia_safe::Data::new_copy(&buf), row)
 }
 
 /// Average relative luminance (0..1) of an image's pixels, or None if the read fails.

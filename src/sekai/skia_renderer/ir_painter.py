@@ -159,7 +159,8 @@ class IRPainter(Painter):
         apos = self._abs(pos)
         adaptive = None
         if isinstance(fill, AdaptiveTextColor):
-            adaptive = adaptive_color(_rgba(fill.light), _rgba(fill.dark), fill.threshold)
+            adaptive = adaptive_color(_rgba(fill.light), _rgba(fill.dark), fill.threshold,
+                                      pixelwise=bool(getattr(fill, "pixelwise", False)))
             fillval: Any = (0, 0, 0, 255)
         elif isinstance(fill, (LinearGradient, RadialGradient)):
             # Gradient text: map the gradient endpoints (fractions of the glyph overlay) to
@@ -220,11 +221,9 @@ class IRPainter(Painter):
 
     def blurglass_roundrect(self, pos, size, fill, radius, blur=4, shadow_width=6, shadow_alpha=0.3,
                             corners=(True, True, True, True), exclude_on_hash=False):
-        # shadow_width/corners are not carried by the IR node (no non-default caller today);
-        # blur is, since misc/vlive/inventory/profile panels pass 6/8 and the frosting differs.
         apos = self._abs(pos)
         self._b.blurglass(apos, size, radius, fill=self._fill(fill, apos, size), shadow_alpha=shadow_alpha,
-                          blur=float(blur))
+                          blur=float(blur), shadow_width=float(shadow_width), corners=tuple(corners))
         return self
 
     def draw_random_triangle_bg(self, time_color, main_hue, size_fixed_rate, exclude_on_hash=False):

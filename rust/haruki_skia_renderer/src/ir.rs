@@ -104,10 +104,9 @@ pub enum GradientSpec {
         p1: Vec2,
         p2: Vec2,
         /// `combine` = standard vector projection (Skia native). `separate` is Painter's
-        /// nonstandard per-axis average; it is approximated by `combine` (differs only for
-        /// diagonal gradients). Accepted for contract completeness but not separately rendered.
+        /// nonstandard per-axis average — still an affine scalar field, so it renders as a
+        /// linear gradient with remapped endpoints (see `interp::separate_endpoints`).
         #[serde(default = "default_gradient_method")]
-        #[allow(dead_code)]
         method: String,
     },
     #[serde(rename = "radial")]
@@ -399,6 +398,10 @@ pub struct AdaptiveColor {
     pub dark: Color4,
     #[serde(default = "default_adaptive_threshold")]
     pub threshold: f32,
+    /// Painter's pixelwise mode: box-blur the backdrop, threshold its luma per pixel, and
+    /// choose light/dark per pixel instead of once for the whole run.
+    #[serde(default)]
+    pub pixelwise: bool,
 }
 
 fn default_adaptive_light() -> Color4 {
@@ -459,6 +462,21 @@ pub struct BlurGlassNode {
     /// gaussian sigma = blur / downsample on the downsampled snapshot.
     #[serde(default = "default_glass_blur")]
     pub blur: f32,
+    /// Per-corner rounding switches (UL, UR, LR, LL), Painter's `corners` kwarg.
+    #[serde(default = "default_glass_corners")]
+    pub corners: [bool; 4],
+    /// Contact-shadow spread (Painter's `shadow_width`, default 6): ring sigmas scale by
+    /// `shadow_width / 6`.
+    #[serde(default = "default_glass_shadow_width")]
+    pub shadow_width: f32,
+}
+
+fn default_glass_corners() -> [bool; 4] {
+    [true; 4]
+}
+
+fn default_glass_shadow_width() -> f32 {
+    6.0
 }
 
 fn default_glass_blur() -> f32 {

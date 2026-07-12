@@ -622,6 +622,25 @@ fn draw_triangle(
     canvas.draw_path(&path, &paint);
 }
 
+/// Per-corner radii (UL, UR, LR, LL) with disabled corners at 0 (Painter's `corners`).
+fn glass_corner_radii(radius: f32, corners: [bool; 4]) -> [Point; 4] {
+    let r = radius.max(0.0);
+    let pick = |on: bool| {
+        if on {
+            Point::new(r, r)
+        } else {
+            Point::new(0.0, 0.0)
+        }
+    };
+    [
+        pick(corners[0]),
+        pick(corners[1]),
+        pick(corners[2]),
+        pick(corners[3]),
+    ]
+}
+
+#[allow(clippy::too_many_arguments)]
 fn draw_blur_glass_rect(
     canvas: &Canvas,
     backdrop: Option<(&Image, (f32, f32))>,
@@ -630,8 +649,10 @@ fn draw_blur_glass_rect(
     panel_paint: &Paint,
     shadow_alpha: f32,
     blur: f32,
+    corners: [bool; 4],
+    shadow_width: f32,
 ) {
-    draw_glass_shadow(canvas, rect, radius, shadow_alpha);
+    draw_glass_shadow(canvas, rect, radius, shadow_alpha, corners, shadow_width);
 
     // `backdrop` is a snapshot of just the panel's region; `origin` is its top-left in canvas
     // space, so absolute sample coordinates map to the sub-image by subtracting it.
@@ -693,7 +714,7 @@ fn draw_blur_glass_rect(
 
                 canvas.save();
                 canvas.clip_rrect(
-                    RRect::new_rect_xy(rect, radius, radius),
+                    RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
                     ClipOp::Intersect,
                     true,
                 );
@@ -711,21 +732,35 @@ fn draw_blur_glass_rect(
         }
     }
 
-    draw_glass_overlay(canvas, rect, radius, panel_paint, 0.6);
+    draw_glass_overlay(canvas, rect, radius, panel_paint, corners, 0.6);
 }
 
-fn draw_glass_shadow(canvas: &Canvas, rect: Rect, radius: f32, shadow_alpha: f32) {
+fn draw_glass_shadow(
+    canvas: &Canvas,
+    rect: Rect,
+    radius: f32,
+    shadow_alpha: f32,
+    corners: [bool; 4],
+    shadow_width: f32,
+) {
     // Symmetric soft contact shadow on all four sides (mirrors Pillow: the panel shape
     // dimmed to shadow_alpha, GaussianBlur'd, interior removed). Clipping to the area
     // OUTSIDE the panel keeps only the outward halo, so the translucent glass fill drawn
     // afterwards never shows interior darkening. Black, not the old downward-only purple.
-    let rrect = RRect::new_rect_xy(rect, radius, radius);
+    let rrect = RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners));
     canvas.save();
     canvas.clip_rrect(rrect, ClipOp::Difference, true);
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_style(PaintStyle::Fill);
-    for (sigma, factor) in [(2.0, 0.55), (5.0, 0.28), (9.0, 0.12)] {
+    // Painter blurs the shadow mask with GaussianBlur(shadow_width * 0.5); scale the tuned
+    // three-ring sigmas by shadow_width / 6 (the Painter default) to track the same spread.
+    let spread = (shadow_width / 6.0).max(0.05);
+    for (sigma, factor) in [
+        (2.0 * spread, 0.55),
+        (5.0 * spread, 0.28),
+        (9.0 * spread, 0.12),
+    ] {
         let alpha = (shadow_alpha * factor * 255.0).clamp(0.0, 255.0) as u8;
         paint.set_color(Color::from_argb(alpha, 0, 0, 0));
         paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, sigma, true));
@@ -740,10 +775,14 @@ fn draw_glass_overlay(
     rect: Rect,
     radius: f32,
     panel_paint: &Paint,
+    corners: [bool; 4],
     edge_strength: f32,
 ) {
     // `panel_paint` is pre-built (anti-alias + Fill style + solid color or gradient shader).
-    canvas.draw_rrect(RRect::new_rect_xy(rect, radius, radius), panel_paint);
+    canvas.draw_rrect(
+        RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
+        panel_paint,
+    );
 
     if edge_strength <= 0.0 {
         return;
@@ -790,7 +829,7 @@ fn draw_glass_overlay(
         let inset = edge_w * 0.5;
         canvas.save();
         canvas.clip_rrect(
-            RRect::new_rect_xy(rect, radius, radius),
+            RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
             ClipOp::Intersect,
             true,
         );
@@ -800,10 +839,9 @@ fn draw_glass_overlay(
         edge.set_stroke_width(edge_w);
         edge.set_shader(shader);
         canvas.draw_rrect(
-            RRect::new_rect_xy(
+            RRect::new_rect_radii(
                 rect.with_inset((inset, inset)),
-                (radius - inset).max(0.0),
-                (radius - inset).max(0.0),
+                &glass_corner_radii((radius - inset).max(0.0), corners),
             ),
             &edge,
         );

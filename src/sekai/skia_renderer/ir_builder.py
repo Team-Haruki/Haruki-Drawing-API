@@ -84,10 +84,14 @@ def text_stroke(color: Color, width: float = 1.0) -> Node:
 
 
 def adaptive_color(light: Color = (255, 255, 255, 255), dark: Color = (0, 0, 0, 255),
-                   threshold: float = 0.4) -> Node:
+                   threshold: float = 0.4, pixelwise: bool = False) -> Node:
     """Background-adaptive text color: ``light`` over dark backdrops, ``dark`` over bright
-    ones (chosen by average luminance vs ``threshold``)."""
-    return {"light": _color(light), "dark": _color(dark), "threshold": float(threshold)}
+    ones. ``pixelwise`` picks per pixel from the box-blurred backdrop (Painter's pixelwise
+    mode) instead of once for the whole run by average luminance."""
+    node: Node = {"light": _color(light), "dark": _color(dark), "threshold": float(threshold)}
+    if pixelwise:
+        node["pixelwise"] = True
+    return node
 
 
 def linear_gradient(
@@ -383,11 +387,16 @@ class IRBuilder:
                           "alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)})
 
     def blurglass(self, pos: Vec2, size: Vec2, radius: float, fill: Color | Node,
-                  shadow_alpha: float = 0.26, blur: float = 4.0) -> Node:
+                  shadow_alpha: float = 0.26, blur: float = 4.0, shadow_width: float = 6.0,
+                  corners: tuple[bool, bool, bool, bool] = (True, True, True, True)) -> Node:
         node: Node = {"type": "BlurGlass", "pos": _vec(pos), "size": _vec(size), "radius": radius,
                       "fill": _fill_value(fill), "shadow_alpha": shadow_alpha}
         if blur != 4.0:
             node["blur"] = float(blur)
+        if shadow_width != 6.0:
+            node["shadow_width"] = float(shadow_width)
+        if tuple(corners) != (True, True, True, True):
+            node["corners"] = [bool(c) for c in corners]
         return self._add(node)
 
     def triangle_bg(self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0,
