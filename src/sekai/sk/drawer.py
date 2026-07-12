@@ -1284,13 +1284,12 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
     event_end = datetime_from_millis(rqd.event_aggregate_at + 1000, rqd.timezone)
     now = request_now(rqd.timezone)
 
-    teams = rqd.team_info
-    teams.sort(key=lambda x: x.team_id)
+    # Build display data without mutating rqd: the build may run twice on the same
+    # request object (Skia shadow path + Pillow fallback), and appending the CN name
+    # onto team.team_name in place would duplicate it on the second build.
+    teams = sorted(rqd.team_info, key=lambda x: x.team_id)
     tids = [team.team_id for team in teams]
-    for team in teams:
-        if team.team_cn_name:
-            team.team_name = f"{team.team_name} ({team.team_cn_name})"
-    tnames = [team.team_name for team in teams]
+    tnames = [f"{team.team_name} ({team.team_cn_name})" if team.team_cn_name else team.team_name for team in teams]
     ticons = [await get_img_from_path(ASSETS_BASE_DIR, team.team_icon_path) for team in teams]
 
     win_tid = tids[0] if teams[0].win_rate >= teams[1].win_rate else tids[1]
