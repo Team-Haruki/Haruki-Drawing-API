@@ -37,9 +37,25 @@ def skia_plot_enabled() -> bool:
     return bool(settings.drawing.use_skia_plot)
 
 
+# Minimum IR capability this code emits (3 = IR v2 + reserve primitives + group mask).
+# An older wheel would silently drop features, so refuse it and fail open to Pillow.
+REQUIRED_NATIVE_IR_CAPABILITY = 3
+
+
 def load_native_renderer():
-    """Import the native Skia renderer module (shared by the shim and card paths)."""
-    return importlib.import_module("haruki_skia_renderer")
+    """Import the native Skia renderer module (shared by the shim and card paths).
+
+    Raises ImportError when the module is missing OR too old for the IR this code
+    builds — callers already treat ImportError as the fail-open path.
+    """
+    native = importlib.import_module("haruki_skia_renderer")
+    capability = getattr(native, "IR_CAPABILITY", 0)
+    if capability < REQUIRED_NATIVE_IR_CAPABILITY:
+        raise ImportError(
+            f"haruki_skia_renderer IR capability {capability} < required "
+            f"{REQUIRED_NATIVE_IR_CAPABILITY}; rebuild/upgrade the wheel"
+        )
+    return native
 
 
 _REQUIRED = {

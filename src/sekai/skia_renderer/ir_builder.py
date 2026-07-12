@@ -175,10 +175,15 @@ class IRBuilder:
         return node
 
     @contextmanager
-    def group(self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None) -> Iterator[IRBuilder]:
+    def group(self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None,
+              mask: str | None = None) -> Iterator[IRBuilder]:
+        """``mask``: image ref (asset path / ``mem:<key>``) whose alpha masks the group's
+        children (DstIn, stretched to the group rect) — Pillow's putalpha semantics."""
         node: Node = {"type": "Group", "offset": _vec(offset), "size": _vec(size), "children": []}
         if clip is not None:
             node["clip"] = clip
+        if mask is not None:
+            node["mask"] = mask
         self._add(node)
         self._stack.append(node["children"])
         try:

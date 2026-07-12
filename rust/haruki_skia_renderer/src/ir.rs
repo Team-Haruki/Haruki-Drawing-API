@@ -273,6 +273,11 @@ pub struct GroupNode {
     pub size: Vec2,
     #[serde(default)]
     pub clip: Option<Clip>,
+    /// Image ref (asset path or ``mem:<key>``) whose ALPHA masks the group's children:
+    /// saveLayer -> children -> mask drawn DstIn stretched to the group rect -> restore.
+    /// Covers Pillow's ``img.putalpha(mask.split()[3])`` (honor bonds). Requires ``size``.
+    #[serde(default)]
+    pub mask: Option<String>,
     #[serde(default)]
     pub children: Vec<Node>,
 }

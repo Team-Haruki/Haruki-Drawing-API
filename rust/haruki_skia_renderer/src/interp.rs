@@ -270,6 +270,14 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
     match node {
         Node::Group(group) => {
             let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
+            let mask_rect = group
+                .mask
+                .as_ref()
+                .map(|_| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
+            if let Some(rect) = mask_rect {
+                let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&rect);
+                surface.canvas().save_layer(&layer);
+            }
             let clipped = group.clip.is_some();
             if let Some(clip) = &group.clip {
                 let canvas = surface.canvas();
@@ -280,6 +288,18 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 render_node(surface, interp, child_off, child);
             }
             if clipped {
+                surface.canvas().restore();
+            }
+            if let Some(rect) = mask_rect {
+                let mask_ref = group.mask.as_deref().unwrap_or_default();
+                if let Some(mask) = interp.load(mask_ref) {
+                    let mut keep = Paint::default();
+                    keep.set_anti_alias(true);
+                    keep.set_blend_mode(BlendMode::DstIn);
+                    surface.canvas().draw_image_rect(&mask, None, rect, &keep);
+                } else {
+                    eprintln!("haruki_skia_renderer: group mask missing, mask skipped: {mask_ref}");
+                }
                 surface.canvas().restore();
             }
         }
