@@ -31,7 +31,7 @@
   - [ ] Phase 2(M):SdfQuad 节点(SkSL/像素循环)+ freetype-rs 度量——甩掉 fontTools 的
         **全进程 GIL 重启风险**(实测确认),文字重卡估 10-40×。
   - [ ] 前置:从生产拉 tmp-font-assets/{region} + sprite + 真实卡 payload(本地全缺)。
-- [ ] mysekai msr_map 多图网格拼接迁 IR(M,drawer.real.py 私有,注意与镜像 API 配对)。
+- [x] mysekai msr_map 多图网格拼接迁 IR(2026-07-13,合并 widget 树 + 双后端 tile 裁剪,Pillow 基线 max_diff=0;drawer.real.py 不进 git,注意与镜像 API 配对)。
 
 ## 🟠 生产化质量项(一次性切换时跳过的计划内容)
 
