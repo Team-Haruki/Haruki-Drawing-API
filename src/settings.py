@@ -107,12 +107,13 @@ class DrawingSettings(BaseModel):
     screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
-    use_skia_card_list: bool = False  # 是否启用 Rust + Skia card/list 渲染 MVP
+    # Skia 门控:默认开启(2026-07-12 全端点真实数据对拍通过后切换)。扩展缺失时 fail-open
+    # 回退 Pillow 并打 ERROR。开关一律不写入 configs.yaml,生产用 HARUKI_DRAWING__* 环境变量覆盖。
+    use_skia_card_list: bool = True  # Rust + Skia card/list 渲染
     skia_card_list_fallback_to_pillow: bool = True  # Skia 渲染失败时是否回退 Pillow
-    skia_card_list_log_visual_metrics: bool = False  # 是否记录 Skia 视觉验收辅助指标
-    use_skia_card_box: bool = False  # 是否启用 Rust + Skia card/box 渲染
+    use_skia_card_box: bool = False  # card/box scene 构建器落后 main 新布局,重做前保持关闭(有防呆)
     skia_card_fallback_to_pillow: bool = True  # Card 模块 Skia 渲染失败时是否回退 Pillow
-    use_skia_plot: bool = False  # 是否对 plot.py widget 树端点启用 IRPainter → Skia 渲染
+    use_skia_plot: bool = True  # plot.py widget 树端点的 IRPainter → Skia 渲染
     custom_profile_assets_dir: Path | None = None
     custom_profile_fonts_dir: Path | None = None
     custom_profile_tmp_font_metadata: Path | None = None
@@ -146,6 +147,15 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        # from_yaml passes configs.yaml as init kwargs; by default init > env, which would
+        # let a key written in the yaml silently defeat HARUKI_* overrides — exactly when an
+        # operator needs env to win (e.g. flipping a Skia gate during an incident). Env first.
+        return (env_settings, init_settings, dotenv_settings, file_secret_settings)
 
     assets: AssetsSettings = AssetsSettings()
     font: FontSettings = FontSettings()
@@ -257,7 +267,6 @@ EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
 USE_SKIA_CARD_LIST = settings.drawing.use_skia_card_list
 SKIA_CARD_LIST_FALLBACK_TO_PILLOW = settings.drawing.skia_card_list_fallback_to_pillow
-SKIA_CARD_LIST_LOG_VISUAL_METRICS = settings.drawing.skia_card_list_log_visual_metrics
 USE_SKIA_CARD_BOX = settings.drawing.use_skia_card_box
 SKIA_CARD_FALLBACK_TO_PILLOW = settings.drawing.skia_card_fallback_to_pillow
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir

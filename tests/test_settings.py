@@ -43,11 +43,11 @@ server:
     assert settings.drawing.thread_pool_size == 3
     assert settings.drawing.export_image_format == "jpg"
     assert settings.drawing.jpg_quality == 77
-    assert settings.drawing.use_skia_card_list is False
+    assert settings.drawing.use_skia_card_list is True
     assert settings.drawing.skia_card_list_fallback_to_pillow is True
-    assert settings.drawing.skia_card_list_log_visual_metrics is False
     assert settings.drawing.use_skia_card_box is False
     assert settings.drawing.skia_card_fallback_to_pillow is True
+    assert settings.drawing.use_skia_plot is True
     assert (
         settings.drawing.custom_profile_assets_dir
         == (PROJECT_ROOT / "custom-data" / "asset" / "{region}-assets" / "startapp" / "custom_profile").resolve()
@@ -84,11 +84,11 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     monkeypatch.setenv("HARUKI_DRAWING__READINESS_UNHEALTHY_INFLIGHT_REQUESTS", "48")
     monkeypatch.setenv("HARUKI_DRAWING__EXPORT_IMAGE_FORMAT", "jpg")
     monkeypatch.setenv("HARUKI_DRAWING__JPG_QUALITY", "91")
-    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_LIST", "true")
+    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_LIST", "false")
     monkeypatch.setenv("HARUKI_DRAWING__SKIA_CARD_LIST_FALLBACK_TO_PILLOW", "false")
-    monkeypatch.setenv("HARUKI_DRAWING__SKIA_CARD_LIST_LOG_VISUAL_METRICS", "true")
     monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_BOX", "true")
     monkeypatch.setenv("HARUKI_DRAWING__SKIA_CARD_FALLBACK_TO_PILLOW", "false")
+    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_PLOT", "false")
 
     settings = Settings()
 
@@ -97,11 +97,34 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     assert settings.drawing.readiness_unhealthy_inflight_requests == 48
     assert settings.drawing.export_image_format == "jpg"
     assert settings.drawing.jpg_quality == 91
-    assert settings.drawing.use_skia_card_list is True
+    assert settings.drawing.use_skia_card_list is False
     assert settings.drawing.skia_card_list_fallback_to_pillow is False
-    assert settings.drawing.skia_card_list_log_visual_metrics is True
     assert settings.drawing.use_skia_card_box is True
     assert settings.drawing.skia_card_fallback_to_pillow is False
+    assert settings.drawing.use_skia_plot is False
+
+
+def test_environment_overrides_beat_yaml_written_keys(tmp_path, monkeypatch):
+    # configs.yaml is passed as init kwargs; env must still win so operators can flip
+    # Skia gates (or any drawing key) without editing files (settings_customise_sources).
+    config_path = tmp_path / "configs.yaml"
+    config_path.write_text(
+        """
+drawing:
+  use_skia_plot: true
+  use_skia_card_list: true
+  jpg_quality: 70
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_PLOT", "false")
+    monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_CARD_LIST", "false")
+
+    settings = Settings.from_yaml(config_path)
+
+    assert settings.drawing.use_skia_plot is False
+    assert settings.drawing.use_skia_card_list is False
+    assert settings.drawing.jpg_quality == 70  # yaml still applies where env is silent
 
 
 @pytest.mark.parametrize("quality", [0, 101])
