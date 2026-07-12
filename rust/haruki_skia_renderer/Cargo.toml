@@ -11,10 +11,11 @@ crate-type = ["cdylib"]
 pyo3 = { version = "0.27.1", features = ["extension-module"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-# "svg" builds Skia's SVG module, required to rasterize OT-SVG color emoji
-# (TwitterColorEmoji-SVGinOT) on the FreeType backend (Linux); without it those glyphs
-# fall back to monochrome outlines in production containers.
-skia-safe = { version = "0.99.0", features = ["svg"] }
+# Default features only: the "svg" module (needed for OT-SVG color emoji) has no
+# prebuilt skia-binaries variant, forcing a from-source Skia build that breaks on CI
+# toolchains. Color emoji therefore uses a COLR-format font (TwemojiMozilla), which
+# the default FreeType backend renders natively.
+skia-safe = "0.99.0"
 
 [profile.release]
 lto = "thin"

@@ -13,7 +13,7 @@ font:
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
-    emoji: TwitterColorEmoji-SVGinOT
+    emoji: TwitterColorEmoji-SVGinOT  # macOS 开发机:CoreText 后端渲染 OT-SVG 彩色(COLR 在 mac scaler 下是空白);Linux 生产用 TwemojiMozilla(见 configs.docker.yaml)
 
 drawing:
   thread_pool_size: 8

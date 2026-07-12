@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover - extension not built
     _native = None
 
 from src.sekai.base.painter import LinearGradient, Painter, get_font
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_EMOJI_FONT, DEFAULT_FONT, FONT_DIR
 
 pytestmark = pytest.mark.skipif(_native is None, reason="haruki_skia_renderer not built")
 
@@ -252,7 +252,7 @@ def test_node_parity(case):
             pytest.fail(f"{name}: ink bbox delta {deltas} > {bound}px (ref={rb} act={ab}, artifacts: {out_dir})")
 
 
-_EMOJI_FONT = "TwitterColorEmoji-SVGinOT"
+_EMOJI_FONT = DEFAULT_EMOJI_FONT  # 平台各异:mac=SVGinOT(CoreText),linux=COLR TwemojiMozilla
 _EMOJI_FONT_EXISTS = os.path.exists(os.path.join(str(FONT_DIR), _EMOJI_FONT + ".ttf"))
 
 

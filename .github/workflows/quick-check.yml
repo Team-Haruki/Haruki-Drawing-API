@@ -122,8 +122,8 @@ jobs:
             data/SourceHanSansSC-Regular.otf
             data/SourceHanSansSC-Bold.otf
             data/SourceHanSansSC-Heavy.otf
-            data/TwitterColorEmoji-SVGinOT.ttf
-          key: ci-fonts-source-han-sans-release-twemoji-v15.1.0
+            data/TwemojiMozilla.ttf
+          key: ci-fonts-source-han-sans-release-twemoji-mozilla-v0.7.0
 
       - name: Download CI fonts
         if: steps.font-cache.outputs.cache-hit != 'true'
@@ -134,10 +134,11 @@ jobs:
             curl -fsSL --retry 3 -o "data/SourceHanSansSC-${weight}.otf" \
               "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-${weight}.otf"
           done
-          curl -fsSL --retry 3 -o /tmp/twemoji.zip \
-            "https://github.com/eosrei/twemoji-color-font/releases/download/v15.1.0/TwitterColorEmoji-SVGinOT-15.1.0.zip"
-          unzip -j -o /tmp/twemoji.zip "TwitterColorEmoji-SVGinOT-15.1.0/TwitterColorEmoji-SVGinOT.ttf" -d data
-          ls -l data/SourceHanSansSC-*.otf data/TwitterColorEmoji-SVGinOT.ttf
+          # COLR-format Twemoji: FreeType/Skia render it in color with default features
+          # (the SVGinOT variant only yields monochrome fallbacks on the Linux backend).
+          curl -fsSL --retry 3 -o data/TwemojiMozilla.ttf \
+            "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf"
+          ls -l data/SourceHanSansSC-*.otf data/TwemojiMozilla.ttf
 
       - name: Sync dependencies
         run: uv sync --frozen --all-groups --python cpython-3.14.3+freethreaded
@@ -161,4 +162,7 @@ jobs:
         run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 3, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Run pytest with native renderer
+        env:
+          # Linux FreeType renders COLR natively; the repo default (OT-SVG) is macOS-only.
+          HARUKI_FONT__EMOJI: TwemojiMozilla
         run: uv run pytest tests/ -q

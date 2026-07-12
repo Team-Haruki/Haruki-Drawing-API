@@ -13,7 +13,7 @@ font:
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
-    emoji: TwitterColorEmoji-SVGinOT
+    emoji: TwemojiMozilla  # Linux/FreeType 后端:COLR 原生彩色(SVGinOT 只出单色回退);字体文件 TwemojiMozilla.ttf 需在数据卷 font.dir 下
 
 drawing:
   thread_pool_size: 8
