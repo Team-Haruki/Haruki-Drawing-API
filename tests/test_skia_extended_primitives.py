@@ -42,11 +42,23 @@ def test_separate_gradient_matches_painter_field():
 
     p1, p2 = (0.1, 0.2), (0.9, 0.8)
     c1, c2 = (255, 0, 0, 255), (0, 0, 255, 255)
-    img = _render([
-        {"type": "Rect", "pos": [0, 0], "size": [W, H],
-         "fill": {"kind": "linear", "c1": list(c1), "c2": list(c2), "method": "separate",
-                  "p1": [p1[0] * W, p1[1] * H], "p2": [p2[0] * W, p2[1] * H]}},
-    ])
+    img = _render(
+        [
+            {
+                "type": "Rect",
+                "pos": [0, 0],
+                "size": [W, H],
+                "fill": {
+                    "kind": "linear",
+                    "c1": list(c1),
+                    "c2": list(c2),
+                    "method": "separate",
+                    "p1": [p1[0] * W, p1[1] * H],
+                    "p2": [p2[0] * W, p2[1] * H],
+                },
+            },
+        ]
+    )
     expected = LinearGradient(c1, c2, p1, p2, method="separate").get_colors((W, H))
     got = np.asarray(img)[:, :, :3].astype(np.float32)
     diff = np.abs(got - expected[:, :, :3].astype(np.float32))
@@ -58,17 +70,24 @@ def test_separate_gradient_matches_painter_field():
 
 def test_pixelwise_adaptive_text_splits_by_backdrop():
     text_node = {
-        "type": "Text", "text": "MMMMMMMM", "pos": [18, 40],
-        "font": {"role": "bold", "size": 34}, "align": "left", "baseline": "cjk_top",
+        "type": "Text",
+        "text": "MMMMMMMM",
+        "pos": [18, 40],
+        "font": {"role": "bold", "size": 34},
+        "align": "left",
+        "baseline": "cjk_top",
         "fill": [255, 0, 0, 255],
-        "adaptive": {"light": [255, 255, 255, 255], "dark": [0, 0, 0, 255],
-                     "threshold": 0.4, "pixelwise": True},
+        "adaptive": {"light": [255, 255, 255, 255], "dark": [0, 0, 0, 255], "threshold": 0.4, "pixelwise": True},
     }
-    img = np.asarray(_render([
-        {"type": "Rect", "pos": [0, 0], "size": [W / 2, H], "fill": [10, 10, 10, 255]},
-        {"type": "Rect", "pos": [W / 2, 0], "size": [W / 2, H], "fill": [245, 245, 245, 255]},
-        text_node,
-    ]))
+    img = np.asarray(
+        _render(
+            [
+                {"type": "Rect", "pos": [0, 0], "size": [W / 2, H], "fill": [10, 10, 10, 255]},
+                {"type": "Rect", "pos": [W / 2, 0], "size": [W / 2, H], "fill": [245, 245, 245, 255]},
+                text_node,
+            ]
+        )
+    )
     left, right = img[:, : W // 2 - 12], img[:, W // 2 + 12 :]
     # Glyph ink on the dark half must be light pixels, and vice versa.
     assert (left[:, :, :3].max(axis=2) > 200).sum() > 50, "no light glyphs over the dark half"
@@ -77,11 +96,15 @@ def test_pixelwise_adaptive_text_splits_by_backdrop():
     # mixed backdrop averages bright (> 0.4), so the dark color wins and the dark half
     # gets NO light glyphs (unlike pixelwise, which put light glyphs there above).
     text_avg = {**text_node, "adaptive": {**text_node["adaptive"], "pixelwise": False}}
-    img_avg = np.asarray(_render([
-        {"type": "Rect", "pos": [0, 0], "size": [W / 2, H], "fill": [10, 10, 10, 255]},
-        {"type": "Rect", "pos": [W / 2, 0], "size": [W / 2, H], "fill": [245, 245, 245, 255]},
-        text_avg,
-    ]))
+    img_avg = np.asarray(
+        _render(
+            [
+                {"type": "Rect", "pos": [0, 0], "size": [W / 2, H], "fill": [10, 10, 10, 255]},
+                {"type": "Rect", "pos": [W / 2, 0], "size": [W / 2, H], "fill": [245, 245, 245, 255]},
+                text_avg,
+            ]
+        )
+    )
     left_avg = img_avg[:, : W // 2 - 12]
     assert (left_avg[:, :, :3].min(axis=2) > 200).sum() < 20, "avg mode should not split per pixel"
 
@@ -92,8 +115,14 @@ def test_mix_tint_preserves_alpha():
     src.paste(Image.new("RGBA", (20, 20), (255, 0, 0, 255)), (0, 0))
     img = _render(
         [
-            {"type": "Image", "path": "mem:m0", "pos": [0, 0], "size": [40, 20], "fit": "stretch",
-             "tint": {"color": [0, 0, 255, 255], "mode": "mix", "strength": 0.5}},
+            {
+                "type": "Image",
+                "path": "mem:m0",
+                "pos": [0, 0],
+                "size": [40, 20],
+                "fit": "stretch",
+                "tint": {"color": [0, 0, 255, 255], "mode": "mix", "strength": 0.5},
+            },
         ],
         mem={"m0": (40, 20, src.tobytes())},
         size=(40, 20),
@@ -110,12 +139,21 @@ def test_mix_tint_preserves_alpha():
 
 def test_blurglass_corners_and_shadow_width():
     def glass(corners, shadow_width=6.0):
-        return _render([
-            {"type": "Rect", "pos": [0, 0], "size": [W, H], "fill": [40, 160, 40, 255]},
-            {"type": "BlurGlass", "pos": [30, 20], "size": [140, 80], "radius": 18,
-             "fill": [255, 255, 255, 255], "shadow_alpha": 0.5,
-             "corners": corners, "shadow_width": shadow_width},
-        ])
+        return _render(
+            [
+                {"type": "Rect", "pos": [0, 0], "size": [W, H], "fill": [40, 160, 40, 255]},
+                {
+                    "type": "BlurGlass",
+                    "pos": [30, 20],
+                    "size": [140, 80],
+                    "radius": 18,
+                    "fill": [255, 255, 255, 255],
+                    "shadow_alpha": 0.5,
+                    "corners": corners,
+                    "shadow_width": shadow_width,
+                },
+            ]
+        )
 
     # UL corner disabled -> square (panel white covers the corner); UR enabled -> rounded
     # (background green shows at the corner point).

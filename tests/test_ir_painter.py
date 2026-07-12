@@ -33,8 +33,14 @@ def _build_canvas() -> Canvas:
 
 def _render(canvas: Canvas):
     size = canvas._get_self_size()
-    p = IRPainter(size, assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR),
-                  default_font=DEF, bold_font=DEFAULT_BOLD_FONT, bg_hour=15.5)
+    p = IRPainter(
+        size,
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEF,
+        bold_font=DEFAULT_BOLD_FONT,
+        bg_hour=15.5,
+    )
     canvas.draw(p)
     scene, mem = p.build_scene()
     result = _native.render_scene(json.dumps(scene, ensure_ascii=False).encode(), mem)
@@ -53,8 +59,13 @@ def test_irpainter_renders_canvas_matching_layout():
 
 def test_irpainter_mem_image_renders():
     red = Image.new("RGBA", (24, 24), (255, 0, 0, 255))
-    p = IRPainter((40, 40), assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR),
-                  default_font=DEF, bold_font=DEFAULT_BOLD_FONT)
+    p = IRPainter(
+        (40, 40),
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEF,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
     p.paste(red, (8, 8), (24, 24))
     scene, mem = p.build_scene()
     assert len(mem) == 1  # the runtime image was captured as a mem:<key> entry
@@ -69,8 +80,13 @@ def test_irpainter_gradient_text_maps_to_glyph_overlay_fill():
     # gradient as a glyph-masked shader.
     from src.sekai.base.painter import FontDesc, LinearGradient
 
-    p = IRPainter((40, 40), assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR),
-                  default_font=DEF, bold_font=DEFAULT_BOLD_FONT)
+    p = IRPainter(
+        (40, 40),
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEF,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
     grad = LinearGradient((255, 0, 0, 255), (0, 0, 255, 255), (0, 0), (1, 0))
     p.text("hi", (0, 0), FontDesc(DEF, 20), fill=grad)
     scene, _mem = p.build_scene()

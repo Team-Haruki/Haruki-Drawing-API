@@ -61,4 +61,3 @@ def test_skia_gates_default_on(flag):
     from src.settings import DrawingSettings
 
     assert getattr(DrawingSettings(), flag) is True
-

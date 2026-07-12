@@ -67,8 +67,15 @@ def test_gradient_radial_and_stroke_and_corner_radii():
 
     b = _builder()
     grad = linear_gradient(stops=[((255, 0, 0, 255), 0.0), ((0, 0, 255, 255), 1.0)], p1=(0, 0), p2=(10, 0))
-    b.roundrect((0, 0), (10, 10), 4, fill=grad, stroke=radial_gradient((0, 0, 0, 255), (255, 255, 255, 255),
-                center=(5, 5), radius_px=5), stroke_width=2, corner_radii=(8, 0, 8, 0))
+    b.roundrect(
+        (0, 0),
+        (10, 10),
+        4,
+        fill=grad,
+        stroke=radial_gradient((0, 0, 0, 255), (255, 255, 255, 255), center=(5, 5), radius_px=5),
+        stroke_width=2,
+        corner_radii=(8, 0, 8, 0),
+    )
     node = b._root_children[-1]
     assert node["fill"]["kind"] == "linear"
     assert len(node["fill"]["stops"]) == 2
@@ -80,15 +87,30 @@ def test_image_tint_shadow_and_text_extras():
     from src.sekai.skia_renderer.ir_builder import adaptive_color, image_shadow, image_tint, text_stroke
 
     b = _builder()
-    b.image("a.png", (0, 0), (10, 10), fit="crop", tint=image_tint((255, 0, 0, 255), "multiply"),
-            shadow=image_shadow(0.5, (3, 3), 2.0))
+    b.image(
+        "a.png",
+        (0, 0),
+        (10, 10),
+        fit="crop",
+        tint=image_tint((255, 0, 0, 255), "multiply"),
+        shadow=image_shadow(0.5, (3, 3), 2.0),
+    )
     img = b._root_children[-1]
     assert img["fit"] == "crop"
     assert img["tint"]["mode"] == "multiply"
     assert img["shadow"]["sigma"] == 2.0
 
-    b.text("hi", (0, 0), "bold", 20, fill=linear_gradient((255, 0, 0, 255), (0, 0, 255, 255), (0, 0), (10, 0)),
-           stroke=text_stroke((0, 0, 0, 255), 2), letter_spacing=1.5, adaptive=adaptive_color(), font_name="serif")
+    b.text(
+        "hi",
+        (0, 0),
+        "bold",
+        20,
+        fill=linear_gradient((255, 0, 0, 255), (0, 0, 255, 255), (0, 0), (10, 0)),
+        stroke=text_stroke((0, 0, 0, 255), 2),
+        letter_spacing=1.5,
+        adaptive=adaptive_color(),
+        font_name="serif",
+    )
     txt = b._root_children[-1]
     assert txt["fill"]["kind"] == "linear"
     assert txt["stroke"]["width"] == 2.0
@@ -98,8 +120,15 @@ def test_image_tint_shadow_and_text_extras():
 
 
 def test_extra_fonts_and_watermark():
-    b = IRBuilder(100, 100, assets_base_dir="/base", font_dir="/fonts", default_font="Regular",
-                  bold_font="Bold", extra_fonts={"serif": "MySerif"})
+    b = IRBuilder(
+        100,
+        100,
+        assets_base_dir="/base",
+        font_dir="/fonts",
+        default_font="Regular",
+        bold_font="Bold",
+        extra_fonts={"serif": "MySerif"},
+    )
     assert b.build()["fonts"]["extra"] == {"serif": "MySerif"}
     b.watermark([("hello", (5, 5), "left"), ("world", (95, 5), "right")], "default", 16)
     wm = b._root_children[-1]
