@@ -218,3 +218,19 @@ TYPEFACE_CACHE 锁外加载。
 仍悬:card/box shim-first 重做(阶段 7/D5)、honor alpha-mask 原语、chart 水印壳、CI wheel 流水线
 (阶段 3,按 D2 仓库 CI 构建 artifact)、生产镜像集成与部署验收。**生产环境在 wheel/Docker 链路
 完成前不受本次默认值影响**(镜像里没有扩展 → fail-open 回退 Pillow 并打 ERROR)。
+
+### 2026-07-12(续):组件库缺口清零 + card/box shim-first 完成
+
+- **覆盖审计**(4 路:widget 层/Painter 原语/Rust IR/富文本):布局引擎按架构共享、8 原语全映射。
+  修复 4 个有触发点的缺口:emoji 区间码点按**字形覆盖**路由(♡☆★♪✓ 零宽消失的根因)、BlurGlass
+  blur 参数透传、TriangleBg 夜间 ml^0.5 衰减、card 背景 fade=0.1;解释器资产加载失败改为打告警。
+- **储备原语补齐**(零调用点,留待后用):separate 渐变精确实现(仿射场重映射端点)、pixelwise
+  自适应文字(BoxBlur 亮度蒙版分层合成)、BlurGlass corners/shadow_width、tint=mix 换颜色矩阵
+  (透明区不再被染色)。`tests/test_skia_extended_primitives.py` 钉死语义。
+- **card/box shim-first 完成(D5 落地)**:`compose_box_image` 拆出共享 `_build_box_canvas`,
+  `try_render_box_payload` 走影子层——收集统计、属性分组、user_info profile card 全部随 widget
+  树自然覆盖。真实 1404 卡对拍:1524×3128 双端一致、diff 均值 3.9、Pillow 2.24s vs Skia 1.29s
+  (1.74×)。手写 box 构建器(~320 行)、`_CARD_BOX_SCENE_STALE` 防呆、`use_skia_card_box`/
+  `skia_card_fallback_to_pillow` 配置全部退役;card/box 与其他影子层端点同用 `use_skia_plot`。
+- 对拍现状:**57 ok / 1 pillow-only(honor)/ 0 失败**。除 honor 与 custom-profile-card 外,
+  全部绘图端点默认走 Skia。
