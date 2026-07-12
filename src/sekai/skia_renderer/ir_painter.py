@@ -70,7 +70,10 @@ class IRPainter(Painter):
         self._heavy_name = heavy_font
         self._bg_hour = bg_hour
         self._mem_images: dict[str, bytes] = {}
-        self._mem_by_id: dict[int, str] = {}
+        # id(img) -> (img, key). Holding the PIL image keeps its id() from being
+        # recycled by the allocator mid-draw — without the strong reference a GC'd
+        # temporary image could alias a later image and paste the wrong pixels.
+        self._mem_by_id: dict[int, tuple[Image.Image, str]] = {}
 
     # ---- output ----
 
@@ -123,12 +126,13 @@ class IRPainter(Painter):
         Raw transport (``(w, h, rgba_bytes)``) skips PNG encode/decode — ~1.6x faster
         end-to-end than shipping PNG, since the pixels are already in hand.
         """
-        key = self._mem_by_id.get(id(img))
-        if key is None:
-            key = f"m{len(self._mem_images)}"
-            rgba = img.convert("RGBA")
-            self._mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
-            self._mem_by_id[id(img)] = key
+        entry = self._mem_by_id.get(id(img))
+        if entry is not None and entry[0] is img:
+            return f"mem:{entry[1]}"
+        key = f"m{len(self._mem_images)}"
+        rgba = img if img.mode == "RGBA" else img.convert("RGBA")
+        self._mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
+        self._mem_by_id[id(img)] = (img, key)
         return f"mem:{key}"
 
     def _fill(self, fill, apos, size):

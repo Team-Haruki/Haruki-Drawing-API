@@ -130,6 +130,15 @@ async def lifespan(app: FastAPI):
             "against main's collection-stats layout; card/box requests will fall back to "
             "Pillow (see docs/skia-migration-restart-plan.md)"
         )
+    if settings.drawing.use_skia_plot or settings.drawing.use_skia_card_list or settings.drawing.use_skia_card_box:
+        try:
+            import haruki_skia_renderer  # noqa: F401
+        except ImportError:
+            logger.error(
+                "Skia gates are enabled but haruki_skia_renderer is not importable; "
+                "every Skia path will fall back to Pillow (fail-open)",
+                exc_info=True,
+            )
     await startup_heavy_render_worker_pool()
     logger.info("Haruki Drawing API is starting...")
     yield

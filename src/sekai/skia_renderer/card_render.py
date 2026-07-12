@@ -273,10 +273,16 @@ async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
     if cached is not None:
         return cached
     native = _load_native_renderer()
-    # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
-    scene = build_card_list_scene(rqd)
-    ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    result = await run_in_pool(native.render_scene, ir_json)
+
+    def _render():
+        # Scene build + JSON encode are CPU work too — keep them off the event loop
+        # (a large card list would otherwise stall every concurrent request).
+        # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
+        scene = build_card_list_scene(rqd)
+        ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return native.render_scene(ir_json)
+
+    result = await run_in_pool(_render)
     if not isinstance(result, dict):
         raise SkiaCardRenderError("native renderer must return a dict")
     payload = _payload_from_native(result)
@@ -573,10 +579,16 @@ async def render_card_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload:
     if cached is not None:
         return cached
     native = _load_native_renderer()
-    # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
-    scene = build_card_box_scene(rqd)
-    ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    result = await run_in_pool(native.render_scene, ir_json)
+
+    def _render():
+        # Keep the scene build + JSON encode off the event loop (a 1000+ card box
+        # would otherwise stall every concurrent request).
+        # The layout is built in Python (Render IR v2); Rust render_scene is a pure interpreter.
+        scene = build_card_box_scene(rqd)
+        ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        return native.render_scene(ir_json)
+
+    result = await run_in_pool(_render)
     if not isinstance(result, dict):
         raise SkiaCardRenderError("native renderer must return a dict")
     payload = _payload_from_native(result)

@@ -92,7 +92,12 @@ async def render_canvas_payload(
     """
     if not settings.drawing.use_skia_plot:
         return None
-    native = load_native_renderer()
+    try:
+        native = load_native_renderer()
+    except ImportError as exc:
+        # Fail-open: a missing/broken native extension must degrade to Pillow, not 500.
+        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        return None
     bg = background_hour() if bg_hour is None else bg_hour
     eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None
     eff_format = EXPORT_IMAGE_FORMAT if export_format is None else export_format
