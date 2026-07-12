@@ -136,10 +136,14 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
         font_size, lines, text_w, text_h = get_watermark_render_spec(text, w - WATERMARK_RIGHT_OFFSET, 12)
         footer_h = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
         b = IRBuilder(
-            w, h + footer_h,
-            assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR),
-            default_font=DEFAULT_FONT, bold_font=DEFAULT_BOLD_FONT,
-            export_format="png", jpg_quality=JPG_QUALITY,  # the /chart route pins PNG
+            w,
+            h + footer_h,
+            assets_base_dir=str(ASSETS_BASE_DIR),
+            font_dir=str(FONT_DIR),
+            default_font=DEFAULT_FONT,
+            bold_font=DEFAULT_BOLD_FONT,
+            export_format="png",
+            jpg_quality=JPG_QUALITY,  # the /chart route pins PNG
         )
         b.image("mem:chart", (0, 0), (w, h), fit="stretch")
         # Footer background: the bottom footer_h strip of the chart, stretched (add_watermark_to_image).
@@ -167,6 +171,9 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
         return None
     logger.info(
         "chart backend=skia total=%.3fs bytes=%d image=%sx%s",
-        time.perf_counter() - started, len(payload.image_bytes), payload.image_width, payload.image_height,
+        time.perf_counter() - started,
+        len(payload.image_bytes),
+        payload.image_width,
+        payload.image_height,
     )
     return payload

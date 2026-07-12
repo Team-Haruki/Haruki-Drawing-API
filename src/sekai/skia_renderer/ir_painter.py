@@ -61,9 +61,16 @@ class IRPainter(Painter):
     ) -> None:
         super().__init__(size=size)
         self._b = IRBuilder(
-            size[0], size[1], assets_base_dir=assets_base_dir, font_dir=font_dir,
-            default_font=default_font, bold_font=bold_font, heavy_font=heavy_font,
-            emoji_font=emoji_font, export_format=export_format, jpg_quality=jpg_quality,
+            size[0],
+            size[1],
+            assets_base_dir=assets_base_dir,
+            font_dir=font_dir,
+            default_font=default_font,
+            bold_font=bold_font,
+            heavy_font=heavy_font,
+            emoji_font=emoji_font,
+            export_format=export_format,
+            jpg_quality=jpg_quality,
         )
         self._default_name = default_font
         self._bold_name = bold_font
@@ -139,14 +146,16 @@ class IRPainter(Painter):
         """Map a Painter fill (Color / LinearGradient / RadialGradient) to an IR fill."""
         if isinstance(fill, LinearGradient):
             return linear_gradient(
-                _rgba(fill.c1), _rgba(fill.c2),
+                _rgba(fill.c1),
+                _rgba(fill.c2),
                 (apos[0] + fill.p1[0] * size[0], apos[1] + fill.p1[1] * size[1]),
                 (apos[0] + fill.p2[0] * size[0], apos[1] + fill.p2[1] * size[1]),
                 method=fill.method,
             )
         if isinstance(fill, RadialGradient):
             return radial_gradient(
-                _rgba(fill.c1), _rgba(fill.c2),
+                _rgba(fill.c1),
+                _rgba(fill.c2),
                 (apos[0] + fill.center[0] * size[0], apos[1] + fill.center[1] * size[1]),
                 radius_px=float(fill.radius),
             )
@@ -159,8 +168,9 @@ class IRPainter(Painter):
         apos = self._abs(pos)
         adaptive = None
         if isinstance(fill, AdaptiveTextColor):
-            adaptive = adaptive_color(_rgba(fill.light), _rgba(fill.dark), fill.threshold,
-                                      pixelwise=bool(getattr(fill, "pixelwise", False)))
+            adaptive = adaptive_color(
+                _rgba(fill.light), _rgba(fill.dark), fill.threshold, pixelwise=bool(getattr(fill, "pixelwise", False))
+            )
             fillval: Any = (0, 0, 0, 255)
         elif isinstance(fill, (LinearGradient, RadialGradient)):
             # Gradient text: map the gradient endpoints (fractions of the glyph overlay) to
@@ -170,8 +180,17 @@ class IRPainter(Painter):
             fillval = self._gradient_text_fill(fill, text, role, size, font_name, apos)
         else:
             fillval = _rgba(fill)
-        self._b.text(text, apos, role, size, align=align, baseline="cjk_top",
-                     fill=fillval, adaptive=adaptive, font_name=font_name)
+        self._b.text(
+            text,
+            apos,
+            role,
+            size,
+            align=align,
+            baseline="cjk_top",
+            fill=fillval,
+            adaptive=adaptive,
+            font_name=font_name,
+        )
         return self
 
     def _gradient_text_fill(self, fill, text, role, size, font_name, apos):
@@ -184,50 +203,115 @@ class IRPainter(Painter):
 
     def _paste(self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha):
         apos = self._abs(pos)
-        w, h = (size if size else sub_img.size)
-        shadow = image_shadow(alpha=shadow_alpha, offset=(0, 0), sigma=max(0.5, shadow_width / 2),
-                              color=(0, 0, 0, 255)) if use_shadow else None
-        self._b.image(self._mem_image(sub_img), apos, (w, h), fit="stretch",
-                      alpha=1.0 if alpha is None else float(alpha), shadow=shadow)
+        w, h = size if size else sub_img.size
+        shadow = (
+            image_shadow(alpha=shadow_alpha, offset=(0, 0), sigma=max(0.5, shadow_width / 2), color=(0, 0, 0, 255))
+            if use_shadow
+            else None
+        )
+        self._b.image(
+            self._mem_image(sub_img),
+            apos,
+            (w, h),
+            fit="stretch",
+            alpha=1.0 if alpha is None else float(alpha),
+            shadow=shadow,
+        )
         return self
 
-    def paste(self, sub_img, pos, size=None, use_shadow=False, shadow_width=8, shadow_alpha=0.6,
-              exclude_on_hash=False):
+    def paste(self, sub_img, pos, size=None, use_shadow=False, shadow_width=8, shadow_alpha=0.6, exclude_on_hash=False):
         return self._paste(sub_img, pos, size, None, use_shadow, shadow_width, shadow_alpha)
 
-    def paste_with_alpha_blend(self, sub_img, pos, size=None, alpha=None, use_shadow=False,
-                               shadow_width=8, shadow_alpha=0.6, exclude_on_hash=False):
+    def paste_with_alpha_blend(
+        self,
+        sub_img,
+        pos,
+        size=None,
+        alpha=None,
+        use_shadow=False,
+        shadow_width=8,
+        shadow_alpha=0.6,
+        exclude_on_hash=False,
+    ):
         return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha)
 
     def rect(self, pos, size, fill, stroke=None, stroke_width=1, exclude_on_hash=False):
         apos = self._abs(pos)
-        self._b.rect(apos, size, fill=self._fill(fill, apos, size),
-                     stroke=None if stroke is None else _rgba(stroke), stroke_width=stroke_width)
+        self._b.rect(
+            apos,
+            size,
+            fill=self._fill(fill, apos, size),
+            stroke=None if stroke is None else _rgba(stroke),
+            stroke_width=stroke_width,
+        )
         return self
 
-    def roundrect(self, pos, size, fill, radius, stroke=None, stroke_width=1,
-                  corners=(True, True, True, True), exclude_on_hash=False):
+    def roundrect(
+        self,
+        pos,
+        size,
+        fill,
+        radius,
+        stroke=None,
+        stroke_width=1,
+        corners=(True, True, True, True),
+        exclude_on_hash=False,
+    ):
         apos = self._abs(pos)
-        self._b.roundrect(apos, size, radius, fill=self._fill(fill, apos, size), corners=corners,
-                          stroke=None if stroke is None else _rgba(stroke), stroke_width=stroke_width)
+        self._b.roundrect(
+            apos,
+            size,
+            radius,
+            fill=self._fill(fill, apos, size),
+            corners=corners,
+            stroke=None if stroke is None else _rgba(stroke),
+            stroke_width=stroke_width,
+        )
         return self
 
-    def pieslice(self, pos, size, start_angle, end_angle, fill, stroke=None, stroke_width=1,
-                 exclude_on_hash=False):
+    def pieslice(self, pos, size, start_angle, end_angle, fill, stroke=None, stroke_width=1, exclude_on_hash=False):
         apos = self._abs(pos)
-        self._b.pieslice(apos, size, start_angle, end_angle, fill=self._fill(fill, apos, size),
-                         stroke=None if stroke is None else _rgba(stroke), stroke_width=stroke_width)
+        self._b.pieslice(
+            apos,
+            size,
+            start_angle,
+            end_angle,
+            fill=self._fill(fill, apos, size),
+            stroke=None if stroke is None else _rgba(stroke),
+            stroke_width=stroke_width,
+        )
         return self
 
-    def blurglass_roundrect(self, pos, size, fill, radius, blur=4, shadow_width=6, shadow_alpha=0.3,
-                            corners=(True, True, True, True), exclude_on_hash=False):
+    def blurglass_roundrect(
+        self,
+        pos,
+        size,
+        fill,
+        radius,
+        blur=4,
+        shadow_width=6,
+        shadow_alpha=0.3,
+        corners=(True, True, True, True),
+        exclude_on_hash=False,
+    ):
         apos = self._abs(pos)
-        self._b.blurglass(apos, size, radius, fill=self._fill(fill, apos, size), shadow_alpha=shadow_alpha,
-                          blur=float(blur), shadow_width=float(shadow_width), corners=tuple(corners))
+        self._b.blurglass(
+            apos,
+            size,
+            radius,
+            fill=self._fill(fill, apos, size),
+            shadow_alpha=shadow_alpha,
+            blur=float(blur),
+            shadow_width=float(shadow_width),
+            corners=tuple(corners),
+        )
         return self
 
     def draw_random_triangle_bg(self, time_color, main_hue, size_fixed_rate, exclude_on_hash=False):
-        self._b.triangle_bg(hour=self._bg_hour, time_color=bool(time_color),
-                            main_hue=float(main_hue) if main_hue is not None else 0.0,
-                            size_fixed_rate=float(size_fixed_rate or 0.0))
+        self._b.triangle_bg(
+            hour=self._bg_hour,
+            time_color=bool(time_color),
+            main_hue=float(main_hue) if main_hue is not None else 0.0,
+            size_fixed_rate=float(size_fixed_rate or 0.0),
+        )
         return self

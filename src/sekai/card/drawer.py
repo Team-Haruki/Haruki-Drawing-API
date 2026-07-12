@@ -1538,7 +1538,10 @@ async def compose_box_image(rqd: CardBoxRequest):
     image = await canvas.get_img()
     _perf_logger.info(
         "card/box pillow render: %.3fs (cards=%d, image=%dx%d)",
-        time.perf_counter() - _t0, len(rqd.cards), image.width, image.height,
+        time.perf_counter() - _t0,
+        len(rqd.cards),
+        image.width,
+        image.height,
     )
     put_composed_image_cache(cache_key, image)
     return image
@@ -1560,7 +1563,10 @@ async def try_render_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | N
     if payload is not None:
         _perf_logger.info(
             "card/box backend=skia render: %.3fs (cards=%d, image=%dx%d)",
-            time.perf_counter() - _t0, len(rqd.cards), payload.image_width, payload.image_height,
+            time.perf_counter() - _t0,
+            len(rqd.cards),
+            payload.image_width,
+            payload.image_height,
         )
         put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
     return payload

@@ -39,7 +39,7 @@ _EXT_KEYS = {"$numberLong", "$numberInt", "$numberDouble", "$oid", "$date"}
 def normalize_extended_json(value: Any) -> Any:
     if isinstance(value, dict):
         if len(value) == 1:
-            (k, v), = value.items()
+            ((k, v),) = value.items()
             if k in ("$numberLong", "$numberInt"):
                 return int(v)
             if k == "$numberDouble":
@@ -139,8 +139,8 @@ class AssetResolver:
     def __init__(self, data_dir: Path = DATA_DIR, region: str = REGION):
         self.data_dir = data_dir
         self.region = region
-        self.used: set[str] = set()        # paths that entered payloads
-        self.missing: set[str] = set()     # used paths absent locally (rsync these)
+        self.used: set[str] = set()  # paths that entered payloads
+        self.missing: set[str] = set()  # used paths absent locally (rsync these)
         self.candidates: set[str] = set()  # all probe candidates for missing paths
 
     def _record(self, path: str, extra_candidates: list[str] | None = None) -> str:
@@ -177,21 +177,44 @@ class AssetResolver:
     def save_manifest(self, out_dir: Path = OUT_DIR) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "assets-used.txt").write_text("\n".join(sorted(self.used)) + "\n")
-        (out_dir / "assets-missing.txt").write_text(
-            "\n".join(sorted(self.missing | self.candidates)) + "\n"
-        )
+        (out_dir / "assets-missing.txt").write_text("\n".join(sorted(self.missing | self.candidates)) + "\n")
 
 
 ASSETS = AssetResolver()
 
 # helper.go:316-343 + builder_helpers.go:231-248
 _NICKNAMES = {
-    1: "ick", 2: "saki", 3: "hnm", 4: "shiho", 5: "mnr", 6: "hrk", 7: "airi",
-    8: "szk", 9: "khn", 10: "an", 11: "akt", 12: "toya", 13: "tks", 14: "emu",
-    15: "nene", 16: "rui", 17: "knd", 18: "mfy", 19: "ena", 20: "mzk",
-    21: "miku", 22: "rin", 23: "len", 24: "luka", 25: "meiko", 26: "kaito",
-    27: "miku_light_sound", 28: "miku_idol", 29: "miku_street",
-    30: "miku_theme_park", 31: "miku_school_refusal",
+    1: "ick",
+    2: "saki",
+    3: "hnm",
+    4: "shiho",
+    5: "mnr",
+    6: "hrk",
+    7: "airi",
+    8: "szk",
+    9: "khn",
+    10: "an",
+    11: "akt",
+    12: "toya",
+    13: "tks",
+    14: "emu",
+    15: "nene",
+    16: "rui",
+    17: "knd",
+    18: "mfy",
+    19: "ena",
+    20: "mzk",
+    21: "miku",
+    22: "rin",
+    23: "len",
+    24: "luka",
+    25: "meiko",
+    26: "kaito",
+    27: "miku_light_sound",
+    28: "miku_idol",
+    29: "miku_street",
+    30: "miku_theme_park",
+    31: "miku_school_refusal",
 }
 
 
@@ -239,8 +262,7 @@ def _wl3_event_ids() -> set[int]:
     return {
         e["id"]
         for e in MD.get("events")
-        if str(e.get("eventType", "")).lower() == "world_bloom"
-        and str(e.get("unit", "none")).lower() == "none"
+        if str(e.get("eventType", "")).lower() == "world_bloom" and str(e.get("unit", "none")).lower() == "none"
     }
 
 
@@ -287,9 +309,7 @@ def card_thumbnail(
     suffix = "after_training" if thumb_after else "normal"
     thumb: dict[str, Any] = {
         "card_id": card["id"],
-        "card_thumbnail_path": ASSETS.region_asset(
-            f"thumbnail/chara/{card['assetbundleName']}_{suffix}.png"
-        ),
+        "card_thumbnail_path": ASSETS.region_asset(f"thumbnail/chara/{card['assetbundleName']}_{suffix}.png"),
         "rare": rare,
         "frame_img_path": ASSETS.static(f"card/frame_{rare}.png"),
         "attr_img_path": ASSETS.static(f"card/attr_{card['attr'].lower()}.png"),

@@ -92,6 +92,7 @@ def get_skia_payload_cached(key: str) -> Any | None:
 def put_skia_payload_cache(key: str, payload: Any, nbytes: int) -> None:
     _skia_payload_cache.set(key, payload, nbytes)
 
+
 # Layout constants shared by the card endpoints (mirror Rust lib.rs / card_scene.rs).
 BG_PADDING = 20.0
 GRID_PADDING = 16.0
@@ -166,8 +167,9 @@ def limited_icon_path(supply_type: str, icons: dict[str, Any]) -> str | None:
     return None
 
 
-def center_text(b: IRBuilder, text: str, role: str, size: float, rx: float, ry: float, rw: float, rh: float,
-                fill: Color4) -> None:
+def center_text(
+    b: IRBuilder, text: str, role: str, size: float, rx: float, ry: float, rw: float, rh: float, fill: Color4
+) -> None:
     # Mirror draw_center_text: horizontally centered, baseline at rect.bottom - 5.
     b.text(text, (rx + rw / 2, ry + rh - 5), role, size, align="center", baseline="alphabetic", fill=fill)
 

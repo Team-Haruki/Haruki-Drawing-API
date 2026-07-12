@@ -194,9 +194,7 @@ def _format_effect(effect: dict[str, Any] | None, token: str) -> str:
 
 def format_skill_description(skill: dict[str, Any], character: dict[str, Any] | None) -> str:
     description = str(skill.get("description") or skill.get("shortDescription") or "")
-    effects = {
-        effect.get("id"): effect for effect in skill.get("skillEffects") or [] if isinstance(effect, dict)
-    }
+    effects = {effect.get("id"): effect for effect in skill.get("skillEffects") or [] if isinstance(effect, dict)}
 
     def replace(match: re.Match[str]) -> str:
         raw_ids, _, token = match.group(1).partition(";")
@@ -257,9 +255,13 @@ def build_card_basic(
     wl3_card_ids: set[int],
 ) -> dict[str, Any]:
     character = characters_by_id.get(int(card.get("characterId") or 0))
-    supply_raw = "birthday" if card.get("cardRarityType") == "rarity_birthday" else supplies_by_id.get(
-        int(card.get("cardSupplyId") or 0),
-        "normal",
+    supply_raw = (
+        "birthday"
+        if card.get("cardRarityType") == "rarity_birthday"
+        else supplies_by_id.get(
+            int(card.get("cardSupplyId") or 0),
+            "normal",
+        )
     )
     if supply_raw == "term_limited" and card["id"] in wl3_card_ids:
         supply_raw = "unit_event_limited"

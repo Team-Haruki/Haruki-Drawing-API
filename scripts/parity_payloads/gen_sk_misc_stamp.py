@@ -45,33 +45,118 @@ CC_EVENT_ID = 132  # cheerful_carnival みんなで配信♡WEDDING LIVE！
 
 # handler/sk_parse.go:212-230
 DEFAULT_NORMAL_RANKS = [
-    *range(1, 11), 20, 30, 40, 50, 100, 200, 300, 400, 500,
-    1000, 1500, 2000, 2500, 3000, 4000, 5000,
-    10000, 20000, 30000, 40000, 50000, 100000, 200000, 300000,
+    *range(1, 11),
+    20,
+    30,
+    40,
+    50,
+    100,
+    200,
+    300,
+    400,
+    500,
+    1000,
+    1500,
+    2000,
+    2500,
+    3000,
+    4000,
+    5000,
+    10000,
+    20000,
+    30000,
+    40000,
+    50000,
+    100000,
+    200000,
+    300000,
 ]
 DEFAULT_WL_RANKS = [
-    *range(1, 11), 20, 30, 40, 50, 100, 200, 300, 400, 500,
-    1000, 2000, 3000, 4000, 5000, 7000,
-    10000, 20000, 30000, 40000, 50000, 70000, 100000,
+    *range(1, 11),
+    20,
+    30,
+    40,
+    50,
+    100,
+    200,
+    300,
+    400,
+    500,
+    1000,
+    2000,
+    3000,
+    4000,
+    5000,
+    7000,
+    10000,
+    20000,
+    30000,
+    40000,
+    50000,
+    70000,
+    100000,
 ]
 CFL_RANKS = [*range(1, 11), 20, 30, 40, 50, 100]
 
 PLAYER_NAMES = [
-    "ろん@イベラン中", "セカイに一番近い場所", "全人類ネネロボ化計画", "ミズキと添い遂げる会",
-    "夜更かしカナデ", "こはねぇ〜〜!", "P茄子の逆襲", "翠のマグロ", "ツカサ様の下僕No.1",
-    "えむ〜ワンダショ!!", "Karin_pjsk", "sleepy_mfy", "初音ミクの消失", "白石杏推し二号",
-    "アイル/イベント休み", "月夜のセレナーデ", "みのり号泣した", "レンきゅんprpr", "ネネカスと呼ばないで",
-    "咲希ちゃんの笑顔守り隊", "ルカ様の靴舐め係", "シホの弦", "奏でる世界", "エナドリ絵名",
-    "瑞希の秘密", "無敵のえむ", "天馬家の食卓", "MEIKOお姉さん", "冬弥の直球", "宵崎奏Fansclub",
-    "彰人のカレーうどん", "青柳recipe", "24時間ワンダショ営業中", "風鈴と司", "遥かなるアイドル道",
+    "ろん@イベラン中",
+    "セカイに一番近い場所",
+    "全人類ネネロボ化計画",
+    "ミズキと添い遂げる会",
+    "夜更かしカナデ",
+    "こはねぇ〜〜!",
+    "P茄子の逆襲",
+    "翠のマグロ",
+    "ツカサ様の下僕No.1",
+    "えむ〜ワンダショ!!",
+    "Karin_pjsk",
+    "sleepy_mfy",
+    "初音ミクの消失",
+    "白石杏推し二号",
+    "アイル/イベント休み",
+    "月夜のセレナーデ",
+    "みのり号泣した",
+    "レンきゅんprpr",
+    "ネネカスと呼ばないで",
+    "咲希ちゃんの笑顔守り隊",
+    "ルカ様の靴舐め係",
+    "シホの弦",
+    "奏でる世界",
+    "エナドリ絵名",
+    "瑞希の秘密",
+    "無敵のえむ",
+    "天馬家の食卓",
+    "MEIKOお姉さん",
+    "冬弥の直球",
+    "宵崎奏Fansclub",
+    "彰人のカレーうどん",
+    "青柳recipe",
+    "24時間ワンダショ営業中",
+    "風鈴と司",
+    "遥かなるアイドル道",
 ]
 
 # Current (70h in) border anchors for event 210; log-log interpolated in between.
 _BORDER_ANCHORS = [
-    (1, 24_500_000), (2, 21_800_000), (3, 19_600_000), (5, 16_800_000), (10, 13_200_000),
-    (20, 10_400_000), (50, 7_800_000), (100, 6_300_000), (200, 4_900_000), (500, 3_400_000),
-    (1000, 2_500_000), (2000, 1_780_000), (5000, 1_050_000), (10000, 660_000), (30000, 285_000),
-    (50000, 178_000), (100000, 84_000), (200000, 27_500), (300000, 9_800),
+    (1, 24_500_000),
+    (2, 21_800_000),
+    (3, 19_600_000),
+    (5, 16_800_000),
+    (10, 13_200_000),
+    (20, 10_400_000),
+    (50, 7_800_000),
+    (100, 6_300_000),
+    (200, 4_900_000),
+    (500, 3_400_000),
+    (1000, 2_500_000),
+    (2000, 1_780_000),
+    (5000, 1_050_000),
+    (10000, 660_000),
+    (30000, 285_000),
+    (50000, 178_000),
+    (100000, 84_000),
+    (200000, 27_500),
+    (300000, 9_800),
 ]
 
 JST = timezone(timedelta(hours=9))
@@ -103,8 +188,9 @@ def _diurnal(ts_ms: int) -> float:
     return 1.0
 
 
-def border_series(rank: int, start_ms: int, end_ms: int, step_ms: int, rng: random.Random,
-                  scale: float = 1.0) -> list[tuple[int, int]]:
+def border_series(
+    rank: int, start_ms: int, end_ms: int, step_ms: int, rng: random.Random, scale: float = 1.0
+) -> list[tuple[int, int]]:
     """Monotonic (time, score) border walk from 0 at event start to border_now at end."""
     times = list(range(start_ms, end_ms + 1, step_ms))
     weights = [_diurnal(t) * rng.uniform(0.85, 1.15) for t in times[1:]]
@@ -117,11 +203,20 @@ def border_series(rank: int, start_ms: int, end_ms: int, step_ms: int, rng: rand
     return series
 
 
-def synth_minute_trace(name: str, start_ms: int, end_ms: int, breaks: list[tuple[int, int]],
-                       rng: random.Random, *, step_ms: int = 60_000, start_score: int = 0,
-                       round_pt: tuple[int, int] = (28_000, 42_000),
-                       round_gap: tuple[int, int] = (150, 280),
-                       rank_start: int = 88, rank_end: int = 24) -> list[dict]:
+def synth_minute_trace(
+    name: str,
+    start_ms: int,
+    end_ms: int,
+    breaks: list[tuple[int, int]],
+    rng: random.Random,
+    *,
+    step_ms: int = 60_000,
+    start_score: int = 0,
+    round_pt: tuple[int, int] = (28_000, 42_000),
+    round_gap: tuple[int, int] = (150, 280),
+    rank_start: int = 88,
+    rank_end: int = 24,
+) -> list[dict]:
     """A player's tracker trace: score jumps once per game round, flat while parked."""
     points: list[dict] = []
     score = start_score
@@ -169,8 +264,15 @@ def derive_metrics(points: list[dict], now_ms: int) -> dict:
     return metrics
 
 
-def tracked_rank_info(rank: int, name: str, rng: random.Random, *, now_ms: int = NOW_MS,
-                      scale: float = 1.0, round_pt: tuple[int, int] | None = None) -> dict:
+def tracked_rank_info(
+    rank: int,
+    name: str,
+    rng: random.Random,
+    *,
+    now_ms: int = NOW_MS,
+    scale: float = 1.0,
+    round_pt: tuple[int, int] | None = None,
+) -> dict:
     """A single tracked entry with metrics derived from a synthetic recent trace."""
     if round_pt is None:
         # keep per-round points coherent with the rank's border pace (~2.8%/h of border)
@@ -179,15 +281,15 @@ def tracked_rank_info(rank: int, name: str, rng: random.Random, *, now_ms: int =
     start = now_ms - 4 * 3_600_000
     brk_end = now_ms - rng.randint(30, 90) * 60_000
     breaks = [(brk_end - rng.randint(6, 14) * 60_000, brk_end)]
-    trace = synth_minute_trace(name, start, now_ms - rng.randint(20, 60) * 1000, breaks, rng,
-                               round_pt=round_pt, rank_start=rank, rank_end=rank)
+    trace = synth_minute_trace(
+        name, start, now_ms - rng.randint(20, 60) * 1000, breaks, rng, round_pt=round_pt, rank_start=rank, rank_end=rank
+    )
     target = int(border_now(rank, scale) * rng.uniform(0.995, 1.005))
     shift = target - trace[-1]["score"]
     for p in trace:
         p["score"] += shift
     last = trace[-1]
-    return {"rank": rank, "name": name, "score": last["score"], "time": last["time"],
-            **derive_metrics(trace, now_ms)}
+    return {"rank": rank, "name": name, "score": last["score"], "time": last["time"], **derive_metrics(trace, now_ms)}
 
 
 def count_csb_stop_texts(points: list[dict]) -> int:
@@ -263,12 +365,14 @@ def gen_sk_line() -> dict:
     for rank in DEFAULT_NORMAL_RANKS:
         if rank == 300_000:  # skipMissing: border not reached yet
             continue
-        ranks.append({
-            "rank": rank,
-            "name": "",  # controller_line_requests.go:30-32
-            "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
-            "time": NOW_MS - rng.randint(0, 90) * 1000,
-        })
+        ranks.append(
+            {
+                "rank": rank,
+                "name": "",  # controller_line_requests.go:30-32
+                "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
+                "time": NOW_MS - rng.randint(0, 90) * 1000,
+            }
+        )
     return {
         "id": meta["id"],
         "region": "jp",
@@ -285,8 +389,26 @@ def gen_sk_line() -> dict:
 def gen_sk_line_predict() -> dict:
     rng = random.Random(210_002)
     meta = event_meta(EVENT_ID)
-    forecast_ranks = [100, 200, 300, 400, 500, 1000, 1500, 2000, 2500, 3000,
-                      4000, 5000, 10000, 20000, 30000, 40000, 50000, 100000]
+    forecast_ranks = [
+        100,
+        200,
+        300,
+        400,
+        500,
+        1000,
+        1500,
+        2000,
+        2500,
+        3000,
+        4000,
+        5000,
+        10000,
+        20000,
+        30000,
+        40000,
+        50000,
+        100000,
+    ]
     final_mult = 2.6  # score at aggregate vs now (70h of 196h elapsed)
 
     def column(key: str, name: str, covered: list[int], bias: float, fetched_min_ago: int) -> dict:
@@ -294,22 +416,28 @@ def gen_sk_line_predict() -> dict:
         return {
             "key": key,
             "name": name,
-            "ranks": [{
-                "rank": rank,
-                "name": "",
-                "score": int(border_now(rank) * final_mult * bias * rng.uniform(0.985, 1.015)),
-                "time": forecast_time,
-            } for rank in covered],
+            "ranks": [
+                {
+                    "rank": rank,
+                    "name": "",
+                    "score": int(border_now(rank) * final_mult * bias * rng.uniform(0.985, 1.015)),
+                    "time": forecast_time,
+                }
+                for rank in covered
+            ],
             "forecast_time": forecast_time,
             "update_time": NOW_MS - 2 * 60_000,
         }
 
-    current = [{
-        "rank": rank,
-        "name": "",
-        "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
-        "time": NOW_MS - rng.randint(0, 90) * 1000,
-    } for rank in forecast_ranks]
+    current = [
+        {
+            "rank": rank,
+            "name": "",
+            "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
+            "time": NOW_MS - rng.randint(0, 90) * 1000,
+        }
+        for rank in forecast_ranks
+    ]
     return {
         "id": meta["id"],
         "region": "jp",
@@ -346,12 +474,14 @@ def gen_sk_query() -> dict:
         if rank <= 100:
             ranks.append(tracked_rank_info(rank, name, rng, now_ms=wl_now, scale=0.16))
         else:
-            ranks.append({
-                "rank": rank,
-                "name": name,
-                "score": int(border_now(rank, 0.16) * rng.uniform(0.99, 1.01)),
-                "time": wl_now - rng.randint(0, 120) * 1000,
-            })
+            ranks.append(
+                {
+                    "rank": rank,
+                    "name": name,
+                    "score": int(border_now(rank, 0.16) * rng.uniform(0.99, 1.01)),
+                    "time": wl_now - rng.randint(0, 120) * 1000,
+                }
+            )
     icon = common.ASSETS.chara_icon(WL_CHAPTER_CID)
     return {
         "id": meta["id"],
@@ -401,12 +531,12 @@ def gen_sk_check_room_multi() -> dict:
     }
 
 
-def _csb_body(name: str, breaks: list[tuple[int, int]], seed: int, *,
-              round_pt: tuple[int, int], rank_end: int) -> dict:
+def _csb_body(name: str, breaks: list[tuple[int, int]], seed: int, *, round_pt: tuple[int, int], rank_end: int) -> dict:
     rng = random.Random(seed)
     meta = event_meta(EVENT_ID)
-    trace = synth_minute_trace(name, meta["start_at"], NOW_MS - 90_000, breaks, rng,
-                               round_pt=round_pt, rank_start=88, rank_end=rank_end)
+    trace = synth_minute_trace(
+        name, meta["start_at"], NOW_MS - 90_000, breaks, rng, round_pt=round_pt, rank_start=88, rank_end=rank_end
+    )
     trace.append({**trace[-1], "time": NOW_MS})  # idle point (metrics.go:137-152)
     return {
         "eid": meta["id"],
@@ -468,12 +598,14 @@ def _speed_body(request_type: str, period_s: int, gain_ratio: float, seed: int) 
         if rank == 300_000:
             continue
         speed = 0 if rank >= 200_000 else int(border_now(rank) * gain_ratio * rng.uniform(0.8, 1.2))
-        ranks.append({
-            "rank": rank,
-            "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
-            "speed": speed,  # nil -> 0 (controller_tracker_v2.go:203-234)
-            "record_time": NOW_MS - rng.randint(0, 90) * 1000,
-        })
+        ranks.append(
+            {
+                "rank": rank,
+                "score": int(border_now(rank) * rng.uniform(0.99, 1.01)),
+                "speed": speed,  # nil -> 0 (controller_tracker_v2.go:203-234)
+                "record_time": NOW_MS - rng.randint(0, 90) * 1000,
+            }
+        )
     return {
         "event_id": meta["id"],
         "region": "jp",
@@ -506,11 +638,29 @@ def gen_sk_player_trace() -> dict:
         (jst(2026, 7, 11, 1, 30), jst(2026, 7, 11, 8, 30)),
         (jst(2026, 7, 12, 2, 30), jst(2026, 7, 12, 9, 30)),
     ]
-    trace_a = synth_minute_trace("みのり号泣した", meta["start_at"], NOW_MS, nights, rng,
-                                 step_ms=300_000, round_pt=(10_000, 16_200), rank_start=70, rank_end=18)
+    trace_a = synth_minute_trace(
+        "みのり号泣した",
+        meta["start_at"],
+        NOW_MS,
+        nights,
+        rng,
+        step_ms=300_000,
+        round_pt=(10_000, 16_200),
+        rank_start=70,
+        rank_end=18,
+    )
     nights_b = [(s + 3_600_000, e + 1_800_000) for s, e in nights]
-    trace_b = synth_minute_trace("ツカサ様の下僕No.1", meta["start_at"], NOW_MS, nights_b, rng,
-                                 step_ms=300_000, round_pt=(7_600, 12_400), rank_start=95, rank_end=41)
+    trace_b = synth_minute_trace(
+        "ツカサ様の下僕No.1",
+        meta["start_at"],
+        NOW_MS,
+        nights_b,
+        rng,
+        step_ms=300_000,
+        round_pt=(7_600, 12_400),
+        rank_start=95,
+        rank_end=41,
+    )
     compare_trace = [
         {"rank": 100, "name": "翠のマグロ", "score": score, "time": t}
         for t, score in border_series(100, meta["start_at"], NOW_MS, 900_000, rng)
@@ -533,8 +683,16 @@ def gen_sk_player_trace() -> dict:
 def gen_sk_rank_trace() -> dict:
     rng = random.Random(210_010)
     meta = event_meta(EVENT_ID)
-    holders = ["翠のマグロ", "エナドリ絵名", "Karin_pjsk", "月夜のセレナーデ", "白石杏推し二号",
-               "シホの弦", "sleepy_mfy", "風鈴と司"]
+    holders = [
+        "翠のマグロ",
+        "エナドリ絵名",
+        "Karin_pjsk",
+        "月夜のセレナーデ",
+        "白石杏推し二号",
+        "シホの弦",
+        "sleepy_mfy",
+        "風鈴と司",
+    ]
     ranks = []
     holder, holder_until = holders[0], meta["start_at"]
     for t, score in border_series(100, meta["start_at"], NOW_MS, 300_000, rng):
@@ -569,16 +727,19 @@ def gen_sk_winrate() -> dict:
         "event_start_at": meta["start_at"],
         "event_aggregate_at": meta["aggregate_at"],
         "banner_img_path": meta["banner"],
-        "team_info": [{
-            "team_id": t["id"],
-            "team_name": t["teamName"],
-            "win_rate": win_rates[t["id"]],
-            "is_recruiting": win_rates[t["id"]] < 0.5,
-            "team_cn_name": cn_names[t["id"]],
-            "team_icon_path": common.ASSETS.region_asset(
-                f"event/{meta['assetbundle_name']}/team_image/{t['assetbundleName']}.png"
-            ),
-        } for t in teams],
+        "team_info": [
+            {
+                "team_id": t["id"],
+                "team_name": t["teamName"],
+                "win_rate": win_rates[t["id"]],
+                "is_recruiting": win_rates[t["id"]] < 0.5,
+                "team_cn_name": cn_names[t["id"]],
+                "team_icon_path": common.ASSETS.region_asset(
+                    f"event/{meta['assetbundle_name']}/team_image/{t['assetbundleName']}.png"
+                ),
+            }
+            for t in teams
+        ],
         "timezone": common.TIMEZONE,
         "dt": dt,
     }
@@ -589,15 +750,54 @@ def gen_sk_winrate() -> dict:
 # ---------------------------------------------------------------------------
 
 MUSIC_ALIASES = [
-    "吸血鬼", "vampire", "ばんぱいあ", "凡派亚", "小吸血鬼", "吸血姬", "DECO吸血鬼", "香蕉皮",
-    "vam", "ヴァンパイア", "深海少女2", "红裙", "红裙子", "吸吸", "血族", "德古拉", "吸血鬼之歌",
-    "someok神曲", "维安帕亚", "苦无", "红色心电图", "爱人错误", "才不是什么吸血鬼",
+    "吸血鬼",
+    "vampire",
+    "ばんぱいあ",
+    "凡派亚",
+    "小吸血鬼",
+    "吸血姬",
+    "DECO吸血鬼",
+    "香蕉皮",
+    "vam",
+    "ヴァンパイア",
+    "深海少女2",
+    "红裙",
+    "红裙子",
+    "吸吸",
+    "血族",
+    "德古拉",
+    "吸血鬼之歌",
+    "someok神曲",
+    "维安帕亚",
+    "苦无",
+    "红色心电图",
+    "爱人错误",
+    "才不是什么吸血鬼",
 ]
 
 CHARACTER_ALIASES = [
-    "初音未来", "初音", "miku", "米库", "葱", "大葱", "葱娘", "世界第一公主殿下", "公主殿下",
-    "hatsune miku", "ミク", "阿绿", "绿双马尾", "赛博歌姬", "电子歌姬", "虚拟歌姬一号",
-    "初音ミク", "初音みく", "39", "米酷", "初音酱", "葱姐",
+    "初音未来",
+    "初音",
+    "miku",
+    "米库",
+    "葱",
+    "大葱",
+    "葱娘",
+    "世界第一公主殿下",
+    "公主殿下",
+    "hatsune miku",
+    "ミク",
+    "阿绿",
+    "绿双马尾",
+    "赛博歌姬",
+    "电子歌姬",
+    "虚拟歌姬一号",
+    "初音ミク",
+    "初音みく",
+    "39",
+    "米酷",
+    "初音酱",
+    "葱姐",
 ]
 
 
@@ -635,10 +835,32 @@ def gen_misc_alias_list_character() -> dict:
 
 # misc_birthday.go:57-84 (hardcoded, not from masterdata)
 CHARACTER_BIRTHDAYS = {
-    1: (8, 11), 2: (5, 9), 3: (10, 27), 4: (1, 8), 5: (4, 14), 6: (10, 5), 7: (3, 19),
-    8: (12, 6), 9: (3, 2), 10: (7, 26), 11: (11, 12), 12: (5, 25), 13: (5, 17), 14: (9, 9),
-    15: (7, 20), 16: (6, 24), 17: (2, 10), 18: (1, 27), 19: (4, 30), 20: (8, 27), 21: (8, 31),
-    22: (12, 27), 23: (12, 27), 24: (1, 30), 25: (11, 5), 26: (2, 17),
+    1: (8, 11),
+    2: (5, 9),
+    3: (10, 27),
+    4: (1, 8),
+    5: (4, 14),
+    6: (10, 5),
+    7: (3, 19),
+    8: (12, 6),
+    9: (3, 2),
+    10: (7, 26),
+    11: (11, 12),
+    12: (5, 25),
+    13: (5, 17),
+    14: (9, 9),
+    15: (7, 20),
+    16: (6, 24),
+    17: (2, 10),
+    18: (1, 27),
+    19: (4, 30),
+    20: (8, 27),
+    21: (8, 31),
+    22: (12, 27),
+    23: (12, 27),
+    24: (1, 30),
+    25: (11, 5),
+    26: (2, 17),
 }
 
 
@@ -666,14 +888,16 @@ def gen_misc_chara_birthday() -> dict:
     )
     cid, month, day, next_ms = infos[0]  # upcoming_index = 1
     bday_cards = sorted(
-        (c for c in common.MD.get("cards")
-         if c["characterId"] == cid and c["cardRarityType"] == "rarity_birthday"),
+        (c for c in common.MD.get("cards") if c["characterId"] == cid and c["cardRarityType"] == "rarity_birthday"),
         key=lambda c: (c.get("releaseAt", 0), c["id"]),
     )
-    cards = [{
-        "id": c["id"],
-        "thumbnail_path": common.ASSETS.region_asset(f"thumbnail/chara/{c['assetbundleName']}_normal.png"),
-    } for c in bday_cards]
+    cards = [
+        {
+            "id": c["id"],
+            "thumbnail_path": common.ASSETS.region_asset(f"thumbnail/chara/{c['assetbundleName']}_normal.png"),
+        }
+        for c in bday_cards
+    ]
     card_image_path = common.ASSETS.region_asset(
         f"character/member/{bday_cards[-1]['assetbundleName']}/card_normal.png"
     )
@@ -696,12 +920,15 @@ def gen_misc_chara_birthday() -> dict:
         "drop_time": _birthday_event_time(next_ms - 3 * day_ms, next_ms),
         "flower_time": _birthday_event_time(next_ms - 3 * day_ms, next_ms + 3 * day_ms),
         "party_time": _birthday_event_time(next_ms, next_ms + 3 * day_ms),
-        "all_characters": [{
-            "cid": icid,
-            "month": im,
-            "day": idy,
-            "icon_path": common.ASSETS.chara_icon(icid),
-        } for icid, im, idy, _ in infos],
+        "all_characters": [
+            {
+                "cid": icid,
+                "month": im,
+                "day": idy,
+                "icon_path": common.ASSETS.chara_icon(icid),
+            }
+            for icid, im, idy, _ in infos
+        ],
         "timezone": common.TIMEZONE,
         "dt": NOW_MS,
     }
@@ -737,7 +964,7 @@ def _with_alias_section(markdown: str, commands: list[str]) -> str:
     missing.sort(key=lambda c: (len(c), c))
     if not missing:
         return markdown.strip()
-    lines = ["- " + " ".join(f"`{alias}`" for alias in missing[i:i + 4]) for i in range(0, len(missing), 4)]
+    lines = ["- " + " ".join(f"`{alias}`" for alias in missing[i : i + 4]) for i in range(0, len(missing), 4)]
     return (markdown.strip() + "\n\n## 指令别名\n" + "\n".join(lines)).strip()
 
 
@@ -757,13 +984,15 @@ def gen_help_render() -> dict:
 # ---------------------------------------------------------------------------
 
 STAMP_PAGE_SIZE = 25
-STAMP_PROMPT = "\n".join([
-    '发送"/stamp 序号"获取单张表情',
-    '发送"/stamp 序号 序号"获取多张表情',
-    '发送"/stamp 角色名"按角色筛选表情',
-    '发送"/stamp page 2"查看指定页',
-    '发送"/stamp all"返回全部页',
-])
+STAMP_PROMPT = "\n".join(
+    [
+        '发送"/stamp 序号"获取单张表情',
+        '发送"/stamp 序号 序号"获取多张表情',
+        '发送"/stamp 角色名"按角色筛选表情',
+        '发送"/stamp page 2"查看指定页',
+        '发送"/stamp all"返回全部页',
+    ]
+)
 
 
 def gen_stamp_list() -> dict:
@@ -772,11 +1001,14 @@ def gen_stamp_list() -> dict:
     # keep every stamp and let the fallback path land in the rsync manifest instead. Only the
     # page-1 slice goes through ASSETS so the manifest stays limited to shipped paths.
     total_pages = max(-(-len(stamps) // STAMP_PAGE_SIZE), 1)
-    items = [{
-        "id": s["id"],
-        "image_path": common.ASSETS.region_asset(f"stamp/{s['assetbundleName']}/{s['assetbundleName']}.png"),
-        "text_color": [200, 0, 0, 255],
-    } for s in stamps[:STAMP_PAGE_SIZE]]
+    items = [
+        {
+            "id": s["id"],
+            "image_path": common.ASSETS.region_asset(f"stamp/{s['assetbundleName']}/{s['assetbundleName']}.png"),
+            "text_color": [200, 0, 0, 255],
+        }
+        for s in stamps[:STAMP_PAGE_SIZE]
+    ]
     return {
         "prompt_message": STAMP_PROMPT,
         "page_message": f"第 1 / {total_pages} 页",

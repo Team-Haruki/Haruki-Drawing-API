@@ -86,10 +86,14 @@ def _metrics(pillow: Image.Image | None, skia: Image.Image) -> dict:
 
 def _side_by_side(pillow: Image.Image | None, skia: Image.Image, out_path: Path) -> None:
     band = 28
-    panels = [("Rust / Skia (new)", skia)] if pillow is None else [
-        ("Pillow (original)", pillow),
-        ("Rust / Skia (new)", skia),
-    ]
+    panels = (
+        [("Rust / Skia (new)", skia)]
+        if pillow is None
+        else [
+            ("Pillow (original)", pillow),
+            ("Rust / Skia (new)", skia),
+        ]
+    )
     gap = 14
     width = sum(p.width for _, p in panels) + gap * (len(panels) - 1)
     height = max(p.height for _, p in panels) + band

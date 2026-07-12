@@ -429,11 +429,7 @@ def build_costume_list() -> str:
     character_token, character_id = "miku", 21
     page, page_size = 1, 20
 
-    items = [
-        c
-        for c in MD.get("costume3ds")
-        if c.get("characterId") == character_id and c.get("colorId") == 1
-    ]
+    items = [c for c in MD.get("costume3ds") if c.get("characterId") == character_id and c.get("colorId") == 1]
     items.sort(key=_costume_sort_key)
     total = len(items)
     total_pages = max(1, math.ceil(total / page_size))
@@ -565,8 +561,7 @@ def build_vlive_list() -> str:
             continue
 
         windows = (
-            (_unix_ms(s.get("startAt")), _unix_ms(s.get("endAt")))
-            for s in live.get("virtualLiveSchedules") or []
+            (_unix_ms(s.get("startAt")), _unix_ms(s.get("endAt"))) for s in live.get("virtualLiveSchedules") or []
         )
         schedules = sorted(w for w in windows if w[0] and w[1] and w[0] < w[1])
         current, living = None, False
@@ -994,8 +989,7 @@ def build_education_power_bonus() -> str:
             for u in _UNIT_ORDER
         ],
         "attr_bonuses": [
-            {"attr": a, "attr_icon_path": _attr_icon(a), **attr[a], "total": attr[a]["area_item"]}
-            for a in _ATTR_ORDER
+            {"attr": a, "attr_icon_path": _attr_icon(a), **attr[a], "total": attr[a]["area_item"]} for a in _ATTR_ORDER
         ],
         "dt": NOW_MS,
     }
@@ -1118,9 +1112,7 @@ def _area_item_target_icon(levels: list[dict]) -> str:
 def build_education_bonds() -> str:
     """User-bond view, cid<=0 (snapshot_bonds.go:10-244)."""
     group_pairs = {
-        b["groupId"]: (b["characterId1"], b["characterId2"])
-        for b in MD.get("bonds")
-        if b.get("groupId", 0) > 0
+        b["groupId"]: (b["characterId1"], b["characterId2"]) for b in MD.get("bonds") if b.get("groupId", 0) > 0
     }
     styles = {
         u["id"]: {"character_id": u.get("gameCharacterId", 0), "color_code": (u.get("colorCode") or "").strip()}

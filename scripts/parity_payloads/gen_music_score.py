@@ -360,8 +360,15 @@ def _inject_omakase(metas: list[dict]) -> list[dict]:
     """meta/omakase.go:9-97; no-op when music_id 10000 already exists."""
     if any(int(m.get("music_id", 0)) == 10000 for m in metas):
         return metas
-    scalar_keys = ["music_time", "event_rate", "base_score", "base_score_auto", "fever_score", "fever_end_time",
-                   "tap_count"]
+    scalar_keys = [
+        "music_time",
+        "event_rate",
+        "base_score",
+        "base_score_auto",
+        "fever_score",
+        "fever_end_time",
+        "tap_count",
+    ]
     slice_keys = ["skill_score_solo", "skill_score_auto", "skill_score_multi"]
     agg: dict[str, object] = dict.fromkeys(scalar_keys, 0.0)
     for k in slice_keys:
@@ -546,8 +553,9 @@ def _weighted_skill(skill_scores: list[float], sorted_skills: list[float], leade
     return total
 
 
-def _populate_live_metrics(row: dict, live_type: str, score: float, skill_account: float,
-                           power: int, deck_bonus: float, play_interval: float) -> None:
+def _populate_live_metrics(
+    row: dict, live_type: str, score: float, skill_account: float, power: int, deck_bonus: float, play_interval: float
+) -> None:
     """board_metrics.go:44-96."""
     active_bonus = 5 * 0.015 * power if live_type == "multi" else 0.0
     real_score = math.floor(score * power * 4 + active_bonus)
@@ -572,8 +580,9 @@ def _populate_live_metrics(row: dict, live_type: str, score: float, skill_accoun
         row["play_count_per_hour"] = play_count_per_hour
 
 
-def _build_board_rows(skills: list[float], strategy: str, power: int, deck_bonus: float,
-                      play_interval: float) -> list[dict]:
+def _build_board_rows(
+    skills: list[float], strategy: str, power: int, deck_bonus: float, play_interval: float
+) -> list[dict]:
     """board_request_rows.go:11-95 (unsorted; caller sorts + ranks)."""
     sorted_skills = list(skills)
     if strategy == "max":
@@ -612,12 +621,33 @@ def _build_board_rows(skills: list[float], strategy: str, power: int, deck_bonus
                 "music_time": meta["music_time"],
                 "tps": tps,
             }
-            _populate_live_metrics(row, "solo", solo_score, solo_skill / solo_score if solo_score > 0 else 0.0,
-                                   power, deck_bonus, play_interval)
-            _populate_live_metrics(row, "auto", auto_score, auto_skill / auto_score if auto_score > 0 else 0.0,
-                                   power, deck_bonus, play_interval)
-            _populate_live_metrics(row, "multi", multi_score, multi_skill / multi_score if multi_score > 0 else 0.0,
-                                   power, deck_bonus, play_interval)
+            _populate_live_metrics(
+                row,
+                "solo",
+                solo_score,
+                solo_skill / solo_score if solo_score > 0 else 0.0,
+                power,
+                deck_bonus,
+                play_interval,
+            )
+            _populate_live_metrics(
+                row,
+                "auto",
+                auto_score,
+                auto_skill / auto_score if auto_score > 0 else 0.0,
+                power,
+                deck_bonus,
+                play_interval,
+            )
+            _populate_live_metrics(
+                row,
+                "multi",
+                multi_score,
+                multi_skill / multi_score if multi_score > 0 else 0.0,
+                power,
+                deck_bonus,
+                play_interval,
+            )
             rows.append(row)
     return rows
 
@@ -634,8 +664,9 @@ def _board_metric(row: dict, target: str, live_type: str) -> float:
     return 0.0
 
 
-def _sort_board_rows(rows: list[dict], target: str, live_type: str, ascend: bool,
-                     keep_one_diff_per_music: bool) -> None:
+def _sort_board_rows(
+    rows: list[dict], target: str, live_type: str, ascend: bool, keep_one_diff_per_music: bool
+) -> None:
     """board_metrics.go:98-129 (in-place sort + rank assignment)."""
 
     def key(row: dict) -> tuple:
@@ -689,11 +720,15 @@ def _detail_leaderboard(music_id: int) -> tuple[list[list[dict | None]], int]:
         "auto": [BOARD_DEFAULT_SOLO_SKILL] * 5,
         "multi": [BOARD_DEFAULT_MULTI_SKILL] * 5,
     }
-    intervals = {"solo": BOARD_DEFAULT_SOLO_INTERVAL, "auto": BOARD_DEFAULT_SOLO_INTERVAL,
-                 "multi": BOARD_DEFAULT_MULTI_INTERVAL}
+    intervals = {
+        "solo": BOARD_DEFAULT_SOLO_INTERVAL,
+        "auto": BOARD_DEFAULT_SOLO_INTERVAL,
+        "multi": BOARD_DEFAULT_MULTI_INTERVAL,
+    }
     for live_type in _LEADERBOARD_LIVE_ORDER:
-        rows = _build_board_rows(skills_by_live[live_type], "avg", BOARD_DEFAULT_POWER,
-                                 BOARD_DEFAULT_DECK_BONUS, intervals[live_type])
+        rows = _build_board_rows(
+            skills_by_live[live_type], "avg", BOARD_DEFAULT_POWER, BOARD_DEFAULT_DECK_BONUS, intervals[live_type]
+        )
         if not rows:
             return [], 0
         row_matrix: list[dict | None] = []
@@ -703,8 +738,11 @@ def _detail_leaderboard(music_id: int) -> tuple[list[list[dict | None]], int]:
             ranked = sum(1 for r in sorted_rows if r["rank"] > 0)
             total_songs = max(total_songs, ranked)
             info = next(
-                ({"rank": r["rank"], "diff": r["difficulty"], "value": _leaderboard_value(r, live_type, target)}
-                 for r in sorted_rows if r["music_id"] == music_id and r["rank"] > 0),
+                (
+                    {"rank": r["rank"], "diff": r["difficulty"], "value": _leaderboard_value(r, live_type, target)}
+                    for r in sorted_rows
+                    if r["music_id"] == music_id and r["rank"] > 0
+                ),
                 None,
             )
             row_matrix.append(info)
@@ -860,9 +898,7 @@ def gen_music_progress() -> str:
         level = _play_level(music["id"], diff)
         if level == 0:
             continue
-        entry = count_map.setdefault(
-            level, {"level": level, "total": 0, "not_clear": 0, "clear": 0, "fc": 0, "ap": 0}
-        )
+        entry = count_map.setdefault(level, {"level": level, "total": 0, "not_clear": 0, "clear": 0, "fc": 0, "ap": 0})
         entry["total"] += 1
         result = results.get(music["id"], "")
         if result == "ap":
@@ -938,8 +974,11 @@ def gen_music_rewards_detail() -> str:
     body = {
         "rank_rewards": rank_rewards,
         "combo_rewards": {
-            diff: [{"level": level, "reward": combo[diff][level]}
-                   for level in sorted(combo[diff]) if combo[diff][level] > 0]
+            diff: [
+                {"level": level, "reward": combo[diff][level]}
+                for level in sorted(combo[diff])
+                if combo[diff][level] > 0
+            ]
             for diff in _REWARD_DIFFS
         },
         "profile": _profile_card(),
@@ -1059,8 +1098,9 @@ def gen_score_control() -> str:
     target_point = 0
     valid_scores: list[dict] = []
     for candidate in (10000, 12500, 7500, 8000, 15000, 5000):
-        rows = _find_valid_score_ranges(candidate, basic_point, SCORE_CONTROL_MAX_EVENT_BONUS,
-                                        SCORE_CONTROL_MAX_SOLUTIONS)
+        rows = _find_valid_score_ranges(
+            candidate, basic_point, SCORE_CONTROL_MAX_EVENT_BONUS, SCORE_CONTROL_MAX_SOLUTIONS
+        )
         if len(rows) >= len(valid_scores):
             target_point, valid_scores = candidate, rows
         if len(rows) >= 20:
@@ -1104,7 +1144,7 @@ def _custom_room_table() -> tuple[list[int], list[tuple[int, list[int]]]]:
         if not head.isdigit() or int(head) <= 0:
             continue
         values = []
-        for cell in record[1: len(bonuses) + 1]:
+        for cell in record[1 : len(bonuses) + 1]:
             cell = cell.strip()
             values.append(int(cell) if cell.lstrip("-").isdigit() else None)
         rows.append((int(head), values))
@@ -1237,7 +1277,7 @@ def gen_score_music_board() -> str:
     if filtered and remaining > 0:
         total_page = math.ceil(len(filtered) / remaining)
         start = (page - 1) * remaining
-        show_rows.extend(filtered[start: start + remaining])
+        show_rows.extend(filtered[start : start + remaining])
     show_rows.sort(key=lambda r: r["rank"])
 
     items = [

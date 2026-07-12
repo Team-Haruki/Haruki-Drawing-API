@@ -108,8 +108,15 @@ def _raw_mysekai() -> dict:
     return doc
 
 
-_PRESERVED_SUITE_KEYS = {"userGamedata", "userProfile", "userDecks", "userCards", "userAreas",
-                         "userCharacters", "userHonors"}
+_PRESERVED_SUITE_KEYS = {
+    "userGamedata",
+    "userProfile",
+    "userDecks",
+    "userCards",
+    "userAreas",
+    "userCharacters",
+    "userHonors",
+}
 
 
 def _preserve_suite_key(key: str) -> bool:
@@ -227,10 +234,31 @@ def _profile_card(merged: dict, *, include_suite: bool, suite_name: bool = False
 # ---------------------------------------------------------------------------
 
 _BIRTHDAYS = {
-    1: (8, 11), 2: (5, 9), 3: (10, 27), 4: (1, 8), 5: (4, 14), 6: (10, 5), 7: (3, 19),
-    8: (12, 6), 9: (3, 2), 10: (7, 26), 11: (11, 12), 12: (5, 25), 13: (5, 17),
-    14: (9, 9), 15: (7, 20), 16: (6, 24), 17: (2, 10), 18: (1, 27), 19: (4, 30),
-    20: (8, 27), 21: (8, 31), 22: (12, 27), 23: (12, 27), 24: (1, 30), 25: (11, 5),
+    1: (8, 11),
+    2: (5, 9),
+    3: (10, 27),
+    4: (1, 8),
+    5: (4, 14),
+    6: (10, 5),
+    7: (3, 19),
+    8: (12, 6),
+    9: (3, 2),
+    10: (7, 26),
+    11: (11, 12),
+    12: (5, 25),
+    13: (5, 17),
+    14: (9, 9),
+    15: (7, 20),
+    16: (6, 24),
+    17: (2, 10),
+    18: (1, 27),
+    19: (4, 30),
+    20: (8, 27),
+    21: (8, 31),
+    22: (12, 27),
+    23: (12, 27),
+    24: (1, 30),
+    25: (11, 5),
     26: (2, 17),
 }
 
@@ -344,10 +372,25 @@ def _parse_color_code(code: str) -> list[int] | None:
 # Resource helpers (controller_resources.go + helpers_resources.go)
 # ---------------------------------------------------------------------------
 
-_MOST_RARE = {"mysekai_material_5", "mysekai_material_12", "mysekai_material_20", "mysekai_material_24",
-              "mysekai_fixture_121", "material_17", "material_170", "material_173"}
-_RARE = {"mysekai_material_32", "mysekai_material_33", "mysekai_material_34", "mysekai_material_61",
-         "mysekai_material_64", "mysekai_material_65", "mysekai_material_66"}
+_MOST_RARE = {
+    "mysekai_material_5",
+    "mysekai_material_12",
+    "mysekai_material_20",
+    "mysekai_material_24",
+    "mysekai_fixture_121",
+    "material_17",
+    "material_170",
+    "material_173",
+}
+_RARE = {
+    "mysekai_material_32",
+    "mysekai_material_33",
+    "mysekai_material_34",
+    "mysekai_material_61",
+    "mysekai_material_64",
+    "mysekai_material_65",
+    "mysekai_material_66",
+}
 
 
 def _key_id_in_range(key: str, prefix: str, lo: int, hi: int) -> bool:
@@ -395,9 +438,12 @@ def _normalize_resource_type(resource_type: str) -> str:
     return {
         "mysekai_material": "mysekai_material",
         "material": "material",
-        "item": "mysekai_item", "mysekai_item": "mysekai_item",
-        "fixture": "mysekai_fixture", "mysekai_fixture": "mysekai_fixture",
-        "music_record": "mysekai_music_record", "mysekai_music_record": "mysekai_music_record",
+        "item": "mysekai_item",
+        "mysekai_item": "mysekai_item",
+        "fixture": "mysekai_fixture",
+        "mysekai_fixture": "mysekai_fixture",
+        "music_record": "mysekai_music_record",
+        "mysekai_music_record": "mysekai_music_record",
     }.get(normalized, (resource_type or "").strip())
 
 
@@ -561,10 +607,12 @@ def _site_resource_numbers(merged: dict) -> list[dict]:
             resources.append(entry)
         if not resources:
             continue
-        result.append({
-            "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
-            "resource_numbers": resources,
-        })
+        result.append(
+            {
+                "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
+                "resource_numbers": resources,
+            }
+        )
     return result
 
 
@@ -591,14 +639,46 @@ def build_resource() -> dict:
 # ---------------------------------------------------------------------------
 
 _SITE_CONFIGS: dict[int, dict[str, Any]] = {
-    5: {"name": "grassland", "grid": 33.333, "ox": 0.0, "oz": -60.0, "dx": -1.0, "dz": -1.0,
-        "rev": True, "crop": [300, 0, 1280, 1080]},
-    6: {"name": "beach", "grid": 20.513, "ox": 0.0, "oz": 80.0, "dx": 1.0, "dz": -1.0,
-        "rev": False, "crop": [300, 0, 1280, 1080]},
-    7: {"name": "flowergarden", "grid": 24.806, "ox": -62.015, "oz": 20.672, "dx": -1.0, "dz": -1.0,
-        "rev": True, "crop": [350, 0, 1280, 1080]},
-    8: {"name": "memorialplace", "grid": 21.333, "ox": 0.0, "oz": -130.0, "dx": 1.0, "dz": -1.0,
-        "rev": False, "crop": [200, 0, 1280, 1080]},
+    5: {
+        "name": "grassland",
+        "grid": 33.333,
+        "ox": 0.0,
+        "oz": -60.0,
+        "dx": -1.0,
+        "dz": -1.0,
+        "rev": True,
+        "crop": [300, 0, 1280, 1080],
+    },
+    6: {
+        "name": "beach",
+        "grid": 20.513,
+        "ox": 0.0,
+        "oz": 80.0,
+        "dx": 1.0,
+        "dz": -1.0,
+        "rev": False,
+        "crop": [300, 0, 1280, 1080],
+    },
+    7: {
+        "name": "flowergarden",
+        "grid": 24.806,
+        "ox": -62.015,
+        "oz": 20.672,
+        "dx": -1.0,
+        "dz": -1.0,
+        "rev": True,
+        "crop": [350, 0, 1280, 1080],
+    },
+    8: {
+        "name": "memorialplace",
+        "grid": 21.333,
+        "ox": 0.0,
+        "oz": -130.0,
+        "dx": 1.0,
+        "dz": -1.0,
+        "rev": False,
+        "crop": [200, 0, 1280, 1080],
+    },
 }
 
 
@@ -637,7 +717,9 @@ def _birthday_refresh_icon_path(char_row: dict) -> str:
                 choose, choose_year, choose_future = entry.name, year, is_future
     if not choose:
         # Construction-time dependency: record for the rsync manifest.
-        ASSETS.candidates.add(f"asset/{common.REGION}-assets/ondemand/mysekai/birthday/{name}_{current_year}/icon_refresh.png")
+        ASSETS.candidates.add(
+            f"asset/{common.REGION}-assets/ondemand/mysekai/birthday/{name}_{current_year}/icon_refresh.png"
+        )
         return ""
     return ASSETS.region_asset(f"mysekai/birthday/{choose}/icon_refresh.png")
 
@@ -657,8 +739,11 @@ def _map_harvest_points(site_map: dict, birthday_char_by_pos: dict[str, int]) ->
             continue
         if fixture_type == "tone_gust" or "tone_gust" in ab.lower():
             continue
-        status = (point.get("userMysekaiSiteHarvestFixtureStatus")
-                  or point.get("mysekaiSiteHarvestFixtureStatus") or "spawned")
+        status = (
+            point.get("userMysekaiSiteHarvestFixtureStatus")
+            or point.get("mysekaiSiteHarvestFixtureStatus")
+            or "spawned"
+        )
         x = float(point.get("positionX", point.get("position_x", 0)) or 0)
         z = float(point.get("positionZ", point.get("position_z", 0)) or 0)
 
@@ -695,6 +780,7 @@ def _map_harvest_points(site_map: dict, birthday_char_by_pos: dict[str, int]) ->
 
 def _map_resource_drops(raw_drops: list) -> list[dict]:
     """buildMapResourceDrops (map_builder_resources.go:14-218)."""
+
     def is_birthday(resource_type: str, resource_id: int) -> bool:
         return resource_type in ("material", "mysekai_material") and 174 <= resource_id <= 199
 
@@ -782,8 +868,11 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
 
 def _build_map_body() -> dict:
     merged = _raw_mysekai()
-    harvest_by_site = {int(m.get("mysekaiSiteId", 0)): m
-                       for m in _nested_list(merged, "userMysekaiHarvestMaps") if int(m.get("mysekaiSiteId", 0))}
+    harvest_by_site = {
+        int(m.get("mysekaiSiteId", 0)): m
+        for m in _nested_list(merged, "userMysekaiHarvestMaps")
+        if int(m.get("mysekaiSiteId", 0))
+    }
     maps: list[dict] = []
     for site_id in (5, 6, 7, 8):  # mysekaiMapSiteOrder (controller.go:15)
         site_map = harvest_by_site.get(site_id)
@@ -800,22 +889,24 @@ def _build_map_body() -> dict:
             z = float(drop.get("positionZ", drop.get("position_z", 0)) or 0)
             birthday_char_by_pos.setdefault(_pos_key(x, z), resource_id - 173)
 
-        maps.append({
-            "map_id": site_id,
-            "site": {
-                "image_path": ASSETS.static(f"mysekai/site/{config['name']}.png"),
-                "grid_size": config["grid"],
-                "offset_x": config["ox"],
-                "offset_z": config["oz"],
-                "dir_x": config["dx"],
-                "dir_z": config["dz"],
-                "rev_xz": config["rev"],
-                "scale": 0.8,
-                "crop_bbox": config["crop"],
-            },
-            "harvest_points": _map_harvest_points(site_map, birthday_char_by_pos),
-            "resource_drops": _map_resource_drops(raw_drops),
-        })
+        maps.append(
+            {
+                "map_id": site_id,
+                "site": {
+                    "image_path": ASSETS.static(f"mysekai/site/{config['name']}.png"),
+                    "grid_size": config["grid"],
+                    "offset_x": config["ox"],
+                    "offset_z": config["oz"],
+                    "dir_x": config["dx"],
+                    "dir_z": config["dz"],
+                    "rev_xz": config["rev"],
+                    "scale": 0.8,
+                    "crop_bbox": config["crop"],
+                },
+                "harvest_points": _map_harvest_points(site_map, birthday_char_by_pos),
+                "resource_drops": _map_resource_drops(raw_drops),
+            }
+        )
 
     body: dict[str, Any] = {
         "maps": maps,
@@ -872,8 +963,11 @@ def _fixture_thumbnail_path(fixture: dict) -> str:
 @cache
 def _birthday_character_ids() -> dict[str, int]:
     """givenName -> characterId, sorted-id iteration (helpers_fixture.go:10-18)."""
-    return {row["givenName"]: row["id"] for row in sorted(MD.get("gameCharacters"), key=lambda r: r["id"])
-            if row.get("givenName")}
+    return {
+        row["givenName"]: row["id"]
+        for row in sorted(MD.get("gameCharacters"), key=lambda r: r["id"])
+        if row.get("givenName")
+    }
 
 
 def _birthday_character_id(fixture_name: str) -> int:
@@ -1025,9 +1119,7 @@ def _fixture_color_images(fixture: dict) -> list[dict]:
     for index, color in enumerate(fixture.get("mysekaiFixtureAnotherColors") or []):
         if fixture.get("mysekaiFixtureType") == "surface_appearance":
             layout = fixture.get("mysekaiSettableLayoutType") or "floor_appearance"
-            path = ASSETS.region_asset(
-                f"mysekai/thumbnail/surface_appearance/{ab}/tex_{ab}_{layout}_{index + 2}.png"
-            )
+            path = ASSETS.region_asset(f"mysekai/thumbnail/surface_appearance/{ab}/tex_{ab}_{layout}_{index + 2}.png")
         else:
             path = ASSETS.region_asset(f"mysekai/thumbnail/fixture/{ab}_{index + 2}.png")
         image: dict[str, Any] = {"image_path": path}
@@ -1089,10 +1181,12 @@ def _material_cost_list(rows: list[dict]) -> list[dict]:
         icon = icons.get(int(row.get("mysekaiMaterialId", 0)), "")
         if not icon:
             continue
-        result.append({
-            "image_path": ASSETS.region_asset(f"mysekai/thumbnail/material/{icon}.png"),
-            "quantity": int(row.get("quantity", 0)),
-        })
+        result.append(
+            {
+                "image_path": ASSETS.region_asset(f"mysekai/thumbnail/material/{icon}.png"),
+                "quantity": int(row.get("quantity", 0)),
+            }
+        )
     return result
 
 
@@ -1151,8 +1245,11 @@ def _reaction_character_groups(fixture_id: int) -> list[dict] | None:
 def _pick_fixture_detail_ids() -> list[int]:
     """Representative ids covering the builder's branches."""
     fixtures = MD.get("mysekaiFixtures")
-    craftable = {int(b.get("craftTargetId", 0)) for b in MD.get("mysekaiBlueprints")
-                 if b.get("mysekaiCraftType") == "mysekai_fixture"}
+    craftable = {
+        int(b.get("craftTargetId", 0))
+        for b in MD.get("mysekaiBlueprints")
+        if b.get("mysekaiCraftType") == "mysekai_fixture"
+    }
     ids: list[int] = [1, 4]  # blueprint w/ craft limit; forced-subgenre special case
     ids.extend(int(r["mysekaiFixtureId"]) for r in MD.get("mysekaiFixtureOnlyDisassembleMaterials")[:2])
     for fixture in fixtures:  # first surface_appearance fixture
@@ -1221,8 +1318,9 @@ def build_fixture_details() -> list[dict]:
         blueprint = _find_fixture_blueprint(fixture_id)
         if blueprint:
             request["basic_info"] = request["basic_info"] + _fixture_blueprint_info(blueprint)
-            cost = _material_cost_list([r for r in costs
-                                        if int(r.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))])
+            cost = _material_cost_list(
+                [r for r in costs if int(r.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))]
+            )
             if cost:
                 request["cost_materials"] = cost
             if blueprint.get("isEnableSketch") and not fabricated_friendcodes:
@@ -1245,10 +1343,15 @@ def build_door_upgrade() -> dict:
     """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
     merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
 
-    user_materials = {int(i.get("mysekaiMaterialId", 0)): int(i.get("quantity", 0))
-                      for i in _nested_list(merged, "userMysekaiMaterials")}
-    spec_levels = {int(i.get("mysekaiGateId", 0)): int(i.get("mysekaiGateLevel", 0))
-                   for i in _nested_list(merged, "userMysekaiGates") if int(i.get("mysekaiGateId", 0))}
+    user_materials = {
+        int(i.get("mysekaiMaterialId", 0)): int(i.get("quantity", 0))
+        for i in _nested_list(merged, "userMysekaiMaterials")
+    }
+    spec_levels = {
+        int(i.get("mysekaiGateId", 0)): int(i.get("mysekaiGateLevel", 0))
+        for i in _nested_list(merged, "userMysekaiGates")
+        if int(i.get("mysekaiGateId", 0))
+    }
 
     gate_temp: dict[int, list[list[dict]]] = {}
     for item in MD.get("mysekaiGateMaterialGroups"):
@@ -1297,21 +1400,25 @@ def build_door_upgrade() -> dict:
                 if user_qty < sum_materials[material_id]:
                     color = red
                     level_color = red
-                out_items.append({
-                    "image_path": ASSETS.region_asset(
-                        f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
-                    ),
-                    "quantity": item["quantity"],
-                    "color": color,
-                    "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
-                })
+                out_items.append(
+                    {
+                        "image_path": ASSETS.region_asset(
+                            f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
+                        ),
+                        "quantity": item["quantity"],
+                        "color": color,
+                        "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
+                    }
+                )
             out_levels.append({"level": current_level + index + 1, "color": level_color, "items": out_items})
-        gate_materials.append({
-            "id": gate_id,
-            "level": current_level,
-            "gate_icon_path": _gate_icon_path(gate_id, 0),
-            "level_materials": out_levels,
-        })
+        gate_materials.append(
+            {
+                "id": gate_id,
+                "level": current_level,
+                "gate_icon_path": _gate_icon_path(gate_id, 0),
+                "level_materials": out_levels,
+            }
+        )
 
     return {
         "profile": _profile_card(merged, include_suite=False, suite_name=True),
@@ -1329,8 +1436,10 @@ _MUSIC_TAG_ORDER = ["light_music_club", "street", "idol", "theme_park", "school_
 def build_music_record() -> dict:
     """show_id=true (the `/mss id` variant) so record ids are drawn too."""
     merged = _raw_mysekai()
-    obtained_records = {int(i.get("mysekaiMusicRecordId", 0)): int(i.get("obtainedAt", 0))
-                        for i in _nested_list(merged, "userMysekaiMusicRecords")}
+    obtained_records = {
+        int(i.get("mysekaiMusicRecordId", 0)): int(i.get("obtainedAt", 0))
+        for i in _nested_list(merged, "userMysekaiMusicRecords")
+    }
     musics = _md_map("musics")
     limited_by_music: dict[int, list[dict]] = {}
     for item in MD.get("limitedTimeMusics"):
@@ -1392,21 +1501,25 @@ def build_music_record() -> dict:
             ab = musics[music_id].get("assetbundleName", "")
             if not ab:  # counted above but skipped (music_record_builder.go:133-142)
                 continue
-            records.append({
-                "id": music_id,
-                "image_path": ASSETS.region_asset(f"music/jacket/{ab}/{ab}.png"),
-                "obtained": music_obtained_at.get(music_id, 0) != 0,
-            })
+            records.append(
+                {
+                    "id": music_id,
+                    "image_path": ASSETS.region_asset(f"music/jacket/{ab}/{ab}.png"),
+                    "obtained": music_obtained_at.get(music_id, 0) != 0,
+                }
+            )
         if not category_total:
             continue
-        categories.append({
-            "tag": tag,
-            "tag_icon_path": tag_icons[tag],
-            "progress_message": (
-                f"{category_obtained}/{category_total} ({_pct(category_obtained, category_total):.1f}%)"
-            ),
-            "musicrecords": records,
-        })
+        categories.append(
+            {
+                "tag": tag,
+                "tag_icon_path": tag_icons[tag],
+                "progress_message": (
+                    f"{category_obtained}/{category_total} ({_pct(category_obtained, category_total):.1f}%)"
+                ),
+                "musicrecords": records,
+            }
+        )
 
     body: dict[str, Any] = {
         "profile": _profile_card(merged, include_suite=False),
@@ -1427,8 +1540,11 @@ TALK_CHARACTER_ID = 17  # 宵崎奏 (knd)
 
 
 def _extract_group_cuids(group: dict) -> list[int]:
-    return [int(group.get(f"gameCharacterUnitId{i}", 0) or 0)
-            for i in range(1, 10) if int(group.get(f"gameCharacterUnitId{i}", 0) or 0)]
+    return [
+        int(group.get(f"gameCharacterUnitId{i}", 0) or 0)
+        for i in range(1, 10)
+        if int(group.get(f"gameCharacterUnitId{i}", 0) or 0)
+    ]
 
 
 def build_talk_list() -> dict:
@@ -1445,7 +1561,8 @@ def build_talk_list() -> dict:
 
     user_talk_reads = {
         int(i.get("mysekaiCharacterTalkId", 0)): bool(i.get("isRead"))
-        for i in _nested_list(merged, "userMysekaiCharacterTalks") if int(i.get("mysekaiCharacterTalkId", 0))
+        for i in _nested_list(merged, "userMysekaiCharacterTalks")
+        if int(i.get("mysekaiCharacterTalkId", 0))
     }
 
     condition_ids_by_fixture: dict[int, list[int]] = {}
@@ -1457,9 +1574,9 @@ def build_talk_list() -> dict:
             condition_ids_by_fixture.setdefault(fixture_id, []).append(int(condition.get("id", 0)))
     group_ids_by_condition: dict[int, list[int]] = {}
     for group in MD.get("mysekaiCharacterTalkConditionGroups"):
-        group_ids_by_condition.setdefault(
-            int(group.get("mysekaiCharacterTalkConditionId", 0)), []
-        ).append(int(group.get("id", 0)))
+        group_ids_by_condition.setdefault(int(group.get("mysekaiCharacterTalkConditionId", 0)), []).append(
+            int(group.get("id", 0))
+        )
     talks_by_group: dict[int, list[dict]] = {}
     for talk in MD.get("mysekaiCharacterTalks"):
         talks_by_group.setdefault(int(talk.get("mysekaiCharacterTalkConditionGroupId", 0)), []).append(talk)
@@ -1523,10 +1640,12 @@ def build_talk_list() -> dict:
             continue
         fixture_ids = item["fixture_ids"]
         main_genre_id = int((fixture_map.get(fixture_ids[0]) or {}).get("mysekaiFixtureMainGenreId", 0))
-        grouped_single.setdefault(main_genre_id, []).append({
-            "fixtures": [fixture_row(fid) for fid in fixture_ids],
-            "noread_num": item["total"] - item["read"],
-        })
+        grouped_single.setdefault(main_genre_id, []).append(
+            {
+                "fixtures": [fixture_row(fid) for fid in fixture_ids],
+                "noread_num": item["total"] - item["read"],
+            }
+        )
 
     def single_cmp(left: dict, right: dict) -> int:
         lf, rf = left["fixtures"], right["fixtures"]
@@ -1543,11 +1662,13 @@ def build_talk_list() -> dict:
     for main_genre_id in sorted(grouped_single):
         info = main_genres_md.get(main_genre_id) or {}
         groups = sorted(grouped_single[main_genre_id], key=cmp_to_key(single_cmp))
-        single_main_genres.append({
-            "name": info.get("name", ""),
-            "image_path": ASSETS.region_asset(f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"),
-            "sub_genres": [groups],
-        })
+        single_main_genres.append(
+            {
+                "name": info.get("name", ""),
+                "image_path": ASSETS.region_asset(f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"),
+                "sub_genres": [groups],
+            }
+        )
 
     total_talks = sum(i["total"] for i in single_reads.values())
     total_reads = sum(i["read"] for i in single_reads.values())
@@ -1559,12 +1680,14 @@ def build_talk_list() -> dict:
         total_reads += item["read"]
         if item["total"] == item["read"]:
             continue
-        multi_reads.append({
-            "fixtures": [fixture_row(fid) for fid in item["fixture_ids"]],
-            "noread_num": item["total"] - item["read"],
-            "character_ids": item["cuids_set"],
-            "chara_icon_path_groups": [[_chara_icon_path(cuid) for cuid in cuids] for cuids in item["cuids_set"]],
-        })
+        multi_reads.append(
+            {
+                "fixtures": [fixture_row(fid) for fid in item["fixture_ids"]],
+                "noread_num": item["total"] - item["read"],
+                "character_ids": item["cuids_set"],
+                "chara_icon_path_groups": [[_chara_icon_path(cuid) for cuid in cuids] for cuids in item["cuids_set"]],
+            }
+        )
     multi_reads.sort(key=lambda m: (-len(m["fixtures"]), m["fixtures"][0]["id"] if m["fixtures"] else 0))
 
     return {
@@ -1623,15 +1746,11 @@ def build_housing_competition() -> dict:
     competition_id = int(competition["id"])
     name = competition.get("name", "") or f"第{competition_id}期"
     if not active:
-        ISSUES.append(
-            f"housing-competition: 当前无进行中的百景期数,退回最近一期 id={competition_id}(生产会直接报错)"
-        )
+        ISSUES.append(f"housing-competition: 当前无进行中的百景期数,退回最近一期 id={competition_id}(生产会直接报错)")
 
     bg = competition.get("backgroundImageAssetbundleFileName", "")
     if bg:
-        banner_path = ASSETS.region_asset(
-            f"mysekai/effect/ui_anim/mysekai_housing_competition/lottery_result/{bg}.png"
-        )
+        banner_path = ASSETS.region_asset(f"mysekai/effect/ui_anim/mysekai_housing_competition/lottery_result/{bg}.png")
     else:
         banner_path = ASSETS.static("unknown.jpg")
 

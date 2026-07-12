@@ -557,9 +557,7 @@ def build_distribution(items: list[dict], icon_paths: dict, color_codes: dict, o
     for attr in attrs:
         count, owned = attribute_buckets.get(attr, [0, 0])
         bar_count = owned if owned_data else count
-        char_stats = _character_stat_list(
-            attr_character_buckets.get(attr, {}), icon_paths, color_codes, owned_data
-        )
+        char_stats = _character_stat_list(attr_character_buckets.get(attr, {}), icon_paths, color_codes, owned_data)
         max_char = max((s["bar_count"] for s in char_stats), default=0)
         _apply_ratios(char_stats, max_char, bar_count)
         stat: dict[str, Any] = {

@@ -48,8 +48,7 @@ def image_tint(color: Color, mode: str = "multiply", strength: float = 1.0) -> N
     return {"color": _color(color), "mode": mode, "strength": float(strength)}
 
 
-def image_shadow(alpha: float = 0.6, offset: Vec2 = (6, 6), sigma: float = 3.0,
-                 color: Color = (0, 0, 0, 255)) -> Node:
+def image_shadow(alpha: float = 0.6, offset: Vec2 = (6, 6), sigma: float = 3.0, color: Color = (0, 0, 0, 255)) -> Node:
     """A drop shadow derived from an Image node's alpha silhouette."""
     return {"alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)}
 
@@ -66,7 +65,7 @@ def parse_colored_segments(markup: str, default: Color | None = None) -> list[tu
     color: Color | None = default
     for m in _COLOR_TAG.finditer(markup):
         if m.start() > pos:
-            segments.append((markup[pos:m.start()], color))
+            segments.append((markup[pos : m.start()], color))
         hexv = m.group(1)
         if hexv:
             color = (int(hexv[0:2], 16), int(hexv[2:4], 16), int(hexv[4:6], 16), 255)
@@ -83,8 +82,9 @@ def text_stroke(color: Color, width: float = 1.0) -> Node:
     return {"color": _color(color), "width": float(width)}
 
 
-def adaptive_color(light: Color = (255, 255, 255, 255), dark: Color = (0, 0, 0, 255),
-                   threshold: float = 0.4, pixelwise: bool = False) -> Node:
+def adaptive_color(
+    light: Color = (255, 255, 255, 255), dark: Color = (0, 0, 0, 255), threshold: float = 0.4, pixelwise: bool = False
+) -> Node:
     """Background-adaptive text color: ``light`` over dark backdrops, ``dark`` over bright
     ones. ``pixelwise`` picks per pixel from the box-blurred backdrop (Painter's pixelwise
     mode) instead of once for the whole run by average luminance."""
@@ -175,8 +175,9 @@ class IRBuilder:
         return node
 
     @contextmanager
-    def group(self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None,
-              mask: str | None = None) -> Iterator[IRBuilder]:
+    def group(
+        self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None, mask: str | None = None
+    ) -> Iterator[IRBuilder]:
         """``mask``: image ref (asset path / ``mem:<key>``) whose alpha masks the group's
         children (DstIn, stretched to the group rect) — Pillow's putalpha semantics."""
         node: Node = {"type": "Group", "offset": _vec(offset), "size": _vec(size), "children": []}
@@ -191,8 +192,14 @@ class IRBuilder:
         finally:
             self._stack.pop()
 
-    def rect(self, pos: Vec2, size: Vec2, fill: Color | Node | None = None, stroke: Color | Node | None = None,
-             stroke_width: float = 1) -> Node:
+    def rect(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        fill: Color | Node | None = None,
+        stroke: Color | Node | None = None,
+        stroke_width: float = 1,
+    ) -> Node:
         node: Node = {"type": "Rect", "pos": _vec(pos), "size": _vec(size)}
         if fill is not None:
             node["fill"] = _fill_value(fill)
@@ -201,11 +208,24 @@ class IRBuilder:
             node["stroke_width"] = stroke_width
         return self._add(node)
 
-    def roundrect(self, pos: Vec2, size: Vec2, radius: float, fill: Color | Node | None = None,
-                  corners: Sequence[bool] = (True, True, True, True), stroke: Color | Node | None = None,
-                  stroke_width: float = 1, corner_radii: Sequence[float] | None = None) -> Node:
-        node: Node = {"type": "RoundRect", "pos": _vec(pos), "size": _vec(size), "radius": radius,
-                      "corners": [bool(c) for c in corners]}
+    def roundrect(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        radius: float,
+        fill: Color | Node | None = None,
+        corners: Sequence[bool] = (True, True, True, True),
+        stroke: Color | Node | None = None,
+        stroke_width: float = 1,
+        corner_radii: Sequence[float] | None = None,
+    ) -> Node:
+        node: Node = {
+            "type": "RoundRect",
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "radius": radius,
+            "corners": [bool(c) for c in corners],
+        }
         if corner_radii is not None:
             node["corner_radii"] = [float(r) for r in corner_radii]
         if fill is not None:
@@ -215,11 +235,23 @@ class IRBuilder:
             node["stroke_width"] = stroke_width
         return self._add(node)
 
-    def pieslice(self, pos: Vec2, size: Vec2, start_angle: float, end_angle: float,
-                 fill: Color | Node | None = None, stroke: Color | Node | None = None,
-                 stroke_width: float = 1) -> Node:
-        node: Node = {"type": "PieSlice", "pos": _vec(pos), "size": _vec(size),
-                      "start_angle": start_angle, "end_angle": end_angle}
+    def pieslice(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        start_angle: float,
+        end_angle: float,
+        fill: Color | Node | None = None,
+        stroke: Color | Node | None = None,
+        stroke_width: float = 1,
+    ) -> Node:
+        node: Node = {
+            "type": "PieSlice",
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "start_angle": start_angle,
+            "end_angle": end_angle,
+        }
         if fill is not None:
             node["fill"] = _fill_value(fill)
         if stroke is not None:
@@ -227,11 +259,19 @@ class IRBuilder:
             node["stroke_width"] = stroke_width
         return self._add(node)
 
-    def image(self, path: str, pos: Vec2, size: Vec2 = (0, 0), fit: str = "stretch", alpha: float = 1.0,
-              anchor: Vec2 = (0, 0), tint: Node | None = None, shadow: Node | None = None,
-              source_rect: tuple[float, float, float, float] | None = None) -> Node:
-        node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path,
-                      "fit": fit, "alpha": alpha}
+    def image(
+        self,
+        path: str,
+        pos: Vec2,
+        size: Vec2 = (0, 0),
+        fit: str = "stretch",
+        alpha: float = 1.0,
+        anchor: Vec2 = (0, 0),
+        tint: Node | None = None,
+        shadow: Node | None = None,
+        source_rect: tuple[float, float, float, float] | None = None,
+    ) -> Node:
+        node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path, "fit": fit, "alpha": alpha}
         if anchor[0] or anchor[1]:
             node["anchor"] = _vec(anchor)
         if tint is not None:
@@ -281,8 +321,7 @@ class IRBuilder:
         """Approximate rendered width (px) of ``text`` (PIL metrics; near-Skia, used for layout)."""
         return float(self._pil_font(role, size, font_name).getlength(text))
 
-    def wrap_text(self, text: str, role: str, size: float, max_width: float,
-                  font_name: str | None = None) -> list[str]:
+    def wrap_text(self, text: str, role: str, size: float, max_width: float, font_name: str | None = None) -> list[str]:
         """Greedy wrap to ``max_width`` (word-aware for Latin, char-wrap for CJK); honors ``\\n``."""
         font = self._pil_font(role, size, font_name)
         lines: list[str] = []
@@ -299,18 +338,31 @@ class IRBuilder:
                     cur, last_space = "", -1
                 elif 0 <= last_space < len(cur):
                     lines.append(cur[:last_space])
-                    cur, last_space = cur[last_space + 1:] + ch, -1
+                    cur, last_space = cur[last_space + 1 :] + ch, -1
                 else:
                     lines.append(cur)
                     cur, last_space = ch, -1
             lines.append(cur)
         return lines
 
-    def multiline_text(self, text: str, pos: Vec2, role: str, size: float, *, max_width: float,
-                       line_height: float | None = None, align: str = "left", baseline: str = "cjk_top",
-                       fill: Color | Node = (0, 0, 0, 255), font_name: str | None = None,
-                       max_lines: int | None = None, ellipsis: str = "…", stroke: Node | None = None,
-                       letter_spacing: float = 0.0) -> list[Node]:
+    def multiline_text(
+        self,
+        text: str,
+        pos: Vec2,
+        role: str,
+        size: float,
+        *,
+        max_width: float,
+        line_height: float | None = None,
+        align: str = "left",
+        baseline: str = "cjk_top",
+        fill: Color | Node = (0, 0, 0, 255),
+        font_name: str | None = None,
+        max_lines: int | None = None,
+        ellipsis: str = "…",
+        stroke: Node | None = None,
+        letter_spacing: float = 0.0,
+    ) -> list[Node]:
         """Wrap ``text`` to ``max_width`` and emit one Text node per line. Truncates with an
         ellipsis past ``max_lines``. Returns the emitted nodes."""
         lines = self.wrap_text(text, role, size, max_width, font_name)
@@ -324,14 +376,35 @@ class IRBuilder:
         lh = line_height if line_height is not None else size * 1.3
         nodes: list[Node] = []
         for i, line in enumerate(lines):
-            nodes.append(self.text(line, (pos[0], pos[1] + i * lh), role, size, align=align,
-                                   baseline=baseline, fill=fill, stroke=stroke,
-                                   letter_spacing=letter_spacing, font_name=font_name))
+            nodes.append(
+                self.text(
+                    line,
+                    (pos[0], pos[1] + i * lh),
+                    role,
+                    size,
+                    align=align,
+                    baseline=baseline,
+                    fill=fill,
+                    stroke=stroke,
+                    letter_spacing=letter_spacing,
+                    font_name=font_name,
+                )
+            )
         return nodes
 
-    def colored_text(self, segments: Sequence[tuple[str, Color | None]], pos: Vec2, role: str, size: float, *,
-                     align: str = "left", baseline: str = "cjk_top", default_fill: Color = (0, 0, 0, 255),
-                     font_name: str | None = None, stroke: Node | None = None) -> list[Node]:
+    def colored_text(
+        self,
+        segments: Sequence[tuple[str, Color | None]],
+        pos: Vec2,
+        role: str,
+        size: float,
+        *,
+        align: str = "left",
+        baseline: str = "cjk_top",
+        default_fill: Color = (0, 0, 0, 255),
+        font_name: str | None = None,
+        stroke: Node | None = None,
+    ) -> list[Node]:
         """Emit inline multi-color text: ``segments`` are ``(text, color|None)`` drawn left to
         right. ``None`` color uses ``default_fill``. Use :func:`parse_colored_segments` for markup."""
         font = self._pil_font(role, size, font_name)
@@ -344,29 +417,76 @@ class IRBuilder:
             cx = pos[0] - total
         nodes: list[Node] = []
         for (txt, col), w in zip(segments, widths):
-            nodes.append(self.text(txt, (cx, pos[1]), role, size, align="left", baseline=baseline,
-                                   fill=col if col is not None else default_fill, stroke=stroke,
-                                   font_name=font_name))
+            nodes.append(
+                self.text(
+                    txt,
+                    (cx, pos[1]),
+                    role,
+                    size,
+                    align="left",
+                    baseline=baseline,
+                    fill=col if col is not None else default_fill,
+                    stroke=stroke,
+                    font_name=font_name,
+                )
+            )
             cx += w
         return nodes
 
-    def shadowed_text(self, text: str, pos: Vec2, role: str, size: float, *, shadow_offset: Vec2 = (2, 2),
-                      shadow_color: Color = (0, 0, 0, 160), align: str = "left", baseline: str = "cjk_top",
-                      fill: Color | Node = (255, 255, 255, 255), font_name: str | None = None) -> list[Node]:
+    def shadowed_text(
+        self,
+        text: str,
+        pos: Vec2,
+        role: str,
+        size: float,
+        *,
+        shadow_offset: Vec2 = (2, 2),
+        shadow_color: Color = (0, 0, 0, 160),
+        align: str = "left",
+        baseline: str = "cjk_top",
+        fill: Color | Node = (255, 255, 255, 255),
+        font_name: str | None = None,
+    ) -> list[Node]:
         """Emit a drop-shadowed text as two Text nodes (shadow then fill)."""
-        shadow = self.text(text, (pos[0] + shadow_offset[0], pos[1] + shadow_offset[1]), role, size,
-                           align=align, baseline=baseline, fill=shadow_color, font_name=font_name)
+        shadow = self.text(
+            text,
+            (pos[0] + shadow_offset[0], pos[1] + shadow_offset[1]),
+            role,
+            size,
+            align=align,
+            baseline=baseline,
+            fill=shadow_color,
+            font_name=font_name,
+        )
         top = self.text(text, pos, role, size, align=align, baseline=baseline, fill=fill, font_name=font_name)
         return [shadow, top]
 
-    def text(self, text: str, pos: Vec2, role: str, size: float, align: str = "left",
-             baseline: str = "cjk_top", fill: Color | Node = (0, 0, 0, 255), stroke: Node | None = None,
-             letter_spacing: float = 0.0, adaptive: Node | None = None, font_name: str | None = None) -> Node:
+    def text(
+        self,
+        text: str,
+        pos: Vec2,
+        role: str,
+        size: float,
+        align: str = "left",
+        baseline: str = "cjk_top",
+        fill: Color | Node = (0, 0, 0, 255),
+        stroke: Node | None = None,
+        letter_spacing: float = 0.0,
+        adaptive: Node | None = None,
+        font_name: str | None = None,
+    ) -> Node:
         font: Node = {"role": role, "size": size}
         if font_name:
             font["name"] = font_name
-        node: Node = {"type": "Text", "text": text, "pos": _vec(pos), "font": font,
-                      "align": align, "baseline": baseline, "fill": _fill_value(fill)}
+        node: Node = {
+            "type": "Text",
+            "text": text,
+            "pos": _vec(pos),
+            "font": font,
+            "align": align,
+            "baseline": baseline,
+            "fill": _fill_value(fill),
+        }
         if stroke is not None:
             node["stroke"] = stroke
         if letter_spacing:
@@ -375,27 +495,69 @@ class IRBuilder:
             node["adaptive"] = adaptive
         return self._add(node)
 
-    def watermark(self, lines: Sequence[tuple[str, Vec2, str]], role: str, size: float,
-                  fill: Color = (255, 255, 255, 255), font_name: str | None = None) -> Node:
+    def watermark(
+        self,
+        lines: Sequence[tuple[str, Vec2, str]],
+        role: str,
+        size: float,
+        fill: Color = (255, 255, 255, 255),
+        font_name: str | None = None,
+    ) -> Node:
         """A multi-line watermark. ``lines`` are ``(text, pos, align)`` (Python owns wrapping
         and auto-sizing; see :meth:`wrap_text`/:meth:`watermark_lines`)."""
         font: Node = {"role": role, "size": size}
         if font_name:
             font["name"] = font_name
-        node: Node = {"type": "Watermark", "font": font, "fill": _color(fill),
-                      "lines": [{"text": t, "pos": _vec(p), "align": a} for t, p, a in lines]}
+        node: Node = {
+            "type": "Watermark",
+            "font": font,
+            "fill": _color(fill),
+            "lines": [{"text": t, "pos": _vec(p), "align": a} for t, p, a in lines],
+        }
         return self._add(node)
 
-    def shadow(self, pos: Vec2, size: Vec2, radius: float, alpha: float = 0.35, offset: Vec2 = (2, 4),
-               sigma: float = 2.5, color: Color = (0, 0, 0, 255)) -> Node:
-        return self._add({"type": "Shadow", "pos": _vec(pos), "size": _vec(size), "radius": radius,
-                          "alpha": alpha, "offset": _vec(offset), "sigma": sigma, "color": _color(color)})
+    def shadow(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        radius: float,
+        alpha: float = 0.35,
+        offset: Vec2 = (2, 4),
+        sigma: float = 2.5,
+        color: Color = (0, 0, 0, 255),
+    ) -> Node:
+        return self._add(
+            {
+                "type": "Shadow",
+                "pos": _vec(pos),
+                "size": _vec(size),
+                "radius": radius,
+                "alpha": alpha,
+                "offset": _vec(offset),
+                "sigma": sigma,
+                "color": _color(color),
+            }
+        )
 
-    def blurglass(self, pos: Vec2, size: Vec2, radius: float, fill: Color | Node,
-                  shadow_alpha: float = 0.26, blur: float = 4.0, shadow_width: float = 6.0,
-                  corners: tuple[bool, bool, bool, bool] = (True, True, True, True)) -> Node:
-        node: Node = {"type": "BlurGlass", "pos": _vec(pos), "size": _vec(size), "radius": radius,
-                      "fill": _fill_value(fill), "shadow_alpha": shadow_alpha}
+    def blurglass(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        radius: float,
+        fill: Color | Node,
+        shadow_alpha: float = 0.26,
+        blur: float = 4.0,
+        shadow_width: float = 6.0,
+        corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
+    ) -> Node:
+        node: Node = {
+            "type": "BlurGlass",
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "radius": radius,
+            "fill": _fill_value(fill),
+            "shadow_alpha": shadow_alpha,
+        }
         if blur != 4.0:
             node["blur"] = float(blur)
         if shadow_width != 6.0:
@@ -404,8 +566,9 @@ class IRBuilder:
             node["corners"] = [bool(c) for c in corners]
         return self._add(node)
 
-    def triangle_bg(self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0,
-                    size_fixed_rate: float = 0.0) -> None:
+    def triangle_bg(
+        self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0, size_fixed_rate: float = 0.0
+    ) -> None:
         node: Node = {"type": "TriangleBg", "hour": hour}
         if not time_color:
             node["time_color"] = False
@@ -414,8 +577,7 @@ class IRBuilder:
             node["size_fixed_rate"] = float(size_fixed_rate)
         self._background = node
 
-    def image_bg(self, path: str, mode: str = "fit", align: str = "c", blur: bool = False,
-                 fade: float = 0.0) -> None:
+    def image_bg(self, path: str, mode: str = "fit", align: str = "c", blur: bool = False, fade: float = 0.0) -> None:
         node: Node = {"type": "ImageBg", "path": path}
         if mode != "fit":
             node["mode"] = mode
@@ -435,8 +597,12 @@ class IRBuilder:
             "jpg_quality": self._jpg_quality,
             "fonts": self._fonts,
             "canvas": {"width": self.width, "height": self.height},
-            "root": {"type": "Group", "offset": [0, 0], "size": [self.width, self.height],
-                     "children": self._root_children},
+            "root": {
+                "type": "Group",
+                "offset": [0, 0],
+                "size": [self.width, self.height],
+                "children": self._root_children,
+            },
         }
         if self._background is not None:
             scene["background"] = self._background
