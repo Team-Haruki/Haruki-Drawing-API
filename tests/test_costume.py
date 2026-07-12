@@ -1,4 +1,4 @@
-from src.sekai.costume.drawer import _published_time_text
+from src.sekai.costume.drawer import _costume_lookup_text, _published_time_text
 from src.sekai.costume.model import CostumeBasic
 
 
@@ -26,3 +26,15 @@ def test_costume_publish_time_uses_published_at_when_present():
     costume = _costume(published_at=1601434800000, archive_published_at=1233284400000)
 
     assert _published_time_text(costume, "Asia/Tokyo") == "2020-09-30 12:00"
+
+
+def test_costume_lookup_text_uses_outfit_id_and_selected_role():
+    costume = _costume(outfit_id=1, character_3d_id=23, character_3d_ids=[21, 22, 23, 24, 25, 26])
+
+    assert _costume_lookup_text(costume) == "服1 角23"
+
+
+def test_costume_lookup_text_uses_accessory_id_and_role_range():
+    costume = _costume(part_type="head", accessory_id=20, character_3d_ids=[21, 22, 23, 24, 25, 26])
+
+    assert _costume_lookup_text(costume) == "饰20 角21-26"
