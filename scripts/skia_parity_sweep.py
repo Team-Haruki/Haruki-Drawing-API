@@ -123,6 +123,8 @@ CASES: tuple[Case, ...] = (
     _case("card_detail", "card", "card_detail", "CardDetailRequest"),
     _case("card_list", "card", "card_list", "CardListRequest", try_render_module=_SKIA_CARD_RENDER),
     _case("card_box", "card", "box", "CardBoxRequest", try_render="try_render_box_payload"),
+    # ---- chart (crate renders the chart body; the watermark shell is the migrated part) ----
+    _case("chart", "chart", "music_chart", "GenerateMusicChartRequest"),
     # ---- costume ----
     _case("costume_list", "costume", "costume_list", "CostumeListRequest"),
     _case("costume_detail", "costume", "costume_detail", "CostumeDetailRequest"),

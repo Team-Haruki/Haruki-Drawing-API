@@ -1,7 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
-from src.sekai.base.draw import add_request_watermark_to_image
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.chart.model import GenerateMusicChartRequest
 
 router = APIRouter(tags=["Chart"])
@@ -10,10 +9,12 @@ router = APIRouter(tags=["Chart"])
 @router.post("", summary="Generate music chart image")
 async def music_chart(request: GenerateMusicChartRequest):
     try:
-        from src.sekai.chart.drawer import generate_music_chart
+        from src.sekai.chart.drawer import compose_music_chart_image, try_render_music_chart_payload
 
-        image = await generate_music_chart(request)
-        image = await add_request_watermark_to_image(image, request)
+        payload = await try_render_music_chart_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
+        image = await compose_music_chart_image(request)
         return await image_to_response(image, export_format="png")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

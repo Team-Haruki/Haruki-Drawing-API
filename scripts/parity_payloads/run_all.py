@@ -23,6 +23,7 @@ DOMAINS = [
     "gen_sk_misc_stamp",
     "gen_gacha_costume_vlive_edu",
     "gen_mysekai",
+    "gen_chart",
 ]
 
 
