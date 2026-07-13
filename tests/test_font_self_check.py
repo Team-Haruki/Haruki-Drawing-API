@@ -13,7 +13,7 @@ from src.core import main as main_mod
 from src.settings import settings
 
 
-def test_passes_when_every_font_resolves():
+def test_passes_when_every_font_resolves(real_fonts):
     """The real configured fonts on this box resolve on both backends."""
     assert main_mod._check_pillow_fonts() == []
     main_mod._self_check_fonts()  # must not raise, must not disable Skia

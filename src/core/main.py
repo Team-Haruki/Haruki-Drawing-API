@@ -12,6 +12,7 @@ ReDoc: http://localhost:8000/redoc
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import sys
 
 import coloredlogs
@@ -73,17 +74,20 @@ def _check_pillow_fonts() -> list[str]:
     """Names of configured fonts Pillow cannot resolve.
 
     Probes through ``get_font`` itself rather than re-implementing its path search, so the check
-    can never drift from the real lookup: a resolved font is a ``FreeTypeFont``, while a failed
-    one silently degrades to PIL's built-in 10px bitmap face.
-    """
-    from PIL import ImageFont
+    cannot drift from the real lookup.
 
+    Do NOT test this with ``isinstance(font, FreeTypeFont)``: modern Pillow's ``load_default()``
+    fallback is ALSO a FreeTypeFont (its bundled Aileron face), so that check passes for every name
+    and the self-check silently protects nothing. What distinguishes them is the file the face came
+    from — a resolved font's ``.path`` is the font file, while the fallback's is an in-memory buffer.
+    """
     from src.sekai.base.painter import get_font
     from src.settings import DEFAULT_BOLD_FONT, DEFAULT_EMOJI_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
     missing = []
     for name in (DEFAULT_FONT, DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT, DEFAULT_EMOJI_FONT):
-        if not isinstance(get_font(name, 20), ImageFont.FreeTypeFont):
+        path = getattr(get_font(name, 20), "path", None)
+        if not isinstance(path, str) or Path(path).stem != Path(name).stem:
             missing.append(name)
     return missing
 

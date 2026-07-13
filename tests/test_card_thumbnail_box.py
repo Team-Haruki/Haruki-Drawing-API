@@ -59,7 +59,7 @@ def test_thumbnail_stays_opaque_under_semi_transparent_overlays():
     assert not translucent, f"{len(translucent)} translucent px inside the clip, e.g. {translucent[:5]}"
 
 
-def test_level_label_sits_inside_the_level_bar():
+def test_level_label_sits_inside_the_level_bar(real_fonts):
     """Painter.text anchors the baseline at y + ink-height('哇'); ImageDraw.text anchored the
     ascender top. The legacy y constant is in ImageDraw terms, so without converting it the
     label rides ~4px high and clips out of the bar."""

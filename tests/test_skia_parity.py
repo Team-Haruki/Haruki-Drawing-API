@@ -272,7 +272,7 @@ if _ATTR_IMG is not None:
 
 
 @pytest.mark.parametrize("case", _CASES, ids=[c["name"] for c in _CASES])
-def test_node_parity(case):
+def test_node_parity(case, real_fonts):
     name = case["name"]
     w, h = case["size"]
     nodes = case.get("nodes") or [case["node"]]
@@ -316,7 +316,7 @@ _TEXT_CASES = [
 
 
 @pytest.mark.parametrize(("name", "role", "font_name", "size", "text"), _TEXT_CASES, ids=[c[0] for c in _TEXT_CASES])
-def test_painter_text_position_and_coverage(name, role, font_name, size, text):
+def test_painter_text_position_and_coverage(name, role, font_name, size, text, real_fonts):
     width, height = 440, 100
     pos = (20, 20)
     ref = _render_pillow(lambda p: p.text(text, pos, get_font(font_name, size), (0, 0, 0, 255)), width, height)

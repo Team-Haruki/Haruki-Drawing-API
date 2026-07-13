@@ -34,7 +34,7 @@ def _clear_cache() -> None:
     irb._thread_font_cache().clear()
 
 
-def test_font_cache_survives_across_builder_instances():
+def test_font_cache_survives_across_builder_instances(real_fonts):
     """Two builders on the same thread must hand back the same font, not rebuild it."""
     _clear_cache()
     a, b = _builder(), _builder()
@@ -47,7 +47,7 @@ def test_font_cache_survives_across_builder_instances():
     assert pil_font_cache_info()["size"] == entries_after_first  # pure cache hit, no new entry
 
 
-def test_font_objects_are_not_shared_across_threads():
+def test_font_objects_are_not_shared_across_threads(real_fonts):
     """THE performance invariant. A FreeTypeFont shared between threads serializes every
     getlength()/getbbox() in the process (Pillow takes a per-object critical section), which
     costs 4-5x throughput on the free-threaded build. Each thread must get its own object."""
@@ -65,7 +65,7 @@ def test_font_objects_are_not_shared_across_threads():
     assert len(set(fonts)) == 4, "font object is shared across threads — measurement will serialize"
 
 
-def test_font_cache_key_is_resolved_name_not_role():
+def test_font_cache_key_is_resolved_name_not_role(real_fonts):
     """Roles resolve through each builder's own font map, so keying on the role would let a
     builder whose "default" is FontX collide with one whose "default" is FontY."""
     _clear_cache()
@@ -76,7 +76,7 @@ def test_font_cache_key_is_resolved_name_not_role():
     assert regular._pil_font("bold", 24) is swapped._pil_font("default", 24)
 
 
-def test_font_cache_dedupes_equivalent_pixel_sizes():
+def test_font_cache_dedupes_equivalent_pixel_sizes(real_fonts):
     """Sizes that round to the same integer px are the same font; they must share an entry."""
     _clear_cache()
     b = _builder()
@@ -89,7 +89,7 @@ def test_font_cache_dedupes_equivalent_pixel_sizes():
     assert b._pil_font("default", 33.0) is not font
 
 
-def test_font_cache_is_bounded():
+def test_font_cache_is_bounded(real_fonts):
     """An unbounded cache keyed by a caller-influenced size would be a slow leak."""
     _clear_cache()
     b = _builder()
@@ -100,7 +100,7 @@ def test_font_cache_is_bounded():
     assert pil_font_cache_info()["size"] <= irb._PIL_FONT_CACHE_MAX
 
 
-def test_unresolvable_font_is_not_cached_so_it_can_self_heal(tmp_path):
+def test_unresolvable_font_is_not_cached_so_it_can_self_heal(real_fonts, tmp_path):
     """A missing font means a misconfigured deploy (asset volume not mounted yet). PIL's default
     is a 10px bitmap face with no CJK coverage; caching it would freeze wrong metrics in for the
     life of the process instead of picking the real font up once it appears."""
