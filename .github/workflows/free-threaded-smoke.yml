@@ -49,6 +49,33 @@ jobs:
         run: |
           UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python -m compileall src
 
+      # The service refuses to start without its text fonts (a missing face means every string on
+      # every image renders wrong), and this job actually BOOTS the server. Same download+cache as
+      # quick-check's native-tests job. Before this, the smoke test rendered with Pillow's fallback
+      # face and asserted the images were fine — it was validating a broken configuration.
+      - name: Cache CI fonts
+        id: font-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/SourceHanSansSC-Regular.otf
+            data/SourceHanSansSC-Bold.otf
+            data/SourceHanSansSC-Heavy.otf
+            data/TwemojiMozilla.ttf
+          key: ci-fonts-source-han-sans-release-twemoji-mozilla-v0.7.0
+
+      - name: Download CI fonts
+        if: steps.font-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          for weight in Regular Bold Heavy; do
+            curl -fsSL --retry 3 -o "data/SourceHanSansSC-${weight}.otf" \
+              "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-${weight}.otf"
+          done
+          curl -fsSL --retry 3 -o data/TwemojiMozilla.ttf \
+            "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf"
+
       - name: Generate SK trend sample payload
         run: |
           UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/generate_sk_trend_sample.py --output-dir out/ci-sk-trend --points 20
@@ -57,7 +84,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          .venv314t/bin/python -X gil=0 -m granian --interface asgi --host 127.0.0.1 --port 18080 src.core.main:app > /tmp/haruki_granian.log 2>&1 &
+          HARUKI_FONT__EMOJI=TwemojiMozilla \
+            .venv314t/bin/python -X gil=0 -m granian --interface asgi --host 127.0.0.1 --port 18080 src.core.main:app > /tmp/haruki_granian.log 2>&1 &
           server_pid=$!
           cleanup() {
             kill "${server_pid}" >/dev/null 2>&1 || true
