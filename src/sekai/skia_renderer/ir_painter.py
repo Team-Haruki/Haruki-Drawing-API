@@ -32,7 +32,12 @@ from src.sekai.base.painter import (
     Painter,
     RadialGradient,
 )
-from src.sekai.base.utils import EncodedImageRef, get_pristine_image_asset_path, resolve_image_source_sync
+from src.sekai.base.utils import (
+    EncodedImageRef,
+    get_pristine_image_asset_path,
+    resolve_existing_asset_path,
+    resolve_image_source_sync,
+)
 from src.sekai.skia_renderer.ir_builder import (
     IRBuilder,
     adaptive_color,
@@ -188,13 +193,15 @@ class IRPainter(Painter):
             return f"mem:{key}"
         source = get_pristine_image_asset_path(img)
         if source is not None:
-            try:
-                relative = source.resolve(strict=True).relative_to(self._assets_base_dir)
-            except (FileNotFoundError, ValueError):
-                pass
-            else:
-                if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
-                    return relative.as_posix()
+            resolved = resolve_existing_asset_path(source)
+            if resolved is not None:
+                try:
+                    relative = resolved.relative_to(self._assets_base_dir)
+                except ValueError:
+                    pass
+                else:
+                    if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
+                        return relative.as_posix()
         if not isinstance(img, Image.Image):
             # AssetImageRef outside the assets root or vanished on disk: decode
             # (placeholder on missing) so mem transport still renders something.

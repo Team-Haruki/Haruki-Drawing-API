@@ -218,6 +218,19 @@ impl FontRegistry {
             .as_ref()
             .map(|t| Font::from_typeface(t.clone(), size))
     }
+
+    /// The emoji `Font`, built only when `text` actually contains an emoji codepoint.
+    ///
+    /// `routes_to_emoji` already returns false for every non-emoji char whether or not the emoji
+    /// font exists, so for the overwhelming majority of strings — which contain no emoji at all —
+    /// passing `None` here is indistinguishable from passing the real font. Building it eagerly
+    /// meant allocating a Skia `Font` for every text node in the scene to route zero characters.
+    fn emoji_font_for(&self, text: &str, size: f32) -> Option<Font> {
+        if self.emoji.is_none() || !text.chars().any(is_emoji) {
+            return None;
+        }
+        self.emoji_font(size)
+    }
 }
 
 /// Whether a codepoint should route to the emoji font (emoji blocks + ZWJ/variation selectors).
@@ -1543,11 +1556,12 @@ fn text_layout(
     baseline: Baseline,
     letter_spacing: f32,
 ) -> (f32, f32) {
-    let advance = measure_advance(main, emoji, text, letter_spacing);
+    // Measure lazily: Left — the common case — places at `abs.0` and never looks at the advance,
+    // so measuring up front was a full text measurement thrown away on most nodes in the scene.
     let x = match align {
         HAlign::Left => abs.0,
-        HAlign::Center => abs.0 - advance * 0.5,
-        HAlign::Right => abs.0 - advance,
+        HAlign::Center => abs.0 - measure_advance(main, emoji, text, letter_spacing) * 0.5,
+        HAlign::Right => abs.0 - measure_advance(main, emoji, text, letter_spacing),
     };
     let (_, metrics) = main.metrics();
     let baseline_y = match baseline {
@@ -1622,7 +1636,7 @@ fn draw_styled_text(
         return;
     }
     let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
-    let emoji = fonts.emoji_font(node.font.size);
+    let emoji = fonts.emoji_font_for(&node.text, node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
         &font,
@@ -1678,7 +1692,7 @@ fn resolve_adaptive_color(
     ad: &AdaptiveColor,
 ) -> Color4 {
     let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
-    let emoji = fonts.emoji_font(node.font.size);
+    let emoji = fonts.emoji_font_for(&node.text, node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
         &font,
@@ -1725,7 +1739,7 @@ fn draw_pixelwise_adaptive_text(
     ad: &AdaptiveColor,
 ) {
     let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
-    let emoji = fonts.emoji_font(node.font.size);
+    let emoji = fonts.emoji_font_for(&node.text, node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
         &font,

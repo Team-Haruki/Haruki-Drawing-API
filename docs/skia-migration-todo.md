@@ -114,7 +114,11 @@
       代表大图 encode 提升 `2.9-5.9x`,最终 63/63 SBS 通过,文件大小变化约 `-2%` 到 `+6%`。
 - [x] **Chart 中间 PNG 消除**(2026-07-13):`pjsekai-scores-rs RasterImage` 以只读 N32 buffer 跨扩展借用，
       完整路径只做最终一次编码；PyPI `0.5.0` 正式 wheel 全量验收 `63/63 ok`。
-- [ ] Scene.scale 整图 resize → canvas 矩阵直渲染(M,需视觉验收;profile 1.5×/winrate 2× 受益)。
+- [x] ~~Scene.scale 整图 resize → canvas 矩阵直渲染~~ **实测否决**(2026-07-14):先量再改,量完发现不值得。
+      `scale_elapsed` 在两个受益端点上分别是 profile `0.005s`/43ms、winrate `0.004s`/19ms——占端到端不到 12%,
+      绝对值只有几毫秒。而矩阵直渲会把整个光栅化搬到放大后的分辨率上(draw 反而变贵),并改变文字 hinting
+      与抗锯齿的落点,拿"几毫秒"去换一次全端点像素验收和长期的两后端字形漂移风险,不划算。**保持整图 resize**
+      (且它与 Pillow `Canvas.get_img(scale)` 的"先渲染再 BILINEAR 缩放"语义天然一致,这本身就是对拍能过的原因)。
 - [x] **`card_full_thumbnail` 子树化**(2026-07-13):`CardFullThumbnailBox(ImageBox)` 经 Painter 原语
       在两后端原生绘制(底图/等级条/框/特训 rank/属性/星级/圆角 clip),profile、card detail/list/box、
       event detail/list、gacha、deck 全部迁移;Pillow 预合成 `get_card_full_thumbnail` 及其 composed/disk
@@ -147,9 +151,34 @@
       改用 `_ascender_top_to_painter_y` 按字体度量换算)、圆角内 alpha 被叠层 lerp 拉低产生光晕
       (`paste` → `paste_with_alpha_blend`,与 Skia 的 SrcOver 语义一致)。
       两者均有变异测试验证的回归用例(tests/test_card_thumbnail_box.py、tests/test_image_source.py)。
-- [ ] 文本渲染缓存:每 Text 节点重复 measure_str("哇")、Left 对齐白测宽度、每节点新建 Font、
-      adaptive 双重布局(S-M)。
-- [ ] fs::metadata TTL(S);TriangleBg 按 seed 缓存 raster(M);mem 图 content-hash 跨请求缓存(L)。
+- [x] **文本测量缓存 + 路径解析缓存**(2026-07-14):**本节其余条目都在猜 Rust 侧,而热点根本不在 Rust。**
+      先 profile 再动手:`inventory_list` 1.673s 里 native 只占 0.165s(~10%),draw→IR 却占 1.202s;
+      cProfile 指向 `Font.getsize` —— **6816 次调用 / 0.966s,占整个 draw pass 的 84%**。原因是布局本身要测量:
+      每个 widget 靠文字尺寸自算大小,而 widget 树在 sizing 时会反复测同一批字符串。
+      ①`painter.get_text_size/get_text_offset` 加进程级 bbox 缓存(key=`(字体文件, 字号, 文本)`,emoji 走
+      `getsize_emoji` 独立池)。②`utils._resolve_asset_path` 记忆化 realpath——`Path.resolve()` 是**逐路径段
+      一次 lstat**,base 和资产路径各走一遍,`music_list`(696 张 jacket)光这一项就 **33134 次 lstat**;
+      同时把 `is_file()+stat()` 两次系统调用并成一次。③`ir_painter._image_ref` 每个 image 节点都
+      `resolve(strict=True)`,同样记忆化(`resolve_existing_asset_path`)。**lstat 33134 → 5 次/render。**
+      成绩:对拍 skia 总时长 `9.79s → 5.41s`(**1.81x**,pillow `20.86s → 16.67s`),`inventory_list` 7.3x、
+      `gacha_list` 4.2x、`score_control` 3.0x;63/63 通过,且 legacy 基线 55/55 `max_delta=0` **逐像素一致**。
+      **缓存 stat 是不能碰的红线**:mtime/size 是所有图片缓存的 key,缓存了它资产同步就会静默失效
+      (变异测试已钉死,见 tests/test_base_utils.py、tests/test_text_measure_cache.py)。
+- [x] **Rust 侧文本微优化**(2026-07-14,**实测只值 ~0.4%,老实记下来**):每个 Text 节点原本都要新建一个
+      emoji `Font`(哪怕整串没有一个 emoji 码位)、且 Left 对齐也会把 advance 测出来再丢掉。已改为
+      `emoji_font_for()`(文本真含 emoji 码位才构造)与惰性 advance(仅 Center/Right 测)。
+      像素中性已用**无背景纯文字场景**逐字节验证(三种对齐 × 有/无 emoji × 字间距 × CjkTop 基线 × 三种字重,
+      前后 sha256 完全相同);对拍 skia `5.43s → 5.41s`——**噪声级**。
+      结论:**这一条在 TODO 里被高估了**,真正的文本开销在 Python 的布局测量,不在 Rust 的绘制。
+      因此同组的 `measure_str("哇")` 全局缓存**不做**:为 0.4% 量级的收益引入跨线程锁不划算。
+- [ ] ~~fs::metadata TTL(S)~~ → 已由上面的路径解析缓存覆盖(在 Python 侧,不在 Rust)。
+      余下:TriangleBg 按 seed 缓存 raster(M,**但先决条件是给 Pillow 侧播种**,见下);
+      mem 图 content-hash 跨请求缓存(L,`get_asset_image_ref` 铺开后 mem 图已经很少,收益存疑)。
+- [ ] **三角形背景的随机源**(值得单独记一笔,它不只是性能问题):Pillow 侧 `_impl_draw_random_triangle_bg`
+      直接抽**全局未播种 `random`**,Rust 侧却是 `(width, height, hour)` 派生的确定性种子。后果有三:
+      ①两后端背景**永远不可能一致**,对拍只能对背景放一个宽松的 mean 阈值;②Pillow 输出**逐次不可复现**
+      (~12% 像素churn),legacy 基线脚本一度因此"自己和自己对不上";③Rust 侧种子含 `hour`,精度到毫秒,
+      所以连 Skia 也不是逐次可复现的。想缓存 TriangleBg raster,必须**先把两侧的种子统一并显式化**。
 
 ## 🔵 新增:对 legacy 的像素基线(补上对拍的系统性盲区)
 

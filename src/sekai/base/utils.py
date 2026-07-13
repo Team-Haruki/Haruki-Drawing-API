@@ -10,6 +10,7 @@ import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
+from stat import S_ISREG
 import threading
 import time
 from typing import Any, Literal
@@ -936,27 +937,21 @@ def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Pat
 
 
 def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
-    safe_path = path.lstrip("/")
-    resolved_base = base_path.resolve()
-    full_path = (resolved_base / safe_path).resolve()
-
-    if not full_path.is_relative_to(resolved_base):
-        raise ValueError(f"图片路径越界: {path}")
-    if not full_path.is_file():
-        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
-        if fallback_path is None:
-            raise FileNotFoundError(f"图片文件不存在: {full_path}")
-        full_path = fallback_path
-
-    return _load_image_full_path_sync(full_path)
+    full_path, _, stat = _resolve_and_stat(base_path, path)
+    return _load_image_full_path_sync(full_path, stat=stat)
 
 
-def _load_image_full_path_sync(full_path: Path) -> Image.Image:
-    """Decode an already-resolved absolute path through the global image cache."""
+def _load_image_full_path_sync(full_path: Path, stat: os.stat_result | None = None) -> Image.Image:
+    """Decode an already-resolved absolute path through the global image cache.
+
+    ``stat`` lets a caller that has already stat'd the file hand the result down instead of
+    paying for a second syscall.
+    """
     if not _cache_enabled(str(full_path)):
         return _mark_pristine_asset_image(_open_image_copy(full_path), full_path)
 
-    stat = full_path.stat()
+    if stat is None:
+        stat = full_path.stat()
     full_path_str = str(full_path)
     cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
     if cached is not None:
@@ -998,21 +993,94 @@ def resolve_image_source_sync(
     raise TypeError(f"unsupported image source: {type(source)!r}")
 
 
-def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
-    """解析路径并获取 stat，供 resize 和原始加载共用。"""
-    safe_path = path.lstrip("/")
-    resolved_base = base_path.resolve()
-    full_path = (resolved_base / safe_path).resolve()
+_PATH_RESOLVE_CACHE_MAX = 32_768
+_resolved_path_cache: dict[tuple[str, str], tuple[Path, Path, str]] = {}
 
+
+def _resolve_asset_path(base_path: Path, path: str) -> tuple[Path, Path, str]:
+    """``(resolved_base, full_path, full_path_str)``, memoized.
+
+    ``Path.resolve()`` is a realpath walk — an ``lstat`` per path COMPONENT — and both the base and
+    the asset path get one on every single image. A music list with 696 jackets was spending 33k
+    lstat calls here. The resolution is pure path arithmetic over a static asset tree, so it is
+    cached; only the ``stat`` (which feeds every cache key, and must see a replaced file) stays live.
+
+    The traversal check runs on the cached side because it is a property of the resolved PATH, not of
+    the file. Caching it does mean a symlink planted inside the asset tree AFTER a path was first
+    resolved would be followed without a fresh escape check — but writing into the asset dir already
+    implies the ability to replace the images themselves, so this buys an attacker nothing new.
+    """
+    key = (str(base_path), path)
+    cached = _resolved_path_cache.get(key)
+    if cached is not None:
+        return cached
+
+    resolved_base = base_path.resolve()
+    full_path = (resolved_base / path.lstrip("/")).resolve()
     if not full_path.is_relative_to(resolved_base):
         raise ValueError(f"图片路径越界: {path}")
-    if not full_path.is_file():
+
+    entry = (resolved_base, full_path, str(full_path))
+    if len(_resolved_path_cache) >= _PATH_RESOLVE_CACHE_MAX:
+        _resolved_path_cache.clear()
+    _resolved_path_cache[key] = entry
+    return entry
+
+
+_resolved_existing_cache: dict[str, Path] = {}
+
+
+def resolve_existing_asset_path(path: Path) -> Path | None:
+    """``path.resolve(strict=True)`` memoized, or ``None`` if it does not exist.
+
+    For the IR builder, which must map an absolute asset path back to a path relative to the assets
+    root — once per image NODE, so a 696-jacket music list paid 13k lstat calls for it. The paths it
+    is handed are already resolved (they come from ``_resolve_and_stat``), so the walk is redundant
+    normalization; but it is kept on the first sighting rather than dropped, because symlink
+    normalization is what makes the caller's later ``relative_to`` escape check meaningful.
+
+    Only successes are cached. A missing file re-resolves every time — that is the rare path, and
+    caching a negative would keep an asset invisible after it lands on disk.
+    """
+    key = str(path)
+    cached = _resolved_existing_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, ValueError):
+        return None
+    if len(_resolved_existing_cache) >= _PATH_RESOLVE_CACHE_MAX:
+        _resolved_existing_cache.clear()
+    _resolved_existing_cache[key] = resolved
+    return resolved
+
+
+def _stat_regular_file(full_path: Path) -> os.stat_result | None:
+    """``stat`` of ``full_path``, or ``None`` if it is not an existing regular file.
+
+    One syscall where ``is_file()`` followed by ``stat()`` was two — and the stat is needed anyway,
+    since its mtime/size are what key every image cache.
+    """
+    try:
+        st = os.stat(full_path)
+    except (OSError, ValueError):
+        return None
+    return st if S_ISREG(st.st_mode) else None
+
+
+def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
+    """解析路径并获取 stat，供 resize 和原始加载共用。"""
+    resolved_base, full_path, full_path_str = _resolve_asset_path(base_path, path)
+
+    st = _stat_regular_file(full_path)
+    if st is None:
         fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
         if fallback_path is None:
             raise FileNotFoundError(f"图片文件不存在: {full_path}")
-        full_path = fallback_path
+        return fallback_path, str(fallback_path), fallback_path.stat()
 
-    return full_path, str(full_path), full_path.stat()
+    return full_path, full_path_str, st
 
 
 @lru_cache(maxsize=16384)
