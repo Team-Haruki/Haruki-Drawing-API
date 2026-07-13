@@ -36,15 +36,18 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    get_asset_image_ref,
     get_composed_image_cached,
     put_composed_image_cache,
 )
 from src.sekai.profile.drawer import (
-    get_card_full_thumbnail,
+    CardFullThumbnailBox,
+    get_card_full_thumbnail_layers,
     get_profile_card,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
+from src.sekai.skia_renderer.render_stats import record_skia_cache_hit
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
 # 从 model.py 导入数据模型
@@ -612,15 +615,15 @@ async def _build_card_detail_canvas(
     sp_skill_info = rqd.card_info.special_skill_info
     # 获取图片（并行）
     _img_tasks = [
-        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path],
-        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path],
-        *[get_card_full_thumbnail(thumbnail) for thumbnail in rqd.card_info.thumbnail_info],
-        get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path),
-        get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path),
+        *[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in rqd.card_images_path],
+        *[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path],
+        *[get_card_full_thumbnail_layers(thumbnail) for thumbnail in rqd.card_info.thumbnail_info],
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.character_icon_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, skill_info.skill_type_icon_path),
     ]
     if sp_skill_info:
-        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
+        _img_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
     _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks)
     logger.debug(
@@ -637,7 +640,7 @@ async def _build_card_detail_canvas(
     _offset += _n_cards
     costume_images = list(_img_results[_offset : _offset + _n_costumes])
     _offset += _n_costumes
-    thumbnail_images = list(_img_results[_offset : _offset + _n_thumbs])
+    thumbnail_layers = list(_img_results[_offset : _offset + _n_thumbs])
     _offset += _n_thumbs
     character_icon = _img_results[_offset]
     _offset += 1
@@ -661,15 +664,15 @@ async def _build_card_detail_canvas(
     # 预加载关联活动/卡池图片（并行）
     _extra_tasks = {}
     if event_detail:
-        _extra_tasks["event_banner"] = get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path)
+        _extra_tasks["event_banner"] = get_asset_image_ref(ASSETS_BASE_DIR, event_detail.event_banner_path)
         if event_detail.bonus_attr and rqd.event_attr_icon_path:
-            _extra_tasks["event_attr"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path)
+            _extra_tasks["event_attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_attr_icon_path)
         if event_detail.unit and rqd.event_unit_icon_path:
-            _extra_tasks["event_unit"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path)
+            _extra_tasks["event_unit"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_unit_icon_path)
         if event_detail.banner_cid and rqd.event_chara_icon_path:
-            _extra_tasks["event_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path)
+            _extra_tasks["event_chara"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_chara_icon_path)
     if gacha_detail:
-        _extra_tasks["gacha_banner"] = get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path)
+        _extra_tasks["gacha_banner"] = get_asset_image_ref(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path)
     _extra_keys = list(_extra_tasks.keys())
     _extra_imgs = dict(zip(_extra_keys, await asyncio.gather(*_extra_tasks.values()))) if _extra_tasks else {}
 
@@ -684,6 +687,8 @@ async def _build_card_detail_canvas(
     tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))  # noqa: F841
 
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
+    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
+    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
     if rqd.background_image_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path, on_missing="raise")
@@ -839,8 +844,8 @@ async def _build_card_detail_canvas(
                     # 缩略图
                     with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
                         TextBox("缩略图", label_style)
-                        for img in thumbnail_images:
-                            ImageBox(img, size=(100, None))
+                        for layers in thumbnail_layers:
+                            CardFullThumbnailBox(layers, size=(100, None))
 
                     # 衣装
                     if len(costume_images) > 0:
@@ -868,7 +873,10 @@ async def try_render_card_detail_payload(
     """Skia 影子层路径；未启用或不可表达时返回 None 回退 Pillow。"""
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_card_detail_canvas(rqd, title, title_style, title_shadow))
+    return await render_canvas_payload(
+        await _build_card_detail_canvas(rqd, title, title_style, title_shadow),
+        endpoint="card_detail",
+    )
 
 
 async def compose_card_list_image(
@@ -893,13 +901,13 @@ async def compose_card_list_image(
         if not thumbnails:
             return []
         if len(thumbnails) == 1:
-            img = await get_card_full_thumbnail(thumbnails[0])
-            return [img] if img is not None else []
+            layers = await get_card_full_thumbnail_layers(thumbnails[0])
+            return [layers] if layers is not None else []
         normal, after = await asyncio.gather(
-            get_card_full_thumbnail(thumbnails[0]),
-            get_card_full_thumbnail(thumbnails[1]),
+            get_card_full_thumbnail_layers(thumbnails[0]),
+            get_card_full_thumbnail_layers(thumbnails[1]),
         )
-        return [img for img in (normal, after) if img is not None]
+        return [layers for layers in (normal, after) if layers is not None]
 
     _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
@@ -919,6 +927,8 @@ async def compose_card_list_image(
     notice_text_style = TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0))
 
     # 使用传入的背景图片，如果没有则使用默认背景
+    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
+    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
     if rqd.background_img_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
@@ -938,11 +948,11 @@ async def compose_card_list_image(
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        preload_tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
     for path in skill_icon_paths:
-        preload_tasks[f"skill::{path}"] = get_img_from_path(ASSETS_BASE_DIR, path)
+        preload_tasks[f"skill::{path}"] = get_asset_image_ref(ASSETS_BASE_DIR, path)
 
     _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
@@ -1014,7 +1024,9 @@ async def compose_card_list_image(
                                     supply_name = card.supply_type or ""
                                     for thumb in thumb_group:
                                         with Frame().set_content_align("rt"):
-                                            ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                                            CardFullThumbnailBox(
+                                                thumb, size=(100, 100), image_size_mode="fill", shadow=True
+                                            )
                                             limited_icon_width = 75
                                             if supply_name in TERM_LIMITED_SUPPLY_TYPES:
                                                 if term_img:
@@ -1077,22 +1089,22 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
         if not thumbnails:
             return None
         if len(thumbnails) == 1:
-            return await get_card_full_thumbnail(thumbnails[0])
+            return await get_card_full_thumbnail_layers(thumbnails[0])
         if card.card.is_after_training:
-            return await get_card_full_thumbnail(thumbnails[1])
-        return await get_card_full_thumbnail(thumbnails[0])
+            return await get_card_full_thumbnail_layers(thumbnails[1])
+        return await get_card_full_thumbnail_layers(thumbnails[0])
 
     _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_box_thumb(card) for card in cards])
     _t_thumbs = time.perf_counter() - _t0
 
     card_records = []
-    for card, img in zip(cards, thumbs):
-        if not img:
+    for card, layers in zip(cards, thumbs):
+        if not layers:
             continue
         card_data = {
             **card.model_dump(),
-            "img": img,
+            "thumb_layers": layers,
             "has": card.has_card,  # 恢复拥有状态判断
         }
         if show_box and not card_data["has"]:
@@ -1180,18 +1192,19 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        preload_tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
     if rqd.character_icon_paths:
         for chara_id, path in rqd.character_icon_paths.items():
+            # 保持即时解码：角色头像会喂给 _circular_progress_avatar 做 convert/resize 像素处理
             preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
     for attr_stat in distribution.attribute_stats:
         if attr_stat.attr_icon_path:
-            preload_tasks[f"attr::{attr_stat.attr}"] = get_img_from_path(ASSETS_BASE_DIR, attr_stat.attr_icon_path)
+            preload_tasks[f"attr::{attr_stat.attr}"] = get_asset_image_ref(ASSETS_BASE_DIR, attr_stat.attr_icon_path)
     if single_progress is not None:
-        preload_tasks["rarity_star"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_RARITY_STAR_PATH)
-        preload_tasks["rarity_birthday"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_BIRTHDAY_RARITY_PATH)
+        preload_tasks["rarity_star"] = get_asset_image_ref(ASSETS_BASE_DIR, CARD_BOX_RARITY_STAR_PATH)
+        preload_tasks["rarity_birthday"] = get_asset_image_ref(ASSETS_BASE_DIR, CARD_BOX_BIRTHDAY_RARITY_PATH)
 
     _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
@@ -1232,7 +1245,7 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
         # 的独立单元，导致每张卡占两格、列数与整体宽度翻倍（触发 watermark 的尺寸越界报错）。
         with VSplit().set_content_align("rt").set_sep(0):
             with Frame().set_content_align("rt"):
-                ImageBox(card_data["img"], size=(sz, sz))
+                CardFullThumbnailBox(card_data["thumb_layers"], size=(sz, sz))
 
                 # 限定类型图标
                 supply_name = card_data["card"].get("supply_type", "")
@@ -1261,6 +1274,7 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
         panel_text_width = max(240, panel_width - 120)
 
     # 使用传入的背景图片，如果没有则使用默认背景
+    # 同 compose_card_list_image：ImageBg 默认 fade=0.1 会在构造时改写像素，保持即时解码。
     if rqd.background_img_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
@@ -1556,10 +1570,13 @@ async def try_render_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | N
     cache_key = f"{_build_card_box_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
     cached = get_skia_payload_cached(cache_key)
     if cached is not None:
+        # Record the hit: render_canvas_payload never sees it, so without this /render-stats and
+        # the backend= log field would systematically under-count card_box.
+        record_skia_cache_hit("card_box", cached)
         return cached
     canvas = await _build_box_canvas(rqd)
     _t0 = time.perf_counter()
-    payload = await render_canvas_payload(canvas)
+    payload = await render_canvas_payload(canvas, endpoint="card_box")
     if payload is not None:
         _perf_logger.info(
             "card/box backend=skia render: %.3fs (cards=%d, image=%dx%d)",

@@ -32,6 +32,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
     get_img_from_path,
@@ -49,7 +50,8 @@ from src.sekai.deck.model import (
     DeckRequest,
 )
 from src.sekai.profile.drawer import (
-    get_card_full_thumbnail,
+    CardFullThumbnailBox,
+    get_card_full_thumbnail_layers,
     get_profile_card,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -183,7 +185,7 @@ async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
     detail = rqd.event_info
     now = request_now(rqd.timezone)
     _t0 = time.perf_counter()
-    card_thumbs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in rqd.event_cards])
+    card_layers = await asyncio.gather(*[get_card_full_thumbnail_layers(card) for card in rqd.event_cards])
     logger.debug(
         "[perf] compose_event_detail_image card thumbs %d: %.3fs",
         len(rqd.event_cards),
@@ -207,23 +209,26 @@ async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
     # 并行加载所有活动图片
     _event_img_tasks = {}
     bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
+    # 即时解码,不能传 ref:这张图喂给 ImageBg(),而 ImageBg 的 fade 默认 0.1——构造时就会
+    # resolve_image_source_sync + ImageEnhance.Brightness 改写像素。传 ref 只会把整图解码从线程池
+    # 挪到事件循环上,且改写后的像素也进不了 IR(Skia 侧仍要走 mem 图),纯亏。
     _event_img_tasks["bg"] = get_img_from_path(ASSETS_BASE_DIR, bg_path)
     event_chara_path = (rqd.event_assets.event_ban_chara_img or "").strip()
     if use_story_bg and event_chara_path:
-        _event_img_tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, event_chara_path)
-    _event_img_tasks["logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
+        _event_img_tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, event_chara_path)
+    _event_img_tasks["logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     if rqd.event_assets.ban_chara_icon_path:
-        _event_img_tasks["ban_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
+        _event_img_tasks["ban_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
     if rqd.event_assets.event_attr_image_path:
-        _event_img_tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
+        _event_img_tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
     if rqd.event_assets.bonus_chara_path:
         for i, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
-            _event_img_tasks[f"bonus_chara_{i}"] = get_img_from_path(ASSETS_BASE_DIR, chara_path)
+            _event_img_tasks[f"bonus_chara_{i}"] = get_asset_image_ref(ASSETS_BASE_DIR, chara_path)
     for i, chapter in enumerate(wl_chapters):
         if chapter.get("character_icon_path"):
             key = f"wl_chapter_icon_{i}"
             chapter["character_icon_key"] = key
-            _event_img_tasks[key] = get_img_from_path(ASSETS_BASE_DIR, chapter["character_icon_path"])
+            _event_img_tasks[key] = get_asset_image_ref(ASSETS_BASE_DIR, chapter["character_icon_path"])
     _ek = list(_event_img_tasks.keys())
     _t0 = time.perf_counter()
     _ev = dict(zip(_ek, await asyncio.gather(*_event_img_tasks.values())))
@@ -388,9 +393,9 @@ async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
                         else:
                             col_count = 4
                         with Grid(col_count=col_count).set_sep(4, 4):
-                            for card, thumb in zip(event_cards, card_thumbs):
+                            for card, layers in zip(event_cards, card_layers):
                                 with VSplit().set_padding(0).set_sep(2).set_item_align("c").set_content_align("c"):
-                                    ImageBox(thumb, size=(80, 80))
+                                    CardFullThumbnailBox(layers, size=(80, 80))
                                     TextBox(
                                         f"ID:{card.card_id}",
                                         TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)),
@@ -426,9 +431,11 @@ async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
 
 
 async def try_render_event_detail_payload(rqd: EventDetailRequest) -> EncodedImagePayload | None:
+    # NOT payload-cached: the canvas bakes in a live countdown ("距结束还有…" / "距章节结束还有…")
+    # and a now-derived progress bar, so any cached image would show a frozen remaining time.
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_event_detail_canvas(rqd))
+    return await render_canvas_payload(await _build_event_detail_canvas(rqd), endpoint="event_detail")
 
 
 # 合成活动记录图片
@@ -496,9 +503,10 @@ async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
                         with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(gh):
                             if item.wl_chara_icon_path:
                                 ImageBox(
-                                    await get_img_from_path(ASSETS_BASE_DIR, item.wl_chara_icon_path), size=(None, gh)
+                                    await get_asset_image_ref(ASSETS_BASE_DIR, item.wl_chara_icon_path),
+                                    size=(None, gh),
                                 )
-                            ImageBox(await get_img_from_path(ASSETS_BASE_DIR, item.banner_path), size=(None, gh))
+                            ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, item.banner_path), size=(None, gh))
                             with VSplit().set_padding(0).set_sep(2).set_item_align("l").set_content_align("l"):
                                 TextBox(f"【{item.id}】{item.event_name}", style2).set_w(150)
                                 TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
@@ -541,7 +549,7 @@ async def compose_event_record_image(rqd: EventRecordRequest) -> Image.Image:
 async def try_render_event_record_payload(rqd: EventRecordRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_event_record_canvas(rqd))
+    return await render_canvas_payload(await _build_event_record_canvas(rqd), endpoint="event_record")
 
 
 def _event_planner_info(rqd: EventPlannerRequest) -> DeckPlannerInfo:
@@ -644,10 +652,17 @@ async def compose_event_planner_image(rqd: EventPlannerRequest) -> Image.Image:
 
 
 async def try_render_event_planner_payload(rqd: EventPlannerRequest) -> EncodedImagePayload | None:
-    """Skia 路径：planner 委托 deck 渲染,直接走 deck 的 Skia 路径。"""
+    """Skia 路径：planner 委托 deck 渲染,直接走 deck 的 Skia 路径。
+
+    ``endpoint`` 必须显式传入：deck 的默认名是 ``deck_recommend``,不传会把规划图的渲染
+    记到组卡端点上。
+    """
     if not skia_plot_enabled():
         return None
-    return await try_render_deck_recommend_payload(_build_event_planner_deck_request(rqd))
+    return await try_render_deck_recommend_payload(
+        _build_event_planner_deck_request(rqd),
+        endpoint="event_planner",
+    )
 
 
 def _resolve_event_list_entry_phase(start_at, end_at, now) -> str:
@@ -677,15 +692,15 @@ def _build_event_list_entry_cache_key(d, phase: str) -> str:
 async def _preload_event_entry_assets(d) -> dict[str, object]:
     tasks = {}
     if d.event_banner_path:
-        tasks["banner"] = get_img_from_path(ASSETS_BASE_DIR, d.event_banner_path)
+        tasks["banner"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_banner_path)
     if d.event_cards:
-        tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail(thumb) for thumb in d.event_cards])
+        tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail_layers(thumb) for thumb in d.event_cards])
     if d.event_attr_path:
-        tasks["attr"] = get_img_from_path(ASSETS_BASE_DIR, d.event_attr_path)
+        tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_attr_path)
     if d.event_unit_path:
-        tasks["unit"] = get_img_from_path(ASSETS_BASE_DIR, d.event_unit_path)
+        tasks["unit"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_unit_path)
     if d.event_chara_path:
-        tasks["chara"] = get_img_from_path(ASSETS_BASE_DIR, d.event_chara_path)
+        tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_chara_path)
     if not tasks:
         return {}
     keys = list(tasks.keys())
@@ -709,10 +724,10 @@ async def _compose_event_list_entry_image(
                 if banner is not None:
                     ImageBox(banner, size=(None, 40))
                 with Grid(col_count=3).set_padding(0).set_sep(1, 1):
-                    card_thumbs = loaded.get("cards", [])
-                    if card_thumbs:
-                        for thumb in card_thumbs:
-                            ImageBox(thumb, size=(30, 30))
+                    card_layers = loaded.get("cards", [])
+                    if card_layers:
+                        for layers in card_layers:
+                            CardFullThumbnailBox(layers, size=(30, 30))
                 if not d.event_cards:
                     Spacer(h=60)
                 if d.event_cards and len(d.event_cards) <= 3:
@@ -797,6 +812,14 @@ async def compose_event_list_image(rqd: EventListRequest) -> Image.Image:
 
 
 async def try_render_event_list_payload(rqd: EventListRequest) -> EncodedImagePayload | None:
+    # NOT payload-cached at the canvas level, deliberately. `add_request_watermark` bakes a
+    # second-resolution "DT: %Y-%m-%d %H:%M:%S" stamp into the image (from `rqd.dt`, or from
+    # `request_now()` when the caller omits it), so a key that can ever hit — i.e. one that
+    # drops the per-request `dt` — would serve a visibly stale timestamp: `event_info` is
+    # stable for the whole event period, so the stale window is the 7d cache TTL, not seconds.
+    # Keying on the full payload (dt included) is airtight but hits 0% of the time and would
+    # just churn the shared payload LRU. The entry sub-images ARE cached, keyed by
+    # (event, phase) in `_get_event_list_entry_image`, which is where the real cost sits.
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_event_list_canvas(rqd))
+    return await render_canvas_payload(await _build_event_list_canvas(rqd), endpoint="event_list")

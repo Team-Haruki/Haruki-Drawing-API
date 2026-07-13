@@ -35,7 +35,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
-    get_img_from_path,
+    get_asset_image_ref,
     get_readable_datetime,
     get_readable_timedelta,
     plt_fig_to_image,
@@ -204,7 +204,7 @@ async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
     event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
     now = request_now(rqd.timezone)
     title = rqd.name
-    banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
+    banner_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.banner_img_path)
     wl_cid = rqd.wl_cid
     region = rqd.region
 
@@ -241,7 +241,7 @@ async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
                     if banner_img:
                         ImageBox(banner_img, size=(140, None))
                     if wl_cid:
-                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path), size=(None, 50))
+                        ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, rqd.chara_icon_path), size=(None, 50))
 
             if ranks:
                 gh = 30
@@ -364,7 +364,7 @@ async def compose_skl_image(rqd: SklRequest) -> Image.Image:
 async def try_render_skl_payload(rqd: SklRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_skl_canvas(rqd))
+    return await render_canvas_payload(await _build_skl_canvas(rqd), endpoint="sk_line")
 
 
 # 合成榜线查询图片
@@ -379,7 +379,7 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
     event_end = datetime_from_millis(rqd.aggregate_at + 1000, rqd.timezone)
     now = request_now(rqd.timezone)
     if rqd.wl_chara_icon_path:
-        wl_chara_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+        wl_chara_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
     style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
     style2 = TextStyle(font=DEFAULT_FONT, size=24, color=BLACK)
@@ -452,7 +452,7 @@ async def compose_sk_image(rqd: SKRequest) -> Image.Image:
 async def try_render_sk_payload(rqd: SKRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_sk_canvas(rqd), scale=1.5)
+    return await render_canvas_payload(await _build_sk_canvas(rqd), endpoint="sk_query", scale=1.5)
 
 
 # 合成查房图片
@@ -572,7 +572,7 @@ async def _build_cf_canvas(rqd: CFRequest) -> Canvas:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
                 if wl_chara_img_path:
-                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR, wl_chara_img_path), size=(None, 50))
+                    ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, wl_chara_img_path), size=(None, 50))
 
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(16):
                 for text, style in texts:
@@ -589,7 +589,7 @@ async def compose_cf_image(rqd: CFRequest) -> Image.Image:
 async def try_render_cf_payload(rqd: CFRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_cf_canvas(rqd), scale=1.5)
+    return await render_canvas_payload(await _build_cf_canvas(rqd), endpoint="sk_check_room", scale=1.5)
 
 
 async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
@@ -713,7 +713,7 @@ async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
                         TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
                     )
                 if wl_chara_img_path:
-                    ImageBox(await get_img_from_path(ASSETS_BASE_DIR, wl_chara_img_path), size=(None, 50))
+                    ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, wl_chara_img_path), size=(None, 50))
 
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
                 TextBox(f'T{latest_rank.rank} "{latest_name}" 各小时Pt变化次数', heat_title_style)
@@ -769,7 +769,7 @@ async def try_render_csb_payload(rqd: CSBRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
     canvas, scale = await _build_csb_canvas(rqd)
-    return await render_canvas_payload(canvas, scale=scale)
+    return await render_canvas_payload(canvas, endpoint="sk_csb", scale=scale)
 
 
 async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
@@ -784,7 +784,7 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
     event_start = datetime_from_millis(rqd.event_start_at, rqd.timezone)
     event_end = datetime_from_millis(rqd.event_aggregate_at + 1000, rqd.timezone)
     now = request_now(rqd.timezone)
-    banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
+    banner_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.banner_img_path)
     is_wl_event = rqd.is_wl_event
     period = rqd.period
     speeds = _collect_speed_display_rows(rqd.ranks)
@@ -810,7 +810,7 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
                     if banner_img:
                         ImageBox(banner_img, size=(140, None))
                     if is_wl_event:
-                        ImageBox(await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path), size=(None, 50))
+                        ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path), size=(None, 50))
 
             if speeds:
                 gh = 30
@@ -862,7 +862,7 @@ async def compose_sks_image(rqd: SpeedRequest) -> Image.Image:
 async def try_render_sks_payload(rqd: SpeedRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_sks_canvas(rqd))
+    return await render_canvas_payload(await _build_sks_canvas(rqd), endpoint="sk_speed")
 
 
 async def _build_player_trace_canvas(rqd: PlayerTraceRequest) -> Canvas:
@@ -880,7 +880,7 @@ async def _build_player_trace_canvas(rqd: PlayerTraceRequest) -> Canvas:
     eid = rqd.event_id
     wl_chara_icon = None
     if rqd.wl_chara_icon_path:
-        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+        wl_chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
     ranks = rqd.ranks
     ranks2 = rqd.ranks2
@@ -1128,7 +1128,7 @@ async def compose_player_trace_image(rqd: PlayerTraceRequest) -> Image.Image:
 async def try_render_player_trace_payload(rqd: PlayerTraceRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_player_trace_canvas(rqd))
+    return await render_canvas_payload(await _build_player_trace_canvas(rqd), endpoint="sk_player_trace")
 
 
 # 合成排名追踪图片
@@ -1150,7 +1150,7 @@ async def _build_rank_trace_canvas(rqd: RankTraceRequest) -> Canvas:
     unique_names = list(dict.fromkeys(original_names))
     wl_chara_icon = None
     if rqd.wl_chara_icon_path:
-        wl_chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+        wl_chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
     # 时速计算
     speeds = []
@@ -1267,7 +1267,7 @@ async def compose_rank_trace_image(rqd: RankTraceRequest) -> Image.Image:
 async def try_render_rank_trace_payload(rqd: RankTraceRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_rank_trace_canvas(rqd))
+    return await render_canvas_payload(await _build_rank_trace_canvas(rqd), endpoint="sk_rank_trace")
 
 
 async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
@@ -1277,7 +1277,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
     展示红白两队的预测胜率、是否急募等信息
     """
     eid = rqd.event_id
-    banner_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.banner_img_path)
+    banner_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.banner_img_path)
 
     event_name = rqd.event_name
     event_start = datetime_from_millis(rqd.event_start_at, rqd.timezone)
@@ -1290,7 +1290,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
     teams = sorted(rqd.team_info, key=lambda x: x.team_id)
     tids = [team.team_id for team in teams]
     tnames = [f"{team.team_name} ({team.team_cn_name})" if team.team_cn_name else team.team_name for team in teams]
-    ticons = [await get_img_from_path(ASSETS_BASE_DIR, team.team_icon_path) for team in teams]
+    ticons = await asyncio.gather(*(get_asset_image_ref(ASSETS_BASE_DIR, team.team_icon_path) for team in teams))
 
     win_tid = tids[0] if teams[0].win_rate >= teams[1].win_rate else tids[1]
 
@@ -1364,4 +1364,4 @@ async def compose_winrate_predict_image(rqd: WinRateRequest) -> Image.Image:
 async def try_render_winrate_predict_payload(rqd: WinRateRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_winrate_predict_canvas(rqd), scale=2.0)
+    return await render_canvas_payload(await _build_winrate_predict_canvas(rqd), endpoint="sk_winrate", scale=2.0)

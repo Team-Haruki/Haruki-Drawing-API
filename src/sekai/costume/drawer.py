@@ -5,10 +5,18 @@ from PIL import Image
 
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
-from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, get_font, get_font_desc, get_text_size
+from src.sekai.base.painter import (
+    BLACK,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    Painter,
+    get_font,
+    get_font_desc,
+    get_text_size,
+)
 from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.utils import ImageSource, get_asset_image_ref, resolve_image_source_sync, run_in_pool
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
@@ -38,14 +46,14 @@ COSTUME_DETAIL_PREVIEW_SIZE = (420, 520)
 PREVIEW_FOREGROUND_DETECT_WIDTH = 700
 
 
-async def _load_image(path: str | None) -> Image.Image:
-    return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="placeholder")
+async def _load_image(path: str | None) -> ImageSource:
+    return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="placeholder")
 
 
-async def _load_optional_image(path: str | None) -> Image.Image | None:
+async def _load_optional_image(path: str | None) -> ImageSource | None:
     if not path:
         return None
-    return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="placeholder")
+    return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="placeholder")
 
 
 def _preview_foreground_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:
@@ -121,12 +129,30 @@ def _costume_preview_cover_crop_box(
     return (0, top, width, top + crop_h)
 
 
-def _prepare_costume_preview_image(
-    image: Image.Image,
-    target_size: tuple[int, int] = COSTUME_DETAIL_PREVIEW_SIZE,
-) -> Image.Image:
-    crop_box = _costume_preview_cover_crop_box(image, target_size)
-    return image.convert("RGBA").crop(crop_box).resize(target_size, Image.Resampling.LANCZOS)
+class _CostumePreviewBox(ImageBox):
+    """Detail 预览：前景检测算出的 cover crop 经 ``src_rect`` 直传两后端——Skia 侧
+    仍是原始 asset 路径（检测用的解码副本不进 IR），Pillow 回退在 paste 内裁剪缩放。"""
+
+    def __init__(
+        self,
+        source: ImageSource,
+        crop_box: tuple[int, int, int, int],
+        size: tuple[int, int] = COSTUME_DETAIL_PREVIEW_SIZE,
+    ) -> None:
+        super().__init__(source, size=size, image_size_mode="fill", shadow=True)
+        self._crop_box = crop_box
+
+    def _draw_content(self, p: Painter) -> None:
+        w, h = self._get_content_size()
+        p.paste(
+            self.image,
+            (0, 0),
+            (w, h),
+            use_shadow=self.shadow,
+            shadow_width=self.shadow_width,
+            shadow_alpha=self.shadow_alpha,
+            src_rect=self._crop_box,
+        )
 
 
 def _format_time(value: int | None, timezone: str) -> str:
@@ -253,13 +279,18 @@ async def compose_costume_list_image(rqd: CostumeListRequest) -> Image.Image:
 async def try_render_costume_list_payload(rqd: CostumeListRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_costume_list_canvas(rqd))
+    return await render_canvas_payload(await _build_costume_list_canvas(rqd), endpoint="costume_list")
 
 
 async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
     costume = rqd.costume
     variant_images = await asyncio.gather(*[_load_image(item.thumbnail_path) for item in costume.variants])
     preview = await _load_optional_image(costume.preview_image_path)
+    preview_crop = None
+    if preview is not None:
+        # 前景检测需要真实像素（解码走全局缓存）；检测与像素循环都在线程池里做。
+        preview_pixels = await run_in_pool(resolve_image_source_sync, preview)
+        preview_crop = await run_in_pool(_costume_preview_cover_crop_box, preview_pixels, COSTUME_DETAIL_PREVIEW_SIZE)
 
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=BLACK)
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
@@ -270,8 +301,8 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with HSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             with VSplit().set_padding(16).set_sep(0).set_bg(roundrect_bg(alpha=80)).set_item_align("c"):
-                if preview:
-                    ImageBox(_prepare_costume_preview_image(preview), size=COSTUME_DETAIL_PREVIEW_SIZE, shadow=True)
+                if preview is not None:
+                    _CostumePreviewBox(preview, preview_crop, COSTUME_DETAIL_PREVIEW_SIZE)
                 else:
                     _preview_placeholder(f"costume_id={costume.costume_id}", COSTUME_DETAIL_PREVIEW_SIZE)
 
@@ -325,4 +356,4 @@ async def compose_costume_detail_image(rqd: CostumeDetailRequest) -> Image.Image
 async def try_render_costume_detail_payload(rqd: CostumeDetailRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_costume_detail_canvas(rqd))
+    return await render_canvas_payload(await _build_costume_detail_canvas(rqd), endpoint="costume_detail")

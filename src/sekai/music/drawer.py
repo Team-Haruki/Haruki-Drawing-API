@@ -39,7 +39,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import get_asset_image_ref, get_img_from_path, get_str_display_length
+from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
@@ -153,7 +153,7 @@ def _draw_vocal_name_chip(vocal_name: str, max_text_width: int):
             textbox.set_w(max_text_width)
 
 
-def _draw_vocal_image_chip(chara_imgs: list[Image.Image]):
+def _draw_vocal_image_chip(chara_imgs: list[ImageSource]):
     with (
         HSplit()
         .set_content_align("c")
@@ -312,7 +312,7 @@ async def _build_music_detail_canvas(rqd: MusicDetailRequest) -> Canvas:
     publish_time = datetime_from_millis(rqd.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
     bpm = rqd.bpm
     is_full_length = rqd.music_info.is_full_length
-    cover_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.music_jacket_path)
+    cover_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)
     length = rqd.length
     cn_name = rqd.cn_name
     region = rqd.region
@@ -323,9 +323,9 @@ async def _build_music_detail_canvas(rqd: MusicDetailRequest) -> Canvas:
     # 并行加载封面、banner和所有vocal logos
     _logo_names = list(vocal_logos_raw.keys())
     _logo_paths = list(vocal_logos_raw.values())
-    _img_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _logo_paths]
+    _img_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _logo_paths]
     if rqd.event_banner_path and not custom_chart:
-        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path))
+        _img_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path))
     _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
     logger.debug(
@@ -708,14 +708,14 @@ async def compose_music_detail_image(rqd: MusicDetailRequest) -> Image.Image:
 async def try_render_music_detail_payload(rqd: MusicDetailRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_music_detail_canvas(rqd))
+    return await render_canvas_payload(await _build_music_detail_canvas(rqd), endpoint="music_detail")
 
 
 async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
     profile = rqd.profile
 
     # 预加载封面
-    jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
+    jacket_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, m.music_jacket_path) for m in rqd.music_list]
     _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
     logger.debug(
@@ -763,7 +763,7 @@ async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
                             ImageBox(jackets.get(m.id), size=(96, 96), image_size_mode="fill")
                             if m.play_result:
                                 result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
-                                result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
+                                result_img = await get_asset_image_ref(ASSETS_BASE_DIR, result_img_path)
                                 if result_img:
                                     ImageBox(result_img, size=(20, 20), image_size_mode="fill").set_offset(
                                         (96 - 14, 96 - 14)
@@ -800,12 +800,14 @@ async def compose_music_brief_list_image(rqd: MusicBriefListRequest) -> Image.Im
 async def try_render_music_brief_list_payload(rqd: MusicBriefListRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_music_brief_list_canvas(rqd))
+    return await render_canvas_payload(await _build_music_brief_list_canvas(rqd), endpoint="music_brief_list")
 
 
-async def _build_music_list_canvas(rqd: MusicListRequest, *, use_asset_refs: bool = False) -> Canvas:
+async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
+    # Header-only refs: the Skia path emits asset paths into the IR, the Pillow
+    # fallback decodes on demand (Canvas.get_img prefetches concurrently).
     jackets = {}
-    image_loader = get_asset_image_ref if use_asset_refs else get_img_from_path
+    image_loader = get_asset_image_ref
     jacket_tasks = [image_loader(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
     _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
@@ -889,7 +891,7 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
 async def try_render_music_list_payload(rqd: MusicListRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_music_list_canvas(rqd, use_asset_refs=True))
+    return await render_canvas_payload(await _build_music_list_canvas(rqd), endpoint="music_list")
 
 
 async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
@@ -918,7 +920,7 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
             ):
 
                 async def draw_icon(path):
-                    path = await get_img_from_path(ASSETS_BASE_DIR, RESULT_ASSET_PATH + f"/{path}")
+                    path = await get_asset_image_ref(ASSETS_BASE_DIR, RESULT_ASSET_PATH + f"/{path}")
                     with Frame().set_size((w, item_h)).set_content_align("c"):
                         ImageBox(path, size=(w // 2, w // 2))
 
@@ -1011,10 +1013,10 @@ async def compose_play_progress_image(rqd: PlayProgressRequest) -> Image.Image:
 async def try_render_play_progress_payload(rqd: PlayProgressRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_play_progress_canvas(rqd))
+    return await render_canvas_payload(await _build_play_progress_canvas(rqd), endpoint="music_progress")
 
 
-def draw_text_icon(text: str, icon: Image.Image, style: TextStyle) -> HSplit:
+def draw_text_icon(text: str, icon: ImageSource, style: TextStyle) -> HSplit:
     r"""draw_text_icon
 
     绘制文字和图标，
@@ -1024,7 +1026,7 @@ def draw_text_icon(text: str, icon: Image.Image, style: TextStyle) -> HSplit:
     ----
     text : str
         要绘制的文字
-    icon : Image.Image
+    icon : ImageSource
         要绘制的图标
     style : TextStyle
         绘制的文字样式
@@ -1062,8 +1064,8 @@ async def _build_detail_music_rewards_canvas(rqd: DetailMusicRewardsRequest) -> 
     # 奖励的icon
     j_path = rqd.jewel_icon_path or RESULT_ASSET_PATH + "/jewel.png"
     s_path = rqd.shard_icon_path or RESULT_ASSET_PATH + "/shard.png"
-    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, j_path)
-    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
+    jewel_icon: ImageSource = await get_asset_image_ref(ASSETS_BASE_DIR, j_path)
+    shard_icon: ImageSource = await get_asset_image_ref(ASSETS_BASE_DIR, s_path)
 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -1135,7 +1137,7 @@ async def compose_detail_music_rewards_image(rqd: DetailMusicRewardsRequest) -> 
 async def try_render_detail_music_rewards_payload(rqd: DetailMusicRewardsRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_detail_music_rewards_canvas(rqd))
+    return await render_canvas_payload(await _build_detail_music_rewards_canvas(rqd), endpoint="music_rewards_detail")
 
 
 async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Canvas:
@@ -1160,8 +1162,8 @@ async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Ca
     # 奖励的icon
     j_path = rqd.jewel_icon_path or f"{RESULT_ASSET_PATH}/jewel.png"
     s_path = rqd.shard_icon_path or f"{RESULT_ASSET_PATH}/shard.png"
-    jewel_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, j_path)
-    shard_icon: Image.Image = await get_img_from_path(ASSETS_BASE_DIR, s_path)
+    jewel_icon: ImageSource = await get_asset_image_ref(ASSETS_BASE_DIR, j_path)
+    shard_icon: ImageSource = await get_asset_image_ref(ASSETS_BASE_DIR, s_path)
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -1222,4 +1224,4 @@ async def compose_basic_music_rewards_image(rqd: BasicMusicRewardsRequest) -> Im
 async def try_render_basic_music_rewards_payload(rqd: BasicMusicRewardsRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_basic_music_rewards_canvas(rqd))
+    return await render_canvas_payload(await _build_basic_music_rewards_canvas(rqd), endpoint="music_rewards_basic")

@@ -19,7 +19,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.utils import get_asset_image_ref
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
@@ -33,7 +33,7 @@ async def _build_stamp_canvas(rqd: StampListRequest) -> Canvas:
     """Build the stamp-list widget tree (shared by the Pillow and Skia render paths)."""
     stamps = rqd.stamps
     _t0 = time.perf_counter()
-    stamp_imgs = await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, stamp.image_path) for stamp in stamps])
+    stamp_imgs = await asyncio.gather(*[get_asset_image_ref(ASSETS_BASE_DIR, stamp.image_path) for stamp in stamps])
     logger.debug("[perf] compose_stamp_list_image preload %d images: %.3fs", len(stamps), time.perf_counter() - _t0)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(8).set_item_align("l").set_bg(roundrect_bg(alpha=80)).set_padding(8):
@@ -70,4 +70,4 @@ async def try_render_stamp_payload(rqd: StampListRequest) -> EncodedImagePayload
     if not skia_plot_enabled():
         return None
     canvas = await _build_stamp_canvas(rqd)
-    return await render_canvas_payload(canvas)
+    return await render_canvas_payload(canvas, endpoint="stamp_list")

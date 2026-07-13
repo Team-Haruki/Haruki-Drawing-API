@@ -1,13 +1,12 @@
 import asyncio
 import base64
-from io import BytesIO
 
 from PIL import Image
 
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.plot import Canvas, HSplit, ImageBox, TextBox, TextStyle, VSplit
-from src.sekai.base.utils import get_img_from_path, run_in_pool
+from src.sekai.base.utils import EncodedImageRef, ImageSource, get_asset_image_ref, get_encoded_image_ref, run_in_pool
 from src.sekai.mysekai.model import MysekaiHousingCompetitionEntry, MysekaiHousingCompetitionRequest
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
@@ -67,28 +66,29 @@ async def try_render_mysekai_housing_competition_payload(
 ) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_mysekai_housing_competition_canvas(rqd))
+    return await render_canvas_payload(
+        await _build_mysekai_housing_competition_canvas(rqd), endpoint="mysekai_housing_competition"
+    )
 
 
-async def _load_optional_image(image_base64: str | None, image_path: str | None) -> Image.Image:
+async def _load_optional_image(image_base64: str | None, image_path: str | None) -> ImageSource:
     if image_base64 and image_base64.strip():
-        return await run_in_pool(_decode_base64_image, image_base64)
-    return await get_img_from_path(ASSETS_BASE_DIR, image_path, on_missing="placeholder")
+        return await run_in_pool(_decode_base64_ref, image_base64)
+    return await get_asset_image_ref(ASSETS_BASE_DIR, image_path, on_missing="placeholder")
 
 
-def _decode_base64_image(data: str) -> Image.Image:
+def _decode_base64_ref(data: str) -> EncodedImageRef:
+    """base64 → EncodedImageRef（仅 header 探测）：Skia 路径原始 encoded bytes 直传 Rust，
+    Pillow 回退在 paste 时按需解码——两边都不再于此处解码整图。"""
     payload = data.strip()
     if payload.lower().startswith("data:") and "," in payload:
         payload = payload.split(",", 1)[1]
-    raw = base64.b64decode(payload)
-    with Image.open(BytesIO(raw)) as img:
-        img.load()
-        return img.convert("RGBA")
+    return get_encoded_image_ref(base64.b64decode(payload))
 
 
 def _entry_block(
     entry: MysekaiHousingCompetitionEntry,
-    image: Image.Image,
+    image: ImageSource,
     owner_style: TextStyle,
     name_style: TextStyle,
     rank_style: TextStyle,

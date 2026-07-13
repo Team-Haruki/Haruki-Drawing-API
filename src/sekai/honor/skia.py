@@ -26,6 +26,7 @@ import time
 
 from PIL import Image
 
+from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
@@ -41,11 +42,44 @@ from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.render_stats import (
+    OUTCOME_CACHE_HIT,
+    OUTCOME_DISABLED,
+    OUTCOME_ERROR,
+    OUTCOME_FALLBACK,
+    OUTCOME_SKIA,
+    backend_for_outcome,
+    record_native_metrics,
+    record_render,
+)
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, EXPORT_IMAGE_FORMAT, FONT_DIR, JPG_QUALITY
 
 from .model import HonorRequest
 
 logger = logging.getLogger("honor.draw.perf")
+
+# /render-stats + the ``backend=`` log field key on this name (the route is /api/pjsk/honor, and
+# every parity payload variant — honor/honor_bonds/honor_birthday/honor_fcap — is this one
+# endpoint). Like the chart path, this module hand-builds its IR around a two-pass watermark
+# shell, so it never goes through render_canvas_payload and has to record its own outcome —
+# exactly one per render attempt, mirroring the canvas helper.
+HONOR_ENDPOINT = "honor"
+
+
+def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
+    """Record one render attempt for /render-stats and tag the request context.
+
+    Mirrors ``src.sekai.skia_renderer.canvas._record`` (and ``chart.drawer._record``): this path
+    cannot reuse the canvas helper, so it records through the same public primitives instead.
+    Folding in ``native_metrics`` is what keeps a broken font config visible — otherwise
+    /render-stats would report 0 font fallbacks while every honor badge rendered in sans-serif.
+    """
+    record_render(HONOR_ENDPOINT, outcome)
+    backend = backend_for_outcome(outcome)
+    set_render_backend(backend)
+    if payload is not None:
+        payload.backend = backend
+        record_native_metrics(payload.native_metrics)
 
 
 def _image_size(path: str | None) -> tuple[int, int] | None:
@@ -286,11 +320,13 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
     Returns ``None`` (gate off / unsupported / failure) so the caller falls back to Pillow.
     """
     if not skia_plot_enabled():
+        _record(OUTCOME_DISABLED)
         return None
     try:
         native = load_native_renderer()
     except ImportError as exc:
         logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        _record(OUTCOME_FALLBACK)
         return None
 
     from src.sekai.honor.drawer import _build_full_honor_cache_key  # lazy: avoids a circular import
@@ -301,25 +337,27 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
     cache_key = f"{_build_full_honor_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}|wm:{watermark_text}"
     cached = get_skia_payload_cached(cache_key)
     if cached is not None:
+        _record(OUTCOME_CACHE_HIT, cached)
         return cached
 
     def _render():
         badge = _build_badge_scene(rqd)
         if badge is None:
             return None
-        # Pass 1: badge scene -> encoded PNG bytes (alpha-lossless regardless of export format).
-        badge_json = json.dumps(badge.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        badge_png = native.render_scene(badge_json, {})["image_bytes"]
         w, h = badge.width, badge.height
 
-        # Pass 2: badge mem image + stretched bottom-strip footer + shadowed watermark lines
-        # (mirrors add_watermark_to_image; same spec as the chart watermark shell).
+        # Single pass: badge nodes + stretched bottom-strip footer (a SelfImage snapshot of
+        # the badge rows just rendered above it) + shadowed watermark lines (mirrors
+        # add_watermark_to_image; same spec as the chart watermark shell).
         font_size, lines, text_w, text_h = get_watermark_render_spec(watermark_text, w - WATERMARK_RIGHT_OFFSET, 12)
         footer_h = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
         b = _new_builder(w, h + footer_h, export_format=EXPORT_IMAGE_FORMAT)
-        b.image("mem:badge", (0, 0), (w, h))
+        # Clip to the badge rect: the old pass-1 canvas cropped any overflow at (w, h),
+        # matching the Pillow composer's canvas bounds.
+        with b.group((0, 0), (w, h), clip={"kind": "rect"}):
+            b.splice_root_children(badge)
         sample_h = max(1, min(h, footer_h))
-        b.image("mem:badge", (0, h), (w, footer_h), source_rect=(0, h - sample_h, w, h))
+        b.self_image((0, h), (w, footer_h), source_rect=(0, h - sample_h, w, h))
         font = get_font(DEFAULT_FONT, font_size)
         x = max(0, w - text_w - WATERMARK_RIGHT_OFFSET)
         y = h + WATERMARK_TOP_OFFSET
@@ -331,17 +369,22 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
             b.text(line, (lx + 1, ly + 1), "default", font_size, baseline="ascender", fill=(75, 75, 75, 255))
             b.text(line, (lx, ly), "default", font_size, baseline="ascender", fill=(255, 255, 255, 255))
         ir_json = json.dumps(b.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        return native.render_scene(ir_json, {"badge": badge_png})
+        return native.render_scene(ir_json, {})
 
     started = time.perf_counter()
     try:
         result = await run_in_pool(_render)
         if result is None:
+            # _build_badge_scene declined (unsupported honor shape / unreadable required asset):
+            # a fallback, not an error — Pillow renders it and raises the canonical message.
+            _record(OUTCOME_FALLBACK)
             return None
         payload = payload_from_native(result)
     except Exception:
         logger.exception("honor backend=skia failed; falling back to Pillow")
+        _record(OUTCOME_ERROR)
         return None
+    _record(OUTCOME_SKIA, payload)
     logger.info(
         "honor backend=skia total=%.3fs bytes=%d image=%sx%s",
         time.perf_counter() - started,
