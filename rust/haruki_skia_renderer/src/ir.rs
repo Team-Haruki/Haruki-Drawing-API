@@ -205,6 +205,17 @@ pub enum Fit {
     Crop,
 }
 
+/// Sampling used while drawing a source image into its destination rectangle.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageSampling {
+    Nearest,
+    Linear,
+    Cubic,
+    #[default]
+    LinearMipmap,
+}
+
 /// How an image tint color is combined with the image pixels.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
@@ -340,6 +351,8 @@ pub struct ImageNode {
     pub path: String,
     #[serde(default)]
     pub fit: Fit,
+    #[serde(default)]
+    pub sampling: ImageSampling,
     /// Optional source-pixel crop window `[x0, y0, x1, y1]` applied BEFORE the fit logic:
     /// only this sub-rect of the source participates (mirrors a Pillow `img.crop(box)`
     /// before placement). Out-of-range coords are clamped. `None` = whole image.

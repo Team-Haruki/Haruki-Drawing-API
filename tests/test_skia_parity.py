@@ -29,12 +29,21 @@ try:
 except ImportError:  # pragma: no cover - extension not built
     _native = None
 
-from src.sekai.base.painter import LinearGradient, Painter, get_font
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_EMOJI_FONT, DEFAULT_FONT, FONT_DIR
+from src.sekai.base.painter import LinearGradient, Painter, get_font, get_text_size
+from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_EMOJI_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
+    FONT_DIR,
+)
 
 pytestmark = pytest.mark.skipif(_native is None, reason="haruki_skia_renderer not built")
 
 ARTIFACT_DIR = Path("out/skia-parity")
+_TEXT_28_BASELINE = 14 + get_text_size(get_font(DEFAULT_FONT, 28), "哇")[1]
 
 # Asset used by the Image cases (transparent-edged so alpha IoU is meaningful).
 # Skipped if the asset isn't synced locally (e.g. CI without game assets).
@@ -166,19 +175,19 @@ _CASES = [
         "check": ("iou", 0.95),
     },
     {
-        "name": "text_cjk_top",
+        "name": "text_painter_baseline",
         "build": lambda p: p.text("提示Aa", (10, 14), get_font(DEFAULT_FONT, 28), (20, 20, 40, 255)),
         "node": {
             "type": "Text",
             "text": "提示Aa",
-            "pos": [10, 14],
+            "pos": [10, _TEXT_28_BASELINE],
             "font": {"role": "default", "size": 28},
             "align": "left",
-            "baseline": "cjk_top",
+            "baseline": "alphabetic",
             "fill": [20, 20, 40, 255],
         },
         "size": (140, 56),
-        "check": ("bbox", 6),
+        "check": ("bbox", 3),
     },
     {
         # Frosted panel over an opaque backdrop; blur of a solid is a solid, so this
@@ -292,6 +301,55 @@ def test_node_parity(case):
         if max(deltas) > bound:
             out_dir = _save_triptych(name, ref, act)
             pytest.fail(f"{name}: ink bbox delta {deltas} > {bound}px (ref={rb} act={ab}, artifacts: {out_dir})")
+
+
+_TEXT_CASES = [
+    ("default_12_latin", "default", DEFAULT_FONT, 12, "watermark"),
+    ("default_20_mixed", "default", DEFAULT_FONT, 20, "ID:335【联动限定】"),
+    ("bold_20_cjk", "bold", DEFAULT_BOLD_FONT, 20, "傲慢な王女"),
+    ("default_22_latin", "default", DEFAULT_FONT, 22, "Rust Skia Compare 2026-06-23"),
+    ("bold_22_cjk", "bold", DEFAULT_BOLD_FONT, 22, "提示"),
+    ("default_28_mixed", "default", DEFAULT_FONT, 28, "提示Aa"),
+    ("bold_28_mixed", "bold", DEFAULT_BOLD_FONT, 28, "提示Aa"),
+    ("heavy_22_mixed", "heavy", DEFAULT_HEAVY_FONT, 22, "重要なお知らせ Heavy"),
+]
+
+
+@pytest.mark.parametrize(("name", "role", "font_name", "size", "text"), _TEXT_CASES, ids=[c[0] for c in _TEXT_CASES])
+def test_painter_text_position_and_coverage(name, role, font_name, size, text):
+    width, height = 440, 100
+    pos = (20, 20)
+    ref = _render_pillow(lambda p: p.text(text, pos, get_font(font_name, size), (0, 0, 0, 255)), width, height)
+
+    builder = IRBuilder(
+        width,
+        height,
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+        heavy_font=DEFAULT_HEAVY_FONT,
+    )
+    builder.text(text, pos, role, size, baseline="cjk_top", fill=(0, 0, 0, 255))
+    result = _native.render_scene(json.dumps(builder.build(), ensure_ascii=False).encode())
+    act = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+
+    ref_bbox, act_bbox = _ink_bbox(ref), _ink_bbox(act)
+    assert ref_bbox is not None
+    assert act_bbox is not None
+    deltas = [act_bbox[i] - ref_bbox[i] for i in range(4)]
+    position_ok = abs(deltas[0]) <= 1 and abs(deltas[1]) <= 1 and abs(deltas[2]) <= 3 and abs(deltas[3]) <= 1
+
+    ref_alpha = np.asarray(ref)[:, :, 3].astype(np.int64)
+    act_alpha = np.asarray(act)[:, :, 3].astype(np.int64)
+    coverage_ratio = float(act_alpha.sum()) / float(ref_alpha.sum())
+    coverage_ok = 0.90 <= coverage_ratio <= 1.12
+    if not position_ok or not coverage_ok:
+        out_dir = _save_triptych(f"text_{name}", ref, act)
+        pytest.fail(
+            f"{name}: bbox delta={deltas}, coverage={coverage_ratio:.3f} outside "
+            f"position limits/0.90..1.12 (artifacts: {out_dir})"
+        )
 
 
 _EMOJI_FONT = DEFAULT_EMOJI_FONT  # 平台各异:mac=SVGinOT(CoreText),linux=COLR TwemojiMozilla

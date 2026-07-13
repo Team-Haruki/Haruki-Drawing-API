@@ -9,6 +9,7 @@ import gc
 from PIL import Image
 import pytest
 
+from src.sekai.base.utils import get_img_from_path
 import src.sekai.skia_renderer.canvas as skia_canvas
 from src.sekai.skia_renderer.ir_painter import IRPainter
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR, settings
@@ -54,6 +55,45 @@ def test_irpainter_mem_images_hold_strong_refs():
     entry = painter._mem_by_id.get(addr)
     assert entry is not None
     assert entry[0] is not None  # still alive via the painter
+
+
+def test_irpainter_uses_asset_paths_only_for_pristine_images(tmp_path):
+    asset_path = tmp_path / "icons" / "sample.png"
+    asset_path.parent.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (20, 80, 140, 255)).save(asset_path)
+
+    pristine = asyncio.run(get_img_from_path(tmp_path, "icons/sample.png", on_missing="raise"))
+    painter = IRPainter(
+        (20, 20),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+    painter.paste(pristine, (0, 0), (4, 4))
+    scene, mem_images = painter.build_scene()
+    image_node = scene["root"]["children"][0]
+    assert image_node["path"] == "icons/sample.png"
+    assert image_node["size"] == [4, 4]
+    assert image_node["sampling"] == "linear_mipmap"
+    assert mem_images == {}
+
+    modified = asyncio.run(get_img_from_path(tmp_path, "icons/sample.png", on_missing="raise"))
+    modified.putalpha(128)
+    fallback = IRPainter(
+        (20, 20),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+    fallback.paste(modified, (0, 0), (4, 4))
+    fallback_scene, fallback_mem_images = fallback.build_scene()
+    assert fallback_scene["root"]["children"][0]["path"] == "mem:m0"
+    assert len(fallback_mem_images) == 1
+
+    pristine.close()
+    modified.close()
 
 
 @pytest.mark.parametrize("flag", ["use_skia_plot", "use_skia_card_list"])

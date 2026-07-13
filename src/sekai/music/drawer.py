@@ -39,7 +39,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import get_img_from_path, get_str_display_length
+from src.sekai.base.utils import get_asset_image_ref, get_img_from_path, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
@@ -803,9 +803,10 @@ async def try_render_music_brief_list_payload(rqd: MusicBriefListRequest) -> Enc
     return await render_canvas_payload(await _build_music_brief_list_canvas(rqd))
 
 
-async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
+async def _build_music_list_canvas(rqd: MusicListRequest, *, use_asset_refs: bool = False) -> Canvas:
     jackets = {}
-    jacket_tasks = [get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
+    image_loader = get_asset_image_ref if use_asset_refs else get_img_from_path
+    jacket_tasks = [image_loader(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
     _t0 = time.perf_counter()
     loaded_jackets = await asyncio.gather(*jacket_tasks)
     logger.debug("[perf] compose_music_list_image jackets %d: %.3fs", len(jacket_tasks), time.perf_counter() - _t0)
@@ -868,7 +869,7 @@ async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
                                                 result_img_path = (
                                                     RESULT_ASSET_PATH + f"/icon_{music['play_result']}.png"
                                                 )
-                                            result_img = await get_img_from_path(ASSETS_BASE_DIR, result_img_path)
+                                            result_img = await image_loader(ASSETS_BASE_DIR, result_img_path)
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
                                                 (64 - 10, 64 - 10)
                                             )
@@ -888,7 +889,7 @@ async def compose_music_list_image(rqd: MusicListRequest) -> Image.Image:
 async def try_render_music_list_payload(rqd: MusicListRequest) -> EncodedImagePayload | None:
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_music_list_canvas(rqd))
+    return await render_canvas_payload(await _build_music_list_canvas(rqd, use_asset_refs=True))
 
 
 async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:

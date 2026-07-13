@@ -10,8 +10,9 @@ own layout to concrete coordinates before calling us, so we only translate each 
 Coordinates: widgets pass positions in the current region's local space; we flatten to
 absolute by adding ``self.offset`` (the same offset ``Painter.add_operation`` would capture).
 
-Runtime images (``paste``) arrive as in-memory ``PIL.Image`` objects with no asset path, so
-they are encoded and shipped as ``mem:<key>`` images (see the renderer's mem-image support).
+Pristine images loaded by ``get_img_from_path`` retain their asset provenance and are emitted
+as relative paths, letting Rust reuse its process-wide image cache. Generated or modified
+images are shipped as ``mem:<key>`` images (see the renderer's mem-image support).
 
 Anything not yet expressible raises :class:`SkiaUnsupported`; callers catch it and fall back
 to the Pillow path, so coverage can grow incrementally without breaking endpoints.
@@ -19,6 +20,7 @@ to the Pillow path, so coverage can grow incrementally without breaking endpoint
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -30,6 +32,7 @@ from src.sekai.base.painter import (
     Painter,
     RadialGradient,
 )
+from src.sekai.base.utils import get_pristine_image_asset_path
 from src.sekai.skia_renderer.ir_builder import IRBuilder, adaptive_color, image_shadow, linear_gradient, radial_gradient
 
 
@@ -60,6 +63,7 @@ class IRPainter(Painter):
         jpg_quality: int = 90,
     ) -> None:
         super().__init__(size=size)
+        self._assets_base_dir = Path(assets_base_dir).resolve()
         self._b = IRBuilder(
             size[0],
             size[1],
@@ -142,6 +146,18 @@ class IRPainter(Painter):
         self._mem_by_id[id(img)] = (img, key)
         return f"mem:{key}"
 
+    def _image_ref(self, img: Image.Image) -> str:
+        source = get_pristine_image_asset_path(img)
+        if source is not None:
+            try:
+                relative = source.resolve(strict=True).relative_to(self._assets_base_dir)
+            except (FileNotFoundError, ValueError):
+                pass
+            else:
+                if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
+                    return relative.as_posix()
+        return self._mem_image(img)
+
     def _fill(self, fill, apos, size):
         """Map a Painter fill (Color / LinearGradient / RadialGradient) to an IR fill."""
         if isinstance(fill, LinearGradient):
@@ -210,7 +226,7 @@ class IRPainter(Painter):
             else None
         )
         self._b.image(
-            self._mem_image(sub_img),
+            self._image_ref(sub_img),
             apos,
             (w, h),
             fit="stretch",

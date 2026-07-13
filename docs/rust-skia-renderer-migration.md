@@ -100,11 +100,74 @@ Rust 解释器骨架（本阶段新增，与既有 `render_card_list`/`render_ca
 - 通用解释器骨架：`ir.rs`（节点 enum）+ `interp.rs`（绝对坐标 region dispatch）+ `render_scene` PyO3 入口已落地。节点：`Group`、`Rect`、`RoundRect`（逐角半径）、`PieSlice`、`Image`（cubic 采样 + stretch/cover/contain/width）、`Text`（CjkTop / Ascender / Alphabetic baseline + 对齐）、`Shadow`、线性 `Gradient` fill、`BlurGlass`、`TriangleBg`、`ImageBg`、`Watermark`。radial 渐变、separate 方法、emoji fallback 为后续。
 - ④ Card List / Card Box 已切到通用解释器（`card_scene.rs` 从 `CardListIr`/`CardBoxIr` 构建 v2 Scene），默认走解释器，`HARUKI_SKIA_CARD_LEGACY=1` 回退旧的写死绘制路径做 A/B。缩略图合成实现为分层节点子 `Group`（方案 1，无内存图句柄）；Card Box 的可变缩略图尺寸通过 build 时按比例缩放各图层坐标处理。
 - 真实 12 卡 payload A/B：尺寸严格一致（Card List `1036x922`、Card Box `1316x368`），视觉与旧路径等价（cubic 采样更清晰、玻璃 backdrop 为实时快照，故非逐字节一致）。
-- ⑥ 逐节点对拍 harness 已落地（`tests/test_skia_parity.py`）：单节点（或多节点,如 backdrop+glass）同时走 Pillow `Painter` 与 `render_scene`，尺寸硬断言 + 按节点选指标（填充 alpha-IoU / 文字 ink-bbox 容差 / 玻璃 MAE 上限），失败输出 `expected|actual|diff` 三联图到 `out/skia-parity/`。已覆盖 rect / roundrect / pieslice / 线性渐变 / CJK 文字 / **Image（stretch + width fit,IoU≈0.99）/ BlurGlass（实色背景上 MAE≈1.2,验证放置+tint+阴影）**。阈值按实测校准（如 rect IoU≥0.95、玻璃 MAE≤8）。Image 用例在缺少素材时自动跳过。顺带把 `Text` CjkTop 基线对齐 Painter 的 `'哇'` 参考高度。
+- ⑥ 逐节点对拍 harness 已落地（`tests/test_skia_parity.py`）：单节点（或多节点,如 backdrop+glass）同时走 Pillow `Painter` 与 `render_scene`，尺寸硬断言 + 按节点选指标（填充 alpha-IoU / 文字 ink-bbox 容差 / 玻璃 MAE 上限），失败输出 `expected|actual|diff` 三联图到 `out/skia-parity/`。已覆盖 rect / roundrect / pieslice / 线性渐变 / CJK 文字 / **Image（stretch + width fit,IoU≈0.99）/ BlurGlass（实色背景上 MAE≈1.2,验证放置+tint+阴影）**。阈值按实测校准（如 rect IoU≥0.95、玻璃 MAE≤8）。Image 用例在缺少素材时自动跳过。`CjkTop` 现由 Python 使用 Pillow 字体度量解析成显式 alphabetic baseline，避免两个光栅器各自计算参考字高度造成整行漂移。
 - ⑤ Python `IRBuilder`（`src/sekai/skia_renderer/ir_builder.py`，方法名沿用 Painter，发 v2 节点）已落地。**Card List 与 Card Box 布局都已从 Rust 搬到 Python**：`card_list.py` 的 `build_card_list_scene` 与 `card_box.py` 的 `build_card_box_scene`（含 `_build_box_groups` / `_compute_box_layout` 打包算法的 Python 移植），共享 helper 抽到 `card_common.py`；两个 `render_*_payload` 都改为构建 v2 scene 走 `render_scene` —— **Python 建 IR、Rust 纯解释**的终态在两个端点上都成立。
 - A/B（真实 12 卡）：Card List 与 Rust 路径**逐字节一致**（`621539` bytes，`1036x922`）；Card Box 尺寸严格一致（`1316x368`，证明打包算法移植正确），像素仅 32/484288 处差 1 个通道 LSB（Python f64→JSON→serde f32 与 Rust 直接 f32 的表示噪声，视觉无差）。
 - **Rust 收尾已完成**：两端点全走 Python scene 后,删除了 Rust 侧全部写死 card 代码 —— `card_scene.rs`、`render_card_list`/`render_card_box` 及其 `*_inner`、card draw 函数、`CardListIr`/`CardBoxIr` 等 IR 结构、`build_box_groups`/`compute_box_layout`、`HARUKI_SKIA_CARD_LEGACY` 旧路径。`lib.rs` 从 ~1970 行降到 739 行,PyO3 只暴露 `render_scene`;保留的共享渲染 helper(image 解码、`encode_surface`、`load_typeface`、`draw_blur_glass_rect`、三角形背景、`draw_cover_image`、`SimpleRng`)供 `interp` 复用。Rust 现已收敛为**纯 IR 解释器**。
 - 待办：对拍再补对齐/裁剪变体与 cover/contain fit；补 radial/adaptive 文本；把 Card Box 布局从"抄旧 Pillow"重新定义为有意的布局(旧 Pillow box drawer 自身有容器/内容 2× 溢出 bug,不值得对齐);开 card list 灰度做真实验收;扩展到 card detail 等端点。
+
+### 文字对齐与粗细校准（2026-07-13）
+
+调查结论：字体文件和 role 映射没有错误，Pillow 与 Skia 均使用 `SourceHanSansSC-Regular/Bold/Heavy`。视觉差异来自两个独立来源：
+
+- 位置：Pillow `Painter` 把逻辑 top 加上参考字 `哇` 的 Pillow ink height 得到 alphabetic baseline；旧 Skia 路径又用 Skia 的字形 bounds 重算一次，因此通用 IR 文字通常向下漂移 1-3px。Card List 的少量手写 baseline 则存在相反方向的 2-3px 偏移。
+- 粗细：macOS 的 Skia/CoreText 与 Pillow/FreeType 对同一字体的抗锯齿覆盖率不同，Skia 默认平均约重 11%；Linux Skia/FreeType 默认平均约轻 12%。这不是切错 Bold/Regular，而是中间 alpha coverage 不同。
+
+实施结果：
+
+- `IRBuilder` 在 Python 侧用 Pillow 的字体度量把 `cjk_top` 统一解析为显式 alphabetic baseline；Rust 不再参与 Painter top 语义的布局计算。
+- Card List 的标题、卡名、ID、未来卡提示和水印改用与 Pillow 相同的文字原点及 baseline 计算。
+- Rust 显式设置 Skia font hinting，并只对单色文本 mask 做平台校准：macOS 使用 `Normal + gamma 4.0`，Linux 使用 `Slight + gamma 0.95`；彩色 emoji 绕过 gamma mask，保持原生 alpha。
+- `HARUKI_SKIA_TEXT_HINTING` 与 `HARUKI_SKIA_TEXT_GAMMA` 可在进程启动前覆盖默认值，仅用于诊断和重新标定。
+
+覆盖率基准以 Pillow 为 `1.0`：macOS 从 `1.113` 收敛到 `1.041`；Linux Docker/FreeType 从 `0.883` 收敛到 `1.012`。240 个文字节点的 macOS 微基准未观察到回归（gamma 关闭/开启中位数约 `0.0753s/0.0737s`）。
+
+真实 payload 全图对拍（最终 release 扩展、默认配置的代表性单次运行；随机背景和预热状态会造成小幅波动，尺寸均一致）：
+
+| Endpoint | 校准前 mean abs diff | 校准后 mean abs diff | Pillow | Skia |
+| --- | ---: | ---: | ---: | ---: |
+| Card Detail | `7.907` | `4.911` | `0.657s` | `0.399s` |
+| Card List | `9.588` | `5.566` | `0.489s` | `0.165s` |
+| Profile | `3.436` | `2.076` | `0.390s` | `0.223s` |
+
+新增回归测试覆盖 Regular/Bold/Heavy、12-28px、Latin/CJK/混排；文字 ink bbox 顶边容差为 1px，coverage ratio 必须处于 `0.90-1.12`。剩余差异主要来自字形轮廓、背景随机三角形和图像采样，不再表现为整行文字基线漂移。
+
+### 原始 asset 路径直传与 draw-time 缩放（2026-07-13）
+
+调查确认：通用 Skia 路径在 `IRPainter.paste()` 阶段已经把源图和目标矩形直接写入 `Image` 节点，Rust 使用 Skia 的 `draw_image_rect` 在一次 draw 中完成缩放与合成，不会像 Pillow `resize()` 后再 `paste()` 那样产生一张中间尺寸的 raster。本次继续消除了原始 asset 的 RGBA 展开传输：
+
+- `get_img_from_path()` 为未修改的返回图保留来源路径，并用 Pillow copy-on-write 状态判断像素是否仍与文件一致。
+- `IRPainter` 仅在来源文件 canonical path 位于 `assets_base_dir` 内、且图像仍 pristine 时发相对路径；`copy/crop/resize`、原地修改、生成图以及根目录外图片继续发 `mem:*`，避免错误复用原文件。
+- Rust 仍执行路径安全校验并通过进程级 image LRU 解码；Python 不再对这些节点调用 `tobytes()`，也不再跨 PyO3 传输整张 raw RGBA。
+- `Image` 节点新增 `nearest`、`linear`、`cubic`、`linear_mipmap` 四种 sampling intent，默认保持原有 `linear_mipmap` 视觉；native `IR_CAPABILITY` 升到 `4`，旧 wheel 会 fail-open 回退 Pillow。
+
+代表性真实 payload 的 IR 传输量（`mem_bytes` 为送入 native 的 raw pixel bytes）：
+
+| Endpoint | Path nodes / image nodes | 优化前 mem bytes | 优化后 mem bytes | 降幅 |
+| --- | ---: | ---: | ---: | ---: |
+| Gacha Detail | `9 / 15` | `1,447,104` | `378,048` | `73.9%` |
+| Music Detail | `11 / 11` | `2,989,632` | `0` | `100%` |
+| MySekai Map | `66 / 111` | `7,598,608` | `5,777,168` | `24.0%` |
+| Profile | `32 / 41` | `2,756,084` | `566,784` | `79.4%` |
+
+同进程交替强制 path / mem 的 15 轮中位数分别为：Gacha `0.0490s / 0.0493s`、Music `0.0688s / 0.0701s`、MySekai Map `0.1152s / 0.1140s`、Profile `0.0844s / 0.0841s`。当前 wall time 基本持平，主要收益是减少 FFI 拷贝和瞬时内存；原因是 widget 构建仍会先通过 Pillow 加载原图，而 Rust 路径随后还需自行解码。要进一步消除这次重复解码，需要让 `ImageBox`/Canvas 接受 lazy `AssetRef`，在 Skia 路径完全跳过 Python image decode，这属于下一阶段的布局边界改造。
+
+全量真实 payload sweep 为 `63 ok / 0 failed`，尺寸全部一致；结果和 SBS 写入 `out/parity-sweep-path-assets/`。代表场景 mean abs diff 为 Gacha Detail `5.098`、Music Detail `3.530`、MySekai Map `0.313`、Profile `2.415`，未观察到由路径直读造成的新色偏、裁剪或边缘回归。
+
+### 目标栅格缓存、lazy asset 与 PNG 编码批次（2026-07-13）
+
+本批次继续处理路径直传后仍存在的重复解码、冷启动串行缩放和 PNG encode 瓶颈：
+
+- Rust 使用 Moka 建立按字节加权的进程级目标栅格缓存。key 包含 asset 的 canonical path / mtime / size、source rect、目标宽高和 sampling；默认预算 `256 MiB`，单项上限 `16 MiB`。可用 `HARUKI_SKIA_RASTER_CACHE_MB`、`HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB` 和 `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE` 调整。
+- 原图通过 memory map 打开，按 `2x` 逐级降采样到实际绘制尺寸，仅保留最终 raster。首次 scene render 会在 Rayon 池中按 path / crop / target / sampling 去重并行预热；并发请求的同 key miss 由 Moka single-flight 合并。
+- 新增 `renderer_cache_stats()` / `clear_renderer_caches()`，每次 native payload 也带 `native_metrics`，包含 setup、draw、encode、asset load、prewarm、cache hit/miss/coalesced、cache bytes 等分项。
+- `music_list` 的 696 张 jacket 改用 header-only `AssetImageRef` 构建 Skia Canvas，Python 不再解码或缓存原图像素；缺图仍返回原有 Pillow 占位图，Pillow composer 与 fail-open 回退路径不变。该能力目前是高基数端点试点，尚未对所有 widget builder 全局启用。
+- `BlurGlass.blur <= 0.01` 跳过 backdrop snapshot 和临时 blur surface；PyO3 输入直接构造 Skia `Data`，输出允许直接持有 Skia `Data` 或 Rust `Vec<u8>`，减少中间复制。
+- PNG 默认改用 `mtpng 0.4.1` 的多线程 fast compression；`HARUKI_SKIA_PNG_ENCODER=skia` 可即时回退原 Skia encoder。PNG 仍无损，代表场景文件大小变化约 `-2%` 到 `+6%`。
+
+`music_list` 同进程 696 asset 基准：旧路径首次约 `6.17s`、后续约 `1.51-1.62s`，RSS 最终约 `2.0 GiB`；新路径首次约 `1.63s`、后续约 `0.62-0.64s`，Python image cache 约 `0.1 MiB`，Rust 696 项目标栅格约 `11.4 MiB`，进程 RSS 约 `0.30 GiB`。最终全量 sweep 的冷态结果为 Pillow `2.939s`、Skia `1.207s`（`2.44x`）。
+
+PNG encoder A/B（Skia level 3 / `mtpng` fast）：Chart `109.5ms -> 37.7ms`、Event Detail `86.7ms -> 14.8ms`、Music List `186.2ms -> 61.3ms`、MySekai Map `79.8ms -> 18.7ms`、MySekai Map Multi `200.5ms -> 42.4ms`。最终 `63/63` 真实 payload 尺寸与视觉对拍通过；代表运行中 62 个端点不慢于 Pillow，仅 `sk_winrate` 的 `scale=2x` 小图路径为 `0.78x`，下一批应处理 scene scale 直渲染而非 render 后整图 resize。
 
 ## 进度表
 
@@ -117,6 +180,10 @@ Rust 解释器骨架（本阶段新增，与既有 `render_card_list`/`render_ca
 | Card List 基线固化 | Done | 12 卡约 `0.076s vs 0.190s`；真实 60 卡约 `0.294s vs 0.780s`；主要瓶颈为 PNG encode。 |
 | 共享缩略图能力 | Done | Card Box 复用 Rust `compose_thumbnail`，后续 Card Detail 可继续沿用该子合成路径。 |
 | Card Box 迁移 | Done | 已新增 `render_card_box`、Python IR builder 和 `/card/box` fallback 接入；先覆盖无 `user_info` 的收集册主体网格。 |
+| 原始 asset 路径直传 | Done | Pristine asset 以安全相对路径进入 Rust；缩放与合成一次 draw 完成，生成图/修改图自动保留 `mem:*`。 |
+| Rust 目标栅格缓存 | Done | Moka 字节预算缓存、mtime/size 失效、逐级降采样、Rayon scene 预热与 native metrics 已落地。 |
+| Lazy AssetRef | In Progress | `music_list` 已跳过 696 张 jacket 的 Python 解码；其余 builder 按端点收益逐步接入。 |
+| 多线程 PNG 编码 | Done | 默认 `mtpng` fast，保留 `HARUKI_SKIA_PNG_ENCODER=skia` 回退；代表场景 encode 提升约 `2.9-5.9x`。 |
 | Card Detail 迁移 | Pending | 等 Card Box 验收后复用共享缩略图、图标、面板和文本能力推进。 |
 | Payload 构建工具 | Done | 已新增 `scripts/build_card_list_payload.py`，可从 `haruki-sekai-master` 生成 Card List payload。 |
 | 资产同步工具 | Done | 已新增 `scripts/sync_card_list_assets.py`，可从主云 Tailscale SSH 按 payload 拉取最小资产集。 |
@@ -263,6 +330,35 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 - Rust 路径默认关闭，且保留回退，以降低上线风险。
 
 ## 验收记录
+
+2026-07-13 Rust 性能批次（目标栅格 cache / lazy asset / parallel prewarm / `mtpng`）：
+
+- `uv run ruff check src/ tests/`：通过。
+- `uv run pytest -q`：172 passed。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：通过；`cargo test`：12 passed（含半透明 RGBA 的 `mtpng` 无损 round-trip）。
+- `uv run maturin develop --release --manifest-path rust/haruki_skia_renderer/Cargo.toml`：通过，CPython 3.14t release 扩展已重建。
+- 最终全量真实 payload sweep：63/63 `ok`、0 failure、尺寸全部一致；结果与 SBS 位于 `out/parity-sweep-raster-cache-mtpng/`。
+- `music_list` 最终 mean abs diff `3.134`，保持在路径直传前后的视觉波动范围；目标缓存的逐级降采样避免了单步 740 -> 64 带来的锐化/混叠回归。
+- 结论：图片解码/缩放和 PNG encode 两类通用 Rust 瓶颈已完成第一轮治理；下一优先项为 `Scene.scale` 直渲染，以及评估其余高基数列表是否接入 lazy `AssetImageRef`。
+
+2026-07-13 原始 asset 路径直传与 sampling：
+
+- `uv run ruff check src/ tests/`：通过。
+- `uv run pytest -q`：170 passed；其中 45 个相关测试覆盖 pristine/modified provenance、根目录约束、path render、mem fallback 和 sampling IR。
+- `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`：通过；`cargo test`：8 passed。
+- `uv run maturin develop --release --manifest-path rust/haruki_skia_renderer/Cargo.toml`：通过，release 扩展报告 `IR_CAPABILITY=4`。
+- 全量真实 payload sweep：63/63 `ok`、0 failure，尺寸全部一致；输出见 `out/parity-sweep-path-assets/`。
+- 结论：原始 asset raw pixel 传输显著下降，热态绘制耗时总体中性；后续性能工作应转向 lazy `AssetRef` 和 PNG encode，而不是重复优化已融合的 resize + paste。
+
+2026-07-13 文字对齐与粗细校准：
+
+- `uv run ruff check src/ tests/`：通过；`uv run ruff format --check src/ tests/`：129 files already formatted。
+- `uv run pytest -q`：167 passed；其中字体回归覆盖 Regular/Bold/Heavy、不同字号与 Latin/CJK/混排。
+- `cargo fmt --check --manifest-path rust/haruki_skia_renderer/Cargo.toml`：通过。
+- `cargo clippy --manifest-path rust/haruki_skia_renderer/Cargo.toml --all-targets -- -D warnings`：通过。
+- `cargo test --manifest-path rust/haruki_skia_renderer/Cargo.toml`：7 passed。
+- `uv run maturin develop --release --manifest-path rust/haruki_skia_renderer/Cargo.toml`：通过，重新安装最终 CPython 3.14t release 扩展。
+- 真实 payload sweep：Card Detail、Card List、Profile 均为 `ok` 且尺寸一致；结果写入临时验收目录 `/tmp/skia-text-final-rebuilt`。
 
 2026-06-23 初版实现记录：
 

@@ -1,6 +1,8 @@
 import asyncio
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import lru_cache
 import hashlib
 import io
 import json
@@ -37,6 +39,52 @@ from src.settings import (
 logger = logging.getLogger(__name__)
 
 MissingImageMode = Literal["raise", "placeholder"]
+_PRISTINE_ASSET_PATH_ATTR = "_haruki_pristine_asset_path"
+
+
+@dataclass(frozen=True, slots=True)
+class AssetImageRef:
+    """Header-only image reference for renderers that can load assets themselves."""
+
+    path: Path
+    size: tuple[int, int]
+    mode: str
+
+    @property
+    def width(self) -> int:
+        return self.size[0]
+
+    @property
+    def height(self) -> int:
+        return self.size[1]
+
+    @property
+    def readonly(self) -> int:
+        return 1
+
+    @property
+    def _haruki_pristine_asset_path(self) -> str:
+        return str(self.path)
+
+
+def _mark_pristine_asset_image(image: Image.Image, full_path: Path) -> Image.Image:
+    """Attach path provenance while making in-place edits observable.
+
+    Pillow drops custom attributes on copy/crop/resize. For in-place operations it uses
+    copy-on-write and clears ``readonly`` before touching pixels, so IRPainter can safely
+    reuse the source path only while both markers are intact.
+    """
+    setattr(image, _PRISTINE_ASSET_PATH_ATTR, str(full_path))
+    image.readonly = 1
+    return image
+
+
+def get_pristine_image_asset_path(image: Image.Image | AssetImageRef) -> Path | None:
+    """Return the backing file only when ``image`` still matches its loaded pixels."""
+    path = getattr(image, _PRISTINE_ASSET_PATH_ATTR, None)
+    if not isinstance(path, str) or not path or getattr(image, "readonly", 0) != 1:
+        return None
+    return Path(path)
 
 
 def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: bool = False) -> str:
@@ -831,18 +879,18 @@ def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
         full_path = fallback_path
 
     if not _cache_enabled(str(full_path)):
-        return _open_image_copy(full_path)
+        return _mark_pristine_asset_image(_open_image_copy(full_path), full_path)
 
     stat = full_path.stat()
     full_path_str = str(full_path)
     cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
     if cached is not None:
-        return cached
+        return _mark_pristine_asset_image(cached, full_path)
 
     loaded = _open_image_copy(full_path)
     ret = loaded.copy()
     _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, loaded)
-    return ret
+    return _mark_pristine_asset_image(ret, full_path)
 
 
 def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
@@ -860,6 +908,49 @@ def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_re
         full_path = fallback_path
 
     return full_path, str(full_path), full_path.stat()
+
+
+@lru_cache(maxsize=16384)
+def _load_asset_image_ref_cached(
+    full_path_str: str,
+    mtime_ns: int,
+    file_size: int,
+) -> AssetImageRef:
+    del mtime_ns, file_size
+    full_path = Path(full_path_str)
+    with Image.open(full_path) as image:
+        return AssetImageRef(path=full_path, size=image.size, mode=image.mode)
+
+
+def _load_asset_image_ref_sync(base_path: Path, path: str) -> AssetImageRef:
+    _, full_path_str, stat = _resolve_and_stat(base_path, path)
+    return _load_asset_image_ref_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
+
+
+async def get_asset_image_ref(
+    base_path: Path,
+    path: str | None,
+    on_missing: MissingImageMode = "placeholder",
+) -> AssetImageRef | Image.Image:
+    """Resolve an asset without decoding its pixels.
+
+    This is intended for renderer-specific paths that emit the source path into an IR.
+    Missing assets still return the normal in-memory placeholder so callers preserve the
+    same behavior as :func:`get_img_from_path`.
+    """
+    if path is None or path.strip() == "":
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, "empty-path")
+            return _get_missing_placeholder_image(path)
+        raise ValueError("图片路径不能为空(None)")
+
+    try:
+        return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
+    except (FileNotFoundError, OSError) as exc:
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, exc)
+            return _get_missing_placeholder_image(path)
+        raise
 
 
 def _load_image_resized_sync(
@@ -1332,6 +1423,7 @@ def shutdown_utils() -> None:
         _missing_placeholder_cache.clear()
         _missing_placeholder_logged.clear()
 
+    _load_asset_image_ref_cached.cache_clear()
     _composed_image_cache.clear()
 
 

@@ -6,22 +6,133 @@
 //! Reuses infrastructure from `lib.rs` (`pub(crate)` items): image decode,
 //! font loading, surface encode, blur glass, triangle background, cover image.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::OnceLock;
+use std::time::Instant;
 
+use rayon::prelude::*;
 use skia_safe::{
-    AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, FilterMode, Font,
-    IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Point, RRect, Rect,
-    RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode, Typeface,
-    canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint, image_filters,
-    surfaces,
+    AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
+    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint,
+    PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode,
+    Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
+    image_filters, surfaces,
 };
 
 use crate::ir::*;
 use crate::{
-    RenderedImage, draw_blur_glass_rect, draw_sekai_triangle_background, encode_surface,
-    load_image_cached, load_typeface,
+    AssetDescriptor, NativeMetrics, RasterCacheOutcome, RenderedImage, decode_asset_descriptor,
+    draw_blur_glass_rect, draw_sekai_triangle_background, encode_surface, load_asset_descriptor,
+    load_typeface, raster_cache_snapshot, rasterize_asset_cached,
 };
+
+#[derive(Clone, Copy)]
+struct TextFontProfile {
+    hinting: FontHinting,
+    force_auto_hinting: bool,
+    linear_metrics: bool,
+}
+
+static TEXT_FONT_PROFILE: OnceLock<TextFontProfile> = OnceLock::new();
+static TEXT_COVERAGE_GAMMA: OnceLock<f32> = OnceLock::new();
+static PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn profile_enabled() -> bool {
+    *PROFILE_ENABLED.get_or_init(|| {
+        std::env::var("HARUKI_SKIA_PROFILE")
+            .ok()
+            .is_some_and(|value| !matches!(value.as_str(), "" | "0" | "false" | "False"))
+    })
+}
+
+fn default_text_font_profile() -> TextFontProfile {
+    if cfg!(target_os = "linux") {
+        TextFontProfile {
+            hinting: FontHinting::Slight,
+            force_auto_hinting: false,
+            linear_metrics: false,
+        }
+    } else {
+        TextFontProfile {
+            hinting: FontHinting::Normal,
+            force_auto_hinting: false,
+            linear_metrics: false,
+        }
+    }
+}
+
+fn default_text_coverage_gamma() -> f32 {
+    if cfg!(target_os = "macos") {
+        4.0
+    } else if cfg!(target_os = "linux") {
+        0.95
+    } else {
+        1.0
+    }
+}
+
+fn text_font(typeface: Typeface, size: f32) -> Font {
+    let profile = TEXT_FONT_PROFILE.get_or_init(|| {
+        let default = default_text_font_profile();
+        match std::env::var("HARUKI_SKIA_TEXT_HINTING")
+            .ok()
+            .map(|name| name.to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("none") => TextFontProfile {
+                hinting: FontHinting::None,
+                force_auto_hinting: false,
+                linear_metrics: false,
+            },
+            Some("slight") => TextFontProfile {
+                hinting: FontHinting::Slight,
+                force_auto_hinting: false,
+                linear_metrics: false,
+            },
+            Some("full") => TextFontProfile {
+                hinting: FontHinting::Full,
+                force_auto_hinting: false,
+                linear_metrics: false,
+            },
+            Some("auto") => TextFontProfile {
+                hinting: FontHinting::Full,
+                force_auto_hinting: true,
+                linear_metrics: false,
+            },
+            Some("linear") => TextFontProfile {
+                hinting: FontHinting::Normal,
+                force_auto_hinting: false,
+                linear_metrics: true,
+            },
+            Some("normal") => TextFontProfile {
+                hinting: FontHinting::Normal,
+                force_auto_hinting: false,
+                linear_metrics: false,
+            },
+            _ => default,
+        }
+    });
+    let mut font = Font::from_typeface(typeface, size);
+    font.set_hinting(profile.hinting)
+        .set_force_auto_hinting(profile.force_auto_hinting)
+        .set_linear_metrics(profile.linear_metrics);
+    font
+}
+
+#[allow(deprecated)]
+fn apply_text_coverage_gamma(paint: &mut Paint) {
+    let gamma = *TEXT_COVERAGE_GAMMA.get_or_init(|| {
+        std::env::var("HARUKI_SKIA_TEXT_GAMMA")
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or_else(default_text_coverage_gamma)
+    });
+    if (gamma - 1.0).abs() > f32::EPSILON {
+        paint.set_mask_filter(MaskFilter::gamma(gamma));
+    }
+}
 
 /// Resolved typefaces for the scene's font roles.
 struct FontRegistry {
@@ -142,71 +253,96 @@ fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> 
 /// A runtime image shipped alongside the IR and referenced as "mem:<key>".
 pub(crate) enum MemImage {
     /// PNG/JPEG bytes (decoded via `Image::from_encoded`).
-    Encoded(Vec<u8>),
+    Encoded(Data),
     /// Straight (un-premultiplied) RGBA8888 pixels — no encode/decode, just a raster wrap.
-    Raw {
-        width: i32,
-        height: i32,
-        bytes: Vec<u8>,
-    },
+    Raw { width: i32, height: i32, data: Data },
 }
 
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
 struct Interp {
     base: PathBuf,
     fonts: FontRegistry,
-    cache: HashMap<String, Image>,
-    /// Runtime images referenced as "mem:<key>"; materialized lazily into `cache`.
+    /// Runtime images and the few direct-draw disk images (background/masks), per render.
+    direct_images: HashMap<String, Image>,
+    /// Small path/signature/dimension descriptors. Full-size decoded disk images are not held.
+    asset_descriptors: HashMap<String, AssetDescriptor>,
+    /// Runtime images referenced as "mem:<key>"; materialized lazily into `direct_images`.
     mem_images: HashMap<String, MemImage>,
     canvas_w: f32,
     canvas_h: f32,
+    metrics: NativeMetrics,
 }
 
 impl Interp {
-    fn load(&mut self, path: &str) -> Option<Image> {
-        if let Some(image) = self.cache.get(path) {
+    fn load_mem(&mut self, path: &str) -> Option<Image> {
+        if let Some(image) = self.direct_images.get(path) {
             return Some(image.clone());
         }
-        // In-memory images: "mem:<key>" materializes the supplied bytes (cached per render).
-        if let Some(key) = path.strip_prefix("mem:") {
-            let image = match self.mem_images.get(key)? {
-                MemImage::Encoded(bytes) => Image::from_encoded(skia_safe::Data::new_copy(bytes))?,
-                MemImage::Raw {
-                    width,
-                    height,
-                    bytes,
-                } => {
-                    let info = ImageInfo::new(
-                        (*width, *height),
-                        ColorType::RGBA8888,
-                        AlphaType::Unpremul,
-                        None,
-                    );
-                    skia_safe::images::raster_from_data(
-                        &info,
-                        skia_safe::Data::new_copy(bytes),
-                        *width as usize * 4,
-                    )?
-                }
-            };
-            self.cache.insert(path.to_string(), image.clone());
-            return Some(image);
+        let key = path.strip_prefix("mem:")?;
+        let image = match self.mem_images.get(key)? {
+            MemImage::Encoded(data) => Image::from_encoded(data.clone())?,
+            MemImage::Raw {
+                width,
+                height,
+                data,
+            } => {
+                let info = ImageInfo::new(
+                    (*width, *height),
+                    ColorType::RGBA8888,
+                    AlphaType::Unpremul,
+                    None,
+                );
+                skia_safe::images::raster_from_data(&info, data.clone(), *width as usize * 4)?
+            }
+        };
+        self.direct_images.insert(path.to_string(), image.clone());
+        Some(image)
+    }
+
+    fn describe_asset(&mut self, path: &str) -> Result<(AssetDescriptor, Option<Image>), String> {
+        if let Some(descriptor) = self.asset_descriptors.get(path) {
+            return Ok((descriptor.clone(), None));
         }
         if !is_safe_asset_path(path) {
-            eprintln!("haruki_skia_renderer: rejected unsafe asset path, node skipped: {path}");
-            return None;
+            return Err(format!("rejected unsafe asset path: {path}"));
         }
-        // L1 (per-render, path-keyed) misses fall through to the process-wide decoded-image
-        // cache, which validates by mtime/size and persists across requests.
-        match load_image_cached(&self.base, path) {
+        let started = Instant::now();
+        let loaded = load_asset_descriptor(&self.base, path);
+        self.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+        let loaded = loaded?;
+        self.asset_descriptors
+            .insert(path.to_string(), loaded.descriptor.clone());
+        Ok((loaded.descriptor, loaded.source))
+    }
+
+    fn load_direct(&mut self, path: &str) -> Option<Image> {
+        if path.starts_with("mem:") {
+            return self.load_mem(path);
+        }
+        if let Some(image) = self.direct_images.get(path) {
+            return Some(image.clone());
+        }
+        let (descriptor, source) = match self.describe_asset(path) {
+            Ok(loaded) => loaded,
+            Err(err) => {
+                eprintln!("haruki_skia_renderer: asset load failed, node skipped: {path} ({err})");
+                return None;
+            }
+        };
+        let started = Instant::now();
+        let image = source
+            .map(Ok)
+            .unwrap_or_else(|| decode_asset_descriptor(&descriptor));
+        self.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+        match image {
             Ok(image) => {
-                self.cache.insert(path.to_string(), image.clone());
+                self.direct_images.insert(path.to_string(), image.clone());
                 Some(image)
             }
             Err(err) => {
-                // The Pillow path raises on missing assets; here the node is skipped, so at
-                // least leave a trace instead of silently dropping content from the output.
-                eprintln!("haruki_skia_renderer: asset load failed, node skipped: {path} ({err})");
+                eprintln!(
+                    "haruki_skia_renderer: asset decode failed, node skipped: {path} ({err})"
+                );
                 None
             }
         }
@@ -217,6 +353,7 @@ pub(crate) fn render_scene_inner(
     scene: &Scene,
     mem_images: HashMap<String, MemImage>,
 ) -> Result<RenderedImage, String> {
+    let total_started = Instant::now();
     if scene.version != 2 {
         return Err(format!("unsupported scene IR version {}", scene.version));
     }
@@ -228,19 +365,28 @@ pub(crate) fn render_scene_inner(
     let mut interp = Interp {
         base: PathBuf::from(&scene.assets_base_dir),
         fonts: FontRegistry::build(&scene.fonts),
-        cache: HashMap::new(),
+        direct_images: HashMap::new(),
+        asset_descriptors: HashMap::new(),
         mem_images,
         canvas_w: scene.canvas.width as f32,
         canvas_h: scene.canvas.height as f32,
+        metrics: NativeMetrics::default(),
     };
+    interp.metrics.setup_elapsed = total_started.elapsed().as_secs_f64();
 
+    prewarm_scene_images(scene, &mut interp);
+
+    let draw_started = Instant::now();
     if let Some(background) = &scene.background {
         render_node(&mut surface, &mut interp, (0.0, 0.0), background);
     }
     render_node(&mut surface, &mut interp, (0.0, 0.0), &scene.root);
+    interp.metrics.draw_elapsed = draw_started.elapsed().as_secs_f64();
 
     // Optional output scaling: render at 1x then resize the raster (linear), matching
     // plot.py Canvas.get_img(scale) which renders then BILINEAR-resizes the final image.
+    let scale_started = Instant::now();
+    let mut output_surface = None;
     if (scene.scale - 1.0).abs() > 1e-3 && scene.scale > 0.0 {
         // Truncate (floor for positives) to match plot.py's int(size * scale).
         let out_w = ((scene.canvas.width as f32) * scene.scale).floor() as i32;
@@ -259,11 +405,49 @@ pub(crate) fn render_scene_inner(
                 SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
                 &paint,
             );
-            return encode_surface(scaled, &scene.export_format, scene.jpg_quality);
+            output_surface = Some(scaled);
         }
     }
+    interp.metrics.scale_elapsed = scale_started.elapsed().as_secs_f64();
+    let mut metrics = std::mem::take(&mut interp.metrics);
+    let cache = raster_cache_snapshot();
+    metrics.raster_cache_entries = cache.entries;
+    metrics.raster_cache_bytes = cache.bytes;
+    drop(interp);
 
-    encode_surface(surface, &scene.export_format, scene.jpg_quality)
+    let mut rendered = encode_surface(
+        output_surface.unwrap_or(surface),
+        &scene.export_format,
+        scene.jpg_quality,
+    )?;
+    metrics.total_elapsed = total_started.elapsed().as_secs_f64();
+    rendered.metrics = metrics;
+    if profile_enabled() {
+        eprintln!(
+            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={}",
+            rendered.metrics.total_elapsed,
+            rendered.metrics.setup_elapsed,
+            rendered.metrics.raster_prewarm_elapsed,
+            rendered.metrics.draw_elapsed,
+            rendered.metrics.scale_elapsed,
+            rendered.encode_elapsed,
+            rendered.metrics.asset_load_elapsed,
+            rendered.metrics.raster_cache_build_elapsed,
+            rendered.metrics.raster_cache_wait_elapsed,
+            rendered.metrics.raster_prewarm_requests,
+            rendered.metrics.raster_prewarm_hits,
+            rendered.metrics.raster_prewarm_misses,
+            rendered.metrics.raster_prewarm_coalesced,
+            rendered.metrics.raster_cache_hits,
+            rendered.metrics.raster_cache_misses,
+            rendered.metrics.raster_cache_coalesced,
+            rendered.metrics.raster_cache_bypasses,
+            rendered.metrics.raster_cache_entries,
+            rendered.metrics.raster_cache_bytes,
+            rendered.metrics.zero_blur_fast_paths,
+        );
+    }
+    Ok(rendered)
 }
 
 fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node: &Node) {
@@ -292,7 +476,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             }
             if let Some(rect) = mask_rect {
                 let mask_ref = group.mask.as_deref().unwrap_or_default();
-                if let Some(mask) = interp.load(mask_ref) {
+                if let Some(mask) = interp.load_direct(mask_ref) {
                     let mut keep = Paint::default();
                     keep.set_anti_alias(true);
                     keep.set_blend_mode(BlendMode::DstIn);
@@ -306,11 +490,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         Node::Rect(rect) => render_rect(surface.canvas(), rect, off),
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
         Node::PieSlice(pie) => render_pie_slice(surface.canvas(), pie, off),
-        Node::Image(image) => {
-            if let Some(decoded) = interp.load(&image.path) {
-                draw_image_fit(surface.canvas(), &decoded, image, off);
-            }
-        }
+        Node::Image(image) => draw_image_node(surface.canvas(), interp, image, off),
         Node::Text(text) => {
             let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
             // Adaptive color samples the backdrop (needs the surface), so resolve it here and
@@ -338,18 +518,21 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 glass.size[0],
                 glass.size[1],
             );
-            // The glass only samples its own region (panel + a small blur margin), so snapshot
-            // just that sub-rect instead of the whole canvas. A full-canvas image_snapshot per
-            // panel is forced to a full copy (the shadow write right after breaks copy-on-write),
-            // which is costly when there is one panel per card.
-            let mut bounds = rect.with_outset((12.0, 12.0));
-            let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
-            let backdrop = if bounds.intersect(canvas_rect) {
-                let ibounds: IRect = bounds.round_out();
-                surface
-                    .image_snapshot_with_bounds(ibounds)
-                    .map(|img| (img, (ibounds.left as f32, ibounds.top as f32)))
+            // Zero blur is a normal translucent panel. Avoid snapshotting the backdrop and
+            // allocating two temporary surfaces for the old near-zero sigma filter.
+            let backdrop = if glass.blur > 0.01 {
+                let mut bounds = rect.with_outset((12.0, 12.0));
+                let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
+                if bounds.intersect(canvas_rect) {
+                    let ibounds: IRect = bounds.round_out();
+                    surface
+                        .image_snapshot_with_bounds(ibounds)
+                        .map(|img| (img, (ibounds.left as f32, ibounds.top as f32)))
+                } else {
+                    None
+                }
             } else {
+                interp.metrics.zero_blur_fast_paths += 1;
                 None
             };
             // Panel tint paint (solid or gradient shader), positioned in absolute coords like
@@ -380,7 +563,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             );
         }
         Node::ImageBg(bg) => {
-            if let Some(decoded) = interp.load(&bg.path) {
+            if let Some(decoded) = interp.load_direct(&bg.path) {
                 draw_image_bg(
                     surface.canvas(),
                     &decoded,
@@ -392,7 +575,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         }
         Node::Watermark(watermark) => {
             let canvas = surface.canvas();
-            let font = Font::from_typeface(
+            let font = text_font(
                 interp.fonts.resolve_ref(&watermark.font).clone(),
                 watermark.font.size,
             );
@@ -401,6 +584,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
             let mut paint = Paint::default();
             paint.set_anti_alias(true);
             paint.set_color(color_of(watermark.fill));
+            apply_text_coverage_gamma(&mut paint);
             for line in &watermark.lines {
                 let abs = (line.pos[0] + off.0, line.pos[1] + off.1);
                 let (x, y) = text_layout(
@@ -422,11 +606,16 @@ fn color_of(c: Color4) -> Color {
     Color::from_argb(c[3], c[0], c[1], c[2])
 }
 
-fn image_sampling() -> SamplingOptions {
+fn image_sampling(mode: ImageSampling) -> SamplingOptions {
     // Bilinear + mipmaps. For mild downscales (thumbnails ~1.3x) this stays at the base
     // level and matches Pillow's soft BILINEAR character; for large downscales (skill icon
     // ~3x) the mipmaps area-average so it doesn't alias the way plain bilinear does.
-    SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
+    match mode {
+        ImageSampling::Nearest => SamplingOptions::default(),
+        ImageSampling::Linear => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+        ImageSampling::Cubic => CubicResampler::mitchell().into(),
+        ImageSampling::LinearMipmap => SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+    }
 }
 
 /// Build a [Point; 4] of per-corner radii (UL, UR, LR, LL); disabled corners are 0.
@@ -703,12 +892,180 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
     canvas.draw_rrect(RRect::new_rect_xy(rect, node.radius, node.radius), &paint);
 }
 
-fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f32)) {
+#[derive(Clone, Copy)]
+struct ImagePlacement {
+    src: Option<Rect>,
+    dst: Rect,
+}
+
+#[derive(Hash, PartialEq, Eq)]
+struct ImagePrewarmKey {
+    path: String,
+    size_bits: [u32; 2],
+    source_rect_bits: Option<[u32; 4]>,
+    fit: u8,
+    sampling: u8,
+}
+
+struct ImagePrewarmRequest<'a> {
+    node: &'a ImageNode,
+    off: (f32, f32),
+}
+
+struct ImagePrewarmResult {
+    path: String,
+    descriptor: Option<AssetDescriptor>,
+    asset_load_elapsed: f64,
+    outcome: Option<RasterCacheOutcome>,
+}
+
+fn image_fit_key(fit: Fit) -> u8 {
+    match fit {
+        Fit::Stretch => 0,
+        Fit::Cover => 1,
+        Fit::Contain => 2,
+        Fit::Width => 3,
+        Fit::Crop => 4,
+    }
+}
+
+fn prewarm_float_bits(value: f32) -> u32 {
+    if value == 0.0 { 0 } else { value.to_bits() }
+}
+
+fn image_prewarm_key(node: &ImageNode) -> ImagePrewarmKey {
+    ImagePrewarmKey {
+        path: node.path.clone(),
+        size_bits: [
+            prewarm_float_bits(node.size[0]),
+            prewarm_float_bits(node.size[1]),
+        ],
+        source_rect_bits: node.source_rect.map(|rect| rect.map(prewarm_float_bits)),
+        fit: image_fit_key(node.fit),
+        sampling: sampling_key(node.sampling),
+    }
+}
+
+fn collect_image_prewarm_requests<'a>(
+    node: &'a Node,
+    off: (f32, f32),
+    seen: &mut HashSet<ImagePrewarmKey>,
+    requests: &mut Vec<ImagePrewarmRequest<'a>>,
+) {
+    match node {
+        Node::Group(group) => {
+            let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
+            for child in &group.children {
+                collect_image_prewarm_requests(child, child_off, seen, requests);
+            }
+        }
+        Node::Image(image)
+            if !image.path.starts_with("mem:") && seen.insert(image_prewarm_key(image)) =>
+        {
+            requests.push(ImagePrewarmRequest { node: image, off });
+        }
+        _ => {}
+    }
+}
+
+fn prewarm_image(base: &std::path::Path, request: &ImagePrewarmRequest<'_>) -> ImagePrewarmResult {
+    let load_started = Instant::now();
+    let loaded = load_asset_descriptor(base, &request.node.path);
+    let asset_load_elapsed = load_started.elapsed().as_secs_f64();
+    let Ok(loaded) = loaded else {
+        return ImagePrewarmResult {
+            path: request.node.path.clone(),
+            descriptor: None,
+            asset_load_elapsed,
+            outcome: None,
+        };
+    };
+    let descriptor = loaded.descriptor;
+    let outcome = image_placement(
+        descriptor.width,
+        descriptor.height,
+        request.node,
+        request.off,
+    )
+    .and_then(|placement| {
+        let (width, height) = integral_target(placement.dst)?;
+        let src = placement.src.unwrap_or_else(|| {
+            Rect::from_xywh(0.0, 0.0, descriptor.width as f32, descriptor.height as f32)
+        });
+        rasterize_asset_cached(
+            &descriptor,
+            loaded.source.as_ref(),
+            src,
+            width,
+            height,
+            image_sampling(request.node.sampling),
+            sampling_key(request.node.sampling),
+        )
+        .ok()
+        .flatten()
+        .map(|cached| cached.outcome)
+    });
+    ImagePrewarmResult {
+        path: request.node.path.clone(),
+        descriptor: Some(descriptor),
+        asset_load_elapsed,
+        outcome,
+    }
+}
+
+fn prewarm_scene_images(scene: &Scene, interp: &mut Interp) {
+    if raster_cache_snapshot().max_bytes == 0 {
+        return;
+    }
+    let mut seen = HashSet::new();
+    let mut requests = Vec::new();
+    if let Some(background) = &scene.background {
+        collect_image_prewarm_requests(background, (0.0, 0.0), &mut seen, &mut requests);
+    }
+    collect_image_prewarm_requests(&scene.root, (0.0, 0.0), &mut seen, &mut requests);
+    if requests.len() < 2 {
+        return;
+    }
+
+    let started = Instant::now();
+    let results: Vec<_> = requests
+        .par_iter()
+        .map(|request| prewarm_image(&interp.base, request))
+        .collect();
+    interp.metrics.raster_prewarm_elapsed = started.elapsed().as_secs_f64();
+    interp.metrics.raster_prewarm_requests = requests.len() as u64;
+    interp.metrics.asset_load_elapsed += results
+        .iter()
+        .map(|result| result.asset_load_elapsed)
+        .sum::<f64>();
+
+    for result in results {
+        if let Some(descriptor) = result.descriptor {
+            interp.asset_descriptors.insert(result.path, descriptor);
+        }
+        match result.outcome {
+            Some(RasterCacheOutcome::Hit) => interp.metrics.raster_prewarm_hits += 1,
+            Some(RasterCacheOutcome::Miss) => interp.metrics.raster_prewarm_misses += 1,
+            Some(RasterCacheOutcome::Coalesced) => interp.metrics.raster_prewarm_coalesced += 1,
+            None => {}
+        }
+    }
+    if interp.metrics.raster_prewarm_misses > 0 {
+        interp.metrics.raster_cache_build_elapsed += interp.metrics.raster_prewarm_elapsed;
+    }
+}
+
+fn image_placement(
+    image_width: i32,
+    image_height: i32,
+    node: &ImageNode,
+    off: (f32, f32),
+) -> Option<ImagePlacement> {
     // Optional source-pixel crop window applied before fit: only this sub-rect participates.
     // All fit math below runs in crop-local coords (origin 0,0, size iw×ih); the resulting
     // source rect is translated back into the original image by (base_x, base_y) at the end.
-    let img_w = image.width() as f32;
-    let img_h = image.height() as f32;
+    let img_w = image_width as f32;
+    let img_h = image_height as f32;
     let (base_x, base_y, iw, ih) = match node.source_rect {
         Some([x0, y0, x1, y1]) => {
             let cx0 = x0.clamp(0.0, img_w);
@@ -720,7 +1077,7 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
         None => (0.0, 0.0, img_w, img_h),
     };
     if iw <= 0.0 || ih <= 0.0 {
-        return;
+        return None;
     }
     // The drawn rect size depends on the fit mode (width fit derives height from aspect).
     let (rw, rh) = match node.fit {
@@ -771,7 +1128,148 @@ fn draw_image_fit(canvas: &Canvas, image: &Image, node: &ImageNode, off: (f32, f
         (None, Some(_)) => Some(Rect::from_xywh(base_x, base_y, iw, ih)),
         (None, None) => None,
     };
-    let sampling = image_sampling();
+    Some(ImagePlacement { src, dst })
+}
+
+fn integral_target(rect: Rect) -> Option<(i32, i32)> {
+    let values = [rect.left, rect.top, rect.right, rect.bottom];
+    if values
+        .iter()
+        .any(|value| !value.is_finite() || (*value - value.round()).abs() > 1e-3)
+    {
+        return None;
+    }
+    let width = rect.width().round() as i32;
+    let height = rect.height().round() as i32;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+fn sampling_key(mode: ImageSampling) -> u8 {
+    match mode {
+        ImageSampling::Nearest => 0,
+        ImageSampling::Linear => 1,
+        ImageSampling::Cubic => 2,
+        ImageSampling::LinearMipmap => 3,
+    }
+}
+
+fn draw_image_node(canvas: &Canvas, interp: &mut Interp, node: &ImageNode, off: (f32, f32)) {
+    if node.path.starts_with("mem:") {
+        interp.metrics.raster_cache_bypasses += 1;
+        if let Some(image) = interp.load_mem(&node.path)
+            && let Some(placement) = image_placement(image.width(), image.height(), node, off)
+        {
+            draw_image_placed(
+                canvas,
+                &image,
+                placement,
+                image_sampling(node.sampling),
+                node,
+            );
+        }
+        return;
+    }
+
+    let (descriptor, source) = match interp.describe_asset(&node.path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!(
+                "haruki_skia_renderer: asset load failed, node skipped: {} ({err})",
+                node.path
+            );
+            return;
+        }
+    };
+    let Some(placement) = image_placement(descriptor.width, descriptor.height, node, off) else {
+        return;
+    };
+    let sampling = image_sampling(node.sampling);
+
+    if let Some((width, height)) = integral_target(placement.dst) {
+        let src = placement.src.unwrap_or_else(|| {
+            Rect::from_xywh(0.0, 0.0, descriptor.width as f32, descriptor.height as f32)
+        });
+        let started = Instant::now();
+        match rasterize_asset_cached(
+            &descriptor,
+            source.as_ref(),
+            src,
+            width,
+            height,
+            sampling,
+            sampling_key(node.sampling),
+        ) {
+            Ok(Some(cached)) => {
+                let elapsed = started.elapsed().as_secs_f64();
+                match cached.outcome {
+                    RasterCacheOutcome::Hit => interp.metrics.raster_cache_hits += 1,
+                    RasterCacheOutcome::Miss => {
+                        interp.metrics.raster_cache_misses += 1;
+                        interp.metrics.raster_cache_build_elapsed += elapsed;
+                    }
+                    RasterCacheOutcome::Coalesced => {
+                        interp.metrics.raster_cache_coalesced += 1;
+                        interp.metrics.raster_cache_wait_elapsed += elapsed;
+                    }
+                }
+                draw_image_placed(
+                    canvas,
+                    &cached.image,
+                    ImagePlacement {
+                        src: None,
+                        dst: placement.dst,
+                    },
+                    if cached.image.width() == width && cached.image.height() == height {
+                        SamplingOptions::default()
+                    } else {
+                        SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+                    },
+                    node,
+                );
+                return;
+            }
+            Ok(None) => interp.metrics.raster_cache_bypasses += 1,
+            Err(err) => eprintln!(
+                "haruki_skia_renderer: target raster cache failed, drawing source directly: {} ({err})",
+                node.path
+            ),
+        }
+    } else {
+        interp.metrics.raster_cache_bypasses += 1;
+    }
+
+    let started = Instant::now();
+    let decoded = if source.is_none() {
+        match decode_asset_descriptor(&descriptor) {
+            Ok(image) => Some(image),
+            Err(err) => {
+                eprintln!(
+                    "haruki_skia_renderer: asset decode failed, node skipped: {} ({err})",
+                    node.path
+                );
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    interp.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+    let image = source
+        .as_ref()
+        .or(decoded.as_ref())
+        .expect("source image available");
+    draw_image_placed(canvas, image, placement, sampling, node);
+}
+
+fn draw_image_placed(
+    canvas: &Canvas,
+    image: &Image,
+    placement: ImagePlacement,
+    sampling: SamplingOptions,
+    node: &ImageNode,
+) {
+    let src = placement.src;
+    let dst = placement.dst;
     let src_arg = src.as_ref().map(|s| (s, SrcRectConstraint::Strict));
     let alpha = node.alpha.clamp(0.0, 1.0);
 
@@ -858,7 +1356,7 @@ fn draw_image_bg(canvas: &Canvas, image: &Image, cw: f32, ch: f32, node: &ImageB
         ));
     }
     let (ha, va) = parse_bg_align(&node.align);
-    let sampling = image_sampling();
+    let sampling = image_sampling(ImageSampling::default());
     match node.mode {
         BgMode::Fit => {
             let scale = (cw / iw).max(ch / ih);
@@ -1002,9 +1500,17 @@ fn draw_text_core(
     let mut cx = x;
     for (e, run) in classify_runs(text, emoji) {
         let font = run_font(e, main, emoji);
+        // Coverage calibration targets monochrome Source Han glyph masks. Color emoji
+        // (CoreText OT-SVG on macOS, FreeType COLR on Linux) must retain native alpha.
+        let emoji_paint = e.then(|| {
+            let mut paint = paint.clone();
+            paint.set_mask_filter(Option::<MaskFilter>::None);
+            paint
+        });
+        let run_paint = emoji_paint.as_ref().unwrap_or(paint);
         if letter_spacing == 0.0 {
             if let Some(blob) = TextBlob::new(&run, font) {
-                canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+                canvas.draw_text_blob(&blob, Point::new(cx, y), run_paint);
             }
             cx += font.measure_str(&run, None).0;
         } else {
@@ -1012,7 +1518,7 @@ fn draw_text_core(
                 let mut buf = [0u8; 4];
                 let s: &str = ch.encode_utf8(&mut buf);
                 if let Some(blob) = TextBlob::new(s, font) {
-                    canvas.draw_text_blob(&blob, Point::new(cx, y), paint);
+                    canvas.draw_text_blob(&blob, Point::new(cx, y), run_paint);
                 }
                 cx += font.measure_str(s, None).0 + letter_spacing;
             }
@@ -1033,7 +1539,7 @@ fn draw_styled_text(
     if node.text.is_empty() {
         return;
     }
-    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
+    let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
@@ -1052,6 +1558,7 @@ fn draw_styled_text(
         sp.set_style(PaintStyle::Stroke);
         sp.set_stroke_width(stroke.width);
         sp.set_color(color_of(stroke.color));
+        apply_text_coverage_gamma(&mut sp);
         draw_text_core(
             canvas,
             &font,
@@ -1067,6 +1574,7 @@ fn draw_styled_text(
     let mut fp = Paint::default();
     fp.set_anti_alias(true);
     apply_fill(&mut fp, fill, off);
+    apply_text_coverage_gamma(&mut fp);
     draw_text_core(
         canvas,
         &font,
@@ -1087,7 +1595,7 @@ fn resolve_adaptive_color(
     abs: (f32, f32),
     ad: &AdaptiveColor,
 ) -> Color4 {
-    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
+    let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
@@ -1134,7 +1642,7 @@ fn draw_pixelwise_adaptive_text(
     off: (f32, f32),
     ad: &AdaptiveColor,
 ) {
-    let font = Font::from_typeface(fonts.resolve_ref(&node.font).clone(), node.font.size);
+    let font = text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font(node.font.size);
     let emoji_ref = emoji.as_ref();
     let (x, y) = text_layout(
@@ -1280,9 +1788,21 @@ mod tests {
         assert_eq!(rendered.height, 48);
         // PNG signature.
         assert_eq!(
-            &rendered.bytes[..8],
+            &rendered.bytes.as_bytes()[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    #[test]
+    fn skips_backdrop_work_for_zero_blur_glass() {
+        let json = scene_json(
+            r#"
+            { "type": "BlurGlass", "pos": [4, 4], "size": [40, 24], "radius": 6,
+              "fill": [255, 255, 255, 80], "shadow_alpha": 0.2, "blur": 0 }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.metrics.zero_blur_fast_paths, 1);
     }
 
     #[test]
@@ -1307,7 +1827,7 @@ mod tests {
         let rendered = render(&json);
         assert_eq!(rendered.width, 64);
         assert_eq!(
-            &rendered.bytes[..8],
+            &rendered.bytes.as_bytes()[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
     }
@@ -1321,16 +1841,57 @@ mod tests {
             r#"
             { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "missing.png",
               "fit": "crop",
+              "sampling": "cubic",
               "source_rect": [2, 2, 40, 40],
               "tint": { "color": [255, 128, 0, 255], "mode": "multiply" },
               "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } },
             { "type": "Image", "pos": [30, 4], "size": [20, 20], "path": "missing.png",
-              "fit": "width", "source_rect": [0, 0, 16, 16],
+              "fit": "width", "sampling": "nearest", "source_rect": [0, 0, 16, 16],
               "tint": { "color": [255, 32, 32, 255], "mode": "recolor" } }
             "#,
         );
         let rendered = render(&json);
         assert_eq!(rendered.width, 64);
+    }
+
+    #[test]
+    fn maps_image_sampling_modes() {
+        let nearest = image_sampling(ImageSampling::Nearest);
+        assert_eq!(nearest.filter, FilterMode::Nearest);
+        assert_eq!(nearest.mipmap, MipmapMode::None);
+
+        let linear = image_sampling(ImageSampling::Linear);
+        assert_eq!(linear.filter, FilterMode::Linear);
+        assert_eq!(linear.mipmap, MipmapMode::None);
+
+        let cubic = image_sampling(ImageSampling::Cubic);
+        assert!(cubic.use_cubic);
+
+        let mipmap = image_sampling(ImageSampling::LinearMipmap);
+        assert_eq!(mipmap.filter, FilterMode::Linear);
+        assert_eq!(mipmap.mipmap, MipmapMode::Linear);
+    }
+
+    #[test]
+    fn deduplicates_nested_image_prewarm_requests() {
+        let json = scene_json(
+            r#"
+            { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "same.png" },
+            { "type": "Group", "offset": [10, 0], "size": [20, 20], "children": [
+                { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "same.png" }
+              ] },
+            { "type": "Image", "pos": [4, 28], "size": [24, 20], "path": "same.png" },
+            { "type": "Image", "pos": [30, 28], "size": [20, 20], "path": "mem:runtime" }
+            "#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("scene parses");
+        let mut seen = HashSet::new();
+        let mut requests = Vec::new();
+        collect_image_prewarm_requests(&scene.root, (0.0, 0.0), &mut seen, &mut requests);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].node.path, "same.png");
+        assert_eq!(requests[1].node.size, [24.0, 20.0]);
     }
 
     #[test]
@@ -1349,7 +1910,7 @@ mod tests {
         let rendered = render(&json);
         assert_eq!(rendered.width, 64);
         assert_eq!(
-            &rendered.bytes[..8],
+            &rendered.bytes.as_bytes()[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
     }

@@ -46,6 +46,7 @@ def _clear_runtime_state() -> None:
     with utils._tmp_files_lock:
         utils._tmp_files_to_remove.clear()
 
+    utils._load_asset_image_ref_cached.cache_clear()
     utils._composed_image_cache.clear()
 
 
@@ -92,6 +93,53 @@ def test_image_and_thumbnail_caches_record_hits(monkeypatch):
     assert stats["thumbnail_cache"]["entries"] == 1
     assert stats["thumbnail_cache"]["hits"] == 1
     assert stats["thumbnail_cache"]["misses"] == 1
+
+
+def test_asset_path_provenance_only_survives_while_pixels_are_pristine(tmp_path):
+    path = tmp_path / "asset.png"
+    _save_image(path)
+
+    image = asyncio.run(utils.get_img_from_path(tmp_path, "asset.png", on_missing="raise"))
+    assert utils.get_pristine_image_asset_path(image) == path.resolve()
+
+    copied = image.copy()
+    resized = image.resize((6, 4))
+    cached_resize = asyncio.run(utils.get_img_resized(tmp_path, "asset.png", 6, 4))
+    assert utils.get_pristine_image_asset_path(copied) is None
+    assert utils.get_pristine_image_asset_path(resized) is None
+    assert utils.get_pristine_image_asset_path(cached_resize) is None
+
+    image.paste((255, 0, 0, 255), (0, 0, 1, 1))
+    assert utils.get_pristine_image_asset_path(image) is None
+
+    image.close()
+    copied.close()
+    resized.close()
+    cached_resize.close()
+
+
+def test_asset_image_ref_reads_header_without_populating_pixel_cache(tmp_path):
+    path = tmp_path / "asset.png"
+    _save_image(path, size=(17, 9))
+
+    image_ref = asyncio.run(utils.get_asset_image_ref(tmp_path, "asset.png", on_missing="raise"))
+
+    assert isinstance(image_ref, utils.AssetImageRef)
+    assert image_ref.size == (17, 9)
+    assert image_ref.mode == "RGBA"
+    assert utils.get_pristine_image_asset_path(image_ref) == path.resolve()
+    assert not utils._image_cache
+    assert not utils._thumb_cache
+
+
+def test_asset_image_ref_blocks_path_traversal_and_preserves_missing_placeholder(tmp_path):
+    with pytest.raises(ValueError, match="越界"):
+        asyncio.run(utils.get_asset_image_ref(tmp_path, "../outside.png", on_missing="raise"))
+
+    placeholder = asyncio.run(utils.get_asset_image_ref(tmp_path, "missing/icon.png"))
+    regular_placeholder = asyncio.run(utils.get_img_from_path(tmp_path, "missing/icon.png"))
+    assert isinstance(placeholder, Image.Image)
+    assert placeholder.size == regular_placeholder.size
 
 
 def test_rendered_image_cache_key_is_stable_for_dict_ordering():

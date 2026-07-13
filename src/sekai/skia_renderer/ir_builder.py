@@ -270,8 +270,17 @@ class IRBuilder:
         tint: Node | None = None,
         shadow: Node | None = None,
         source_rect: tuple[float, float, float, float] | None = None,
+        sampling: str = "linear_mipmap",
     ) -> Node:
-        node: Node = {"type": "Image", "pos": _vec(pos), "size": _vec(size), "path": path, "fit": fit, "alpha": alpha}
+        node: Node = {
+            "type": "Image",
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "path": path,
+            "fit": fit,
+            "sampling": sampling,
+            "alpha": alpha,
+        }
         if anchor[0] or anchor[1]:
             node["anchor"] = _vec(anchor)
         if tint is not None:
@@ -320,6 +329,20 @@ class IRBuilder:
     def measure_text(self, text: str, role: str, size: float, font_name: str | None = None) -> float:
         """Approximate rendered width (px) of ``text`` (PIL metrics; near-Skia, used for layout)."""
         return float(self._pil_font(role, size, font_name).getlength(text))
+
+    def measure_text_ink(self, text: str, role: str, size: float, font_name: str | None = None) -> tuple[float, float]:
+        """Return Pillow's ink-bbox size for layout that must match ``Painter`` exactly."""
+        x0, y0, x1, y1 = self._pil_font(role, size, font_name).getbbox(text)
+        return float(x1 - x0), float(y1 - y0)
+
+    def painter_baseline_y(self, top_y: float, role: str, size: float, font_name: str | None = None) -> float:
+        """Resolve ``Painter._text``'s logical top to an alphabetic baseline.
+
+        Painter anchors text at ``top_y + ink_height('哇')``. Resolve that value with
+        Pillow here so Skia does not independently derive it from different font metrics.
+        """
+        _, reference_height = self.measure_text_ink("哇", role, size, font_name)
+        return float(top_y) + reference_height
 
     def wrap_text(self, text: str, role: str, size: float, max_width: float, font_name: str | None = None) -> list[str]:
         """Greedy wrap to ``max_width`` (word-aware for Latin, char-wrap for CJK); honors ``\\n``."""
@@ -475,16 +498,21 @@ class IRBuilder:
         adaptive: Node | None = None,
         font_name: str | None = None,
     ) -> Node:
+        resolved_pos = [float(pos[0]), float(pos[1])]
+        resolved_baseline = baseline
+        if baseline == "cjk_top":
+            resolved_pos[1] = self.painter_baseline_y(resolved_pos[1], role, size, font_name)
+            resolved_baseline = "alphabetic"
         font: Node = {"role": role, "size": size}
         if font_name:
             font["name"] = font_name
         node: Node = {
             "type": "Text",
             "text": text,
-            "pos": _vec(pos),
+            "pos": resolved_pos,
             "font": font,
             "align": align,
-            "baseline": baseline,
+            "baseline": resolved_baseline,
             "fill": _fill_value(fill),
         }
         if stroke is not None:

@@ -2,9 +2,11 @@ from PIL import Image
 import pytest
 
 from src.core.pjsk import card as card_router
+from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.card.model import CardBasic, CardListRequest, CardSkill
 from src.sekai.profile.model import CardFullThumbnailRequest
 from src.sekai.skia_renderer import card_render as card_list  # merged module (card/list + card/box)
+from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 
 def _thumbnail(card_id: int, path: str = "cards/card.png") -> CardFullThumbnailRequest:
@@ -58,6 +60,37 @@ def test_card_list_ir_sorts_cards_and_includes_required_fields():
     assert ir["cards"][0]["thumbnail_info"][0]["card_thumbnail_path"] == "cards/card.png"
     assert ir["fonts"]["default"]
     assert ir["fonts"]["bold"]
+
+
+def test_card_list_scene_uses_painter_text_origins_and_baselines():
+    request = CardListRequest(
+        cards=[_card(1, 4_102_444_800_000)],
+        region="jp",
+        title="notice",
+        term_limited_icon_path="icons/term.png",
+        fes_limited_icon_path="icons/fes.png",
+    )
+
+    scene = card_list.build_card_list_scene(request)
+
+    def text_nodes(node):
+        found = []
+        if node.get("type") == "Text":
+            found.append(node)
+        for child in node.get("children", []):
+            found.extend(text_nodes(child))
+        return found
+
+    by_text = {node["text"]: node for node in text_nodes(scene["root"])}
+    bold_20_height = get_text_size(get_font(DEFAULT_BOLD_FONT, 20), "哇")[1]
+    regular_20_height = get_text_size(get_font(DEFAULT_FONT, 20), "哇")[1]
+    bold_22_height = get_text_size(get_font(DEFAULT_BOLD_FONT, 22), "哇")[1]
+
+    assert by_text["提示"]["pos"][1] == 36 + bold_22_height
+    assert by_text["未上线"]["pos"] == [6.0, 164 + bold_20_height]
+    assert by_text["Card 1"]["pos"][1] == 131 + bold_20_height
+    assert by_text["ID:1【Fes限定】"]["pos"][1] == 160 + regular_20_height
+    assert all(node["baseline"] == "alphabetic" for node in by_text.values())
 
 
 @pytest.mark.parametrize("path", ["/tmp/evil.png", "../evil.png", "cards\\evil.png"])

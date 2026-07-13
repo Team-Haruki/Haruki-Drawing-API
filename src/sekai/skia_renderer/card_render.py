@@ -158,7 +158,9 @@ def _card_cell(b: IRBuilder, card: dict[str, Any], icons: dict[str, Any], now_ms
     b.blurglass((0, 0), (_CARD_W, _CARD_H), 10, fill, shadow_alpha=0.30)
 
     if card["release_at"] > now_ms:
-        b.text("未上线", (4, _CARD_H - 8), "bold", 20, baseline="alphabetic", fill=(200, 0, 0, 255))
+        leak_top = _CARD_H - 26
+        leak_baseline = b.painter_baseline_y(leak_top, "bold", 20)
+        b.text("未上线", (6, leak_baseline), "bold", 20, baseline="alphabetic", fill=(200, 0, 0, 255))
 
     if card.get("skill_type") and card.get("skill_icon_path"):
         # Aspect-preserving (width 32), bottom-right anchored. Mirrors Pillow's
@@ -246,14 +248,16 @@ def _card_list_scene_from_ir(ir: dict[str, Any]) -> dict[str, Any]:
     # (1, 1) grey shadow, starting TOP_OFFSET below the content (mirrors add_watermark()).
     wm_y = _BG_PADDING + title_h + grid_h + WATERMARK_TOP_OFFSET
     for i, line in enumerate(wm_lines):
+        line_top = wm_y + i * (wm_font_size + WATERMARK_LINE_SEP)
+        line_w, _ = b.measure_text_ink(line, "default", float(wm_font_size))
         b.shadowed_text(
             line,
-            (width - _BG_PADDING, wm_y + i * (wm_font_size + WATERMARK_LINE_SEP)),
+            (width - _BG_PADDING - line_w, line_top),
             "default",
             float(wm_font_size),
             shadow_offset=(WATERMARK_SHADOW_OFFSET, WATERMARK_SHADOW_OFFSET),
             shadow_color=(75, 75, 75, 255),
-            align="right",
+            align="left",
             baseline="cjk_top",
             fill=(255, 255, 255, 255),
         )

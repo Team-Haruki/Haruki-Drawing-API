@@ -37,9 +37,9 @@ def skia_plot_enabled() -> bool:
     return bool(settings.drawing.use_skia_plot)
 
 
-# Minimum IR capability this code emits (3 = IR v2 + reserve primitives + group mask).
+# Minimum IR capability this code emits (4 = capability 3 + per-image sampling intent).
 # An older wheel would silently drop features, so refuse it and fail open to Pillow.
-REQUIRED_NATIVE_IR_CAPABILITY = 3
+REQUIRED_NATIVE_IR_CAPABILITY = 4
 
 
 def load_native_renderer():
@@ -94,6 +94,7 @@ def payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:
         image_height=int(result["image_height"]),
         image_mode=str(result["image_mode"]),
         encode_elapsed=float(result["encode_elapsed"]),
+        native_metrics=dict(result["native_metrics"]) if isinstance(result.get("native_metrics"), dict) else None,
     )
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.skia_renderer.ir_builder import IRBuilder, linear_gradient
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 
 def _builder() -> IRBuilder:
@@ -62,6 +64,26 @@ def test_background_omitted_when_unset():
     assert "background" not in _builder().build()
 
 
+def test_cjk_top_is_resolved_with_painter_font_metrics():
+    b = IRBuilder(
+        120,
+        100,
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+    node = b.text("提示Aa", (10, 14), "default", 28, baseline="cjk_top")
+    reference_height = get_text_size(get_font(DEFAULT_FONT, 28), "哇")[1]
+
+    assert node["pos"] == [10.0, 14.0 + reference_height]
+    assert node["baseline"] == "alphabetic"
+
+    explicit = b.text("提示Aa", (10, 42), "default", 28, baseline="alphabetic")
+    assert explicit["pos"] == [10.0, 42.0]
+    assert explicit["baseline"] == "alphabetic"
+
+
 def test_gradient_radial_and_stroke_and_corner_radii():
     from src.sekai.skia_renderer.ir_builder import radial_gradient
 
@@ -92,11 +114,13 @@ def test_image_tint_shadow_and_text_extras():
         (0, 0),
         (10, 10),
         fit="crop",
+        sampling="cubic",
         tint=image_tint((255, 0, 0, 255), "multiply"),
         shadow=image_shadow(0.5, (3, 3), 2.0),
     )
     img = b._root_children[-1]
     assert img["fit"] == "crop"
+    assert img["sampling"] == "cubic"
     assert img["tint"]["mode"] == "multiply"
     assert img["shadow"]["sigma"] == 2.0
 

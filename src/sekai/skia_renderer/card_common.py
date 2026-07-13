@@ -170,14 +170,32 @@ def limited_icon_path(supply_type: str, icons: dict[str, Any]) -> str | None:
 def center_text(
     b: IRBuilder, text: str, role: str, size: float, rx: float, ry: float, rw: float, rh: float, fill: Color4
 ) -> None:
-    # Mirror draw_center_text: horizontally centered, baseline at rect.bottom - 5.
-    b.text(text, (rx + rw / 2, ry + rh - 5), role, size, align="center", baseline="alphabetic", fill=fill)
+    # TextBox centers Pillow's ink bbox inside the content width and places the logical
+    # text top inside its 2px vertical padding. Resolve both with Pillow metrics so Skia
+    # receives the same left origin and alphabetic baseline.
+    text_w, _ = b.measure_text_ink(text, role, size)
+    text_x = rx + (rw - text_w) // 2
+    text_top = ry + (rh - size) // 2
+    baseline_y = b.painter_baseline_y(text_top, role, size)
+    b.text(text, (text_x, baseline_y), role, size, baseline="alphabetic", fill=fill)
 
 
 def notice_title(b: IRBuilder, x: float, y: float, width: float, title: str) -> None:
     b.blurglass((x, y), (width, TITLE_H), 10, (255, 246, 219, 220), shadow_alpha=0.24)
-    b.text("提示", (x + 14, y + 34), "bold", 22, baseline="alphabetic", fill=(166, 90, 0, 255))
-    b.text(title, (x + 80, y + 34), "default", 22, baseline="alphabetic", fill=(98, 68, 0, 255))
+    label = "提示"
+    label_w, _ = b.measure_text_ink(label, "bold", 22)
+    text_top = y + 16
+    label_baseline = b.painter_baseline_y(text_top, "bold", 22)
+    title_baseline = b.painter_baseline_y(text_top, "default", 22)
+    b.text(label, (x + 16, label_baseline), "bold", 22, baseline="alphabetic", fill=(166, 90, 0, 255))
+    b.text(
+        title,
+        (x + 32 + label_w, title_baseline),
+        "default",
+        22,
+        baseline="alphabetic",
+        fill=(98, 68, 0, 255),
+    )
 
 
 def thumbnail(b: IRBuilder, thumb: dict[str, Any], size: float) -> None:

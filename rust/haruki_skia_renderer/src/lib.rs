@@ -1,17 +1,21 @@
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use moka::sync::Cache;
+use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
+use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use skia_safe::{
-    BlurStyle, Canvas, ClipOp, Color, Data, EncodedImageFormat, FilterMode, FontMgr, Image,
-    MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point, RRect, Rect, SamplingOptions,
-    Surface, TileMode, Typeface, gradient, image_filters, png_encoder, surfaces,
+    AlphaType, BlurStyle, Canvas, ClipOp, Color, ColorType, Data, EncodedImageFormat, FilterMode,
+    FontMgr, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point,
+    RRect, Rect, SamplingOptions, Surface, TileMode, Typeface, canvas::SrcRectConstraint, gradient,
+    image_filters, png_encoder, surfaces,
 };
 
 /// Smooth (bilinear) sampling, matching Pillow's BILINEAR down/upscale in the blur
@@ -40,14 +44,14 @@ fn render_scene(
     if let Some(dict) = images {
         for (key, value) in dict.iter() {
             let key: String = key.extract()?;
-            let mem = if let Ok((width, height, bytes)) = value.extract::<(i32, i32, Vec<u8>)>() {
+            let mem = if let Ok((width, height, bytes)) = value.extract::<(i32, i32, &[u8])>() {
                 interp::MemImage::Raw {
                     width,
                     height,
-                    bytes,
+                    data: Data::new_copy(bytes),
                 }
             } else {
-                interp::MemImage::Encoded(value.extract::<&[u8]>()?.to_vec())
+                interp::MemImage::Encoded(Data::new_copy(value.extract::<&[u8]>()?))
             };
             mem_images.insert(key, mem);
         }
@@ -59,35 +63,126 @@ fn render_scene(
         })?;
 
     let dict = PyDict::new(py);
-    dict.set_item("image_bytes", PyBytes::new(py, &rendered.bytes))?;
+    dict.set_item("image_bytes", PyBytes::new(py, rendered.bytes.as_bytes()))?;
     dict.set_item("media_type", rendered.media_type)?;
     dict.set_item("filename", rendered.filename)?;
     dict.set_item("image_width", rendered.width)?;
     dict.set_item("image_height", rendered.height)?;
     dict.set_item("image_mode", "RGBA")?;
     dict.set_item("encode_elapsed", rendered.encode_elapsed)?;
+    let metrics = PyDict::new(py);
+    metrics.set_item("total_elapsed", rendered.metrics.total_elapsed)?;
+    metrics.set_item("setup_elapsed", rendered.metrics.setup_elapsed)?;
+    metrics.set_item("draw_elapsed", rendered.metrics.draw_elapsed)?;
+    metrics.set_item("scale_elapsed", rendered.metrics.scale_elapsed)?;
+    metrics.set_item("asset_load_elapsed", rendered.metrics.asset_load_elapsed)?;
+    metrics.set_item(
+        "raster_prewarm_elapsed",
+        rendered.metrics.raster_prewarm_elapsed,
+    )?;
+    metrics.set_item(
+        "raster_prewarm_requests",
+        rendered.metrics.raster_prewarm_requests,
+    )?;
+    metrics.set_item("raster_prewarm_hits", rendered.metrics.raster_prewarm_hits)?;
+    metrics.set_item(
+        "raster_prewarm_misses",
+        rendered.metrics.raster_prewarm_misses,
+    )?;
+    metrics.set_item(
+        "raster_prewarm_coalesced",
+        rendered.metrics.raster_prewarm_coalesced,
+    )?;
+    metrics.set_item(
+        "raster_cache_build_elapsed",
+        rendered.metrics.raster_cache_build_elapsed,
+    )?;
+    metrics.set_item(
+        "raster_cache_wait_elapsed",
+        rendered.metrics.raster_cache_wait_elapsed,
+    )?;
+    metrics.set_item("raster_cache_hits", rendered.metrics.raster_cache_hits)?;
+    metrics.set_item("raster_cache_misses", rendered.metrics.raster_cache_misses)?;
+    metrics.set_item(
+        "raster_cache_coalesced",
+        rendered.metrics.raster_cache_coalesced,
+    )?;
+    metrics.set_item(
+        "raster_cache_bypasses",
+        rendered.metrics.raster_cache_bypasses,
+    )?;
+    metrics.set_item(
+        "raster_cache_entries",
+        rendered.metrics.raster_cache_entries,
+    )?;
+    metrics.set_item("raster_cache_bytes", rendered.metrics.raster_cache_bytes)?;
+    metrics.set_item(
+        "zero_blur_fast_paths",
+        rendered.metrics.zero_blur_fast_paths,
+    )?;
+    dict.set_item("native_metrics", metrics)?;
     Ok(dict.unbind())
 }
 
 /// Capability level of the IR this build understands. Bump when nodes/fields are added so
 /// the Python side can refuse (fail-open to Pillow) instead of silently dropping features
-/// when an older wheel meets newer IR. 3 = IR v2 + reserve primitives + group mask.
-pub const IR_CAPABILITY: u32 = 3;
+/// when an older wheel meets newer IR. 4 = capability 3 + per-image sampling intent.
+pub const IR_CAPABILITY: u32 = 4;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_scene, m)?)?;
+    m.add_function(wrap_pyfunction!(renderer_cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(clear_renderer_caches, m)?)?;
     m.add("IR_CAPABILITY", IR_CAPABILITY)?;
     Ok(())
 }
 
 struct RenderedImage {
-    bytes: Vec<u8>,
+    bytes: EncodedBytes,
     media_type: &'static str,
     filename: &'static str,
     width: i32,
     height: i32,
     encode_elapsed: f64,
+    metrics: NativeMetrics,
+}
+
+enum EncodedBytes {
+    Skia(Data),
+    Owned(Vec<u8>),
+}
+
+impl EncodedBytes {
+    fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Skia(data) => data.as_bytes(),
+            Self::Owned(bytes) => bytes,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct NativeMetrics {
+    pub(crate) total_elapsed: f64,
+    pub(crate) setup_elapsed: f64,
+    pub(crate) draw_elapsed: f64,
+    pub(crate) scale_elapsed: f64,
+    pub(crate) asset_load_elapsed: f64,
+    pub(crate) raster_prewarm_elapsed: f64,
+    pub(crate) raster_prewarm_requests: u64,
+    pub(crate) raster_prewarm_hits: u64,
+    pub(crate) raster_prewarm_misses: u64,
+    pub(crate) raster_prewarm_coalesced: u64,
+    pub(crate) raster_cache_build_elapsed: f64,
+    pub(crate) raster_cache_wait_elapsed: f64,
+    pub(crate) raster_cache_hits: u64,
+    pub(crate) raster_cache_misses: u64,
+    pub(crate) raster_cache_coalesced: u64,
+    pub(crate) raster_cache_bypasses: u64,
+    pub(crate) raster_cache_entries: u64,
+    pub(crate) raster_cache_bytes: u64,
+    pub(crate) zero_blur_fast_paths: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -861,13 +956,20 @@ fn encode_surface(
     jpg_quality: i32,
 ) -> Result<RenderedImage, String> {
     let started = Instant::now();
-    let image = surface.image_snapshot();
+    let width = surface.width();
+    let height = surface.height();
     let data = if export_format == "jpg" {
+        let image = surface.image_snapshot();
         let quality = jpg_quality.clamp(1, 100) as u32;
-        image
-            .encode(None, EncodedImageFormat::JPEG, Some(quality))
-            .ok_or_else(|| "failed to encode image".to_string())?
+        EncodedBytes::Skia(
+            image
+                .encode(None, EncodedImageFormat::JPEG, Some(quality))
+                .ok_or_else(|| "failed to encode image".to_string())?,
+        )
+    } else if std::env::var("HARUKI_SKIA_PNG_ENCODER").as_deref() != Ok("skia") {
+        EncodedBytes::Owned(encode_surface_mtpng(&mut surface)?)
     } else {
+        let image = surface.image_snapshot();
         // PNG is lossless, so deflate settings only trade encode speed vs file size, never
         // pixels. skia's default (used by Image::encode) is z_lib_level=6 + FilterFlag::ALL,
         // which runs the full 5-filter per-row search — the single biggest cost of the render.
@@ -876,93 +978,436 @@ fn encode_surface(
         let mut opts = png_encoder::Options::default();
         opts.z_lib_level = 3;
         opts.filter_flags = png_encoder::FilterFlag::SUB | png_encoder::FilterFlag::UP;
-        png_encoder::encode_image(None, &image, &opts)
-            .ok_or_else(|| "failed to encode image".to_string())?
+        EncodedBytes::Skia(
+            png_encoder::encode_image(None, &image, &opts)
+                .ok_or_else(|| "failed to encode image".to_string())?,
+        )
     };
-    let bytes = data.as_bytes().to_vec();
-    let width = image.width();
-    let height = image.height();
     let (media_type, filename) = if export_format == "jpg" {
         ("image/jpeg", "image.jpg")
     } else {
         ("image/png", "image.png")
     };
     Ok(RenderedImage {
-        bytes,
+        bytes: data,
         media_type,
         filename,
         width,
         height,
         encode_elapsed: started.elapsed().as_secs_f64(),
+        metrics: NativeMetrics::default(),
     })
 }
 
+fn encode_surface_mtpng(surface: &mut Surface) -> Result<Vec<u8>, String> {
+    let width = surface.width();
+    let height = surface.height();
+    let row_bytes = width as usize * 4;
+    let mut pixels = vec![0_u8; row_bytes * height as usize];
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
+        return Err("failed to read RGBA pixels for mtpng".to_string());
+    }
+
+    let mut header = MtpngHeader::new();
+    header
+        .set_size(width as u32, height as u32)
+        .map_err(|err| format!("mtpng header size failed: {err}"))?;
+    header
+        .set_color(MtpngColorType::TruecolorAlpha, 8)
+        .map_err(|err| format!("mtpng header color failed: {err}"))?;
+    let mut options = MtpngOptions::new();
+    options
+        .set_compression_level(CompressionLevel::Fast)
+        .map_err(|err| format!("mtpng options failed: {err}"))?;
+    let mut encoder = MtpngEncoder::new(Vec::new(), &options);
+    encoder
+        .write_header(&header)
+        .map_err(|err| format!("mtpng header encode failed: {err}"))?;
+    encoder
+        .write_image_rows(&pixels)
+        .map_err(|err| format!("mtpng pixel encode failed: {err}"))?;
+    encoder
+        .finish()
+        .map_err(|err| format!("mtpng finish failed: {err}"))
+}
+
 fn decode_image_file(full_path: &Path) -> Result<Image, String> {
-    let bytes = fs::read(full_path)
-        .map_err(|err| format!("failed to read {}: {err}", full_path.display()))?;
-    let data = Data::new_copy(&bytes);
+    let data = Data::from_filename(full_path)
+        .ok_or_else(|| format!("failed to memory-map {}", full_path.display()))?;
     Image::from_encoded(data).ok_or_else(|| format!("failed to decode {}", full_path.display()))
 }
 
-struct ImageCacheEntry {
-    image: Image,
-    last_used: u64,
+const MIB: u64 = 1024 * 1024;
+const DEFAULT_RASTER_CACHE_MB: u64 = 256;
+const DEFAULT_RASTER_CACHE_MAX_ENTRY_MB: u64 = 16;
+const DEFAULT_RASTER_CACHE_OVERSAMPLE: i32 = 1;
+const IMAGE_DIMENSION_CACHE_CAP: u64 = 16_384;
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct AssetIdentity {
+    full_path: PathBuf,
+    mtime_ns: u128,
+    file_size: u64,
 }
 
-static IMAGE_CACHE: OnceLock<Mutex<HashMap<String, ImageCacheEntry>>> = OnceLock::new();
-static IMAGE_CACHE_TICK: AtomicU64 = AtomicU64::new(0);
-/// Bound on distinct decoded images kept process-wide. skia ``Image`` is ref-counted, so a
-/// clone is cheap; the working set per deployment is a few hundred thumbnails plus shared
-/// frames/icons, so this caps memory while spanning many requests. Mirrors the Pillow global
-/// image pool (CLAUDE.md: prefer the persistent pool over per-request caches).
-const IMAGE_CACHE_CAP: usize = 4096;
+#[derive(Clone)]
+pub(crate) struct AssetDescriptor {
+    identity: AssetIdentity,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
 
-/// Decode an asset, caching the decoded ``Image`` process-wide so repeated requests reuse it
-/// instead of re-reading and re-decoding from disk. Keyed by ``(full_path, mtime, size)`` so
-/// the entry self-invalidates when the file changes. Eviction is least-recently-used.
-pub(crate) fn load_image_cached(base: &Path, path: &str) -> Result<Image, String> {
+pub(crate) struct LoadedAssetDescriptor {
+    pub(crate) descriptor: AssetDescriptor,
+    /// Reuse the lazy image opened while discovering dimensions on a metadata-cache miss.
+    /// It is intentionally not retained globally: after target rasterization it can release
+    /// the full-size decoded pixels instead of growing RSS with the source asset catalogue.
+    pub(crate) source: Option<Image>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct RasterCacheKey {
+    asset: AssetIdentity,
+    src_bits: [u32; 4],
+    width: i32,
+    height: i32,
+    sampling: u8,
+}
+
+#[derive(Clone)]
+struct RasterCacheValue {
+    image: Image,
+    byte_size: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RasterCacheOutcome {
+    Hit,
+    Miss,
+    Coalesced,
+}
+
+pub(crate) struct RasterCacheResult {
+    pub(crate) image: Image,
+    pub(crate) outcome: RasterCacheOutcome,
+}
+
+#[derive(Clone, Copy)]
+struct RasterCacheConfig {
+    max_bytes: u64,
+    max_entry_bytes: u64,
+    oversample: i32,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RasterCacheSnapshot {
+    pub(crate) max_bytes: u64,
+    pub(crate) max_entry_bytes: u64,
+    pub(crate) oversample: i32,
+    pub(crate) entries: u64,
+    pub(crate) bytes: u64,
+}
+
+static RASTER_CACHE_CONFIG: OnceLock<RasterCacheConfig> = OnceLock::new();
+static RASTER_IMAGE_CACHE: OnceLock<Option<Cache<RasterCacheKey, RasterCacheValue>>> =
+    OnceLock::new();
+static IMAGE_DIMENSION_CACHE: OnceLock<Cache<AssetIdentity, [i32; 2]>> = OnceLock::new();
+
+fn env_mb(name: &str, default_mb: u64) -> u64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default_mb)
+        .saturating_mul(MIB)
+}
+
+fn raster_cache_config() -> &'static RasterCacheConfig {
+    RASTER_CACHE_CONFIG.get_or_init(|| RasterCacheConfig {
+        max_bytes: env_mb("HARUKI_SKIA_RASTER_CACHE_MB", DEFAULT_RASTER_CACHE_MB),
+        max_entry_bytes: env_mb(
+            "HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB",
+            DEFAULT_RASTER_CACHE_MAX_ENTRY_MB,
+        ),
+        oversample: std::env::var("HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(DEFAULT_RASTER_CACHE_OVERSAMPLE)
+            .clamp(1, 4),
+    })
+}
+
+fn raster_image_cache() -> Option<&'static Cache<RasterCacheKey, RasterCacheValue>> {
+    RASTER_IMAGE_CACHE
+        .get_or_init(|| {
+            let config = raster_cache_config();
+            (config.max_bytes > 0).then(|| {
+                Cache::builder()
+                    .max_capacity(config.max_bytes)
+                    .weigher(|_, value: &RasterCacheValue| value.byte_size)
+                    .build()
+            })
+        })
+        .as_ref()
+}
+
+fn image_dimension_cache() -> &'static Cache<AssetIdentity, [i32; 2]> {
+    IMAGE_DIMENSION_CACHE.get_or_init(|| Cache::new(IMAGE_DIMENSION_CACHE_CAP))
+}
+
+fn asset_identity(full_path: PathBuf, meta: &fs::Metadata) -> AssetIdentity {
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    AssetIdentity {
+        full_path,
+        mtime_ns,
+        file_size: meta.len(),
+    }
+}
+
+/// Resolve and inspect an asset without retaining its full-size decoded pixels globally.
+/// Dimension metadata is cached by `(path, mtime, size)`, while the optional lazy source image
+/// is handed to the first target-raster build and dropped immediately afterwards.
+pub(crate) fn load_asset_descriptor(
+    base: &Path,
+    path: &str,
+) -> Result<LoadedAssetDescriptor, String> {
     let full_path = resolve_asset_path(base, path)?;
     let meta = fs::metadata(&full_path)
         .map_err(|err| format!("failed to stat {}: {err}", full_path.display()))?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let key = format!("{}\0{}\0{}", full_path.display(), mtime, meta.len());
-    let tick = IMAGE_CACHE_TICK.fetch_add(1, Ordering::Relaxed);
-    let cache = IMAGE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-
-    if let Ok(mut guard) = cache.lock()
-        && let Some(entry) = guard.get_mut(&key)
-    {
-        entry.last_used = tick;
-        return Ok(entry.image.clone());
-    }
-
-    // Decode outside the lock; concurrent decodes of the same key just race to insert.
-    let image = decode_image_file(&full_path)?;
-
-    if let Ok(mut guard) = cache.lock() {
-        if guard.len() >= IMAGE_CACHE_CAP
-            && !guard.contains_key(&key)
-            && let Some(evict) = guard
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(k, _)| k.clone())
-        {
-            guard.remove(&evict);
-        }
-        guard.insert(
-            key,
-            ImageCacheEntry {
-                image: image.clone(),
-                last_used: tick,
+    let identity = asset_identity(full_path, &meta);
+    if let Some([width, height]) = image_dimension_cache().get(&identity) {
+        return Ok(LoadedAssetDescriptor {
+            descriptor: AssetDescriptor {
+                identity,
+                width,
+                height,
             },
-        );
+            source: None,
+        });
     }
-    Ok(image)
+
+    let source = decode_image_file(&identity.full_path)?;
+    let width = source.width();
+    let height = source.height();
+    if width <= 0 || height <= 0 {
+        return Err(format!(
+            "decoded image has invalid dimensions: {}",
+            identity.full_path.display()
+        ));
+    }
+    image_dimension_cache().insert(identity.clone(), [width, height]);
+    Ok(LoadedAssetDescriptor {
+        descriptor: AssetDescriptor {
+            identity,
+            width,
+            height,
+        },
+        source: Some(source),
+    })
+}
+
+pub(crate) fn decode_asset_descriptor(descriptor: &AssetDescriptor) -> Result<Image, String> {
+    decode_image_file(&descriptor.identity.full_path)
+}
+
+fn normalized_float_bits(value: f32) -> u32 {
+    if value == 0.0 { 0 } else { value.to_bits() }
+}
+
+fn build_target_raster(
+    source: &Image,
+    source_rect: Rect,
+    width: i32,
+    height: i32,
+    sampling: SamplingOptions,
+) -> Result<Image, String> {
+    let mut current = source.clone();
+    let mut current_src = source_rect;
+
+    // CPU raster images do not retain Skia's lazy mip chain. Build only the levels needed for
+    // this destination so a 740px jacket is reduced 740→370→185→93→64 instead of one aliased
+    // bilinear jump. Each previous level is released immediately; only the final raster is cached.
+    if sampling.mipmap != MipmapMode::None {
+        loop {
+            let next_width = (current_src.width() * 0.5).ceil() as i32;
+            let next_height = (current_src.height() * 0.5).ceil() as i32;
+            if next_width < width || next_height < height {
+                break;
+            }
+            if next_width == current_src.width().ceil() as i32
+                && next_height == current_src.height().ceil() as i32
+            {
+                break;
+            }
+            current = draw_source_to_raster(
+                &current,
+                current_src,
+                next_width,
+                next_height,
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
+            )?;
+            current_src = Rect::from_xywh(0.0, 0.0, next_width as f32, next_height as f32);
+        }
+    }
+
+    let final_sampling = if sampling.use_cubic {
+        sampling
+    } else {
+        SamplingOptions::new(sampling.filter, MipmapMode::None)
+    };
+    draw_source_to_raster(&current, current_src, width, height, final_sampling)
+}
+
+fn draw_source_to_raster(
+    source: &Image,
+    source_rect: Rect,
+    width: i32,
+    height: i32,
+    sampling: SamplingOptions,
+) -> Result<Image, String> {
+    let mut surface = surfaces::raster_n32_premul((width, height))
+        .ok_or_else(|| format!("failed to create target raster {width}x{height}"))?;
+    surface.canvas().clear(Color::TRANSPARENT);
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    surface.canvas().draw_image_rect_with_sampling_options(
+        source,
+        Some((&source_rect, SrcRectConstraint::Strict)),
+        Rect::from_xywh(0.0, 0.0, width as f32, height as f32),
+        sampling,
+        &paint,
+    );
+    Ok(surface.image_snapshot())
+}
+
+/// Return a process-wide cached raster at the image's actual draw size. `None` means the cache
+/// is disabled or this entry exceeds its per-item budget, so the caller should draw the source
+/// directly. Moka coalesces concurrent misses for the same key.
+pub(crate) fn rasterize_asset_cached(
+    descriptor: &AssetDescriptor,
+    source: Option<&Image>,
+    source_rect: Rect,
+    width: i32,
+    height: i32,
+    sampling: SamplingOptions,
+    sampling_key: u8,
+) -> Result<Option<RasterCacheResult>, String> {
+    if width <= 0 || height <= 0 {
+        return Ok(None);
+    }
+    let config = raster_cache_config();
+    let raster_width = width.saturating_mul(config.oversample);
+    let raster_height = height.saturating_mul(config.oversample);
+    let byte_size = (raster_width as u64)
+        .saturating_mul(raster_height as u64)
+        .saturating_mul(4);
+    let Some(cache) = raster_image_cache() else {
+        return Ok(None);
+    };
+    if byte_size == 0 || byte_size > config.max_entry_bytes || byte_size > u32::MAX as u64 {
+        return Ok(None);
+    }
+
+    let key = RasterCacheKey {
+        asset: descriptor.identity.clone(),
+        src_bits: [
+            normalized_float_bits(source_rect.left),
+            normalized_float_bits(source_rect.top),
+            normalized_float_bits(source_rect.right),
+            normalized_float_bits(source_rect.bottom),
+        ],
+        width: raster_width,
+        height: raster_height,
+        sampling: sampling_key,
+    };
+    if let Some(value) = cache.get(&key) {
+        return Ok(Some(RasterCacheResult {
+            image: value.image,
+            outcome: RasterCacheOutcome::Hit,
+        }));
+    }
+
+    let did_build = Cell::new(false);
+    let value = cache
+        .try_get_with(key, || {
+            did_build.set(true);
+            let decoded = if source.is_none() {
+                Some(decode_asset_descriptor(descriptor)?)
+            } else {
+                None
+            };
+            let source = source.or(decoded.as_ref()).expect("source image available");
+            let image =
+                build_target_raster(source, source_rect, raster_width, raster_height, sampling)?;
+            Ok::<RasterCacheValue, String>(RasterCacheValue {
+                image,
+                byte_size: byte_size as u32,
+            })
+        })
+        .map_err(|err| err.as_ref().clone())?;
+    Ok(Some(RasterCacheResult {
+        image: value.image,
+        outcome: if did_build.get() {
+            RasterCacheOutcome::Miss
+        } else {
+            RasterCacheOutcome::Coalesced
+        },
+    }))
+}
+
+pub(crate) fn raster_cache_snapshot() -> RasterCacheSnapshot {
+    let config = raster_cache_config();
+    let (entries, bytes) = raster_image_cache()
+        .map(|cache| (cache.entry_count(), cache.weighted_size()))
+        .unwrap_or_default();
+    RasterCacheSnapshot {
+        max_bytes: config.max_bytes,
+        max_entry_bytes: config.max_entry_bytes,
+        oversample: config.oversample,
+        entries,
+        bytes,
+    }
+}
+
+#[pyfunction]
+fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
+    if let Some(cache) = raster_image_cache() {
+        cache.run_pending_tasks();
+    }
+    image_dimension_cache().run_pending_tasks();
+    let snapshot = raster_cache_snapshot();
+    let dict = PyDict::new(py);
+    dict.set_item("raster_cache_max_bytes", snapshot.max_bytes)?;
+    dict.set_item("raster_cache_max_entry_bytes", snapshot.max_entry_bytes)?;
+    dict.set_item("raster_cache_oversample", snapshot.oversample)?;
+    dict.set_item("raster_cache_entries", snapshot.entries)?;
+    dict.set_item("raster_cache_bytes", snapshot.bytes)?;
+    dict.set_item(
+        "dimension_cache_entries",
+        image_dimension_cache().entry_count(),
+    )?;
+    Ok(dict.unbind())
+}
+
+#[pyfunction]
+fn clear_renderer_caches() {
+    if let Some(cache) = raster_image_cache() {
+        cache.invalidate_all();
+        cache.run_pending_tasks();
+    }
+    let dimensions = image_dimension_cache();
+    dimensions.invalidate_all();
+    dimensions.run_pending_tasks();
 }
 
 fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {
@@ -1044,5 +1489,78 @@ mod tests {
     #[test]
     fn rejects_parent_asset_paths() {
         assert!(resolve_asset_path(Path::new("/tmp/base"), "../x.png").is_err());
+    }
+
+    #[test]
+    fn caches_target_sized_rasters() {
+        if raster_cache_config().max_bytes == 0 {
+            return;
+        }
+        let mut surface = surfaces::raster_n32_premul((64, 64)).expect("surface");
+        surface.canvas().clear(Color::RED);
+        let source = surface.image_snapshot();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let descriptor = AssetDescriptor {
+            identity: AssetIdentity {
+                full_path: PathBuf::from(format!("/virtual/cache-test-{unique}.png")),
+                mtime_ns: unique,
+                file_size: 1,
+            },
+            width: 64,
+            height: 64,
+        };
+        let src = Rect::from_xywh(0.0, 0.0, 64.0, 64.0);
+        let first = rasterize_asset_cached(
+            &descriptor,
+            Some(&source),
+            src,
+            16,
+            16,
+            linear_sampling(),
+            1,
+        )
+        .expect("first raster")
+        .expect("cache enabled");
+        let cached_size = 16 * raster_cache_config().oversample;
+        assert_eq!(first.image.dimensions(), (cached_size, cached_size).into());
+
+        let second = rasterize_asset_cached(&descriptor, None, src, 16, 16, linear_sampling(), 1)
+            .expect("second raster")
+            .expect("cache enabled");
+        assert_eq!(second.outcome, RasterCacheOutcome::Hit);
+    }
+
+    #[test]
+    fn mtpng_round_trips_unpremultiplied_rgba_pixels() {
+        let mut surface = surfaces::raster_n32_premul((3, 2)).expect("surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_argb(127, 20, 80, 140));
+        surface
+            .canvas()
+            .draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
+        paint.set_color(Color::from_argb(255, 240, 10, 60));
+        surface
+            .canvas()
+            .draw_rect(Rect::from_xywh(2.0, 0.0, 1.0, 1.0), &paint);
+
+        let info = ImageInfo::new((3, 2), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let mut expected = vec![0_u8; 3 * 2 * 4];
+        assert!(surface.read_pixels(&info, &mut expected, 3 * 4, (0, 0)));
+
+        let encoded = encode_surface_mtpng(&mut surface).expect("mtpng encode");
+        let decoded = Image::from_encoded(Data::new_copy(&encoded)).expect("PNG decode");
+        let mut actual = vec![0_u8; expected.len()];
+        assert!(decoded.read_pixels(
+            &info,
+            &mut actual,
+            3 * 4,
+            (0, 0),
+            skia_safe::image::CachingHint::Disallow,
+        ));
+        assert_eq!(actual, expected);
     }
 }

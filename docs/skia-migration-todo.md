@@ -11,7 +11,7 @@
 - [x] **CI wheel 流水线**(2026-07-13,skia-wheels.yml:linux-x86_64 + macos-arm64 矩阵、rust-cache、wheel tag 断言、IR_CAPABILITY 冒烟、artifact 上传)。
 - [x] **CI 跑 native 测试**(2026-07-13,quick-check native-tests job:maturin develop + OFL 字体下载缓存 + 全量 pytest;素材类 parity 自动跳过)。
 - [x] **Docker 集成**(2026-07-13,docker.yml 先构 wheel → docker/skia-wheels → 镜像条件安装 + 构建期自检;无 wheel 时 fail-open 构建仍绿,双分支本地实测)。
-- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY=3,load_native_renderer 校验不足抛 ImportError 走 fail-open)。
+- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY=4,load_native_renderer 校验不足抛 ImportError 走 fail-open)。
 - [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开;
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
@@ -46,8 +46,15 @@
 
 ## 🟢 性能后备队(指标不达标时按需提前)
 
-- [ ] **fpnge/mtpng PNG 编码替换**(M):encode 占 Skia 耗时 ~45%;music_list(0.81×)、
-      mysekai_map(0.95×)、event_detail(0.95×)三个慢于 Pillow 的端点全是编码/传输主导。
+- [x] **原始 asset 路径直传 + draw-time 缩放**(2026-07-13):pristine 图片发安全相对路径,Rust image LRU 解码;
+      Skia 单次 draw 融合 resize + composite,生成/修改图自动回退 mem。代表场景 raw mem transport 下降 24%-100%,
+      63/63 SBS 通过;当前 wall time 基本中性,收益集中在 FFI 拷贝与瞬时内存。
+- [ ] **lazy AssetRef 穿透 widget/Canvas**(M):`music_list` 试点已完成,696 张 jacket 不再进入 Python 像素 cache,
+      冷态 `2.44x`、热态约 `4.7x`,RSS 约 `2.0 GiB -> 0.30 GiB`;其余 builder 仍需按收益接入并复测 composed widget。
+- [x] **Moka 目标栅格缓存 + Rayon 并行预热**(2026-07-13):按 asset identity/source rect/target/sampling 缓存,
+      696 项仅约 11.4 MiB;music_list 冷启动串行 raster build `6.36s -> 0.83s`,暴露 stats/clear API 与 native metrics。
+- [x] **mtpng PNG 编码替换**(2026-07-13):默认多线程 fast encode,保留 `HARUKI_SKIA_PNG_ENCODER=skia` 回退;
+      代表大图 encode 提升 `2.9-5.9x`,最终 63/63 SBS 通过,文件大小变化约 `-2%` 到 `+6%`。
 - [ ] Scene.scale 整图 resize → canvas 矩阵直渲染(M,需视觉验收;profile 1.5×/winrate 2× 受益)。
 - [ ] 文本渲染缓存:每 Text 节点重复 measure_str("哇")、Left 对齐白测宽度、每节点新建 Font、
       adaptive 双重布局(S-M)。

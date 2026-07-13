@@ -48,6 +48,7 @@ class EncodedImagePayload:
     image_height: int | None
     image_mode: str | None
     encode_elapsed: float
+    native_metrics: dict[str, int | float] | None = None
 
 
 @dataclass(slots=True)

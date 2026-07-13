@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from io import BytesIO
 import json
 
@@ -15,6 +16,7 @@ except ImportError:  # pragma: no cover - extension not built
 
 from src.sekai.base.draw import Canvas, TextBox, roundrect_bg
 from src.sekai.base.plot import TextStyle, VSplit
+from src.sekai.base.utils import get_img_from_path
 from src.sekai.skia_renderer.ir_painter import IRPainter
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
@@ -72,6 +74,30 @@ def test_irpainter_mem_image_renders():
     result = _native.render_scene(json.dumps(scene).encode(), mem)
     img = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
     assert img.getpixel((20, 20))[0] > 200  # red present
+
+
+def test_irpainter_path_image_renders_without_mem_transport(tmp_path):
+    asset = tmp_path / "icons" / "red.png"
+    asset.parent.mkdir(parents=True)
+    Image.new("RGBA", (8, 8), (255, 0, 0, 255)).save(asset)
+    source = asyncio.run(get_img_from_path(tmp_path, "icons/red.png", on_missing="raise"))
+
+    painter = IRPainter(
+        (40, 40),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEF,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+    painter.paste(source, (8, 8), (24, 24))
+    scene, mem = painter.build_scene()
+    assert mem == {}
+    assert scene["root"]["children"][0]["path"] == "icons/red.png"
+
+    result = _native.render_scene(json.dumps(scene).encode(), mem)
+    img = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+    assert img.getpixel((20, 20))[0] > 200
+    source.close()
 
 
 def test_irpainter_gradient_text_maps_to_glyph_overlay_fill():
