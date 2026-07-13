@@ -118,12 +118,11 @@ def _case(
     )
 
 
-_SKIA_CARD_RENDER = "src.sekai.skia_renderer.card_render"
 
 CASES: tuple[Case, ...] = (
     # ---- card ----
     _case("card_detail", "card", "card_detail", "CardDetailRequest"),
-    _case("card_list", "card", "card_list", "CardListRequest", try_render_module=_SKIA_CARD_RENDER),
+    _case("card_list", "card", "card_list", "CardListRequest"),
     _case("card_box", "card", "box", "CardBoxRequest", try_render="try_render_box_payload"),
     # ---- chart (crate renders the chart body; the watermark shell is the migrated part) ----
     _case("chart", "chart", "music_chart", "GenerateMusicChartRequest"),
@@ -232,7 +231,7 @@ CASES: tuple[Case, ...] = (
 def setup() -> None:
     """Disable the process pool and force every Skia gate on. Call once at start."""
     settings.drawing.use_process_pool = False
-    for flag in ("use_skia_plot", "use_skia_card_list"):
+    for flag in ("use_skia_plot",):
         if hasattr(settings.drawing, flag):
             setattr(settings.drawing, flag, True)
 

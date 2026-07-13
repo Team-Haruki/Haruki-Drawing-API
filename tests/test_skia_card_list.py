@@ -1,12 +1,18 @@
-from PIL import Image
+"""card/list draws the shared plot.py widget tree on both backends.
+
+The hand-written IR scene builder it used to have (skia_renderer/card_render.py) is retired, so
+what is worth pinning is no longer the shape of the IR it emitted, but that the tree both backends
+draw is built once, that the ordering it depends on is unchanged, and that the fail-open gate
+still holds now that card/list rides use_skia_plot like every other endpoint.
+"""
+
+from __future__ import annotations
+
 import pytest
 
-from src.core.pjsk import card as card_router
-from src.sekai.base.painter import get_font, get_text_size
+from src.sekai.card import drawer as card
 from src.sekai.card.model import CardBasic, CardListRequest, CardSkill
 from src.sekai.profile.model import CardFullThumbnailRequest
-from src.sekai.skia_renderer import card_render as card_list  # merged module (card/list + card/box)
-from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 
 def _thumbnail(card_id: int, path: str = "cards/card.png") -> CardFullThumbnailRequest:
@@ -39,138 +45,60 @@ def _card(card_id: int, release_at: int, path: str = "cards/card.png") -> CardBa
     )
 
 
-def test_card_list_ir_sorts_cards_and_includes_required_fields():
-    request = CardListRequest(
-        cards=[_card(1, 1000), _card(2, 3000), _card(3, 2000)],
-        region="jp",
-        title="notice",
-        background_img_path="backgrounds/bg.png",
-        term_limited_icon_path="icons/term.png",
-        fes_limited_icon_path="icons/fes.png",
-    )
-
-    ir = card_list.build_card_list_ir(request)
-
-    assert ir["version"] == 1
-    assert ir["title"] == "notice"
-    assert 0.0 <= ir["background_hour"] < 24.0
-    assert ir["background_img_path"] == "backgrounds/bg.png"
-    assert ir["icons"]["skill"] == ["icons/skill.png"]
-    assert [card["card_id"] for card in ir["cards"]] == [2, 3, 1]
-    assert ir["cards"][0]["thumbnail_info"][0]["card_thumbnail_path"] == "cards/card.png"
-    assert ir["fonts"]["default"]
-    assert ir["fonts"]["bold"]
+def _request(*cards: CardBasic) -> CardListRequest:
+    return CardListRequest(cards=list(cards), region="jp")
 
 
-def test_card_list_scene_uses_painter_text_origins_and_baselines():
-    request = CardListRequest(
-        cards=[_card(1, 4_102_444_800_000)],
-        region="jp",
-        title="notice",
-        term_limited_icon_path="icons/term.png",
-        fes_limited_icon_path="icons/fes.png",
-    )
-
-    scene = card_list.build_card_list_scene(request)
-
-    def text_nodes(node):
-        found = []
-        if node.get("type") == "Text":
-            found.append(node)
-        for child in node.get("children", []):
-            found.extend(text_nodes(child))
-        return found
-
-    by_text = {node["text"]: node for node in text_nodes(scene["root"])}
-    bold_20_height = get_text_size(get_font(DEFAULT_BOLD_FONT, 20), "哇")[1]
-    regular_20_height = get_text_size(get_font(DEFAULT_FONT, 20), "哇")[1]
-    bold_22_height = get_text_size(get_font(DEFAULT_BOLD_FONT, 22), "哇")[1]
-
-    assert by_text["提示"]["pos"][1] == 36 + bold_22_height
-    assert by_text["未上线"]["pos"] == [6.0, 164 + bold_20_height]
-    assert by_text["Card 1"]["pos"][1] == 131 + bold_20_height
-    assert by_text["ID:1【Fes限定】"]["pos"][1] == 160 + regular_20_height
-    assert all(node["baseline"] == "alphabetic" for node in by_text.values())
-
-
-@pytest.mark.parametrize("path", ["/tmp/evil.png", "../evil.png", "cards\\evil.png"])
-def test_card_list_ir_rejects_unsafe_asset_paths(path):
-    request = CardListRequest(cards=[_card(1, 1000, path)], region="jp")
-
-    with pytest.raises(ValueError, match=r"relative|forward slash|contain"):
-        card_list.build_card_list_ir(request)
+def _walk(widget):
+    yield widget
+    for child in getattr(widget, "items", None) or ():
+        yield from _walk(child)
 
 
 @pytest.mark.anyio
-async def test_skia_card_list_disabled_does_not_import_native(monkeypatch):
-    monkeypatch.setattr(card_list.settings.drawing, "use_skia_card_list", False)
-    monkeypatch.setattr(
-        card_list,
-        "_load_native_renderer",
-        lambda: (_ for _ in ()).throw(AssertionError("native renderer should not load")),
-    )
+async def test_card_list_orders_cards_newest_first():
+    """The grid is ordered by (release_at, card_id) descending. That ordering used to live in the
+    dedicated IR builder AND in the Pillow composer; now there is one tree, so one ordering."""
+    canvas = await card._build_card_list_canvas(_request(_card(1, 1000), _card(2, 3000), _card(3, 2000)))
 
-    payload = await card_list.try_render_card_list_payload(CardListRequest(cards=[], region="jp"))
-
-    assert payload is None
+    ids = [w.layers.rqd.card_id for w in _walk(canvas) if isinstance(w, card.CardFullThumbnailBox)]
+    assert ids == [2, 3, 1]
 
 
 @pytest.mark.anyio
-async def test_skia_card_list_falls_back_to_pillow_on_native_error(monkeypatch):
-    monkeypatch.setattr(card_list.settings.drawing, "use_skia_card_list", True)
-    monkeypatch.setattr(card_list.settings.drawing, "skia_card_list_fallback_to_pillow", True)
-    monkeypatch.setattr(
-        card_list,
-        "_load_native_renderer",
-        lambda: (_ for _ in ()).throw(card_list.SkiaCardRenderError("missing native")),
-    )
+async def test_skia_disabled_returns_none_without_rendering(monkeypatch):
+    monkeypatch.setattr(card, "skia_plot_enabled", lambda: False)
 
-    payload = await card_list.try_render_card_list_payload(CardListRequest(cards=[], region="jp"))
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not render when the gate is off")
 
-    assert payload is None
+    monkeypatch.setattr(card, "render_canvas_payload", _boom)
+
+    assert await card.try_render_card_list_payload(_request()) is None
 
 
 @pytest.mark.anyio
-async def test_card_list_endpoint_uses_pillow_when_skia_returns_none(monkeypatch):
-    async def fake_try_render(_request):
+async def test_skia_decline_falls_back_to_pillow(monkeypatch):
+    """FAIL-OPEN: card/list no longer carries its own fallback flag. It rides the shared contract,
+    where a Skia problem yields None and the route composes with Pillow instead."""
+    monkeypatch.setattr(card, "skia_plot_enabled", lambda: True)
+
+    async def _decline(*args, **kwargs):
         return None
 
-    async def fake_compose(_request):
-        return Image.new("RGBA", (2, 2), (255, 0, 0, 255))
+    monkeypatch.setattr(card, "render_canvas_payload", _decline)
 
-    monkeypatch.setattr(card_router, "try_render_card_list_payload", fake_try_render)
-    monkeypatch.setattr(card_router, "compose_card_list_image", fake_compose)
-
-    response = await card_router.card_list(CardListRequest(cards=[], region="jp"))
-
-    assert response.media_type == "image/png"
+    assert await card.try_render_card_list_payload(_request(_card(1, 1000))) is None
 
 
 @pytest.mark.anyio
-async def test_skia_card_list_caches_payload(monkeypatch):
-    from src.sekai.skia_renderer import card_common
+@pytest.mark.parametrize("path", ["../../../etc/passwd", "cards/../../../../etc/hosts"])
+async def test_asset_paths_cannot_escape_the_asset_root(path):
+    """The retired builder validated asset paths itself. On the shared path the loader is what
+    refuses to escape the asset root, so the protection has to still be there -- and it is even
+    stricter: a traversal raises rather than degrading to the placeholder."""
+    from src.sekai.base.utils import get_asset_image_ref
+    from src.settings import ASSETS_BASE_DIR
 
-    card_common._skia_payload_cache.clear()
-    calls = {"n": 0}
-
-    class FakeNative:
-        def render_scene(self, _ir_json):
-            calls["n"] += 1
-            return {
-                "image_bytes": b"\x89PNG-fake",
-                "media_type": "image/png",
-                "filename": "image.png",
-                "image_width": 1,
-                "image_height": 1,
-                "image_mode": "RGBA",
-                "encode_elapsed": 0.0,
-            }
-
-    monkeypatch.setattr(card_list, "_load_native_renderer", lambda: FakeNative())
-    request = CardListRequest(cards=[], region="jp")
-
-    first = await card_list.render_card_list_payload(request)
-    second = await card_list.render_card_list_payload(request)
-
-    assert calls["n"] == 1  # second request served from the payload cache
-    assert first is second
+    with pytest.raises(ValueError, match="越界"):
+        await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="placeholder")

@@ -46,7 +46,7 @@ from src.sekai.profile.drawer import (
     get_profile_card,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
+from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import record_skia_cache_hit
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
@@ -879,18 +879,13 @@ async def try_render_card_detail_payload(
     )
 
 
-async def compose_card_list_image(
-    rqd: CardListRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
-):
-    """
-    合成卡牌列表图片
-    """
-    cache_key = _build_card_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("card/list cache hit: cards=%d", len(rqd.cards))
-        return cached
+async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
+    """构建卡牌列表的 widget 树。
 
+    两个后端共用:Pillow 走 :func:`compose_card_list_image`(canvas.get_img),Skia 走
+    :func:`try_render_card_list_payload`(IRPainter 影子层)。取代早期为逐像素对齐手写的
+    ``card_render`` list 场景构建器。
+    """
     _t_total = time.perf_counter()
     cards = rqd.cards
     region = rqd.region  # noqa: F841
@@ -1046,24 +1041,56 @@ async def compose_card_list_image(
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    _t0 = time.perf_counter()
-    image = await canvas.get_img()
-    _t_render = time.perf_counter() - _t0
-    put_composed_image_cache(cache_key, image)
     _perf_logger.info(
-        "card/list total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, "
-        "cards=%d, rendered=%d, skills=%d, image=%dx%d)",
+        "card/list build: %.3fs (thumbs=%.3fs, preload=%.3fs, cards=%d, rendered=%d, skills=%d)",
         time.perf_counter() - _t_total,
         _t_thumbs,
         _t_preload,
-        _t_render,
         len(rqd.cards),
         len(card_and_thumbs),
         len(skill_icon_paths),
-        image.width,
-        image.height,
     )
+    return canvas
+
+
+async def compose_card_list_image(rqd: CardListRequest) -> Image.Image:
+    """合成卡牌列表图片 (Pillow 路径)。"""
+    cache_key = _build_card_list_cache_key(rqd)
+    cached = get_composed_image_cached(cache_key)
+    if cached is not None:
+        _perf_logger.info("card/list cache hit: cards=%d", len(rqd.cards))
+        return cached
+
+    canvas = await _build_card_list_canvas(rqd)
+    _t0 = time.perf_counter()
+    image = await canvas.get_img()
+    _perf_logger.info("card/list backend=pillow render: %.3fs (image=%dx%d)", time.perf_counter() - _t0, *image.size)
+    put_composed_image_cache(cache_key, image)
     return image
+
+
+async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload | None:
+    """Skia 路径:同一棵 widget 树经 IRPainter 渲染。不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    cache_key = f"{_build_card_list_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
+    cached = get_skia_payload_cached(cache_key)
+    if cached is not None:
+        record_skia_cache_hit("card_list", cached)
+        return cached
+    canvas = await _build_card_list_canvas(rqd)
+    _t0 = time.perf_counter()
+    payload = await render_canvas_payload(canvas, endpoint="card_list")
+    if payload is not None:
+        _perf_logger.info(
+            "card/list backend=skia render: %.3fs (cards=%d, image=%dx%d)",
+            time.perf_counter() - _t0,
+            len(rqd.cards),
+            payload.image_width,
+            payload.image_height,
+        )
+        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
+    return payload
 
 
 async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:

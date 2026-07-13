@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.core.pjsk import card as card_router
 from src.sekai.card import drawer as card_drawer
@@ -118,14 +120,11 @@ def test_card_box_endpoint_uses_shadow_payload(monkeypatch):
     assert response.media_type == "image/png"
 
 
-def test_dedicated_box_builder_is_gone():
-    from src.sekai.skia_renderer import card_render
+def test_no_dedicated_card_scene_builders_remain():
+    """Both card endpoints now draw the shared plot.py widget tree, so the whole hand-written IR
+    scene module is retired -- card/box first, card/list after it. A dedicated builder means two
+    layouts to keep in step, which is exactly how card/list drifted from the Pillow tree."""
+    import importlib
 
-    for name in (
-        "build_card_box_ir",
-        "build_card_box_scene",
-        "render_card_box_payload",
-        "try_render_card_box_payload",
-        "_CARD_BOX_SCENE_STALE",
-    ):
-        assert not hasattr(card_render, name)
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("src.sekai.skia_renderer.card_render")

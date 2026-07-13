@@ -96,7 +96,7 @@ def test_irpainter_uses_asset_paths_only_for_pristine_images(tmp_path):
     modified.close()
 
 
-@pytest.mark.parametrize("flag", ["use_skia_plot", "use_skia_card_list"])
+@pytest.mark.parametrize("flag", ["use_skia_plot"])
 def test_skia_gates_default_on(flag):
     from src.settings import DrawingSettings
 

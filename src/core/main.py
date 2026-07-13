@@ -124,7 +124,7 @@ async def lifespan(app: FastAPI):
         _cleanup_disk_caches()
     except Exception:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
-    if settings.drawing.use_skia_plot or settings.drawing.use_skia_card_list:
+    if settings.drawing.use_skia_plot:
         try:
             import haruki_skia_renderer  # noqa: F401
         except ImportError:

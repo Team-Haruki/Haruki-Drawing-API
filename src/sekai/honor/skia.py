@@ -40,8 +40,8 @@ from src.sekai.base.draw import (
 from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
-from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_CACHE_HIT,
     OUTCOME_DISABLED,
