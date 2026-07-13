@@ -118,7 +118,6 @@ def _case(
     )
 
 
-
 CASES: tuple[Case, ...] = (
     # ---- card ----
     _case("card_detail", "card", "card_detail", "CardDetailRequest"),
