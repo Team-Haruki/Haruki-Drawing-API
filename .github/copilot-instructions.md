@@ -83,6 +83,64 @@ For deployment:
 
 **Do not delete or rewrite `drawer.real.py` if it exists locally** — it is the production implementation. Only modify `drawer.py` (the stub) when the public API surface needs to change.
 
+## Skia Backend (`rust/haruki_skia_renderer` + `src/sekai/skia_renderer/`)
+
+Drawing endpoints render through a Rust + Skia extension (PyO3, built with maturin). Python builds a widget
+tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pillow remains as the fallback.
+
+**IR-first rule.** The widget tree (`src/sekai/base/plot.py`) is the *only* layout carrier for a drawing
+endpoint. Both backends draw the same tree. If a primitive is missing, add it to `Painter` **and** to
+`IRPainter` so both backends stay in step — do not special-case a backend inside a drawer with
+`isinstance(p, IRPainter)`. A hand-written dedicated scene builder needs a specific performance justification
+(Card List is the last remaining one).
+
+**Fail-open.** A missing, stale, or broken extension must degrade to Pillow, never 500. `try_render_*_payload`
+returns `None` to mean "Pillow, please". Never let a Skia error escape.
+
+**Switches are env-only** (`HARUKI_` prefix, `__` nesting): `HARUKI_DRAWING__USE_SKIA_PLOT`,
+`HARUKI_DRAWING__USE_SKIA_CARD_LIST`. Rollback = flip the env var and restart; the image itself is unchanged.
+Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`, `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_TEXT_HINTING`,
+`HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
+
+**Capability handshake.** The extension exports `IR_CAPABILITY`; `src/sekai/skia_renderer/canvas.py` checks it
+against `REQUIRED_NATIVE_IR_CAPABILITY`. A too-old extension raises `ImportError` and fails open. **When you add
+an IR node, bump BOTH sides and the two CI smoke assertions** (`.github/workflows/quick-check.yml`,
+`.github/workflows/skia-wheels.yml`).
+
+```bash
+# Rebuild the extension after ANY Rust change (otherwise you are testing the old .so)
+uv run maturin develop --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
+
+# cargo test needs an explicit libpython link (pyo3 extension-module breaks a bare `cargo test`)
+PYLIB=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+RUSTFLAGS="-L $PYLIB -C link-arg=-lpython3.14t" cargo test --release \
+  --manifest-path rust/haruki_skia_renderer/Cargo.toml
+
+# Parity sweep over 63 real payloads — the regression gate for ANY rendering change
+uv run python -X gil=0 scripts/skia_parity_sweep.py            # baseline: {'ok': 63}, 0 failures
+```
+
+Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
+an index) and installed conditionally by the Docker build. Wheels are Python-version-specific: **upgrading
+Python means rebuilding wheels first**, otherwise the image silently falls back to Pillow.
+
+**Traps that have already cost real debugging time:**
+
+- **The parity sweep only compares Pillow ↔ Skia on the *current* tree.** Drift that both backends share — e.g.
+  porting a Pillow composer to `Painter` primitives slightly wrong — renders 63/63 green while every image is
+  subtly wrong. When you port an existing Pillow composition, diff it pixel-wise against `main`, not just
+  across backends.
+- **`ImageBg` defaults to `fade=0.1`**, and fade/blur rewrite pixels in the *constructor*. Passing an
+  `AssetImageRef` there forces a full decode **on the event loop** and the ref never reaches the IR. Only pass a
+  ref to `ImageBg(..., blur=False, fade=0)`; otherwise keep `get_img_from_path`.
+- **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
+  A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
+- **Pillow's `paste(im, pos, im)` lerps the destination alpha** toward the layer's, so anti-aliased overlay
+  edges leave the result translucent. Use `paste_with_alpha_blend` (true `alpha_composite`) for overlays — that
+  is also what Skia does for both paste variants.
+- **Resizes are cached globally keyed on the resample filter too.** Pastes use BICUBIC (`PASTE_RESAMPLE`, matching
+  Pillow's `Image.resize()` default); `get_img_resized` defaults to BILINEAR. Don't "unify" them casually.
+
 ## CI
 
 GitHub Actions workflow `.github/workflows/free-threaded-smoke.yml` runs on every push/PR: installs 3.14t, verifies no-GIL imports, compiles all source, runs concurrency smoke tests, and compares GIL vs no-GIL benchmark throughput.
