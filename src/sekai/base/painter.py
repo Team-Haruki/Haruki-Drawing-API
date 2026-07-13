@@ -13,6 +13,7 @@ import logging
 import math
 from multiprocessing import get_context
 import os
+from pathlib import PurePath
 import random
 import threading
 from typing import Any, Literal, Self
@@ -35,7 +36,7 @@ from src.settings import (
 )
 
 from .img_utils import adjust_image_alpha_inplace
-from .utils import run_in_pool
+from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
 # Process pool for CPU-intensive drawing operations
 _process_pool_ctx = get_context("spawn")
@@ -116,6 +117,9 @@ def deterministic_hash(obj: Any) -> str:
             return None
         elif isinstance(_obj, bytes):
             update(_obj)
+            return None
+        elif isinstance(_obj, PurePath):
+            update(str(_obj))
             return None
 
         # 容器类型
@@ -570,6 +574,43 @@ class PainterOperation:
                 self.args[i] = img_dict[img_id]
 
 
+_IMAGE_PASTE_OPS = ("_impl_paste", "_impl_paste_with_alpha_blend")
+# Positional index of the src_rect arg in each paste op's queued args.
+_PASTE_SRC_RECT_INDEX = {"_impl_paste": 6, "_impl_paste_with_alpha_blend": 7}
+
+
+def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
+    """Resolve a lazy paste source to pixels. An ``AssetImageRef`` with a concrete
+    target size goes through the global resize cache, so layers shared across many
+    widgets (rarity stars, card frames, attr icons) resize once per size."""
+    if isinstance(source, Image.Image):
+        return source
+    if isinstance(source, AssetImageRef) and size and size[0] and size[1] and tuple(size) != tuple(source.size):
+        return resolve_image_source_sync(source, target_size=(int(size[0]), int(size[1])))
+    return resolve_image_source_sync(source)
+
+
+def _resolve_op_image_sources(operations: list["PainterOperation"]) -> None:
+    """Materialize lazy image refs in queued paste ops.
+
+    Called before ops cross a process boundary: spawn workers cannot reach this
+    process's image caches, so ship decoded pixels via ``image_to_id``/``image_dict``
+    (the pre-ImageSource behavior) instead of having every worker re-decode from
+    disk with a cold private cache."""
+    for op in operations:
+        if op.func in _IMAGE_PASTE_OPS and op.args:
+            source = op.args[0]
+            if not isinstance(source, Image.Image):
+                if isinstance(op.args, tuple):
+                    op.args = list(op.args)
+                # A src_rect paste crops before the fit, so it must ship full-size pixels
+                # (the crop happens in the paste impl on the worker side).
+                rect_idx = _PASTE_SRC_RECT_INDEX[op.func]
+                has_src_rect = len(op.args) > rect_idx and op.args[rect_idx] is not None
+                size = None if has_src_rect else (op.args[2] if len(op.args) > 2 else None)
+                op.args[0] = _resolve_paste_source(source, size)
+
+
 def _emoji_source_cache_key(kind: str, value: str) -> str:
     digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
     return f"google_{kind}_{digest}"
@@ -693,6 +734,11 @@ class Painter:
         self.w = self.size[0]
         self.h = self.size[1]
         self.region_stack = []
+        # (saved_img, pos_in_parent, size, radius, corners) frames for push/pop_clip_roundrect.
+        # While a clip is open, self.img is a clip-rect-sized buffer and _execute rebases
+        # every op offset by _clip_origin (the buffer origin in canvas coords).
+        self._clip_stack: list[tuple[Image.Image, tuple[int, int], tuple[int, int], float, tuple]] = []
+        self._clip_origin = (0, 0)
 
     def _text(self, text: str, pos: Position, font: Font, fill: Color = BLACK, align: str = "left") -> Self:
         std_size = get_text_size(font, "哇")
@@ -728,11 +774,12 @@ class Painter:
         p = Painter(img, size)
         for op in operations:
             op.id_to_image(image_dict)
-            p.offset = op.offset
+            p.offset = (op.offset[0] - p._clip_origin[0], op.offset[1] - p._clip_origin[1])
             p.size = op.size
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
             func(*op.args)
+        assert not p._clip_stack, "unbalanced push_clip_roundrect/pop_clip"
         debug_print(f"Sub process use time: {datetime.now() - t}")
         return p.img
 
@@ -768,6 +815,18 @@ class Painter:
         # 收集所有图片对象到字典中
         image_dict: dict[str, Image.Image] = {}
         try:
+            # 根据图片大小选择执行方式
+            total_pixels = self.size[0] * self.size[1]
+            use_process_pool = (
+                settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
+            )
+
+            if use_process_pool:
+                # Spawn workers can't see this process's image caches: resolve lazy
+                # refs to decoded pixels here (warm from prefetch_asset_refs) so they
+                # ship via image_dict instead of re-decoding cold in every worker.
+                await run_in_pool(_resolve_op_image_sources, self.operations)
+
             for op in self.operations:
                 op.image_to_id(image_dict)
             total_img_size = 0
@@ -780,12 +839,6 @@ class Painter:
 
             # 执行绘图操作
             t = datetime.now()
-
-            # 根据图片大小选择执行方式
-            total_pixels = self.size[0] * self.size[1]
-            use_process_pool = (
-                settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
-            )
 
             if use_process_pool:
                 loop = asyncio.get_event_loop()
@@ -936,35 +989,72 @@ class Painter:
 
     def paste(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         use_shadow: bool = False,
         shadow_width: int = 8,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
     ) -> Self:
+        """``src_rect`` crops the source to ``(x0, y0, x1, y1)`` in source pixels before
+        the fit (both backends; the IR Image node's ``source_rect``), so slices of one
+        asset draw without a Python-side crop/decode."""
         return self.add_operation(
             "_impl_paste",
             exclude_on_hash,
-            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha),
+            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect),
         )
 
     def paste_with_alpha_blend(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         alpha: float | None = None,
         use_shadow: bool = False,
         shadow_width: int = 8,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
     ) -> Self:
         return self.add_operation(
             "_impl_paste_with_alpha_blend",
             exclude_on_hash,
-            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha),
+            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect),
+        )
+
+    def push_clip_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Clip subsequent draws to a rounded rect until the matching :meth:`pop_clip`.
+
+        Pillow implements this as an offscreen buffer masked back on pop, so
+        backdrop-sampling ops (blurglass, adaptive text color) inside the clip see a
+        transparent backdrop; the Skia path clips on the live surface."""
+        return self.add_operation("_impl_push_clip_roundrect", exclude_on_hash, (pos, size, radius, corners))
+
+    def pop_clip(self, exclude_on_hash: bool = False) -> Self:
+        return self.add_operation("_impl_pop_clip", exclude_on_hash, ())
+
+    def shadow_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.3,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Draw a blurred rounded-rect drop shadow (both backends: blurred rrect, no offset)."""
+        return self.add_operation(
+            "_impl_shadow_roundrect", exclude_on_hash, (pos, size, radius, shadow_width, shadow_alpha)
         )
 
     def rect(
@@ -1116,17 +1206,30 @@ class Painter:
 
     def _impl_paste(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         use_shadow: bool = False,
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
-        if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
+        if src_rect is not None:
+            # Crop precedes the fit, so the whole-asset resize cache does not apply here;
+            # resolve full pixels (cache-decoded for refs) and crop the slice.
+            if not isinstance(sub_img, Image.Image):
+                sub_img = resolve_image_source_sync(sub_img)
+            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
+        else:
+            sub_img = _resolve_paste_source(sub_img, size)
+        # Normalize the mode BEFORE resizing. Pillow forces NEAREST when resizing a palette ("P")
+        # or bilevel ("1") image, so resizing first would resample the palette INDICES and only
+        # then expand to RGBA — blocky edges and no alpha interpolation. Converting first lets the
+        # resize run in RGBA with the real filter. A no-op for RGB/RGBA, which is nearly everything.
         if sub_img.mode not in ("RGB", "RGBA"):
             sub_img = sub_img.convert("RGBA")
+        if size and size != sub_img.size:
+            sub_img = sub_img.resize(size)
 
         if use_shadow:
             w, h = sub_img.size
@@ -1155,16 +1258,90 @@ class Painter:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
+    def _impl_push_clip_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
+    ) -> Self:
+        # pos_in_parent is in the current buffer's coords; the temp buffer covers only
+        # the clip rect (draws are rebased there via _clip_origin, out-of-rect pixels
+        # are dropped by the buffer bounds — which is what clipping means).
+        pos_in_parent = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
+        clip_size = (max(1, int(size[0])), max(1, int(size[1])))
+        self._clip_stack.append((self.img, pos_in_parent, clip_size, radius, tuple(corners)))
+        self._clip_origin = (self._clip_origin[0] + pos_in_parent[0], self._clip_origin[1] + pos_in_parent[1])
+        self.img = Image.new("RGBA", clip_size, TRANSPARENT)
+        return self
+
+    def _impl_pop_clip(self) -> Self:
+        overlay = self.img
+        base, pos_in_parent, size, radius, corners = self._clip_stack.pop()
+        self._clip_origin = (self._clip_origin[0] - pos_in_parent[0], self._clip_origin[1] - pos_in_parent[1])
+        mask = Image.new("L", size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, size[0], size[1]),
+            radius=radius,
+            fill=255,
+            corners=corners,
+        )
+        overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask))
+        self.img = base
+        dx, dy = pos_in_parent
+        if dx < 0 or dy < 0:
+            overlay = overlay.crop((max(0, -dx), max(0, -dy), size[0], size[1]))
+            dx, dy = max(0, dx), max(0, dy)
+        self.img.alpha_composite(overlay, (dx, dy))
+        return self
+
+    def _impl_shadow_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.3,
+    ) -> Self:
+        apos = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
+        w, h = int(size[0]), int(size[1])
+        sw = shadow_width
+        lw, lh = w + sw * 2, h + sw * 2
+        shadow_mask = Image.new("L", (lw, lh), 0)
+        ImageDraw.Draw(shadow_mask).rounded_rectangle(
+            (sw, sw, sw + w, sw + h), radius=radius, fill=int(255 * shadow_alpha)
+        )
+        blurred = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+        shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+        shadow.putalpha(blurred)
+        dx, dy = apos[0] - sw, apos[1] - sw
+        if dx < 0 or dy < 0:
+            shadow = shadow.crop((max(0, -dx), max(0, -dy), lw, lh))
+            dx, dy = max(0, dx), max(0, dy)
+        self.img.alpha_composite(shadow, (dx, dy))
+        return self
+
     def _impl_paste_with_alpha_blend(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         alpha: float | None = None,
         use_shadow: bool = False,
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
+        if src_rect is not None:
+            if not isinstance(sub_img, Image.Image):
+                sub_img = resolve_image_source_sync(sub_img)
+            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
+        else:
+            sub_img = _resolve_paste_source(sub_img, size)
+        # See _impl_paste: convert before resizing, or a "P"/"1" source is resampled NEAREST in
+        # palette space.
+        if sub_img.mode not in ("RGB", "RGBA"):
+            sub_img = sub_img.convert("RGBA")
         if size and size != sub_img.size:
             sub_img = sub_img.resize(size)
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])

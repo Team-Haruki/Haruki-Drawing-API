@@ -12,15 +12,89 @@ resolves them to absolute canvas space. Colors are ``(r, g, b, a)`` 0-255.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 import os
 import re
+import threading
 from typing import Any
 
 Color = Sequence[int]
 Vec2 = Sequence[float]
 Node = dict[str, Any]
+
+
+# ---- process-level PIL font cache -------------------------------------------------
+#
+# Text layout is measured with PIL on the Python side, so ``_pil_font`` sits on the hot path
+# of every Skia render, and the same handful of (font_dir, name, size) triples recur across
+# every request. The cache therefore outlives the IRBuilder — but it is deliberately
+# THREAD-LOCAL, not process-wide, which is also how ``painter.get_font`` does it.
+#
+# Do NOT "improve" this into a shared cache. Pillow guards a FreeTypeFont's internal state
+# with a per-OBJECT critical section, so on a free-threaded build one shared font object
+# serializes every getlength()/getbbox() in the process. Measured on this box with the real
+# SourceHanSans face: 8 threads 897ms shared vs 207ms per-thread, 16 threads 1785ms vs 381ms
+# — a 4-5x throughput loss that grows with the pool size. Per-thread objects cost one extra
+# font construction per thread (~6ms, once) and keep measurement fully parallel.
+_PIL_FONT_CACHE_MAX = 128
+_pil_font_tls = threading.local()
+
+
+def _thread_font_cache() -> OrderedDict[tuple[str, str, int], Any]:
+    cache = getattr(_pil_font_tls, "cache", None)
+    if cache is None:
+        cache = OrderedDict()
+        _pil_font_tls.cache = cache
+    return cache
+
+
+def _load_pil_font(font_dir: str, name: str, px: int) -> tuple[Any, bool]:
+    """Returns (font, resolved). ``resolved`` is False when we fell back to PIL's default."""
+    from PIL import ImageFont
+
+    for ext in (".otf", ".ttf", ".ttc", ""):
+        path = os.path.join(font_dir, name + ext)
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, px), True
+            except OSError:
+                continue
+    return ImageFont.load_default(), False
+
+
+def get_pil_font(font_dir: str, name: str, size: float) -> Any:
+    """Load a PIL font for measurement, from a bounded per-thread cache.
+
+    Keyed by the *resolved* ``(font_dir, name, px)`` — role/alias resolution depends on the
+    calling builder's font map, so a role is not a valid cache key. ``px`` is the integer pixel
+    size actually handed to FreeType, so 32.0 and 32.4 share one entry.
+    """
+    px = max(1, round(float(size)))
+    key = (font_dir, name, px)
+    cache = _thread_font_cache()  # no lock: the dict is owned by this thread
+    font = cache.get(key)
+    if font is not None:
+        cache.move_to_end(key)
+        return font
+
+    font, resolved = _load_pil_font(font_dir, name, px)
+    if not resolved:
+        # A missing font is a misconfigured deployment (wrong font dir, asset volume not
+        # mounted yet). Caching PIL's 10px bitmap default would freeze wrong text metrics in
+        # for the life of the process; re-probing lets it self-heal once the file shows up.
+        return font
+
+    cache[key] = font
+    while len(cache) > _PIL_FONT_CACHE_MAX:
+        cache.popitem(last=False)
+    return font
+
+
+def pil_font_cache_info() -> dict[str, int]:
+    """Entry count and cap of THIS thread's PIL font cache."""
+    return {"size": len(_thread_font_cache()), "max": _PIL_FONT_CACHE_MAX}
 
 
 def _color(c: Color) -> list[int]:
@@ -80,6 +154,11 @@ def parse_colored_segments(markup: str, default: Color | None = None) -> list[tu
 def text_stroke(color: Color, width: float = 1.0) -> Node:
     """An outline for a Text node, drawn under the fill."""
     return {"color": _color(color), "width": float(width)}
+
+
+def clip_rrect(radius: float, corners: Sequence[bool] = (True, True, True, True)) -> Node:
+    """A rounded-rect clip for a Group; the clip rect is the group's offset+size."""
+    return {"kind": "rrect", "radius": float(radius), "corners": [bool(c) for c in corners]}
 
 
 def adaptive_color(
@@ -168,18 +247,17 @@ class IRBuilder:
         self._root_children: list[Node] = []
         self._stack: list[list[Node]] = [self._root_children]
         self._background: Node | None = None
-        self._pil_font_cache: dict[tuple, Any] = {}
 
     def _add(self, node: Node) -> Node:
         self._stack[-1].append(node)
         return node
 
-    @contextmanager
-    def group(
+    def push_group(
         self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None, mask: str | None = None
-    ) -> Iterator[IRBuilder]:
-        """``mask``: image ref (asset path / ``mem:<key>``) whose alpha masks the group's
-        children (DstIn, stretched to the group rect) — Pillow's putalpha semantics."""
+    ) -> Node:
+        """Open a Group node; subsequent nodes become its children until :meth:`pop_group`.
+        Prefer the :meth:`group` context manager unless push/pop must span call sites
+        (e.g. Painter-style push_clip/pop_clip primitives)."""
         node: Node = {"type": "Group", "offset": _vec(offset), "size": _vec(size), "children": []}
         if clip is not None:
             node["clip"] = clip
@@ -187,10 +265,23 @@ class IRBuilder:
             node["mask"] = mask
         self._add(node)
         self._stack.append(node["children"])
+        return node
+
+    def pop_group(self) -> None:
+        assert len(self._stack) > 1, "pop_group without a matching push_group"
+        self._stack.pop()
+
+    @contextmanager
+    def group(
+        self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None, mask: str | None = None
+    ) -> Iterator[IRBuilder]:
+        """``mask``: image ref (asset path / ``mem:<key>``) whose alpha masks the group's
+        children (DstIn, stretched to the group rect) — Pillow's putalpha semantics."""
+        self.push_group(offset, size, clip=clip, mask=mask)
         try:
             yield self
         finally:
-            self._stack.pop()
+            self.pop_group()
 
     def rect(
         self,
@@ -292,39 +383,52 @@ class IRBuilder:
             node["source_rect"] = [float(v) for v in source_rect]
         return self._add(node)
 
+    def self_image(
+        self,
+        pos: Vec2,
+        size: Vec2,
+        source_rect: tuple[float, float, float, float],
+        sampling: str = "linear_mipmap",
+    ) -> Node:
+        """Stretch a snapshot of the ALREADY-RENDERED canvas region ``source_rect``
+        into ``pos``/``size`` (single-pass replacement for render → mem image → render).
+        Requires IR_CAPABILITY >= 5."""
+        return self._add(
+            {
+                "type": "SelfImage",
+                "pos": _vec(pos),
+                "size": _vec(size),
+                "source_rect": [float(v) for v in source_rect],
+                "sampling": sampling,
+            }
+        )
+
+    def splice_root_children(self, other: "IRBuilder") -> None:
+        """Append another builder's root nodes into the current container as-is
+        (coordinates are absolute in both scenes — used to merge a pre-built
+        sub-scene, e.g. the honor badge, into a larger canvas)."""
+        self._stack[-1].extend(other._root_children)
+
     # ---- rich-text layout helpers (Python owns wrapping/measuring; emit Text nodes) ----
 
-    def _pil_font(self, role: str, size: float, font_name: str | None = None) -> Any:
-        """Load a PIL font for measurement, matching the role/name the renderer will use."""
-        from PIL import ImageFont
-
-        key = (role, font_name, round(float(size), 2))
-        cached = self._pil_font_cache.get(key)
-        if cached is not None:
-            return cached
+    def _resolve_font_name(self, role: str, font_name: str | None) -> str:
+        """Map a role/alias to the concrete font file stem this builder's font map names."""
         extra = self._fonts.get("extra", {})
         if font_name and font_name in extra:
-            name = extra[font_name]
-        elif role == "bold":
-            name = self._fonts["bold"]
-        elif role == "heavy":
-            name = self._fonts.get("heavy") or self._fonts["bold"]
-        else:
-            name = self._fonts["default"]
-        font = None
-        for ext in (".otf", ".ttf", ".ttc", ""):
-            path = os.path.join(self._font_dir, name + ext)
-            if os.path.exists(path):
-                try:
-                    font = ImageFont.truetype(path, max(1, round(size)))
-                except OSError:
-                    font = None
-                if font is not None:
-                    break
-        if font is None:
-            font = ImageFont.load_default()
-        self._pil_font_cache[key] = font
-        return font
+            return extra[font_name]
+        if role == "bold":
+            return self._fonts["bold"]
+        if role == "heavy":
+            return self._fonts.get("heavy") or self._fonts["bold"]
+        return self._fonts["default"]
+
+    def _pil_font(self, role: str, size: float, font_name: str | None = None) -> Any:
+        """Load a PIL font for measurement, matching the role/name the renderer will use.
+
+        Backed by the process-wide cache above, so the font objects are shared across
+        IRBuilder instances (i.e. across requests) instead of being rebuilt per render.
+        """
+        return get_pil_font(self._font_dir, self._resolve_font_name(role, font_name), size)
 
     def measure_text(self, text: str, role: str, size: float, font_name: str | None = None) -> float:
         """Approximate rendered width (px) of ``text`` (PIL metrics; near-Skia, used for layout)."""

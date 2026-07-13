@@ -32,8 +32,15 @@ from src.sekai.base.painter import (
     Painter,
     RadialGradient,
 )
-from src.sekai.base.utils import get_pristine_image_asset_path
-from src.sekai.skia_renderer.ir_builder import IRBuilder, adaptive_color, image_shadow, linear_gradient, radial_gradient
+from src.sekai.base.utils import EncodedImageRef, get_pristine_image_asset_path, resolve_image_source_sync
+from src.sekai.skia_renderer.ir_builder import (
+    IRBuilder,
+    adaptive_color,
+    clip_rrect,
+    image_shadow,
+    linear_gradient,
+    radial_gradient,
+)
 
 
 class SkiaUnsupported(RuntimeError):
@@ -84,11 +91,17 @@ class IRPainter(Painter):
         # id(img) -> (img, key). Holding the PIL image keeps its id() from being
         # recycled by the allocator mid-draw — without the strong reference a GC'd
         # temporary image could alias a later image and paste the wrong pixels.
-        self._mem_by_id: dict[int, tuple[Image.Image, str]] = {}
+        self._mem_by_id: dict[int, tuple[Any, str]] = {}
+        # push_clip_roundrect opens an IR Group whose children are group-relative;
+        # _abs subtracts the accumulated origin so widget coords stay untouched.
+        self._group_origin: tuple[float, float] = (0.0, 0.0)
+        self._group_origin_stack: list[tuple[float, float]] = []
 
     # ---- output ----
 
     def build_scene(self) -> tuple[dict, dict[str, bytes]]:
+        if self._group_origin_stack:
+            raise SkiaUnsupported("unbalanced push_clip_roundrect/pop_clip")
         return self._b.build(), self._mem_images
 
     # ---- region model (translation only; restore guards the missing self.img) ----
@@ -108,7 +121,10 @@ class IRPainter(Painter):
     # ---- helpers ----
 
     def _abs(self, pos) -> tuple[float, float]:
-        return (pos[0] + self.offset[0], pos[1] + self.offset[1])
+        return (
+            pos[0] + self.offset[0] - self._group_origin[0],
+            pos[1] + self.offset[1] - self._group_origin[1],
+        )
 
     def _font(self, font) -> tuple[str, float, str | None]:
         """Map a FontDesc / PIL Font to (role, size, font_name)."""
@@ -146,7 +162,16 @@ class IRPainter(Painter):
         self._mem_by_id[id(img)] = (img, key)
         return f"mem:{key}"
 
-    def _image_ref(self, img: Image.Image) -> str:
+    def _image_ref(self, img: Any) -> str:
+        if isinstance(img, EncodedImageRef):
+            entry = self._mem_by_id.get(id(img))
+            if entry is not None and entry[0] is img:
+                return f"mem:{entry[1]}"
+            key = f"m{len(self._mem_images)}"
+            # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
+            self._mem_images[key] = img.data
+            self._mem_by_id[id(img)] = (img, key)
+            return f"mem:{key}"
         source = get_pristine_image_asset_path(img)
         if source is not None:
             try:
@@ -156,6 +181,10 @@ class IRPainter(Painter):
             else:
                 if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
                     return relative.as_posix()
+        if not isinstance(img, Image.Image):
+            # AssetImageRef outside the assets root or vanished on disk: decode
+            # (placeholder on missing) so mem transport still renders something.
+            img = resolve_image_source_sync(img)
         return self._mem_image(img)
 
     def _fill(self, fill, apos, size):
@@ -217,9 +246,14 @@ class IRPainter(Painter):
         overlay_size = ((x1 - x0) + 10, (y1 - y0) + 10)
         return self._fill(fill, apos, overlay_size)
 
-    def _paste(self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha):
+    def _paste(self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect=None):
         apos = self._abs(pos)
-        w, h = size if size else sub_img.size
+        if size:
+            w, h = size
+        elif src_rect is not None:
+            w, h = src_rect[2] - src_rect[0], src_rect[3] - src_rect[1]
+        else:
+            w, h = sub_img.size
         shadow = (
             image_shadow(alpha=shadow_alpha, offset=(0, 0), sigma=max(0.5, shadow_width / 2), color=(0, 0, 0, 255))
             if use_shadow
@@ -232,11 +266,22 @@ class IRPainter(Painter):
             fit="stretch",
             alpha=1.0 if alpha is None else float(alpha),
             shadow=shadow,
+            source_rect=src_rect,
         )
         return self
 
-    def paste(self, sub_img, pos, size=None, use_shadow=False, shadow_width=8, shadow_alpha=0.6, exclude_on_hash=False):
-        return self._paste(sub_img, pos, size, None, use_shadow, shadow_width, shadow_alpha)
+    def paste(
+        self,
+        sub_img,
+        pos,
+        size=None,
+        use_shadow=False,
+        shadow_width=8,
+        shadow_alpha=0.6,
+        src_rect=None,
+        exclude_on_hash=False,
+    ):
+        return self._paste(sub_img, pos, size, None, use_shadow, shadow_width, shadow_alpha, src_rect)
 
     def paste_with_alpha_blend(
         self,
@@ -247,9 +292,36 @@ class IRPainter(Painter):
         use_shadow=False,
         shadow_width=8,
         shadow_alpha=0.6,
+        src_rect=None,
         exclude_on_hash=False,
     ):
-        return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha)
+        return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect)
+
+    def push_clip_roundrect(self, pos, size, radius, corners=(True, True, True, True), exclude_on_hash=False):
+        apos = self._abs(pos)
+        self._b.push_group(apos, (float(size[0]), float(size[1])), clip=clip_rrect(radius, corners))
+        self._group_origin_stack.append(self._group_origin)
+        self._group_origin = (self._group_origin[0] + apos[0], self._group_origin[1] + apos[1])
+        return self
+
+    def pop_clip(self, exclude_on_hash=False):
+        if not self._group_origin_stack:
+            raise SkiaUnsupported("pop_clip without a matching push_clip_roundrect")
+        self._b.pop_group()
+        self._group_origin = self._group_origin_stack.pop()
+        return self
+
+    def shadow_roundrect(self, pos, size, radius, shadow_width=6, shadow_alpha=0.3, exclude_on_hash=False):
+        apos = self._abs(pos)
+        self._b.shadow(
+            apos,
+            (float(size[0]), float(size[1])),
+            float(radius),
+            alpha=float(shadow_alpha),
+            offset=(0, 0),
+            sigma=max(0.5, shadow_width / 2),
+        )
+        return self
 
     def rect(self, pos, size, fill, stroke=None, stroke_width=1, exclude_on_hash=False):
         apos = self._abs(pos)
