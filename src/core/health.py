@@ -3,6 +3,8 @@ from fastapi.responses import JSONResponse
 
 from src.core.debug import evaluate_runtime_readiness, runtime_readiness_thresholds
 from src.sekai.base.utils import get_runtime_cache_stats
+from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
+from src.sekai.skia_renderer.render_stats import get_render_stats
 
 router = APIRouter(tags=["Health"])
 
@@ -45,4 +47,14 @@ async def cache_stats():
     return {
         "status": "healthy",
         "caches": get_runtime_cache_stats(),
+    }
+
+
+@router.get("/render-stats")
+async def render_stats():
+    """Render backend stats: how many requests each endpoint served via Skia / cache / Pillow."""
+    return {
+        "status": "healthy",
+        "renders": get_render_stats(),
+        "skia_payload_cache": get_skia_payload_cache_stats(),
     }

@@ -18,6 +18,7 @@ import math
 import time
 from typing import Any
 
+from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
@@ -53,6 +54,15 @@ from src.sekai.skia_renderer.card_common import (
     validate_asset_path as _validate_asset_path,
 )
 from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.render_stats import (
+    OUTCOME_DISABLED,
+    OUTCOME_ERROR,
+    OUTCOME_SKIA,
+    backend_for_outcome,
+    record_native_metrics,
+    record_render,
+    record_skia_cache_hit,
+)
 from src.settings import (
     ASSETS_BASE_DIR,
     DEFAULT_BOLD_FONT,
@@ -64,6 +74,21 @@ from src.settings import (
 )
 
 logger = logging.getLogger("card.draw.perf")
+
+# card/list hand-builds its own IR (dedicated scene builder), so it never passes through
+# render_canvas_payload and has to record its own outcomes — otherwise it is simply absent from
+# /render-stats and every card/list request logs backend=pillow.
+_CARD_LIST_ENDPOINT = "card_list"
+
+
+def _record_card_list(outcome: str, payload=None) -> None:
+    record_render(_CARD_LIST_ENDPOINT, outcome)
+    backend = backend_for_outcome(outcome)
+    set_render_backend(backend)
+    if payload is not None:
+        payload.backend = backend
+        record_native_metrics(payload.native_metrics)
+
 
 IR_VERSION = 1
 NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
@@ -275,6 +300,7 @@ async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
     cache_key = _list_cache_key(rqd)
     cached = get_skia_payload_cached(cache_key)
     if cached is not None:
+        record_skia_cache_hit(_CARD_LIST_ENDPOINT, cached)
         return cached
     native = _load_native_renderer()
 
@@ -296,6 +322,7 @@ async def render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload:
 
 async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload | None:
     if not settings.drawing.use_skia_card_list:
+        _record_card_list(OUTCOME_DISABLED)
         return None
 
     started = time.perf_counter()
@@ -309,8 +336,12 @@ async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayl
                 elapsed,
                 exc_info=True,
             )
+            _record_card_list(OUTCOME_ERROR)
             return None
         raise
+
+    if payload.backend is None:  # a cache hit already stamped itself
+        _record_card_list(OUTCOME_SKIA, payload)
 
     logger.info(
         "card/list backend=skia total=%.3fs encode=%.3fs bytes=%d image=%sx%s cards=%d",

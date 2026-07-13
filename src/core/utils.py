@@ -6,7 +6,12 @@ import time
 from fastapi.responses import StreamingResponse
 from starlette.background import BackgroundTask
 
-from src.core.debug import current_request_context, set_request_stage, snapshot_process_metrics
+from src.core.debug import (
+    current_render_backend,
+    current_request_context,
+    set_request_stage,
+    snapshot_process_metrics,
+)
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
@@ -72,7 +77,8 @@ async def image_to_response(
     elapsed = time.perf_counter() - started
     byte_len = buffer.getbuffer().nbytes
     logger.info(
-        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs metrics=%s",
+        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
+        "backend=%s metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -82,6 +88,9 @@ async def image_to_response(
         media_type,
         byte_len,
         elapsed,
+        # A request that never attempted Skia leaves the default "pillow"; one where Skia
+        # declined/raised was tagged "skia_fallback" by the render helper.
+        current_render_backend(),
         snapshot_process_metrics(include_asyncio=False),
     )
     set_request_stage("stream_response")
@@ -97,7 +106,8 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Streaming
     request_ctx = current_request_context()
     byte_len = len(payload.image_bytes)
     logger.info(
-        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs metrics=%s",
+        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
+        "backend=%s metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -107,6 +117,9 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Streaming
         payload.media_type,
         byte_len,
         payload.encode_elapsed,
+        # The payload carries its own backend across the heavy-worker process boundary, where a
+        # contextvar set in the child is invisible here; in-process renders set the contextvar.
+        payload.backend or current_render_backend(),
         snapshot_process_metrics(include_asyncio=False),
     )
     set_request_stage("stream_response")

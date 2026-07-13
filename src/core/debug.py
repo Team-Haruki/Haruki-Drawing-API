@@ -28,6 +28,14 @@ _request_id_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_r
 _request_path_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_path", default="-")
 _request_method_var: contextvars.ContextVar[str] = contextvars.ContextVar("drawing_request_method", default="-")
 
+# Which renderer actually served this request: skia | skia_cache | skia_fallback | pillow.
+# Requests that never attempt Skia keep the default.
+DEFAULT_RENDER_BACKEND = "pillow"
+_render_backend_var: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "drawing_render_backend",
+    default=DEFAULT_RENDER_BACKEND,
+)
+
 
 @dataclass(slots=True)
 class RequestStageRef:
@@ -65,6 +73,7 @@ class RequestContextTokens:
     path: contextvars.Token
     method: contextvars.Token
     stage: contextvars.Token
+    render_backend: contextvars.Token | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -83,6 +92,7 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         path=_request_path_var.set(path),
         method=_request_method_var.set(method),
         stage=_request_stage_var.set(RequestStageRef("middleware")),
+        render_backend=_render_backend_var.set(DEFAULT_RENDER_BACKEND),
     )
 
 
@@ -91,6 +101,17 @@ def pop_request_context(tokens: RequestContextTokens) -> None:
     _request_path_var.reset(tokens.path)
     _request_method_var.reset(tokens.method)
     _request_stage_var.reset(tokens.stage)
+    if tokens.render_backend is not None:
+        _render_backend_var.reset(tokens.render_backend)
+
+
+def set_render_backend(backend: str) -> None:
+    """Record which renderer served this request (read back by the image.response log line)."""
+    _render_backend_var.set((backend or "").strip() or DEFAULT_RENDER_BACKEND)
+
+
+def current_render_backend() -> str:
+    return _render_backend_var.get()
 
 
 def set_request_stage(stage: str) -> None:
