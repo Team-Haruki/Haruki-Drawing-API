@@ -9,7 +9,7 @@ dependencies = [
     "matplotlib>=3.11.0",
     "numpy>=2.5.1",
     "emoji==2.15.0",
-    "pillow>=12.1.1",
+    "pillow>=12.3.0",
     "pilmoji==2.0.5",
     "psutil>=7.2.2",
     "pydantic>=2.12.5",
