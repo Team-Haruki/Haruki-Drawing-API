@@ -36,30 +36,41 @@ from PIL import Image, ImageChops
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.skia_parity_sweep import CASES, PAYLOAD_DIR, _load_payload
+from scripts.skia_parity_sweep import CASES, MYSEKAI_REAL, PAYLOAD_DIR, _load_payload
 
 # The baseline renders in a worktree that has no copy of the untracked config/assets.
 _UNTRACKED_NEEDED = ("configs.yaml",)
 
+# configs.yaml points assets at a RELATIVE ./data, and data/ is gitignored (859MB of untracked
+# art), so a fresh worktree has none of it -- every image would resolve to the missing-image
+# placeholder and EVERY case would report drift, at every ref, including HEAD against itself.
+# Link the real asset tree in. (The harness self-check --ref HEAD must come back all-ok; if it
+# does not, the harness is measuring itself, not the code.)
+_ASSET_DIRS = ("data",)
+
 # Rendered with a fixed clock so a day/night background does not diff against itself.
-# The process pool is off because a spawned worker in the baseline worktree cannot import the
-# tree it was launched from (BrokenProcessPool); the thread pool renders the same pixels.
-_RENDER_ENV = {
-    "HARUKI_BG_TEST_HOUR": "12.0",
-    "HARUKI_DRAWING__USE_PROCESS_POOL": "false",
-}
+_RENDER_ENV = {"HARUKI_BG_TEST_HOUR": "12.0"}
+
+# The triangle background draws from the UNSEEDED global `random` module (painter.py
+# _impl_draw_random_triangle_bg), so two renders of the same tree differ by ~12% of pixels all on
+# their own. Seed it identically on both sides or every comparison is pure noise -- this is also
+# why the Pillow-vs-Skia parity sweep can only assert a loose mean diff on these endpoints: their
+# backgrounds never match at all.
+_RNG_SEED = 12345
 
 _BASELINE_DRIVER = textwrap.dedent(
     """
-    import asyncio, importlib, json, sys
+    import asyncio, importlib, json, random, sys
     from pathlib import Path
 
-    payload_path, drawer_mod, model_mod, model_cls, compose_fn, out_png = sys.argv[1:7]
+    payload_path, drawer_mod, model_mod, model_cls, compose_fn, is_list, seed, out_png = sys.argv[1:9]
 
     async def main():
+        random.seed(int(seed))
         mod = importlib.import_module(drawer_mod)
         cls = getattr(importlib.import_module(model_mod), model_cls)
-        req = cls(**json.loads(Path(payload_path).read_text()))
+        raw = json.loads(Path(payload_path).read_text())
+        req = [cls(**item) for item in raw] if is_list == "1" else cls(**raw)
         image = await getattr(mod, compose_fn)(req)
         image.save(out_png)
 
@@ -80,6 +91,25 @@ def _prepare_worktree(ref: str, workdir: Path) -> Path:
         src = REPO_ROOT / name
         if src.exists():
             shutil.copy2(src, tree / name)
+
+    for name in _ASSET_DIRS:
+        src = REPO_ROOT / name
+        dst = tree / name
+        if not src.exists():
+            continue
+        if dst.is_symlink() or dst.is_file():
+            dst.unlink()
+        elif dst.is_dir():
+            shutil.rmtree(dst)
+        dst.symlink_to(src, target_is_directory=True)
+
+    # Turn the process pool OFF in the baseline's config, not via HARUKI_ env: the "env beats
+    # yaml" precedence fix only exists on THIS branch, so on an older baseline the yaml wins and
+    # the env var is ignored. A spawned worker in the throwaway worktree cannot import the tree it
+    # was launched from (BrokenProcessPool); the thread pool renders the same pixels anyway.
+    config = tree / "configs.yaml"
+    if config.exists():
+        config.write_text(config.read_text().replace("use_process_pool: true", "use_process_pool: false"))
     return tree
 
 
@@ -101,6 +131,8 @@ def _render_baseline(tree: Path, case, payload_path: Path, out_png: Path, env_ex
             case.model_module,
             case.model_cls,
             case.compose,
+            "1" if case.is_list else "0",
+            str(_RNG_SEED),
             str(out_png),
         ],
         cwd=tree,
@@ -114,12 +146,34 @@ def _render_baseline(tree: Path, case, payload_path: Path, out_png: Path, env_ex
     return None
 
 
-async def _render_current(case, raw: dict) -> Image.Image:
-    import importlib
+def _exists_on_baseline(tree: Path, case) -> bool:
+    """Whether the baseline tree even has this drawer + model + compose function."""
+    probe = (
+        "import importlib,sys\n"
+        f"m=importlib.import_module({case.drawer!r})\n"
+        f"mm=importlib.import_module({case.model_module!r})\n"
+        f"sys.exit(0 if hasattr(m,{case.compose!r}) and hasattr(mm,{case.model_cls!r}) else 3)\n"
+    )
+    import os
 
+    proc = subprocess.run(
+        [sys.executable, "-X", "gil=0", "-c", probe],
+        cwd=tree,
+        env={**os.environ, "PYTHONPATH": str(tree)},
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+async def _render_current(case, raw) -> Image.Image:
+    import importlib
+    import random
+
+    random.seed(_RNG_SEED)
     mod = importlib.import_module(case.drawer)
     cls = getattr(importlib.import_module(case.model_module), case.model_cls)
-    return await getattr(mod, case.compose)(cls(**raw))
+    req = [cls(**item) for item in raw] if case.is_list else cls(**raw)
+    return await getattr(mod, case.compose)(req)
 
 
 def _diff(a: Image.Image, b: Image.Image) -> dict:
@@ -176,6 +230,14 @@ def main() -> int:
                     rows.append({"case": case.name, "status": "no-payload"})
                     continue
                 row: dict = {"case": case.name}
+                if case.drawer == MYSEKAI_REAL:
+                    # drawer.real.py is gitignored, so the baseline worktree only has the stub.
+                    rows.append({"case": case.name, "status": "no-baseline", "detail": "mysekai drawer.real.py"})
+                    continue
+                if not _exists_on_baseline(tree, case):
+                    # The endpoint did not exist on the baseline ref — nothing to drift from.
+                    rows.append({"case": case.name, "status": "no-baseline", "detail": "endpoint is new"})
+                    continue
                 base_png = out_dir / f"{case.name}_baseline.png"
                 err = _render_baseline(tree, case, payload_file, base_png, env_extra)
                 if err:
