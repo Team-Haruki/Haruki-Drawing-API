@@ -23,6 +23,7 @@ from src.sekai.base.painter import (
     RED,
     WHITE,
     Painter,
+    ascender_top_to_painter_y,
     get_font,
     get_font_desc,
     get_text_size,
@@ -176,18 +177,6 @@ class _ProfileLayoutContext:
     multi_live: MultiLiveTopScoreCount | None
 
 
-def _ascender_top_to_painter_y(font_path: str, font_size: int, ascender_top_y: int) -> int:
-    """Convert an ``ImageDraw.text`` y (its default ``"la"`` anchor = top of the ascender)
-    into the y ``Painter.text`` expects (it anchors the baseline at ``y + ink-height("哇")``).
-
-    The two differ by ``ascent - ink_height("哇")`` — 4px for the bold font at size 20 — so a
-    layout constant lifted straight from the old ImageDraw code lands the text that much too
-    high. The gap is font- and size-dependent, so derive it from the metrics rather than
-    folding a fudge factor into the constant."""
-    font = get_font(font_path, font_size)
-    return ascender_top_y + font.getmetrics()[0] - get_text_size(font, "哇")[1]
-
-
 @dataclass(slots=True)
 class CardFullThumbnailLayers:
     """Header-only layer refs for one card thumbnail (placeholder PIL image when an
@@ -274,7 +263,7 @@ class CardFullThumbnailBox(ImageBox):
             text = rqd.custom_text or f"Lv.{rqd.level}"
             font_size = max(1, round(20 * sy))
             font = get_font_desc(DEFAULT_BOLD_FONT, font_size)
-            y = _ascender_top_to_painter_y(DEFAULT_BOLD_FONT, font_size, h - round(31 * sy))
+            y = ascender_top_to_painter_y(DEFAULT_BOLD_FONT, font_size, h - round(31 * sy))
             p.text(text, (round(6 * sx), y), font=font, fill=WHITE)
         # The overlays go through paste_with_alpha_blend, not paste: Pillow's paste(im, pos, im)
         # lerps the DESTINATION alpha toward the layer's, so an anti-aliased frame/star edge

@@ -99,6 +99,60 @@ def test_painter_unbalanced_clip_raises():
         asyncio.run(main())
 
 
+def test_painter_push_mask_multiplies_the_layer_alpha_by_the_mask():
+    """The Pillow half of the push_mask/pop_mask pair: the layer's alpha times the mask's alpha
+    (Skia's DstIn — see test_ir_painter). Over an opaque layer that is exactly putalpha()."""
+    mask = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    mask.paste(Image.new("RGBA", (20, 40), (255, 255, 255, 255)), (0, 0))  # left half opaque
+    mask.paste(Image.new("RGBA", (10, 40), (255, 255, 255, 128)), (20, 0))  # then half-transparent
+
+    async def main():
+        p = Painter(size=(40, 40))
+        p.push_mask(mask, (0, 0), (40, 40))
+        p.rect((0, 0), (40, 40), fill=(255, 0, 0, 255))
+        p.pop_mask()
+        return await p.get()
+
+    img = asyncio.run(main())
+    assert img.getpixel((10, 20)) == (255, 0, 0, 255)  # mask opaque -> layer untouched
+    assert img.getpixel((25, 20))[3] == 128  # mask half -> alpha multiplied
+    assert img.getpixel((35, 20))[3] == 0  # mask empty -> masked away
+
+
+def test_painter_unbalanced_mask_raises():
+    async def main():
+        p = Painter(size=(20, 20))
+        p.push_mask(Image.new("RGBA", (20, 20), (255, 255, 255, 255)), (0, 0), (20, 20))
+        return await p.get()
+
+    with pytest.raises(AssertionError):
+        asyncio.run(main())
+
+
+def test_painter_paste_src_writes_all_four_channels_verbatim():
+    """paste_src is Porter-Duff Src: it must carry the rgb hiding under fully transparent pixels,
+    because Pillow's paste-lerp reads it back when a later overlay's AA edge crosses them (the
+    honor badge frame over its base art's transparent corners)."""
+    art = Image.new("RGBA", (20, 20), (200, 30, 90, 0))  # rgb under zero alpha
+    art.paste(Image.new("RGBA", (10, 20), (10, 20, 30, 255)), (0, 0))
+
+    async def main():
+        p = Painter(size=(20, 20))
+        p.paste_src(art, (0, 0))
+        return await p.get()
+
+    img = asyncio.run(main())
+    assert img.getpixel((5, 10)) == (10, 20, 30, 255)
+    assert img.getpixel((15, 10)) == (200, 30, 90, 0)  # verbatim, not zeroed by a src-over
+
+    async def blended():
+        p = Painter(size=(20, 20))
+        p.paste_with_alpha_blend(art, (0, 0))
+        return await p.get()
+
+    assert asyncio.run(blended()).getpixel((15, 10)) == (0, 0, 0, 0)  # the difference paste_src exists for
+
+
 def test_painter_shadow_roundrect_draws_blur():
     async def main():
         p = Painter(size=(60, 60))

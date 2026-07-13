@@ -406,6 +406,20 @@ def get_text_offset(font: Font, text: str) -> Position:
     return bbox[0], bbox[1]
 
 
+def ascender_top_to_painter_y(font_path: str, font_size: int, ascender_top_y: int) -> int:
+    """Convert an ``ImageDraw.text`` y (its default ``"la"`` anchor = top of the ascender)
+    into the y ``Painter.text`` expects (it anchors the baseline at ``y + ink-height("哇")``).
+
+    The two differ by ``ascent - ink_height("哇")`` — 4px for the bold font at size 20 — so a
+    layout constant lifted straight from the old ImageDraw code lands the text that much too
+    high. The gap is font- and size-dependent, so derive it from the metrics rather than
+    folding a fudge factor into the constant. Both backends agree: the Skia path resolves
+    ``Painter.text``'s logical top through the same Pillow ink height (IRBuilder's
+    ``cjk_top`` baseline)."""
+    font = get_font(font_path, font_size)
+    return ascender_top_y + font.getmetrics()[0] - get_text_size(font, "哇")[1]
+
+
 def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
     """
     Resize image to keep the aspect ratio, with a maximum size.
@@ -574,9 +588,14 @@ class PainterOperation:
                 self.args[i] = img_dict[img_id]
 
 
-_IMAGE_PASTE_OPS = ("_impl_paste", "_impl_paste_with_alpha_blend")
-# Positional index of the src_rect arg in each paste op's queued args.
-_PASTE_SRC_RECT_INDEX = {"_impl_paste": 6, "_impl_paste_with_alpha_blend": 7}
+# Queued ops whose FIRST arg is an ImageSource, mapped to the positional index of their
+# src_rect arg (None when the op has none — the mask of a push_mask is never cropped).
+_IMAGE_SOURCE_OPS: dict[str, int | None] = {
+    "_impl_paste": 6,
+    "_impl_paste_with_alpha_blend": 7,
+    "_impl_paste_src": 3,
+    "_impl_push_mask": None,
+}
 
 
 def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
@@ -598,15 +617,15 @@ def _resolve_op_image_sources(operations: list["PainterOperation"]) -> None:
     (the pre-ImageSource behavior) instead of having every worker re-decode from
     disk with a cold private cache."""
     for op in operations:
-        if op.func in _IMAGE_PASTE_OPS and op.args:
+        if op.func in _IMAGE_SOURCE_OPS and op.args:
             source = op.args[0]
             if not isinstance(source, Image.Image):
                 if isinstance(op.args, tuple):
                     op.args = list(op.args)
                 # A src_rect paste crops before the fit, so it must ship full-size pixels
                 # (the crop happens in the paste impl on the worker side).
-                rect_idx = _PASTE_SRC_RECT_INDEX[op.func]
-                has_src_rect = len(op.args) > rect_idx and op.args[rect_idx] is not None
+                rect_idx = _IMAGE_SOURCE_OPS[op.func]
+                has_src_rect = rect_idx is not None and len(op.args) > rect_idx and op.args[rect_idx] is not None
                 size = None if has_src_rect else (op.args[2] if len(op.args) > 2 else None)
                 op.args[0] = _resolve_paste_source(source, size)
 
@@ -734,10 +753,12 @@ class Painter:
         self.w = self.size[0]
         self.h = self.size[1]
         self.region_stack = []
-        # (saved_img, pos_in_parent, size, radius, corners) frames for push/pop_clip_roundrect.
-        # While a clip is open, self.img is a clip-rect-sized buffer and _execute rebases
-        # every op offset by _clip_origin (the buffer origin in canvas coords).
-        self._clip_stack: list[tuple[Image.Image, tuple[int, int], tuple[int, int], float, tuple]] = []
+        # Layer frames for push_clip_roundrect/push_mask: (kind, saved_img, pos_in_parent,
+        # size, payload) where payload is (radius, corners) for a roundrect clip and the mask
+        # ImageSource for a mask. While a layer is open, self.img is a layer-rect-sized buffer
+        # and _execute rebases every op offset by _clip_origin (the buffer origin in canvas
+        # coords).
+        self._clip_stack: list[tuple[str, Image.Image, tuple[int, int], tuple[int, int], Any]] = []
         self._clip_origin = (0, 0)
 
     def _text(self, text: str, pos: Position, font: Font, fill: Color = BLACK, align: str = "left") -> Self:
@@ -779,7 +800,7 @@ class Painter:
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
             func(*op.args)
-        assert not p._clip_stack, "unbalanced push_clip_roundrect/pop_clip"
+        assert not p._clip_stack, "unbalanced push_clip_roundrect/push_mask"
         debug_print(f"Sub process use time: {datetime.now() - t}")
         return p.img
 
@@ -1025,6 +1046,30 @@ class Painter:
             (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect),
         )
 
+    def paste_src(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size = None,
+        src_rect: tuple[float, float, float, float] | None = None,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Porter-Duff **Src**: write all four channels verbatim, replacing the destination
+        (Pillow: a mask-less ``Image.paste``). For the BASE layer of an absolute-coordinate
+        composite — the asset that *is* the canvas — where the alternatives both lose data:
+
+        - :meth:`paste` lerps the destination toward the source, which over an empty canvas
+          squares the alpha of an anti-aliased edge;
+        - :meth:`paste_with_alpha_blend` (src-over) is exact wherever the result is visible, but
+          zeroes the rgb UNDER fully transparent pixels — and Pillow's own paste-lerp reads that
+          rgb back when a later overlay's AA edge crosses those pixels (an honor badge's frame
+          over the transparent corners of its base art shifts by up to 228/255 without it).
+
+        The Skia backend draws it src-over, which is identical wherever the destination is empty
+        — the only supported use — except that a premultiplied surface cannot carry rgb under
+        zero alpha at all. That is the pre-existing backend divergence, not a new one."""
+        return self.add_operation("_impl_paste_src", exclude_on_hash, (sub_img, pos, size, src_rect))
+
     def push_clip_roundrect(
         self,
         pos: Position,
@@ -1042,6 +1087,34 @@ class Painter:
 
     def pop_clip(self, exclude_on_hash: bool = False) -> Self:
         return self.add_operation("_impl_pop_clip", exclude_on_hash, ())
+
+    def push_mask(
+        self,
+        mask: ImageSource,
+        pos: Position,
+        size: Size,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Mask subsequent draws with an arbitrary image's alpha until :meth:`pop_mask`.
+
+        The ops between push/pop render into their own layer covering ``pos``/``size``; on pop
+        the layer's alpha is MULTIPLIED by the ALPHA CHANNEL of ``mask`` (stretched to ``size``
+        when it does not match) and the layer is composited back over the destination. That is Skia's
+        ``DstIn`` and the same alpha arithmetic :meth:`push_clip_roundrect` applies with its
+        rounded rect, so both backends agree.
+
+        It reproduces Pillow's ``img.putalpha(mask.split()[3])`` whenever the layer is opaque
+        where the mask is — which is what an absolute-coordinate composite over a solid
+        background gives. A layer that is already translucent there stays translucent (the
+        alphas multiply); ``putalpha`` would have overwritten it.
+
+        Like the roundrect clip, this is an offscreen buffer on the Pillow side, so
+        backdrop-sampling ops (blurglass, adaptive text color) inside a mask see a transparent
+        backdrop."""
+        return self.add_operation("_impl_push_mask", exclude_on_hash, (mask, pos, size))
+
+    def pop_mask(self, exclude_on_hash: bool = False) -> Self:
+        return self.add_operation("_impl_pop_mask", exclude_on_hash, ())
 
     def shadow_roundrect(
         self,
@@ -1214,22 +1287,7 @@ class Painter:
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
-        if src_rect is not None:
-            # Crop precedes the fit, so the whole-asset resize cache does not apply here;
-            # resolve full pixels (cache-decoded for refs) and crop the slice.
-            if not isinstance(sub_img, Image.Image):
-                sub_img = resolve_image_source_sync(sub_img)
-            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
-        else:
-            sub_img = _resolve_paste_source(sub_img, size)
-        # Normalize the mode BEFORE resizing. Pillow forces NEAREST when resizing a palette ("P")
-        # or bilevel ("1") image, so resizing first would resample the palette INDICES and only
-        # then expand to RGBA — blocky edges and no alpha interpolation. Converting first lets the
-        # resize run in RGBA with the real filter. A no-op for RGB/RGBA, which is nearly everything.
-        if sub_img.mode not in ("RGB", "RGBA"):
-            sub_img = sub_img.convert("RGBA")
-        if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
 
         if use_shadow:
             w, h = sub_img.size
@@ -1258,6 +1316,89 @@ class Painter:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
+    def _resolve_sub_img(
+        self,
+        sub_img: ImageSource,
+        size: Size | None,
+        src_rect: tuple[float, float, float, float] | None,
+    ) -> Image.Image:
+        if src_rect is not None:
+            # Crop precedes the fit, so the whole-asset resize cache does not apply here;
+            # resolve full pixels (cache-decoded for refs) and crop the slice.
+            if not isinstance(sub_img, Image.Image):
+                sub_img = resolve_image_source_sync(sub_img)
+            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
+        else:
+            sub_img = _resolve_paste_source(sub_img, size)
+        # Normalize the mode BEFORE resizing. Pillow forces NEAREST when resizing a palette ("P")
+        # or bilevel ("1") image, so resizing first would resample the palette INDICES and only
+        # then expand to RGBA — blocky edges and no alpha interpolation. Converting first lets the
+        # resize run in RGBA with the real filter. A no-op for RGB/RGBA, which is nearly everything.
+        if sub_img.mode not in ("RGB", "RGBA"):
+            sub_img = sub_img.convert("RGBA")
+        if size and size != sub_img.size:
+            sub_img = sub_img.resize(size)
+        return sub_img
+
+    def _impl_paste_src(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size = None,
+        src_rect: tuple[float, float, float, float] | None = None,
+    ) -> Self:
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
+        # No mask -> Pillow copies every channel, alpha included (Porter-Duff Src).
+        self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+        return self
+
+    def _push_layer(self, kind: str, pos: Position, size: Size, payload: Any) -> Self:
+        # pos_in_parent is in the current buffer's coords; the temp buffer covers only
+        # the layer rect (draws are rebased there via _clip_origin, out-of-rect pixels
+        # are dropped by the buffer bounds — which is what clipping means).
+        pos_in_parent = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
+        layer_size = (max(1, int(size[0])), max(1, int(size[1])))
+        self._clip_stack.append((kind, self.img, pos_in_parent, layer_size, payload))
+        self._clip_origin = (self._clip_origin[0] + pos_in_parent[0], self._clip_origin[1] + pos_in_parent[1])
+        self.img = Image.new("RGBA", layer_size, TRANSPARENT)
+        return self
+
+    def _pop_layer(self, kind: str) -> tuple[Image.Image, tuple[int, int], Size, Any]:
+        overlay = self.img
+        frame_kind, base, pos_in_parent, size, payload = self._clip_stack.pop()
+        assert frame_kind == kind, f"layer stack mismatch: popped {kind} off a {frame_kind} layer"
+        self._clip_origin = (self._clip_origin[0] - pos_in_parent[0], self._clip_origin[1] - pos_in_parent[1])
+        self.img = base
+        return overlay, pos_in_parent, size, payload
+
+    def _composite_layer(
+        self,
+        overlay: Image.Image,
+        pos_in_parent: tuple[int, int],
+        size: Size,
+        preserve_hidden_rgb: bool = False,
+    ) -> None:
+        dx, dy = pos_in_parent
+        if dx < 0 or dy < 0:
+            overlay = overlay.crop((max(0, -dx), max(0, -dy), size[0], size[1]))
+            dx, dy = max(0, dx), max(0, dy)
+        if not preserve_hidden_rgb:
+            self.img.alpha_composite(overlay, (dx, dy))
+            return
+        # Pillow's paste-lerp (Painter.paste) mixes in the DESTINATION's rgb even where the
+        # destination alpha is 0, so the rgb hiding under fully transparent pixels is
+        # load-bearing for any overlay whose AA edge later crosses them (an honor badge's frame
+        # over the corners its mask cut away). alpha_composite forces that rgb to black — which
+        # is only correct when nothing reads it. Keep the layer's own rgb there instead: those
+        # pixels stay invisible, and the destination now carries what it would have carried had
+        # the ops drawn straight onto it. (Where the destination is empty this is exactly a Src
+        # write; see paste_src.)
+        box = (dx, dy, dx + overlay.width, dy + overlay.height)
+        region = Image.alpha_composite(self.img.crop(box), overlay)
+        hidden = region.getchannel("A").point(lambda a: 255 if a == 0 else 0)
+        region.paste(overlay, (0, 0), hidden)
+        self.img.paste(region, box)
+
     def _impl_push_clip_roundrect(
         self,
         pos: Position,
@@ -1265,20 +1406,10 @@ class Painter:
         radius: float,
         corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
     ) -> Self:
-        # pos_in_parent is in the current buffer's coords; the temp buffer covers only
-        # the clip rect (draws are rebased there via _clip_origin, out-of-rect pixels
-        # are dropped by the buffer bounds — which is what clipping means).
-        pos_in_parent = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
-        clip_size = (max(1, int(size[0])), max(1, int(size[1])))
-        self._clip_stack.append((self.img, pos_in_parent, clip_size, radius, tuple(corners)))
-        self._clip_origin = (self._clip_origin[0] + pos_in_parent[0], self._clip_origin[1] + pos_in_parent[1])
-        self.img = Image.new("RGBA", clip_size, TRANSPARENT)
-        return self
+        return self._push_layer("clip", pos, size, (radius, tuple(corners)))
 
     def _impl_pop_clip(self) -> Self:
-        overlay = self.img
-        base, pos_in_parent, size, radius, corners = self._clip_stack.pop()
-        self._clip_origin = (self._clip_origin[0] - pos_in_parent[0], self._clip_origin[1] - pos_in_parent[1])
+        overlay, pos_in_parent, size, (radius, corners) = self._pop_layer("clip")
         mask = Image.new("L", size, 0)
         ImageDraw.Draw(mask).rounded_rectangle(
             (0, 0, size[0], size[1]),
@@ -1287,12 +1418,23 @@ class Painter:
             corners=corners,
         )
         overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask))
-        self.img = base
-        dx, dy = pos_in_parent
-        if dx < 0 or dy < 0:
-            overlay = overlay.crop((max(0, -dx), max(0, -dy), size[0], size[1]))
-            dx, dy = max(0, dx), max(0, dy)
-        self.img.alpha_composite(overlay, (dx, dy))
+        self._composite_layer(overlay, pos_in_parent, size)
+        return self
+
+    def _impl_push_mask(self, mask: ImageSource, pos: Position, size: Size) -> Self:
+        return self._push_layer("mask", pos, size, mask)
+
+    def _impl_pop_mask(self) -> Self:
+        overlay, pos_in_parent, size, mask_source = self._pop_layer("mask")
+        mask_img = _resolve_paste_source(mask_source, size)
+        # The mask is the image's ALPHA channel — the same channel Skia's DstIn samples, and
+        # what ``mask.split()[3]`` means on the Pillow side.
+        if mask_img.mode != "RGBA":
+            mask_img = mask_img.convert("RGBA")
+        if mask_img.size != size:
+            mask_img = mask_img.resize(size)
+        overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask_img.getchannel("A")))
+        self._composite_layer(overlay, pos_in_parent, size, preserve_hidden_rgb=True)
         return self
 
     def _impl_shadow_roundrect(
@@ -1332,18 +1474,7 @@ class Painter:
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
-        if src_rect is not None:
-            if not isinstance(sub_img, Image.Image):
-                sub_img = resolve_image_source_sync(sub_img)
-            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
-        else:
-            sub_img = _resolve_paste_source(sub_img, size)
-        # See _impl_paste: convert before resizing, or a "P"/"1" source is resampled NEAREST in
-        # palette space.
-        if sub_img.mode not in ("RGB", "RGBA"):
-            sub_img = sub_img.convert("RGBA")
-        if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
         overlay = Image.new("RGBA", sub_img.size, (0, 0, 0, 0))
         overlay.paste(sub_img, (0, 0))

@@ -296,7 +296,7 @@ fn validate_raw_image(
 /// Capability level of the IR this build understands. Bump when nodes/fields are added so
 /// the Python side can refuse (fail-open to Pillow) instead of silently dropping features
 /// when an older wheel meets newer IR. 4 = capability 3 + per-image sampling intent.
-pub const IR_CAPABILITY: u32 = 5;
+pub const IR_CAPABILITY: u32 = 6;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {

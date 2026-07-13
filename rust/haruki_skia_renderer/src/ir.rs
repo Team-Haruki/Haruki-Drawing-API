@@ -372,6 +372,20 @@ pub struct ImageNode {
     /// Optional drop shadow from the image's alpha silhouette, drawn behind the image.
     #[serde(default)]
     pub shadow: Option<ImageShadow>,
+    /// Porter-Duff blend for the image itself. Default `SrcOver` (composite over what is there).
+    /// `Src` REPLACES the destination in the drawn rect, all four channels verbatim — the
+    /// Pillow-side equivalent of a mask-less `Image.paste`, which `Painter.paste_src` needs so
+    /// that the two backends do not silently disagree wherever the destination is non-empty.
+    #[serde(default)]
+    pub blend: ImageBlend,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageBlend {
+    #[default]
+    SrcOver,
+    Src,
 }
 
 fn default_alpha() -> f32 {

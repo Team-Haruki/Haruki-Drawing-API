@@ -1,26 +1,21 @@
-"""Skia Render-IR path for the /honor endpoint (badge scene + chart-style watermark shell).
+"""Skia Render-IR path for the /honor endpoint (shared badge tree + chart-style watermark shell).
 
-``drawer._compose_full_honor_image_sync`` (pure Pillow) stays the ground truth; this module
-rebuilds the same absolute-coordinate composite as IR v2 nodes:
+The badge itself is NOT built here: it is the same ``HonorBadgeBox`` widget tree
+(``honor.widget``) that the Pillow path renders, drawn into an ``IRPainter`` by
+``skia_renderer.canvas.build_canvas_ir``. This module only owns the shell that the widget tree
+cannot express — the raster watermark footer the route would otherwise add AFTER the compose
+(``add_request_watermark_to_image``: a stretched copy of the image's own bottom rows plus two
+shadowed text lines). That footer samples the rendered canvas, so it is a ``SelfImage`` node,
+and it is drawn in the SAME native pass: the badge sub-scene is spliced into the final builder
+(chart/drawer.py does the same).
 
-- ``Image`` nodes with ``source_rect`` crops cover the bonds half-background paste and the
-  chara-icon mid-line crops;
-- ``group(mask=...)`` (saveLayer + DstIn) covers ``img.putalpha(mask.split()[3])``;
-- the raster watermark footer the route otherwise adds via ``add_request_watermark_to_image``
-  is drawn in the SAME pass: the badge sub-scene is spliced into the final builder and the
-  footer strip samples the already-rendered canvas with a ``SelfImage`` node. (It used to take
-  two native passes with an intermediate PNG; that is gone.) Python never touches pixels.
+NOTE Python DOES decode pixels on this path: the shared badge tree resizes/crops the bonds chara
+icons in Python (in the legacy resize-then-crop order — doing it as an IR source_rect crop was
+crop-then-scale, which is what had drifted) and ships them as `mem:` rasters. They are small and go
+through the global image cache.
 
-Layout decisions (canvas size, crop windows, text measurement) run in Python against the
-asset headers / PIL font metrics so every coordinate matches the Pillow composer. Any
-unsupported shape or unreadable *required* asset returns ``None`` so the caller falls back
+Any unsupported shape or unreadable *required* asset returns ``None`` so the caller falls back
 to the Pillow path, which raises the canonical user-visible error.
-
-NOTE this module is a hand-written IR scene builder — it does NOT go through plot.py's widget
-tree or IRPainter, so the honor layout exists TWICE in Python: here, and in
-``drawer._compose_full_honor_image_sync``. That is the same two-layouts-by-hand hazard that
-retired ``card_render.py``; any geometry change must be made on both sides. Collapsing honor
-onto the shared widget tree is tracked in docs/skia-migration-todo.md.
 """
 
 from __future__ import annotations
@@ -28,8 +23,6 @@ from __future__ import annotations
 import json
 import logging
 import time
-
-from PIL import Image
 
 from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
@@ -44,7 +37,7 @@ from src.sekai.base.draw import (
 )
 from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.base.utils import run_in_pool
-from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
+from src.sekai.skia_renderer.canvas import build_canvas_ir, load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import (
@@ -65,7 +58,7 @@ logger = logging.getLogger("honor.draw.perf")
 
 # /render-stats + the ``backend=`` log field key on this name (the route is /api/pjsk/honor, and
 # every parity payload variant — honor/honor_bonds/honor_birthday/honor_fcap — is this one
-# endpoint). Like the chart path, this module hand-builds its IR around a two-pass watermark
+# endpoint). Like the chart path, this module wraps the shared tree in a two-layer watermark
 # shell, so it never goes through render_canvas_payload and has to record its own outcome —
 # exactly one per render attempt, mirroring the canvas helper.
 HONOR_ENDPOINT = "honor"
@@ -87,20 +80,6 @@ def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
         record_native_metrics(payload.native_metrics)
 
 
-def _image_size(path: str | None) -> tuple[int, int] | None:
-    """Natural pixel size straight from the file header (no pixel decode).
-
-    Joins like ``get_img_from_path`` (leading-slash safe). ``None`` = missing/unreadable.
-    """
-    if not path or not path.strip():
-        return None
-    try:
-        with Image.open(ASSETS_BASE_DIR / path.lstrip("/")) as img:
-            return img.size
-    except (FileNotFoundError, OSError, ValueError):
-        return None
-
-
 def _new_builder(width: int, height: int, export_format: str = "png") -> IRBuilder:
     return IRBuilder(
         width,
@@ -114,214 +93,9 @@ def _new_builder(width: int, height: int, export_format: str = "png") -> IRBuild
     )
 
 
-def _resolve_event_rank_pos(base: tuple[int, int], rank: tuple[int, int], is_main: bool) -> tuple[int, int]:
-    """Size-based mirror of ``drawer.resolve_event_rank_position`` (full-cover overlays at 0,0)."""
-    if rank[0] >= base[0] - 8 and rank[1] >= base[1] - 8:
-        return (0, 0)
-    return (190, 0) if is_main else (34, 42)
-
-
-def _build_badge_scene(rqd: HonorRequest) -> IRBuilder | None:
-    """IR mirror of ``drawer._compose_full_honor_image_sync`` (same branches and coordinates).
-
-    Returns ``None`` when the Pillow path must handle the request instead: either the
-    composer would return ``None`` too, or a *required* asset cannot be probed (Pillow then
-    raises the canonical error). Only ``rank_img`` is optional, matching
-    ``load_optional_image``.
-    """
-    from src.sekai.honor.drawer import (  # lazy: drawer re-exports from this module at its end
-        BONDS_BACKGROUND_CENTER_OVERLAP,
-        honor_group_uses_scroll_level,
-        is_world_link_rank_style,
-    )
-
-    is_main = rqd.is_main_honor
-    htype = rqd.honor_type
-    hlv = rqd.honor_level
-
-    # Assets the Pillow composer loads unconditionally (raising when missing).
-    lv_size = _image_size(rqd.lv_img_path) if rqd.lv_img_path else None
-    if rqd.lv_img_path and lv_size is None:
-        return None
-    lv6_size = _image_size(rqd.lv6_img_path) if rqd.lv6_img_path else None
-    if rqd.lv6_img_path and lv6_size is None:
-        return None
-    frame_size = _image_size(rqd.frame_img_path) if rqd.frame_img_path else None
-    if rqd.frame_img_path and frame_size is None:
-        return None
-    icon_available = False
-    if htype == "birthday" and rqd.frame_degree_level_img_path:
-        if _image_size(rqd.frame_degree_level_img_path) is None:
-            return None
-        icon_available = True
-
-    def add_frame(b: IRBuilder, w: int, h: int, rarity: str | None, level: int | None = None) -> None:
-        if frame_size is None:
-            return
-        b.image(rqd.frame_img_path, (8, 0) if rarity == "low" else (0, 0), frame_size)
-        if htype == "birthday":
-            if not icon_available or not level:
-                return
-            sz = 18
-            for i in range(level):
-                b.image(rqd.frame_degree_level_img_path, (int(w / 2 - sz * level / 2 + i * sz), h - sz), (sz, sz))
-
-    def add_lv_star(b: IRBuilder, level: int) -> None:
-        if level > 10:
-            level = level - 10
-        if lv_size is not None:
-            for i in range(0, min(level, 5)):
-                b.image(rqd.lv_img_path, (50 + 16 * i, 61), lv_size)
-        if lv6_size is not None:
-            for i in range(5, level):
-                b.image(rqd.lv6_img_path, (50 + 16 * (i - 5), 61), lv6_size)
-
-    def add_fcap_lv(b: IRBuilder) -> None:
-        lv_text = str(rqd.fc_or_ap_level or "")
-        font = get_font(path=DEFAULT_BOLD_FONT, size=22)
-        text_w, _ = get_text_size(font, lv_text)
-        offset = 215 if is_main else 37
-        # PIL ImageDraw.text default anchor is left/top-of-ascent -> IR "ascender" baseline.
-        b.text(lv_text, (offset + 50 - text_w // 2, 46), "bold", 22, baseline="ascender", fill=(255, 255, 255, 255))
-
-    if rqd.is_empty:
-        empty_size = _image_size(rqd.empty_honor_path) if rqd.empty_honor_path else None
-        if rqd.empty_honor_path and empty_size is None:
-            return None
-        if empty_size is None:
-            return None
-        padding = 3
-        b = _new_builder(empty_size[0] + padding * 2, empty_size[1] + padding * 2)
-        b.image(rqd.empty_honor_path, (padding, padding), empty_size)
-        return b
-
-    if htype in ("normal", "birthday"):
-        rarity = rqd.honor_rarity
-        gtype = rqd.group_type
-        base_size = _image_size(rqd.honor_img_path) if rqd.honor_img_path else None
-        if rqd.honor_img_path and base_size is None:
-            return None
-        if base_size is None:
-            return None
-        w, h = base_size
-        b = _new_builder(w, h)
-        b.image(rqd.honor_img_path, (0, 0), (w, h))
-        add_frame(b, w, h, rarity, hlv)
-
-        rank_size = _image_size(rqd.rank_img_path) if rqd.rank_img_path else None  # optional asset
-        if rank_size is not None:
-            if gtype == "rank_match":
-                rank_pos = (190, 0) if is_main else (17, 42)
-            elif is_world_link_rank_style(gtype, rqd.rank_img_path):
-                rank_pos = (0, 0)
-            else:
-                rank_pos = _resolve_event_rank_pos(base_size, rank_size, is_main)
-            b.image(rqd.rank_img_path, rank_pos, rank_size)
-
-        if honor_group_uses_scroll_level(gtype):
-            scroll_size = _image_size(rqd.scroll_img_path) if rqd.scroll_img_path else None
-            if rqd.scroll_img_path and scroll_size is None:
-                return None
-            if scroll_size is not None:
-                b.image(rqd.scroll_img_path, (215, 3) if is_main else (37, 3), scroll_size)
-            if gtype == "fc_ap" or scroll_size is not None:
-                add_fcap_lv(b)
-        elif gtype in ("character", "achievement"):
-            add_lv_star(b, hlv)
-        return b
-
-    if htype == "bonds":
-        rarity = rqd.honor_rarity
-        left_size = _image_size(rqd.bonds_bg_path) if rqd.bonds_bg_path else None
-        if rqd.bonds_bg_path and left_size is None:
-            return None
-        right_size = _image_size(rqd.bonds_bg_path2) if rqd.bonds_bg_path2 else None
-        if rqd.bonds_bg_path2 and right_size is None:
-            return None
-        if left_size is None or right_size is None:
-            return None
-        c1_size = _image_size(rqd.chara_icon_path) if rqd.chara_icon_path else None
-        if rqd.chara_icon_path and c1_size is None:
-            return None
-        c2_size = _image_size(rqd.chara_icon_path2) if rqd.chara_icon_path2 else None
-        if rqd.chara_icon_path2 and c2_size is None:
-            return None
-        mask_path = rqd.mask_img_path
-        if mask_path and _image_size(mask_path) is None:
-            return None
-        word_size = _image_size(rqd.word_img_path) if rqd.word_img_path else None
-        if rqd.word_img_path and word_size is None:
-            return None
-
-        w, h = right_size
-        b = _new_builder(w, h)
-
-        def bonds_background(bb: IRBuilder) -> None:
-            # _paste_bonds_background: right bg full, left bg's left half (mid + overlap) on top.
-            bb.image(rqd.bonds_bg_path2, (0, 0), (w, h))
-            left_width = min(w, w // 2 + BONDS_BACKGROUND_CENTER_OVERLAP)
-            lw, lh = left_size
-            if (lw, lh) == (w, h):
-                source = (0.0, 0.0, float(left_width), float(lh))
-            else:  # Pillow resizes left to the right bg's size before cropping
-                source = (0.0, 0.0, left_width * lw / w, float(lh))
-            bb.image(rqd.bonds_bg_path, (0, 0), (left_width, h), source_rect=source)
-
-        if c1_size is None or c2_size is None:
-            # Pillow returns the bare background composite (no mask/frame/word/stars).
-            bonds_background(b)
-            return b
-
-        # Center-anchored face layout (see the drawer's legacy chara_id note): 0.8x scale,
-        # then crop each icon at the canvas mid-line.
-        c1w0, c1h0 = c1_size
-        c2w0, c2h0 = c2_size
-        scale = 0.8
-        c1w, c1h = int(c1w0 * scale), int(c1h0 * scale)
-        c2w, c2h = int(c2w0 * scale), int(c2h0 * scale)
-        c1_face = int((c1w0 // 2) * scale)
-        c2_face = int((c2w0 // 2) * scale)
-
-        offset_to_mid = 120 if is_main else 30
-        mid = w // 2
-        c1_face_x = mid - offset_to_mid
-        c2_face_x = mid + offset_to_mid
-
-        overlap1 = (c1_face_x - c1_face + c1w) - mid
-        c1_draw_w = c1w - overlap1 if overlap1 > 0 else c1w
-        overlap2 = mid - (c2_face_x - c2_face)
-        c2_crop = overlap2 if overlap2 > 0 else 0
-        c2_draw_w = c2w - c2_crop
-        c2_face -= c2_crop
-
-        def bonds_children(bb: IRBuilder) -> None:
-            bonds_background(bb)
-            if c1_draw_w <= 0 or c2_draw_w <= 0:
-                return
-            c1_src = None if c1_draw_w == c1w else (0.0, 0.0, c1_draw_w * c1w0 / c1w, float(c1h0))
-            bb.image(rqd.chara_icon_path, (c1_face_x - c1_face, h - c1h), (c1_draw_w, c1h), source_rect=c1_src)
-            c2_src = None if c2_crop == 0 else (c2_crop * c2w0 / c2w, 0.0, float(c2w0), float(c2h0))
-            bb.image(rqd.chara_icon_path2, (c2_face_x - c2_face, h - c2h), (c2_draw_w, c2h), source_rect=c2_src)
-
-        if mask_path:
-            # putalpha(mask.split()[3]) over the bg+icon composite only (frame/word/stars after).
-            with b.group((0, 0), (w, h), mask=mask_path):
-                bonds_children(b)
-        else:
-            bonds_children(b)
-
-        add_frame(b, w, h, rarity)
-        if is_main and word_size is not None:
-            b.image(rqd.word_img_path, (int(190 - word_size[0] / 2), int(40 - word_size[1] / 2)), word_size)
-        add_lv_star(b, hlv)
-        return b
-
-    return None
-
-
 async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayload | None:
-    """Skia path for the /honor route: badge scene + the route's raster watermark footer
-    (``add_request_watermark_to_image`` equivalent) rendered natively in two passes.
+    """Skia path for the /honor route: the shared badge tree + the route's raster watermark
+    footer (``add_request_watermark_to_image`` equivalent), rendered natively in one pass.
     Returns ``None`` (gate off / unsupported / failure) so the caller falls back to Pillow.
     """
     if not skia_plot_enabled():
@@ -334,7 +108,9 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         _record(OUTCOME_FALLBACK)
         return None
 
-    from src.sekai.honor.drawer import _build_full_honor_cache_key  # lazy: avoids a circular import
+    # lazy: the drawer re-exports this module's entry point at its end
+    from src.sekai.honor.drawer import _build_full_honor_cache_key, load_honor_images
+    from src.sekai.honor.widget import build_honor_badge_canvas
 
     # The cached payload embeds the footer, so the key must cover everything the footer text
     # derives from (dt/timezone) on top of the Pillow composed key (which excludes timezone).
@@ -345,10 +121,22 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         _record(OUTCOME_CACHE_HIT, cached)
         return cached
 
+    try:
+        images = await load_honor_images(rqd)
+    except Exception:
+        # FAIL-OPEN. Not just (FileNotFoundError, OSError, ValueError): a corrupt PNG can raise
+        # DecompressionBombError or a plugin's struct.error, and anything that escapes here would
+        # skip _record entirely and 500 instead of letting Pillow render (and raise the canonical
+        # user-visible message).
+        logger.info("honor assets not loadable for the Skia path; falling back to Pillow", exc_info=True)
+        _record(OUTCOME_FALLBACK)
+        return None
+
     def _render():
-        badge = _build_badge_scene(rqd)
-        if badge is None:
+        canvas = build_honor_badge_canvas(rqd, images)
+        if canvas is None:
             return None
+        badge, mem_images = build_canvas_ir(canvas, export_format=EXPORT_IMAGE_FORMAT)
         w, h = badge.width, badge.height
 
         # Single pass: badge nodes + stretched bottom-strip footer (a SelfImage snapshot of
@@ -357,8 +145,9 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         font_size, lines, text_w, text_h = get_watermark_render_spec(watermark_text, w - WATERMARK_RIGHT_OFFSET, 12)
         footer_h = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
         b = _new_builder(w, h + footer_h, export_format=EXPORT_IMAGE_FORMAT)
-        # Clip to the badge rect: the old pass-1 canvas cropped any overflow at (w, h),
-        # matching the Pillow composer's canvas bounds.
+        # Clip to the badge rect: the badge canvas is (w, h), so anything the widget draws
+        # outside it (the bonds chara icons overhang) must be cropped exactly as the Pillow
+        # canvas bounds crop it.
         with b.group((0, 0), (w, h), clip={"kind": "rect"}):
             b.splice_root_children(badge)
         sample_h = max(1, min(h, footer_h))
@@ -374,14 +163,15 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
             b.text(line, (lx + 1, ly + 1), "default", font_size, baseline="ascender", fill=(75, 75, 75, 255))
             b.text(line, (lx, ly), "default", font_size, baseline="ascender", fill=(255, 255, 255, 255))
         ir_json = json.dumps(b.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        return native.render_scene(ir_json, {})
+        # The badge tree ships the bonds chara icons as runtime (mem:) images; they must travel.
+        return native.render_scene(ir_json, mem_images)
 
     started = time.perf_counter()
     try:
         result = await run_in_pool(_render)
         if result is None:
-            # _build_badge_scene declined (unsupported honor shape / unreadable required asset):
-            # a fallback, not an error — Pillow renders it and raises the canonical message.
+            # The request is not renderable at all (the Pillow composer would return None too):
+            # a fallback, not an error.
             _record(OUTCOME_FALLBACK)
             return None
         payload = payload_from_native(result)

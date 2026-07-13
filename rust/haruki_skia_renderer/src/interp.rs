@@ -1381,6 +1381,13 @@ fn draw_image_placed(
     if let Some(tint) = &node.tint {
         paint.set_color_filter(tint_filter(tint));
     }
+    if node.blend == ImageBlend::Src {
+        // Replace the destination rather than compositing over it, so `Painter.paste_src` means
+        // the same thing on both backends. Anti-aliasing must be off: an AA edge under kSrc would
+        // write partially-transparent pixels OUTSIDE the source's own coverage.
+        paint.set_blend_mode(BlendMode::Src);
+        paint.set_anti_alias(false);
+    }
     canvas.draw_image_rect_with_sampling_options(image, src_arg, dst, sampling, &paint);
 }
 

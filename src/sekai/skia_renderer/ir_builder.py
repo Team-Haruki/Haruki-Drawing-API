@@ -362,7 +362,10 @@ class IRBuilder:
         shadow: Node | None = None,
         source_rect: tuple[float, float, float, float] | None = None,
         sampling: str = "linear_mipmap",
+        blend: str = "src_over",
     ) -> Node:
+        """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
+        the mask-less ``Image.paste``); the default composites over it. Requires IR_CAPABILITY >= 6."""
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -372,6 +375,8 @@ class IRBuilder:
             "sampling": sampling,
             "alpha": alpha,
         }
+        if blend != "src_over":
+            node["blend"] = blend
         if anchor[0] or anchor[1]:
             node["anchor"] = _vec(anchor)
         if tint is not None:
@@ -406,7 +411,17 @@ class IRBuilder:
     def splice_root_children(self, other: "IRBuilder") -> None:
         """Append another builder's root nodes into the current container as-is
         (coordinates are absolute in both scenes — used to merge a pre-built
-        sub-scene, e.g. the honor badge, into a larger canvas)."""
+        sub-scene, e.g. the honor badge, into a larger canvas).
+
+        The sub-scene's font map comes with it: its Text nodes address fonts by role/name, so a
+        role (``heavy``/``emoji``) or an ``extra`` font that only the sub-scene registered would
+        otherwise resolve against THIS scene's map and silently fall back to another face."""
+        for role in ("heavy", "emoji"):
+            if role not in self._fonts and role in other._fonts:
+                self._fonts[role] = other._fonts[role]
+        extra = other._fonts.get("extra")
+        if extra:
+            self._fonts.setdefault("extra", {}).update(extra)
         self._stack[-1].extend(other._root_children)
 
     # ---- rich-text layout helpers (Python owns wrapping/measuring; emit Text nodes) ----

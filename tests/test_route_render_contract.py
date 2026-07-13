@@ -13,6 +13,7 @@ exemption in the lists below, not an accident.
 
 from __future__ import annotations
 
+import ast
 import inspect
 from pathlib import Path
 
@@ -90,12 +91,13 @@ def test_the_heavy_worker_routes_really_do_render_via_skia():
 _MAY_HAND_BUILD_IR = {
     "src/sekai/skia_renderer/ir_builder.py",  # the builder itself
     "src/sekai/skia_renderer/ir_painter.py",  # the widget-tree lowering
+    "src/sekai/skia_renderer/canvas.py",  # lowers a widget tree via build_canvas_ir()
     # The chart image comes from the pjsekai-scores-rs crate on BOTH backends; the IR here is only
     # the watermark footer shell around that raster, not a second layout of the chart.
     "src/sekai/chart/drawer.py",
-    # honor still hand-builds its badge scene while honor/drawer.py keeps a full PIL compositor —
-    # i.e. the honor layout genuinely exists twice. Tracked in docs/skia-migration-todo.md; this
-    # entry should disappear when honor moves onto the shared widget tree.
+    # Same shape as chart: the badge is the shared HonorBadgeBox widget tree (spliced in via
+    # build_canvas_ir); the IR built here is ONLY the raster watermark footer the route adds after
+    # the compose — a SelfImage snapshot of the canvas, which no widget can express.
     "src/sekai/honor/skia.py",
 }
 
@@ -104,16 +106,29 @@ def test_no_new_hand_written_scene_builders():
     """The widget tree is the only layout carrier. A dedicated IR scene builder means the layout is
     written twice and has to be kept in step by hand — which is exactly how card/list drifted from
     its Pillow tree, and why card_render.py was deleted."""
+    # Watch BOTH doors. Constructing an IRBuilder is the obvious one. The subtle one is
+    # build_canvas_ir(): it hands back a LIVE, MUTABLE builder so a widget tree can be spliced into
+    # a larger scene — which also lets a caller emit its own .image()/.text() nodes onto it and
+    # hand-build a second layout without ever naming IRBuilder. Guarding only the first door leaves
+    # the second one standing open.
+    #
+    # Scan the IMPORTS, not the raw text: you cannot use either without importing it, and a text
+    # scan trips over any comment that merely names them (this test's own explanation did).
+    doors = {"IRBuilder", "build_canvas_ir"}
     offenders = []
     for py in (REPO_ROOT / "src" / "sekai").rglob("*.py"):
         rel = py.relative_to(REPO_ROOT).as_posix()
         if rel in _MAY_HAND_BUILD_IR:
             continue
-        if "IRBuilder" in py.read_text(encoding="utf-8"):
-            offenders.append(rel)
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=rel)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and any(alias.name in doors for alias in node.names):
+                offenders.append(rel)
+                break
 
     assert not offenders, (
-        "these modules hand-build an IR scene instead of drawing the shared widget tree:\n  "
+        "these modules hand-build an IR scene (or take a mutable builder from build_canvas_ir) "
+        "instead of drawing the shared widget tree:\n  "
         + "\n  ".join(offenders)
         + "\nDraw a plot.py widget tree both backends can render, or add an argued exemption to "
         "_MAY_HAND_BUILD_IR."

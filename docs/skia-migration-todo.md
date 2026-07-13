@@ -4,9 +4,9 @@
 > **`use_skia_plot` 是唯一的 Skia 门控,默认开**——`use_skia_card_list` / `skia_card_list_fallback_to_pillow` /
 > `use_skia_card_box` 已随手写 IR builder 一起从 settings.py 删除,不要再引用。card/box 与 card/list 现在都画
 > 共享 widget 树(无专用 scene builder),Chart raw-N32 单次编码已落地。
-> **注意**:「画共享 widget 树」只对 card 系与其余 plot 端点成立——**honor 与 chart 至今仍各自手写 IR**
-> (`IRBuilder` 直出,不经 widget 树/IRPainter),别把「无专用 scene builder」当成全局结论,
-> 详见 ⚪ 收尾与防漂移 的「honor / chart 仍手写 IR」条。
+> **注意**:**所有端点的布局都已收敛到共享 widget 树**(honor 于 2026-07-14 收尾)。`honor/skia.py` 与
+> `chart/drawer.py` 仍直接用 `IRBuilder`,但包的是 **widget 树表达不了的栅格页脚外壳**(水印条带 =
+> `SelfImage` 采样已渲染画布),不是第二套布局;详见 ⚪ 收尾与防漂移 的对应条目。
 > 本清单是切换后的收尾与生产化工作,按"挡在生产收益前面 → 端点残余 → 质量项 → 性能 → 收尾"排序。
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
@@ -39,11 +39,11 @@
       (进程内走 contextvar,跨 heavy worker 进程走 `EncodedImagePayload.backend` 带回、父进程 replay);
       `_SkiaPayloadCache` 拆到 `payload_cache.py`,接入 `/cache/stats` 与全局缓存清理。
       **记录点在 `render_canvas_payload` 内部**,所以每个走 widget 树的 drawer 都被计数
-      (**例外**:honor 与 chart 手写 IR、不经 `render_canvas_payload`,各自调 `record_render` 记账,
-      见 `honor/skia.py:77`、`chart/drawer.py:175`);端点名已全部穿参
+      (**例外**:honor 与 chart 的水印外壳自己发 IR、不经 `render_canvas_payload`,各自调 `record_render`
+      记账,见 `honor/skia.py`、`chart/drawer.py` 的 `_record`);端点名已全部穿参
       (`src/sekai` 下 51 处调用点无一遗漏,签名里的 `endpoint or "unknown"` 只是兜底)。带 payload 缓存的
       card/box 与 card/list 命中 payload 缓存时不进 `render_canvas_payload`,由 `record_skia_cache_hit` 单独计数;
-      honor 也有 payload 缓存,但它手写 IR,命中走自己的 `_record`(→`record_render`),不经过那个 helper。
+      honor 也有 payload 缓存,但它的水印外壳自己发 IR,命中走自己的 `_record`(→`record_render`),不经过那个 helper。
 - [x] **影子层结果缓存推广(阶段 5)——结论:整页 payload 缓存不做**(2026-07-14,所有者确认):
       **调用方 cloud 会先按 payload 查自己的缓存,命中就不会调 drawing**,所以同一个 payload 根本不会
       来第二次——drawing 侧再加一层页面级缓存**永远不可能命中**,而每次 miss 仍会 insert,把共享 LRU 里
@@ -123,8 +123,8 @@
       与 `shadow_roundrect`(两端=模糊圆角矩形);clip 局部缓冲修复后 card_box Pillow 全量合成
       `2.2s -> 1.27s`,63/63 SBS 通过。
 - [x] **Card List 回归共享 widget 树**(2026-07-14):~~最后一个手写 IR scene builder 退役~~
-      (**更正**:退役的是最后一个**与既有 widget 树重复**的 scene builder;honor 与 chart 仍在手写 IR,
-      见 ⚪ 收尾与防漂移 的「honor / chart 仍手写 IR」条)——
+      (**更正**:退役的是最后一个**与既有 widget 树重复**的 scene builder;honor 当时仍是两套布局,
+      已于 2026-07-14 收尾,见 ⚪ 收尾与防漂移 的「honor 回归共享 widget 树」条)——
       `_build_card_list_canvas` 成为唯一布局,Pillow 走 `canvas.get_img()`、Skia 走 IRPainter,与 card/box 同构。
       `skia_renderer/card_render.py` 整个删除,`card_common` 收缩到唯一真正共享的 `rare_count`,
       `scripts/compare_card_render.py`(只为对比两套布局而存在)一并删除。专用开关
@@ -188,17 +188,17 @@
       cargo test 链接配方、IR-first 规则,以及本轮踩到的 5 个陷阱——对拍的 legacy 盲区、ImageBg fade 默认值、
       Painter.text 基线锚点、Pillow paste 拖低 dst alpha、resize 缓存按 resample 分键)。
 - [ ] 结构性防呆 CI 测试:枚举全部路由,断言每个绘图端点绑定 widget 树/IR 路径(白名单显式豁免)。
-- [ ] **honor / chart 仍手写 IR——与 card_render.py 同类的双实现风险**(2026-07-14 记):
-      两者都直接用 `IRBuilder` 拼绝对坐标场景,**不经 widget 树、也不经 IRPainter**
-      (`src/sekai/honor/skia.py`、`src/sekai/chart/drawer.py:40` 的注释里各自写明),因此也不经
-      `render_canvas_payload`,而是自己调 `record_render` 记账。
-      **honor 是真风险**:它的 Pillow 基线 `honor/drawer.py:106 _compose_full_honor_image_sync` 是一整个
-      独立合成器,画布尺寸/裁剪窗/文字度量在 Python 里被**写了两遍**——正是 card/list 手写 builder
-      "两套布局要手工同步、而它们已经漂移了"的翻版(见 🟢 节 Card List 回归共享树)。
-      **chart 风险低**:Pillow 侧只是 crate PNG + 通用 `add_request_watermark_to_image`
-      (`chart/drawer.py:152 compose_music_chart_image`),重复面仅水印页脚,且 crate 位图两边同源。
-      待办:评估把 honor 收进 plot.py widget 树(与 card 系同构、Pillow 走 `Canvas.get_img()`),
-      或至少给它加"两后端逐位对拍"的锁测试钉住漂移;chart 维持现状即可。
+- [x] **honor 回归共享 widget 树**(2026-07-14):`honor/widget.py` 的 `HonorBadgeBox` 是唯一布局,
+      `_compose_full_honor_image_sync` 与 `skia._build_badge_scene` 删除;新增公共 Painter 原语
+      `push_mask`/`pop_mask`(两端同语义:Pillow `ImageChops.multiply` = Skia `Group{mask}` DstIn,
+      无 IR 变更)与 `paste_src`(Porter-Duff Src,底图四通道原样写入),外加 `Canvas.get_img_sync()`
+      (custom-profile 的三处同步调用点)和公共 helper `skia_renderer.canvas.build_canvas_ir()`。
+      11 个基线逐位一致;bonds 头像的 crop 顺序 drift(maxΔ52/5513px)一并归零。详见迁移记录条目 12。
+- [ ] **chart 仍手写 IR——但包的不是布局**(2026-07-14 复核):`chart/drawer.py` 直接用 `IRBuilder`
+      拼水印页脚外壳(谱面栅格由 `pjsekai-scores-rs` 产出,两后端同源;Pillow 侧是 crate PNG +
+      通用 `add_request_watermark_to_image`),重复面仅水印页脚度量,且两边共用
+      `get_watermark_render_spec`。honor 同形(徽章本体已是共享树,外壳里只剩 `SelfImage` 页脚)。
+      维持现状即可;若哪天想再收一层,可把「水印页脚」本身做成一个公共 IR 外壳 helper。
 - [x] 删 GIF/APNG helpers 死代码(2026-07-14,img_utils 全仓零调用方,-285 行)。
 - [ ] Pillow 退役决策(D8):全量 Skia 稳定 ≥2 个活动周期、fallback≈0 后再议——删端点级双实现 +
       扩展改启动必需 + 删静默泛型回退,`last-dual-backend` tag + 镜像回滚兜底;"永久保留"亦可接受。

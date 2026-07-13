@@ -102,3 +102,30 @@ def test_bonds_honor_places_faces_in_each_half_for_main_and_sub_slots() -> None:
         assert green_xs
         assert min(red_xs) <= expected_left <= max(red_xs)
         assert min(green_xs) <= expected_right <= max(green_xs)
+
+
+def test_bonds_honor_mask_defines_the_badge_silhouette() -> None:
+    """The mask is what ``img.putalpha(mask.split()[3])`` used to do, now expressed as
+    Painter.push_mask (alpha multiply / Skia's DstIn). It runs over an OPAQUE background, so the
+    badge's alpha must come out as the mask's alpha exactly — including under the chara icons,
+    whose anti-aliased edges must not eat into it."""
+    mask = Image.new("RGBA", (380, 80), (0, 0, 0, 0))
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, 379, 79), radius=16, fill=(255, 255, 255, 255))
+
+    image = compose_full_honor_image_from_loaded_assets(
+        _bonds_request(main=True),
+        {
+            "bonds_bg": Image.new("RGBA", (380, 80), (10, 20, 200, 255)),
+            "bonds_bg2": Image.new("RGBA", (380, 80), (220, 210, 20, 255)),
+            "chara_icon_1": _marker_icon(80, (255, 0, 0, 255)),
+            "chara_icon_2": _marker_icon(80, (0, 255, 0, 255)),
+            "mask_img": mask,
+        },
+    )
+
+    assert image is not None
+    assert image.getpixel((0, 0))[3] == 0  # corner cut away by the mask
+    assert image.getpixel((190, 40))[3] == 255  # centre kept
+    # the icons sit at the bottom of the badge; their edges must not punch holes in it
+    assert image.getpixel((70, 79))[3] == 255
+    assert image.getpixel((310, 79))[3] == 255

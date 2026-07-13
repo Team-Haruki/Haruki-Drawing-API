@@ -92,16 +92,30 @@ class IRPainter(Painter):
         # recycled by the allocator mid-draw — without the strong reference a GC'd
         # temporary image could alias a later image and paste the wrong pixels.
         self._mem_by_id: dict[int, tuple[Any, str]] = {}
-        # push_clip_roundrect opens an IR Group whose children are group-relative;
+        # push_clip_roundrect/push_mask open an IR Group whose children are group-relative;
         # _abs subtracts the accumulated origin so widget coords stay untouched.
         self._group_origin: tuple[float, float] = (0.0, 0.0)
-        self._group_origin_stack: list[tuple[float, float]] = []
+        self._group_origin_stack: list[tuple[str, tuple[float, float]]] = []
 
     # ---- output ----
 
-    def build_scene(self) -> tuple[dict, dict[str, bytes]]:
+    @property
+    def builder(self) -> IRBuilder:
+        """The scene builder, for callers that splice this tree into a larger scene
+        (see ``skia_renderer.canvas.build_canvas_ir``). Check :meth:`assert_balanced` first."""
+        return self._b
+
+    @property
+    def mem_images(self) -> dict[str, Any]:
+        """Runtime images referenced as ``mem:<key>``; pass to ``native.render_scene``."""
+        return self._mem_images
+
+    def assert_balanced(self) -> None:
         if self._group_origin_stack:
-            raise SkiaUnsupported("unbalanced push_clip_roundrect/pop_clip")
+            raise SkiaUnsupported("unbalanced push_clip_roundrect/push_mask")
+
+    def build_scene(self) -> tuple[dict, dict[str, Any]]:
+        self.assert_balanced()
         return self._b.build(), self._mem_images
 
     # ---- region model (translation only; restore guards the missing self.img) ----
@@ -246,7 +260,9 @@ class IRPainter(Painter):
         overlay_size = ((x1 - x0) + 10, (y1 - y0) + 10)
         return self._fill(fill, apos, overlay_size)
 
-    def _paste(self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect=None):
+    def _paste(
+        self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect=None, blend="src_over"
+    ):
         apos = self._abs(pos)
         if size:
             w, h = size
@@ -267,6 +283,7 @@ class IRPainter(Painter):
             alpha=1.0 if alpha is None else float(alpha),
             shadow=shadow,
             source_rect=src_rect,
+            blend=blend,
         )
         return self
 
@@ -297,18 +314,45 @@ class IRPainter(Painter):
     ):
         return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect)
 
+    def _push_group(self, kind: str, apos: tuple[float, float]) -> None:
+        self._group_origin_stack.append((kind, self._group_origin))
+        self._group_origin = (self._group_origin[0] + apos[0], self._group_origin[1] + apos[1])
+
+    def _pop_group(self, kind: str) -> None:
+        if not self._group_origin_stack:
+            raise SkiaUnsupported(f"pop_{kind} without a matching push")
+        opened, origin = self._group_origin_stack.pop()
+        if opened != kind:
+            raise SkiaUnsupported(f"pop_{kind} closing a {opened} group")
+        self._b.pop_group()
+        self._group_origin = origin
+
+    def paste_src(self, sub_img, pos, size=None, src_rect=None, exclude_on_hash=False):
+        # True Porter-Duff Src, same as the Pillow side: the drawn rect REPLACES the destination.
+        # Src-over would only agree where the destination is empty, and a public Painter primitive
+        # must not depend on the caller honouring a prose caveat to keep the two backends aligned.
+        return self._paste(sub_img, pos, size, None, False, 0, 0, src_rect, blend="src")
+
     def push_clip_roundrect(self, pos, size, radius, corners=(True, True, True, True), exclude_on_hash=False):
         apos = self._abs(pos)
         self._b.push_group(apos, (float(size[0]), float(size[1])), clip=clip_rrect(radius, corners))
-        self._group_origin_stack.append(self._group_origin)
-        self._group_origin = (self._group_origin[0] + apos[0], self._group_origin[1] + apos[1])
+        self._push_group("clip", apos)
         return self
 
     def pop_clip(self, exclude_on_hash=False):
-        if not self._group_origin_stack:
-            raise SkiaUnsupported("pop_clip without a matching push_clip_roundrect")
-        self._b.pop_group()
-        self._group_origin = self._group_origin_stack.pop()
+        self._pop_group("clip")
+        return self
+
+    def push_mask(self, mask, pos, size, exclude_on_hash=False):
+        # Group{mask} = saveLayer + DstIn, i.e. the layer's alpha times the mask's — the same
+        # arithmetic Painter._impl_pop_mask applies with ImageChops.multiply.
+        apos = self._abs(pos)
+        self._b.push_group(apos, (float(size[0]), float(size[1])), mask=self._image_ref(mask))
+        self._push_group("mask", apos)
+        return self
+
+    def pop_mask(self, exclude_on_hash=False):
+        self._pop_group("mask")
         return self
 
     def shadow_roundrect(self, pos, size, radius, shadow_width=6, shadow_alpha=0.3, exclude_on_hash=False):

@@ -198,6 +198,39 @@ def test_irpainter_unbalanced_clip_raises_skia_unsupported():
         _painter().pop_clip()
 
 
+def test_irpainter_push_mask_emits_masked_group_and_multiplies_alpha():
+    """Painter.push_mask -> Group{mask} (saveLayer + DstIn), i.e. the same alpha multiply the
+    Pillow backend applies in _impl_pop_mask (see test_image_source)."""
+    mask = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
+    mask.paste(Image.new("RGBA", (20, 40), (255, 255, 255, 255)), (0, 0))  # left half opaque
+
+    p = _painter((40, 40))
+    p.push_mask(mask, (0, 0), (40, 40))
+    p.rect((0, 0), (40, 40), fill=(255, 0, 0, 255))
+    p.pop_mask()
+    scene, mem = p.build_scene()
+
+    group = scene["root"]["children"][0]
+    assert group["type"] == "Group"
+    assert group["offset"] == [0.0, 0.0]
+    assert group["mask"].startswith("mem:")  # runtime image -> mem ref, and it must travel
+    assert group["mask"][4:] in mem
+    assert group["children"][0]["pos"] == [0.0, 0.0]  # group-relative
+
+    img = Image.open(BytesIO(_native.render_scene(json.dumps(scene).encode(), mem)["image_bytes"])).convert("RGBA")
+    assert img.getpixel((10, 20)) == (255, 0, 0, 255)  # kept where the mask is opaque
+    assert img.getpixel((30, 20))[3] == 0  # masked away
+
+
+def test_irpainter_pop_mask_cannot_close_a_clip_group():
+    from src.sekai.skia_renderer.ir_painter import SkiaUnsupported
+
+    p = _painter()
+    p.push_clip_roundrect((0, 0), (10, 10), 2)
+    with pytest.raises(SkiaUnsupported):
+        p.pop_mask()
+
+
 def test_irpainter_shadow_roundrect_emits_shadow_node():
     p = _painter()
     p.shadow_roundrect((10, 10), (30, 30), 8, shadow_width=6, shadow_alpha=0.4)

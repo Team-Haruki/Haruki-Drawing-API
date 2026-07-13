@@ -1740,6 +1740,16 @@ async def prefetch_asset_refs(root: Widget) -> None:
 class Canvas(Frame):
     def __init__(self, w=None, h=None, bg: WidgetBg = None) -> None:
         super().__init__()
+        # A Canvas is a page ROOT — it must never become a child of whatever widget context happens
+        # to be open. Widget.__init__ auto-adds every new widget to the enclosing `with` block, so
+        # building a Canvas inside one (e.g. a drawer composing a sub-badge inline, which is the
+        # `with Canvas(): with VSplit():` idiom every drawer uses) would silently adopt it into the
+        # outer layout and corrupt it.
+        parent = Widget.get_current_widget()
+        if parent is not None and self in parent.items:
+            parent.items.remove(self)
+            self.parent = None
+
         self.set_size((w, h))
         self.set_bg(bg)
         self.set_margin(0)
@@ -1758,6 +1768,24 @@ class Canvas(Frame):
         if DEBUG:
             logging.debug(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
             pass
+        return img
+
+    def get_img_sync(self, scale: float | None = None) -> Image.Image:
+        """Render the tree with Pillow from SYNCHRONOUS code (no pool offload, no prefetch).
+
+        Same draw path as :meth:`get_img` — ``Painter._execute`` is the static, sync entry that
+        one also ends in — so a tree renders identically either way. It is for callers that are
+        already inside a worker/sync context (e.g. the custom-profile renderer composing an honor
+        badge); lazy ``AssetImageRef``s resolve inline in the paste impls instead of being
+        prefetched concurrently, so prefer :meth:`get_img` from async code."""
+        size = self._get_self_size()
+        size_limit = CANVAS_SIZE_LIMIT
+        assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        p = Painter(size=size)
+        self.draw(p)
+        img = Painter._execute(p.operations, None, size, {})
+        if scale:
+            img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
         return img
 
 

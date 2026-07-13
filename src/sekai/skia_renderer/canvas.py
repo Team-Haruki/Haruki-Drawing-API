@@ -18,6 +18,7 @@ from typing import Any
 from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.utils import run_in_pool
+from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.ir_painter import IRPainter, SkiaUnsupported
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
@@ -49,7 +50,7 @@ def skia_plot_enabled() -> bool:
 
 # Minimum IR capability this code emits (5 = capability 4 + SelfImage canvas snapshot).
 # An older wheel would silently drop features, so refuse it and fail open to Pillow.
-REQUIRED_NATIVE_IR_CAPABILITY = 5
+REQUIRED_NATIVE_IR_CAPABILITY = 6
 
 
 def load_native_renderer():
@@ -130,6 +131,43 @@ def canvas_size_within_limit(size: tuple[int, int]) -> bool:
     return w * h <= SKIA_MAX_CANVAS_PIXELS
 
 
+def build_canvas_ir(
+    canvas,
+    *,
+    bg_hour: float | None = None,
+    export_format: str | None = None,
+) -> tuple[IRBuilder, dict[str, Any]]:
+    """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
+
+    For callers that need the widget tree's IR as a *sub-scene* rather than a finished render —
+    the /honor route splices the badge into the builder that also carries its raster watermark
+    footer (a ``SelfImage`` node the widget tree cannot express). Merge with
+    ``IRBuilder.splice_root_children`` and pass the returned mem images to
+    ``native.render_scene`` alongside the caller's own.
+
+    Synchronous and CPU-bound (it measures the tree and draws it): call it from a pool task.
+    Raises ``SkiaUnsupported`` for a tree/size the IR cannot express.
+    """
+    size = canvas._get_self_size()
+    if not canvas_size_within_limit(size):
+        raise SkiaUnsupported(f"canvas {size[0]}x{size[1]} exceeds the Skia size guard")
+    painter = IRPainter(
+        size,
+        assets_base_dir=str(ASSETS_BASE_DIR),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+        heavy_font=DEFAULT_HEAVY_FONT,
+        emoji_font=DEFAULT_EMOJI_FONT,
+        bg_hour=background_hour() if bg_hour is None else bg_hour,
+        export_format=EXPORT_IMAGE_FORMAT if export_format is None else export_format,
+        jpg_quality=JPG_QUALITY,
+    )
+    canvas.draw(painter)
+    painter.assert_balanced()
+    return painter.builder, painter.mem_images
+
+
 async def render_canvas_payload(
     canvas,
     *,
@@ -194,24 +232,10 @@ async def _render_canvas_uncounted(
         # and native render — in one pool task so it parallelizes under concurrency (the native
         # render releases the GIL). Doing the measure/draw/json/encode on the event-loop thread
         # would serialize it across requests and cap throughput — which is why the size guard
-        # below lives HERE and not before the offload: _get_self_size() walks the whole tree.
-        size = canvas._get_self_size()
-        if not canvas_size_within_limit(size):
-            raise SkiaUnsupported(f"canvas {size[0]}x{size[1]} exceeds the Skia size guard")
-        painter = IRPainter(
-            size,
-            assets_base_dir=str(ASSETS_BASE_DIR),
-            font_dir=str(FONT_DIR),
-            default_font=DEFAULT_FONT,
-            bold_font=DEFAULT_BOLD_FONT,
-            heavy_font=DEFAULT_HEAVY_FONT,
-            emoji_font=DEFAULT_EMOJI_FONT,
-            bg_hour=bg,
-            export_format=eff_format,
-            jpg_quality=JPG_QUALITY,
-        )
-        canvas.draw(painter)
-        scene, mem_images = painter.build_scene()
+        # inside build_canvas_ir runs HERE and not before the offload: _get_self_size() walks
+        # the whole tree.
+        builder, mem_images = build_canvas_ir(canvas, bg_hour=bg, export_format=eff_format)
+        scene = builder.build()
         if eff_scale is not None:
             scene["scale"] = eff_scale
         ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
