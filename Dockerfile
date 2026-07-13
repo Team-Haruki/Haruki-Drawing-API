@@ -89,11 +89,26 @@ RUN set -eux; \
     ln -s "$system_freetype" "$bundled_freetype"; \
     /app/haruki_drawing_api/.venv/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
 
+# 复制项目代码
+COPY . .
+
 # haruki_skia_renderer 自检(仿上方 pjsekai_scores_rs 模式,但条件执行):
 # 装了 wheel 就必须能导入且通过 IR capability 握手,失败让镜像构建尽早报错;
 # 没装 wheel 仅提示,运行时 fail-open 回退 Pillow。
+#
+# 门槛值从 canvas.py 的 REQUIRED_NATIVE_IR_CAPABILITY 解析而来,而不是在这里再写一个数字——
+# 曾经这里写死 >= 3 而代码要求 5,于是一个 cap-3/4 的旧 wheel 能通过镜像自检、打印"self-check passed",
+# 再在运行时被 load_native_renderer() 拒掉,每个绘图端点静默回退 Pillow。自检必须跟着代码走。
+# (放在 COPY 之后,因为要读源码。)
 RUN /app/haruki_drawing_api/.venv/bin/python - <<'PY'
 import importlib.util
+import pathlib
+import re
+
+source = pathlib.Path("src/sekai/skia_renderer/canvas.py").read_text(encoding="utf-8")
+match = re.search(r"^REQUIRED_NATIVE_IR_CAPABILITY\s*=\s*(\d+)", source, re.MULTILINE)
+assert match, "cannot find REQUIRED_NATIVE_IR_CAPABILITY in canvas.py"
+required = int(match.group(1))
 
 if importlib.util.find_spec("haruki_skia_renderer") is None:
     print("haruki_skia_renderer not bundled; Skia IR rendering will fail-open to Pillow")
@@ -101,12 +116,11 @@ else:
     import haruki_skia_renderer as m
 
     capability = getattr(m, "IR_CAPABILITY", 0)
-    assert capability >= 3, f"stale haruki_skia_renderer wheel: IR_CAPABILITY={capability} < 3"
-    print(f"haruki_skia_renderer self-check passed (IR_CAPABILITY={capability})")
+    assert capability >= required, (
+        f"stale haruki_skia_renderer wheel: IR_CAPABILITY={capability} < {required} required by canvas.py"
+    )
+    print(f"haruki_skia_renderer self-check passed (IR_CAPABILITY={capability} >= {required})")
 PY
-
-# 复制项目代码
-COPY . .
 
 # 暴露端口
 EXPOSE 8000

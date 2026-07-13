@@ -107,11 +107,12 @@ def record_render(endpoint: str, outcome: str) -> None:
 
 
 def record_skia_cache_hit(endpoint: str, payload) -> None:
-    """Record a payload-cache hit from a hand-written render path.
+    """Record a payload-cache hit for an endpoint that short-circuits before rendering.
 
-    ``render_canvas_payload`` records its own outcomes, but the endpoints that build their IR by
-    hand (card_list, card_box, alias_list, honor) return the cached payload before ever reaching
-    it. Without this, /render-stats and the ``backend=`` log line would silently under-count them.
+    ``render_canvas_payload`` records its own outcomes, but card/list and card/box return a cached
+    payload before ever reaching it, so without this they would silently under-count themselves.
+    (honor also has a payload cache, but it hand-builds its IR and records through its own
+    ``_record`` helper instead of this one.)
     """
     from src.core.debug import set_render_backend
 

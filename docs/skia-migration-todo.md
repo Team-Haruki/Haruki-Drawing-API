@@ -1,7 +1,12 @@
 # Skia 迁移剩余工作清单
 
-> 2026-07-12 盘点,2026-07-13 更新。迁移本体已完成:**63 用例对拍 63 ok / 0 失败(pillow-only 已归零)**,
-> `use_skia_plot`/`use_skia_card_list` 默认开,card/box shim-first 与 Chart raw-N32 单次编码均已落地。
+> 2026-07-12 盘点,2026-07-14 更新。迁移本体已完成:**63 用例对拍 63 ok / 0 失败(pillow-only 已归零)**。
+> **`use_skia_plot` 是唯一的 Skia 门控,默认开**——`use_skia_card_list` / `skia_card_list_fallback_to_pillow` /
+> `use_skia_card_box` 已随手写 IR builder 一起从 settings.py 删除,不要再引用。card/box 与 card/list 现在都画
+> 共享 widget 树(无专用 scene builder),Chart raw-N32 单次编码已落地。
+> **注意**:「画共享 widget 树」只对 card 系与其余 plot 端点成立——**honor 与 chart 至今仍各自手写 IR**
+> (`IRBuilder` 直出,不经 widget 树/IRPainter),别把「无专用 scene builder」当成全局结论,
+> 详见 ⚪ 收尾与防漂移 的「honor / chart 仍手写 IR」条。
 > 本清单是切换后的收尾与生产化工作,按"挡在生产收益前面 → 端点残余 → 质量项 → 性能 → 收尾"排序。
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
@@ -32,14 +37,20 @@
 - [x] **可观测性(阶段 4)**(2026-07-14):`render_stats.py` 按端点计 skia/cache_hit/fallback/disabled/error,
       挂 `GET /render-stats`(含 `font_fallbacks`);`image.response` 日志加 `backend=skia|skia_cache|skia_fallback|pillow`
       (进程内走 contextvar,跨 heavy worker 进程走 `EncodedImagePayload.backend` 带回、父进程 replay);
-      `_SkiaPayloadCache` 拆到 `payload_cache.py`,接入 `/cache-stats` 与全局缓存清理。
-      **记录点在 `render_canvas_payload` 内部**,所以尚未接缓存 helper 的 ~60 个 drawer 也能被正确计数
-      (端点名默认 `unknown`,待逐个穿参)。
+      `_SkiaPayloadCache` 拆到 `payload_cache.py`,接入 `/cache/stats` 与全局缓存清理。
+      **记录点在 `render_canvas_payload` 内部**,所以每个走 widget 树的 drawer 都被计数
+      (**例外**:honor 与 chart 手写 IR、不经 `render_canvas_payload`,各自调 `record_render` 记账,
+      见 `honor/skia.py:77`、`chart/drawer.py:175`);端点名已全部穿参
+      (`src/sekai` 下 51 处调用点无一遗漏,签名里的 `endpoint or "unknown"` 只是兜底)。带 payload 缓存的
+      card/box 与 card/list 命中 payload 缓存时不进 `render_canvas_payload`,由 `record_skia_cache_hit` 单独计数;
+      honor 也有 payload 缓存,但它手写 IR,命中走自己的 `_record`(→`record_render`),不经过那个 helper。
 - [x] **影子层结果缓存推广(阶段 5)——结论:整页 payload 缓存不做**(2026-07-14,所有者确认):
       **调用方 cloud 会先按 payload 查自己的缓存,命中就不会调 drawing**,所以同一个 payload 根本不会
       来第二次——drawing 侧再加一层页面级缓存**永远不可能命中**,而每次 miss 仍会 insert,把共享 LRU 里
       真能命中的条目挤出去,净负收益。profile/vlive_list/chart 的整页缓存(连同为它服务的 `bg_hour` 量化、
       asset signature 扫描、cache key 构造)已全部删除,只保留端点名穿参。
+      **删的只是"整页"那层**:vlive/list 的逐条目 composed 缓存(`vlive_list_entry`,跨请求跨用户可命中)保留;
+      card/box、card/list、honor 的 Skia payload 缓存(`payload_cache.py`)也仍在,本条未动它们。
       跨请求复用发生在**更下层且是跨用户共享的**:Rust 的 Moka 栅格缓存 + Pillow 的全局 resize 缓存按
       素材路径/尺寸缓存单个图层——这才是 `card_full_thumbnail` 子树化后"CPU 反升"担忧的真正补偿。
       **已核对 cloud 实现**(Haruki-Cloud `internal/pjsk/drawing/`):它的 key 由
@@ -111,7 +122,9 @@
       `push_clip_roundrect/pop_clip`(Pillow=clip 矩形大小的离屏缓冲+alpha 遮罩,Skia=`Group{clip:rrect}`)
       与 `shadow_roundrect`(两端=模糊圆角矩形);clip 局部缓冲修复后 card_box Pillow 全量合成
       `2.2s -> 1.27s`,63/63 SBS 通过。
-- [x] **Card List 回归共享 widget 树**(2026-07-14):最后一个手写 IR scene builder 退役——
+- [x] **Card List 回归共享 widget 树**(2026-07-14):~~最后一个手写 IR scene builder 退役~~
+      (**更正**:退役的是最后一个**与既有 widget 树重复**的 scene builder;honor 与 chart 仍在手写 IR,
+      见 ⚪ 收尾与防漂移 的「honor / chart 仍手写 IR」条)——
       `_build_card_list_canvas` 成为唯一布局,Pillow 走 `canvas.get_img()`、Skia 走 IRPainter,与 card/box 同构。
       `skia_renderer/card_render.py` 整个删除,`card_common` 收缩到唯一真正共享的 `rare_count`,
       `scripts/compare_card_render.py`(只为对比两套布局而存在)一并删除。专用开关
@@ -122,7 +135,7 @@
       `push_clip_roundrect(radius=0)`(后端分支与预栅格化管线删除);头像框 9-slice 子树化(`PlayerFrameBox` +
       `paste* src_rect`);housing base64 改 `EncodedImageRef`、costume 迁 ref + 前景检测 crop 走 `src_rect`;
       Honor 单 pass(IR 新增 `SelfImage` 画布快照节点,IR_CAPABILITY 4→5,中间 PNG 和第二次 render 消除,
-      对拍逐位一致)。Card List 回归共享树仍留最后评估。
+      对拍逐位一致)。Card List 回归共享树当时仍留最后评估,已于 2026-07-14 完成(见本节上一条)。
 - [x] **其余 builder 迁 `get_asset_image_ref`**(2026-07-13,详见 migration.md ✅7):card/mysekai/gacha/
       score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**
       (喂 `ImageBg(fade>0)` 的背景图、走 PIL 像素 API 的 `_circular_progress_avatar`/`concat_images`/
@@ -143,7 +156,8 @@
 - [x] **`scripts/skia_legacy_baseline.py`**(2026-07-14):在 main 的 git worktree 里跑同一批 payload 的
       **Pillow** 输出,与当前分支的 **Pillow** 输出逐像素对比。对拍 sweep 只比"当前树的 Pillow ↔ Skia",
       因此**两个后端一起偏离 legacy 的漂移一律照绿**——`CardFullThumbnailBox` 的 4px 文字错位和 alpha 光晕
-      就是这么带着 63/63 跑了一整轮的。用法:`uv run python -X gil=0 scripts/skia_legacy_baseline.py --tolerance 2`。
+      就是这么带着 63/63 跑了一整轮的。用法:`uv run python -X gil=0 scripts/skia_legacy_baseline.py --tolerance 2`
+      (`--ref` 默认 `main`;全量跑要显式换成能比的基线,理由见下一条)。
       注意 `_diff` 不能用 `ImageChops.difference(...).getbbox()`——getbbox 看 alpha,两张不透明图的差值图
       alpha 恒为 0,再大的 RGB 漂移都会报"无差异"。
 - [x] **legacy 漂移分诊完成**(2026-07-14):**没有发现回归**。
@@ -153,7 +167,8 @@
       同一棵树渲两次自己就差 ~12% 像素;③用 env 关进程池无效——`env>yaml` 优先级修复只在本分支上,
       老基线里 yaml 赢,进程池仍开着而 spawn worker 进不了一次性 worktree。
       **教训:差分 harness 必须先做 `--ref HEAD` 自检(max_delta 必须为 0),否则你量的是自己。**
-      修好后拿**移植前的 1c9f367** 当基线(main 不能当基线——本分支还带着 main 没有的功能端点):
+      修好后拿**子树化移植前的 1c9f367** 当基线(它已含 Skia 后端,但卡面缩略图/头像框仍是旧 Pillow
+      预合成器 `get_card_full_thumbnail`——这正是要比的那一层;main 不能当基线,本分支还带着 main 没有的功能端点):
       **53 个可比端点中 45 个逐位一致、0 个尺寸变化**;剩下 10 个里,8 个是画卡面缩略图的端点
       (差异精确落在缩略图区域,mean 0.03-2.1,正是"按最终尺寸直绘"取代"128 合成再缩放"的预期效果,
       文字位置与 alpha 已单独对着 legacy 合成器逐项验过),另外 2 个 alias-list **内容零差异**,
@@ -162,12 +177,28 @@
 ## ⚪ 收尾与防漂移
 
 - [x] 文档修正(2026-07-13):migration.md 已同步 card/detail、Card Box 验收、Rust typeface/Moka/PNG/Chart raw 状态；
-- [ ] 继续修正其余历史描述:径向渐变状态、
-      gaps.md 错误项(gacha 无条目缓存、honor 仅 mem、profile 预渲染是死代码)。
+- [x] 修正**其他文档**的历史描述(2026-07-14,已逐条对着当前文件核过):
+      ①径向渐变**早已实装**(`ir_builder.radial_gradient:198` → `ir_painter:201` 映射 → `interp.rs:828`
+      的 `gradient::shaders::radial_gradient`):gaps.md 已改写为"✅ 真实径向渐变……首轮的『只平涂中心色』
+      stub 已替换"(gaps.md §6),migration.md 的 v2 节点清单是**带日期的进度记录**,原文"radial…为后续"
+      保留但已就地加注"**均已在后续批次落地**",其待办行也标了"radial / adaptive 文本(已补)"——两处都不再误导;
+      ②gaps.md 其余错误项亦已修正:gacha **无**条目级合成缓存、honor 的整图缓存仅 mem 无 disk、
+      profile 模块预渲染(`profile/drawer.py:445 _build_cached_profile_module_image`,零调用方)是死代码。
 - [x] CLAUDE.md Skia 后端章节(2026-07-14,三份镜像文件同步:env-only 开关、wheel/CI 链路、capability 握手、
       cargo test 链接配方、IR-first 规则,以及本轮踩到的 5 个陷阱——对拍的 legacy 盲区、ImageBg fade 默认值、
       Painter.text 基线锚点、Pillow paste 拖低 dst alpha、resize 缓存按 resample 分键)。
 - [ ] 结构性防呆 CI 测试:枚举全部路由,断言每个绘图端点绑定 widget 树/IR 路径(白名单显式豁免)。
+- [ ] **honor / chart 仍手写 IR——与 card_render.py 同类的双实现风险**(2026-07-14 记):
+      两者都直接用 `IRBuilder` 拼绝对坐标场景,**不经 widget 树、也不经 IRPainter**
+      (`src/sekai/honor/skia.py`、`src/sekai/chart/drawer.py:40` 的注释里各自写明),因此也不经
+      `render_canvas_payload`,而是自己调 `record_render` 记账。
+      **honor 是真风险**:它的 Pillow 基线 `honor/drawer.py:106 _compose_full_honor_image_sync` 是一整个
+      独立合成器,画布尺寸/裁剪窗/文字度量在 Python 里被**写了两遍**——正是 card/list 手写 builder
+      "两套布局要手工同步、而它们已经漂移了"的翻版(见 🟢 节 Card List 回归共享树)。
+      **chart 风险低**:Pillow 侧只是 crate PNG + 通用 `add_request_watermark_to_image`
+      (`chart/drawer.py:152 compose_music_chart_image`),重复面仅水印页脚,且 crate 位图两边同源。
+      待办:评估把 honor 收进 plot.py widget 树(与 card 系同构、Pillow 走 `Canvas.get_img()`),
+      或至少给它加"两后端逐位对拍"的锁测试钉住漂移;chart 维持现状即可。
 - [x] 删 GIF/APNG helpers 死代码(2026-07-14,img_utils 全仓零调用方,-285 行)。
 - [ ] Pillow 退役决策(D8):全量 Skia 稳定 ≥2 个活动周期、fallback≈0 后再议——删端点级双实现 +
       扩展改启动必需 + 删静默泛型回退,`last-dual-backend` tag + 镜像回滚兜底;"永久保留"亦可接受。

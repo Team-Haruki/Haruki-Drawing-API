@@ -1,16 +1,38 @@
 # Skia 迁移重启计划(除 custom profile 外全量)
 
-> 2026-07-12 制定。基于对分支 `feat/rust-skia-render-ir` 的六路代码审计(门控/缺口/CI构建/性能/分支考古/逐端点矩阵)
-> 与三视角方案对抗评审的综合定稿。配套阅读:[`rust-skia-renderer-migration.md`](./rust-skia-renderer-migration.md)(做了什么)、
-> [`skia-pillow-coverage-gaps.md`](./skia-pillow-coverage-gaps.md)(能力差距;注意两份文档均有过时项,见阶段 8 文档修正清单)。
+> **本文是 2026-07-12 的原始计划 + 执行日志,大部分内容反映的是当时的状态与当时设想的路径,已被实际执行改写。**
+> 只有下面的「现状一句话」与「已拍板决策」表维护为当前有效;关键路径与阶段 0–8 是历史计划(所有者 07-12
+> 改道"真实数据全量验证 + 一次性切换",分波放量作废),**剩余工作以
+> [`skia-migration-todo.md`](./skia-migration-todo.md) 为准**,本文不再重复维护清单。
+>
+> 配套阅读:[`rust-skia-renderer-migration.md`](./rust-skia-renderer-migration.md)(做了什么)、
+> [`skia-pillow-coverage-gaps.md`](./skia-pillow-coverage-gaps.md)(能力差距)。
 
 ## 现状一句话
 
-代码完成度 ~90%(50/53 端点已接线、Rust 已收敛为纯 IR 解释器、实测 1.4×–4× 收益),**上线完成度 ~0%**
-(开关全关、生产镜像无扩展、CI 零 Rust、无灰度机制、无可观测性)。迁移是 06-23/24 一次 26.5 小时冲刺的产物,
-之后被 release v2.3.19 与 main 上的 card box 业务需求(+744 行 Pillow)插队搁置。
+**迁移本体已完成并已默认开启**:除 custom profile card 外全部绘图端点默认走 Rust Skia,对拍
+**63 用例 / 63 ok / 0 失败**(honor 亦已迁移,无 pillow-only 端点),实测普遍 ~2× 提速。唯一 Skia
+门控是 `use_skia_plot`,**代码默认 true**(`use_skia_card_list` / `use_skia_card_box` /
+`skia_card_list_fallback_to_pillow` 均已随影子层收敛而删除)。
 
-日历预期:**到 Skia 成为默认后端约 5–7 周;到 Pillow 收尾处置约 10–12 周**。实际动手量约 4–5 周,其余为并行浸泡观察期。
+但**"全部端点共用一份 widget 树"是不成立的**,别把"全量迁完"读成"单布局":
+
+- **绝大多数端点**(profile、card/list、card/box、card/detail、event、music、gacha、score、sk、mysekai …)
+  走同一份 plot.py widget 树,经 IRPainter 输出 Render-IR 交 Rust Skia 解释器渲染——改一处两个后端同时生效。
+  card/list 与 card/box **没有**专用 scene builder,同样画 widget 树。
+- **honor 与 chart 是例外**:两者用 `IRBuilder` **手工拼 IR**,既不碰 widget 树也不经 IRPainter
+  (`src/sekai/honor/skia.py`——其模块 docstring 自己就这么写;`src/sekai/chart/drawer.py:24,208`——直接 `IRBuilder(...)`,
+  全文件不出现 plot/Canvas/IRPainter)。
+  **honor 是当前唯一实打实的双布局漂移风险**:`src/sekai/honor/drawer.py::_compose_full_honor_image_sync`
+  是一份独立的纯 Pillow 合成器,且被 skia.py 的 docstring 认作 ground truth——同一张图两套绝对坐标,
+  改布局必须两边同改。这正是阶段 8 点名要防的"下一个 `card_render.py` 式双实现",parity 用例是唯一防线。
+
+生产化链路已就位:CI 构 cp314t wheel(`skia-wheels.yml`)、native 测试进 CI(`quick-check.yml`)、
+Docker 条件安装 wheel + 构建期 IR capability 自检、扩展缺失时 fail-open 回退 Pillow 并打 ERROR、
+`/render-stats` 逐端点计数 + image.response `backend=` 字段。
+
+**剩余的是生产验收而非代码**:PR #33 合并、带扩展镜像的全关金丝雀与放量验收,以及
+[`skia-migration-todo.md`](./skia-migration-todo.md) 里的收尾项(三角背景确定性播种、双池预算合并、Pillow 退役等)。
 
 ## 已拍板决策
 
@@ -19,16 +41,25 @@
 | D1 | mysekai 私有实现托管 | **维持现状**:真实逻辑写在 `drawer.real.py`(gitignore),公开侧只有 stub。不做外部托管。API 漂移防护靠冒烟脚本(见阶段 3),镜像与 real 文件成对部署写入发布 checklist |
 | D2 | wheel 分发 | **不发布到任何 index**。仓库 GitHub Actions 构建 wheel(artifact 形式),**可多平台**(生产 linux 架构 + macOS arm64 开发机)。pyproject/uv.lock **不声明**该依赖,保持 importlib 懒加载 + fail-open;Docker 构建消费 CI wheel artifact 并做 import 自检 |
 
-待拍板(按截止时间排序,均附默认建议):
+D3–D8 的当前状态(原为待拍板,已随执行推进):
 
-| # | 事项 | 何时 | 建议 |
-|---|---|---|---|
-| D3 | 三角形背景 RNG:确定性播种(可对拍可缓存,同参数出图恒定)vs 保持随机 | 波次 1 前 | 确定性,seed 去掉小时分量、测试可注入 |
-| D4 | card/detail 字形步进差、mysekai 各端点:人工看图签字 | 各自放量前 | — |
-| D5 | card/box:shim-first vs 手工移植 vs 重设计布局 | 阶段 7 前 | **shim-first**(见阶段 7) |
-| D6 | sk 双 trace 永久保留 matplotlib 混合方案 | 波次 3 前 | 永久混合,不投入 L 级原语开发 |
-| D7 | 过渡期双缓存(Pillow composed 池 + Skia payload 池)预算分配 | 阶段 5 | 共享单预算 |
-| D8 | Pillow 退役力度与时间点 | 全量稳定 ≥4 周后 | 删端点级双实现,`last-dual-backend` tag + 镜像回滚兜底 |
+| # | 事项 | 状态(截至 2026-07-13) |
+|---|---|---|
+| D3 | 三角形背景 RNG:确定性播种 vs 保持随机 | **未决,且问题在 Pillow 侧、不在 plot.py**。未播种的全局 `random` 位于 `src/sekai/base/painter.py::_impl_draw_random_triangle_bg`(三角采样 ~1868–1908 行);plot.py 只在 `if DEBUG:` 分支里用 `random` 画调试框,与三角背景无关。Skia 侧**已经是确定性的**:Rust 从 `(width, height, hour \| main_hue)` 推导 seed 自带 RNG,全程不碰 Python `random`;测试注入 `HARUKI_BG_TEST_HOUR` 也已存在(`canvas.py::background_hour()`,painter 侧同样认)。**实际残留两点**:① `background_hour()` 随墙钟漂移,不注入时同一棵树两次渲染 seed 不同;② Pillow 参照实现仍未播种,自差 ~12%——所以带背景端点的跨后端对拍只能断言宽松均值 |
+| D4 | card/detail 字形步进差、mysekai 各端点:人工看图签字 | 放量验收时执行(mysekai 无 parity、不在 CI,回退率仪表防不住"渲染成功但画错") |
+| D5 | card/box:shim-first vs 手工移植 vs 重设计布局 | **已执行 shim-first**(2026-07-12,见执行日志):手写 box 构建器与 `use_skia_card_box` 一并退役 |
+| D6 | sk 双 trace 永久保留 matplotlib 混合方案 | **按建议永久混合**,`sk/drawer.py` 仍依赖 matplotlib,不投入 L 级原语开发 |
+| D7 | 过渡期双缓存(Pillow composed 池 + Skia payload 池)预算分配 | **未落地**。`payload_cache.py` 复用 `COMPOSED_IMAGE_CACHE_*` 的**数值**但自成一池,实际预算翻倍 |
+| D8 | Pillow 退役力度与时间点 | **未决**,待全量稳定后按原建议(删端点级双实现,`last-dual-backend` tag + 镜像回滚兜底) |
+
+---
+
+> **以下各节(关键路径、阶段 0–8、收益兑现点)是 2026-07-12 的原始计划,保留作决策记录,不代表当前状态。**
+> 所有者当日即改道"真实数据全量验证 + 一次性切换",阶段 6 的分波放量、阶段 4 的逐端点 override 门控 schema
+> 均未按此执行(实际只有一个 `use_skia_plot`);阶段 2/3/5 的绝大多数条目已完成(见执行日志与
+> [`skia-migration-todo.md`](./skia-migration-todo.md)),**阶段 7 则是部分完成、部分被推翻**——有条目最终
+> 走了与当时写法相反的路(见该节内的删除线标注),不要把"已完成"读成"按当时写法执行了"。
+> 阅读时请把它们当作"当时打算怎么做",而非待办清单。
 
 ## 关键路径
 
@@ -162,8 +193,11 @@ TYPEFACE_CACHE 锁外加载。
   消灭每请求大图 Pillow 解码→水印→重编码往返。
 - mysekai msr_map 多图网格拼接迁 IR(drawer.real.py 内,注意与镜像 API 配对)。(M)
 - 删 GIF/APNG helpers(死代码,全仓零调用方、零动图端点);separate 渐变/任意 mask 不做,登记为已知不支持。
-- card_full_thumbnail 等子渲染:**保留 mem 图混合方案**(mem+disk 缓存健康,100 图 ≈4–8ms)——
-  目标是"最终合成单路径",不是教条式清零 PIL import。
+- ~~card_full_thumbnail 等子渲染:**保留 mem 图混合方案**(mem+disk 缓存健康,100 图 ≈4–8ms)——
+  目标是"最终合成单路径",不是教条式清零 PIL import。~~
+  **(已推翻,不是"按此完成":mem 图混合方案已废弃。`get_card_full_thumbnail_layers()` 现在只返回
+  `AssetImageRef` 资产引用,由 `CardFullThumbnailBox` 在 widget 树里逐层原生绘制——Skia 路径直接把资产
+  路径写进 IR,Pillow 路径按需解码同一批层。见 `src/sekai/profile/drawer.py`。)**
 
 ## 阶段 8 — 切默认与终态(观察 ≥4 周后)
 
@@ -234,3 +268,21 @@ TYPEFACE_CACHE 锁外加载。
   `skia_card_fallback_to_pillow` 配置全部退役;card/box 与其他影子层端点同用 `use_skia_plot`。
 - 对拍现状:**57 ok / 1 pillow-only(honor)/ 0 失败**。除 honor 与 custom-profile-card 外,
   全部绘图端点默认走 Skia。
+
+### 2026-07-13:生产化链路就位(07-12 首条日志的「仍悬」五项落地四项)
+
+结账对象是 **2026-07-12 第一条日志末尾**那段"仍悬"(即上面 card/box shim-first 那条日志之**前**的那段,
+不是紧邻的续篇),它列的是**五项**,不是四项:
+
+1. card/box shim-first 重做 —— **已完成**,见 2026-07-12(续)。
+2. honor alpha-mask 原语 —— **已完成**(`src/sekai/honor/skia.py`,pillow-only 归零)。
+3. chart 水印壳 —— **已完成**。
+4. CI wheel 流水线 —— **已完成**(`skia-wheels.yml`)+ native 测试进 CI + Docker 条件安装与构建期自检。
+5. 生产镜像集成与部署验收 —— **未完成**。PR #33 仍处于 open,带扩展镜像的全关金丝雀与放量验收都还没做;
+   这正是「现状一句话」里"剩余的是生产验收而非代码"所指,不要因为本条日志存在就当它已结账。
+
+同期:IR capability 握手(当前 5)、`/render-stats` 与 `backend=` 可观测性、
+card/list 也收敛回共享 widget 树(`card_render.py` 与 `use_skia_card_list` 随之删除)、
+对拍扩到 **63 用例 63 ok**。
+
+**逐项清单不在本文维护,见 [`skia-migration-todo.md`](./skia-migration-todo.md)。** 本文自此仅作历史记录。

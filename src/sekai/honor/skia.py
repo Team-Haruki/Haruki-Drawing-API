@@ -7,15 +7,20 @@ rebuilds the same absolute-coordinate composite as IR v2 nodes:
   chara-icon mid-line crops;
 - ``group(mask=...)`` (saveLayer + DstIn) covers ``img.putalpha(mask.split()[3])``;
 - the raster watermark footer the route otherwise adds via ``add_request_watermark_to_image``
-  is replicated chart-style in two native passes: pass 1 renders the badge scene to PNG
-  bytes, pass 2 draws that as an encoded mem image plus the stretched bottom-strip footer
-  sample (``source_rect``) and the right-aligned white/grey shadowed watermark lines.
-  Python never touches pixels.
+  is drawn in the SAME pass: the badge sub-scene is spliced into the final builder and the
+  footer strip samples the already-rendered canvas with a ``SelfImage`` node. (It used to take
+  two native passes with an intermediate PNG; that is gone.) Python never touches pixels.
 
 Layout decisions (canvas size, crop windows, text measurement) run in Python against the
 asset headers / PIL font metrics so every coordinate matches the Pillow composer. Any
 unsupported shape or unreadable *required* asset returns ``None`` so the caller falls back
 to the Pillow path, which raises the canonical user-visible error.
+
+NOTE this module is a hand-written IR scene builder — it does NOT go through plot.py's widget
+tree or IRPainter, so the honor layout exists TWICE in Python: here, and in
+``drawer._compose_full_honor_image_sync``. That is the same two-layouts-by-hand hazard that
+retired ``card_render.py``; any geometry change must be made on both sides. Collapsing honor
+onto the shared widget tree is tracked in docs/skia-migration-todo.md.
 """
 
 from __future__ import annotations

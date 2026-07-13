@@ -7,7 +7,6 @@ No native extension required — the render is faked throughout.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import pytest
 
@@ -66,14 +65,6 @@ class _FakeCanvas:
 
 async def _build_ok() -> _FakeCanvas:
     return _FakeCanvas()
-
-
-def _use_fake_cache(monkeypatch) -> dict[str, Any]:
-    """Swap the helper's payload-cache accessors for a plain dict (config-independent)."""
-    store: dict[str, Any] = {}
-    monkeypatch.setattr(canvas_mod, "get_skia_payload_cached", store.get)
-    monkeypatch.setattr(canvas_mod, "put_skia_payload_cache", lambda k, v, _n: store.__setitem__(k, v))
-    return store
 
 
 # ------------------------------- counters -------------------------------
@@ -138,120 +129,82 @@ def test_font_fallbacks_are_aggregated_from_the_payload():
     assert get_render_stats()["font_fallbacks"] == 3
 
 
-# --------------------------- the shared helper ---------------------------
+# ----------------------- outcomes on the render path -----------------------
+#
+# There is no separate "cached render helper" any more: page-level result caching was removed
+# (the caller already caches by payload, and our key could never hit), so render_canvas_payload
+# IS the entry point, and it is where every outcome is recorded. The three endpoints that keep a
+# payload cache (card/box, card/list, honor) return the cached payload before reaching it and
+# record the hit themselves via record_skia_cache_hit — covered in tests/test_skia_card_box.py.
 
 
-def test_helper_records_skia_and_stores_in_cache(monkeypatch):
+def test_records_skia_and_stamps_the_payload(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    store = _use_fake_cache(monkeypatch)
     payload = _payload()
 
     async def fake_render(canvas, **kwargs):
         return payload
 
     monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
-    built = 0
 
-    async def build():
-        nonlocal built
-        built += 1
-        return _FakeCanvas()
-
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", build, cache_key="k1"))
+    result = asyncio.run(canvas_mod.render_canvas_payload(_FakeCanvas(), endpoint="card_list"))
     assert result is payload
-    assert built == 1
-    assert store["k1"] is payload
     assert get_render_stats()["endpoints"]["card_list"]["skia"] == 1
     assert payload.backend == "skia"
 
 
-def test_helper_skips_build_canvas_on_cache_hit(monkeypatch):
-    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    store = _use_fake_cache(monkeypatch)
-    cached = _payload()
-    store["k1"] = cached
-
-    async def build():  # pragma: no cover - must not run
-        raise AssertionError("build_canvas must not run on a cache hit")
-
-    async def fake_render(canvas, **kwargs):  # pragma: no cover - must not run
-        raise AssertionError("render must not run on a cache hit")
-
-    monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
-
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", build, cache_key="k1"))
-    assert result is cached
-    assert cached.backend == "skia_cache"
-    assert get_render_stats()["endpoints"]["card_list"]["cache_hit"] == 1
-
-
-def test_helper_without_cache_key_never_reads_or_writes_the_cache(monkeypatch):
-    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    store = _use_fake_cache(monkeypatch)
-    payload = _payload()
-
-    async def fake_render(canvas, **kwargs):
-        return payload
-
-    monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
-
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("sk_live", _build_ok))
-    assert result is payload
-    assert store == {}  # time-sensitive endpoints must not be cached
-    assert get_render_stats()["endpoints"]["sk_live"]["skia"] == 1
-
-
-def test_helper_records_disabled_and_skips_build(monkeypatch):
+def test_records_disabled_without_rendering(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", False)
 
-    async def build():  # pragma: no cover - must not run
-        raise AssertionError("build_canvas must not run when Skia is disabled")
+    async def _boom(canvas, **kwargs):  # pragma: no cover - must not run
+        raise AssertionError("must not render when the gate is off")
 
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", build, cache_key="k1"))
+    monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", _boom)
+
+    result = asyncio.run(canvas_mod.render_canvas_payload(_FakeCanvas(), endpoint="card_list"))
     assert result is None
     assert get_render_stats()["endpoints"]["card_list"]["disabled"] == 1
 
 
-def test_helper_records_fallback_when_render_declines(monkeypatch):
+def test_records_fallback_when_render_declines(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    store = _use_fake_cache(monkeypatch)
 
     async def fake_render(canvas, **kwargs):
         return None  # unsupported primitive / native ext missing
 
     monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
 
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", _build_ok, cache_key="k1"))
+    result = asyncio.run(canvas_mod.render_canvas_payload(_FakeCanvas(), endpoint="card_list"))
     assert result is None
-    assert store == {}
     assert get_render_stats()["endpoints"]["card_list"]["fallback"] == 1
 
 
-def test_helper_swallows_render_exception_and_records_error(monkeypatch):
+def test_swallows_render_exception_and_records_error(monkeypatch):
     """FAIL-OPEN: an unexpected Skia error must degrade to Pillow, never propagate."""
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    _use_fake_cache(monkeypatch)
 
     async def fake_render(canvas, **kwargs):
         raise RuntimeError("native exploded")
 
     monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
 
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", _build_ok, cache_key="k1"))
+    result = asyncio.run(canvas_mod.render_canvas_payload(_FakeCanvas(), endpoint="card_list"))
     assert result is None
     assert get_render_stats()["endpoints"]["card_list"]["error"] == 1
 
 
-def test_helper_swallows_build_canvas_exception(monkeypatch):
+def test_an_unnamed_caller_is_still_counted(monkeypatch):
+    """endpoint= is optional so a forgotten call site still renders; it must not vanish from
+    /render-stats though, or the gap would be invisible."""
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    _use_fake_cache(monkeypatch)
 
-    async def build():
-        raise ValueError("bad layout")
+    async def fake_render(canvas, **kwargs):
+        return _payload()
 
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("card_list", build))
-    assert result is None
-    assert get_render_stats()["endpoints"]["card_list"]["error"] == 1
+    monkeypatch.setattr(canvas_mod, "_render_canvas_uncounted", fake_render)
+
+    asyncio.run(canvas_mod.render_canvas_payload(_FakeCanvas()))
+    assert get_render_stats()["endpoints"]["unknown"]["skia"] == 1
 
 
 # ---------------------------- canvas-size guard ----------------------------
@@ -262,7 +215,6 @@ def test_canvas_size_guard_falls_back_without_rendering(monkeypatch):
     (The native MODULE may be imported first — that is just a cached import; what must not
     happen is render_scene being handed a multi-gigapixel surface.)"""
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    _use_fake_cache(monkeypatch)
 
     class _Native:
         def render_scene(self, *a, **kw):  # pragma: no cover - must not run
@@ -270,10 +222,8 @@ def test_canvas_size_guard_falls_back_without_rendering(monkeypatch):
 
     monkeypatch.setattr(canvas_mod, "load_native_renderer", lambda: _Native())
 
-    async def build_huge():
-        return _FakeCanvas((30000, 30000))  # 900 Mpx
-
-    result = asyncio.run(canvas_mod.render_cached_canvas_payload("mysekai_map", build_huge))
+    huge = _FakeCanvas((30000, 30000))  # 900 Mpx
+    result = asyncio.run(canvas_mod.render_canvas_payload(huge, endpoint="mysekai_map"))
     assert result is None
     assert get_render_stats()["endpoints"]["mysekai_map"]["fallback"] == 1
 

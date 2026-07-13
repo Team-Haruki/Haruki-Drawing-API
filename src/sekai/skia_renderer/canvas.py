@@ -8,7 +8,6 @@ so the caller falls back to the Pillow composer. See ``docs/skia-pillow-coverage
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from datetime import datetime
 import importlib
 import json
@@ -20,9 +19,7 @@ from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.ir_painter import IRPainter, SkiaUnsupported
-from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import (
-    OUTCOME_CACHE_HIT,
     OUTCOME_DISABLED,
     OUTCOME_ERROR,
     OUTCOME_FALLBACK,
@@ -150,9 +147,10 @@ async def render_canvas_payload(
     ``endpoint`` names the caller for /render-stats and the ``backend=`` log field. It is
     optional only so that an un-wired caller still renders; pass it.
 
-    This is where every outcome is recorded — including for the ~60 drawers that call this
-    directly rather than through :func:`render_cached_canvas_payload` — so that /render-stats
-    and ``backend=`` tell the truth before the endpoints are wired to the caching helper.
+    This is where every render outcome is recorded, so /render-stats and the ``backend=`` log
+    field cover every drawing endpoint. The three endpoints that keep a payload cache
+    (card/box, card/list, honor) return a cached payload before reaching here, and record it
+    themselves via ``record_skia_cache_hit``.
     """
     name = endpoint or "unknown"
     if not settings.drawing.use_skia_plot:
@@ -234,57 +232,3 @@ def _record(endpoint: str, outcome: str, payload: EncodedImagePayload | None = N
     if payload is not None:
         payload.backend = backend
         record_native_metrics(payload.native_metrics)
-
-
-async def render_cached_canvas_payload(
-    endpoint: str,
-    build_canvas: Callable[[], Awaitable[Any]],
-    *,
-    cache_key: str | None = None,
-    bg_hour: float | None = None,
-    scale: float | None = None,
-    export_format: str | None = None,
-) -> EncodedImagePayload | None:
-    """The shared Skia entry point for the drawers: cache lookup → build → render → record.
-
-    Returns the encoded payload, or ``None`` when the caller must fall back to Pillow. This is
-    FAIL-OPEN: it never propagates a Skia error.
-
-    ``build_canvas`` is a zero-arg async callable returning a built ``Canvas``. It is only
-    awaited when we actually have to render — a cache hit or a disabled backend skips the whole
-    layout, which is the point of passing a callable instead of a canvas.
-
-    ``cache_key`` opts into the Skia payload cache; pass ``None`` for time-sensitive endpoints
-    (anything whose output embeds "now") so they always re-render.
-    """
-    if not settings.drawing.use_skia_plot:
-        _record(endpoint, OUTCOME_DISABLED)
-        return None
-
-    if cache_key is not None:
-        cached = get_skia_payload_cached(cache_key)
-        if cached is not None:
-            _record(endpoint, OUTCOME_CACHE_HIT, cached)
-            return cached
-
-    try:
-        canvas = await build_canvas()
-    except Exception:
-        # Fail-open: a broken Skia layout must degrade to Pillow, never 500.
-        logger.exception("Skia canvas build failed for %s; falling back to Pillow", endpoint)
-        _record(endpoint, OUTCOME_ERROR)
-        return None
-
-    # render_canvas_payload records the skia/fallback/error outcome itself (it is also the
-    # entry point for the drawers that have not been wired to this helper yet), so do not
-    # record again here — that would double-count every render.
-    payload = await render_canvas_payload(
-        canvas,
-        endpoint=endpoint,
-        bg_hour=bg_hour,
-        scale=scale,
-        export_format=export_format,
-    )
-    if payload is not None and cache_key is not None:
-        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
-    return payload
