@@ -16,7 +16,7 @@
 - [x] **CI wheel 流水线**(2026-07-13,skia-wheels.yml:linux-x86_64 + macos-arm64 矩阵、rust-cache、wheel tag 断言、IR_CAPABILITY 冒烟、artifact 上传)。
 - [x] **CI 跑 native 测试**(2026-07-13,quick-check native-tests job:maturin develop + OFL 字体下载缓存 + 全量 pytest;素材类 parity 自动跳过)。
 - [x] **Docker 集成**(2026-07-13,docker.yml 先构 wheel → docker/skia-wheels → 镜像条件安装 + 构建期自检;无 wheel 时 fail-open 构建仍绿,双分支本地实测)。
-- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;当前=5,SelfImage 画布快照)。
+- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;当前=6,`ImageNode.blend` 的 Src 通道)。
 - [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开;
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
@@ -216,7 +216,14 @@
 - [x] CLAUDE.md Skia 后端章节(2026-07-14,三份镜像文件同步:env-only 开关、wheel/CI 链路、capability 握手、
       cargo test 链接配方、IR-first 规则,以及本轮踩到的 5 个陷阱——对拍的 legacy 盲区、ImageBg fade 默认值、
       Painter.text 基线锚点、Pillow paste 拖低 dst alpha、resize 缓存按 resample 分键)。
-- [ ] 结构性防呆 CI 测试:枚举全部路由,断言每个绘图端点绑定 widget 树/IR 路径(白名单显式豁免)。
+- [x] **结构性防呆 CI 测试**(2026-07-14,`tests/test_route_render_contract.py`):递归枚举全部 `/api/pjsk` 路由
+      (FastAPI 不摊平被 include 的 router,得自己下钻),断言 ①每个绘图端点都调 `try_render_*_payload`
+      ②每个调了的都还留着 Pillow `compose` 兜底(fail-open)③没有新的手写 IR scene builder。
+      豁免走显式白名单并各自写明理由(custom-profile 自带渲染器、两个 heavy-worker 路由的 Skia 调用在
+      worker 里而非路由体——后者另有一条测试反向证明它确实还在,免得白名单变成藏污纳垢的地方)。
+      第 ③ 条**扫 import 而不是扫文本**:`IRBuilder` 和 `build_canvas_ir` 两个门都得看紧
+      (后者交出的是**可变**builder,能绕开前者另起一套布局),而文本扫描会被注释里提到名字绊倒
+      ——这条测试自己的说明文字就绊倒过它。
 - [x] **honor 回归共享 widget 树**(2026-07-14):`honor/widget.py` 的 `HonorBadgeBox` 是唯一布局,
       `_compose_full_honor_image_sync` 与 `skia._build_badge_scene` 删除;新增公共 Painter 原语
       `push_mask`/`pop_mask`(两端同语义:Pillow `ImageChops.multiply` = Skia `Group{mask}` DstIn,

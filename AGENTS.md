@@ -142,8 +142,8 @@ flip the env var and restart; the image itself is unchanged. Renderer tunables: 
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_TEXT_HINTING`, `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **5**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 5). A too-old
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **6**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 6). A too-old
 extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
 self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
