@@ -1,14 +1,17 @@
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::f32::consts::PI;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use moka::sync::Cache;
 use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
 use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
+#[cfg(not(test))]
+use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use skia_safe::{
@@ -27,6 +30,13 @@ fn linear_sampling() -> SamplingOptions {
 mod interp;
 mod ir;
 
+/// Distinguishes an IR that failed to parse (caller error → ValueError) from one that failed
+/// to render (RuntimeError), now that both happen inside the same detached region.
+enum SceneError {
+    Parse(String),
+    Render(String),
+}
+
 #[pyfunction]
 #[pyo3(signature = (ir_json, images = None))]
 fn render_scene(
@@ -34,32 +44,36 @@ fn render_scene(
     ir_json: &[u8],
     images: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyDict>> {
-    let scene: ir::Scene = serde_json::from_slice(ir_json).map_err(|err| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid scene IR: {err}"))
-    })?;
-    // Runtime in-memory images, referenced from the IR as "mem:<key>". A value is either
-    // encoded bytes (PNG/JPEG) or a (width, height, rgba_bytes) tuple of raw pixels (no
-    // encode/decode). Extracted here under the GIL, materialized lazily during rendering.
+    // Runtime in-memory images, referenced from the IR as "mem:<key>". A value is encoded
+    // PNG/JPEG, a legacy (width, height, rgba_bytes) tuple, or a six-tuple describing a
+    // read-only native pixel buffer. Extracted here under the GIL, materialized lazily.
     let mut mem_images: HashMap<String, interp::MemImage> = HashMap::new();
     if let Some(dict) = images {
         for (key, value) in dict.iter() {
             let key: String = key.extract()?;
-            let mem = if let Ok((width, height, bytes)) = value.extract::<(i32, i32, &[u8])>() {
-                interp::MemImage::Raw {
-                    width,
-                    height,
-                    data: Data::new_copy(bytes),
-                }
-            } else {
-                interp::MemImage::Encoded(Data::new_copy(value.extract::<&[u8]>()?))
-            };
-            mem_images.insert(key, mem);
+            // A degenerate raw image (e.g. a layout crop that clamped to zero width) must skip
+            // just that Image node — as it did before validation existed — not abort the whole
+            // scene and throw away an otherwise perfectly good native render.
+            if let Some(mem) = extract_mem_image(py, &value)? {
+                mem_images.insert(key, mem);
+            }
         }
     }
+    // Parse AND render with the GIL released. `ir_json` borrows an immutable Python `bytes`
+    // object (pyo3 only extracts `&[u8]` from `bytes`) that the caller's argument tuple keeps
+    // alive for the whole call, so the slice stays valid while detached. Nothing inside touches
+    // a Python object: the MemImage owners are only moved and dropped, and pyo3's `Py`/`PyBuffer`
+    // Drop impls re-attach the thread themselves.
     let rendered = py
-        .detach(|| interp::render_scene_inner(&scene, mem_images))
-        .map_err(|err| {
-            pyo3::exceptions::PyRuntimeError::new_err(format!("scene render failed: {err}"))
+        .detach(|| {
+            let scene: ir::Scene = serde_json::from_slice(ir_json)
+                .map_err(|err| SceneError::Parse(format!("invalid scene IR: {err}")))?;
+            interp::render_scene_inner(&scene, mem_images)
+                .map_err(|err| SceneError::Render(format!("scene render failed: {err}")))
+        })
+        .map_err(|err| match err {
+            SceneError::Parse(message) => pyo3::exceptions::PyValueError::new_err(message),
+            SceneError::Render(message) => pyo3::exceptions::PyRuntimeError::new_err(message),
         })?;
 
     let dict = PyDict::new(py);
@@ -120,14 +134,169 @@ fn render_scene(
         "zero_blur_fast_paths",
         rendered.metrics.zero_blur_fast_paths,
     )?;
+    // Non-zero means this scene asked for a font that could not be resolved and rendered with
+    // Skia's sans-serif instead: the output is wrong even though the request succeeded.
+    metrics.set_item("font_fallbacks", rendered.metrics.font_fallbacks)?;
     dict.set_item("native_metrics", metrics)?;
     Ok(dict.unbind())
+}
+
+/// Wrap the bytes of an *immutable* Python object in a Skia `Data` without copying them.
+///
+/// `owner` must be the object the slice points into — a `bytes`, or a tuple whose (immutable)
+/// items hold it. The returned owner is a strong reference stored next to the `Data` inside the
+/// `MemImage`, and `Interp` drops its images before its `mem_images`, so the buffer outlives
+/// every `Data`/`Image` derived from it. CPython never mutates or reallocates a live `bytes`
+/// buffer, so no other thread can invalidate the slice while Skia reads it.
+#[cfg(not(test))]
+fn borrowed_data(bytes: &[u8], owner: &Bound<'_, PyAny>) -> (Data, Option<interp::BytesOwner>) {
+    // SAFETY: see above — the memory is immutable and kept alive by the returned owner.
+    let data = unsafe { Data::new_bytes(bytes) };
+    (data, Some(owner.clone().unbind()))
+}
+
+/// Test builds have no live interpreter to hold the owner alive, so they copy instead.
+#[cfg(test)]
+fn borrowed_data(bytes: &[u8], _owner: &Bound<'_, PyAny>) -> (Data, Option<interp::BytesOwner>) {
+    (Data::new_copy(bytes), None)
+}
+
+fn extract_mem_image(
+    _py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<interp::MemImage>> {
+    if let Ok((width, height, bytes)) = value.extract::<(i32, i32, &[u8])>() {
+        // Not an error: skip the image and let the rest of the scene render natively.
+        if let Err(reason) =
+            validate_raw_image(width, height, width.max(0) as usize * 4, bytes.len())
+        {
+            eprintln!("[haruki_skia_renderer] skipping raw mem image ({width}x{height}): {reason}");
+            return Ok(None);
+        }
+        // Zero-copy: the RGBA payload is often megabytes, and the tuple keeps the `bytes` alive.
+        let (data, owner) = borrowed_data(bytes, value);
+        return Ok(Some(interp::MemImage::Raw {
+            width,
+            height,
+            row_bytes: width as usize * 4,
+            color_type: ColorType::RGBA8888,
+            alpha_type: AlphaType::Unpremul,
+            data,
+            _buffer: None,
+            _owner: owner,
+        }));
+    }
+
+    #[cfg(not(test))]
+    if let Ok((width, height, row_bytes, color_type, alpha_type, owner)) =
+        value.extract::<(i32, i32, usize, String, String, Py<PyAny>)>()
+    {
+        let color_type = match color_type.as_str() {
+            "rgba8888" => ColorType::RGBA8888,
+            "bgra8888" => ColorType::BGRA8888,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported raw image color type: {color_type}"
+                )));
+            }
+        };
+        let alpha_type = match alpha_type.as_str() {
+            "premul" => AlphaType::Premul,
+            "unpremul" => AlphaType::Unpremul,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "unsupported raw image alpha type: {alpha_type}"
+                )));
+            }
+        };
+        let exporter = owner.bind(_py);
+        let buffer = PyBuffer::<u8>::get(exporter)?;
+        if !buffer.readonly() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "raw image buffer must be read-only",
+            ));
+        }
+        if !buffer.is_c_contiguous() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "raw image buffer must be C-contiguous",
+            ));
+        }
+        let expected = match validate_raw_image(width, height, row_bytes, buffer.len_bytes()) {
+            Ok(expected) => expected,
+            Err(reason) => {
+                eprintln!(
+                    "[haruki_skia_renderer] skipping raw mem image ({width}x{height}): {reason}"
+                );
+                return Ok(None);
+            }
+        };
+
+        // `buffer.readonly()` describes the VIEW, not the exporter: `memoryview(ba).toreadonly()`
+        // over a bytearray reports read-only while `ba[0] = x` still succeeds. Skia reads these
+        // bytes with the interpreter DETACHED, so another Python thread mutating the exporter is
+        // a data race on memory Rust holds as an immutable slice. Borrowing is therefore only
+        // sound for an exporter Python cannot write through; for the mutable built-ins we copy.
+        // (The real producer — pjsekai_scores_rs' RasterImage — owns its pixels in Rust and
+        // exposes no mutator, so the hot chart path keeps its zero-copy transport.)
+        let mutable_exporter = exporter.is_instance_of::<pyo3::types::PyByteArray>()
+            || exporter.is_instance_of::<pyo3::types::PyMemoryView>();
+        let bytes = unsafe { std::slice::from_raw_parts(buffer.buf_ptr().cast::<u8>(), expected) };
+        let (data, keep_buffer) = if mutable_exporter {
+            (Data::new_copy(bytes), None)
+        } else {
+            // PyBuffer keeps the exporter alive (and unresizable) until the render completes.
+            (unsafe { Data::new_bytes(bytes) }, Some(buffer))
+        };
+        return Ok(Some(interp::MemImage::Raw {
+            width,
+            height,
+            row_bytes,
+            color_type,
+            alpha_type,
+            data,
+            _buffer: keep_buffer,
+            _owner: None,
+        }));
+    }
+
+    // Encoded PNG/JPEG bytes: borrowed, not copied — Skia decodes lazily out of the `bytes`.
+    // Sound because pyo3 only extracts `&[u8]` from an immutable `bytes` (a bytearray is
+    // rejected here), and `borrowed_data` holds a reference to it for the render's lifetime.
+    let (data, owner) = borrowed_data(value.extract::<&[u8]>()?, value);
+    Ok(Some(interp::MemImage::Encoded {
+        data,
+        _owner: owner,
+    }))
+}
+
+fn validate_raw_image(
+    width: i32,
+    height: i32,
+    row_bytes: usize,
+    buffer_len: usize,
+) -> Result<usize, String> {
+    if width <= 0 || height <= 0 {
+        return Err("raw image dimensions must be positive".to_string());
+    }
+    let min_row_bytes = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "raw image dimensions overflow".to_string())?;
+    if row_bytes < min_row_bytes {
+        return Err("raw image row_bytes is too small".to_string());
+    }
+    let expected = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| "raw image dimensions overflow".to_string())?;
+    if buffer_len < expected {
+        return Err("raw image buffer is too small".to_string());
+    }
+    Ok(expected)
 }
 
 /// Capability level of the IR this build understands. Bump when nodes/fields are added so
 /// the Python side can refuse (fail-open to Pillow) instead of silently dropping features
 /// when an older wheel meets newer IR. 4 = capability 3 + per-image sampling intent.
-pub const IR_CAPABILITY: u32 = 4;
+pub const IR_CAPABILITY: u32 = 5;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -135,6 +304,7 @@ fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(renderer_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(clear_renderer_caches, m)?)?;
     m.add("IR_CAPABILITY", IR_CAPABILITY)?;
+    m.add("RAW_BUFFER_CAPABILITY", 1_u32)?;
     Ok(())
 }
 
@@ -183,6 +353,8 @@ pub(crate) struct NativeMetrics {
     pub(crate) raster_cache_entries: u64,
     pub(crate) raster_cache_bytes: u64,
     pub(crate) zero_blur_fast_paths: u64,
+    /// Fonts this scene requested that could not be resolved (rendered with sans-serif).
+    pub(crate) font_fallbacks: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1396,6 +1568,10 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
         "dimension_cache_entries",
         image_dimension_cache().entry_count(),
     )?;
+    // Font health: any non-zero count means some text rendered with sans-serif instead of the
+    // configured face. `font_fallback_fonts` names them so a misconfigured deploy is actionable.
+    dict.set_item("font_fallback_count", font_fallback_count())?;
+    dict.set_item("font_fallback_fonts", missing_font_names())?;
     Ok(dict.unbind())
 }
 
@@ -1430,37 +1606,107 @@ fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(base.join(relative))
 }
 
-static TYPEFACE_CACHE: OnceLock<Mutex<HashMap<String, Typeface>>> = OnceLock::new();
+static TYPEFACE_CACHE: OnceLock<Mutex<HashMap<String, CachedTypeface>>> = OnceLock::new();
+static MISSING_FONTS: OnceLock<Mutex<BTreeSet<String>>> = OnceLock::new();
+static FONT_FALLBACK_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+struct CachedTypeface {
+    typeface: Typeface,
+    /// The requested font could not be resolved; Skia's sans-serif is standing in and every
+    /// glyph drawn with it is wrong. Kept in the cache entry so repeat resolutions still count.
+    fallback: bool,
+}
+
+fn missing_fonts() -> &'static Mutex<BTreeSet<String>> {
+    MISSING_FONTS.get_or_init(|| Mutex::new(BTreeSet::new()))
+}
+
+/// A missing font is a silent, permanent, whole-deployment defect if it is only papered over,
+/// so shout about it once per unresolvable font and keep counting every resolution that hits
+/// the fallback. Rendering still proceeds with sans-serif — the contract is fail-open.
+fn report_missing_font(dir: &str, name: &str) {
+    let first_time = missing_fonts()
+        .lock()
+        .map(|mut seen| seen.insert(format!("{dir}::{name}")))
+        .unwrap_or(true);
+    if !first_time {
+        return;
+    }
+    let tried = font_candidates(dir, name)
+        .iter()
+        .map(|candidate| candidate.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "haruki_skia_renderer: ERROR font not found: name={name:?} dir={dir:?}; falling back to \
+         sans-serif — TEXT WILL RENDER WITH THE WRONG FACE. Tried: [{tried}]"
+    );
+}
+
+/// Process-wide count of font resolutions that fell back to sans-serif (see `renderer_cache_stats`).
+pub(crate) fn font_fallback_count() -> u64 {
+    FONT_FALLBACK_COUNT.load(Ordering::Relaxed)
+}
+
+/// The distinct fonts that could not be resolved, as `"<dir>::<name>"`.
+pub(crate) fn missing_font_names() -> Vec<String> {
+    missing_fonts()
+        .lock()
+        .map(|seen| seen.iter().cloned().collect())
+        .unwrap_or_default()
+}
 
 /// Load a typeface, caching it process-wide by (dir, name) so each render does not
 /// re-read and re-parse the font files (Typeface is cheap to clone — ref-counted).
-fn load_typeface(dir: &str, name: &str) -> Typeface {
+/// Returns `(typeface, fell_back)`; `fell_back` means the requested font is missing.
+pub(crate) fn load_typeface_checked(dir: &str, name: &str) -> (Typeface, bool) {
     let key = format!("{dir}\0{name}");
     let cache = TYPEFACE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(mut cache) = cache.lock() {
-        if let Some(typeface) = cache.get(&key) {
-            return typeface.clone();
+    let cached = cache.lock().ok().and_then(|guard| guard.get(&key).cloned());
+    if let Some(entry) = cached {
+        if entry.fallback {
+            FONT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
         }
-        let typeface = load_typeface_uncached(dir, name);
-        cache.insert(key, typeface.clone());
-        return typeface;
+        return (entry.typeface, entry.fallback);
     }
-    load_typeface_uncached(dir, name)
+
+    // Read and parse the font file OUTSIDE the lock. Holding it across the I/O would serialize
+    // every cold miss (and every render that races one) behind a single mutex; a duplicate load
+    // when two threads miss the same font at once is cheap, and the loser's copy is dropped.
+    let loaded = load_typeface_uncached(dir, name);
+    if loaded.fallback {
+        FONT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
+        report_missing_font(dir, name);
+    }
+    if let Ok(mut guard) = cache.lock() {
+        let stored = guard.entry(key).or_insert_with(|| loaded.clone());
+        return (stored.typeface.clone(), stored.fallback);
+    }
+    (loaded.typeface, loaded.fallback)
 }
 
-fn load_typeface_uncached(dir: &str, name: &str) -> Typeface {
+fn load_typeface_uncached(dir: &str, name: &str) -> CachedTypeface {
     let mgr = FontMgr::default();
     for candidate in font_candidates(dir, name) {
         if candidate.exists()
             && let Ok(bytes) = fs::read(candidate)
             && let Some(typeface) = mgr.new_from_data(&bytes, None)
         {
-            return typeface;
+            return CachedTypeface {
+                typeface,
+                fallback: false,
+            };
         }
     }
-    mgr.match_family_style("sans-serif", skia_safe::FontStyle::normal())
+    let typeface = mgr
+        .match_family_style("sans-serif", skia_safe::FontStyle::normal())
         .or_else(|| mgr.legacy_make_typeface(None, skia_safe::FontStyle::normal()))
-        .expect("Skia fallback typeface unavailable")
+        .expect("Skia fallback typeface unavailable");
+    CachedTypeface {
+        typeface,
+        fallback: true,
+    }
 }
 
 fn font_candidates(dir: &str, name: &str) -> Vec<PathBuf> {
@@ -1489,6 +1735,46 @@ mod tests {
     #[test]
     fn rejects_parent_asset_paths() {
         assert!(resolve_asset_path(Path::new("/tmp/base"), "../x.png").is_err());
+    }
+
+    #[test]
+    fn missing_font_falls_back_loudly_and_is_counted() {
+        // A font that cannot be resolved must still render (fail-open, sans-serif) but must be
+        // counted every time it is resolved — including on typeface-cache hits — and named in
+        // the stats, so a misconfigured deployment is visible instead of silently wrong.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let name = format!("haruki-missing-font-{unique}");
+        let dir = "/nonexistent/haruki-font-dir";
+        let before = font_fallback_count();
+
+        let (_typeface, fell_back) = load_typeface_checked(dir, &name);
+        assert!(fell_back, "an unresolvable font must report the fallback");
+        let (_cached, cached_fell_back) = load_typeface_checked(dir, &name);
+        assert!(
+            cached_fell_back,
+            "the cached entry must stay marked as a fallback"
+        );
+        assert!(
+            font_fallback_count() >= before + 2,
+            "cache hits on a fallback typeface must keep counting"
+        );
+        assert!(
+            missing_font_names()
+                .iter()
+                .any(|entry| entry == &format!("{dir}::{name}")),
+            "the unresolvable font must be named in the stats"
+        );
+    }
+
+    #[test]
+    fn validates_raw_image_stride_and_length() {
+        assert_eq!(validate_raw_image(3, 2, 16, 32).expect("valid"), 32);
+        assert!(validate_raw_image(3, 2, 11, 32).is_err());
+        assert!(validate_raw_image(3, 2, 12, 23).is_err());
+        assert!(validate_raw_image(0, 2, 12, 24).is_err());
     }
 
     #[test]

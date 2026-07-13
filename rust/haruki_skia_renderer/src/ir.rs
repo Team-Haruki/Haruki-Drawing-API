@@ -267,6 +267,7 @@ pub enum Node {
     RoundRect(RoundRectNode),
     PieSlice(PieSliceNode),
     Image(ImageNode),
+    SelfImage(SelfImageNode),
     Text(TextNode),
     Shadow(ShadowNode),
     BlurGlass(BlurGlassNode),
@@ -375,6 +376,20 @@ pub struct ImageNode {
 
 fn default_alpha() -> f32 {
     1.0
+}
+
+/// Draws a snapshot of the canvas content ALREADY rendered when this node executes:
+/// `source_rect` (same coordinate space as `pos`, i.e. group-relative) is captured
+/// and stretched into the `pos`/`size` dest rect. Lets a scene reuse a drawn region
+/// as an image source (e.g. the honor watermark footer strip) in a single pass
+/// instead of rendering twice and shipping the intermediate as a mem image.
+#[derive(Debug, Deserialize)]
+pub struct SelfImageNode {
+    pub pos: Vec2,
+    pub size: Vec2,
+    pub source_rect: Rect4,
+    #[serde(default)]
+    pub sampling: ImageSampling,
 }
 
 #[derive(Debug, Deserialize)]

@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+#[cfg(not(test))]
+use pyo3::buffer::PyBuffer;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
@@ -24,8 +26,21 @@ use crate::ir::*;
 use crate::{
     AssetDescriptor, NativeMetrics, RasterCacheOutcome, RenderedImage, decode_asset_descriptor,
     draw_blur_glass_rect, draw_sekai_triangle_background, encode_surface, load_asset_descriptor,
-    load_typeface, raster_cache_snapshot, rasterize_asset_cached,
+    load_typeface_checked, raster_cache_snapshot, rasterize_asset_cached,
 };
+
+#[cfg(not(test))]
+pub(crate) type RawBufferOwner = PyBuffer<u8>;
+#[cfg(test)]
+pub(crate) struct RawBufferOwner;
+
+/// Strong reference to the immutable Python object (a `bytes`, or a tuple holding one) whose
+/// buffer a borrowed `Data` points into. Keeping it next to the `Data` is what makes the
+/// zero-copy `mem:*` transport sound; see `crate::borrowed_data`.
+#[cfg(not(test))]
+pub(crate) type BytesOwner = pyo3::Py<pyo3::PyAny>;
+#[cfg(test)]
+pub(crate) struct BytesOwner;
 
 #[derive(Clone, Copy)]
 struct TextFontProfile {
@@ -143,26 +158,32 @@ struct FontRegistry {
     emoji: Option<Typeface>,
     /// Arbitrary named fonts (FontsIr.extra), addressable via FontRef.name.
     extra: HashMap<String, Typeface>,
+    /// How many of this scene's fonts could not be resolved and fell back to sans-serif.
+    /// `load_typeface_checked` logs each distinct one at ERROR; this surfaces it per render.
+    fallbacks: u64,
 }
 
 impl FontRegistry {
     fn build(fonts: &FontsIr) -> Self {
-        let regular = load_typeface(&fonts.dir, &fonts.default);
-        let bold = load_typeface(&fonts.dir, &fonts.bold);
+        let mut fallbacks = 0_u64;
+        let mut load = |name: &str| {
+            let (typeface, fell_back) = load_typeface_checked(&fonts.dir, name);
+            fallbacks += u64::from(fell_back);
+            typeface
+        };
+        let regular = load(&fonts.default);
+        let bold = load(&fonts.bold);
         let heavy = match &fonts.heavy {
-            Some(name) => load_typeface(&fonts.dir, name),
+            Some(name) => load(name),
             None => bold.clone(),
         };
         // Only load an emoji typeface when explicitly configured (otherwise emoji codepoints
         // keep falling back to the main font, unchanged).
-        let emoji = fonts
-            .emoji
-            .as_ref()
-            .map(|name| load_typeface(&fonts.dir, name));
-        let extra = fonts
+        let emoji = fonts.emoji.as_ref().map(|name| load(name));
+        let extra: HashMap<String, Typeface> = fonts
             .extra
             .iter()
-            .map(|(key, file)| (key.clone(), load_typeface(&fonts.dir, file)))
+            .map(|(key, file)| (key.clone(), load(file)))
             .collect();
         Self {
             regular,
@@ -170,6 +191,7 @@ impl FontRegistry {
             heavy,
             emoji,
             extra,
+            fallbacks,
         }
     }
 
@@ -251,11 +273,28 @@ fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> 
 }
 
 /// A runtime image shipped alongside the IR and referenced as "mem:<key>".
+///
+/// Both variants borrow their bytes from Python rather than copying them, so each keeps the
+/// owner of that memory alive: `_buffer` for a read-only buffer exported by another extension,
+/// `_owner` for an immutable `bytes` (or a tuple holding one). `Interp` declares `direct_images`
+/// before `mem_images`, so the `Image`s built from these `Data`s are dropped first.
 pub(crate) enum MemImage {
-    /// PNG/JPEG bytes (decoded via `Image::from_encoded`).
-    Encoded(Data),
-    /// Straight (un-premultiplied) RGBA8888 pixels — no encode/decode, just a raster wrap.
-    Raw { width: i32, height: i32, data: Data },
+    /// PNG/JPEG bytes (decoded lazily via `Image::from_encoded`).
+    Encoded {
+        data: Data,
+        _owner: Option<BytesOwner>,
+    },
+    /// Raw pixels — no encode/decode.
+    Raw {
+        width: i32,
+        height: i32,
+        row_bytes: usize,
+        color_type: ColorType,
+        alpha_type: AlphaType,
+        data: Data,
+        _buffer: Option<RawBufferOwner>,
+        _owner: Option<BytesOwner>,
+    },
 }
 
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
@@ -280,19 +319,18 @@ impl Interp {
         }
         let key = path.strip_prefix("mem:")?;
         let image = match self.mem_images.get(key)? {
-            MemImage::Encoded(data) => Image::from_encoded(data.clone())?,
+            MemImage::Encoded { data, .. } => Image::from_encoded(data.clone())?,
             MemImage::Raw {
                 width,
                 height,
+                row_bytes,
+                color_type,
+                alpha_type,
                 data,
+                ..
             } => {
-                let info = ImageInfo::new(
-                    (*width, *height),
-                    ColorType::RGBA8888,
-                    AlphaType::Unpremul,
-                    None,
-                );
-                skia_safe::images::raster_from_data(&info, data.clone(), *width as usize * 4)?
+                let info = ImageInfo::new((*width, *height), *color_type, *alpha_type, None);
+                skia_safe::images::raster_from_data(&info, data.clone(), *row_bytes)?
             }
         };
         self.direct_images.insert(path.to_string(), image.clone());
@@ -372,6 +410,7 @@ pub(crate) fn render_scene_inner(
         canvas_h: scene.canvas.height as f32,
         metrics: NativeMetrics::default(),
     };
+    interp.metrics.font_fallbacks = interp.fonts.fallbacks;
     interp.metrics.setup_elapsed = total_started.elapsed().as_secs_f64();
 
     prewarm_scene_images(scene, &mut interp);
@@ -424,7 +463,7 @@ pub(crate) fn render_scene_inner(
     rendered.metrics = metrics;
     if profile_enabled() {
         eprintln!(
-            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={}",
+            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={} font_fallbacks={}",
             rendered.metrics.total_elapsed,
             rendered.metrics.setup_elapsed,
             rendered.metrics.raster_prewarm_elapsed,
@@ -445,6 +484,7 @@ pub(crate) fn render_scene_inner(
             rendered.metrics.raster_cache_entries,
             rendered.metrics.raster_cache_bytes,
             rendered.metrics.zero_blur_fast_paths,
+            rendered.metrics.font_fallbacks,
         );
     }
     Ok(rendered)
@@ -491,6 +531,41 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
         Node::PieSlice(pie) => render_pie_slice(surface.canvas(), pie, off),
         Node::Image(image) => draw_image_node(surface.canvas(), interp, image, off),
+        Node::SelfImage(node) => {
+            let dst = Rect::from_xywh(
+                node.pos[0] + off.0,
+                node.pos[1] + off.1,
+                node.size[0],
+                node.size[1],
+            );
+            let mut src = Rect::new(
+                node.source_rect[0] + off.0,
+                node.source_rect[1] + off.1,
+                node.source_rect[2] + off.0,
+                node.source_rect[3] + off.1,
+            );
+            let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
+            if src.intersect(canvas_rect) && !src.is_empty() && !dst.is_empty() {
+                let ibounds: IRect = src.round_out();
+                if let Some(snap) = surface.image_snapshot_with_bounds(ibounds) {
+                    let src_local = Rect::from_xywh(
+                        src.left - ibounds.left as f32,
+                        src.top - ibounds.top as f32,
+                        src.width(),
+                        src.height(),
+                    );
+                    let mut paint = Paint::default();
+                    paint.set_anti_alias(true);
+                    surface.canvas().draw_image_rect_with_sampling_options(
+                        &snap,
+                        Some((&src_local, skia_safe::canvas::SrcRectConstraint::Strict)),
+                        dst,
+                        image_sampling(node.sampling),
+                        &paint,
+                    );
+                }
+            }
+        }
         Node::Text(text) => {
             let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
             // Adaptive color samples the backdrop (needs the surface), so resolve it here and
@@ -1913,6 +1988,18 @@ mod tests {
             &rendered.bytes.as_bytes()[..8],
             &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    #[test]
+    fn counts_unresolvable_scene_fonts_in_metrics() {
+        // The test scene points `default` and `bold` at a font that does not exist: the render
+        // still succeeds (sans-serif stands in), but the scene reports both fallbacks so the
+        // caller can see that the text came out with the wrong face.
+        let rendered = render(&scene_json(
+            r#"{ "type": "Text", "text": "Hi", "pos": [4, 10],
+                 "font": { "role": "bold", "size": 14 }, "fill": [0, 0, 0, 255] }"#,
+        ));
+        assert_eq!(rendered.metrics.font_fallbacks, 2);
     }
 
     #[test]
