@@ -69,6 +69,101 @@ TMP_CLEANUP_INTERVAL = 300  # 临时文件清理间隔（秒）
 DISK_CACHE_CLEANUP_INTERVAL = 3600  # 磁盘缓存清理间隔（秒）
 
 
+def _check_pillow_fonts() -> list[str]:
+    """Names of configured fonts Pillow cannot resolve.
+
+    Probes through ``get_font`` itself rather than re-implementing its path search, so the check
+    can never drift from the real lookup: a resolved font is a ``FreeTypeFont``, while a failed
+    one silently degrades to PIL's built-in 10px bitmap face.
+    """
+    from PIL import ImageFont
+
+    from src.sekai.base.painter import get_font
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_EMOJI_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
+
+    missing = []
+    for name in (DEFAULT_FONT, DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT, DEFAULT_EMOJI_FONT):
+        if not isinstance(get_font(name, 20), ImageFont.FreeTypeFont):
+            missing.append(name)
+    return missing
+
+
+def _check_native_fonts() -> list[str]:
+    """Names of configured fonts the NATIVE renderer cannot resolve.
+
+    Pillow and Rust search for fonts independently, so Rust can miss a face Pillow finds (a
+    different font dir inside the image, a wheel built against another layout). Rust does not fail
+    on a miss — it renders sans-serif and counts the fallback — so probe it: render a tiny scene
+    per font and read ``native_metrics["font_fallbacks"]``.
+    """
+    import json
+
+    from src.sekai.skia_renderer.canvas import load_native_renderer
+    from src.sekai.skia_renderer.ir_builder import IRBuilder
+    from src.settings import (
+        ASSETS_BASE_DIR,
+        DEFAULT_BOLD_FONT,
+        DEFAULT_EMOJI_FONT,
+        DEFAULT_FONT,
+        DEFAULT_HEAVY_FONT,
+        FONT_DIR,
+    )
+
+    native = load_native_renderer()
+    missing = []
+    for name in (DEFAULT_FONT, DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT, DEFAULT_EMOJI_FONT):
+        builder = IRBuilder(
+            8, 8, assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR), default_font=name, bold_font=name
+        )
+        builder.text("A", (0, 0), size=8, role="default")
+        result = native.render_scene(json.dumps(builder.build()).encode(), {})
+        if (result.get("native_metrics") or {}).get("font_fallbacks"):
+            missing.append(name)
+    return missing
+
+
+def _self_check_fonts() -> None:
+    """Fail loudly at startup when a configured font cannot be resolved.
+
+    A missing font is not a slow render — it is a WRONG one: every string comes out in the wrong
+    face, on every image, silently, until someone notices by eye. The two layers need different
+    answers:
+
+    - **Pillow cannot resolve it** → BOTH backends are broken (Pillow degrades to a 10px bitmap
+      face; Rust to sans-serif), so turning Skia off would fix nothing. Refuse to start. A deploy
+      that fails fast beats one that serves thousands of wrong images.
+    - **Only the native renderer cannot resolve it** → Pillow still renders correctly, so disable
+      Skia and keep serving. This is the case the "refuse to enable Skia" rule is actually for.
+    """
+    missing_pillow = _check_pillow_fonts()
+    if missing_pillow:
+        raise RuntimeError(
+            f"configured fonts cannot be resolved by Pillow: {missing_pillow} (font dir: {settings.font.dir}). "
+            "Every rendered image would use the wrong face; refusing to start. Check the asset volume mount."
+        )
+
+    if not settings.drawing.use_skia_plot:
+        return
+    try:
+        missing_native = _check_native_fonts()
+    except ImportError:
+        return  # no extension: already reported below, and Pillow renders everything
+    except Exception:
+        logger.exception("native font self-check failed to run; leaving Skia enabled")
+        return
+
+    if missing_native:
+        settings.drawing.use_skia_plot = False
+        logger.error(
+            "DISABLING Skia: the native renderer cannot resolve %s (font dir: %s) and would render them in "
+            "sans-serif, while Pillow resolves them correctly. Serving with Pillow.",
+            missing_native,
+            settings.font.dir,
+        )
+    else:
+        logger.info("font self-check passed (Pillow and native renderer both resolve every configured font)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
@@ -133,6 +228,7 @@ async def lifespan(app: FastAPI):
                 "every Skia path will fall back to Pillow (fail-open)",
                 exc_info=True,
             )
+    _self_check_fonts()
     await startup_heavy_render_worker_pool()
     logger.info("Haruki Drawing API is starting...")
     yield
