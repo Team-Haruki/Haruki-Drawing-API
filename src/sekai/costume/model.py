@@ -16,6 +16,11 @@ class CostumeColorVariant(BaseModel):
 class CostumeBasic(BaseModel):
     costume_id: int
     costume_group_id: int
+    outfit_id: int | None = None
+    accessory_id: int | None = None
+    hair_id: int | None = None
+    character_3d_id: int | None = None
+    character_3d_ids: list[int] = Field(default_factory=list)
     name: str
     part_type: str
     part_name: str = ""

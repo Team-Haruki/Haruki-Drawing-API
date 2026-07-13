@@ -175,6 +175,28 @@ def _published_time_text(costume, timezone: str) -> str:
     return _format_time(costume.published_at, timezone)
 
 
+def _character_3d_ids_text(ids: list[int]) -> str:
+    if not ids:
+        return "-"
+    if ids == list(range(ids[0], ids[-1] + 1)) and len(ids) > 2:
+        return f"{ids[0]}-{ids[-1]}"
+    return ",".join(str(item) for item in ids)
+
+
+def _costume_lookup_text(costume) -> str:
+    role_ids = costume.character_3d_ids
+    if costume.character_3d_id:
+        role_ids = [costume.character_3d_id]
+    role_text = _character_3d_ids_text(role_ids)
+    if costume.outfit_id:
+        return f"服{costume.outfit_id} 角{role_text}"
+    if costume.accessory_id:
+        return f"饰{costume.accessory_id} 角{role_text}"
+    if costume.hair_id:
+        return f"发{costume.hair_id} 角{role_text}"
+    return f"ID:{costume.costume_id}"
+
+
 def _preview_placeholder(label: str, size: tuple[int, int] = (420, 520)) -> None:
     def draw(_, p):
         text_style = get_font_desc(DEFAULT_BOLD_FONT, 28)
@@ -264,7 +286,7 @@ async def _build_costume_list_canvas(rqd: CostumeListRequest) -> Canvas:
                                             LIST_ITEM_WIDTH - 12
                                         ).set_content_align("c")
                                         TextBox(
-                                            f"ID:{item.costume_id}",
+                                            _costume_lookup_text(item),
                                             id_style,
                                         ).set_w(LIST_ITEM_WIDTH - 12).set_content_align("c")
 
@@ -309,7 +331,18 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
             with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
                 with VSplit().set_padding(16).set_sep(8).set_bg(roundrect_bg(alpha=80)).set_item_align("lt"):
                     TextBox(costume.name, title_style, use_real_line_count=True).set_w(660)
-                    _draw_info_row("ID", str(costume.costume_id))
+                    if costume.outfit_id:
+                        _draw_info_row("服装ID", str(costume.outfit_id))
+                    elif costume.accessory_id:
+                        _draw_info_row("饰品ID", str(costume.accessory_id))
+                    elif costume.hair_id:
+                        _draw_info_row("发型ID", str(costume.hair_id))
+                    else:
+                        _draw_info_row("ID", str(costume.costume_id))
+                    role_ids = costume.character_3d_ids
+                    if costume.character_3d_id:
+                        role_ids = [costume.character_3d_id]
+                    _draw_info_row("角色ID", _character_3d_ids_text(role_ids))
                     _draw_info_row("类别", costume.part_name or costume.part_type)
                     _draw_info_row("角色", costume.character_name)
                     _draw_info_row("颜色", costume.color_name or "-")
@@ -319,7 +352,7 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
                     _draw_info_row("发布", _published_time_text(costume, rqd.timezone))
 
                 with VSplit().set_padding(16).set_sep(10).set_bg(roundrect_bg(alpha=80)).set_item_align("lt"):
-                    TextBox("颜色缩略图 / 指定 ID", label_style)
+                    TextBox("颜色缩略图 / 颜色ID", label_style)
                     if not costume.variants:
                         TextBox("没有颜色变体", small_style)
                     else:
@@ -333,7 +366,7 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
                                     .set_item_align("c")
                                 ):
                                     ImageBox(img, size=(56, 56), image_size_mode="fit", shadow=True)
-                                    TextBox(f"ID:{variant.costume_id}", variant_id_style).set_w(112).set_content_align(
+                                    TextBox(f"颜色{variant.color_id}", variant_id_style).set_w(112).set_content_align(
                                         "c"
                                     )
                                     TextBox(
