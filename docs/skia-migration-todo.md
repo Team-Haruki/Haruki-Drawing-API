@@ -111,6 +111,13 @@
       `push_clip_roundrect/pop_clip`(Pillow=clip 矩形大小的离屏缓冲+alpha 遮罩,Skia=`Group{clip:rrect}`)
       与 `shadow_roundrect`(两端=模糊圆角矩形);clip 局部缓冲修复后 card_box Pillow 全量合成
       `2.2s -> 1.27s`,63/63 SBS 通过。
+- [x] **Card List 回归共享 widget 树**(2026-07-14):最后一个手写 IR scene builder 退役——
+      `_build_card_list_canvas` 成为唯一布局,Pillow 走 `canvas.get_img()`、Skia 走 IRPainter,与 card/box 同构。
+      `skia_renderer/card_render.py` 整个删除,`card_common` 收缩到唯一真正共享的 `rare_count`,
+      `scripts/compare_card_render.py`(只为对比两套布局而存在)一并删除。专用开关
+      `use_skia_card_list` / `skia_card_list_fallback_to_pillow` 退役,card/list 与其余端点同用 `use_skia_plot`
+      和同一套 fail-open 契约。对拍 63/63,且共享树反而更快(skia 0.059s vs 手写 builder 记录的 0.076s)。
+      **手写 builder 的代价正是它退役的理由**:两套布局要手工保持同步,而它们已经漂移了。
 - [x] Pillow/Skia 混用收敛(2026-07-13,详见 migration.md 审计节 ✅3-6):MySekai tile clip 迁
       `push_clip_roundrect(radius=0)`(后端分支与预栅格化管线删除);头像框 9-slice 子树化(`PlayerFrameBox` +
       `paste* src_rect`);housing base64 改 `EncodedImageRef`、costume 迁 ref + 前景检测 crop 走 `src_rect`;
@@ -139,11 +146,18 @@
       就是这么带着 63/63 跑了一整轮的。用法:`uv run python -X gil=0 scripts/skia_legacy_baseline.py --tolerance 2`。
       注意 `_diff` 不能用 `ImageChops.difference(...).getbbox()`——getbbox 看 alpha,两张不透明图的差值图
       alpha 恒为 0,再大的 RGB 漂移都会报"无差异"。
-- [ ] **分诊 harness 首轮报出的 legacy 漂移**(尚未定性,不要盲目"改回 main"):
-      profile 高度 979→964(-15px)、card_list 内容大面积变化、event_list 宽 874→878、stamp_list 宽 676→687。
-      已排除 ref 迁移的影响(stamp 强制即时解码后宽度仍是 687)。其中**部分是有意改动**
-      (缩略图从"128 合成再缩放"改为按最终尺寸直绘、头像框 9-slice、card/list 水印 footer 4px 修正),
-      需要逐项确认哪些是预期、哪些是回归。
+- [x] **legacy 漂移分诊完成**(2026-07-14):**没有发现回归**。
+      首轮报出的"48/52 全在漂移"是 **harness 自己的 bug**——它连 `--ref HEAD` 对自己都报差异:
+      ①`configs.yaml` 的素材路径是相对的 `./data`,而 `data/` 在 .gitignore 里(859MB 未跟踪素材),
+      所以一次性 worktree 里**一张素材都没有**,基线全画成缺图占位符;②三角背景用**无种子的全局 random**,
+      同一棵树渲两次自己就差 ~12% 像素;③用 env 关进程池无效——`env>yaml` 优先级修复只在本分支上,
+      老基线里 yaml 赢,进程池仍开着而 spawn worker 进不了一次性 worktree。
+      **教训:差分 harness 必须先做 `--ref HEAD` 自检(max_delta 必须为 0),否则你量的是自己。**
+      修好后拿**移植前的 1c9f367** 当基线(main 不能当基线——本分支还带着 main 没有的功能端点):
+      **53 个可比端点中 45 个逐位一致、0 个尺寸变化**;剩下 10 个里,8 个是画卡面缩略图的端点
+      (差异精确落在缩略图区域,mean 0.03-2.1,正是"按最终尺寸直绘"取代"128 合成再缩放"的预期效果,
+      文字位置与 alpha 已单独对着 legacy 合成器逐项验过),另外 2 个 alias-list **内容零差异**,
+      只有播种导致的三角背景不同(RNG 消耗顺序一变三角就全变,属 harness 副作用)。
 
 ## ⚪ 收尾与防漂移
 
