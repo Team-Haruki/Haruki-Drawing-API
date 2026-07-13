@@ -7,6 +7,7 @@ import time
 from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
 
+from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
@@ -21,11 +22,30 @@ from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.render_stats import (
+    OUTCOME_DISABLED,
+    OUTCOME_ERROR,
+    OUTCOME_FALLBACK,
+    OUTCOME_SKIA,
+    backend_for_outcome,
+    record_native_metrics,
+    record_render,
+)
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR, JPG_QUALITY
 
 from .model import GenerateMusicChartRequest
 
 logger = logging.getLogger("chart.draw.perf")
+
+# /render-stats + the ``backend=`` log field key on this name. The chart path hand-builds its IR
+# (it feeds the crate's raster in as a mem image), so it never goes through render_canvas_payload
+# and has to record its own outcome — one per render attempt, exactly like the canvas helper.
+CHART_ENDPOINT = "chart"
+
+# The /chart route pins PNG on BOTH backends (see src/core/pjsk/chart.py: the Pillow fallback
+# calls image_to_response(..., export_format="png")), so EXPORT_IMAGE_FORMAT does not reach the
+# pixels here.
+CHART_EXPORT_FORMAT = "png"
 
 CHART_FONT_FILENAMES = (
     "SourceHanSansSC-Regular.otf",
@@ -52,9 +72,7 @@ def load_score(rqd: GenerateMusicChartRequest) -> Score:
     return Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
 
 
-def render_chart_png_bytes(rqd: GenerateMusicChartRequest) -> bytes:
-    """Render the chart via the pjsekai_scores_rs crate and return the encoded PNG bytes
-    (sync; run inside the worker pool). Both backends start from these bytes."""
+def _prepare_chart_render(rqd: GenerateMusicChartRequest) -> tuple[Drawing, Score]:
     style_sheet = ""
     if rqd.style_path:
         style_sheet = (ASSETS_BASE_DIR / rqd.style_path).read_text(encoding="utf-8")
@@ -75,7 +93,37 @@ def render_chart_png_bytes(rqd: GenerateMusicChartRequest) -> bytes:
         target_segment_seconds=rqd.target_segment_seconds,
         **chart_font_kwargs(),
     )
+    return drawing, score
+
+
+def render_chart_png_bytes(rqd: GenerateMusicChartRequest) -> bytes:
+    """Render the chart via pjsekai_scores_rs and return encoded PNG bytes."""
+    drawing, score = _prepare_chart_render(rqd)
     return drawing.png(score)
+
+
+def render_chart_mem_image(
+    rqd: GenerateMusicChartRequest,
+    *,
+    allow_raster: bool = True,
+) -> tuple[object, int, int, str]:
+    """Return a render_scene mem image, preferring pjsekai_scores_rs' zero-copy raster transport."""
+    drawing, score = _prepare_chart_render(rqd)
+    raster_render = getattr(drawing, "raster", None)
+    if allow_raster and raster_render is not None:
+        raster = raster_render(score)
+        mem_image = (
+            raster.width,
+            raster.height,
+            raster.row_bytes,
+            raster.color_type,
+            raster.alpha_type,
+            raster,
+        )
+        return mem_image, raster.width, raster.height, "raw-n32"
+    png = drawing.png(score)
+    width, height = _png_size(png)
+    return png, width, height, "png"
 
 
 async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
@@ -117,23 +165,45 @@ def _png_size(png: bytes) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
+    """Record one render attempt for /render-stats and tag the request context.
+
+    Mirrors ``src.sekai.skia_renderer.canvas._record``; the chart path cannot reuse the canvas
+    helper (it hand-builds its IR around a mem image), so it records through the same public
+    primitives instead.
+    """
+    record_render(CHART_ENDPOINT, outcome)
+    backend = backend_for_outcome(outcome)
+    set_render_backend(backend)
+    if payload is not None:
+        payload.backend = backend
+        record_native_metrics(payload.native_metrics)
+
+
 async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> EncodedImagePayload | None:
-    """Skia 路径,一进一出:crate 出的 PNG bytes 作 encoded mem 图进 ``render_scene``
-    (场景 = 谱面图 + 底部条采样页脚 + 右对齐白字灰影水印,复刻 ``add_watermark_to_image``
-    的光栅页脚),编码字节直接出——Python 全程不解码像素。失败回退 Pillow 路径。"""
+    """Skia 路径:谱面优先以只读 N32 buffer 零拷贝进入最终场景,只编码一次。
+
+    旧版 pjsekai_scores_rs 没有 ``Drawing.raster`` 时自动退回中间 PNG transport;
+    整条 Skia 路径失败时仍由调用方回退 Pillow。
+    """
     if not skia_plot_enabled():
+        _record(OUTCOME_DISABLED)
         return None
     try:
         native = load_native_renderer()
     except ImportError as exc:
         logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        _record(OUTCOME_FALLBACK)
         return None
+    allow_raster = getattr(native, "RAW_BUFFER_CAPABILITY", 0) >= 1
+
+    # 没有整页 payload 缓存,这是有意的:调用方 (cloud) 已按 payload 去重,同一个 payload 不会来第二次,
+    # 页面级缓存永远不可能命中,而每次 miss 仍会 insert 挤占共享 LRU。
+    watermark_text = build_request_watermark_text(rqd)
 
     def _render():
-        png = render_chart_png_bytes(rqd)
-        w, h = _png_size(png)
-        text = build_request_watermark_text(rqd)
-        font_size, lines, text_w, text_h = get_watermark_render_spec(text, w - WATERMARK_RIGHT_OFFSET, 12)
+        chart_image, w, h, transport = render_chart_mem_image(rqd, allow_raster=allow_raster)
+        font_size, lines, text_w, text_h = get_watermark_render_spec(watermark_text, w - WATERMARK_RIGHT_OFFSET, 12)
         footer_h = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
         b = IRBuilder(
             w,
@@ -142,8 +212,8 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
             font_dir=str(FONT_DIR),
             default_font=DEFAULT_FONT,
             bold_font=DEFAULT_BOLD_FONT,
-            export_format="png",
-            jpg_quality=JPG_QUALITY,  # the /chart route pins PNG
+            export_format=CHART_EXPORT_FORMAT,  # the /chart route pins PNG
+            jpg_quality=JPG_QUALITY,
         )
         b.image("mem:chart", (0, 0), (w, h), fit="stretch")
         # Footer background: the bottom footer_h strip of the chart, stretched (add_watermark_to_image).
@@ -160,17 +230,20 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
             b.text(line, (lx + 1, ly + 1), "default", font_size, baseline="ascender", fill=(75, 75, 75, 255))
             b.text(line, (lx, ly), "default", font_size, baseline="ascender", fill=(255, 255, 255, 255))
         ir_json = json.dumps(b.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        return native.render_scene(ir_json, {"chart": png})
+        return native.render_scene(ir_json, {"chart": chart_image}), transport
 
     started = time.perf_counter()
     try:
-        result = await run_in_pool(_render)
+        result, transport = await run_in_pool(_render)
         payload = payload_from_native(result)
     except Exception:
         logger.exception("chart backend=skia failed; falling back to Pillow")
+        _record(OUTCOME_ERROR)
         return None
+    _record(OUTCOME_SKIA, payload)
     logger.info(
-        "chart backend=skia total=%.3fs bytes=%d image=%sx%s",
+        "chart backend=skia transport=%s total=%.3fs bytes=%d image=%sx%s",
+        transport,
         time.perf_counter() - started,
         len(payload.image_bytes),
         payload.image_width,

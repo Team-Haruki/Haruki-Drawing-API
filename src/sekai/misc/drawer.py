@@ -33,26 +33,22 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
-    build_rendered_image_cache_key,
-    get_composed_image_cached,
-    get_composed_image_disk_cached,
-    get_image_asset_signature,
+    ImageSource,
+    get_asset_image_ref,
     get_img_from_path,
     get_img_resized,
     get_str_display_length,
-    put_composed_image_cache,
-    put_composed_image_disk_cache,
     run_in_pool,
 )
-from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.sekai.skia_renderer.card_common import get_skia_payload_cached, put_skia_payload_cache
+from src.sekai.skia_renderer.canvas import (
+    render_canvas_payload,
+    skia_plot_enabled,
+)
 from src.settings import (
     ASSETS_BASE_DIR,
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     DEFAULT_HEAVY_FONT,
-    EXPORT_IMAGE_FORMAT,
-    JPG_QUALITY,
 )
 
 # =========================== 从.model导入数据类型 =========================== #
@@ -69,7 +65,6 @@ _HELP_MARGIN = 62
 _HELP_CARD_MARGIN = 28
 _HELP_MAX_TEXT_WIDTH = _HELP_IMAGE_WIDTH - _HELP_MARGIN * 2
 _HELP_LINK_RE = re.compile(r"\[([^\]]+)]\([^)]+\)")
-_ALIAS_LIST_CACHE_NAMESPACE = "alias_list"
 _ALIAS_TRIM_ALPHA_FLOOR = 36
 _ALIAS_TRIM_MIN_FRAME_W = 260
 _ALIAS_TRIM_MAX_FRAME_W = 920
@@ -512,7 +507,7 @@ async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> Enco
         return None
     canvas = await _build_command_help_canvas(rqd)
     # The /help route pins PNG output regardless of the global export format.
-    return await render_canvas_payload(canvas, export_format="png")
+    return await render_canvas_payload(canvas, endpoint="command_help", export_format="png")
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
@@ -525,28 +520,6 @@ def _resolve_alias_accent(entity_label: str, entity_id: int) -> tuple[int, int, 
             return tuple(color_code_to_rgb(color_code))
         return (255, 204, 170)
     return (110, 180, 255)
-
-
-def _build_alias_list_cache_key(rqd: AliasListRequest) -> str:
-    trim_path = _resolve_alias_trim_path(rqd)
-    request_payload = {
-        "title": rqd.title,
-        "entity_label": rqd.entity_label,
-        "entity_id": rqd.entity_id,
-        "entity_name": rqd.entity_name,
-        "music_jacket_path": rqd.music_jacket_path,
-        "character_trim_path": rqd.character_trim_path,
-        "character_silhouette_path": rqd.character_silhouette_path,
-        "aliases": [alias.strip() for alias in rqd.aliases if alias and alias.strip()],
-    }
-    return build_rendered_image_cache_key(
-        _ALIAS_LIST_CACHE_NAMESPACE,
-        request_payload,
-        asset_signatures={
-            "music_jacket": get_image_asset_signature(ASSETS_BASE_DIR, rqd.music_jacket_path),
-            "character_trim": get_image_asset_signature(ASSETS_BASE_DIR, trim_path),
-        },
-    )
 
 
 def _resolve_alias_name_box_width(
@@ -590,11 +563,12 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[Image.Image, Image.Image, Image.Image, list[Image.Image], dict[int, Image.Image], float]:
+) -> tuple[Image.Image, ImageSource, ImageSource, list[Image.Image], dict[int, Image.Image], float]:
     tasks = [
+        # card_image feeds ImageBg(fade=0.1), which brightness-adjusts pixels eagerly.
         get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
         *[
             get_img_resized(
                 ASSETS_BASE_DIR,
@@ -1047,9 +1021,11 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
 
 
 async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> EncodedImagePayload | None:
+    # Renders inside a heavy-worker process; the parent replays this outcome from the payload's
+    # backend under the pool kind "chara_birthday", so the endpoint name must match that kind.
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_chara_birthday_canvas(rqd))
+    return await render_canvas_payload(await _build_chara_birthday_canvas(rqd), endpoint="chara_birthday")
 
 
 async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
@@ -1207,31 +1183,25 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     return canvas
 
 
+# alias-list 的结果缓存(内存 + 磁盘 + Skia payload)已全部删除。
+#
+# 这张图上有 `add_request_watermark`,水印会把每请求的 `dt` 渲染成秒级 `DT: yyyy-mm-dd HH:MM:SS`;
+# 而这里的 cache key 不含 dt ⇒ 一旦命中就会发**上一次请求的时间戳**(磁盘那层还跨重启存活)。
+# 调用方 Haruki-Cloud 正是为了这个原因**专门让 alias-list 绕过它自己的渲染缓存**
+# (internal/pjsk/drawing/client.go:361 "Alias-list watermarks include request DT, so we
+# intentionally bypass the render cache here to avoid serving stale timestamps."),
+# drawing 侧再缓存一次就把 cloud 的意图整个抵消掉了。
+#
+# 其它端点 cloud 是接受陈旧水印的(默认 24h TTL,card/list 等甚至永不过期),且它的 key 与这里等价
+# ——cloud 命中就不会调 drawing,cloud 未命中这里也不会命中,所以 drawing 侧的结果缓存本就是死重。
 async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
-    """合成别名列表图片 (Pillow 路径,带最终结果缓存)。"""
-    cache_key = _build_alias_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        return cached
-    disk_cached = get_composed_image_disk_cached(_ALIAS_LIST_CACHE_NAMESPACE, cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        return disk_cached
-    image = await (await _build_alias_list_canvas(rqd)).get_img()
-    put_composed_image_cache(cache_key, image)
-    put_composed_image_disk_cache(_ALIAS_LIST_CACHE_NAMESPACE, cache_key, image)
-    return image
+    """合成别名列表图片 (Pillow 路径)。"""
+    return await (await _build_alias_list_canvas(rqd)).get_img()
 
 
 async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePayload | None:
-    """Skia 路径:复用 Skia payload 结果缓存(键同 Pillow 缓存键 + 格式后缀)。"""
+    """Skia 路径:经 IRPainter 渲染同一棵 widget 树;不可用时返回 None 回退 Pillow。"""
     if not skia_plot_enabled():
         return None
-    cache_key = f"{_build_alias_list_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
-    cached = get_skia_payload_cached(cache_key)
-    if cached is not None:
-        return cached
-    payload = await render_canvas_payload(await _build_alias_list_canvas(rqd))
-    if payload is not None:
-        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
-    return payload
+    canvas = await _build_alias_list_canvas(rqd)
+    return await render_canvas_payload(canvas, endpoint="alias_list")

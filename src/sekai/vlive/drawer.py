@@ -11,9 +11,9 @@ from src.sekai.base.plot import Canvas, Flow, Frame, HSplit, ImageBox, TextBox, 
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
-    get_img_from_path,
     get_readable_timedelta,
     put_composed_image_cache,
     put_composed_image_disk_cache,
@@ -24,6 +24,7 @@ from src.settings import ASSETS_BASE_DIR
 from .model import VLiveBrief, VLiveListRequest
 
 _perf_logger = logging.getLogger("vlive.draw.perf")
+_VLIVE_LIST_ENDPOINT = "vlive_list"
 _VLIVE_LIST_ENTRY_CACHE_NAMESPACE = "vlive_list_entry"
 _VLIVE_ENTRY_CONTENT_W = 724
 
@@ -81,14 +82,14 @@ def _build_vlive_entry_cache_key(vlive: VLiveBrief, now: datetime) -> str:
 async def _preload_vlive_entry_assets(vlive: VLiveBrief) -> dict[str, object]:
     tasks = {}
     if vlive.banner_path:
-        tasks["banner"] = get_img_from_path(ASSETS_BASE_DIR, vlive.banner_path)
+        tasks["banner"] = get_asset_image_ref(ASSETS_BASE_DIR, vlive.banner_path)
     if vlive.rewards:
         tasks["rewards"] = asyncio.gather(
-            *[get_img_from_path(ASSETS_BASE_DIR, item.image_path) for item in vlive.rewards]
+            *[get_asset_image_ref(ASSETS_BASE_DIR, item.image_path) for item in vlive.rewards]
         )
     if vlive.characters:
         tasks["characters"] = asyncio.gather(
-            *[get_img_from_path(ASSETS_BASE_DIR, item.icon_path) for item in vlive.characters]
+            *[get_asset_image_ref(ASSETS_BASE_DIR, item.icon_path) for item in vlive.characters]
         )
     if not tasks:
         return {}
@@ -183,9 +184,10 @@ async def _get_vlive_list_entry_image(vlive: VLiveBrief, now: datetime) -> Image
     return image
 
 
-async def _build_vlive_list_canvas(rqd: VLiveListRequest) -> Canvas:
+async def _build_vlive_list_canvas(rqd: VLiveListRequest, now: datetime | None = None) -> Canvas:
     lives = rqd.lives
-    now = request_now(rqd.timezone)
+    if now is None:
+        now = request_now(rqd.timezone)
 
     entry_images = await asyncio.gather(*[_get_vlive_list_entry_image(vlive, now) for vlive in lives]) if lives else []
 
@@ -204,6 +206,12 @@ async def compose_vlive_list_image(rqd: VLiveListRequest) -> Image.Image:
 
 
 async def try_render_vlive_list_payload(rqd: VLiveListRequest) -> EncodedImagePayload | None:
+    """Skia 路径。没有整页 payload 缓存,这是有意的:调用方 (cloud) 已按 payload 去重,同一个 payload
+    不会来第二次,页面级缓存永远不可能命中,而每次 miss 仍会 insert 挤占共享 LRU。"""
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_vlive_list_canvas(rqd))
+    # One `now` for the whole layout: recomputing it inside the builder could cross a minute
+    # boundary mid-render and put two different living/upcoming states in one image.
+    now = request_now(rqd.timezone)
+    canvas = await _build_vlive_list_canvas(rqd, now=now)
+    return await render_canvas_payload(canvas, endpoint=_VLIVE_LIST_ENDPOINT)
