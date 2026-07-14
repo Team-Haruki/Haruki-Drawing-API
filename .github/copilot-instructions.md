@@ -88,9 +88,9 @@ the Skia chapter below — the three caches in the table above are not the whole
 
 Notable `drawing.*` keys:
 - `thread_pool_size` — default thread pool size (CPU-bound rendering).
-- `isolated_worker_pool_size` / `isolated_worker_queue_limit` / `isolated_worker_queue_timeout_seconds` / `request_hard_timeout_seconds` — the heavy-task subprocess pool (`src/core/heavy_render_pool.py`).
+- `isolated_worker_pool_size` / `isolated_worker_queue_limit` / `isolated_worker_queue_timeout_seconds` / `request_hard_timeout_seconds` — the heavy-task subprocess pool (`src/core/heavy_render_pool.py`). **Size it to the CPU allocation, not higher.** The workers are spawned at boot and never recycled except on crash, and each builds its *own* asset/font/raster caches: measured in the image, one grows from 47 MB idle to ~500 MB after serving, and the pool plateaus at ~270 MB × N. `deck_recommend` is a CPU-bound search (~12 s), so oversubscribing the CPUs buys nothing: 8 workers vs 2 was 6% p50 latency for 1.5 GB of RSS.
 - `overload_max_inflight_requests` / `overload_retry_after_seconds` — optional overload guard; reject new requests with `503` once in-flight requests exceed the threshold.
-- `readiness_unhealthy_inflight_requests` / `readiness_unhealthy_rss_mb` / `readiness_unhealthy_asyncio_tasks` — readiness thresholds used by `/ready`; once exceeded, the service reports `503` so orchestration can stop routing more traffic.
+- `readiness_unhealthy_inflight_requests` / `readiness_unhealthy_rss_mb` / `readiness_unhealthy_asyncio_tasks` — readiness thresholds used by `/ready`; once exceeded, the service reports `503` so orchestration can stop routing more traffic. **`readiness_unhealthy_rss_mb` reads `/proc/self/status` VmRSS — the parent process ONLY** (`src/core/debug.py:189`). It cannot see the heavy-render workers, which is where most of the container's memory actually lives, so it must be set against the *parent's* ceiling (measured peak ~765 MB) and never above the container's hard limit, or it can never fire before the kernel OOM-kills the cgroup.
 - `image_cache_size` / `image_cache_max_mb` — general image LRU.
 - `thumbnail_cache_size` / `thumbnail_cache_max_mb` — dedicated thumbnail LRU (recommend 4096 / 256MB).
 - `composed_image_cache_size` / `composed_image_cache_max_mb` / `composed_image_cache_ttl_seconds` — final-output cache.

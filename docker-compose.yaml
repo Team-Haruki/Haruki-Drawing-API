@@ -46,8 +46,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 2G
+          # 实测(OrbStack, linux/glibc, 镜像内): 空转 cgroup 671MB(app 267 + 4 个 heavy worker),
+          # card/box 12 并发峰值 1113MB, deck/recommend 打满 heavy pool 后稳态 1616MB。
+          # 4G 给稳态留了约 2 倍余量。2G 是不够的 —— 光 heavy worker 暖起来就能到 2.5GB。
+          cpus: '4'
+          memory: 4G
         reservations:
           cpus: '0.5'
           memory: 512M

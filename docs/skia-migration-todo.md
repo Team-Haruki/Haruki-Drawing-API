@@ -23,6 +23,42 @@
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
 
+## 🔵 生产容量:实测(2026-07-14,OrbStack/linux-aarch64 镜像内,glibc)
+
+**此前所有内存数字都是 macOS/libmalloc 上量的,而 macOS 在内存压力下会把页从测量脚下抽走
+(整棵进程树的 RSS 会同时塌到 1/4)。以下是镜像里的真实数字。**
+
+- **空转** cgroup `671 MB`(app 267 + 8 个 heavy worker × 47)。改成 4 worker 后 `590 MB`。
+- **card/box 并发**:12 并发峰值 `1113 MB`。**峰值几乎不随并发涨**(4/8/12 并发 = 996/1024/1113 MB)——
+  glibc 复用 arena,且缩略图缓存跨请求共享且热。这与 macOS 上量到的"每并发 +110 MB"完全不同。
+- **heavy worker 才是内存主项**,而且此前没人称过:worker 在启动时就 spawn,**只在崩溃/超时才重启
+  (没有"跑够 N 个任务就回收"的策略)**,每个各建一套自己的资产/字体/栅格缓存。
+  单个从空转 `47 MB` 涨到 `~500 MB`,8 个合计稳态 `~2.15 GB`,cgroup 稳态 **`2.54 GB`**。
+  **会涨但收敛**(30 个任务后不再增长),是缓存工作集上界不是泄漏 ⇒ 配置能解决。
+- ⇒ **`memory: 2G` 是撑不住的**:光 heavy pool 暖起来就越过它。deck_recommend 第一次来 8 个并发就 OOM。
+
+**worker 数该定几个 —— A/B(24 请求 @ 并发 8):**
+
+| pool | p50 | p95 | cgroup 稳态 |
+|---|---|---|---|
+| 2 | 13.39s | 14.42s | **1075 MB** |
+| 4 | 12.91s | 13.26s | 1616 MB |
+| 8 | 12.53s | 13.07s | **2580 MB** |
+
+`deck_recommend` 是 **CPU-bound 搜索(真实 12–13 秒**,不是对拍里那个 0.2s——那条路径不跑推荐搜索)。
+容器只有 4 核,8 个 worker 只是互相抢 CPU:**2→8 只买到 6.4% 的 p50,却要 1.5 GB**。
+⇒ **worker 数跟 CPU 配额走,不要超订**。
+
+**已改**(`configs.yaml` + `configs.docker.yaml` + `docker-compose.yaml`):
+`isolated_worker_pool_size: 8→4`、`readiness_unhealthy_rss_mb: 4096→1536`、`memory: 2G→4G`、`cpus: 2→4`。
+验收:4G 容器里混合负载(12×card/box + 8×deck/recommend,10 并发)**峰值 1790 MB = 限额的 44%,
+20 个响应全 OK,`oom_kill 0`**。
+
+- [ ] **`/ready` 的 RSS 门是结构性瞎的**:`readiness_unhealthy_rss_mb` 读 `/proc/self/status` 的 VmRSS,
+      **只看父进程**(`src/core/debug.py:189`)。而父进程峰值才 ~765 MB,真正会撑爆 cgroup 的是 heavy worker
+      (稳态 2.15 GB)——这个门**看不见它们**。阈值已从 4096(比容器硬限额还高一倍,永远触发不了)改到 1536,
+      但**根治要让它读 cgroup**(`/sys/fs/cgroup/memory.current` vs `memory.max`),那是代码改动,未做。
+
 ## 🟡 端点残余
 
 - [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
