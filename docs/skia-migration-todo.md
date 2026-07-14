@@ -23,6 +23,39 @@
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
 
+## 🔴 已修:每个图片响应都在按"行"切块(2026-07-14)
+
+**全服务 17 个绘图路由的响应出口只有一个** —— `src/core/utils.py` 的 `encoded_image_payload_to_response`
+/ `image_to_response`。它们原本返回 `StreamingResponse(io.BytesIO(image_bytes))`。
+
+这里没有任何东西可以"流":字节早就整块在内存里了,包成 `BytesIO` 一点内存都省不下。它真正干的事是
+**把一个同步可迭代对象交给 Starlette**,而 Starlette 会用 `iterate_in_threadpool()` 逐项去取 ——
+**`BytesIO` 的迭代协议是按行(`readline`)**,于是二进制 PNG 在每一个 `0x0A` 字节处被切开:
+
+- 实测平均 **384 字节一块**。一张 870 KB 的 deck 图 = **~2,262 块**;7.3 MB 的 card/box = **~19,000 块**。
+- 每一块都是一次 **anyio 线程池往返 + 一条独立的 ASGI body 消息**,还丢掉了 `Content-Length`(退化成 chunked)。
+
+**代价(deck/recommend,24 请求 @ 并发 8):**
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 单发(暖) | 0.43s | **0.07s** |
+| p50 | 10.24s | **0.22s** |
+| 墙钟 | 30.8s | **0.97s** |
+| 吞吐 | 0.78 req/s | **24.8 req/s**(**32×**) |
+
+**它为什么能藏这么久:功能上完全正确** —— 客户端每个字节都收到了,图也没错。而且服务端日志看不见它:
+`request.end elapsed=0.116s` 是在端点**返回 Response 对象**时记的,body 的实际发送发生在计时区间之外。
+所以日志说 0.12 秒,客户端等 10 秒,两边都"没说谎"。CPU 全程 **5% 空闲**。
+
+**回归锁**:`tests/test_image_response.py` —— 断言的是 **ASGI body 消息数 == 1**(不是字节内容,
+因为坏版本的字节内容也是对的;只有消息数会露馅)。已做变异验证:把 `StreamingResponse` 塞回去,3/3 立刻红。
+
+> **教训**:我最初把这 10 秒解释成"`deck_recommend` 是 CPU-bound 搜索、8 个 worker 抢 4 个核",
+> 还据此改了配置、写进了文档。**那是编的** —— `src/sekai/deck/` 里没有一行搜索代码。
+> 数据当时就在打脸:**2 个 worker、24 个请求、最慢 14.43 秒**,单次 12 秒 CPU 的话这在物理上不可能;
+> 而且 **pool=1 和 pool=8 吞吐完全相同**,worker 根本不是瓶颈。我没去追这个矛盾,直接给了个顺耳的故事。
+
 ## 🔵 生产容量:实测(2026-07-14,OrbStack/linux-aarch64 镜像内,glibc)
 
 **此前所有内存数字都是 macOS/libmalloc 上量的,而 macOS 在内存压力下会把页从测量脚下抽走
@@ -37,17 +70,23 @@
   **会涨但收敛**(30 个任务后不再增长),是缓存工作集上界不是泄漏 ⇒ 配置能解决。
 - ⇒ **`memory: 2G` 是撑不住的**:光 heavy pool 暖起来就越过它。deck_recommend 第一次来 8 个并发就 OOM。
 
-**worker 数该定几个 —— A/B(24 请求 @ 并发 8):**
+**worker 数该定几个 —— A/B(24 请求 @ 并发 8,10 核开发机,已修完流式 bug):**
 
-| pool | p50 | p95 | cgroup 稳态 |
+| pool | p50 | 吞吐 | CPU |
 |---|---|---|---|
-| 2 | 13.39s | 14.42s | **1075 MB** |
-| 4 | 12.91s | 13.26s | 1616 MB |
-| 8 | 12.53s | 13.07s | **2580 MB** |
+| 1 | 0.54s | 13.4 req/s | 2.6 core-s |
+| 2 | 0.36s | 19.2 req/s | 3.2 core-s |
+| **4** | **0.21s** | **23.3 req/s** | 4.3 core-s |
+| 8 | 0.31s | 15.4 req/s | 7.3 core-s |
 
-`deck_recommend` 是 **CPU-bound 搜索(真实 12–13 秒**,不是对拍里那个 0.2s——那条路径不跑推荐搜索)。
-容器只有 4 核,8 个 worker 只是互相抢 CPU:**2→8 只买到 6.4% 的 p50,却要 1.5 GB**。
-⇒ **worker 数跟 CPU 配额走,不要超订**。
+**4 个是拐点:8 个吞吐反而掉回去,CPU 却翻倍——这才是真正的超订。**
+(4 核容器上最优值可能更低,但 4 个有余量,且远好于原来的 8。)
+
+> ⚠️ **这张表推翻了本文档的前一个版本。** 那一版写的是"`deck_recommend` 是 CPU-bound 搜索,真实
+> 12–13 秒",并据此解释"2→8 个 worker 只快 6%"。**两句都是错的**:`src/sekai/deck/` 里没有任何
+> 搜索/求解代码(组卡结果是调用方算好、随 `DeckRequest.deck_data` 传进来的,本服务只负责画),
+> 而那 12–13 秒是下面那个流式 bug 的产物。**当时的破绽就摆在数据里:2 个 worker 跑完 24 个请求
+> 最慢的一个只用了 14.43 秒——如果单次真要 12 秒 CPU,这在物理上不可能。** 我没去看这个矛盾。
 
 **已改**(`configs.yaml` + `configs.docker.yaml` + `docker-compose.yaml`):
 `isolated_worker_pool_size: 8→4`、`readiness_unhealthy_rss_mb: 4096→1536`、`memory: 2G→4G`、`cpus: 2→4`。

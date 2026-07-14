@@ -79,7 +79,8 @@ def test_the_seed_separates_canvases_and_palettes():
 def test_triangles_stay_on_the_canvas_and_carry_a_visible_alpha():
     spec = build_triangle_bg(*ARGS)
     for t in spec.triangles:
-        assert 0 <= t.x < 900 and 0 <= t.y < 600
+        assert 0 <= t.x < 900
+        assert 0 <= t.y < 600
         assert 1 <= t.size <= 1000
         assert 34 < t.color[3] <= 255, "the generator drops triangles too faint to see"
         assert t.type in (0, 1, 2)

@@ -17,7 +17,7 @@ font:
 
 drawing:
   thread_pool_size: 8
-  isolated_worker_pool_size: 4  # 跟 CPU 配额走,不是越多越好:deck_recommend 是 CPU-bound 搜索
+  isolated_worker_pool_size: 4  # 跟 CPU 配额走:实测 4 个的 p50 和吞吐都优于 8 个(超订反而更慢)
   isolated_worker_queue_limit: 16
   isolated_worker_queue_timeout_seconds: 30
   request_hard_timeout_seconds: 180
