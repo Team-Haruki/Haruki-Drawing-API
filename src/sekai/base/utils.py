@@ -662,6 +662,35 @@ def _normalize_cache_material(value: Any) -> Any:
     return str(value)
 
 
+@lru_cache(maxsize=1)
+def renderer_code_fingerprint() -> str:
+    """A hash of the drawing code itself, folded into every rendered-image cache key.
+
+    The composed-image cache has an L2 on disk (``data/utils/composed_image_disk_cache``, TTL one
+    week) and in Docker ``data/`` is a MOUNTED VOLUME -- it outlives the container. Nothing in the
+    key identified the code that drew the image, so a deploy that changed how a fragment is drawn
+    left the new binary happily serving the old pixels off the volume for up to seven days.
+    Reproduced: change the entry background colour, restart (memory cleared, volume kept), and the
+    pre-change image comes straight back.
+
+    Content, not mtime: rebuilding the image rewrites every mtime, which would throw the whole disk
+    cache away on each deploy even when nothing changed. Costs ~15 ms once, at import.
+
+    Degrades to a constant if the source tree is not readable (installed as a zipapp, say) -- that
+    puts us back where we started rather than crashing a render.
+    """
+    root = Path(__file__).resolve().parents[2]  # .../src
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(root.rglob("*.py")):
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(path.read_bytes())
+    except OSError:
+        logger.warning("renderer source fingerprint unavailable; disk-cached images may survive a deploy")
+        return "unknown"
+    return digest.hexdigest()[:16]
+
+
 def build_rendered_image_cache_key(
     namespace: str,
     request: Any,
@@ -671,6 +700,7 @@ def build_rendered_image_cache_key(
 ) -> str:
     material = {
         "namespace": namespace,
+        "code": renderer_code_fingerprint(),
         "request": _normalize_cache_material(request),
         "assets": _normalize_cache_material(asset_signatures or {}),
         "extra": _normalize_cache_material(extra or {}),

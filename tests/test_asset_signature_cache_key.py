@@ -131,3 +131,39 @@ def test_card_pages_are_not_cached():
             f"card/drawer.py uses {forbidden} again — the card pages render the wall clock, so a "
             "cache hit serves someone else's timestamp and a stale 未上线 badge"
         )
+
+
+def test_the_key_carries_a_fingerprint_of_the_drawing_code():
+    """The composed cache's L2 lives on disk, and in Docker ``data/`` is a MOUNTED VOLUME — it
+    outlives the container. Nothing in the key used to identify the code that drew the image, so a
+    deploy that changed how a fragment is drawn left the new binary serving the old pixels off the
+    volume for up to the 7-day TTL. Reproduced end-to-end: render, edit one colour constant in
+    src/sekai/event/drawer.py, restart — the pre-change image came straight back."""
+    from src.sekai.base import utils
+
+    material = {"cards": ["a.png"]}
+    before = utils.build_rendered_image_cache_key("event_list_entry", material)
+
+    real = utils.renderer_code_fingerprint
+    utils.renderer_code_fingerprint = lambda: "deadbeefdeadbeef"  # a different build of the code
+    try:
+        after = utils.build_rendered_image_cache_key("event_list_entry", material)
+    finally:
+        utils.renderer_code_fingerprint = real
+
+    assert before != after, "the cache key does not move when the drawing code changes"
+    assert utils.build_rendered_image_cache_key("event_list_entry", material) == before, (
+        "the fingerprint must be stable for unchanged code, or nothing ever hits"
+    )
+
+
+def test_the_fingerprint_hashes_content_not_mtimes():
+    """Rebuilding the image rewrites every mtime. If the fingerprint were mtime-based, every deploy
+    would throw the whole disk cache away even when not one line changed."""
+    import inspect
+
+    from src.sekai.base import utils
+
+    source = inspect.getsource(utils.renderer_code_fingerprint)
+    assert "read_bytes()" in source
+    assert "st_mtime" not in source

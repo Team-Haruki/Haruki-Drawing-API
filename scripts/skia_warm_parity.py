@@ -39,7 +39,9 @@ WHAT THIS DOES NOT COVER -- do not read a green run as more than it is:
   * One payload per endpoint means a KEY COLLISION between two different payloads cannot show up
     here. That has to come from reading the key material, not from this sweep.
   * Nothing on disk is mutated, so asset-staleness (an asset file edited under a live cache) is
-    untested.
+    untested. Two separate one-off probes covered that: replacing a card thumbnail under a hot cache
+    (fixed by collect_asset_signatures) and editing a drawer's source between two processes with the
+    disk cache volume kept (fixed by renderer_code_fingerprint).
 
 Run (repo root):
     uv run python -X gil=0 scripts/skia_warm_parity.py [--only a,b] [--backend skia|pillow|both]
