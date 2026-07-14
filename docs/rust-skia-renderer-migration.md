@@ -27,10 +27,12 @@
     手写的只有路由在 compose **之后**才加的水印页脚——它把画布自己的底部若干行拉伸成页脚条
     （`SelfImage` 节点，采样已渲染画布），任何 widget 都表达不了。
 - **Rust 是纯 IR 解释器**：PyO3 只暴露 `render_scene` / `renderer_cache_stats` / `clear_renderer_caches`。
-  `IR_CAPABILITY = 5`（Python 侧 `REQUIRED_NATIVE_IR_CAPABILITY = 5`），旧 wheel 自动 fail-open。
+  `IR_CAPABILITY = 7`（Python 侧 `REQUIRED_NATIVE_IR_CAPABILITY = 7`），旧 wheel 自动 fail-open。
+  5→6 是 `Image.blend="src"`（`Painter.paste_src`），6→7 是 `TriangleBg.tris`。数字**四处硬编码**需同步：
+  `lib.rs`、`canvas.py`、`quick-check.yml`、`skia-wheels.yml`。
 - **观测**：`GET /render-stats`（每端点 skia / cache_hit / fallback / disabled / error 计数 +
   Skia payload cache 统计）、`GET /cache/stats`（含 `skia_payload_cache`）。
-- **结果缓存现状**：只有 card/box、card/list、honor 还保留 Skia payload cache。chart、vlive/list、
+- **结果缓存现状**：**只有 honor 还保留 Skia payload cache**（card/box 与 card/list 的整页缓存已于 2026-07-14 删除：两者把墙钟画进页面——`add_request_watermark` 的秒级 `DT:` 页脚，card/list 还按 `request_now()` 判「未上线」——而 key 里只有 request，命中必然发陈旧图；配套的 `record_skia_cache_hit()` 一并删除。见 `f088c41`、`tests/test_asset_signature_cache_key.py::test_card_pages_are_not_cached`）
   misc/alias-list 的整页结果缓存已**主动删除**，profile 则刻意不加整页缓存（只留模块级子图缓存）——
   理由见「待办」小节。
 
@@ -518,7 +520,9 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 - `skia-safe` 会增加构建时间和依赖体积，CI 需要单独观察。
 - **Skia 现为默认后端**（`use_skia_plot=true`）：上线风险由 fail-open 回退（扩展缺失 / IR 校验失败 /
   渲染失败 → Pillow + ERROR 日志）和 `GET /render-stats` 的每端点 fallback 计数兜底，而不再由"默认关闭"兜底。
-- 背景三角形由**未播种的全局 `random`** 绘制，同一棵树两次渲染本身就有约 12% 像素差异；因此带背景的端点
+- ~~背景三角形由**未播种的全局 `random`** 绘制，同一棵树两次渲染本身就有约 12% 像素差异~~
+  （**已失效**：2026-07-14 起散布只在 `base/triangle_bg.py` 生成一次，两个后端画同一份列表，都不再自带 PRNG）；
+  当时因此带背景的端点
   只能做宽松的 mean diff 断言，逐像素回归要靠 `scripts/skia_legacy_baseline.py`（对基线 git ref 的 Pillow
   输出做对比）而不是 Pillow↔Skia 对拍。
 
@@ -668,4 +672,5 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
   缓存（Pillow 的 per-object critical section 会在 free-threaded 下把测量串行化）。
 - ~~其余高基数端点的 lazy `AssetRef`~~ —— 已全量迁移（见进度表 Lazy AssetRef 行）。
 - ~~把背景三角形 RNG 种子从确定性改为请求级随机~~ —— Skia 侧 `TriangleBg` 按 `(宽, 高, hour)` 播种保持确定性；
-  Pillow 侧用的是**未播种的全局 `random`**，两次渲染本就不同，因此对拍只对带背景的端点做宽松 mean diff 断言。
+  ~~Pillow 侧用的是**未播种的全局 `random`**，两次渲染本就不同~~（**已失效**，见上：两侧 PRNG 都已删除，
+  散布由 `triangle_bg.py` 一次生成、两端共用，像素可复现，对拍不再需要为带背景端点放宽阈值）。

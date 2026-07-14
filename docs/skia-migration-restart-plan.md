@@ -20,12 +20,14 @@
 - **绝大多数端点**(profile、card/list、card/box、card/detail、event、music、gacha、score、sk、mysekai …)
   走同一份 plot.py widget 树,经 IRPainter 输出 Render-IR 交 Rust Skia 解释器渲染——改一处两个后端同时生效。
   card/list 与 card/box **没有**专用 scene builder,同样画 widget 树。
-- **honor 与 chart 是例外**:两者用 `IRBuilder` **手工拼 IR**,既不碰 widget 树也不经 IRPainter
-  (`src/sekai/honor/skia.py`——其模块 docstring 自己就这么写;`src/sekai/chart/drawer.py:24,208`——直接 `IRBuilder(...)`,
-  全文件不出现 plot/Canvas/IRPainter)。
-  **honor 是当前唯一实打实的双布局漂移风险**:`src/sekai/honor/drawer.py::_compose_full_honor_image_sync`
-  是一份独立的纯 Pillow 合成器,且被 skia.py 的 docstring 认作 ground truth——同一张图两套绝对坐标,
-  改布局必须两边同改。这正是阶段 8 点名要防的"下一个 `card_render.py` 式双实现",parity 用例是唯一防线。
+- **chart 是唯一手工拼 IR 的例外**(`src/sekai/chart/drawer.py:24,208`——直接 `IRBuilder(...)`,全文件不出现
+  plot/Canvas/IRPainter),而且有正当理由:图表像素来自 `pjsekai_scores_rs`,IR 只在外面加水印外壳。
+- **honor 已经不是双布局了**(2026-07-14 起,本条曾长期写反)。布局只有**一份**:
+  `src/sekai/honor/widget.py::HonorBadgeBox`,由 `build_honor_badge_canvas()` 产出,**两个后端共用**——
+  Pillow 走 `drawer.py` 的 `get_img_sync()`,Skia 走 `skia.py` 的 `splice_root_children()` 把同一棵树的 IR
+  拼到水印页脚下面。`_compose_full_honor_image_sync` 这个函数**早已不存在**。
+  > ⚠️ 本条的旧文字("honor 是当前唯一实打实的双布局漂移风险")在 2026-07-15 被当成**删掉 honor Skia 路径的
+  > 理由**引用过。过期的文档不是无害的,它会被照着执行。
 
 生产化链路已就位:CI 构 cp314t wheel(`skia-wheels.yml`)、native 测试进 CI(`quick-check.yml`)、
 Docker 条件安装 wheel + 构建期 IR capability 自检、扩展缺失时 fail-open 回退 Pillow 并打 ERROR、
@@ -45,7 +47,7 @@ D3–D8 的当前状态(原为待拍板,已随执行推进):
 
 | # | 事项 | 状态(截至 2026-07-13) |
 |---|---|---|
-| D3 | 三角形背景 RNG:确定性播种 vs 保持随机 | **未决,且问题在 Pillow 侧、不在 plot.py**。未播种的全局 `random` 位于 `src/sekai/base/painter.py::_impl_draw_random_triangle_bg`(三角采样 ~1868–1908 行);plot.py 只在 `if DEBUG:` 分支里用 `random` 画调试框,与三角背景无关。Skia 侧**已经是确定性的**:Rust 从 `(width, height, hour \| main_hue)` 推导 seed 自带 RNG,全程不碰 Python `random`;测试注入 `HARUKI_BG_TEST_HOUR` 也已存在(`canvas.py::background_hour()`,painter 侧同样认)。**实际残留两点**:① `background_hour()` 随墙钟漂移,不注入时同一棵树两次渲染 seed 不同;② Pillow 参照实现仍未播种,自差 ~12%——所以带背景端点的跨后端对拍只能断言宽松均值 |
+| D3 | 三角形背景 RNG:确定性播种 vs 保持随机 | **已解决(2026-07-14,`d562865`)**。做法不是「给两边的 PRNG 对齐种子」,而是**把散布变成数据**:`src/sekai/base/triangle_bg.py` 在 **Python 里生成一次**三角形列表(种子量化到整点 → blake2b 派生 → 局部 `random.Random`,**不碰全局 `random`**),Pillow 的 painter 直接画这份列表,`IRPainter` 经 `TriangleBg.tris` 把同一份发给 Skia(cap 7)。**两个后端的 PRNG 都已删除,禁止加回**——它们曾经一个用未播种的全局 `random`、一个用毫秒级种子的 xorshift,永远不可能一致。仍随时间变的只有调色板(按**小数**小时插值),所以需要字节稳定输出的 harness 一律固定 `HARUKI_BG_TEST_HOUR`。用例:`tests/test_triangle_bg.py` |
 | D4 | card/detail 字形步进差、mysekai 各端点:人工看图签字 | 放量验收时执行(mysekai 无 parity、不在 CI,回退率仪表防不住"渲染成功但画错") |
 | D5 | card/box:shim-first vs 手工移植 vs 重设计布局 | **已执行 shim-first**(2026-07-12,见执行日志):手写 box 构建器与 `use_skia_card_box` 一并退役 |
 | D6 | sk 双 trace 永久保留 matplotlib 混合方案 | **按建议永久混合**,`sk/drawer.py` 仍依赖 matplotlib,不投入 L 级原语开发 |
@@ -145,7 +147,6 @@ TYPEFACE_CACHE 锁外加载。
 - **批量对拍/基准工具正式落库 `scripts/`**:固定 payload 集 → 双后端渲染 → 尺寸断言 + 像素 diff + 耗时报告。
   diff 报告必须区分"新增 diff"与"已知可接受 diff"(TriangleBg 区域掩膜/固定 seed 注入、字形差异阈值白名单),
   否则签字流程退化为"反正有 diff 扫一眼"。payload 语料作为显式子任务(生产采样或手工构造并 check in)。
-- 三角背景确定性播种(D3):统一 seed 去掉小时分量、测试可注入。
 - parity 补缺:Shadow/TriangleBg/ImageBg/Watermark/Group-clip 五个节点无像素对拍。
 
 ## 阶段 5 — 缓存补齐(2–3 天)

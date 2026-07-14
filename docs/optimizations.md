@@ -128,8 +128,16 @@ drawing:
 - 端点可用 `image_to_response(image, export_format=None, jpg_quality=None, *, jpeg_subsampling=None)`
   的参数逐次覆盖全局配置；编码本身走 `run_in_pool()`，不阻塞事件循环。
 - Skia 后端直接产出编码字节时不再回到 PIL：`src/core/utils.py` 另有
-  `encoded_image_payload_to_response(payload)`，把已编码的 `EncodedImagePayload` 直接包成
-  `StreamingResponse`，省掉一次解码 + 重编码。
+  `encoded_image_payload_to_response(payload)`，把已编码的 `EncodedImagePayload` 经 `_image_response()`
+  作**单条 body 消息**（`Response(content=...)`）发出，省掉一次解码 + 重编码。
+  > ⚠️ **不要改回 `StreamingResponse(io.BytesIO(...))`**（本文早期版本就是这么写的，那是个 bug）：
+  > 字节本来就整块在内存里，流式一点内存都省不下；但它把一个**同步**可迭代对象交给 Starlette，而
+  > Starlette 会用 `iterate_in_threadpool()` 逐项取——**`BytesIO` 的迭代协议是按行的**，二进制 PNG 于是
+  > 在每个 `0x0A` 处被切开：实测平均 384 字节一块，一张 870 KB 的图约 2300 次线程池往返 + 2300 条 ASGI
+  > 消息（7.3 MB 的 card/box 约 19000 块），`Content-Length` 也丢了。并发 8 时，服务端 0.12 秒画完的图，
+  > 客户端要等约 10 秒，而 CPU 全程 95% 空闲。修复后吞吐 **32 倍**（0.78 → 24.8 req/s）。
+  > 回归锁：`tests/test_image_response.py` 断言 **ASGI body 消息数 == 1**（不能断言字节内容——坏版本的
+  > 字节也是对的，只有消息数会露馅）。见 commit `5792b02`。
 - 两条路径都会打一条 `image.response ... backend=<pillow|skia|skia_cache|skia_fallback>` 的 INFO 日志
   （标签定义见 `src/sekai/skia_renderer/render_stats.py`，聚合计数由 `GET /render-stats` 暴露）。
 

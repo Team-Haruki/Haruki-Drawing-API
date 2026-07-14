@@ -66,11 +66,35 @@ is a **different** entry (`(0, 0)` target means "no resize", and then `resample`
 `_composed_image_cache` is a `_TTLImageCache` and stores **decoded images**, not encoded PNG/JPG bytes — the encoded
 composed-image disk cache below is simply the L2 tier of that same cache — same sha256 key, PIL image in,
 PNG on disk, PIL image out — and it holds sub-page FRAGMENTS (event/vlive list entries, profile modules),
-not end-result responses. The encoded response bytes live in `skia_payload_cache`.
+not end-result responses. The only encoded response bytes cached anywhere are **honor's**, in
+`skia_payload_cache` — card/box and card/list had theirs removed (they bake the wall clock into the page; see the
+Skia chapter), and every other endpoint re-renders.
+
+**A rendered-image cache key carries two things the request does not.**
+
+1. **A fingerprint of the drawing code**, folded in for you by `build_rendered_image_cache_key()`:
+   `renderer_code_fingerprint()` is a sha256 of every `.py` under `src/` — **content, not mtime**, or every image
+   rebuild would throw the whole disk cache away. It exists because the composed-image L2 lives under `data/`, which
+   is a **mounted volume** in Docker and outlives a deploy: without it, a new build cheerfully served the *old* pixels
+   off the volume for up to the 7-day TTL. Reproduced across two processes with the volume kept between them.
+2. **Asset signatures, which are yours to pass.** Either `collect_asset_signatures(ASSETS_BASE_DIR, material)`, which
+   stats every path-shaped string in the key material (what `event/drawer.py` does), or a hand-listed dict of
+   `get_image_asset_signature()` calls (what `honor/drawer.py` does — fourteen paths by name, correct today and
+   silently wrong the day someone adds a fifteenth; **prefer the collector**). Without them, an asset **replaced** at a
+   path the request already names — or one that finally **arrives** after a `?` placeholder was cached in its place —
+   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` still keys on the
+   request alone; it gets away with it only because its key carries a minute bucket, so it self-heals within 60s.
+
+`tests/test_asset_signature_cache_key.py` pins both. A new page/fragment cache must satisfy it.
 
 Resize results are **also** cached in the same general/thumb pool — see `get_img_resized()` and `get_img_resized_long_edge()`. Always prefer these over per-request `dict` caches; the global pool persists across requests.
 
-Sizes are configured in `configs.yaml` under `drawing.*` and exported as `IMAGE_CACHE_SIZE`, `THUMB_CACHE_SIZE`, `COMPOSED_IMAGE_CACHE_SIZE`, with their `*_MAX_BYTES` companions. Setting any size to `0` disables that pool.
+Sizes are configured in `configs.yaml` under `drawing.*` and exported as `IMAGE_CACHE_SIZE`, `THUMB_CACHE_SIZE`, `COMPOSED_IMAGE_CACHE_SIZE`, with their `*_MAX_BYTES` companions. Setting a size to `0` disables that pool.
+
+**The Skia payload cache has no knob of its own.** `payload_cache.py` builds it from `COMPOSED_IMAGE_CACHE_SIZE` /
+`COMPOSED_IMAGE_CACHE_MAX_BYTES` / `COMPOSED_IMAGE_CACHE_TTL_SECONDS` — the same three keys that size
+`_composed_image_cache`. So those three `composed_image_cache_*` keys size **two** independent pools, and zeroing any
+one of them (it needs size, bytes *and* TTL all `> 0`) silently disables honor's encoded-response cache too.
 
 Beyond these three there are two disk tiers, both swept periodically by the lifespan handler (`_cleanup_disk_caches`
 in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_image_disk_cache`, TTL-based) and
@@ -228,9 +252,13 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
   ref to `ImageBg(..., blur=False, fade=0)`; otherwise keep `get_img_from_path`.
 - **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
   A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
-- **Pillow's `paste(im, pos, im)` lerps the destination alpha** toward the layer's, so anti-aliased overlay
-  edges leave the result translucent. Use `paste_with_alpha_blend` (true `alpha_composite`) for overlays — that
-  is also what Skia does for both paste variants.
+- **There are THREE paste primitives, not two.** Pillow's `paste(im, pos, im)` lerps the destination alpha toward
+  the layer's, so anti-aliased overlay edges leave the result translucent — use `paste_with_alpha_blend` (true
+  `alpha_composite`) for overlays; Skia draws both of those src-over. The third is `Painter.paste_src` (Porter-Duff
+  **Src**, IR `blend="src"`, `BlendMode::Src` in Rust, no AA), for the **base layer** of an absolute-coordinate
+  composite — the asset that *is* the canvas. There, `paste` squares the alpha of an anti-aliased edge and
+  `paste_with_alpha_blend` zeroes the rgb under fully transparent pixels; an honor badge's frame over the transparent
+  corners of its base art shifts by up to 228/255 without it.
 - **The triangle background is generated in Python, not in either renderer.**
   `src/sekai/base/triangle_bg.py` scatters the triangles from a seed quantized to the whole hour;
   `Painter` draws that list and `IRPainter` ships it on `TriangleBg.tris`. Do **not** re-add a PRNG to

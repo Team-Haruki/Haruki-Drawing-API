@@ -1,8 +1,16 @@
 """Process-wide TTL + LRU cache for rendered Skia payloads (the encoded final image).
 
-Lives in its own module (it used to sit in ``card_common``) so that the generic render path
-and ``src.sekai.base.utils`` can report/clear it without importing the card layout helpers.
-``card_common`` re-exports the accessors, so existing callers keep working unchanged.
+It lives in its own module (it used to sit in ``card_common``) so that ``src.sekai.base.utils`` and
+``src.core.health`` can report and clear it without importing any card layout helper.
+
+**One endpoint uses it: honor** (``src/sekai/honor/skia.py``). card/box and card/list had page caches
+here and they were removed -- both bake the wall clock into the page (the ``DT:`` watermark footer, and
+card/list's 未上线 badge), so a hit served an earlier request's timestamp. honor's key folds in the
+watermark text, which carries ``dt`` to the SECOND, so it only hits for requests that share a second.
+
+It has **no size knob of its own**: it is built from COMPOSED_IMAGE_CACHE_SIZE / _MAX_BYTES /
+_TTL_SECONDS, the same three settings that size the composed-image pool. Zeroing any of those disables
+both.
 """
 
 from __future__ import annotations

@@ -96,7 +96,9 @@
 > 最慢的一个只用了 14.43 秒——如果单次真要 12 秒 CPU,这在物理上不可能。** 我没去看这个矛盾。
 
 **已改**(`configs.yaml` + `configs.docker.yaml` + `docker-compose.yaml`):
-`isolated_worker_pool_size: 8→4`、`readiness_unhealthy_rss_mb: 4096→1536`、`memory: 2G→4G`、`cpus: 2→4`。
+`isolated_worker_pool_size: 8→4`、`readiness_unhealthy_rss_mb: 4096→0`(先试过 1536,最终**关掉**——它只看得见父进程,
+本质是校准错了的并发闸)、新增 `readiness_unhealthy_cgroup_percent: 90`、`memory: 2G→4G`、`cpus: 2→4`
+(**注意**:`deploy` 块此前一直挂在 screenshot-service 上,绘图服务其实没有限额;已归位,见 `6c4e138`)。
 
 **验收(2026-07-14 修完流式 bug 后在 4G 容器里重测)**:空转 `588 MB`;混合负载
 (12×card/box + 8×deck/recommend,10 并发)**峰值 `2039 MB` = 限额的 50%,20 个响应全 OK,`oom_kill 0`**。
@@ -136,16 +138,20 @@
       **记录点在 `render_canvas_payload` 内部**,所以每个走 widget 树的 drawer 都被计数
       (**例外**:honor 与 chart 的水印外壳自己发 IR、不经 `render_canvas_payload`,各自调 `record_render`
       记账,见 `honor/skia.py`、`chart/drawer.py` 的 `_record`);端点名已全部穿参
-      (`src/sekai` 下 51 处调用点无一遗漏,签名里的 `endpoint or "unknown"` 只是兜底)。带 payload 缓存的
-      card/box 与 card/list 命中 payload 缓存时不进 `render_canvas_payload`,由 `record_skia_cache_hit` 单独计数;
-      honor 也有 payload 缓存,但它的水印外壳自己发 IR,命中走自己的 `_record`(→`record_render`),不经过那个 helper。
+      (`src/sekai` 下 51 处调用点无一遗漏,签名里的 `endpoint or "unknown"` 只是兜底)。**card/box 与 card/list 的整页 payload
+      缓存已于 2026-07-14 删除**(它们把墙钟画进页面,命中必然发陈旧水印;见 `f088c41`),配套的
+      `record_skia_cache_hit()` 一并删除——现在两者每次都走 `render_canvas_payload`,由那个记录点统一计数。
+      **唯一**还有 Skia payload 缓存的端点是 honor:它的水印外壳自己发 IR,命中走自己的 `_record`
+      (→`record_render`),不经过那个 helper。
 - [x] **影子层结果缓存推广(阶段 5)——结论:整页 payload 缓存不做**(2026-07-14,所有者确认):
       **调用方 cloud 会先按 payload 查自己的缓存,命中就不会调 drawing**,所以同一个 payload 根本不会
       来第二次——drawing 侧再加一层页面级缓存**永远不可能命中**,而每次 miss 仍会 insert,把共享 LRU 里
       真能命中的条目挤出去,净负收益。profile/vlive_list/chart 的整页缓存(连同为它服务的 `bg_hour` 量化、
       asset signature 扫描、cache key 构造)已全部删除,只保留端点名穿参。
       **删的只是"整页"那层**:vlive/list 的逐条目 composed 缓存(`vlive_list_entry`,跨请求跨用户可命中)保留;
-      card/box、card/list、honor 的 Skia payload 缓存(`payload_cache.py`)也仍在,本条未动它们。
+      当时 card/box、card/list、honor 的 Skia payload 缓存仍在,本条未动它们;**后来 card 的两页缓存已按同一条教训删除**
+      (`f088c41`——任何带 `add_request_watermark` 的端点都不该做结果缓存),现在只剩 honor(它的 key 里烤进了水印文本,
+      所以 `dt` 一变就 miss)。由 `tests/test_asset_signature_cache_key.py::test_card_pages_are_not_cached` 钉死。
       跨请求复用发生在**更下层且是跨用户共享的**:Rust 的 Moka 栅格缓存 + Pillow 的全局 resize 缓存按
       素材路径/尺寸缓存单个图层——这才是 `card_full_thumbnail` 子树化后"CPU 反升"担忧的真正补偿。
       **已核对 cloud 实现**(Haruki-Cloud `internal/pjsk/drawing/`):它的 key 由

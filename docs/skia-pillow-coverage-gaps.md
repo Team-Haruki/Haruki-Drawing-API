@@ -16,15 +16,21 @@
 - **门控**：`drawing.use_skia_plot`（`src/settings.py`，**默认 `True`**）是唯一的 Skia 门控。
   早期的 `use_skia_card_box` / `use_skia_card_list` / `skia_card_list_fallback_to_pillow` 已随专用场景
   构建器一起删除。
-- **原生能力版本**：`IR_CAPABILITY = 5`（`lib.rs`，含 `SelfImage` 画布快照节点），
-  `REQUIRED_NATIVE_IR_CAPABILITY = 5`（`skia_renderer/canvas.py`）；低于此版本的 wheel 拒绝加载并回退 Pillow。
+- **原生能力版本**：`IR_CAPABILITY = 7`（5 = `SelfImage` 画布快照节点，6 = `Image.blend="src"`（`Painter.paste_src`），
+  7 = `TriangleBg.tris`），`REQUIRED_NATIVE_IR_CAPABILITY = 7`；低于此版本的 wheel 拒绝加载并回退 Pillow。
+  数字有**四处**硬编码需同步：`lib.rs`、`canvas.py`、`quick-check.yml`、`skia-wheels.yml`。
 - **对拍**：`scripts/skia_parity_sweep.py` 共 **63 个用例、63 ok、0 失败**，已无 pillow-only 用例
-  （honor 已迁）。注意三角背景由**未播种的全局 `random`** 散布，同一棵树两次渲染本身就有差异，
-  故带背景端点只能断言宽松的均值差。`scripts/skia_legacy_baseline.py` 另外用 baseline git ref 的 Pillow
-  输出对当前 Pillow 输出做基线回归，覆盖“Pillow vs Skia 同树对拍”看不到的盲区。
+  （honor 已迁）。三角背景的散布现在**只在 Python 生成一次**（`base/triangle_bg.py`，blake2b + 整点量化种子），
+  两个后端画同一份列表、**都不再自带 PRNG**（禁止加回），所以两次渲染像素一致，带背景端点不再需要放宽阈值；
+  仍随时间变的只有调色板，故各脚本统一固定 `HARUKI_BG_TEST_HOUR=12.0`。
+  另外三道门：`scripts/skia_legacy_baseline.py`（用 baseline git ref 的 Pillow 输出做基线回归，覆盖
+  “Pillow vs Skia 同树对拍”看不到的**共享漂移**）、`scripts/skia_warm_parity.py`（**缓存全开**跑，正序 + 逆序
+  两趟，抓 key 碰撞 / 命中后被就地改写 / 跨端点栅格污染——对拍本身是 `bypass_caches()` 关着缓存跑的）、
+  `scripts/skia_bench.py`（**唯一的基准**；对拍的计时字段已删除，因为它先跑 Pillow 替 Skia 暖了缓存，
+  又只给 Skia 记 PNG 编码的账）。
 - **可观测性**：`skia_renderer/render_stats.py` 按端点计数 `skia|cache_hit|fallback|disabled|error`
   （`GET /render-stats`），`image.response` 日志带 `backend=` 字段；Skia payload 缓存在 `payload_cache.py`，
-  经 `/cache-stats` 上报。
+  经 `GET /cache/stats` 的 `skia_payload_cache` 键上报（**路由是 `/cache/stats`，不是 `/cache-stats`**）。
 
 | 口径 | 首轮审计 | 当前 | 说明 |
 |---|---|---|---|
