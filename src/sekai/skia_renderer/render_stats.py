@@ -106,23 +106,6 @@ def record_render(endpoint: str, outcome: str) -> None:
         bucket[outcome] += 1
 
 
-def record_skia_cache_hit(endpoint: str, payload) -> None:
-    """Record a payload-cache hit for an endpoint that short-circuits before rendering.
-
-    ``render_canvas_payload`` records its own outcomes, but card/list and card/box return a cached
-    payload before ever reaching it, so without this they would silently under-count themselves.
-    (honor also has a payload cache, but it hand-builds its IR and records through its own
-    ``_record`` helper instead of this one.)
-    """
-    from src.core.debug import set_render_backend
-
-    record_render(endpoint, OUTCOME_CACHE_HIT)
-    backend = backend_for_outcome(OUTCOME_CACHE_HIT)
-    set_render_backend(backend)
-    if payload is not None:
-        payload.backend = backend
-
-
 def record_worker_payload_backend(endpoint: str, backend: str | None) -> str:
     """Parent-side record for a payload rendered inside a heavy-worker process.
 

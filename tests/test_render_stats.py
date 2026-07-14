@@ -135,7 +135,8 @@ def test_font_fallbacks_are_aggregated_from_the_payload():
 # (the caller already caches by payload, and our key could never hit), so render_canvas_payload
 # IS the entry point, and it is where every outcome is recorded. The three endpoints that keep a
 # payload cache (card/box, card/list, honor) return the cached payload before reaching it and
-# record the hit themselves via record_skia_cache_hit — covered in tests/test_skia_card_box.py.
+# card/box and card/list no longer have a payload cache at all (they bake the wall clock into
+# the page), so there is no cache-hit path left on this side to count.
 
 
 def test_records_skia_and_stamps_the_payload(monkeypatch):

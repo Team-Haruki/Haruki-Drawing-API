@@ -63,7 +63,10 @@ def test_box_returns_none_when_gate_off(monkeypatch):
     assert asyncio.run(card_drawer.try_render_box_payload(_request())) is None
 
 
-def test_box_renders_via_shadow_layer_and_caches_payload(monkeypatch):
+def test_box_renders_via_shadow_layer_every_time(monkeypatch):
+    """card/box used to cache the encoded payload. It must not any more, and the rebuild-on-every-
+    request is the assertion: the page bakes in the wall clock (the ``DT:`` footer, the 未上线
+    badge), so a hit served an earlier request's timestamp and a stale badge."""
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
 
     calls = {"build": 0}
@@ -76,19 +79,15 @@ def test_box_renders_via_shadow_layer_and_caches_payload(monkeypatch):
     async def fake_render(canvas, **kwargs):
         return payload
 
-    cache: dict[str, EncodedImagePayload] = {}
     monkeypatch.setattr(card_drawer, "_build_box_canvas", fake_build)
     monkeypatch.setattr(card_drawer, "render_canvas_payload", fake_render)
-    monkeypatch.setattr(card_drawer, "get_skia_payload_cached", cache.get)
-    monkeypatch.setattr(card_drawer, "put_skia_payload_cache", lambda k, v, _size: cache.__setitem__(k, v))
 
     rqd = _request()
     assert asyncio.run(card_drawer.try_render_box_payload(rqd)) is payload
     assert calls["build"] == 1
-    assert len(cache) == 1  # encoded payload cached under the box business key
-    # Second call hits the payload cache without rebuilding the canvas.
+    # The same request again: the canvas is rebuilt, so the clock is read again.
     assert asyncio.run(card_drawer.try_render_box_payload(rqd)) is payload
-    assert calls["build"] == 1
+    assert calls["build"] == 2
 
 
 def test_box_falls_back_when_shadow_render_returns_none(monkeypatch):
@@ -102,7 +101,6 @@ def test_box_falls_back_when_shadow_render_returns_none(monkeypatch):
 
     monkeypatch.setattr(card_drawer, "_build_box_canvas", fake_build)
     monkeypatch.setattr(card_drawer, "render_canvas_payload", fake_render)
-    monkeypatch.setattr(card_drawer, "get_skia_payload_cached", lambda _k: None)
     assert asyncio.run(card_drawer.try_render_box_payload(_request())) is None
 
 

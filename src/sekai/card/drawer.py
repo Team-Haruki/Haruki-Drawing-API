@@ -35,11 +35,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
-    build_rendered_image_cache_key,
-    collect_asset_signatures,
     get_asset_image_ref,
-    get_composed_image_cached,
-    put_composed_image_cache,
 )
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
@@ -47,9 +43,6 @@ from src.sekai.profile.drawer import (
     get_profile_card,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
-from src.sekai.skia_renderer.render_stats import record_skia_cache_hit
-from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -108,89 +101,6 @@ def get_notice_dimensions(content_width: int, min_width: int = 520) -> tuple[int
     panel_width = max(min_width, content_width)
     text_width = max(240, panel_width - 120)
     return panel_width, text_width
-
-
-def _build_card_list_cache_key(rqd: CardListRequest) -> str:
-    request_payload = {
-        "cards": [
-            {
-                "card_id": card.card_id,
-                "release_at": card.release_at,
-                "supply_type": card.supply_type,
-                "prefix": card.prefix,
-                "skill_icon_path": card.skill.skill_type_icon_path if card.skill else None,
-                "thumbnail_info": [thumb.model_dump(mode="json") for thumb in (card.thumbnail_info or [])],
-            }
-            for card in rqd.cards
-        ],
-        "region": rqd.region,
-        "title": rqd.title,
-        "timezone": rqd.timezone,
-        "background_img_path": rqd.background_img_path,
-        "term_limited_icon_path": rqd.term_limited_icon_path,
-        "fes_limited_icon_path": rqd.fes_limited_icon_path,
-    }
-    return build_rendered_image_cache_key(
-        "card_list",
-        request_payload,
-        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, request_payload),
-    )
-
-
-def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
-    request_payload = {
-        "cards": [
-            {
-                "card": {
-                    "card_id": user_card.card.card_id,
-                    "character_id": user_card.card.character_id,
-                    "release_at": user_card.card.release_at,
-                    "supply_type": user_card.card.supply_type,
-                    "rare": user_card.card.rare,
-                    "thumbnail_info": [
-                        thumb.model_dump(mode="json") for thumb in (user_card.card.thumbnail_info or [])
-                    ],
-                    "is_after_training": user_card.card.is_after_training,
-                },
-                "has_card": user_card.has_card,
-            }
-            for user_card in rqd.cards
-        ],
-        "region": rqd.region,
-        "title": rqd.title,
-        "timezone": rqd.timezone,
-        "show_id": rqd.show_id,
-        "show_box": rqd.show_box,
-        "unowned_only": rqd.unowned_only,
-        "group_by": rqd.group_by,
-        "distribution": rqd.distribution.model_dump(mode="json") if rqd.distribution else None,
-        "background_img_path": rqd.background_img_path,
-        "character_icon_paths": rqd.character_icon_paths,
-        "character_color_codes": rqd.character_color_codes,
-        "term_limited_icon_path": rqd.term_limited_icon_path,
-        "fes_limited_icon_path": rqd.fes_limited_icon_path,
-        "user_info": (
-            {
-                "id": rqd.user_info.id,
-                "region": rqd.user_info.region,
-                "nickname": rqd.user_info.nickname,
-                "source": rqd.user_info.source,
-                "update_time": rqd.user_info.update_time,
-                "mode": rqd.user_info.mode,
-                "is_hide_uid": rqd.user_info.is_hide_uid,
-                "leader_image_path": rqd.user_info.leader_image_path,
-                "has_frame": rqd.user_info.has_frame,
-                "frame_path": rqd.user_info.frame_path,
-            }
-            if rqd.user_info is not None
-            else None
-        ),
-    }
-    return build_rendered_image_cache_key(
-        "card_box",
-        request_payload,
-        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, request_payload),
-    )
 
 
 def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):
@@ -1064,17 +974,10 @@ async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
 
 async def compose_card_list_image(rqd: CardListRequest) -> Image.Image:
     """合成卡牌列表图片 (Pillow 路径)。"""
-    cache_key = _build_card_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("card/list cache hit: cards=%d", len(rqd.cards))
-        return cached
-
     canvas = await _build_card_list_canvas(rqd)
     _t0 = time.perf_counter()
     image = await canvas.get_img()
     _perf_logger.info("card/list backend=pillow render: %.3fs (image=%dx%d)", time.perf_counter() - _t0, *image.size)
-    put_composed_image_cache(cache_key, image)
     return image
 
 
@@ -1082,11 +985,6 @@ async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayl
     """Skia 路径:同一棵 widget 树经 IRPainter 渲染。不可用时返回 None 回退 Pillow。"""
     if not skia_plot_enabled():
         return None
-    cache_key = f"{_build_card_list_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
-    cached = get_skia_payload_cached(cache_key)
-    if cached is not None:
-        record_skia_cache_hit("card_list", cached)
-        return cached
     canvas = await _build_card_list_canvas(rqd)
     _t0 = time.perf_counter()
     payload = await render_canvas_payload(canvas, endpoint="card_list")
@@ -1098,7 +996,6 @@ async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayl
             payload.image_width,
             payload.image_height,
         )
-        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
     return payload
 
 
@@ -1578,11 +1475,6 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
 
 async def compose_box_image(rqd: CardBoxRequest):
     """合成卡牌一览图片（Pillow 路径）。"""
-    cache_key = _build_card_box_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("card/box cache hit: cards=%d", len(rqd.cards))
-        return cached
     canvas = await _build_box_canvas(rqd)
     _t0 = time.perf_counter()
     image = await canvas.get_img()
@@ -1593,7 +1485,6 @@ async def compose_box_image(rqd: CardBoxRequest):
         image.width,
         image.height,
     )
-    put_composed_image_cache(cache_key, image)
     return image
 
 
@@ -1603,13 +1494,6 @@ async def try_render_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | N
     构建器。不可用时返回 None 回退 Pillow。"""
     if not skia_plot_enabled():
         return None
-    cache_key = f"{_build_card_box_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}"
-    cached = get_skia_payload_cached(cache_key)
-    if cached is not None:
-        # Record the hit: render_canvas_payload never sees it, so without this /render-stats and
-        # the backend= log field would systematically under-count card_box.
-        record_skia_cache_hit("card_box", cached)
-        return cached
     canvas = await _build_box_canvas(rqd)
     _t0 = time.perf_counter()
     payload = await render_canvas_payload(canvas, endpoint="card_box")
@@ -1621,5 +1505,4 @@ async def try_render_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | N
             payload.image_width,
             payload.image_height,
         )
-        put_skia_payload_cache(cache_key, payload, len(payload.image_bytes))
     return payload

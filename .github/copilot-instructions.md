@@ -153,9 +153,18 @@ number already exist (Rust, canvas.py, and the two CI assertions) — do not add
 
 **Observability.** `GET /render-stats` reports, per endpoint, how many requests were served
 `skia` / `cache_hit` / `fallback` / `disabled` / `error` (`src/sekai/skia_renderer/render_stats.py`), plus the
-Skia payload cache (`payload_cache.py`, currently used by card/box, card/list and honor — the other endpoints
-deliberately have no page-level cache because the caller already dedupes by payload). The `image.response` log
-line carries a `backend=` field.
+Skia payload cache (`payload_cache.py`, **used by honor only**). The `image.response` log line carries a
+`backend=` field.
+
+**No page-level cache on a page that renders the clock.** card/box and card/list used to have one and it was
+removed: `add_request_watermark` stamps a `DT: <timestamp>` footer, and card/list's 未上线 badge is decided by
+`request_now()` against each card's `release_at` — neither was in the key. Two requests differing only in `dt`
+therefore shared a key and the second was handed the first one's footer; a card that had gone live an hour
+earlier still rendered 未上线 out of the cache, for up to the 7-day TTL. A key honest about the clock cannot hit
+(`dt` is millisecond wall-clock), so there was nothing to fix in the key — the cache itself was the bug. honor
+keeps its payload cache because its key *does* carry the watermark text and every asset signature, and its page
+has no other clock term. The rest of the endpoints deliberately have no page-level cache because the caller
+already dedupes by payload.
 
 ```bash
 # Rebuild the extension after ANY Rust change (otherwise you are testing the old .so)
