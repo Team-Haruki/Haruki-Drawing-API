@@ -26,6 +26,7 @@ from src.core.pjsk import router as pjsk_router
 from src.settings import (
     FIELD_STYLE,
     LOG_FORMAT,
+    PROJECT_ROOT,
     SERVER_HOST,
     SERVER_PORT,
     settings,
@@ -269,10 +270,26 @@ async def lifespan(app: FastAPI):
     logger.info("Resources cleaned up.")
 
 
+def _app_version() -> str:
+    """The version /docs and openapi.json advertise, read from the one place that defines it.
+
+    It used to be hardcoded here AND in pyproject.toml, and both drifted: the app reported 2.4.8
+    while the repo had shipped v2.5.0 through v2.5.3. Releases are cut from a git tag and nothing
+    read either constant, so nobody noticed for five releases.
+    """
+    try:
+        import tomllib
+
+        with open(PROJECT_ROOT / "pyproject.toml", "rb") as fh:
+            return str(tomllib.load(fh)["project"]["version"])
+    except Exception:  # pyproject not shipped / unreadable — never fail a boot over a version string
+        return "unknown"
+
+
 app = FastAPI(
     title="Haruki Drawing API",
     description=_description,
-    version="2.4.8",
+    version=_app_version(),
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",

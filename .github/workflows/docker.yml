@@ -54,19 +54,45 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Docker image
+      # A pre-release (v3.0.0-rc1, v2.9.0-beta.2, ...) must NOT move `:latest`. Anything deploying
+      # `:latest` would silently pick up the release candidate, which is the one thing an RC is
+      # supposed not to be. Only a plain vX.Y.Z tag is allowed to claim it.
+      - name: Decide whether this tag claims :latest
+        id: tags
         run: |
           IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')
           VERSION=${{ github.ref_name }}
+          echo "image=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is a stable release — it will also be pushed as :latest"
+          else
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is a pre-release — :latest will NOT be moved"
+          fi
+
+      - name: Build Docker image
+        run: |
+          IMAGE_NAME=${{ steps.tags.outputs.image }}
+          VERSION=${{ steps.tags.outputs.version }}
+          TAGS="-t $IMAGE_NAME:$VERSION"
+          if [[ "${{ steps.tags.outputs.is_prerelease }}" == "false" ]]; then
+            TAGS="$TAGS -t $IMAGE_NAME:latest"
+          fi
           docker build \
             --build-arg VERSION="$VERSION" \
             --build-arg GIT_SHA="${GITHUB_SHA}" \
             --build-arg BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
-            -t $IMAGE_NAME:$VERSION -t $IMAGE_NAME:latest .
+            $TAGS .
 
       - name: Push Docker image
         run: |
-          IMAGE_NAME=ghcr.io/$(echo ${{ github.repository }} | tr '[:upper:]' '[:lower:]')
-          VERSION=${{ github.ref_name }}
+          IMAGE_NAME=${{ steps.tags.outputs.image }}
+          VERSION=${{ steps.tags.outputs.version }}
           docker push $IMAGE_NAME:$VERSION
-          docker push $IMAGE_NAME:latest
+          if [[ "${{ steps.tags.outputs.is_prerelease }}" == "false" ]]; then
+            docker push $IMAGE_NAME:latest
+          else
+            echo "pre-release: skipping :latest"
+          fi
