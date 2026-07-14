@@ -105,7 +105,6 @@ class DrawingSettings(BaseModel):
     composed_image_cache_size: int = 0  # 合成图片缓存条目数，0 表示关闭
     composed_image_cache_max_mb: int = 0  # 合成图片缓存总内存上限（MB），0 表示关闭
     composed_image_cache_ttl_seconds: int = 7 * 24 * 3600  # 合成图片缓存 TTL（秒）
-    screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
     # Skia 门控:默认开启(2026-07-12 全端点真实数据对拍通过后切换)。扩展缺失时 fail-open
@@ -207,8 +206,6 @@ class Settings(BaseSettings):
         drawing: dict = {}
         if "default_thread_pool_size" in data:
             drawing["thread_pool_size"] = data["default_thread_pool_size"]
-        if "screenshot_api_path" in data:
-            drawing["screenshot_api_path"] = data["screenshot_api_path"]
         if "drawing" in data:
             drawing.update(data["drawing"])
         if drawing:
@@ -260,7 +257,6 @@ THUMB_CACHE_MAX_BYTES = settings.drawing.thumbnail_cache_max_mb * 1024 * 1024
 COMPOSED_IMAGE_CACHE_SIZE = settings.drawing.composed_image_cache_size
 COMPOSED_IMAGE_CACHE_MAX_BYTES = settings.drawing.composed_image_cache_max_mb * 1024 * 1024
 COMPOSED_IMAGE_CACHE_TTL_SECONDS = settings.drawing.composed_image_cache_ttl_seconds
-SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir

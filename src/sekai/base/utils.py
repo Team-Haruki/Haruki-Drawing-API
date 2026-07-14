@@ -16,7 +16,6 @@ import time
 from typing import Any, Literal
 from uuid import uuid4
 
-import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 
 from src.core.debug import current_request_context, snapshot_process_metrics
@@ -31,7 +30,6 @@ from src.settings import (
     FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
-    SCREENSHOT_API_PATH,
     THUMB_CACHE_MAX_BYTES,
     THUMB_CACHE_SIZE,
     TMP_PATH,
@@ -1696,82 +1694,3 @@ def shutdown_utils() -> None:
     from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 
     clear_skia_payload_cache()
-
-
-# ============================ chromedp截图 ============================ #
-
-
-async def screenshot(
-    url: str,
-    *,
-    width: int = 1920,
-    height: int = 1080,
-    format: Literal["png", "jpeg", "webp"] = "png",
-    quanlity: int = 90,
-    wait_time: int = 0,
-    wait_for: str | None = None,
-    full_page: bool = False,
-    headers: dict | None = None,
-    user_agent: str | None = None,
-    device_scale: float = 1.0,
-    mobile: bool = False,
-    landscape: bool = False,
-    req_timeout: int = 30,
-    clip: dict[Literal["x", "y", "width", "height"], float] | None = None,
-) -> Image.Image:
-    r"""screenshot
-
-    调用chromedp截图微服务
-
-    Args
-    ----
-    url : str
-        资源连接，如果是本地资源，请使用file://+绝对路径，并且保证该路径被挂载到微服务的volumes下
-    width : int = 1920
-        窗口宽度
-    height : int = 1080
-        窗口高度
-    format : Literal[ 'png', 'jpeg', 'webp' ] = 'png'
-        返回的截图格式
-    quanlity : int = 90
-        压缩质量(1 - 100)
-    wait_time : int = 0
-        额外等待时间(毫秒)
-    wait_for : Optional[ str ] = None
-        等待元素出现(CSS选择器)
-    full_page : bool = False
-        全页面截图
-    headers : Optional[ dict ] = None
-        自定义请求头
-    user_agent : Optional[ str ] = None
-        自定义User-Agent
-    device_scale : float = 1.0
-        设备像素比
-    mobile : bool = false
-        移动端模拟
-    landscape : bool = false
-        横屏模式
-    timeout : int = 30
-        超时时间(秒, 最大120)
-    clip : Optional[ dict[ Literal[ 'x', 'y', 'width', 'height' ], float ] ] = None
-        裁剪区域
-    """
-    # locals() 获取当前所有的局部变量，在函数开头调用，获取所有的参数
-    params = {k: v for k, v in locals().items() if v is not None}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.request("post", SCREENSHOT_API_PATH, json=params) as resp:
-                if resp.status != 200:
-                    try:
-                        error = await resp.json()
-                        error = error["error"]
-                    except Exception:
-                        error = await resp.text
-                    raise Exception(error)
-                if resp.content_type not in ("image/jpeg", "image/webp", "image/png"):
-                    raise Exception(f"未知的响应体类型{resp.content_type}")
-                with Image.open(io.BytesIO(await resp.read())) as img:
-                    img.load()
-                    return img.copy()
-    except aiohttp.ClientConnectionError:
-        raise Exception("连接截图API失败")
