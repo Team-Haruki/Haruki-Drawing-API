@@ -105,12 +105,16 @@
 > 同一时刻真正在渲染的请求就更多。**任何在旧代码上量的容量数字都偏低**,因为那时候大部分请求
 > 卡在发包上,根本没在画图。4G 仍有一倍余量。
 
-- [ ] **`/ready` 的 RSS 门是结构性瞎的**:`readiness_unhealthy_rss_mb` 读 `/proc/self/status` 的 VmRSS,
-      **只看父进程**(`src/core/debug.py:189`)。父进程 RSS 随并发涨(12 并发 958 MB),而真正会撑爆 cgroup 的
-      heavy worker(稳态 2.15 GB)它**一个都看不见**。阈值已从 4096(比容器硬限额还高一倍,永远触发不了)
-      改到 1536,但那实际上是一道并发闸而不是内存闸。**根治要让它读 cgroup**
-      (`/sys/fs/cgroup/memory.current` vs `memory.max`,注意 v1/v2 路径不同、非容器环境要能优雅退化),
-      那是代码改动,未做。
+- [x] **`/ready` 改成看 cgroup**(2026-07-14):新增 `readiness_unhealthy_cgroup_percent`(默认 90),
+      `read_cgroup_memory()` 读 `memory.current` vs `memory.max`(v2,回退 v1 的
+      `usage_in_bytes`/`limit_in_bytes`),**这是唯一能看见 heavy worker 的信号**——实测空转时父进程
+      RSS 只有 267 MB,而 cgroup 已经 585 MB,旧的门连一半都没看见。用**百分比**表达是为了让它
+      不可能被配到硬限额之上(旧的 4096 就是那样,永远触发不了)。不在受限 cgroup 里(裸机/macOS)
+      时返回 `None`,门自动失效,不猜。真容器验证:阈值压到 5% → `/ready` 返回 503 且理由为
+      `cgroup_percent 9.4 >= 5 (385/4096 MB)`。
+      **`readiness_unhealthy_rss_mb` 同时关掉(设 0)**:父进程 RSS 随并发线性涨
+      (1/4/8/12 并发 = 483/757/838/958 MB),它其实是一道校准错了的并发门,会抢在真正的并发门
+      (inflight 48)前面开火,而且照样看不见 worker。并发有 inflight 门,内存有 cgroup 门,它没位置了。
 
 ## 🟡 端点残余
 

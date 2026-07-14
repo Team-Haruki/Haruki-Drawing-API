@@ -18,6 +18,7 @@ from src.settings import (
     OVERLOAD_MAX_INFLIGHT_REQUESTS,
     OVERLOAD_RETRY_AFTER_SECONDS,
     READINESS_UNHEALTHY_ASYNCIO_TASKS,
+    READINESS_UNHEALTHY_CGROUP_PERCENT,
     READINESS_UNHEALTHY_INFLIGHT_REQUESTS,
     READINESS_UNHEALTHY_RSS_MB,
 )
@@ -224,11 +225,56 @@ def snapshot_process_metrics(*, include_asyncio: bool = False) -> dict[str, Any]
     return metrics
 
 
+# cgroup v2 first (what any current container runtime gives us), then v1.
+_CGROUP_MEMORY_FILES: tuple[tuple[Path, Path], ...] = (
+    (Path("/sys/fs/cgroup/memory.current"), Path("/sys/fs/cgroup/memory.max")),
+    (
+        Path("/sys/fs/cgroup/memory/memory.usage_in_bytes"),
+        Path("/sys/fs/cgroup/memory/memory.limit_in_bytes"),
+    ),
+)
+# cgroup v1 spells "no limit" as a huge sentinel (PAGE_COUNTER_MAX scaled by the page size), not as
+# a word. Treat anything absurd as unlimited rather than as a ceiling we are 0.0000001% of.
+_CGROUP_UNLIMITED_BYTES = 1 << 62
+
+
+def read_cgroup_memory() -> tuple[float, float] | None:
+    """``(usage_mb, limit_mb)`` for the whole container, or ``None`` when there is no limit to read.
+
+    This is the only memory number that can see the heavy-render workers. They are separate
+    processes, so the parent's ``VmRSS`` -- which is what ``rss_mb`` reports -- cannot account for
+    them, and they are where most of the container's memory actually lives (measured: ~500 MB each
+    once warm, versus a parent that peaks under 1 GB). A gate on the parent's RSS therefore cannot
+    fire before the kernel OOM-kills the cgroup.
+
+    Returns ``None`` outside a memory-limited cgroup -- bare metal, macOS, an unconstrained
+    container -- so the readiness gate simply does not apply rather than guessing.
+    """
+    for usage_path, limit_path in _CGROUP_MEMORY_FILES:
+        try:
+            raw_limit = limit_path.read_text().strip()
+            raw_usage = usage_path.read_text().strip()
+        except (OSError, ValueError):
+            continue
+        if raw_limit == "max":  # cgroup v2, no limit set
+            return None
+        try:
+            limit = int(raw_limit)
+            usage = int(raw_usage)
+        except ValueError:
+            continue
+        if limit <= 0 or limit >= _CGROUP_UNLIMITED_BYTES:
+            return None
+        return usage / (1024 * 1024), limit / (1024 * 1024)
+    return None
+
+
 def runtime_readiness_thresholds() -> dict[str, int]:
     return {
         "inflight": READINESS_UNHEALTHY_INFLIGHT_REQUESTS,
         "rss_mb": READINESS_UNHEALTHY_RSS_MB,
         "asyncio_tasks": READINESS_UNHEALTHY_ASYNCIO_TASKS,
+        "cgroup_percent": READINESS_UNHEALTHY_CGROUP_PERCENT,
     }
 
 
@@ -250,6 +296,21 @@ def evaluate_runtime_readiness(metrics: dict[str, Any] | None = None) -> tuple[b
     if READINESS_UNHEALTHY_ASYNCIO_TASKS > 0 and isinstance(asyncio_tasks, int):
         if asyncio_tasks >= READINESS_UNHEALTHY_ASYNCIO_TASKS:
             reasons.append(f"asyncio_tasks {asyncio_tasks} >= {READINESS_UNHEALTHY_ASYNCIO_TASKS}")
+
+    # Read the cgroup here rather than in snapshot_process_metrics(): that runs on every request log
+    # line, this runs on /ready.
+    cgroup = read_cgroup_memory()
+    if cgroup is not None:
+        usage_mb, limit_mb = cgroup
+        percent = usage_mb / limit_mb * 100
+        metrics["cgroup_mb"] = round(usage_mb, 2)
+        metrics["cgroup_limit_mb"] = round(limit_mb, 2)
+        metrics["cgroup_percent"] = round(percent, 1)
+        if READINESS_UNHEALTHY_CGROUP_PERCENT > 0 and percent >= READINESS_UNHEALTHY_CGROUP_PERCENT:
+            reasons.append(
+                f"cgroup_percent {percent:.1f} >= {READINESS_UNHEALTHY_CGROUP_PERCENT} "
+                f"({usage_mb:.0f}/{limit_mb:.0f} MB)"
+            )
 
     return len(reasons) == 0, reasons, metrics
 

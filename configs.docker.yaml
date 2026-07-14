@@ -24,8 +24,14 @@ drawing:
   overload_max_inflight_requests: 64
   overload_retry_after_seconds: 5
   readiness_unhealthy_inflight_requests: 48
-  readiness_unhealthy_rss_mb: 1536  # 只看父进程 RSS(实测峰值 ~765MB);必须低于容器硬限额才有意义
+  # 关掉:它只看父进程 VmRSS,看不见 heavy worker(内存主项),而父进程 RSS 是随并发线性涨的
+  # (实测 1/4/8/12 并发 = 483/757/838/958 MB),所以它本质是一道校准错了的"并发门"——
+  # 1536 会在并发 ~26 触发,抢在真正的并发门(inflight 48)前面开火。内存交给 cgroup 门。
+  readiness_unhealthy_rss_mb: 0
   readiness_unhealthy_asyncio_tasks: 256
+  # 容器内存用量达到硬限额的 90% 时 /ready 报 503。这是唯一能看见 heavy worker 的信号。
+  # 不在受限 cgroup 里(裸机/macOS/无限额容器)时自动失效,不猜。
+  readiness_unhealthy_cgroup_percent: 90
   image_cache_size: 1024
   image_cache_max_mb: 256
   thumbnail_cache_size: 2048
