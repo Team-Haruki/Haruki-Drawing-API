@@ -22,13 +22,18 @@ def _builder() -> IRBuilder:
 
 def test_build_envelope_and_root():
     b = _builder()
-    b.triangle_bg(15.5)
+    b.triangle_bg([(10.0, 20.0, 45.0, 30.0, 255.0, 0.0, 0.0, 128.0, 1.0)], hour=15.5)
     scene = b.build()
     assert scene["version"] == 2
     assert scene["assets_base_dir"] == "/base"
     assert scene["canvas"] == {"width": 120, "height": 100}
     assert scene["fonts"] == {"dir": "/fonts", "default": "Regular", "bold": "Bold"}
-    assert scene["background"] == {"type": "TriangleBg", "hour": 15.5}
+    # The scatter is data, generated once by base/triangle_bg.py and drawn by both backends.
+    assert scene["background"] == {
+        "type": "TriangleBg",
+        "hour": 15.5,
+        "tris": [[10.0, 20.0, 45.0, 30.0, 255.0, 0.0, 0.0, 128.0, 1.0]],
+    }
     assert scene["root"]["type"] == "Group"
     assert scene["root"]["size"] == [120, 100]
 

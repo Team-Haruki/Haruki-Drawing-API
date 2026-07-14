@@ -714,14 +714,23 @@ class IRBuilder:
         return self._add(node)
 
     def triangle_bg(
-        self, hour: float = 15.0, time_color: bool = True, main_hue: float = 0.0, size_fixed_rate: float = 0.0
+        self,
+        tris: Sequence[Sequence[float]],
+        hour: float = 15.0,
+        time_color: bool = True,
+        main_hue: float = 0.0,
     ) -> None:
+        """``hour`` still drives the gradient palette on the Rust side; ``tris`` carries the scatter.
+
+        The triangles are generated once in ``base/triangle_bg.py`` and both backends draw that same
+        list, so neither the seed nor the PRNG has to be mirrored across the FFI. ``size_fixed_rate``
+        is deliberately NOT in the IR: it only affects how the triangles are sized, which now happens
+        entirely on the Python side. Each entry is ``[x, y, rot, size, r, g, b, a, type]``."""
         node: Node = {"type": "TriangleBg", "hour": hour}
         if not time_color:
             node["time_color"] = False
             node["main_hue"] = float(main_hue)
-        if size_fixed_rate:
-            node["size_fixed_rate"] = float(size_fixed_rate)
+        node["tris"] = [list(t) for t in tris]
         self._background = node
 
     def image_bg(self, path: str, mode: str = "fit", align: str = "c", blur: bool = False, fade: float = 0.0) -> None:

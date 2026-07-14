@@ -647,7 +647,7 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 bg.hour,
                 bg.time_color,
                 bg.main_hue,
-                bg.size_fixed_rate,
+                &bg.tris,
             );
         }
         Node::ImageBg(bg) => {

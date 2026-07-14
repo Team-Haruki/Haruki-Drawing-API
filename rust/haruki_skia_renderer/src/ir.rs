@@ -544,9 +544,16 @@ pub struct TriangleBgNode {
     /// Base hue (0..1) for the non-time palette.
     #[serde(default)]
     pub main_hue: f32,
-    /// 0 = size scales with canvas (default); 1 = fixed triangle size, density scales instead.
+    /// The scatter, generated once by `src/sekai/base/triangle_bg.py` and drawn verbatim.
+    ///
+    /// This used to be rolled here from a `(width, height, hour)`-seeded xorshift while Pillow
+    /// rolled its own from Python's unseeded global `random` — so the two backends could never
+    /// agree, and neither reproduced itself (the seed's `hour` carried milliseconds). The layout
+    /// is data; only the rasterization belongs to a backend.
+    ///
+    /// Each entry is `[x, y, rot, size, r, g, b, a, type]`.
     #[serde(default)]
-    pub size_fixed_rate: f32,
+    pub tris: Vec<[f32; 9]>,
 }
 
 fn default_hour() -> f32 {

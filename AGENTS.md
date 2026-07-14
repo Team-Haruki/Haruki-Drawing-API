@@ -141,8 +141,8 @@ flip the env var and restart; the image itself is unchanged. Renderer tunables: 
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_TEXT_HINTING`, `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **6**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 6). A too-old
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **7**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 7). A too-old
 extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
 self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
@@ -191,6 +191,14 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
 - **Pillow's `paste(im, pos, im)` lerps the destination alpha** toward the layer's, so anti-aliased overlay
   edges leave the result translucent. Use `paste_with_alpha_blend` (true `alpha_composite`) for overlays — that
   is also what Skia does for both paste variants.
+- **The triangle background is generated in Python, not in either renderer.**
+  `src/sekai/base/triangle_bg.py` scatters the triangles from a seed quantized to the whole hour;
+  `Painter` draws that list and `IRPainter` ships it on `TriangleBg.tris`. Do **not** re-add a PRNG to
+  either backend: they used to roll their own (Pillow from the *unseeded global* `random`, Rust from a
+  millisecond-precision seed), so the backgrounds could never match, neither backend reproduced itself,
+  and the parity sweep needed a loose threshold that hid real drift. The palette still follows the
+  *fractional* hour by design, so a harness that wants byte-stable output must pin
+  `HARUKI_BG_TEST_HOUR` (both `skia_parity_sweep.py` and `skia_legacy_baseline.py` do).
 - **Resizes are cached globally keyed on the resample filter too.** Pastes use BICUBIC (`PASTE_RESAMPLE`, matching
   Pillow's `Image.resize()` default); `get_img_resized` defaults to BILINEAR. Don't "unify" them casually.
 

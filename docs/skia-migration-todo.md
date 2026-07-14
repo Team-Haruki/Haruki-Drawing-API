@@ -16,7 +16,9 @@
 - [x] **CI wheel 流水线**(2026-07-13,skia-wheels.yml:linux-x86_64 + macos-arm64 矩阵、rust-cache、wheel tag 断言、IR_CAPABILITY 冒烟、artifact 上传)。
 - [x] **CI 跑 native 测试**(2026-07-13,quick-check native-tests job:maturin develop + OFL 字体下载缓存 + 全量 pytest;素材类 parity 自动跳过)。
 - [x] **Docker 集成**(2026-07-13,docker.yml 先构 wheel → docker/skia-wheels → 镜像条件安装 + 构建期自检;无 wheel 时 fail-open 构建仍绿,双分支本地实测)。
-- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;当前=6,`ImageNode.blend` 的 Src 通道)。
+- [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;
+      **当前=7**,`TriangleBg.tris`——旧 wheel 会 serde-skip 这个未知字段,画出**一个三角形都没有的背景**,
+      而且是静默的;这正是握手要挡的那种事)。
 - [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开;
       验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
@@ -172,13 +174,29 @@
       结论:**这一条在 TODO 里被高估了**,真正的文本开销在 Python 的布局测量,不在 Rust 的绘制。
       因此同组的 `measure_str("哇")` 全局缓存**不做**:为 0.4% 量级的收益引入跨线程锁不划算。
 - [ ] ~~fs::metadata TTL(S)~~ → 已由上面的路径解析缓存覆盖(在 Python 侧,不在 Rust)。
-      余下:TriangleBg 按 seed 缓存 raster(M,**但先决条件是给 Pillow 侧播种**,见下);
+      余下:TriangleBg 按 seed 缓存 raster(M,播种前提已于 2026-07-14 解决,见下条;现在卡的是调色板按秒变);
       mem 图 content-hash 跨请求缓存(L,`get_asset_image_ref` 铺开后 mem 图已经很少,收益存疑)。
-- [ ] **三角形背景的随机源**(值得单独记一笔,它不只是性能问题):Pillow 侧 `_impl_draw_random_triangle_bg`
-      直接抽**全局未播种 `random`**,Rust 侧却是 `(width, height, hour)` 派生的确定性种子。后果有三:
-      ①两后端背景**永远不可能一致**,对拍只能对背景放一个宽松的 mean 阈值;②Pillow 输出**逐次不可复现**
-      (~12% 像素churn),legacy 基线脚本一度因此"自己和自己对不上";③Rust 侧种子含 `hour`,精度到毫秒,
-      所以连 Skia 也不是逐次可复现的。想缓存 TriangleBg raster,必须**先把两侧的种子统一并显式化**。
+- [x] **三角形背景的随机源**(2026-07-14):**没有去移植 PRNG——把散布提成了数据。**
+      两侧原本各掷各的骰子:Pillow 抽**全局未播种 `random`**(Mersenne Twister + `normalvariate` 的
+      Kinderman-Monahan + `int()` 截断),Rust 用 `(width,height,hour)` 播种的 xorshift64*(+ Box-Muller
+      + `round()`),连 preset 颜色都是 4 个 vs 3 个。**统一种子是不够的,得连 PRNG、正态算法、取整规则
+      一起对齐**——那等于把同一份逻辑写两遍,正是 IR-first 规则要禁的事。
+      改为:新增 `src/sekai/base/triangle_bg.py`,按显式种子生成三角形列表(x/y/rot/size/rgba/type),
+      `Painter` 直接画这个列表,`IRPainter` 把同一个列表放进 `TriangleBg.tris`(IR_CAPABILITY 6→7)。
+      **两个后端的分歧从构造上消失**,Rust 侧净删 276 行(`SimpleRng`/`weighted_edge`/`time_lightness`/
+      preset 计算全部退役)。顺带把 Pillow 的三角形改成**亚像素落点**(原本 `int(x) - w//2` 整数对齐,
+      与 Skia 的浮点 path 天然差半像素,种子对齐也救不了)。
+      成绩:Pillow **逐次可复现**(原 ~12% 像素 churn)、Skia **逐次可复现**(原种子含毫秒,每 3.6s 变一次)、
+      纯背景画布两后端 **mean 0.55 / max 41**(原本是完全不同的两组三角形)。
+      对拍全量跑两遍,**非确定性端点 51 → 8**;剩下 8 个(`sk_*` + `gacha_detail`)画的是**实时倒计时**
+      (`time_to_end = event_end - now`),属内容随时间变,不是渲染器的不确定性。
+      `skia_parity_sweep.py` 补上 `HARUKI_BG_TEST_HOUR=12.0`(legacy 基线本来就钉着)——**种子按整点量化,
+      但调色板仍随小数小时平滑变化**(这是设计要的),所以要字节稳定的 harness 必须钉住这个 env。
+      legacy 基线:7 个无三角背景的端点**逐像素一致**,48 个有的**只有背景变**(mean_delta 0.1–1.2/255),
+      内容零改动。变异测试三条(种子退回小数小时 / scatter 退回全局 random / IRPainter 少发一个三角形)
+      各自被对应用例抓住,见 `tests/test_triangle_bg.py`。
+      **仍未做**:TriangleBg raster 缓存。现在种子可缓存了,但调色板按秒变,整张 bg 仍不可跨秒复用——
+      要缓存得先决定"调色板是否也量化",那是个产品取舍,不是技术阻塞。
 
 ## 🔵 新增:对 legacy 的像素基线(补上对拍的系统性盲区)
 

@@ -8,15 +8,14 @@ so the caller falls back to the Pillow composer. See ``docs/skia-pillow-coverage
 
 from __future__ import annotations
 
-from datetime import datetime
 import importlib
 import json
 import logging
-import os
 from typing import Any
 
 from src.core.debug import set_render_backend
 from src.core.heavy_render_pool import EncodedImagePayload
+from src.sekai.base.triangle_bg import background_hour
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.ir_painter import IRPainter, SkiaUnsupported
@@ -50,7 +49,7 @@ def skia_plot_enabled() -> bool:
 
 # Minimum IR capability this code emits (5 = capability 4 + SelfImage canvas snapshot).
 # An older wheel would silently drop features, so refuse it and fail open to Pillow.
-REQUIRED_NATIVE_IR_CAPABILITY = 6
+REQUIRED_NATIVE_IR_CAPABILITY = 7
 
 
 def load_native_renderer():
@@ -78,17 +77,6 @@ _REQUIRED = {
     "image_mode",
     "encode_elapsed",
 }
-
-
-def background_hour() -> float:
-    override = os.getenv("HARUKI_BG_TEST_HOUR")
-    if override is not None:
-        try:
-            return max(0.0, min(23.999, float(override)))
-        except ValueError:
-            pass
-    now = datetime.now()
-    return now.hour + now.minute / 60 + now.second / 3600
 
 
 def payload_from_native(result: dict[str, Any]) -> EncodedImagePayload:

@@ -32,6 +32,7 @@ from src.sekai.base.painter import (
     Painter,
     RadialGradient,
 )
+from src.sekai.base.triangle_bg import build_triangle_bg
 from src.sekai.base.utils import (
     EncodedImageRef,
     get_pristine_image_asset_path,
@@ -76,6 +77,9 @@ class IRPainter(Painter):
     ) -> None:
         super().__init__(size=size)
         self._assets_base_dir = Path(assets_base_dir).resolve()
+        # The canvas size, captured once: Painter mutates ``self.size`` per queued op, and the
+        # triangle background is a scene-level node that must be generated at canvas dimensions.
+        self._canvas_size = (int(size[0]), int(size[1]))
         self._b = IRBuilder(
             size[0],
             size[1],
@@ -447,10 +451,13 @@ class IRPainter(Painter):
         return self
 
     def draw_random_triangle_bg(self, time_color, main_hue, size_fixed_rate, exclude_on_hash=False):
+        # The same generator Painter calls, the same seed, the same list. The scatter is data;
+        # only its rasterization is a backend's business.
+        spec = build_triangle_bg(*self._canvas_size, self._bg_hour, bool(time_color), main_hue, size_fixed_rate)
         self._b.triangle_bg(
+            tris=[(t.x, t.y, t.rot, t.size, *t.color, t.type) for t in spec.triangles],
             hour=self._bg_hour,
             time_color=bool(time_color),
             main_hue=float(main_hue) if main_hue is not None else 0.0,
-            size_fixed_rate=float(size_fixed_rate or 0.0),
         )
         return self

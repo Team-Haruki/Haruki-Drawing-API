@@ -1,6 +1,5 @@
 use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap};
-use std::f32::consts::PI;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -296,7 +295,11 @@ fn validate_raw_image(
 /// Capability level of the IR this build understands. Bump when nodes/fields are added so
 /// the Python side can refuse (fail-open to Pillow) instead of silently dropping features
 /// when an older wheel meets newer IR. 4 = capability 3 + per-image sampling intent.
-pub const IR_CAPABILITY: u32 = 6;
+/// 7 = `TriangleBg.tris`: the scatter is generated in Python and drawn verbatim. A capability-6
+/// wheel would parse the node, ignore the unknown field, and render a background with **no
+/// triangles at all** — silently, since serde skips unknown fields. Exactly what the handshake
+/// exists to catch.
+pub const IR_CAPABILITY: u32 = 7;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -387,53 +390,10 @@ struct PinkPaletteStop {
 type NormPoint = (f32, f32);
 type GradientPoints = (NormPoint, NormPoint, NormPoint, NormPoint);
 
-struct SimpleRng {
-    state: u64,
-    spare_normal: Option<f32>,
-}
+/// (grad1, grad2, overlay1, overlay2, white_veil_alpha). The triangle preset colors used to be
+/// derived here too; they now arrive baked into `TriangleBgNode::tris`.
+type TrianglePalette = ([u8; 3], [u8; 3], Rgba, Rgba, u8);
 
-impl SimpleRng {
-    fn new(seed: u64) -> Self {
-        Self {
-            state: seed.max(1),
-            spare_normal: None,
-        }
-    }
-
-    fn next_u64(&mut self) -> u64 {
-        let mut x = self.state;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.state = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    fn next_f32(&mut self) -> f32 {
-        ((self.next_u64() >> 40) as f32) / ((1u64 << 24) as f32)
-    }
-
-    fn uniform(&mut self, min: f32, max: f32) -> f32 {
-        min + (max - min) * self.next_f32()
-    }
-
-    fn normal(&mut self, mean: f32, stddev: f32) -> f32 {
-        if let Some(value) = self.spare_normal.take() {
-            return mean + value * stddev;
-        }
-        let u1 = self.next_f32().max(1.0e-6);
-        let u2 = self.next_f32();
-        let radius = (-2.0 * u1.ln()).sqrt();
-        let theta = 2.0 * PI * u2;
-        self.spare_normal = Some(radius * theta.sin());
-        mean + radius * theta.cos() * stddev
-    }
-}
-
-/// (grad1, grad2, overlay1, overlay2, white_veil_alpha, triangle_preset_colors).
-type TrianglePalette = ([u8; 3], [u8; 3], Rgba, Rgba, u8, Vec<[u8; 3]>);
-
-#[allow(clippy::too_many_arguments)]
 fn draw_sekai_triangle_background(
     canvas: &Canvas,
     width: f32,
@@ -441,52 +401,37 @@ fn draw_sekai_triangle_background(
     hour: f32,
     time_color: bool,
     main_hue: f32,
-    size_fixed_rate: f32,
+    tris: &[[f32; 9]],
 ) {
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
 
-    // Resolve the base/overlay gradient colors, white veil, and triangle preset colors for
-    // either the time-of-day pink palette or a custom-hue palette (mirrors Painter).
-    let (grad1, grad2, overlay1, overlay2, white_alpha, preset_colors): TrianglePalette =
-        if time_color {
-            let palette = pink_palette(hour);
-            let mid = mix_rgb(palette.grad1, palette.grad2, 0.5);
-            let preset = vec![
-                brighten_rgb(mix_rgb(palette.grad1, [255, 206, 232], 0.72), 0.20),
-                brighten_rgb(mix_rgb(mid, [238, 214, 255], 0.68), 0.18),
-                brighten_rgb(mix_rgb(palette.grad2, [208, 232, 255], 0.66), 0.20),
-                brighten_rgb(mix_rgb(mid, [255, 228, 176], 0.56), 0.18),
-            ];
-            (
-                palette.grad1,
-                palette.grad2,
-                palette.overlay1,
-                palette.overlay2,
-                palette.white_alpha,
-                preset,
-            )
-        } else {
-            let ofs = 0.025;
-            let g1 = hls_to_rgb_trunc(main_hue, 1.0, 0.5);
-            let g2 = hls_to_rgb_trunc(main_hue + ofs, 0.5, 0.9);
-            let ov1 = hls_to_rgb_trunc(main_hue, 0.7, 0.9);
-            let ov2 = hls_to_rgb_trunc(main_hue - ofs, 0.5, 0.5);
-            let preset = vec![
-                brighten_rgb([255, 189, 246], 0.22),
-                brighten_rgb([183, 246, 255], 0.22),
-                brighten_rgb([255, 247, 146], 0.22),
-            ];
-            (
-                g1,
-                g2,
-                Rgba(ov1[0], ov1[1], ov1[2], 100),
-                Rgba(ov2[0], ov2[1], ov2[2], 100),
-                100,
-                preset,
-            )
-        };
+    // The gradient palette is still resolved here: it is a pure function of `hour`, both backends
+    // interpolate the same table, and it was never what diverged.
+    let (grad1, grad2, overlay1, overlay2, white_alpha): TrianglePalette = if time_color {
+        let palette = pink_palette(hour);
+        (
+            palette.grad1,
+            palette.grad2,
+            palette.overlay1,
+            palette.overlay2,
+            palette.white_alpha,
+        )
+    } else {
+        let ofs = 0.025;
+        let g1 = hls_to_rgb_trunc(main_hue, 1.0, 0.5);
+        let g2 = hls_to_rgb_trunc(main_hue + ofs, 0.5, 0.9);
+        let ov1 = hls_to_rgb_trunc(main_hue, 0.7, 0.9);
+        let ov2 = hls_to_rgb_trunc(main_hue - ofs, 0.5, 0.5);
+        (
+            g1,
+            g2,
+            Rgba(ov1[0], ov1[1], ov1[2], 100),
+            Rgba(ov2[0], ov2[1], ov2[2], 100),
+            100,
+        )
+    };
 
     draw_linear_gradient(
         canvas,
@@ -503,79 +448,21 @@ fn draw_sekai_triangle_background(
     paint.set_color(Color::from_argb(white_alpha, 255, 255, 255));
     canvas.draw_rect(Rect::from_xywh(0.0, 0.0, width, height), &paint);
 
-    let factor = width.min(height) / 2048.0 * 1.5;
-    // size_fixed_rate=0 keeps the exact legacy expressions (size scales, density fixed).
-    let (size_factor, dense_factor) = if size_fixed_rate == 0.0 {
-        (factor, 1.0)
-    } else {
-        (
-            1.0 + (factor - 1.0) * (1.0 - size_fixed_rate),
-            1.0 + (factor * factor - 1.0) * size_fixed_rate,
-        )
-    };
-    let aspect = width / height.max(1.0);
-    let aspect_density_boost = 1.55_f32.min(1.15_f32.max(aspect.powf(0.22)));
-    let wide_shift = 0.12_f32.min(0.0_f32.max((aspect - 1.0) * 0.08));
-
-    let seed_extra = if time_color {
-        (hour * 1000.0) as u64
-    } else {
-        ((main_hue * 100000.0) as u64).wrapping_add(7919)
-    };
-    let seed = ((width as u64) << 32) ^ (height as u64) ^ seed_extra.rotate_left(17);
-    let ml = if time_color {
-        time_lightness(hour)
-    } else {
-        1.0
-    };
-    let mut rng = SimpleRng::new(seed);
-    draw_random_triangles(
-        canvas,
-        &mut rng,
-        width,
-        height,
-        (28.0 * dense_factor * aspect_density_boost) as usize,
-        (128.0 * size_factor, 16.0 * size_factor),
-        size_factor,
-        wide_shift,
-        &preset_colors,
-        ml,
-    );
-    draw_random_triangles(
-        canvas,
-        &mut rng,
-        width,
-        height,
-        (280.0 * dense_factor * aspect_density_boost) as usize,
-        (64.0 * size_factor, 16.0 * size_factor),
-        size_factor,
-        wide_shift,
-        &preset_colors,
-        ml,
-    );
-}
-
-/// Painter's time-of-day lightness (timecolors "l" column, painter.py:1447-1455): triangles
-/// are damped by ml**0.5 at night so they fade with the palette. Piecewise-linear over the
-/// fractional hour; the custom-hue path uses ml = 1.0.
-fn time_lightness(hour: f32) -> f32 {
-    const STOPS: [(f32, f32); 7] = [
-        (0.0, 0.1),
-        (5.0, 0.2),
-        (9.0, 0.8),
-        (12.0, 1.0),
-        (15.0, 0.8),
-        (19.0, 0.2),
-        (24.0, 0.1),
-    ];
-    let h = hour.clamp(0.0, 24.0);
-    for w in STOPS.windows(2) {
-        let ((h1, l1), (h2, l2)) = (w[0], w[1]);
-        if h >= h1 && h < h2 {
-            return l1 + (l2 - l1) * ((h - h1) / (h2 - h1));
-        }
+    // The scatter is NOT rolled here any more. It arrives as data -- byte-for-byte the list the
+    // Pillow painter draws (`src/sekai/base/triangle_bg.py`) -- so the two backends cannot disagree
+    // and a render reproduces itself. Sizing and the time-of-day alpha damping happen on the Python
+    // side, where the triangles are made; `size_fixed_rate` stays on the node only for IR shape.
+    for t in tris {
+        draw_triangle(
+            canvas,
+            t[0],
+            t[1],
+            t[2],
+            t[3],
+            Rgba(t[4] as u8, t[5] as u8, t[6] as u8, t[7] as u8),
+            t[8] as usize,
+        );
     }
-    STOPS[STOPS.len() - 1].1
 }
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
@@ -597,10 +484,6 @@ fn lerp_rgba(a: Rgba, b: Rgba, t: f32) -> Rgba {
         lerp_u8(a.2, b.2, t),
         lerp_u8(a.3, b.3, t),
     )
-}
-
-fn mix_rgb(a: [u8; 3], b: [u8; 3], ratio: f32) -> [u8; 3] {
-    lerp_rgb(a, b, ratio)
 }
 
 /// `colorsys.hls_to_rgb` with Painter's `int(255*c)` truncation and `(h+1)%1` hue wrap.
@@ -630,14 +513,6 @@ fn hls_to_rgb_trunc(h: f32, l: f32, s: f32) -> [u8; 3] {
         (c * 255.0) as u8
     };
     [v(h + 1.0 / 3.0), v(h), v(h - 1.0 / 3.0)]
-}
-
-fn brighten_rgb(color: [u8; 3], amount: f32) -> [u8; 3] {
-    [
-        (color[0] as f32 + (255.0 - color[0] as f32) * amount).min(255.0) as u8,
-        (color[1] as f32 + (255.0 - color[1] as f32) * amount).min(255.0) as u8,
-        (color[2] as f32 + (255.0 - color[2] as f32) * amount).min(255.0) as u8,
-    ]
 }
 
 fn pink_palette(hour: f32) -> PinkPalette {
@@ -766,110 +641,6 @@ fn draw_linear_gradient(
         paint.set_shader(shader);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, width, height), &paint);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_random_triangles(
-    canvas: &Canvas,
-    rng: &mut SimpleRng,
-    width: f32,
-    height: f32,
-    count: usize,
-    size_dist: (f32, f32),
-    size_factor: f32,
-    wide_shift: f32,
-    preset_colors: &[[u8; 3]],
-    ml: f32,
-) {
-    let std_size_lower = 64.0 * size_factor;
-    let std_size_upper = 128.0 * size_factor;
-
-    for _ in 0..count {
-        let (x, y) = if rng.next_f32() < 0.78 {
-            let edge = weighted_edge(rng, wide_shift);
-            match edge {
-                0 => (
-                    rng.uniform(-0.04 * width, 0.18 * width),
-                    rng.uniform(0.0, height),
-                ),
-                1 => (
-                    rng.uniform((0.82 - wide_shift) * width, 1.03 * width),
-                    rng.uniform(0.0, height),
-                ),
-                2 => (
-                    rng.uniform(0.0, width),
-                    rng.uniform(-0.04 * height, (0.20 + wide_shift * 0.5) * height),
-                ),
-                _ => (
-                    rng.uniform(0.0, width),
-                    rng.uniform((0.80 - wide_shift * 0.8) * height, 1.03 * height),
-                ),
-            }
-        } else {
-            (
-                rng.uniform(0.12 * width, 0.88 * width),
-                rng.uniform(0.12 * height, 0.88 * height),
-            )
-        };
-
-        if x < 0.0 || x >= width || y < 0.0 || y >= height {
-            continue;
-        }
-
-        let rot = rng.uniform(0.0, 360.0);
-        let mut size = rng
-            .normal(size_dist.0, size_dist.1)
-            .round()
-            .clamp(1.0, 1000.0);
-        let dist =
-            ((x - width * 0.5) / width * 2.0).powi(2) + ((y - height * 0.5) / height * 2.0).powi(2);
-        size *= 0.28_f32.max(dist);
-
-        let mut size_alpha_factor = 1.0;
-        if size < std_size_lower {
-            size_alpha_factor = size / std_size_lower.max(1.0);
-        }
-        if size > std_size_upper {
-            size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5);
-        }
-        let mut alpha =
-            rng.normal(122.0, 138.0) * 0.0_f32.max(1.5_f32.min(size_alpha_factor) * ml.sqrt());
-        if rng.next_f32() < 0.05 && size > std_size_lower {
-            alpha = 255.0;
-        }
-        if alpha <= 34.0 {
-            continue;
-        }
-        let color = preset_colors[(rng.next_u64() as usize) % preset_colors.len()];
-        let tri_type = [0, 1, 1, 1, 2, 2][(rng.next_u64() as usize) % 6];
-        draw_triangle(
-            canvas,
-            x,
-            y,
-            rot,
-            size,
-            Rgba(color[0], color[1], color[2], alpha.clamp(0.0, 255.0) as u8),
-            tri_type,
-        );
-    }
-}
-
-fn weighted_edge(rng: &mut SimpleRng, wide_shift: f32) -> usize {
-    let weights = [
-        0.9,
-        0.95 - wide_shift * 1.8,
-        1.18 + wide_shift * 1.6,
-        0.72 - wide_shift * 1.2,
-    ];
-    let total = weights.iter().sum::<f32>();
-    let mut pick = rng.uniform(0.0, total);
-    for (idx, weight) in weights.iter().enumerate() {
-        if pick <= *weight {
-            return idx;
-        }
-        pick -= *weight;
-    }
-    weights.len() - 1
 }
 
 fn draw_triangle(

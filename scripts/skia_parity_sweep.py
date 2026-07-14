@@ -30,6 +30,15 @@ Run (repo root):
 
 from __future__ import annotations
 
+import os
+
+# Pin the background's clock. The triangle SCATTER is deterministic (base/triangle_bg.py seeds off
+# the whole hour), but the palette still follows the fractional hour by design — so Pillow and Skia,
+# which each read the clock on their own, would otherwise render very slightly different colours,
+# and two sweeps seconds apart would not agree with each other either. Same value the legacy
+# baseline harness pins.
+os.environ.setdefault("HARUKI_BG_TEST_HOUR", "12.0")
+
 import argparse
 import asyncio
 from collections import Counter
