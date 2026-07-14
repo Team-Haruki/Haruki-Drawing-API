@@ -4,6 +4,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -24,11 +25,13 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import (
-    get_card_full_thumbnail,
+    CardFullThumbnailBox,
+    get_card_full_thumbnail_layers,
     get_profile_card,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 logger = logging.getLogger(__name__)
@@ -169,7 +172,7 @@ def planner_cover_key(song) -> str:
     return str(song.music_id or song.music_cover_path or song.title)
 
 
-def draw_event_planner_block(planner, planner_music_imgs: dict[str, Image.Image]) -> None:
+def draw_event_planner_block(planner, planner_music_imgs: dict[str, ImageSource]) -> None:
     th_style = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(75, 75, 75))
     tb_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(70, 70, 70))
     rows = []
@@ -328,7 +331,7 @@ def build_recommend_title(
     return title
 
 
-async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
+async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
     # 数据准备区
     use_max_profile = rqd.is_max_deck
     music_compare = rqd.music_compare
@@ -340,19 +343,19 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     chara_name = rqd.chara_name
     chara_icon = None
     if rqd.chara_icon_path:
-        chara_icon = await get_img_from_path(ASSETS_BASE_DIR, rqd.chara_icon_path)
+        chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.chara_icon_path)
     # 并行加载所有可选图标
     _deck_tasks = {}
     if rqd.wl_chara_icon_path:
-        _deck_tasks["wl_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
+        _deck_tasks["wl_chara"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
     if rqd.unit_logo_path:
-        _deck_tasks["unit_logo"] = get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path)
+        _deck_tasks["unit_logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path)
     if rqd.attr_icon_path:
-        _deck_tasks["attr_icon"] = get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path)
+        _deck_tasks["attr_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_icon_path)
     if not music_compare and rqd.music_cover_path:
-        _deck_tasks["music_cover"] = get_img_from_path(ASSETS_BASE_DIR, rqd.music_cover_path)
+        _deck_tasks["music_cover"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_cover_path)
     if rqd.canvas_thumbnail_path:
-        _deck_tasks["canvas_thumb"] = get_img_from_path(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
+        _deck_tasks["canvas_thumb"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
     # 收集卡牌缩略图和比较封面
     _card_thumb_tasks = []
     _card_thumb_keys = []
@@ -362,7 +365,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
         if music_compare and deck.music_cover_path and deck.music_cover_path not in dict.fromkeys(_compare_cover_paths):
             _compare_cover_paths.append(deck.music_cover_path)
         for card in deck.card_data:
-            _card_thumb_tasks.append(get_card_full_thumbnail(card.card_thumbnail))
+            _card_thumb_tasks.append(get_card_full_thumbnail_layers(card.card_thumbnail))
             _card_thumb_keys.append(
                 (
                     card.card_thumbnail.card_id,
@@ -374,8 +377,8 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
         for song in rqd.event_planner.songs:
             if song.music_cover_path and song.music_cover_path not in dict.fromkeys(_planner_cover_paths):
                 _planner_cover_paths.append(song.music_cover_path)
-    _compare_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
-    _planner_tasks = [get_img_from_path(ASSETS_BASE_DIR, p) for p in _planner_cover_paths]
+    _compare_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
+    _planner_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _planner_cover_paths]
 
     # 并行执行所有加载
     _dk = list(_deck_tasks.keys())
@@ -407,7 +410,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
     result_algs = rqd.model_name or [""] * len(result_decks)
     # The same card id can appear in multiple candidate decks with different
     # flower-before/after skill art states, so card_id alone is not a safe key.
-    card_imgs = dict(zip(_card_thumb_keys, _thumb_results))
+    card_layers = dict(zip(_card_thumb_keys, _thumb_results))
     compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
     planner_music_imgs = dict(zip(_planner_cover_paths, _planner_results))
 
@@ -445,7 +448,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                     with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
                         if recommend_type in ["event", "wl", "bonus", "wl_bonus", "mysekai"] and rqd.event_id:
                             if rqd.event_banner_path:
-                                event_banner = await get_img_from_path(ASSETS_BASE_DIR, rqd.event_banner_path)
+                                event_banner = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path)
                                 ImageBox(event_banner, size=(None, 50))
                             else:
                                 title = rqd.event_name + " " + title
@@ -492,11 +495,11 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                 TextBox("仅", setting_style)
                                 if unit_filter:
                                     ImageBox(
-                                        await get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path), size=(None, 40)
+                                        await get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path), size=(None, 40)
                                     )
                                 if attr_filter:
                                     ImageBox(
-                                        await get_img_from_path(ASSETS_BASE_DIR, rqd.attr_icon_path), size=(None, 35)
+                                        await get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_icon_path), size=(None, 35)
                                     )
                                 TextBox("上场", setting_style)
                             if excluded_cards:
@@ -712,7 +715,7 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                                             ):
                                                 with Frame().set_w(card_col_w).set_content_align("c"):
                                                     with Frame().set_content_align("rt"):
-                                                        ImageBox(card_imgs[card_key], size=(None, 80))
+                                                        CardFullThumbnailBox(card_layers[card_key], size=(None, 80))
                                                         if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
                                                             rqd.fixed_characters_id
                                                             and character_id in rqd.fixed_characters_id
@@ -895,4 +898,25 @@ async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
                         ).set_w(note_text_width)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_deck_recommend_image(rqd: DeckRequest) -> Image.Image:
+    """合成组队推荐图片 (Pillow 路径)。"""
+    return await (await _build_deck_recommend_canvas(rqd)).get_img()
+
+
+async def try_render_deck_recommend_payload(
+    rqd: DeckRequest, *, endpoint: str = "deck_recommend"
+) -> EncodedImagePayload | None:
+    """Skia 路径：经 IRPainter 渲染同一棵 widget 树；不可用时返回 None 回退 Pillow。
+
+    ``endpoint`` names the caller for /render-stats. It defaults to the deck route, which renders
+    inside a heavy worker process (see ``heavy_render_pool``) — those child-process counters are
+    replayed in the parent from ``payload.backend``. The event planner delegates to this same
+    canvas but renders in-process, so it must pass its own name; otherwise its renders would be
+    counted as ``deck_recommend`` in the parent's /render-stats.
+    """
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_deck_recommend_canvas(rqd), endpoint=endpoint)

@@ -1,6 +1,8 @@
 import asyncio
 from collections import OrderedDict
+from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import lru_cache
 import hashlib
 import io
 import json
@@ -8,12 +10,12 @@ import logging
 import os
 from os.path import join as pjoin
 from pathlib import Path
+from stat import S_ISREG
 import threading
 import time
 from typing import Any, Literal
 from uuid import uuid4
 
-import aiohttp
 from PIL import Image, ImageDraw, ImageFont
 
 from src.core.debug import current_request_context, snapshot_process_metrics
@@ -28,7 +30,6 @@ from src.settings import (
     FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
-    SCREENSHOT_API_PATH,
     THUMB_CACHE_MAX_BYTES,
     THUMB_CACHE_SIZE,
     TMP_PATH,
@@ -37,6 +38,95 @@ from src.settings import (
 logger = logging.getLogger(__name__)
 
 MissingImageMode = Literal["raise", "placeholder"]
+_PRISTINE_ASSET_PATH_ATTR = "_haruki_pristine_asset_path"
+
+
+@dataclass(frozen=True, slots=True)
+class AssetImageRef:
+    """Header-only image reference for renderers that can load assets themselves.
+
+    ``mtime_ns``/``file_size`` capture the file identity at probe time so cache keys
+    derived from the ref (e.g. ``deterministic_hash`` of painter ops) invalidate when
+    the asset is hot-reloaded with the same dimensions.
+    """
+
+    path: Path
+    size: tuple[int, int]
+    mode: str
+    mtime_ns: int = 0
+    file_size: int = 0
+
+    @property
+    def width(self) -> int:
+        return self.size[0]
+
+    @property
+    def height(self) -> int:
+        return self.size[1]
+
+    @property
+    def readonly(self) -> int:
+        return 1
+
+    @property
+    def _haruki_pristine_asset_path(self) -> str:
+        return str(self.path)
+
+
+@dataclass(frozen=True, slots=True)
+class EncodedImageRef:
+    """Encoded (PNG/JPEG/...) image bytes with header-probed dimensions.
+
+    The Skia path ships ``data`` straight to Rust as an encoded mem image; the Pillow
+    fallback decodes on demand in ``Painter._impl_paste*``. Use for images that arrive
+    already encoded (base64 payloads, downloads) to skip the Python-side decode."""
+
+    data: bytes
+    size: tuple[int, int]
+    mode: str
+
+    @property
+    def width(self) -> int:
+        return self.size[0]
+
+    @property
+    def height(self) -> int:
+        return self.size[1]
+
+
+def get_encoded_image_ref(data: bytes) -> EncodedImageRef:
+    """Wrap encoded image bytes into an :class:`EncodedImageRef` (header probe only)."""
+    with Image.open(io.BytesIO(data)) as probe:
+        return EncodedImageRef(data=data, size=probe.size, mode=probe.mode)
+
+
+ImageSource = Image.Image | AssetImageRef | EncodedImageRef
+
+# Painter resizes a decoded PIL image with a bare ``Image.resize(size)``, whose Pillow
+# default is BICUBIC. A ref-backed paste must resample identically or the same widget
+# tree renders softer just because its source stayed lazy. The resize cache keys on the
+# filter too, so this never collides with ``get_img_resized``'s BILINEAR/LANCZOS entries.
+PASTE_RESAMPLE = Image.Resampling.BICUBIC
+
+
+def _mark_pristine_asset_image(image: Image.Image, full_path: Path) -> Image.Image:
+    """Attach path provenance while making in-place edits observable.
+
+    Pillow drops custom attributes on copy/crop/resize. For in-place operations it uses
+    copy-on-write and clears ``readonly`` before touching pixels, so IRPainter can safely
+    reuse the source path only while both markers are intact.
+    """
+    setattr(image, _PRISTINE_ASSET_PATH_ATTR, str(full_path))
+    image.readonly = 1
+    return image
+
+
+def get_pristine_image_asset_path(image: Image.Image | AssetImageRef) -> Path | None:
+    """Return the backing file only when ``image`` still matches its loaded pixels."""
+    path = getattr(image, _PRISTINE_ASSET_PATH_ATTR, None)
+    if not isinstance(path, str) or not path or getattr(image, "readonly", 0) != 1:
+        return None
+    return Path(path)
 
 
 def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: bool = False) -> str:
@@ -105,9 +195,12 @@ def _open_image_copy(path: Path) -> Image.Image:
 
 
 _image_cache_lock = threading.RLock()
-# cache key: (path, mtime_ns, file_size, target_w, target_h)
-# target (0, 0) means original size (no resize)
-_image_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
+# cache key: (path, mtime_ns, file_size, target_w, target_h, resample)
+# target (0, 0) means original size (no resize), and then resample is 0 as well;
+# the filter is part of the key so a BICUBIC paste and a BILINEAR/LANCZOS
+# get_img_resized of the same asset at the same size cannot return each other's pixels.
+_ImageCacheKey = tuple[str, int, int, int, int, int]
+_image_cache: OrderedDict[_ImageCacheKey, tuple[Image.Image, int]] = OrderedDict()
 _image_cache_total_bytes = 0
 _image_cache_hits = 0
 _image_cache_misses = 0
@@ -116,7 +209,7 @@ _image_cache_evictions = 0
 
 # 缩略图专用缓存：路径含 "thumbnail" 的图片路由到此缓存，避免被大图驱逐
 _thumb_cache_lock = threading.RLock()
-_thumb_cache: OrderedDict[tuple[str, int, int, int, int], tuple[Image.Image, int]] = OrderedDict()
+_thumb_cache: OrderedDict[_ImageCacheKey, tuple[Image.Image, int]] = OrderedDict()
 _thumb_cache_total_bytes = 0
 _thumb_cache_hits = 0
 _thumb_cache_misses = 0
@@ -567,6 +660,35 @@ def _normalize_cache_material(value: Any) -> Any:
     return str(value)
 
 
+@lru_cache(maxsize=1)
+def renderer_code_fingerprint() -> str:
+    """A hash of the drawing code itself, folded into every rendered-image cache key.
+
+    The composed-image cache has an L2 on disk (``data/utils/composed_image_disk_cache``, TTL one
+    week) and in Docker ``data/`` is a MOUNTED VOLUME -- it outlives the container. Nothing in the
+    key identified the code that drew the image, so a deploy that changed how a fragment is drawn
+    left the new binary happily serving the old pixels off the volume for up to seven days.
+    Reproduced: change the entry background colour, restart (memory cleared, volume kept), and the
+    pre-change image comes straight back.
+
+    Content, not mtime: rebuilding the image rewrites every mtime, which would throw the whole disk
+    cache away on each deploy even when nothing changed. Costs ~15 ms once, at import.
+
+    Degrades to a constant if the source tree is not readable (installed as a zipapp, say) -- that
+    puts us back where we started rather than crashing a render.
+    """
+    root = Path(__file__).resolve().parents[2]  # .../src
+    digest = hashlib.sha256()
+    try:
+        for path in sorted(root.rglob("*.py")):
+            digest.update(str(path.relative_to(root)).encode("utf-8"))
+            digest.update(path.read_bytes())
+    except OSError:
+        logger.warning("renderer source fingerprint unavailable; disk-cached images may survive a deploy")
+        return "unknown"
+    return digest.hexdigest()[:16]
+
+
 def build_rendered_image_cache_key(
     namespace: str,
     request: Any,
@@ -576,6 +698,7 @@ def build_rendered_image_cache_key(
 ) -> str:
     material = {
         "namespace": namespace,
+        "code": renderer_code_fingerprint(),
         "request": _normalize_cache_material(request),
         "assets": _normalize_cache_material(asset_signatures or {}),
         "extra": _normalize_cache_material(extra or {}),
@@ -599,6 +722,42 @@ def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, An
         "mtime_ns": stat.st_mtime_ns,
         "size": stat.st_size,
     }
+
+
+_ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def collect_asset_signatures(base_path: Path, material: Any) -> dict[str, Any]:
+    """Stat every asset path mentioned anywhere in ``material`` (the cache key's request payload).
+
+    A cache key that carries only the request goes stale the moment an asset is REPLACED at a path
+    the request already names: the request is unchanged, so the key is unchanged, so the old picture
+    keeps being served until the entry expires (the TTL here is a week). The nastiest version is not
+    an art change but a missing asset -- the page renders a "?" placeholder, the asset later lands on
+    disk, and the placeholder is what everyone keeps getting.
+
+    Walking the key material instead of hand-listing the fields is deliberate: honor lists its
+    fourteen asset paths by name (``honor/drawer.py``), which is correct today and silently wrong the
+    day someone adds a fifteenth. Anything path-shaped in the key gets stat'd, automatically.
+
+    Cost is small next to what the cache is skipping: card/box mentions 1457 distinct assets and
+    stats them all in ~3 ms warm, against a ~26 ms key build and a 1-2 s render.
+    """
+    signatures: dict[str, Any] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            if node.lower().endswith(_ASSET_SUFFIXES) and node not in signatures:
+                signatures[node] = get_image_asset_signature(base_path, node)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value)
+
+    walk(material)
+    return signatures
 
 
 def get_composed_image_cached(cache_key: str) -> Image.Image | None:
@@ -678,16 +837,32 @@ def get_runtime_cache_stats() -> dict[str, Any]:
 
     composed_stats = _composed_image_cache.stats()
     composed_disk_stats = _composed_image_disk_cache.stats()
+    # Imported lazily: the Skia payload cache lives under src.sekai.skia_renderer, which imports
+    # this module transitively.
+    from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
+
     return {
         "image_cache": image_stats,
         "thumbnail_cache": thumb_stats,
         "composed_image_cache": composed_stats,
         "composed_image_disk_cache": composed_disk_stats,
+        "skia_payload_cache": get_skia_payload_cache_stats(),
     }
 
 
-def _load_image_cached(path: str, mtime_ns: int, size: int, target_w: int = 0, target_h: int = 0) -> Image.Image | None:
-    cache_key = (path, mtime_ns, size, target_w, target_h)
+def _load_image_cached(
+    path: str,
+    mtime_ns: int,
+    size: int,
+    target_w: int = 0,
+    target_h: int = 0,
+    count_stats: bool = True,
+    resample: int = 0,
+) -> Image.Image | None:
+    """``count_stats=False`` for opportunistic probes (the full-size lookup a resize does on its
+    way to a miss). Such a probe must be stats-NEUTRAL: counting only its hits and not its misses
+    would inflate the reported hit rate of a cache that served nothing."""
+    cache_key = (path, mtime_ns, size, target_w, target_h, resample)
     if _is_thumbnail_path(path):
         lock, cache = _thumb_cache_lock, _thumb_cache
         hit_name, miss_name = "_thumb_cache_hits", "_thumb_cache_misses"
@@ -697,16 +872,24 @@ def _load_image_cached(path: str, mtime_ns: int, size: int, target_w: int = 0, t
     with lock:
         entry = cache.get(cache_key)
         if entry is None:
-            globals()[miss_name] += 1
+            if count_stats:
+                globals()[miss_name] += 1
             return None
         image, _ = entry
-        globals()[hit_name] += 1
+        if count_stats:
+            globals()[hit_name] += 1
         cache.move_to_end(cache_key)
         return image.copy()
 
 
 def _put_image_cache(
-    path: str, mtime_ns: int, size: int, image: Image.Image, target_w: int = 0, target_h: int = 0
+    path: str,
+    mtime_ns: int,
+    size: int,
+    image: Image.Image,
+    target_w: int = 0,
+    target_h: int = 0,
+    resample: int = 0,
 ) -> None:
     global _image_cache_total_bytes, _thumb_cache_total_bytes
     global _image_cache_sets, _thumb_cache_sets, _image_cache_evictions, _thumb_cache_evictions
@@ -722,7 +905,7 @@ def _put_image_cache(
     if max_size <= 0 or max_bytes <= 0:
         return
 
-    cache_key = (path, mtime_ns, size, target_w, target_h)
+    cache_key = (path, mtime_ns, size, target_w, target_h, resample)
     cache_bytes = _estimate_image_bytes(image)
     with lock:
         old_entry = cache.pop(cache_key, None)
@@ -818,48 +1001,192 @@ def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Pat
 
 
 def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
-    safe_path = path.lstrip("/")
-    resolved_base = base_path.resolve()
-    full_path = (resolved_base / safe_path).resolve()
+    full_path, _, stat = _resolve_and_stat(base_path, path)
+    return _load_image_full_path_sync(full_path, stat=stat)
 
-    if not full_path.is_relative_to(resolved_base):
-        raise ValueError(f"图片路径越界: {path}")
-    if not full_path.is_file():
-        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
-        if fallback_path is None:
-            raise FileNotFoundError(f"图片文件不存在: {full_path}")
-        full_path = fallback_path
 
+def _load_image_full_path_sync(full_path: Path, stat: os.stat_result | None = None) -> Image.Image:
+    """Decode an already-resolved absolute path through the global image cache.
+
+    ``stat`` lets a caller that has already stat'd the file hand the result down instead of
+    paying for a second syscall.
+    """
     if not _cache_enabled(str(full_path)):
-        return _open_image_copy(full_path)
+        return _mark_pristine_asset_image(_open_image_copy(full_path), full_path)
 
-    stat = full_path.stat()
+    if stat is None:
+        stat = full_path.stat()
     full_path_str = str(full_path)
     cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
     if cached is not None:
-        return cached
+        return _mark_pristine_asset_image(cached, full_path)
 
     loaded = _open_image_copy(full_path)
     ret = loaded.copy()
     _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, loaded)
-    return ret
+    return _mark_pristine_asset_image(ret, full_path)
+
+
+def resolve_image_source_sync(
+    source: ImageSource,
+    target_size: tuple[int, int] | None = None,
+    resample: int = PASTE_RESAMPLE,
+) -> Image.Image:
+    """Decode an image source to pixels for the Pillow renderer.
+
+    ``AssetImageRef`` decodes through the global image cache and degrades to the
+    missing-image placeholder if the file vanished after the ref was probed
+    (mirroring ``get_img_from_path``); ``EncodedImageRef`` decodes its bytes; a PIL
+    image passes through untouched. With ``target_size``, an ``AssetImageRef`` goes
+    through the global resize cache (other source kinds ignore it — the caller
+    resizes). Synchronous — call from pool threads, not the event loop."""
+    if isinstance(source, Image.Image):
+        return source
+    if isinstance(source, AssetImageRef):
+        try:
+            if target_size is not None:
+                return _load_image_resized_full_path_sync(source.path, target_size[0], target_size[1], resample)
+            return _load_image_full_path_sync(source.path)
+        except (FileNotFoundError, OSError) as exc:
+            _log_missing_image_once(str(source.path), exc)
+            return _get_missing_placeholder_image(str(source.path))
+    if isinstance(source, EncodedImageRef):
+        with Image.open(io.BytesIO(source.data)) as img:
+            img.load()
+            return img.copy()
+    raise TypeError(f"unsupported image source: {type(source)!r}")
+
+
+_PATH_RESOLVE_CACHE_MAX = 32_768
+_resolved_path_cache: dict[tuple[str, str], tuple[Path, Path, str]] = {}
+
+
+def _resolve_asset_path(base_path: Path, path: str) -> tuple[Path, Path, str]:
+    """``(resolved_base, full_path, full_path_str)``, memoized.
+
+    ``Path.resolve()`` is a realpath walk — an ``lstat`` per path COMPONENT — and both the base and
+    the asset path get one on every single image. A music list with 696 jackets was spending 33k
+    lstat calls here. The resolution is pure path arithmetic over a static asset tree, so it is
+    cached; only the ``stat`` (which feeds every cache key, and must see a replaced file) stays live.
+
+    The traversal check runs on the cached side because it is a property of the resolved PATH, not of
+    the file. Caching it does mean a symlink planted inside the asset tree AFTER a path was first
+    resolved would be followed without a fresh escape check — but writing into the asset dir already
+    implies the ability to replace the images themselves, so this buys an attacker nothing new.
+    """
+    key = (str(base_path), path)
+    cached = _resolved_path_cache.get(key)
+    if cached is not None:
+        return cached
+
+    resolved_base = base_path.resolve()
+    full_path = (resolved_base / path.lstrip("/")).resolve()
+    if not full_path.is_relative_to(resolved_base):
+        raise ValueError(f"图片路径越界: {path}")
+
+    entry = (resolved_base, full_path, str(full_path))
+    if len(_resolved_path_cache) >= _PATH_RESOLVE_CACHE_MAX:
+        _resolved_path_cache.clear()
+    _resolved_path_cache[key] = entry
+    return entry
+
+
+_resolved_existing_cache: dict[str, Path] = {}
+
+
+def resolve_existing_asset_path(path: Path) -> Path | None:
+    """``path.resolve(strict=True)`` memoized, or ``None`` if it does not exist.
+
+    For the IR builder, which must map an absolute asset path back to a path relative to the assets
+    root — once per image NODE, so a 696-jacket music list paid 13k lstat calls for it. The paths it
+    is handed are already resolved (they come from ``_resolve_and_stat``), so the walk is redundant
+    normalization; but it is kept on the first sighting rather than dropped, because symlink
+    normalization is what makes the caller's later ``relative_to`` escape check meaningful.
+
+    Only successes are cached. A missing file re-resolves every time — that is the rare path, and
+    caching a negative would keep an asset invisible after it lands on disk.
+    """
+    key = str(path)
+    cached = _resolved_existing_cache.get(key)
+    if cached is not None:
+        return cached
+    try:
+        resolved = path.resolve(strict=True)
+    except (OSError, ValueError):
+        return None
+    if len(_resolved_existing_cache) >= _PATH_RESOLVE_CACHE_MAX:
+        _resolved_existing_cache.clear()
+    _resolved_existing_cache[key] = resolved
+    return resolved
+
+
+def _stat_regular_file(full_path: Path) -> os.stat_result | None:
+    """``stat`` of ``full_path``, or ``None`` if it is not an existing regular file.
+
+    One syscall where ``is_file()`` followed by ``stat()`` was two — and the stat is needed anyway,
+    since its mtime/size are what key every image cache.
+    """
+    try:
+        st = os.stat(full_path)
+    except (OSError, ValueError):
+        return None
+    return st if S_ISREG(st.st_mode) else None
 
 
 def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
     """解析路径并获取 stat，供 resize 和原始加载共用。"""
-    safe_path = path.lstrip("/")
-    resolved_base = base_path.resolve()
-    full_path = (resolved_base / safe_path).resolve()
+    resolved_base, full_path, full_path_str = _resolve_asset_path(base_path, path)
 
-    if not full_path.is_relative_to(resolved_base):
-        raise ValueError(f"图片路径越界: {path}")
-    if not full_path.is_file():
+    st = _stat_regular_file(full_path)
+    if st is None:
         fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
         if fallback_path is None:
             raise FileNotFoundError(f"图片文件不存在: {full_path}")
-        full_path = fallback_path
+        return fallback_path, str(fallback_path), fallback_path.stat()
 
-    return full_path, str(full_path), full_path.stat()
+    return full_path, full_path_str, st
+
+
+@lru_cache(maxsize=16384)
+def _load_asset_image_ref_cached(
+    full_path_str: str,
+    mtime_ns: int,
+    file_size: int,
+) -> AssetImageRef:
+    full_path = Path(full_path_str)
+    with Image.open(full_path) as image:
+        return AssetImageRef(path=full_path, size=image.size, mode=image.mode, mtime_ns=mtime_ns, file_size=file_size)
+
+
+def _load_asset_image_ref_sync(base_path: Path, path: str) -> AssetImageRef:
+    _, full_path_str, stat = _resolve_and_stat(base_path, path)
+    return _load_asset_image_ref_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
+
+
+async def get_asset_image_ref(
+    base_path: Path,
+    path: str | None,
+    on_missing: MissingImageMode = "placeholder",
+) -> AssetImageRef | Image.Image:
+    """Resolve an asset without decoding its pixels.
+
+    This is intended for renderer-specific paths that emit the source path into an IR.
+    Missing assets still return the normal in-memory placeholder so callers preserve the
+    same behavior as :func:`get_img_from_path`.
+    """
+    if path is None or path.strip() == "":
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, "empty-path")
+            return _get_missing_placeholder_image(path)
+        raise ValueError("图片路径不能为空(None)")
+
+    try:
+        return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
+    except (FileNotFoundError, OSError) as exc:
+        if on_missing == "placeholder":
+            _log_missing_image_once(path, exc)
+            return _get_missing_placeholder_image(path)
+        raise
 
 
 def _load_image_resized_sync(
@@ -870,20 +1197,49 @@ def _load_image_resized_sync(
     resample: int = Image.Resampling.BILINEAR,
 ) -> Image.Image:
     """加载图片并 resize 到目标尺寸，结果缓存。"""
-    full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+    full_path, _, stat = _resolve_and_stat(base_path, path)
+    return _load_image_resized_full_path_sync(full_path, target_w, target_h, resample, stat=stat)
+
+
+def _load_image_resized_full_path_sync(
+    full_path: Path,
+    target_w: int,
+    target_h: int,
+    resample: int = Image.Resampling.BILINEAR,
+    *,
+    stat: os.stat_result | None = None,
+) -> Image.Image:
+    """Resize an already-resolved absolute path through the global resize cache.
+
+    ``stat`` lets a caller that already stat'd the file (``_load_image_resized_sync`` does, to
+    resolve the path) pass it in rather than paying a second syscall per image — a list render
+    resizes hundreds of thumbnails."""
+    if stat is None:
+        stat = full_path.stat()
+    full_path_str = str(full_path)
 
     if _cache_enabled(full_path_str):
-        cached = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, target_w, target_h)
+        cached = _load_image_cached(
+            full_path_str, stat.st_mtime_ns, stat.st_size, target_w, target_h, resample=resample
+        )
         if cached is not None:
             return cached
 
-    loaded = _open_image_copy(full_path)
+    # Read-only full-size cache probe (an opportunistic bonus lookup, so it stays out of the
+    # hit/miss stats entirely); deliberately NO full-size cache put — resized consumers
+    # (e.g. hundreds of list jackets) would thrash the byte budget with full-size
+    # entries they never read again.
+    loaded = None
+    if _cache_enabled(full_path_str):
+        loaded = _load_image_cached(full_path_str, stat.st_mtime_ns, stat.st_size, count_stats=False)
+    if loaded is None:
+        loaded = _open_image_copy(full_path)
     resized = loaded.resize((target_w, target_h), resample)
     loaded.close()
 
     if _cache_enabled(full_path_str):
         ret = resized.copy()
-        _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, target_w, target_h)
+        _put_image_cache(full_path_str, stat.st_mtime_ns, stat.st_size, resized, target_w, target_h, resample=resample)
         return ret
 
     return resized
@@ -1332,83 +1688,9 @@ def shutdown_utils() -> None:
         _missing_placeholder_cache.clear()
         _missing_placeholder_logged.clear()
 
+    _load_asset_image_ref_cached.cache_clear()
     _composed_image_cache.clear()
 
+    from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 
-# ============================ chromedp截图 ============================ #
-
-
-async def screenshot(
-    url: str,
-    *,
-    width: int = 1920,
-    height: int = 1080,
-    format: Literal["png", "jpeg", "webp"] = "png",
-    quanlity: int = 90,
-    wait_time: int = 0,
-    wait_for: str | None = None,
-    full_page: bool = False,
-    headers: dict | None = None,
-    user_agent: str | None = None,
-    device_scale: float = 1.0,
-    mobile: bool = False,
-    landscape: bool = False,
-    req_timeout: int = 30,
-    clip: dict[Literal["x", "y", "width", "height"], float] | None = None,
-) -> Image.Image:
-    r"""screenshot
-
-    调用chromedp截图微服务
-
-    Args
-    ----
-    url : str
-        资源连接，如果是本地资源，请使用file://+绝对路径，并且保证该路径被挂载到微服务的volumes下
-    width : int = 1920
-        窗口宽度
-    height : int = 1080
-        窗口高度
-    format : Literal[ 'png', 'jpeg', 'webp' ] = 'png'
-        返回的截图格式
-    quanlity : int = 90
-        压缩质量(1 - 100)
-    wait_time : int = 0
-        额外等待时间(毫秒)
-    wait_for : Optional[ str ] = None
-        等待元素出现(CSS选择器)
-    full_page : bool = False
-        全页面截图
-    headers : Optional[ dict ] = None
-        自定义请求头
-    user_agent : Optional[ str ] = None
-        自定义User-Agent
-    device_scale : float = 1.0
-        设备像素比
-    mobile : bool = false
-        移动端模拟
-    landscape : bool = false
-        横屏模式
-    timeout : int = 30
-        超时时间(秒, 最大120)
-    clip : Optional[ dict[ Literal[ 'x', 'y', 'width', 'height' ], float ] ] = None
-        裁剪区域
-    """
-    # locals() 获取当前所有的局部变量，在函数开头调用，获取所有的参数
-    params = {k: v for k, v in locals().items() if v is not None}
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.request("post", SCREENSHOT_API_PATH, json=params) as resp:
-                if resp.status != 200:
-                    try:
-                        error = await resp.json()
-                        error = error["error"]
-                    except Exception:
-                        error = await resp.text
-                    raise Exception(error)
-                if resp.content_type not in ("image/jpeg", "image/webp", "image/png"):
-                    raise Exception(f"未知的响应体类型{resp.content_type}")
-                with Image.open(io.BytesIO(await resp.read())) as img:
-                    img.load()
-                    return img.copy()
-    except aiohttp.ClientConnectionError:
-        raise Exception("连接截图API失败")
+    clear_skia_payload_cache()

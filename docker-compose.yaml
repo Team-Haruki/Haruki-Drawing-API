@@ -15,7 +15,6 @@ services:
       - MALLOC_ARENA_MAX=2
       - MALLOC_TRIM_THRESHOLD_=131072
     volumes:
-      # 必须和 screenshot-service 同名且挂载到同一位置。
       # 当前约定的素材根目录为 Windows 主机上的 Z:\pjskdata\Data，
       # 容器内统一挂载为 /pjskdata/Data。
       - "./data:/pjskdata/Data"
@@ -23,42 +22,17 @@ services:
       # 挂载真实的 drawer.py 以替换占位文件（开源版本不包含真实实现）：
       # - "/path/to/real/drawer.py:/app/haruki_drawing_api/src/sekai/mysekai/drawer.py"
     restart: always
-    depends_on:
-      screenshot-service:
-        condition: service_healthy
-
-  screenshot-service:
-    build:
-      # 注意，这个路径是在测试时使用的，实际路径按需更改
-      context: ./../screenshot-service
-      dockerfile: Dockerfile
-    container_name: screenshot-service
-    ports:
-      - "28080:8080"
-    environment:
-      - PORT=8080
-      - GIN_MODE=release
-    volumes:
-      # 必须和 haruki-drawing-api 挂载到同一位置。
-      # 当前约定的素材根目录为 Windows 主机上的 Z:\pjskdata\Data，
-      # 容器内统一挂载为 /pjskdata/Data。
-      - "./data:/pjskdata/Data"
     deploy:
       resources:
         limits:
-          cpus: '2'
-          memory: 2G
+          # 实测(OrbStack, linux/glibc, 镜像内): 空转 cgroup 588MB(app 267 + 4 个 heavy worker),
+          # card/box 12 并发峰值 1182MB, 混合负载(12×card/box + 8×deck/recommend, 10 并发)峰值 2005MB。
+          # 4G 给峰值留了约 2 倍余量。2G 撑不住 —— 光 heavy worker 暖起来就能到 2.5GB。
+          #
+          # 这个 memory 限额同时是 readiness_unhealthy_cgroup_percent 的分母:不设限额时容器的
+          # memory.max 读作 "max",read_cgroup_memory() 返回 None,那道门就永远不会触发。
+          cpus: '4'
+          memory: 4G
         reservations:
           cpus: '0.5'
           memory: 512M
-    security_opt:
-      - seccomp:unconfined
-    cap_add:
-      - SYS_ADMIN
-    restart: unless-stopped
-    healthcheck:
-      test: [ "CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/ready" ]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s

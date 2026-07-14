@@ -3,10 +3,14 @@ import io
 import logging
 import time
 
-from fastapi.responses import StreamingResponse
-from starlette.background import BackgroundTask
+from fastapi.responses import Response
 
-from src.core.debug import current_request_context, set_request_stage, snapshot_process_metrics
+from src.core.debug import (
+    current_render_backend,
+    current_request_context,
+    set_request_stage,
+    snapshot_process_metrics,
+)
 from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
@@ -53,8 +57,8 @@ async def image_to_response(
     jpg_quality: int | None = None,
     *,
     jpeg_subsampling: int | str | None = None,
-) -> StreamingResponse:
-    """Convert PIL Image to StreamingResponse without blocking the event loop."""
+) -> Response:
+    """Encode a PIL Image off the event loop and return it as a single-body response."""
     request_ctx = current_request_context()
     image_width = getattr(image, "width", None)
     image_height = getattr(image, "height", None)
@@ -72,7 +76,8 @@ async def image_to_response(
     elapsed = time.perf_counter() - started
     byte_len = buffer.getbuffer().nbytes
     logger.info(
-        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs metrics=%s",
+        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
+        "backend=%s metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -82,22 +87,42 @@ async def image_to_response(
         media_type,
         byte_len,
         elapsed,
+        # A request that never attempted Skia leaves the default "pillow"; one where Skia
+        # declined/raised was tagged "skia_fallback" by the render helper.
+        current_render_backend(),
         snapshot_process_metrics(include_asyncio=False),
     )
-    set_request_stage("stream_response")
-    return StreamingResponse(
-        buffer,
+    set_request_stage("send_response")
+    try:
+        return _image_response(buffer.getvalue(), media_type, filename)
+    finally:
+        buffer.close()
+
+
+def _image_response(image_bytes: bytes, media_type: str, filename: str) -> Response:
+    """Send the encoded image as ONE body message.
+
+    This used to be ``StreamingResponse(io.BytesIO(image_bytes))``, which streamed nothing useful:
+    the bytes are already whole in memory, so there was no memory to save. What it did instead was
+    hand Starlette a *sync* iterable, which Starlette drives through ``iterate_in_threadpool`` --
+    and iterating a ``BytesIO`` yields **lines**. A PNG is binary, so it split on every 0x0A byte:
+    ~384 bytes per chunk, i.e. ~2,300 thread-pool round-trips and ~2,300 ASGI body messages for a
+    single 870 KB image. Under 8 concurrent requests that scheduling storm took a render the server
+    finished in 0.12s and made the client wait ~10s for it, with the CPU 95% idle.
+    """
+    return Response(
+        content=image_bytes,
         media_type=media_type,
         headers={"Content-Disposition": f"inline; filename={filename}"},
-        background=BackgroundTask(buffer.close),
     )
 
 
-def encoded_image_payload_to_response(payload: EncodedImagePayload) -> StreamingResponse:
+def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
     request_ctx = current_request_context()
     byte_len = len(payload.image_bytes)
     logger.info(
-        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs metrics=%s",
+        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
+        "backend=%s metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -107,13 +132,10 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Streaming
         payload.media_type,
         byte_len,
         payload.encode_elapsed,
+        # The payload carries its own backend across the heavy-worker process boundary, where a
+        # contextvar set in the child is invisible here; in-process renders set the contextvar.
+        payload.backend or current_render_backend(),
         snapshot_process_metrics(include_asyncio=False),
     )
-    set_request_stage("stream_response")
-    buffer = io.BytesIO(payload.image_bytes)
-    return StreamingResponse(
-        buffer,
-        media_type=payload.media_type,
-        headers={"Content-Disposition": f"inline; filename={payload.filename}"},
-        background=BackgroundTask(buffer.close),
-    )
+    set_request_stage("send_response")
+    return _image_response(payload.image_bytes, payload.media_type, payload.filename)

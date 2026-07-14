@@ -3,11 +3,14 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.card.drawer import (
     compose_box_image,
     compose_card_detail_image,
     compose_card_list_image,
+    try_render_box_payload,
+    try_render_card_detail_payload,
+    try_render_card_list_payload,
 )
 from src.sekai.card.model import (
     CardBoxRequest,
@@ -27,6 +30,9 @@ async def card_detail(request: CardDetailRequest):
     The image includes card information, power stats, skills, and related event/gacha info.
     """
     try:
+        payload = await try_render_card_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_card_detail_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -42,12 +48,25 @@ async def card_list(request: CardListRequest):
     """
     try:
         _t0 = time.perf_counter()
+        payload = await try_render_card_list_payload(request)
+        if payload is not None:
+            resp = encoded_image_payload_to_response(payload)
+            _perf_logger.info(
+                "/list total: %.3fs (backend=skia, encode=%.3fs, image=%dx%d, cards=%d)",
+                time.perf_counter() - _t0,
+                payload.encode_elapsed,
+                payload.image_width,
+                payload.image_height,
+                len(request.cards),
+            )
+            return resp
+
         image = await compose_card_list_image(request)
         _t1 = time.perf_counter()
         width, height = image.width, image.height
         resp = await image_to_response(image)
         _perf_logger.info(
-            "/list total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d, cards=%d)",
+            "/list total: %.3fs (backend=pillow, draw=%.3fs, encode=%.3fs, image=%dx%d, cards=%d)",
             time.perf_counter() - _t0,
             _t1 - _t0,
             time.perf_counter() - _t1,
@@ -69,12 +88,25 @@ async def card_box(request: CardBoxRequest):
     """
     try:
         _t0 = time.perf_counter()
+        payload = await try_render_box_payload(request)
+        if payload is not None:
+            resp = encoded_image_payload_to_response(payload)
+            _perf_logger.info(
+                "/box total: %.3fs (backend=skia, encode=%.3fs, image=%dx%d, cards=%d)",
+                time.perf_counter() - _t0,
+                payload.encode_elapsed,
+                payload.image_width,
+                payload.image_height,
+                len(request.cards),
+            )
+            return resp
+
         image = await compose_box_image(request)
         _t1 = time.perf_counter()
         width, height = image.width, image.height
         resp = await image_to_response(image)
         _perf_logger.info(
-            "/box total: %.3fs (draw=%.3fs, encode=%.3fs, image=%dx%d, cards=%d)",
+            "/box total: %.3fs (backend=pillow, draw=%.3fs, encode=%.3fs, image=%dx%d, cards=%d)",
             time.perf_counter() - _t0,
             _t1 - _t0,
             time.perf_counter() - _t1,

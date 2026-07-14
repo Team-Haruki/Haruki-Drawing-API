@@ -3,11 +3,13 @@ import logging
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, get_font, get_text_size
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit
-from src.sekai.base.utils import get_img_from_path
+from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
 from .model import InventoryItem, InventoryListRequest, InventorySection
@@ -31,7 +33,7 @@ QTY_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(38, 50, 76))
 ICON_FALLBACK_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(112, 122, 148))
 
 
-async def compose_inventory_list_image(rqd: InventoryListRequest) -> Image.Image:
+async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
     icon_cache = await _load_inventory_icons(rqd.sections)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -44,10 +46,23 @@ async def compose_inventory_list_image(rqd: InventoryListRequest) -> Image.Image
                     _draw_section(section, icon_cache)
 
     add_request_watermark(canvas, rqd)
+    return canvas
+
+
+async def compose_inventory_list_image(rqd: InventoryListRequest) -> Image.Image:
+    canvas = await _build_inventory_canvas(rqd)
     return await canvas.get_img()
 
 
-async def _load_inventory_icons(sections: list[InventorySection]) -> dict[str, Image.Image]:
+async def try_render_inventory_list_payload(rqd: InventoryListRequest) -> EncodedImagePayload | None:
+    """Skia 路径：构建同一棵 widget 树并经 IRPainter 渲染；不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_inventory_canvas(rqd)
+    return await render_canvas_payload(canvas, endpoint="inventory_list")
+
+
+async def _load_inventory_icons(sections: list[InventorySection]) -> dict[str, ImageSource]:
     paths = []
     seen = set()
     for section in sections:
@@ -65,9 +80,9 @@ async def _load_inventory_icons(sections: list[InventorySection]) -> dict[str, I
     return {path: icon for path, icon in zip(paths, loaded) if icon is not None}
 
 
-async def _load_inventory_icon(path: str) -> Image.Image | None:
+async def _load_inventory_icon(path: str) -> ImageSource | None:
     try:
-        return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+        return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise")
     except (FileNotFoundError, OSError, ValueError) as exc:
         logger.debug("背包图标缺失，使用轻量占位: %s (%s)", path, exc)
         return None
@@ -77,7 +92,7 @@ def _draw_header() -> None:
     TextBox("背包一览", TITLE_STYLE).set_padding((8, 0))
 
 
-def _draw_section(section: InventorySection, icon_cache: dict[str, Image.Image]) -> None:
+def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource]) -> None:
     with (
         VSplit()
         .set_w(PANEL_WIDTH)
@@ -98,7 +113,7 @@ def _draw_section(section: InventorySection, icon_cache: dict[str, Image.Image])
                 _draw_item_tile(item, icon_cache)
 
 
-def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, Image.Image]) -> None:
+def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource]) -> None:
     icon = icon_cache.get((item.icon_path or "").strip())
     with (
         HSplit()

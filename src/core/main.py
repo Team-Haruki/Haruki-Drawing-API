@@ -12,6 +12,7 @@ ReDoc: http://localhost:8000/redoc
 import asyncio
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import sys
 
 import coloredlogs
@@ -27,6 +28,7 @@ from src.settings import (
     LOG_FORMAT,
     SERVER_HOST,
     SERVER_PORT,
+    settings,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,124 @@ def _ensure_nogil_runtime() -> None:
 
 TMP_CLEANUP_INTERVAL = 300  # 临时文件清理间隔（秒）
 DISK_CACHE_CLEANUP_INTERVAL = 3600  # 磁盘缓存清理间隔（秒）
+
+
+def _font_resolves(name: str) -> bool:
+    """Whether Pillow finds the actual font FILE for ``name``.
+
+    Probes through ``get_font`` itself rather than re-implementing its path search, so the check
+    cannot drift from the real lookup.
+
+    Do NOT test this with ``isinstance(font, FreeTypeFont)``: modern Pillow's ``load_default()``
+    fallback is ALSO a FreeTypeFont (its bundled Aileron face), so that check passes for every name
+    and the self-check silently protects nothing. What distinguishes them is the file the face came
+    from — a resolved font's ``.path`` is the font file, while the fallback's is an in-memory buffer.
+    """
+    from src.sekai.base.painter import get_font
+
+    path = getattr(get_font(name, 20), "path", None)
+    return isinstance(path, str) and Path(path).stem == Path(name).stem
+
+
+def _check_pillow_fonts() -> tuple[list[str], list[str]]:
+    """``(missing_text_fonts, missing_emoji)`` — the two have different severities.
+
+    A missing TEXT face means every string on every image renders in the wrong face. A missing
+    EMOJI face only means emoji do; the text is still correct and the service is still useful.
+    """
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_EMOJI_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
+
+    text = [n for n in (DEFAULT_FONT, DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT) if not _font_resolves(n)]
+    emoji = [DEFAULT_EMOJI_FONT] if not _font_resolves(DEFAULT_EMOJI_FONT) else []
+    return text, emoji
+
+
+def _check_native_fonts() -> list[str]:
+    """Names of configured TEXT fonts the NATIVE renderer cannot resolve.
+
+    Pillow and Rust search for fonts independently, so Rust can miss a face Pillow finds (a
+    different font dir inside the image, a wheel built against another layout). Rust does not fail
+    on a miss — it renders sans-serif and counts the fallback — so probe it: render a tiny scene
+    per font and read ``native_metrics["font_fallbacks"]``.
+
+    Emoji are deliberately NOT probed here. Losing the whole native renderer over a decorative face
+    would be a disproportionate trade, and where Pillow cannot resolve the emoji font either, both
+    backends degrade identically — disabling Skia would fix nothing and cost the speedup.
+    """
+    import json
+
+    from src.sekai.skia_renderer.canvas import load_native_renderer
+    from src.sekai.skia_renderer.ir_builder import IRBuilder
+    from src.settings import (
+        ASSETS_BASE_DIR,
+        DEFAULT_BOLD_FONT,
+        DEFAULT_FONT,
+        DEFAULT_HEAVY_FONT,
+        FONT_DIR,
+    )
+
+    native = load_native_renderer()
+    missing = []
+    for name in (DEFAULT_FONT, DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT):
+        builder = IRBuilder(
+            8, 8, assets_base_dir=str(ASSETS_BASE_DIR), font_dir=str(FONT_DIR), default_font=name, bold_font=name
+        )
+        builder.text("A", (0, 0), size=8, role="default")
+        result = native.render_scene(json.dumps(builder.build()).encode(), {})
+        if (result.get("native_metrics") or {}).get("font_fallbacks"):
+            missing.append(name)
+    return missing
+
+
+def _self_check_fonts() -> None:
+    """Fail loudly at startup when a configured font cannot be resolved.
+
+    A missing font is not a slow render — it is a WRONG one: every string comes out in the wrong
+    face, on every image, silently, until someone notices by eye. The two layers need different
+    answers:
+
+    - **Pillow cannot resolve a TEXT face** → BOTH backends are broken (Pillow degrades to its
+      bundled Aileron; Rust to sans-serif), so turning Skia off would fix nothing. Refuse to start.
+      A deploy that fails fast beats one that serves thousands of wrong images.
+    - **Only the EMOJI face is missing** → the text is still correct; only emoji degrade. Log it and
+      keep serving. Refusing to start over emoji would be a self-inflicted outage.
+    - **Only the native renderer cannot resolve it** → Pillow still renders correctly, so disable
+      Skia and keep serving. This is the case the "refuse to enable Skia" rule is actually for.
+    """
+    missing_text, missing_emoji = _check_pillow_fonts()
+    if missing_text:
+        raise RuntimeError(
+            f"configured text fonts cannot be resolved: {missing_text} (font dir: {settings.font.dir}). "
+            "Every rendered image would use the wrong face; refusing to start. Check the asset volume mount."
+        )
+    if missing_emoji:
+        logger.error(
+            "emoji font %s cannot be resolved (font dir: %s); emoji will render as tofu/monochrome. "
+            "Text is unaffected, so this is not fatal.",
+            missing_emoji,
+            settings.font.dir,
+        )
+
+    if not settings.drawing.use_skia_plot:
+        return
+    try:
+        missing_native = _check_native_fonts()
+    except ImportError:
+        return  # no extension: already reported below, and Pillow renders everything
+    except Exception:
+        logger.exception("native font self-check failed to run; leaving Skia enabled")
+        return
+
+    if missing_native:
+        settings.drawing.use_skia_plot = False
+        logger.error(
+            "DISABLING Skia: the native renderer cannot resolve %s (font dir: %s) and would render them in "
+            "sans-serif, while Pillow resolves them correctly. Serving with Pillow.",
+            missing_native,
+            settings.font.dir,
+        )
+    else:
+        logger.info("font self-check passed (Pillow and native renderer both resolve every configured font)")
 
 
 @asynccontextmanager
@@ -123,6 +243,16 @@ async def lifespan(app: FastAPI):
         _cleanup_disk_caches()
     except Exception:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
+    if settings.drawing.use_skia_plot:
+        try:
+            import haruki_skia_renderer  # noqa: F401
+        except ImportError:
+            logger.error(
+                "Skia gates are enabled but haruki_skia_renderer is not importable; "
+                "every Skia path will fall back to Pillow (fail-open)",
+                exc_info=True,
+            )
+    _self_check_fonts()
     await startup_heavy_render_worker_pool()
     logger.info("Haruki Drawing API is starting...")
     yield

@@ -1,19 +1,15 @@
-import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
-import colorsys
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 import glob
 import hashlib
 from io import BytesIO
 import logging
 import math
-from multiprocessing import get_context
 import os
-import random
+from pathlib import PurePath
 import threading
 from typing import Any, Literal, Self
 from urllib.request import Request, urlopen
@@ -22,8 +18,7 @@ import emoji
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
-from pilmoji import Pilmoji
-from pilmoji import getsize as getsize_emoji
+from pilmoji import Pilmoji, getsize as getsize_emoji
 from pilmoji.source import BaseSource, GoogleEmojiSource
 
 from src.settings import (
@@ -32,40 +27,15 @@ from src.settings import (
     DEFAULT_FONT,  # noqa: F401
     DEFAULT_HEAVY_FONT,  # noqa: F401
     FONT_DIR,
-    settings,
 )
 
 from .img_utils import adjust_image_alpha_inplace
-from .utils import run_in_pool
-
-# Process pool for CPU-intensive drawing operations
-_process_pool_ctx = get_context("spawn")
-_painter_process_pool: ProcessPoolExecutor | None = None
-_painter_process_pool_lock = threading.Lock()
-
-
-def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
-    """Get or create the painter process pool."""
-    global _painter_process_pool
-    if _painter_process_pool is not None:
-        return _painter_process_pool
-
-    with _painter_process_pool_lock:
-        if _painter_process_pool is None:
-            workers = max_workers or settings.drawing.process_pool_workers
-            _painter_process_pool = ProcessPoolExecutor(
-                max_workers=workers,
-                mp_context=_process_pool_ctx,
-            )
-    return _painter_process_pool
+from .triangle_bg import background_hour, build_triangle_bg, gradient_points
+from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
 
 def shutdown_painter() -> None:
-    """关闭 painter 模块持有的全局资源（进程池、磁盘缓存清理）"""
-    global _painter_process_pool
-    if _painter_process_pool is not None:
-        _painter_process_pool.shutdown(wait=False)
-        _painter_process_pool = None
+    """关闭 painter 模块持有的全局资源（磁盘缓存清理）"""
     Painter.cleanup_old_disk_cache()
 
 
@@ -117,6 +87,9 @@ def deterministic_hash(obj: Any) -> str:
             return None
         elif isinstance(_obj, bytes):
             update(_obj)
+            return None
+        elif isinstance(_obj, PurePath):
+            update(str(_obj))
             return None
 
         # 容器类型
@@ -391,16 +364,74 @@ def get_font(path: str, size: int) -> Font:
     return entry.font
 
 
+# Text measurement dominates the render. Profiling one inventory/list request: Font.getsize was
+# 6816 calls / 0.97s — 84% of the 1.15s it takes to walk the widget tree, and 7x the entire native
+# Skia render (0.16s). 518 text nodes measured ~13 times each: every node re-measures the "哇"
+# standard box for its baseline, and layout measures a string again at draw time.
+#
+# Measuring is a PURE function of (face, size, string), so cache it. The cache is keyed by the font
+# FILE and size, not the font object, so all pool threads share the results while each keeps its own
+# FreeTypeFont (sharing the object would serialize every measurement — see ir_builder's font cache).
+_TEXT_BBOX_CACHE_MAX = 50_000
+_text_bbox_cache: dict[tuple, tuple[int, int, int, int]] = {}
+_text_emoji_size_cache: dict[tuple, Size] = {}
+
+
+def _font_key(font: Font) -> tuple:
+    """A cross-thread identity for a font: its file + size. Falls back to the object id for PIL's
+    in-memory default face, which has no path."""
+    path = getattr(font, "path", None)
+    size = getattr(font, "size", None)
+    return (path, size) if isinstance(path, str) else (id(font), size)
+
+
+def _measure_bbox(font: Font, text: str) -> tuple[int, int, int, int]:
+    key = (_font_key(font), text)
+    cached = _text_bbox_cache.get(key)
+    if cached is not None:
+        return cached
+    bbox = font.getbbox(text)
+    # A plain dict is enough: entries are immutable, a duplicate compute under a race is harmless,
+    # and a lock here would re-serialize the very thing this cache exists to parallelize. The bound
+    # matters because the keys carry request text; a wholesale clear is fine since a cold measure is
+    # cheap and correctness never depends on a hit.
+    if len(_text_bbox_cache) >= _TEXT_BBOX_CACHE_MAX:
+        _text_bbox_cache.clear()
+    _text_bbox_cache[key] = bbox
+    return bbox
+
+
 def get_text_size(font: Font, text: str) -> Size:
     if emoji.emoji_count(text) > 0:
-        return getsize_emoji(text, font=font)
-    bbox = font.getbbox(text)
+        key = (_font_key(font), text)
+        cached = _text_emoji_size_cache.get(key)
+        if cached is None:
+            cached = getsize_emoji(text, font=font)
+            if len(_text_emoji_size_cache) >= _TEXT_BBOX_CACHE_MAX:
+                _text_emoji_size_cache.clear()
+            _text_emoji_size_cache[key] = cached
+        return cached
+    bbox = _measure_bbox(font, text)
     return bbox[2] - bbox[0], bbox[3] - bbox[1]
 
 
 def get_text_offset(font: Font, text: str) -> Position:
-    bbox = font.getbbox(text)
+    bbox = _measure_bbox(font, text)
     return bbox[0], bbox[1]
+
+
+def ascender_top_to_painter_y(font_path: str, font_size: int, ascender_top_y: int) -> int:
+    """Convert an ``ImageDraw.text`` y (its default ``"la"`` anchor = top of the ascender)
+    into the y ``Painter.text`` expects (it anchors the baseline at ``y + ink-height("哇")``).
+
+    The two differ by ``ascent - ink_height("哇")`` — 4px for the bold font at size 20 — so a
+    layout constant lifted straight from the old ImageDraw code lands the text that much too
+    high. The gap is font- and size-dependent, so derive it from the metrics rather than
+    folding a fudge factor into the constant. Both backends agree: the Skia path resolves
+    ``Painter.text``'s logical top through the same Pillow ink height (IRBuilder's
+    ``cjk_top`` baseline)."""
+    font = get_font(font_path, font_size)
+    return ascender_top_y + font.getmetrics()[0] - get_text_size(font, "哇")[1]
 
 
 def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
@@ -553,22 +584,16 @@ class PainterOperation:
     args: list
     exclude_on_hash: bool
 
-    def image_to_id(self, img_dict: dict[int, Image.Image]) -> None:
-        if isinstance(self.args, tuple):
-            self.args = list(self.args)
-        for i in range(len(self.args)):
-            if isinstance(self.args[i], Image.Image):
-                img_id = id(self.args[i])
-                img_dict[img_id] = self.args[i]
-                self.args[i] = f"%%image%%{img_id}"
 
-    def id_to_image(self, img_dict: dict[int | str, Image.Image]) -> None:
-        if isinstance(self.args, tuple):
-            self.args = list(self.args)
-        for i in range(len(self.args)):
-            if isinstance(self.args[i], str) and self.args[i].startswith("%%image%%"):
-                img_id = int(self.args[i][9:])
-                self.args[i] = img_dict[img_id]
+def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
+    """Resolve a lazy paste source to pixels. An ``AssetImageRef`` with a concrete
+    target size goes through the global resize cache, so layers shared across many
+    widgets (rarity stars, card frames, attr icons) resize once per size."""
+    if isinstance(source, Image.Image):
+        return source
+    if isinstance(source, AssetImageRef) and size and size[0] and size[1] and tuple(size) != tuple(source.size):
+        return resolve_image_source_sync(source, target_size=(int(size[0]), int(size[1])))
+    return resolve_image_source_sync(source)
 
 
 def _emoji_source_cache_key(kind: str, value: str) -> str:
@@ -694,6 +719,13 @@ class Painter:
         self.w = self.size[0]
         self.h = self.size[1]
         self.region_stack = []
+        # Layer frames for push_clip_roundrect/push_mask: (kind, saved_img, pos_in_parent,
+        # size, payload) where payload is (radius, corners) for a roundrect clip and the mask
+        # ImageSource for a mask. While a layer is open, self.img is a layer-rect-sized buffer
+        # and _execute rebases every op offset by _clip_origin (the buffer origin in canvas
+        # coords).
+        self._clip_stack: list[tuple[str, Image.Image, tuple[int, int], tuple[int, int], Any]] = []
+        self._clip_origin = (0, 0)
 
     def _text(self, text: str, pos: Position, font: Font, fill: Color = BLACK, align: str = "left") -> Self:
         std_size = get_text_size(font, "哇")
@@ -719,22 +751,19 @@ class Painter:
         return self
 
     @staticmethod
-    def _execute(
-        operations: list[PainterOperation], img: Image.Image, size: tuple[int, int], image_dict: dict[str, Image.Image]
-    ) -> Image.Image:
+    def _execute(operations: list[PainterOperation], img: Image.Image, size: tuple[int, int]) -> Image.Image:
         t = datetime.now()
-        debug_print(f"Sub process enter memory usage: {get_memo_usage()} MB")
         if img is None:
             img = Image.new("RGBA", size, TRANSPARENT)
         p = Painter(img, size)
         for op in operations:
-            op.id_to_image(image_dict)
-            p.offset = op.offset
+            p.offset = (op.offset[0] - p._clip_origin[0], op.offset[1] - p._clip_origin[1])
             p.size = op.size
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
             func(*op.args)
-        debug_print(f"Sub process use time: {datetime.now() - t}")
+        assert not p._clip_stack, "unbalanced push_clip_roundrect/push_mask"
+        debug_print(f"Painter._execute use time: {datetime.now() - t}")
         return p.img
 
     async def get(self, cache_key: str | None = None) -> Image.Image:
@@ -764,48 +793,18 @@ class Painter:
                                 logging.warning(f"Failed to remove cache file {p}: {e}")
                         debug_print(f"Cache mismatch, removed {len(paths)} files")
 
-        debug_print(f"Main process memory usage: {get_memo_usage()} MB")
+        debug_print(f"Memory usage: {get_memo_usage()} MB")
 
-        # 收集所有图片对象到字典中
-        image_dict: dict[str, Image.Image] = {}
         try:
-            for op in self.operations:
-                op.image_to_id(image_dict)
-            total_img_size = 0
-            for img in image_dict.values():
-                total_img_size += img.size[0] * img.size[1] * 4
-            debug_print(f"image_dict len: {len(image_dict)}, total size: {total_img_size // 1024 // 1024} MB")
-
             for op in self.operations:
                 debug_print(str(op))
 
             # 执行绘图操作
             t = datetime.now()
-
-            # 根据图片大小选择执行方式
-            total_pixels = self.size[0] * self.size[1]
-            use_process_pool = (
-                settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
-            )
-
-            if use_process_pool:
-                loop = asyncio.get_event_loop()
-                pool = get_painter_process_pool()
-                self.img = await loop.run_in_executor(
-                    pool,
-                    Painter._execute,
-                    self.operations,
-                    self.img,
-                    self.size,
-                    image_dict,
-                )
-                debug_print(f"Painter executed in process pool in {datetime.now() - t}")
-            else:
-                self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
-                debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
+            self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size)
+            debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
         finally:
             self.operations = []
-            image_dict.clear()
 
         # 保存缓存
         if cache_key is not None:
@@ -937,35 +936,124 @@ class Painter:
 
     def paste(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         use_shadow: bool = False,
         shadow_width: int = 8,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
     ) -> Self:
+        """``src_rect`` crops the source to ``(x0, y0, x1, y1)`` in source pixels before
+        the fit (both backends; the IR Image node's ``source_rect``), so slices of one
+        asset draw without a Python-side crop/decode."""
         return self.add_operation(
             "_impl_paste",
             exclude_on_hash,
-            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha),
+            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect),
         )
 
     def paste_with_alpha_blend(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         alpha: float | None = None,
         use_shadow: bool = False,
         shadow_width: int = 8,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
     ) -> Self:
         return self.add_operation(
             "_impl_paste_with_alpha_blend",
             exclude_on_hash,
-            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha),
+            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect),
+        )
+
+    def paste_src(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size = None,
+        src_rect: tuple[float, float, float, float] | None = None,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Porter-Duff **Src**: write all four channels verbatim, replacing the destination
+        (Pillow: a mask-less ``Image.paste``). For the BASE layer of an absolute-coordinate
+        composite — the asset that *is* the canvas — where the alternatives both lose data:
+
+        - :meth:`paste` lerps the destination toward the source, which over an empty canvas
+          squares the alpha of an anti-aliased edge;
+        - :meth:`paste_with_alpha_blend` (src-over) is exact wherever the result is visible, but
+          zeroes the rgb UNDER fully transparent pixels — and Pillow's own paste-lerp reads that
+          rgb back when a later overlay's AA edge crosses those pixels (an honor badge's frame
+          over the transparent corners of its base art shifts by up to 228/255 without it).
+
+        The Skia backend draws it src-over, which is identical wherever the destination is empty
+        — the only supported use — except that a premultiplied surface cannot carry rgb under
+        zero alpha at all. That is the pre-existing backend divergence, not a new one."""
+        return self.add_operation("_impl_paste_src", exclude_on_hash, (sub_img, pos, size, src_rect))
+
+    def push_clip_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Clip subsequent draws to a rounded rect until the matching :meth:`pop_clip`.
+
+        Pillow implements this as an offscreen buffer masked back on pop, so
+        backdrop-sampling ops (blurglass, adaptive text color) inside the clip see a
+        transparent backdrop; the Skia path clips on the live surface."""
+        return self.add_operation("_impl_push_clip_roundrect", exclude_on_hash, (pos, size, radius, corners))
+
+    def pop_clip(self, exclude_on_hash: bool = False) -> Self:
+        return self.add_operation("_impl_pop_clip", exclude_on_hash, ())
+
+    def push_mask(
+        self,
+        mask: ImageSource,
+        pos: Position,
+        size: Size,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Mask subsequent draws with an arbitrary image's alpha until :meth:`pop_mask`.
+
+        The ops between push/pop render into their own layer covering ``pos``/``size``; on pop
+        the layer's alpha is MULTIPLIED by the ALPHA CHANNEL of ``mask`` (stretched to ``size``
+        when it does not match) and the layer is composited back over the destination. That is Skia's
+        ``DstIn`` and the same alpha arithmetic :meth:`push_clip_roundrect` applies with its
+        rounded rect, so both backends agree.
+
+        It reproduces Pillow's ``img.putalpha(mask.split()[3])`` whenever the layer is opaque
+        where the mask is — which is what an absolute-coordinate composite over a solid
+        background gives. A layer that is already translucent there stays translucent (the
+        alphas multiply); ``putalpha`` would have overwritten it.
+
+        Like the roundrect clip, this is an offscreen buffer on the Pillow side, so
+        backdrop-sampling ops (blurglass, adaptive text color) inside a mask see a transparent
+        backdrop."""
+        return self.add_operation("_impl_push_mask", exclude_on_hash, (mask, pos, size))
+
+    def pop_mask(self, exclude_on_hash: bool = False) -> Self:
+        return self.add_operation("_impl_pop_mask", exclude_on_hash, ())
+
+    def shadow_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.3,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Draw a blurred rounded-rect drop shadow (both backends: blurred rrect, no offset)."""
+        return self.add_operation(
+            "_impl_shadow_roundrect", exclude_on_hash, (pos, size, radius, shadow_width, shadow_alpha)
         )
 
     def rect(
@@ -1117,17 +1205,15 @@ class Painter:
 
     def _impl_paste(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         use_shadow: bool = False,
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
-        if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
-        if sub_img.mode not in ("RGB", "RGBA"):
-            sub_img = sub_img.convert("RGBA")
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
 
         if use_shadow:
             w, h = sub_img.size
@@ -1156,18 +1242,165 @@ class Painter:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
+    def _resolve_sub_img(
+        self,
+        sub_img: ImageSource,
+        size: Size | None,
+        src_rect: tuple[float, float, float, float] | None,
+    ) -> Image.Image:
+        if src_rect is not None:
+            # Crop precedes the fit, so the whole-asset resize cache does not apply here;
+            # resolve full pixels (cache-decoded for refs) and crop the slice.
+            if not isinstance(sub_img, Image.Image):
+                sub_img = resolve_image_source_sync(sub_img)
+            sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
+        else:
+            sub_img = _resolve_paste_source(sub_img, size)
+        # Normalize the mode BEFORE resizing. Pillow forces NEAREST when resizing a palette ("P")
+        # or bilevel ("1") image, so resizing first would resample the palette INDICES and only
+        # then expand to RGBA — blocky edges and no alpha interpolation. Converting first lets the
+        # resize run in RGBA with the real filter. A no-op for RGB/RGBA, which is nearly everything.
+        if sub_img.mode not in ("RGB", "RGBA"):
+            sub_img = sub_img.convert("RGBA")
+        if size and size != sub_img.size:
+            sub_img = sub_img.resize(size)
+        return sub_img
+
+    def _impl_paste_src(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size = None,
+        src_rect: tuple[float, float, float, float] | None = None,
+    ) -> Self:
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
+        # No mask -> Pillow copies every channel, alpha included (Porter-Duff Src).
+        self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+        return self
+
+    def _push_layer(self, kind: str, pos: Position, size: Size, payload: Any) -> Self:
+        # pos_in_parent is in the current buffer's coords; the temp buffer covers only
+        # the layer rect (draws are rebased there via _clip_origin, out-of-rect pixels
+        # are dropped by the buffer bounds — which is what clipping means).
+        pos_in_parent = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
+        layer_size = (max(1, int(size[0])), max(1, int(size[1])))
+        self._clip_stack.append((kind, self.img, pos_in_parent, layer_size, payload))
+        self._clip_origin = (self._clip_origin[0] + pos_in_parent[0], self._clip_origin[1] + pos_in_parent[1])
+        self.img = Image.new("RGBA", layer_size, TRANSPARENT)
+        return self
+
+    def _pop_layer(self, kind: str) -> tuple[Image.Image, tuple[int, int], Size, Any]:
+        overlay = self.img
+        frame_kind, base, pos_in_parent, size, payload = self._clip_stack.pop()
+        assert frame_kind == kind, f"layer stack mismatch: popped {kind} off a {frame_kind} layer"
+        self._clip_origin = (self._clip_origin[0] - pos_in_parent[0], self._clip_origin[1] - pos_in_parent[1])
+        self.img = base
+        return overlay, pos_in_parent, size, payload
+
+    def _composite_layer(
+        self,
+        overlay: Image.Image,
+        pos_in_parent: tuple[int, int],
+        size: Size,
+        preserve_hidden_rgb: bool = False,
+    ) -> None:
+        dx, dy = pos_in_parent
+        if dx < 0 or dy < 0:
+            overlay = overlay.crop((max(0, -dx), max(0, -dy), size[0], size[1]))
+            dx, dy = max(0, dx), max(0, dy)
+        if not preserve_hidden_rgb:
+            self.img.alpha_composite(overlay, (dx, dy))
+            return
+        # Pillow's paste-lerp (Painter.paste) mixes in the DESTINATION's rgb even where the
+        # destination alpha is 0, so the rgb hiding under fully transparent pixels is
+        # load-bearing for any overlay whose AA edge later crosses them (an honor badge's frame
+        # over the corners its mask cut away). alpha_composite forces that rgb to black — which
+        # is only correct when nothing reads it. Keep the layer's own rgb there instead: those
+        # pixels stay invisible, and the destination now carries what it would have carried had
+        # the ops drawn straight onto it. (Where the destination is empty this is exactly a Src
+        # write; see paste_src.)
+        box = (dx, dy, dx + overlay.width, dy + overlay.height)
+        region = Image.alpha_composite(self.img.crop(box), overlay)
+        hidden = region.getchannel("A").point(lambda a: 255 if a == 0 else 0)
+        region.paste(overlay, (0, 0), hidden)
+        self.img.paste(region, box)
+
+    def _impl_push_clip_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        corners: tuple[bool, bool, bool, bool] = (True, True, True, True),
+    ) -> Self:
+        return self._push_layer("clip", pos, size, (radius, tuple(corners)))
+
+    def _impl_pop_clip(self) -> Self:
+        overlay, pos_in_parent, size, (radius, corners) = self._pop_layer("clip")
+        mask = Image.new("L", size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            (0, 0, size[0], size[1]),
+            radius=radius,
+            fill=255,
+            corners=corners,
+        )
+        overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask))
+        self._composite_layer(overlay, pos_in_parent, size)
+        return self
+
+    def _impl_push_mask(self, mask: ImageSource, pos: Position, size: Size) -> Self:
+        return self._push_layer("mask", pos, size, mask)
+
+    def _impl_pop_mask(self) -> Self:
+        overlay, pos_in_parent, size, mask_source = self._pop_layer("mask")
+        mask_img = _resolve_paste_source(mask_source, size)
+        # The mask is the image's ALPHA channel — the same channel Skia's DstIn samples, and
+        # what ``mask.split()[3]`` means on the Pillow side.
+        if mask_img.mode != "RGBA":
+            mask_img = mask_img.convert("RGBA")
+        if mask_img.size != size:
+            mask_img = mask_img.resize(size)
+        overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask_img.getchannel("A")))
+        self._composite_layer(overlay, pos_in_parent, size, preserve_hidden_rgb=True)
+        return self
+
+    def _impl_shadow_roundrect(
+        self,
+        pos: Position,
+        size: Size,
+        radius: float,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.3,
+    ) -> Self:
+        apos = (int(pos[0] + self.offset[0]), int(pos[1] + self.offset[1]))
+        w, h = int(size[0]), int(size[1])
+        sw = shadow_width
+        lw, lh = w + sw * 2, h + sw * 2
+        shadow_mask = Image.new("L", (lw, lh), 0)
+        ImageDraw.Draw(shadow_mask).rounded_rectangle(
+            (sw, sw, sw + w, sw + h), radius=radius, fill=int(255 * shadow_alpha)
+        )
+        blurred = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
+        shadow = Image.new("RGBA", (lw, lh), (0, 0, 0, 255))
+        shadow.putalpha(blurred)
+        dx, dy = apos[0] - sw, apos[1] - sw
+        if dx < 0 or dy < 0:
+            shadow = shadow.crop((max(0, -dx), max(0, -dy), lw, lh))
+            dx, dy = max(0, dx), max(0, dy)
+        self.img.alpha_composite(shadow, (dx, dy))
+        return self
+
     def _impl_paste_with_alpha_blend(
         self,
-        sub_img: Image.Image,
+        sub_img: ImageSource,
         pos: Position,
         size: Size = None,
         alpha: float | None = None,
         use_shadow: bool = False,
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
+        src_rect: tuple[float, float, float, float] | None = None,
     ) -> Self:
-        if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
         overlay = Image.new("RGBA", sub_img.size, (0, 0, 0, 0))
         overlay.paste(sub_img, (0, 0))
@@ -1445,294 +1678,37 @@ class Painter:
         return self
 
     def _impl_draw_random_triangle_bg(self, use_time_color: bool, main_hue: float, size_fixed_rate: float):
-        timecolors = [
-            (0, 0.57, 7.0, 0.1),
-            (5, 0.57, 3.0, 0.2),
-            (9, 0.57, 1.0, 0.8),
-            (12, 0.57, 1.0, 1.0),
-            (15, 0.57, 1.0, 0.8),
-            (19, 0.57, 3.0, 0.2),
-            (24, 0.57, 7.0, 0.1),
-        ]
-        pink_time_palettes = [
-            {
-                "hour": 0,
-                "grad1": (128, 106, 170),
-                "grad2": (194, 145, 210),
-                "overlay1": (255, 194, 228, 60),
-                "overlay2": (198, 184, 255, 42),
-                "tri_colors": [(255, 142, 202), (202, 158, 255), (148, 203, 255), (255, 222, 138)],
-                "white_alpha": 72,
-            },
-            {
-                "hour": 5,
-                "grad1": (248, 218, 234),
-                "grad2": (205, 214, 255),
-                "overlay1": (255, 240, 246, 84),
-                "overlay2": (255, 214, 236, 52),
-                "tri_colors": [(255, 150, 206), (208, 166, 255), (158, 210, 255), (255, 228, 146)],
-                "white_alpha": 76,
-            },
-            {
-                "hour": 9,
-                "grad1": (236, 208, 228),
-                "grad2": (172, 205, 255),
-                "overlay1": (255, 244, 248, 76),
-                "overlay2": (226, 221, 255, 52),
-                "tri_colors": [(255, 144, 198), (194, 170, 255), (132, 206, 255), (255, 228, 148)],
-                "white_alpha": 72,
-            },
-            {
-                "hour": 12,
-                "grad1": (230, 198, 224),
-                "grad2": (160, 198, 255),
-                "overlay1": (255, 246, 249, 72),
-                "overlay2": (214, 219, 255, 50),
-                "tri_colors": [(255, 142, 194), (188, 166, 255), (126, 202, 255), (255, 220, 142)],
-                "white_alpha": 70,
-            },
-            {
-                "hour": 15,
-                "grad1": (242, 186, 216),
-                "grad2": (173, 186, 242),
-                "overlay1": (255, 220, 236, 88),
-                "overlay2": (255, 192, 224, 54),
-                "tri_colors": [(255, 136, 188), (188, 160, 255), (146, 196, 255), (255, 212, 132)],
-                "white_alpha": 64,
-            },
-            {
-                "hour": 19,
-                "grad1": (176, 132, 190),
-                "grad2": (146, 156, 226),
-                "overlay1": (255, 194, 224, 62),
-                "overlay2": (213, 188, 255, 40),
-                "tri_colors": [(255, 142, 196), (180, 154, 255), (138, 190, 255), (255, 206, 126)],
-                "white_alpha": 58,
-            },
-            {
-                "hour": 24,
-                "grad1": (128, 106, 170),
-                "grad2": (194, 145, 210),
-                "overlay1": (255, 194, 228, 60),
-                "overlay2": (198, 184, 255, 42),
-                "tri_colors": [(255, 142, 202), (202, 158, 255), (148, 203, 255), (255, 222, 138)],
-                "white_alpha": 72,
-            },
-        ]
-
-        def lerp_tuple(c1, c2, t):
-            return tuple(int(c1[i] * (1 - t) + c2[i] * t) for i in range(len(c1)))
-
-        def get_timecolor(t: datetime):
-            if t.hour < timecolors[0][0]:
-                return timecolors[0][1:]
-            elif t.hour >= timecolors[-1][0]:
-                return timecolors[-1][1:]
-            for i in range(0, len(timecolors) - 1):
-                if t.hour >= timecolors[i][0] and t.hour < timecolors[i + 1][0]:
-                    hour1, h1, s1, l1 = timecolors[i]
-                    hour2, h2, s2, light2 = timecolors[i + 1]
-                    t1 = datetime(t.year, t.month, t.day, hour1)
-                    if hour2 == 24:
-                        t2 = datetime(t.year, t.month, t.day, 0) + timedelta(days=1)
-                    else:
-                        t2 = datetime(t.year, t.month, t.day, hour2)
-                    x = (t - t1) / (t2 - t1)
-                    return (
-                        h1 + (h2 - h1) * x,
-                        s1 + (s2 - s1) * x,
-                        l1 + (light2 - l1) * x,
-                    )
-
-        def get_pink_palette(t: datetime):
-            hour = t.hour + t.minute / 60 + t.second / 3600
-            if hour < pink_time_palettes[0]["hour"]:
-                return pink_time_palettes[0]
-            if hour >= pink_time_palettes[-1]["hour"]:
-                return pink_time_palettes[-1]
-            for i in range(0, len(pink_time_palettes) - 1):
-                current = pink_time_palettes[i]
-                nxt = pink_time_palettes[i + 1]
-                if current["hour"] <= hour <= nxt["hour"]:
-                    span = nxt["hour"] - current["hour"]
-                    x = 0 if span == 0 else (hour - current["hour"]) / span
-                    return {
-                        "grad1": lerp_tuple(current["grad1"], nxt["grad1"], x),
-                        "grad2": lerp_tuple(current["grad2"], nxt["grad2"], x),
-                        "overlay1": lerp_tuple(current["overlay1"], nxt["overlay1"], x),
-                        "overlay2": lerp_tuple(current["overlay2"], nxt["overlay2"], x),
-                        "tri_colors": [lerp_tuple(current["tri_colors"][j], nxt["tri_colors"][j], x) for j in range(4)],
-                        "white_alpha": int(current["white_alpha"] * (1 - x) + nxt["white_alpha"] * x),
-                    }
-            return pink_time_palettes[-1]
-
-        now = datetime.now()
-        override_hour = os.getenv("HARUKI_BG_TEST_HOUR")
-        if override_hour is not None:
-            try:
-                override_hour_float = max(0.0, min(23.999, float(override_hour)))
-                hour = int(override_hour_float)
-                minute_float = (override_hour_float - hour) * 60
-                minute = int(minute_float)
-                second = int((minute_float - minute) * 60)
-                now = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
-            except ValueError:
-                pass
-        # now = datetime.strptime("2024-06-21 23:00", "%Y-%m-%d %H:%M")
-
+        """Draw the shared triangle-background spec. The scatter is NOT rolled here — see
+        ``base/triangle_bg.py``: both backends draw the same generated list, so neither the two
+        backends nor two runs of the same backend can disagree about it any more."""
         w, h = self.size
-        if use_time_color:
-            mh, ms, ml = get_timecolor(now)
-        else:
-            mh = main_hue
-            ms = 1.0
-            ml = 1.0
+        spec = build_triangle_bg(w, h, background_hour(), use_time_color, main_hue, size_fixed_rate)
+        primary_p1, primary_p2, overlay_p1, overlay_p2 = gradient_points(w, h)
 
-        def h2c(h, s, l, a=255):  # noqa: E741
-            h = (h + 1.0) % 1.0
-            r, g, b = colorsys.hls_to_rgb(h, l * ml, s * ms)
-            return [int(255 * c) for c in (r, g, b)] + [a]
-
-        def get_gradient_points(size: Size) -> tuple[Position, Position, Position, Position]:
-            width, height = size
-            aspect = width / max(height, 1)
-            wide_bias = max(0.0, min(0.2, (aspect - 1.0) * 0.12))
-            tall_bias = max(0.0, min(0.16, (1.0 - aspect) * 0.16))
-            primary_p1 = (0.02 + tall_bias * 0.3, 0.96 - wide_bias)
-            primary_p2 = (0.98 - tall_bias * 0.3, 0.08 + wide_bias * 0.8)
-            overlay_p1 = (0.04 + tall_bias * 0.2, 0.06 + wide_bias * 0.3)
-            overlay_p2 = (0.96 - tall_bias * 0.2, 0.94 - wide_bias * 0.5)
-            return primary_p1, primary_p2, overlay_p1, overlay_p2
-
-        ofs, s = 0.025, 4
-        primary_p1, primary_p2, overlay_p1, overlay_p2 = get_gradient_points((w, h))
-        pink_palette = get_pink_palette(now) if use_time_color else None
-        if pink_palette:
-            bg = LinearGradient(
-                c1=(*pink_palette["grad1"], 255),
-                c2=(*pink_palette["grad2"], 255),
-                p1=primary_p1,
-                p2=primary_p2,
-            ).get_img((w // s, h // s))
-            bg.alpha_composite(
-                LinearGradient(
-                    c1=pink_palette["overlay1"],
-                    c2=pink_palette["overlay2"],
-                    p1=overlay_p1,
-                    p2=overlay_p2,
-                ).get_img((w // s, h // s))
-            )
-            bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, pink_palette["white_alpha"])))
-        else:
-            bg = LinearGradient(c1=h2c(mh, 0.5, 1.0), c2=h2c(mh + ofs, 0.9, 0.5), p1=primary_p1, p2=primary_p2).get_img(
-                (w // s, h // s)
-            )
-            bg.alpha_composite(
-                LinearGradient(
-                    c1=h2c(mh, 0.9, 0.7, 100), c2=h2c(mh - ofs, 0.5, 0.5, 100), p1=overlay_p1, p2=overlay_p2
-                ).get_img((w // s, h // s))
-            )
-            bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, 100)))
+        s = 4  # the gradients are smooth; build them at quarter size and LANCZOS back up
+        bg = LinearGradient(c1=spec.grad1, c2=spec.grad2, p1=primary_p1, p2=primary_p2).get_img((w // s, h // s))
+        bg.alpha_composite(
+            LinearGradient(c1=spec.overlay1, c2=spec.overlay2, p1=overlay_p1, p2=overlay_p2).get_img((w // s, h // s))
+        )
+        bg.alpha_composite(Image.new("RGBA", (w // s, h // s), (255, 255, 255, spec.white_alpha)))
         bg = bg.resize((w, h), Image.Resampling.LANCZOS)
 
-        # preset_tris = [
-        #     Image.open(f"/Users/deseer/PycharmProjects/Haruki-Drawing-API/data/static_images/triangle/tri{i+1}.png")  # noqa: E501
-        #     .convert("RGBA")
-        #     .resize((128, 128), Image.Resampling.BILINEAR)
-        #     for i in range(3)
-        # ]
-        def brighten_color(color: tuple[int, int, int], amount: float = 0.22) -> tuple[int, int, int]:
-            return tuple(min(255, int(c + (255 - c) * amount)) for c in color)
-
-        def mix_color(c1: tuple[int, int, int], c2: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
-            return tuple(int(c1[i] * (1 - ratio) + c2[i] * ratio) for i in range(3))
-
-        if pink_palette:
-            grad1 = pink_palette["grad1"]
-            grad2 = pink_palette["grad2"]
-            mid = mix_color(grad1, grad2, 0.5)
-            preset_colors = [
-                brighten_color(mix_color(grad1, (255, 206, 232), 0.72), 0.20),
-                brighten_color(mix_color(mid, (238, 214, 255), 0.68), 0.18),
-                brighten_color(mix_color(grad2, (208, 232, 255), 0.66), 0.20),
-                brighten_color(mix_color(mid, (255, 228, 176), 0.56), 0.18),
-            ]
-        else:
-            preset_colors = [
-                brighten_color(color)
-                for color in [
-                    (255, 189, 246),
-                    (183, 246, 255),
-                    (255, 247, 146),
-                ]
-            ]
-
-        def draw_tri(x, y, rot, size, color, type):
-            overlay = Image.new("RGBA", (size * 2, size * 2), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(overlay)
-            center = size
-            r = size * 0.56
-            type_angle_offset = (0, 18, -18)[type % 3]
+        for tri in spec.triangles:
+            # Skia strokes the path at float coordinates, so the overlay's ORIGIN is snapped to the
+            # pixel grid and the vertices keep their subpixel offset inside it. Rounding the centre
+            # instead (the old `int(x) - width // 2`) shifted every triangle by up to half a pixel
+            # relative to Skia, which no amount of seed-sharing would have fixed.
+            span = tri.size * 2
+            overlay = Image.new("RGBA", (span, span), (0, 0, 0, 0))
+            ox, oy = math.floor(tri.x - tri.size), math.floor(tri.y - tri.size)
+            cx, cy = tri.x - ox, tri.y - oy
+            radius = tri.size * 0.56
+            type_angle_offset = (0, 18, -18)[tri.type % 3]
             points = []
             for idx in range(3):
-                angle = math.radians(rot + type_angle_offset + idx * 120 - 90)
-                points.append((center + r * math.cos(angle), center + r * math.sin(angle)))
-            draw.polygon(points, fill=color)
-            bg.alpha_composite(overlay, (int(x) - overlay.width // 2, int(y) - overlay.height // 2))
-
-        factor = min(w, h) / 2048 * 1.5
-        size_factor = 1.0 + (factor - 1.0) * (1.0 - size_fixed_rate)
-        dense_factor = 1.0 + (factor * factor - 1.0) * size_fixed_rate
-        aspect_density_boost = min(1.55, max(1.15, (w / max(h, 1)) ** 0.22))
-        aspect = w / max(h, 1)
-        wide_shift = min(0.12, max(0.0, (aspect - 1.0) * 0.08))
-
-        def rand_tri(num, sz):
-            for i in range(num):
-                if random.random() < 0.78:
-                    edge = random.choices(
-                        ("left", "right", "top", "bottom"),
-                        weights=(0.9, 0.95 - wide_shift * 1.8, 1.18 + wide_shift * 1.6, 0.72 - wide_shift * 1.2),
-                        k=1,
-                    )[0]
-                    if edge == "left":
-                        x = random.uniform(-0.04 * w, 0.18 * w)
-                        y = random.uniform(0, h)
-                    elif edge == "right":
-                        x = random.uniform((0.82 - wide_shift) * w, 1.03 * w)
-                        y = random.uniform(0, h)
-                    elif edge == "top":
-                        x = random.uniform(0, w)
-                        y = random.uniform(-0.04 * h, (0.20 + wide_shift * 0.5) * h)
-                    else:
-                        x = random.uniform(0, w)
-                        y = random.uniform((0.80 - wide_shift * 0.8) * h, 1.03 * h)
-                else:
-                    x = random.uniform(0.12 * w, 0.88 * w)
-                    y = random.uniform(0.12 * h, 0.88 * h)
-                if x < 0 or x >= w or y < 0 or y >= h:
-                    continue
-                rot = random.uniform(0, 360)
-                size = max(1, min(1000, int(random.normalvariate(sz[0], sz[1]))))
-                dist = ((x - w // 2) / w * 2) ** 2 + ((y - h // 2) / h * 2) ** 2
-                size = int(size * max(0.28, dist))
-
-                size_alpha_factor, std_size_lower, std_size_upper = 1.0, 64 * size_factor, 128 * size_factor
-                if size < std_size_lower:
-                    size_alpha_factor = size / std_size_lower
-                if size > std_size_upper:
-                    size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5)
-                alpha = int(random.normalvariate(122, 138) * max(0, min(1.5, size_alpha_factor) * (ml**0.5)))
-                if random.random() < 0.05 and size > std_size_lower:
-                    alpha = 255
-                if alpha <= 34:
-                    continue
-                color = random.choice(preset_colors)
-                color = (*color, alpha)
-                type = random.choice([0, 1, 1, 1, 2, 2])
-                draw_tri(x, y, rot, size, color, type)
-
-        rand_tri(int(28 * dense_factor * aspect_density_boost), (128 * size_factor, 16 * size_factor))
-        rand_tri(int(280 * dense_factor * aspect_density_boost), (64 * size_factor, 16 * size_factor))
+                angle = math.radians(tri.rot + type_angle_offset + idx * 120 - 90)
+                points.append((cx + radius * math.cos(angle), cy + radius * math.sin(angle)))
+            ImageDraw.Draw(overlay).polygon(points, fill=tri.color)
+            bg.alpha_composite(overlay, (ox, oy))
 
         self.img.paste(bg, self.offset)

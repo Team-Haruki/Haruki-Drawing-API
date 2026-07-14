@@ -92,8 +92,12 @@ class DrawingSettings(BaseModel):
     overload_max_inflight_requests: int = 0  # 过载保护：允许的最大并发请求数，0 表示关闭
     overload_retry_after_seconds: int = 5  # 过载拒绝后的 Retry-After 秒数
     readiness_unhealthy_inflight_requests: int = 0  # readiness: inflight 达到该值时返回不健康，0 表示关闭
-    readiness_unhealthy_rss_mb: int = 0  # readiness: RSS 达到该值时返回不健康，0 表示关闭
+    readiness_unhealthy_rss_mb: int = 0  # readiness: 父进程 RSS 达到该值时返回不健康，0 表示关闭
     readiness_unhealthy_asyncio_tasks: int = 0  # readiness: asyncio task 达到该值时返回不健康，0 表示关闭
+    # readiness: 容器内存用量达到硬限额的该百分比时返回不健康，0 表示关闭。
+    # 这是唯一能看见 heavy worker 的内存信号（它们是独立进程，父进程 RSS 看不到），
+    # 而且按百分比表达就不可能像绝对 MB 那样被配到硬限额之上、永远触发不了。
+    readiness_unhealthy_cgroup_percent: int = 0
     image_cache_size: int = 0  # 图片解码缓存条目数，0 表示关闭
     image_cache_max_mb: int = 0  # 图片解码缓存总内存上限（MB），0 表示关闭
     thumbnail_cache_size: int = 0  # 缩略图专用缓存条目数，0 表示关闭
@@ -101,12 +105,11 @@ class DrawingSettings(BaseModel):
     composed_image_cache_size: int = 0  # 合成图片缓存条目数，0 表示关闭
     composed_image_cache_max_mb: int = 0  # 合成图片缓存总内存上限（MB），0 表示关闭
     composed_image_cache_ttl_seconds: int = 7 * 24 * 3600  # 合成图片缓存 TTL（秒）
-    use_process_pool: bool = False  # 是否启用进程池
-    process_pool_workers: int = 4  # 进程池工作进程数
-    process_pool_threshold: int = 2_000_000  # 像素阈值 (约 2000x1000)
-    screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
+    # Skia 门控:默认开启(2026-07-12 全端点真实数据对拍通过后切换)。扩展缺失时 fail-open
+    # 回退 Pillow 并打 ERROR。开关一律不写入 configs.yaml,生产用 HARUKI_DRAWING__* 环境变量覆盖。
+    use_skia_plot: bool = True  # plot.py widget 树端点的 IRPainter → Skia 渲染
     custom_profile_assets_dir: Path | None = None
     custom_profile_fonts_dir: Path | None = None
     custom_profile_tmp_font_metadata: Path | None = None
@@ -140,6 +143,15 @@ class Settings(BaseSettings):
         env_nested_delimiter="__",
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls, settings_cls, init_settings, env_settings, dotenv_settings, file_secret_settings
+    ):
+        # from_yaml passes configs.yaml as init kwargs; by default init > env, which would
+        # let a key written in the yaml silently defeat HARUKI_* overrides — exactly when an
+        # operator needs env to win (e.g. flipping a Skia gate during an incident). Env first.
+        return (env_settings, init_settings, dotenv_settings, file_secret_settings)
 
     assets: AssetsSettings = AssetsSettings()
     font: FontSettings = FontSettings()
@@ -194,8 +206,6 @@ class Settings(BaseSettings):
         drawing: dict = {}
         if "default_thread_pool_size" in data:
             drawing["thread_pool_size"] = data["default_thread_pool_size"]
-        if "screenshot_api_path" in data:
-            drawing["screenshot_api_path"] = data["screenshot_api_path"]
         if "drawing" in data:
             drawing.update(data["drawing"])
         if drawing:
@@ -239,6 +249,7 @@ OVERLOAD_RETRY_AFTER_SECONDS = settings.drawing.overload_retry_after_seconds
 READINESS_UNHEALTHY_INFLIGHT_REQUESTS = settings.drawing.readiness_unhealthy_inflight_requests
 READINESS_UNHEALTHY_RSS_MB = settings.drawing.readiness_unhealthy_rss_mb
 READINESS_UNHEALTHY_ASYNCIO_TASKS = settings.drawing.readiness_unhealthy_asyncio_tasks
+READINESS_UNHEALTHY_CGROUP_PERCENT = settings.drawing.readiness_unhealthy_cgroup_percent
 IMAGE_CACHE_SIZE = settings.drawing.image_cache_size
 IMAGE_CACHE_MAX_BYTES = settings.drawing.image_cache_max_mb * 1024 * 1024
 THUMB_CACHE_SIZE = settings.drawing.thumbnail_cache_size
@@ -246,7 +257,6 @@ THUMB_CACHE_MAX_BYTES = settings.drawing.thumbnail_cache_max_mb * 1024 * 1024
 COMPOSED_IMAGE_CACHE_SIZE = settings.drawing.composed_image_cache_size
 COMPOSED_IMAGE_CACHE_MAX_BYTES = settings.drawing.composed_image_cache_max_mb * 1024 * 1024
 COMPOSED_IMAGE_CACHE_TTL_SECONDS = settings.drawing.composed_image_cache_ttl_seconds
-SCREENSHOT_API_PATH = settings.drawing.screenshot_api_path
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir

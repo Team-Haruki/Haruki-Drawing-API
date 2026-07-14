@@ -3,9 +3,9 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
-from src.sekai.profile.drawer import compose_profile_image
+from src.sekai.profile.drawer import compose_profile_image, try_render_profile_payload
 from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileRequest
 
 router = APIRouter(tags=["Profile"])
@@ -41,6 +41,10 @@ async def profile(request: ProfileRequest):
             ],
         )
         set_request_stage("profile:compose_image")
+        payload = await try_render_profile_payload(request)
+        if payload is not None:
+            set_request_stage("profile:image_to_response")
+            return encoded_image_payload_to_response(payload)
         image = await compose_profile_image(request)
         set_request_stage("profile:image_to_response")
         return await image_to_response(image)

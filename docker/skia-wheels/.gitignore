@@ -1,0 +1,7 @@
+# CI drops the freshly built haruki_skia_renderer wheel here before `docker build`
+# (see .github/workflows/docker.yml). Wheels are never committed (D2: no index,
+# artifacts only); this file keeps the directory present in the build context so
+# the Dockerfile COPY succeeds even when no wheel is provided (fail-open).
+# Note: the directory is named skia-wheels because the root .gitignore ignores wheels/.
+*
+!.gitignore

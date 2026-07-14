@@ -5,6 +5,7 @@ import time
 
 from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -19,8 +20,16 @@ from src.sekai.base.painter import (
 )
 from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis, request_now
-from src.sekai.base.utils import concat_images, get_float_str, get_img_from_path, get_readable_timedelta
-from src.sekai.profile.drawer import get_card_full_thumbnail
+from src.sekai.base.utils import (
+    ImageSource,
+    concat_images,
+    get_asset_image_ref,
+    get_float_str,
+    get_img_from_path,
+    get_readable_timedelta,
+)
+from src.sekai.profile.drawer import CardFullThumbnailBox, CardFullThumbnailLayers, get_card_full_thumbnail_layers
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 
 # 从 model.py 导入数据模型
@@ -60,19 +69,40 @@ async def get_gacha_image_or_unknown(path: str | None, *, allow_empty: bool = Fa
     return await get_unknown_fallback_image()
 
 
+async def get_gacha_image_ref_or_unknown(path: str | None, *, allow_empty: bool = False) -> ImageSource | None:
+    """加载卡池图片（惰性引用），缺图时自动回退到 UnKnown 占位图。
+
+    与 :func:`get_gacha_image_or_unknown` 语义一致，但只探测图片头部而不解码像素，
+    仅供 ImageBox/ImageBg 等支持 ImageSource 的消费者使用。
+    """
+    if path:
+        try:
+            return await get_asset_image_ref(ASSETS_BASE_DIR, path)
+        except IMAGE_LOAD_EXCEPTIONS:
+            return await get_unknown_fallback_image(path)
+    if allow_empty:
+        return None
+    return await get_unknown_fallback_image()
+
+
 async def get_gacha_list_image_with_fallback(
     logo_path: str | None,
     banner_path: str | None,
-) -> tuple[Image.Image, str]:
-    """优先使用 logo，缺失时回退到 banner，再退回 unknown。"""
+) -> tuple[ImageSource, str]:
+    """优先使用 logo，缺失时回退到 banner，再退回 unknown。
+
+    注意 ref 只探测文件头：回退触发条件是"文件缺失/不是图片"，而非旧版的"像素解码失败"。
+    头部合法但像素截断的坏文件不再回退到 banner，而是画成占位图(不抛错)。缺图——也就是这条
+    回退链真正服务的场景——行为不变。
+    """
     if logo_path:
         try:
-            return await get_img_from_path(ASSETS_BASE_DIR, logo_path, on_missing="raise"), "logo"
+            return await get_asset_image_ref(ASSETS_BASE_DIR, logo_path, on_missing="raise"), "logo"
         except IMAGE_LOAD_EXCEPTIONS:
             pass
     if banner_path:
         try:
-            return await get_img_from_path(ASSETS_BASE_DIR, banner_path, on_missing="raise"), "banner"
+            return await get_asset_image_ref(ASSETS_BASE_DIR, banner_path, on_missing="raise"), "banner"
         except IMAGE_LOAD_EXCEPTIONS:
             pass
     return await get_unknown_fallback_image(), "unknown"
@@ -126,7 +156,7 @@ GACHA_RARE_NAMES = {
 # ======================= Drawing Functions ======================= #
 
 
-async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
+async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
     """合成卡池一览图片"""
     gachas = list(rqd.gachas)
     pre_paginated = rqd.pre_paginated or (rqd.current_page is not None and rqd.total_page is not None)
@@ -209,10 +239,20 @@ async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
                             TextBox(f"T {g.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
 
 
-async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
+async def compose_gacha_list_image(rqd: GachaListRequest) -> Image.Image:
+    return await (await _build_gacha_list_canvas(rqd)).get_img()
+
+
+async def try_render_gacha_list_payload(rqd: GachaListRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_gacha_list_canvas(rqd), endpoint="gacha_list")
+
+
+async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
     """合成卡池详情图片"""
     # 绘图
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
@@ -234,13 +274,13 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
 
     if rqd.logo_img_path:
         _gd_keys.append("logo")
-        _gd_coros.append(get_gacha_image_or_unknown(rqd.logo_img_path))
+        _gd_coros.append(get_gacha_image_ref_or_unknown(rqd.logo_img_path))
     if rqd.banner_img_path:
         _gd_keys.append("banner")
-        _gd_coros.append(get_gacha_image_or_unknown(rqd.banner_img_path))
+        _gd_coros.append(get_gacha_image_ref_or_unknown(rqd.banner_img_path))
     if rqd.gacha.ceil_item_img_path:
         _gd_keys.append("ceil_item")
-        _gd_coros.append(get_gacha_image_or_unknown(rqd.gacha.ceil_item_img_path))
+        _gd_coros.append(get_gacha_image_ref_or_unknown(rqd.gacha.ceil_item_img_path))
 
     # cost icons
     _cost_icon_indices: list[tuple[str, str]] = []
@@ -249,13 +289,13 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
             key = f"cost_{behavior.cost_icon_path}"
             if key not in _gd_keys:
                 _gd_keys.append(key)
-                _gd_coros.append(get_gacha_image_or_unknown(behavior.cost_icon_path))
+                _gd_coros.append(get_gacha_image_ref_or_unknown(behavior.cost_icon_path))
 
     # pickup card thumbnails
     if rqd.pickup_cards:
         for i, card in enumerate(rqd.pickup_cards):
             _gd_keys.append(f"card_{i}")
-            _gd_coros.append(get_card_full_thumbnail(card.thumbnail_request))
+            _gd_coros.append(get_card_full_thumbnail_layers(card.thumbnail_request))
 
     # rarity images
     for rarity in GACHA_RATE_RARITIES:
@@ -271,7 +311,7 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
         len(_gd_coros),
         time.perf_counter() - _t0,
     )
-    _gd_cache: dict[str, Image.Image | None] = {}
+    _gd_cache: dict[str, ImageSource | CardFullThumbnailLayers | None] = {}
     for k, v in zip(_gd_keys, _gd_results):
         _gd_cache[k] = v if not isinstance(v, BaseException) else None
 
@@ -392,11 +432,12 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                             card_size = 80
                             for idx, card in enumerate(rqd.pickup_cards):
                                 with VSplit().set_padding(0).set_sep(1).set_content_align("c").set_item_align("c"):
-                                    full_thumb = _gd_cache.get(f"card_{idx}")
-                                    if not full_thumb:
-                                        full_thumb = await get_unknown_fallback_image()
-
-                                    ImageBox(full_thumb, size=(card_size, card_size), shadow=True)
+                                    card_layers = _gd_cache.get(f"card_{idx}")
+                                    if card_layers is not None:
+                                        CardFullThumbnailBox(card_layers, size=(card_size, card_size), shadow=True)
+                                    else:
+                                        fallback_img = await get_unknown_fallback_image()
+                                        ImageBox(fallback_img, size=(card_size, card_size), shadow=True)
                                     TextBox(f"{card.id} ({get_float_str(card.rate * 100, 4)}%)", small_style)
 
                 # 抽卡概率
@@ -481,4 +522,14 @@ async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
                                 TextBox(rate_text, text_style)
 
     add_request_watermark(canvas, rqd)
-    return await canvas.get_img()
+    return canvas
+
+
+async def compose_gacha_detail_image(rqd: GachaDetailRequest) -> Image.Image:
+    return await (await _build_gacha_detail_canvas(rqd)).get_img()
+
+
+async def try_render_gacha_detail_payload(rqd: GachaDetailRequest) -> EncodedImagePayload | None:
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_gacha_detail_canvas(rqd), endpoint="gacha_detail")

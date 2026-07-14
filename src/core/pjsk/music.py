@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.music.drawer import (
     compose_basic_music_rewards_image,
     compose_detail_music_rewards_image,
@@ -8,6 +8,12 @@ from src.sekai.music.drawer import (
     compose_music_detail_image,
     compose_music_list_image,
     compose_play_progress_image,
+    try_render_basic_music_rewards_payload,
+    try_render_detail_music_rewards_payload,
+    try_render_music_brief_list_payload,
+    try_render_music_detail_payload,
+    try_render_music_list_payload,
+    try_render_play_progress_payload,
 )
 from src.sekai.music.model import (
     BasicMusicRewardsRequest,
@@ -29,6 +35,9 @@ async def music_detail(request: MusicDetailRequest):
     Shows song information, difficulty levels, vocal info, and related event.
     """
     try:
+        payload = await try_render_music_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_music_detail_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -43,6 +52,9 @@ async def music_brief_list(request: MusicBriefListRequest):
     Shows multiple songs in a compact list format.
     """
     try:
+        payload = await try_render_music_brief_list_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_music_brief_list_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -57,6 +69,9 @@ async def music_list(request: MusicListRequest):
     Shows songs with user's play status and results.
     """
     try:
+        payload = await try_render_music_list_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_music_list_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -71,6 +86,9 @@ async def music_progress(request: PlayProgressRequest):
     Shows player's progress across different difficulty levels.
     """
     try:
+        payload = await try_render_play_progress_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_play_progress_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -85,6 +103,9 @@ async def music_rewards_detail(request: DetailMusicRewardsRequest):
     Shows remaining rewards with detailed breakdown.
     """
     try:
+        payload = await try_render_detail_music_rewards_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_detail_music_rewards_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -99,6 +120,9 @@ async def music_rewards_basic(request: BasicMusicRewardsRequest):
     Shows remaining rewards in simplified format.
     """
     try:
+        payload = await try_render_basic_music_rewards_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_basic_music_rewards_image(request)
         return await image_to_response(image)
     except Exception as e:

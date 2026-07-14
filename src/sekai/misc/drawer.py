@@ -7,6 +7,7 @@ import time
 
 from PIL import Image, ImageDraw, ImageFilter
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
@@ -32,18 +33,23 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
-    build_rendered_image_cache_key,
-    get_composed_image_cached,
-    get_composed_image_disk_cached,
-    get_image_asset_signature,
+    ImageSource,
+    get_asset_image_ref,
     get_img_from_path,
     get_img_resized,
     get_str_display_length,
-    put_composed_image_cache,
-    put_composed_image_disk_cache,
     run_in_pool,
 )
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
+from src.sekai.skia_renderer.canvas import (
+    render_canvas_payload,
+    skia_plot_enabled,
+)
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    DEFAULT_HEAVY_FONT,
+)
 
 # =========================== 从.model导入数据类型 =========================== #
 from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest, CommandHelpRenderRequest
@@ -59,7 +65,6 @@ _HELP_MARGIN = 62
 _HELP_CARD_MARGIN = 28
 _HELP_MAX_TEXT_WIDTH = _HELP_IMAGE_WIDTH - _HELP_MARGIN * 2
 _HELP_LINK_RE = re.compile(r"\[([^\]]+)]\([^)]+\)")
-_ALIAS_LIST_CACHE_NAMESPACE = "alias_list"
 _ALIAS_TRIM_ALPHA_FLOOR = 36
 _ALIAS_TRIM_MIN_FRAME_W = 260
 _ALIAS_TRIM_MAX_FRAME_W = 920
@@ -481,14 +486,28 @@ def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Ima
     return img
 
 
-async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Image:
+async def _build_command_help_canvas(rqd: CommandHelpRenderRequest) -> Canvas:
     panel = await run_in_pool(partial(_compose_command_help_image_sync, rqd))
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         Frame().set_size(panel.size).add_draw_func(
             lambda _widget, painter: painter.paste_with_alpha_blend(panel, (0, 0), exclude_on_hash=True)
         )
     add_request_watermark(canvas, rqd)
+    return canvas
+
+
+async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Image:
+    canvas = await _build_command_help_canvas(rqd)
     return await canvas.get_img()
+
+
+async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> EncodedImagePayload | None:
+    """Skia 路径：帮助面板位图经 mem 图传输,外壳走 IRPainter;不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_command_help_canvas(rqd)
+    # The /help route pins PNG output regardless of the global export format.
+    return await render_canvas_payload(canvas, endpoint="command_help", export_format="png")
 
 
 def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
@@ -501,28 +520,6 @@ def _resolve_alias_accent(entity_label: str, entity_id: int) -> tuple[int, int, 
             return tuple(color_code_to_rgb(color_code))
         return (255, 204, 170)
     return (110, 180, 255)
-
-
-def _build_alias_list_cache_key(rqd: AliasListRequest) -> str:
-    trim_path = _resolve_alias_trim_path(rqd)
-    request_payload = {
-        "title": rqd.title,
-        "entity_label": rqd.entity_label,
-        "entity_id": rqd.entity_id,
-        "entity_name": rqd.entity_name,
-        "music_jacket_path": rqd.music_jacket_path,
-        "character_trim_path": rqd.character_trim_path,
-        "character_silhouette_path": rqd.character_silhouette_path,
-        "aliases": [alias.strip() for alias in rqd.aliases if alias and alias.strip()],
-    }
-    return build_rendered_image_cache_key(
-        _ALIAS_LIST_CACHE_NAMESPACE,
-        request_payload,
-        asset_signatures={
-            "music_jacket": get_image_asset_signature(ASSETS_BASE_DIR, rqd.music_jacket_path),
-            "character_trim": get_image_asset_signature(ASSETS_BASE_DIR, trim_path),
-        },
-    )
 
 
 def _resolve_alias_name_box_width(
@@ -566,11 +563,12 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[Image.Image, Image.Image, Image.Image, list[Image.Image], dict[int, Image.Image], float]:
+) -> tuple[Image.Image, ImageSource, ImageSource, list[Image.Image], dict[int, Image.Image], float]:
     tasks = [
+        # card_image feeds ImageBg(fade=0.1), which brightness-adjusts pixels eagerly.
         get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.sd_image_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.title_image_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
         *[
             get_img_resized(
                 ASSETS_BASE_DIR,
@@ -883,8 +881,8 @@ def _resolve_alias_panel_widths(
     return best_overflow[1], best_overflow[2], best_overflow[3]
 
 
-async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image:
-    r"""compose_chara_birthday_image
+async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
+    r"""_build_chara_birthday_canvas
 
     合成角色生日图片
 
@@ -895,7 +893,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
 
     Returns
     -------
-    PIL.Image.Image
+    Canvas
     """
     cid = rqd.cid
     month = rqd.month
@@ -911,10 +909,7 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
-    total_started = time.perf_counter()
-    card_image, sd_image, title_image, card_thumbs, calendar_icons, load_elapsed = await _load_chara_birthday_assets(
-        rqd
-    )
+    card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
 
     # 绘制时间范围的辅助函数
     def draw_time_range(label: str, tr: BirthdayEventTime):
@@ -1018,36 +1013,23 @@ async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
     add_request_watermark(canvas, rqd)
-    render_started = time.perf_counter()
-    image = await canvas.get_img()
-    render_elapsed = time.perf_counter() - render_started
-    total_elapsed = time.perf_counter() - total_started
-    _birthday_perf_logger.info(
-        "birthday render: cid=%s cards=%d characters=%d load=%.3fs render=%.3fs total=%.3fs image=%dx%d",
-        cid,
-        len(cards),
-        len(all_characters),
-        load_elapsed,
-        render_elapsed,
-        total_elapsed,
-        image.width,
-        image.height,
-    )
-    return image
+    return canvas
 
 
-async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
+async def compose_chara_birthday_image(rqd: CharaBirthdayRequest) -> Image.Image:
+    return await (await _build_chara_birthday_canvas(rqd)).get_img()
+
+
+async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> EncodedImagePayload | None:
+    # Renders inside a heavy-worker process; the parent replays this outcome from the payload's
+    # backend under the pool kind "chara_birthday", so the endpoint name must match that kind.
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(await _build_chara_birthday_canvas(rqd), endpoint="chara_birthday")
+
+
+async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     aliases = [alias.strip() for alias in rqd.aliases if alias and alias.strip()]
-    cache_key = _build_alias_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        return cached
-    disk_cached = get_composed_image_disk_cached(_ALIAS_LIST_CACHE_NAMESPACE, cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        return disk_cached
-
-    _t0 = time.perf_counter()
     accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
     jacket_img = None
     if rqd.music_jacket_path:
@@ -1198,15 +1180,28 @@ async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
                             ).set_padding((14, 9))
 
     add_request_watermark(canvas, rqd)
-    image = await canvas.get_img()
-    put_composed_image_cache(cache_key, image)
-    put_composed_image_disk_cache(_ALIAS_LIST_CACHE_NAMESPACE, cache_key, image)
-    if time.perf_counter() - _t0 >= 0.05:
-        logger.info(
-            "[perf] alias_list miss: entity_label=%s entity_id=%s aliases=%d total=%.3fs",
-            rqd.entity_label,
-            rqd.entity_id,
-            len(aliases),
-            time.perf_counter() - _t0,
-        )
-    return image
+    return canvas
+
+
+# alias-list 的结果缓存(内存 + 磁盘 + Skia payload)已全部删除。
+#
+# 这张图上有 `add_request_watermark`,水印会把每请求的 `dt` 渲染成秒级 `DT: yyyy-mm-dd HH:MM:SS`;
+# 而这里的 cache key 不含 dt ⇒ 一旦命中就会发**上一次请求的时间戳**(磁盘那层还跨重启存活)。
+# 调用方 Haruki-Cloud 正是为了这个原因**专门让 alias-list 绕过它自己的渲染缓存**
+# (internal/pjsk/drawing/client.go:361 "Alias-list watermarks include request DT, so we
+# intentionally bypass the render cache here to avoid serving stale timestamps."),
+# drawing 侧再缓存一次就把 cloud 的意图整个抵消掉了。
+#
+# 其它端点 cloud 是接受陈旧水印的(默认 24h TTL,card/list 等甚至永不过期),且它的 key 与这里等价
+# ——cloud 命中就不会调 drawing,cloud 未命中这里也不会命中,所以 drawing 侧的结果缓存本就是死重。
+async def compose_alias_list_image(rqd: AliasListRequest) -> Image.Image:
+    """合成别名列表图片 (Pillow 路径)。"""
+    return await (await _build_alias_list_canvas(rqd)).get_img()
+
+
+async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePayload | None:
+    """Skia 路径:经 IRPainter 渲染同一棵 widget 树;不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_alias_list_canvas(rqd)
+    return await render_canvas_payload(canvas, endpoint="alias_list")

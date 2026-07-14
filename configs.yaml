@@ -13,19 +13,25 @@ font:
     default: SourceHanSansSC-Regular
     bold: SourceHanSansSC-Bold
     heavy: SourceHanSansSC-Heavy
-    emoji: TwitterColorEmoji-SVGinOT
+    emoji: TwitterColorEmoji-SVGinOT  # macOS 开发机:CoreText 后端渲染 OT-SVG 彩色(COLR 在 mac scaler 下是空白);Linux 生产用 TwemojiMozilla(见 configs.docker.yaml)
 
 drawing:
   thread_pool_size: 8
-  isolated_worker_pool_size: 8
+  isolated_worker_pool_size: 4  # 跟 CPU 配额走:实测 4 个的 p50 和吞吐都优于 8 个(超订反而更慢)
   isolated_worker_queue_limit: 16
   isolated_worker_queue_timeout_seconds: 30
   request_hard_timeout_seconds: 180
   overload_max_inflight_requests: 64
   overload_retry_after_seconds: 5
   readiness_unhealthy_inflight_requests: 48
-  readiness_unhealthy_rss_mb: 4096
+  # 关掉:它只看父进程 VmRSS,看不见 heavy worker(内存主项),而父进程 RSS 是随并发线性涨的
+  # (实测 1/4/8/12 并发 = 483/757/838/958 MB),所以它本质是一道校准错了的"并发门"——
+  # 1536 会在并发 ~26 触发,抢在真正的并发门(inflight 48)前面开火。内存交给 cgroup 门。
+  readiness_unhealthy_rss_mb: 0
   readiness_unhealthy_asyncio_tasks: 256
+  # 容器内存用量达到硬限额的 90% 时 /ready 报 503。这是唯一能看见 heavy worker 的信号。
+  # 不在受限 cgroup 里(裸机/macOS/无限额容器)时自动失效,不猜。
+  readiness_unhealthy_cgroup_percent: 90
   image_cache_size: 1024
   image_cache_max_mb: 256
   thumbnail_cache_size: 2048
@@ -33,10 +39,6 @@ drawing:
   composed_image_cache_size: 2048
   composed_image_cache_max_mb: 256
   composed_image_cache_ttl_seconds: 604800
-  use_process_pool: true
-  process_pool_workers: 6
-  process_pool_threshold: 1000000  # 约 1200x900 像素
-  screenshot_api_path: http://localhost:28080/screenshot
   export_image_format: png  # png 或 jpg
   jpg_quality: 85  # JPEG 压缩质量 (1-100)，仅在 export_image_format 为 jpg 时生效
   custom_profile_assets_dir: data/asset/{region}-assets/startapp/custom_profile

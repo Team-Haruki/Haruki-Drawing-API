@@ -23,7 +23,6 @@ from src.settings import (
     ISOLATED_WORKER_QUEUE_TIMEOUT_SECONDS,
     JPG_QUALITY,
     REQUEST_HARD_TIMEOUT_SECONDS,
-    settings,
 )
 
 logger = logging.getLogger("src.core.heavy_render_pool")
@@ -48,6 +47,11 @@ class EncodedImagePayload:
     image_height: int | None
     image_mode: str | None
     encode_elapsed: float
+    native_metrics: dict[str, int | float] | None = None
+    # skia | skia_cache | skia_fallback | pillow — stamped by the Skia render helper. Heavy tasks
+    # render in a spawned process where a contextvar is invisible to the parent, so the backend
+    # rides back on the payload; None means "not rendered by Skia" (the parent resolves it).
+    backend: str | None = None
 
 
 @dataclass(slots=True)
@@ -119,28 +123,41 @@ def _encode_image_payload(image: Image.Image) -> EncodedImagePayload:
     )
 
 
-def _configure_worker_render_environment() -> None:
-    # Heavy requests already run inside isolated worker processes.
-    # Disable nested painter process-pool fanout there to avoid spawning
-    # grandchildren from worker processes.
-    settings.drawing.use_process_pool = False
+def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
+    """Tag a worker-rendered Skia payload so the parent can log/count the backend.
+
+    The worker runs in a spawned process: its contextvar and its render_stats counters are
+    invisible to the parent, so the backend has to ride back on the payload. A drawer that goes
+    through ``render_cached_canvas_payload`` already set a precise value (skia / skia_cache);
+    anything else that produced a payload at all came from Skia.
+    """
+    from src.sekai.skia_renderer.render_stats import BACKEND_SKIA
+
+    if not payload.backend:
+        payload.backend = BACKEND_SKIA
+    return payload
 
 
 def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
-    _configure_worker_render_environment()
     if kind == "deck_recommend":
-        from src.sekai.deck.drawer import compose_deck_recommend_image
+        from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
         from src.sekai.deck.model import DeckRequest
 
         request = DeckRequest.model_validate(payload)
+        skia_payload = asyncio.run(try_render_deck_recommend_payload(request))
+        if skia_payload is not None:
+            return _stamp_skia_backend(skia_payload)
         image = asyncio.run(compose_deck_recommend_image(request))
         return _encode_image_payload(image)
 
     if kind == "chara_birthday":
-        from src.sekai.misc.drawer import compose_chara_birthday_image
+        from src.sekai.misc.drawer import compose_chara_birthday_image, try_render_chara_birthday_payload
         from src.sekai.misc.model import CharaBirthdayRequest
 
         request = CharaBirthdayRequest.model_validate(payload)
+        skia_payload = asyncio.run(try_render_chara_birthday_payload(request))
+        if skia_payload is not None:
+            return _stamp_skia_backend(skia_payload)
         image = asyncio.run(compose_chara_birthday_image(request))
         return _encode_image_payload(image)
 
@@ -304,7 +321,16 @@ class HeavyRenderWorkerPool:
         try:
             await asyncio.to_thread(self._put_task, slot, task)
             task_submitted = True
-            return await self._wait_for_result(slot, task)
+            payload = await self._wait_for_result(slot, task)
+            # The worker's render_stats counters live in that child process; replay the outcome
+            # here from the backend the payload carried back so /render-stats and the
+            # image.response log line see the heavy endpoints too.
+            from src.core.debug import set_render_backend
+            from src.sekai.skia_renderer.render_stats import record_worker_payload_backend
+
+            payload.backend = record_worker_payload_backend(kind, payload.backend)
+            set_render_backend(payload.backend)
+            return payload
         except asyncio.CancelledError:
             if task_submitted:
                 self._spawn_worker(

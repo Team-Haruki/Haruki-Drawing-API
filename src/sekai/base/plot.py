@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Callable
 import contextvars
 from copy import deepcopy
@@ -25,6 +26,7 @@ from .painter import (
     get_font_desc,
     get_text_size,
 )
+from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
 DEBUG = False
 CANVAS_SIZE_LIMIT = [4096, 4096]
@@ -95,7 +97,7 @@ class RoundRectBg(WidgetBg):
 class ImageBg(WidgetBg):
     def __init__(
         self,
-        img: str | Image.Image,
+        img: str | ImageSource,
         align: ALIGN_TYPE = "c",
         mode: Literal["fit", "fill", "fixed", "repeat"] = "fit",
         blur: bool = False,
@@ -110,10 +112,15 @@ class ImageBg(WidgetBg):
         self.align = align
         assert mode in ("fit", "fill", "fixed", "repeat")
         self.mode = mode
-        if blur:
-            self.img = self.img.filter(ImageFilter.GaussianBlur(radius=3))
-        if fade > 0:
-            self.img = ImageEnhance.Brightness(self.img).enhance(1 - fade)
+        if blur or fade > 0:
+            # blur/fade mutate pixels, so a lazy ref must decode here; pass fade=0 to
+            # keep an AssetImageRef pass-through (path straight into the IR).
+            if not isinstance(self.img, Image.Image):
+                self.img = resolve_image_source_sync(self.img)
+            if blur:
+                self.img = self.img.filter(ImageFilter.GaussianBlur(radius=3))
+            if fade > 0:
+                self.img = ImageEnhance.Brightness(self.img).enhance(1 - fade)
 
     def draw(self, p: Painter) -> None:
         if self.mode == "fit":
@@ -1552,7 +1559,7 @@ class ColoredTextBox(Widget):
 class ImageBox(Widget):
     def __init__(
         self,
-        image: str | Image.Image,
+        image: str | ImageSource,
         image_size_mode=None,
         size=None,
         use_alpha_blend=False,
@@ -1563,6 +1570,11 @@ class ImageBox(Widget):
     ) -> None:
         """
         image_size_mode: 'fit', 'fill', 'original'
+
+        ``image`` may be a decoded PIL image, an absolute file path (decoded eagerly),
+        or a lazy AssetImageRef/EncodedImageRef: the Skia path then passes the asset
+        path / encoded bytes straight through and the Pillow fallback decodes on
+        demand inside Painter (layout only needs ``.size``, which refs provide).
         """
         super().__init__()
         self.image_size_mode = None
@@ -1605,7 +1617,7 @@ class ImageBox(Widget):
         self.shadow_alpha = shadow_alpha
         return self
 
-    def set_image(self, image: str | Image.Image) -> Self:
+    def set_image(self, image: str | ImageSource) -> Self:
         if isinstance(image, str):
             self.image = _open_image_copy(image)
         else:
@@ -1673,9 +1685,74 @@ class Spacer(Widget):
         pass
 
 
+def _image_box_size_hint(widget) -> tuple[int, int] | None:
+    """The exact size an ImageBox will paste its ref at, if computable pre-layout.
+
+    ImageBox._get_content_size only needs the ref's header dimensions plus the
+    widget's own w/h, so prefetch can warm the (small) resize-cache entry the draw
+    will hit instead of parking a full-size decode that may be evicted long before
+    the serial replay reads it (hundreds of list jackets exceed the byte budget)."""
+    if not isinstance(widget, ImageBox):
+        return None
+    try:
+        w, h = widget._get_content_size()
+    except Exception:
+        return None
+    if not w or not h or w <= 0 or h <= 0:
+        return None
+    if (w, h) == tuple(widget.image.size):
+        return None
+    return (int(w), int(h))
+
+
+def _collect_asset_refs(widget, out: dict) -> None:
+    """Gather lazy AssetImageRefs held by a widget tree (ImageBox images, bg images,
+    and any widget-declared ``prefetch_image_sources`` extras) with target-size hints."""
+    image = getattr(widget, "image", None)
+    if isinstance(image, AssetImageRef):
+        out[id(image)] = (image, _image_box_size_hint(widget))
+    for holder in (getattr(widget, "bg", None), getattr(widget, "item_bg", None)):
+        bg_img = getattr(holder, "img", None)
+        if isinstance(bg_img, AssetImageRef):
+            out[id(bg_img)] = (bg_img, None)
+    for extra in getattr(widget, "prefetch_image_sources", None) or ():
+        if isinstance(extra, AssetImageRef):
+            # setdefault, not assignment: a widget may list its own ``image`` among the extras
+            # (CardFullThumbnailBox does — ``layers.base`` is both), and an unhinted extra must not
+            # overwrite the display-size hint recorded for it above.
+            out.setdefault(id(extra), (extra, None))
+    for child in getattr(widget, "items", None) or ():
+        _collect_asset_refs(child, out)
+
+
+async def prefetch_asset_refs(root: Widget) -> None:
+    """Decode every lazy AssetImageRef in the tree into the global caches
+    concurrently — at the display size when known — so the serial Pillow draw hits
+    warm caches instead of decoding inline op by op. No-op for trees without refs
+    (the Skia path never calls this)."""
+    refs: dict[int, tuple[AssetImageRef, tuple[int, int] | None]] = {}
+    _collect_asset_refs(root, refs)
+    if not refs:
+        return
+    unique: dict[tuple, tuple[AssetImageRef, tuple[int, int] | None]] = {}
+    for ref, hint in refs.values():
+        unique.setdefault((str(ref.path), ref.mtime_ns, ref.file_size, hint), (ref, hint))
+    await asyncio.gather(*(run_in_pool(resolve_image_source_sync, r, h) for r, h in unique.values()))
+
+
 class Canvas(Frame):
     def __init__(self, w=None, h=None, bg: WidgetBg = None) -> None:
         super().__init__()
+        # A Canvas is a page ROOT — it must never become a child of whatever widget context happens
+        # to be open. Widget.__init__ auto-adds every new widget to the enclosing `with` block, so
+        # building a Canvas inside one (e.g. a drawer composing a sub-badge inline, which is the
+        # `with Canvas(): with VSplit():` idiom every drawer uses) would silently adopt it into the
+        # outer layout and corrupt it.
+        parent = Widget.get_current_widget()
+        if parent is not None and self in parent.items:
+            parent.items.remove(self)
+            self.parent = None
+
         self.set_size((w, h))
         self.set_bg(bg)
         self.set_margin(0)
@@ -1685,6 +1762,7 @@ class Canvas(Frame):
         size = self._get_self_size()
         size_limit = CANVAS_SIZE_LIMIT
         assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        await prefetch_asset_refs(self)
         p = Painter(size=size)
         self.draw(p)
         img = await p.get(cache_key)
@@ -1693,6 +1771,24 @@ class Canvas(Frame):
         if DEBUG:
             logging.debug(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
             pass
+        return img
+
+    def get_img_sync(self, scale: float | None = None) -> Image.Image:
+        """Render the tree with Pillow from SYNCHRONOUS code (no pool offload, no prefetch).
+
+        Same draw path as :meth:`get_img` — ``Painter._execute`` is the static, sync entry that
+        one also ends in — so a tree renders identically either way. It is for callers that are
+        already inside a worker/sync context (e.g. the custom-profile renderer composing an honor
+        badge); lazy ``AssetImageRef``s resolve inline in the paste impls instead of being
+        prefetched concurrently, so prefer :meth:`get_img` from async code."""
+        size = self._get_self_size()
+        size_limit = CANVAS_SIZE_LIMIT
+        assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        p = Painter(size=size)
+        self.draw(p)
+        img = Painter._execute(p.operations, None, size)
+        if scale:
+            img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
         return img
 
 

@@ -83,3 +83,86 @@ jobs:
 
       - name: Run pytest
         run: .venv314t/bin/python -m pytest -q
+
+  # Builds the haruki_skia_renderer extension in-place so the native Skia tests
+  # (ir_painter / skia_safety / font-only parity cases) actually run instead of
+  # skipping. Parity cases that need synced game assets still skip cleanly.
+  native-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install skia-safe link dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install CPython free-threaded
+        run: uv python install cpython-3.14.3+freethreaded
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/haruki_skia_renderer
+          shared-key: skia-renderer
+
+      # Fonts are OFL/CC licensed and too large to vendor; download once and cache.
+      - name: Cache CI fonts
+        id: font-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/SourceHanSansSC-Regular.otf
+            data/SourceHanSansSC-Bold.otf
+            data/SourceHanSansSC-Heavy.otf
+            data/TwemojiMozilla.ttf
+          key: ci-fonts-source-han-sans-release-twemoji-mozilla-v0.7.0
+
+      - name: Download CI fonts
+        if: steps.font-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          for weight in Regular Bold Heavy; do
+            curl -fsSL --retry 3 -o "data/SourceHanSansSC-${weight}.otf" \
+              "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-${weight}.otf"
+          done
+          # COLR-format Twemoji: FreeType/Skia render it in color with default features
+          # (the SVGinOT variant only yields monochrome fallbacks on the Linux backend).
+          curl -fsSL --retry 3 -o data/TwemojiMozilla.ttf \
+            "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf"
+          ls -l data/SourceHanSansSC-*.otf data/TwemojiMozilla.ttf
+
+      - name: Sync dependencies
+        run: uv sync --frozen --all-groups --python cpython-3.14.3+freethreaded
+
+      - name: Repair pjsekai_scores_rs FreeType linkage
+        run: |
+          set -euo pipefail
+          system_freetype="$(ldconfig -p | awk '/libfreetype\.so\.6 / { print $NF; exit }')"
+          bundled_freetype="$(find .venv/lib -path '*/pjsekai_scores_rs_skia_image.libs/libfreetype-*.so.6' -print -quit)"
+          if [ -n "$bundled_freetype" ]; then
+            test -n "$system_freetype"
+            rm "$bundled_freetype"
+            ln -s "$system_freetype" "$bundled_freetype"
+          fi
+          uv run python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
+
+      - name: Build haruki_skia_renderer in-place
+        run: uv run maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
+
+      - name: Verify native renderer capability handshake
+        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 7, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+
+      - name: Run pytest with native renderer
+        env:
+          # Linux FreeType renders COLR natively; the repo default (OT-SVG) is macOS-only.
+          HARUKI_FONT__EMOJI: TwemojiMozilla
+        run: uv run pytest tests/ -q

@@ -5,6 +5,7 @@ import time
 
 from PIL import Image, ImageDraw
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base import (
     ASSETS_BASE_DIR,
     BG_PADDING,
@@ -34,14 +35,14 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
-    build_rendered_image_cache_key,
-    get_composed_image_cached,
-    put_composed_image_cache,
+    get_asset_image_ref,
 )
 from src.sekai.profile.drawer import (
-    get_card_full_thumbnail,
+    CardFullThumbnailBox,
+    get_card_full_thumbnail_layers,
     get_profile_card,
 )
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -100,81 +101,6 @@ def get_notice_dimensions(content_width: int, min_width: int = 520) -> tuple[int
     panel_width = max(min_width, content_width)
     text_width = max(240, panel_width - 120)
     return panel_width, text_width
-
-
-def _build_card_list_cache_key(rqd: CardListRequest) -> str:
-    request_payload = {
-        "cards": [
-            {
-                "card_id": card.card_id,
-                "release_at": card.release_at,
-                "supply_type": card.supply_type,
-                "prefix": card.prefix,
-                "skill_icon_path": card.skill.skill_type_icon_path if card.skill else None,
-                "thumbnail_info": [thumb.model_dump(mode="json") for thumb in (card.thumbnail_info or [])],
-            }
-            for card in rqd.cards
-        ],
-        "region": rqd.region,
-        "title": rqd.title,
-        "timezone": rqd.timezone,
-        "background_img_path": rqd.background_img_path,
-        "term_limited_icon_path": rqd.term_limited_icon_path,
-        "fes_limited_icon_path": rqd.fes_limited_icon_path,
-    }
-    return build_rendered_image_cache_key("card_list", request_payload)
-
-
-def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
-    request_payload = {
-        "cards": [
-            {
-                "card": {
-                    "card_id": user_card.card.card_id,
-                    "character_id": user_card.card.character_id,
-                    "release_at": user_card.card.release_at,
-                    "supply_type": user_card.card.supply_type,
-                    "rare": user_card.card.rare,
-                    "thumbnail_info": [
-                        thumb.model_dump(mode="json") for thumb in (user_card.card.thumbnail_info or [])
-                    ],
-                    "is_after_training": user_card.card.is_after_training,
-                },
-                "has_card": user_card.has_card,
-            }
-            for user_card in rqd.cards
-        ],
-        "region": rqd.region,
-        "title": rqd.title,
-        "timezone": rqd.timezone,
-        "show_id": rqd.show_id,
-        "show_box": rqd.show_box,
-        "unowned_only": rqd.unowned_only,
-        "group_by": rqd.group_by,
-        "distribution": rqd.distribution.model_dump(mode="json") if rqd.distribution else None,
-        "background_img_path": rqd.background_img_path,
-        "character_icon_paths": rqd.character_icon_paths,
-        "character_color_codes": rqd.character_color_codes,
-        "term_limited_icon_path": rqd.term_limited_icon_path,
-        "fes_limited_icon_path": rqd.fes_limited_icon_path,
-        "user_info": (
-            {
-                "id": rqd.user_info.id,
-                "region": rqd.user_info.region,
-                "nickname": rqd.user_info.nickname,
-                "source": rqd.user_info.source,
-                "update_time": rqd.user_info.update_time,
-                "mode": rqd.user_info.mode,
-                "is_hide_uid": rqd.user_info.is_hide_uid,
-                "leader_image_path": rqd.user_info.leader_image_path,
-                "has_frame": rqd.user_info.has_frame,
-                "frame_path": rqd.user_info.frame_path,
-            }
-            if rqd.user_info is not None
-            else None
-        ),
-    }
-    return build_rendered_image_cache_key("card_box", request_payload)
 
 
 def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):
@@ -595,11 +521,11 @@ def _fallback_card_box_distribution(rqd: CardBoxRequest) -> CardBoxDistribution:
 # ========== 主要函数 ==========
 
 
-async def compose_card_detail_image(
+async def _build_card_detail_canvas(
     rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
-):
+) -> Canvas:
     """
-    合成卡牌详情图片
+    合成卡牌详情图片（构建 plot.py widget 树，供 Pillow 与 Skia 影子层共用）
     """
     card_info = rqd.card_info
     region = rqd.region
@@ -608,15 +534,15 @@ async def compose_card_detail_image(
     sp_skill_info = rqd.card_info.special_skill_info
     # 获取图片（并行）
     _img_tasks = [
-        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.card_images_path],
-        *[get_img_from_path(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path],
-        *[get_card_full_thumbnail(thumbnail) for thumbnail in rqd.card_info.thumbnail_info],
-        get_img_from_path(ASSETS_BASE_DIR, rqd.character_icon_path),
-        get_img_from_path(ASSETS_BASE_DIR, rqd.unit_logo_path),
-        get_img_from_path(ASSETS_BASE_DIR, skill_info.skill_type_icon_path),
+        *[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in rqd.card_images_path],
+        *[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in rqd.costume_images_path],
+        *[get_card_full_thumbnail_layers(thumbnail) for thumbnail in rqd.card_info.thumbnail_info],
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.character_icon_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, skill_info.skill_type_icon_path),
     ]
     if sp_skill_info:
-        _img_tasks.append(get_img_from_path(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
+        _img_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, sp_skill_info.skill_type_icon_path))
     _t0 = time.perf_counter()
     _img_results = await asyncio.gather(*_img_tasks)
     logger.debug(
@@ -633,7 +559,7 @@ async def compose_card_detail_image(
     _offset += _n_cards
     costume_images = list(_img_results[_offset : _offset + _n_costumes])
     _offset += _n_costumes
-    thumbnail_images = list(_img_results[_offset : _offset + _n_thumbs])
+    thumbnail_layers = list(_img_results[_offset : _offset + _n_thumbs])
     _offset += _n_thumbs
     character_icon = _img_results[_offset]
     _offset += 1
@@ -657,15 +583,15 @@ async def compose_card_detail_image(
     # 预加载关联活动/卡池图片（并行）
     _extra_tasks = {}
     if event_detail:
-        _extra_tasks["event_banner"] = get_img_from_path(ASSETS_BASE_DIR, event_detail.event_banner_path)
+        _extra_tasks["event_banner"] = get_asset_image_ref(ASSETS_BASE_DIR, event_detail.event_banner_path)
         if event_detail.bonus_attr and rqd.event_attr_icon_path:
-            _extra_tasks["event_attr"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_attr_icon_path)
+            _extra_tasks["event_attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_attr_icon_path)
         if event_detail.unit and rqd.event_unit_icon_path:
-            _extra_tasks["event_unit"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_unit_icon_path)
+            _extra_tasks["event_unit"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_unit_icon_path)
         if event_detail.banner_cid and rqd.event_chara_icon_path:
-            _extra_tasks["event_chara"] = get_img_from_path(ASSETS_BASE_DIR, rqd.event_chara_icon_path)
+            _extra_tasks["event_chara"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_chara_icon_path)
     if gacha_detail:
-        _extra_tasks["gacha_banner"] = get_img_from_path(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path)
+        _extra_tasks["gacha_banner"] = get_asset_image_ref(ASSETS_BASE_DIR, gacha_detail.gacha_banner_path)
     _extra_keys = list(_extra_tasks.keys())
     _extra_imgs = dict(zip(_extra_keys, await asyncio.gather(*_extra_tasks.values()))) if _extra_tasks else {}
 
@@ -680,6 +606,8 @@ async def compose_card_detail_image(
     tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))  # noqa: F841
 
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
+    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
+    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
     if rqd.background_image_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path, on_missing="raise")
@@ -835,8 +763,8 @@ async def compose_card_detail_image(
                     # 缩略图
                     with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
                         TextBox("缩略图", label_style)
-                        for img in thumbnail_images:
-                            ImageBox(img, size=(100, None))
+                        for layers in thumbnail_layers:
+                            CardFullThumbnailBox(layers, size=(100, None))
 
                     # 衣装
                     if len(costume_images) > 0:
@@ -847,21 +775,36 @@ async def compose_card_detail_image(
                                     ImageBox(img, size=(80, None))
 
     add_request_watermark(canvas, rqd)
+    return canvas
+
+
+async def compose_card_detail_image(
+    rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+):
+    """合成卡牌详情图片（Pillow 路径）"""
+    canvas = await _build_card_detail_canvas(rqd, title, title_style, title_shadow)
     return await canvas.get_img()
 
 
-async def compose_card_list_image(
-    rqd: CardListRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
-):
-    """
-    合成卡牌列表图片
-    """
-    cache_key = _build_card_list_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("card/list cache hit: cards=%d", len(rqd.cards))
-        return cached
+async def try_render_card_detail_payload(
+    rqd: CardDetailRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
+) -> EncodedImagePayload | None:
+    """Skia 影子层路径；未启用或不可表达时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    return await render_canvas_payload(
+        await _build_card_detail_canvas(rqd, title, title_style, title_shadow),
+        endpoint="card_detail",
+    )
 
+
+async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
+    """构建卡牌列表的 widget 树。
+
+    两个后端共用:Pillow 走 :func:`compose_card_list_image`(canvas.get_img),Skia 走
+    :func:`try_render_card_list_payload`(IRPainter 影子层)。取代早期为逐像素对齐手写的
+    ``card_render`` list 场景构建器。
+    """
     _t_total = time.perf_counter()
     cards = rqd.cards
     region = rqd.region  # noqa: F841
@@ -872,13 +815,13 @@ async def compose_card_list_image(
         if not thumbnails:
             return []
         if len(thumbnails) == 1:
-            img = await get_card_full_thumbnail(thumbnails[0])
-            return [img] if img is not None else []
+            layers = await get_card_full_thumbnail_layers(thumbnails[0])
+            return [layers] if layers is not None else []
         normal, after = await asyncio.gather(
-            get_card_full_thumbnail(thumbnails[0]),
-            get_card_full_thumbnail(thumbnails[1]),
+            get_card_full_thumbnail_layers(thumbnails[0]),
+            get_card_full_thumbnail_layers(thumbnails[1]),
         )
-        return [img for img in (normal, after) if img is not None]
+        return [layers for layers in (normal, after) if layers is not None]
 
     _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
@@ -898,6 +841,8 @@ async def compose_card_list_image(
     notice_text_style = TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0))
 
     # 使用传入的背景图片，如果没有则使用默认背景
+    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
+    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
     if rqd.background_img_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
@@ -917,11 +862,11 @@ async def compose_card_list_image(
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        preload_tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
     for path in skill_icon_paths:
-        preload_tasks[f"skill::{path}"] = get_img_from_path(ASSETS_BASE_DIR, path)
+        preload_tasks[f"skill::{path}"] = get_asset_image_ref(ASSETS_BASE_DIR, path)
 
     _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
@@ -993,7 +938,9 @@ async def compose_card_list_image(
                                     supply_name = card.supply_type or ""
                                     for thumb in thumb_group:
                                         with Frame().set_content_align("rt"):
-                                            ImageBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                                            CardFullThumbnailBox(
+                                                thumb, size=(100, 100), image_size_mode="fill", shadow=True
+                                            )
                                             limited_icon_width = 75
                                             if supply_name in TERM_LIMITED_SUPPLY_TYPES:
                                                 if term_img:
@@ -1013,38 +960,51 @@ async def compose_card_list_image(
                                 TextBox(id_text, id_style).set_w(GW).set_content_align("c")
 
     add_request_watermark(canvas, rqd)
-    _t0 = time.perf_counter()
-    image = await canvas.get_img()
-    _t_render = time.perf_counter() - _t0
-    put_composed_image_cache(cache_key, image)
     _perf_logger.info(
-        "card/list total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, "
-        "cards=%d, rendered=%d, skills=%d, image=%dx%d)",
+        "card/list build: %.3fs (thumbs=%.3fs, preload=%.3fs, cards=%d, rendered=%d, skills=%d)",
         time.perf_counter() - _t_total,
         _t_thumbs,
         _t_preload,
-        _t_render,
         len(rqd.cards),
         len(card_and_thumbs),
         len(skill_icon_paths),
-        image.width,
-        image.height,
     )
+    return canvas
+
+
+async def compose_card_list_image(rqd: CardListRequest) -> Image.Image:
+    """合成卡牌列表图片 (Pillow 路径)。"""
+    canvas = await _build_card_list_canvas(rqd)
+    _t0 = time.perf_counter()
+    image = await canvas.get_img()
+    _perf_logger.info("card/list backend=pillow render: %.3fs (image=%dx%d)", time.perf_counter() - _t0, *image.size)
     return image
 
 
-async def compose_box_image(
-    rqd: CardBoxRequest, title: str | None = None, title_style: TextStyle = None, title_shadow: bool = False
-):
-    """
-    合成卡牌一览图片（按角色分类的卡牌收集册）
-    """
-    cache_key = _build_card_box_cache_key(rqd)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("card/box cache hit: cards=%d", len(rqd.cards))
-        return cached
+async def try_render_card_list_payload(rqd: CardListRequest) -> EncodedImagePayload | None:
+    """Skia 路径:同一棵 widget 树经 IRPainter 渲染。不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_card_list_canvas(rqd)
+    _t0 = time.perf_counter()
+    payload = await render_canvas_payload(canvas, endpoint="card_list")
+    if payload is not None:
+        _perf_logger.info(
+            "card/list backend=skia render: %.3fs (cards=%d, image=%dx%d)",
+            time.perf_counter() - _t0,
+            len(rqd.cards),
+            payload.image_width,
+            payload.image_height,
+        )
+    return payload
 
+
+async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
+    """构建卡牌一览的 widget 树（按角色分类的卡牌收集册）。
+
+    两个后端共用：Pillow 走 :func:`compose_box_image`（canvas.get_img），Skia 走
+    :func:`try_render_box_payload`（IRPainter 影子层）。
+    """
     _t_total = time.perf_counter()
     cards = rqd.cards
     region = rqd.region  # noqa: F841
@@ -1062,22 +1022,22 @@ async def compose_box_image(
         if not thumbnails:
             return None
         if len(thumbnails) == 1:
-            return await get_card_full_thumbnail(thumbnails[0])
+            return await get_card_full_thumbnail_layers(thumbnails[0])
         if card.card.is_after_training:
-            return await get_card_full_thumbnail(thumbnails[1])
-        return await get_card_full_thumbnail(thumbnails[0])
+            return await get_card_full_thumbnail_layers(thumbnails[1])
+        return await get_card_full_thumbnail_layers(thumbnails[0])
 
     _t0 = time.perf_counter()
     thumbs = await asyncio.gather(*[get_box_thumb(card) for card in cards])
     _t_thumbs = time.perf_counter() - _t0
 
     card_records = []
-    for card, img in zip(cards, thumbs):
-        if not img:
+    for card, layers in zip(cards, thumbs):
+        if not layers:
             continue
         card_data = {
             **card.model_dump(),
-            "img": img,
+            "thumb_layers": layers,
             "has": card.has_card,  # 恢复拥有状态判断
         }
         if show_box and not card_data["has"]:
@@ -1165,18 +1125,19 @@ async def compose_box_image(
 
     preload_tasks: dict[str, asyncio.Future] = {}
     if rqd.term_limited_icon_path:
-        preload_tasks["term_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        preload_tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        preload_tasks["fes_img"] = get_img_from_path(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+        preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
     if rqd.character_icon_paths:
         for chara_id, path in rqd.character_icon_paths.items():
+            # 保持即时解码：角色头像会喂给 _circular_progress_avatar 做 convert/resize 像素处理
             preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
     for attr_stat in distribution.attribute_stats:
         if attr_stat.attr_icon_path:
-            preload_tasks[f"attr::{attr_stat.attr}"] = get_img_from_path(ASSETS_BASE_DIR, attr_stat.attr_icon_path)
+            preload_tasks[f"attr::{attr_stat.attr}"] = get_asset_image_ref(ASSETS_BASE_DIR, attr_stat.attr_icon_path)
     if single_progress is not None:
-        preload_tasks["rarity_star"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_RARITY_STAR_PATH)
-        preload_tasks["rarity_birthday"] = get_img_from_path(ASSETS_BASE_DIR, CARD_BOX_BIRTHDAY_RARITY_PATH)
+        preload_tasks["rarity_star"] = get_asset_image_ref(ASSETS_BASE_DIR, CARD_BOX_RARITY_STAR_PATH)
+        preload_tasks["rarity_birthday"] = get_asset_image_ref(ASSETS_BASE_DIR, CARD_BOX_BIRTHDAY_RARITY_PATH)
 
     _t0 = time.perf_counter()
     preloaded: dict[str, object] = {}
@@ -1213,25 +1174,31 @@ async def compose_box_image(
 
     # 绘制单张卡
     def draw_card(card_data):
-        with Frame().set_content_align("rt"):
-            ImageBox(card_data["img"], size=(sz, sz))
+        # 卡图与卡号 ID 必须包裹在同一个容器里，否则 show_id 为真时 ID 文本会被注册成 Grid
+        # 的独立单元，导致每张卡占两格、列数与整体宽度翻倍（触发 watermark 的尺寸越界报错）。
+        with VSplit().set_content_align("rt").set_sep(0):
+            with Frame().set_content_align("rt"):
+                CardFullThumbnailBox(card_data["thumb_layers"], size=(sz, sz))
 
-            # 限定类型图标
-            supply_name = card_data["card"].get("supply_type", "")
-            limited_icon_width = int(sz * 0.75)
-            if supply_name in TERM_LIMITED_SUPPLY_TYPES:
-                if term_img:
-                    ImageBox(term_img, size=(limited_icon_width, None))
-            elif supply_name in FES_LIMITED_SUPPLY_TYPES:
-                if fes_img:
-                    ImageBox(fes_img, size=(limited_icon_width, None))
+                # 限定类型图标
+                supply_name = card_data["card"].get("supply_type", "")
+                limited_icon_width = int(sz * 0.75)
+                if supply_name in TERM_LIMITED_SUPPLY_TYPES:
+                    if term_img:
+                        ImageBox(term_img, size=(limited_icon_width, None))
+                elif supply_name in FES_LIMITED_SUPPLY_TYPES:
+                    if fes_img:
+                        ImageBox(fes_img, size=(limited_icon_width, None))
 
-            # 如果用户没有此卡牌，添加遮罩
-            if not card_data["has"] and user_info:
-                Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
+                # 如果用户没有此卡牌，添加遮罩
+                if not card_data["has"] and user_info:
+                    Spacer(w=sz, h=sz).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
 
-        if show_id:
-            TextBox(f"{card_data['card']['card_id']}", TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0))).set_w(sz)
+            if show_id:
+                TextBox(
+                    f"{card_data['card']['card_id']}",
+                    TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 0)),
+                ).set_w(sz)
 
     profile_card = None
     if user_info:
@@ -1240,6 +1207,7 @@ async def compose_box_image(
         panel_text_width = max(240, panel_width - 120)
 
     # 使用传入的背景图片，如果没有则使用默认背景
+    # 同 compose_card_list_image：ImageBg 默认 fade=0.1 会在构造时改写像素，保持即时解码。
     if rqd.background_img_path:
         try:
             bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
@@ -1493,21 +1461,48 @@ async def compose_box_image(
                 draw_normal_card_box_grid()
 
     add_request_watermark(canvas, rqd)
-    _t0 = time.perf_counter()
-    image = await canvas.get_img()
-    _t_render = time.perf_counter() - _t0
-    put_composed_image_cache(cache_key, image)
     _perf_logger.info(
-        "card/box total: %.3fs (thumbs=%.3fs, preload=%.3fs, render=%.3fs, "
-        "cards=%d, visible=%d, groups=%d, image=%dx%d)",
+        "card/box build: %.3fs (thumbs=%.3fs, preload=%.3fs, cards=%d, visible=%d, groups=%d)",
         time.perf_counter() - _t_total,
         _t_thumbs,
         _t_preload,
-        _t_render,
         len(rqd.cards),
         sum(len(group_cards) for _, group_cards in chara_cards),
         len(chara_cards),
+    )
+    return canvas
+
+
+async def compose_box_image(rqd: CardBoxRequest):
+    """合成卡牌一览图片（Pillow 路径）。"""
+    canvas = await _build_box_canvas(rqd)
+    _t0 = time.perf_counter()
+    image = await canvas.get_img()
+    _perf_logger.info(
+        "card/box pillow render: %.3fs (cards=%d, image=%dx%d)",
+        time.perf_counter() - _t0,
+        len(rqd.cards),
         image.width,
         image.height,
     )
     return image
+
+
+async def try_render_box_payload(rqd: CardBoxRequest) -> EncodedImagePayload | None:
+    """Skia 路径：同一棵 widget 树经 IRPainter 渲染（user_info profile card、收集统计、
+    属性分组全部随 widget 树自然覆盖）。取代早期为逐像素对齐手写的 card_render box 场景
+    构建器。不可用时返回 None 回退 Pillow。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_box_canvas(rqd)
+    _t0 = time.perf_counter()
+    payload = await render_canvas_payload(canvas, endpoint="card_box")
+    if payload is not None:
+        _perf_logger.info(
+            "card/box backend=skia render: %.3fs (cards=%d, image=%dx%d)",
+            time.perf_counter() - _t0,
+            len(rqd.cards),
+            payload.image_width,
+            payload.image_height,
+        )
+    return payload

@@ -2,7 +2,7 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import image_to_response
+from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.education.drawer import (
     compose_area_item_upgrade_materials_image,
     compose_bonds_image,
@@ -11,6 +11,13 @@ from src.sekai.education.drawer import (
     compose_character_mission_overview_image,
     compose_leader_count_image,
     compose_power_bonus_detail_image,
+    try_render_area_item_upgrade_materials_payload,
+    try_render_bonds_payload,
+    try_render_challenge_live_detail_payload,
+    try_render_character_mission_all_payload,
+    try_render_character_mission_overview_payload,
+    try_render_leader_count_payload,
+    try_render_power_bonus_detail_payload,
 )
 from src.sekai.education.model import (
     AreaItemUpgradeMaterialsRequest,
@@ -33,6 +40,9 @@ async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
     Shows challenge live progress for all characters.
     """
     try:
+        payload = await try_render_challenge_live_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_challenge_live_detail_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -47,6 +57,9 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
     Shows character, unit, and attribute bonus details.
     """
     try:
+        payload = await try_render_power_bonus_detail_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_power_bonus_detail_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -62,6 +75,9 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
     Shows required materials for upgrading area items.
     """
     try:
+        payload = await try_render_area_item_upgrade_materials_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_area_item_upgrade_materials_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -77,6 +93,9 @@ async def bonds_level(request: BondsRequest):
     Shows character bonds levels and progress.
     """
     try:
+        payload = await try_render_bonds_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_bonds_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -92,6 +111,9 @@ async def leader_count(request: LeaderCountRequest):
     Shows character leader play counts and EX levels.
     """
     try:
+        payload = await try_render_leader_count_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_leader_count_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -101,6 +123,9 @@ async def leader_count(request: LeaderCountRequest):
 @router.post("/character-mission-overview", summary="Generate character mission overview image")
 async def character_mission_overview(request: CharacterMissionOverviewRequest):
     try:
+        payload = await try_render_character_mission_overview_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_character_mission_overview_image(request)
         return await image_to_response(image)
     except Exception as e:
@@ -110,6 +135,9 @@ async def character_mission_overview(request: CharacterMissionOverviewRequest):
 @router.post("/character-mission-all", summary="Generate character mission full table image")
 async def character_mission_all(request: CharacterMissionAllRequest):
     try:
+        payload = await try_render_character_mission_all_payload(request)
+        if payload is not None:
+            return encoded_image_payload_to_response(payload)
         image = await compose_character_mission_all_image(request)
         return await image_to_response(image)
     except Exception as e:

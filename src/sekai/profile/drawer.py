@@ -3,8 +3,9 @@ from dataclasses import dataclass
 import logging
 import time
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
+from src.core.heavy_render_pool import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -22,9 +23,10 @@ from src.sekai.base.painter import (
     RED,
     WHITE,
     Painter,
+    ascender_top_to_painter_y,
     get_font,
+    get_font_desc,
     get_text_size,
-    resize_keep_ratio,
 )
 from src.sekai.base.plot import (
     Canvas,
@@ -44,19 +46,21 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
+    AssetImageRef,
+    ImageSource,
     build_rendered_image_cache_key,
+    get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
-    get_image_asset_signature,
-    get_img_from_path,
     get_img_resized,
     get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
-    run_in_pool,
     truncate,
 )
 from src.sekai.honor.drawer import HonorRequest, compose_full_honor_image
+from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
+from src.sekai.skia_renderer.card_common import rare_count
 from src.settings import ASSETS_BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -163,7 +167,7 @@ from .model import (
 class _ProfileLayoutContext:
     request: ProfileRequest
     profile: BasicProfile
-    avatar_img: Image.Image
+    avatar_img: ImageSource
     ui_bg: RoundRectBg
     pcards: list[CardFullThumbnailRequest]
     honors: list[HonorRequest]
@@ -173,244 +177,228 @@ class _ProfileLayoutContext:
     multi_live: MultiLiveTopScoreCount | None
 
 
-def _compose_card_full_thumbnail_sync(
-    rqd: CardFullThumbnailRequest,
-    img: Image.Image,
-    rare_img: Image.Image,
-    frame_img: Image.Image | None,
-    rank_img: Image.Image | None,
-    attr_img: Image.Image | None,
-) -> Image.Image:
-    # 兼容 "rarity_4", "4_star", "4" 等格式
-    if rqd.rare == "rarity_birthday":
-        rare_num = 1
-    else:
-        import re
+@dataclass(slots=True)
+class CardFullThumbnailLayers:
+    """Header-only layer refs for one card thumbnail (placeholder PIL image when an
+    asset is missing). Load with :func:`get_card_full_thumbnail_layers` before entering
+    layout ``with`` blocks; render with :class:`CardFullThumbnailBox`."""
 
-        match = re.search(r"(\d+)", rqd.rare)
-        if match:
-            rare_num = int(match.group(1))
-        else:
-            rare_num = 0
-
-    img_w, img_h = img.size
-    custom_text = rqd.custom_text or None
-    pcard = rqd.is_pcard
-    if pcard:
-        draw = ImageDraw.Draw(img)
-        draw.rectangle((0, img_h - 24, img_w, img_h), fill=(70, 70, 100, 255))
-        if custom_text is not None:
-            draw.text((6, img_h - 31), custom_text, font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
-        else:
-            draw.text((6, img_h - 31), f"Lv.{rqd.level}", font=get_font(DEFAULT_BOLD_FONT, 20), fill=WHITE)
-
-    if frame_img is not None:
-        img.paste(frame_img, (0, 0), frame_img)
-
-    if pcard and rqd.train_rank and rank_img is not None:
-        rank_img_w, rank_img_h = rank_img.size
-        img.paste(rank_img, (img_w - rank_img_w, img_h - rank_img_h), rank_img)
-
-    if attr_img is not None:
-        img.paste(attr_img, (1, 0), attr_img)
-
-    hoffset, voffset = 6, 6 if not pcard else 24
-    rare_w, rare_h = rare_img.size
-    for i in range(rare_num):
-        img.paste(rare_img, (hoffset + rare_w * i, img_h - rare_h - voffset), rare_img)
-
-    mask = Image.new("L", (img_w, img_h), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, img_w, img_h), radius=10, fill=255)
-    img.putalpha(mask)
-    return img
+    rqd: CardFullThumbnailRequest
+    base: AssetImageRef | Image.Image
+    rare: AssetImageRef | Image.Image
+    frame: AssetImageRef | Image.Image | None = None
+    rank: AssetImageRef | Image.Image | None = None
+    attr: AssetImageRef | Image.Image | None = None
 
 
-def _build_card_full_thumbnail_cache_key(
-    rqd: CardFullThumbnailRequest,
-    *,
-    rare_img_path: str,
-) -> str:
-    request_payload = {
-        "card_id": rqd.card_id,
-        "card_thumbnail_path": rqd.card_thumbnail_path,
-        "rare": rqd.rare,
-        "frame_img_path": rqd.frame_img_path,
-        "attr_img_path": rqd.attr_img_path,
-        "rare_img_path": rare_img_path,
-        "train_rank": rqd.train_rank,
-        "train_rank_img_path": rqd.train_rank_img_path,
-        "level": rqd.level,
-        "custom_text": rqd.custom_text,
-        "is_pcard": rqd.is_pcard,
-    }
-    asset_signatures = {
-        "card_thumbnail": get_image_asset_signature(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
-        "rare": get_image_asset_signature(ASSETS_BASE_DIR, rare_img_path),
-        "frame": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_img_path),
-        "attr": get_image_asset_signature(ASSETS_BASE_DIR, rqd.attr_img_path),
-        "rank": get_image_asset_signature(ASSETS_BASE_DIR, rqd.train_rank_img_path),
-    }
-    return build_rendered_image_cache_key(
-        "card_full_thumbnail",
-        request_payload,
-        asset_signatures=asset_signatures,
-    )
-
-
-async def get_card_full_thumbnail(rqd: CardFullThumbnailRequest) -> Image.Image:
+async def get_card_full_thumbnail_layers(rqd: CardFullThumbnailRequest) -> CardFullThumbnailLayers:
     rare_img_path = rqd.birthday_icon_path if rqd.rare == "rarity_birthday" else rqd.rare_img_path
-    cache_key = _build_card_full_thumbnail_cache_key(rqd, rare_img_path=rare_img_path)
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        return cached
-    disk_cached = get_composed_image_disk_cached("card_full_thumbnail", cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        return disk_cached
-
-    _t0 = time.perf_counter()
-    img = await get_img_from_path(ASSETS_BASE_DIR, rqd.card_thumbnail_path)
-    img_w, img_h = img.size
-    rare_scale = 0.17 if not rqd.is_pcard else 0.15
-    tasks = {
-        "rare_img": get_img_resized(
-            ASSETS_BASE_DIR,
-            rare_img_path,
-            max(1, int(img_w * rare_scale)),
-            max(1, int(img_h * rare_scale)),
-        ),
-    }
+    keys = ["base", "rare"]
+    tasks = [
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, rare_img_path),
+    ]
     if rqd.frame_img_path:
-        tasks["frame_img"] = get_img_resized(ASSETS_BASE_DIR, rqd.frame_img_path, img_w, img_h)
+        keys.append("frame")
+        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.frame_img_path))
     if rqd.is_pcard and rqd.train_rank and rqd.train_rank_img_path:
-        tasks["rank_img"] = get_img_resized(
-            ASSETS_BASE_DIR,
-            rqd.train_rank_img_path,
-            max(1, int(img_w * 0.35)),
-            max(1, int(img_h * 0.35)),
-        )
+        keys.append("rank")
+        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.train_rank_img_path))
     if rqd.attr_img_path:
-        tasks["attr_img"] = get_img_resized(
-            ASSETS_BASE_DIR,
-            rqd.attr_img_path,
-            max(1, int(img_w * 0.22)),
-            max(1, int(img_h * 0.25)),
-        )
-
-    keys = list(tasks.keys())
-    _t1 = time.perf_counter()
-    values = await asyncio.gather(*tasks.values())
-    _t2 = time.perf_counter()
-    loaded = dict(zip(keys, values))
-    composed = await run_in_pool(
-        _compose_card_full_thumbnail_sync,
-        rqd,
-        img,
-        loaded["rare_img"],
-        loaded.get("frame_img"),
-        loaded.get("rank_img"),
-        loaded.get("attr_img"),
+        keys.append("attr")
+        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_img_path))
+    loaded = dict(zip(keys, await asyncio.gather(*tasks)))
+    return CardFullThumbnailLayers(
+        rqd=rqd,
+        base=loaded["base"],
+        rare=loaded["rare"],
+        frame=loaded.get("frame"),
+        rank=loaded.get("rank"),
+        attr=loaded.get("attr"),
     )
-    _t3 = time.perf_counter()
-    put_composed_image_cache(cache_key, composed)
-    put_composed_image_disk_cache("card_full_thumbnail", cache_key, composed)
-    if _t3 - _t0 >= 0.05:
-        logger.info(
-            "[perf] card_full_thumbnail miss: card=%s total=%.3fs load_base=%.3fs preload=%.3fs compose=%.3fs",
-            rqd.card_id,
-            _t3 - _t0,
-            _t1 - _t0,
-            _t2 - _t1,
-            _t3 - _t2,
-        )
-    return composed
 
 
-# 获取头像框图片，失败返回None
-async def get_player_frame_image(frame_paths, frame_w: int) -> Image.Image | None:
-    r"""get_player_frame_image
+class CardFullThumbnailBox(ImageBox):
+    """Card thumbnail composed natively by whichever backend draws the tree.
 
-    获取头像框图片
+    Layer recipe mirrors the legacy Pillow pre-composition (base art → pcard level
+    bar/text → frame → train rank → attribute icon → rarity stars, clipped to
+    10px-radius rounded corners at art scale), drawn through Painter primitives so
+    the Skia path emits asset paths straight into the IR and the Pillow fallback
+    decodes the same layers on demand. Constants are in base-art pixels and scale
+    with the display size, matching the legacy compose-then-resize output."""
+
+    def __init__(
+        self,
+        layers: CardFullThumbnailLayers,
+        size=None,
+        image_size_mode=None,
+        shadow=False,
+        shadow_width=6,
+        shadow_alpha=0.6,
+    ) -> None:
+        super().__init__(layers.base, image_size_mode=image_size_mode, size=size)
+        self.layers = layers
+        self.thumb_shadow = shadow
+        self.thumb_shadow_width = shadow_width
+        self.thumb_shadow_alpha = shadow_alpha
+        self.prefetch_image_sources = [
+            layer for layer in (layers.base, layers.rare, layers.frame, layers.rank, layers.attr) if layer is not None
+        ]
+
+    def _draw_content(self, p: Painter) -> None:
+        w, h = self._get_content_size()
+        layers, rqd = self.layers, self.layers.rqd
+        art_w, art_h = self.image.size
+        sx, sy = w / art_w, h / art_h
+        radius = max(1, round(10 * sy))
+        if self.thumb_shadow:
+            p.shadow_roundrect((0, 0), (w, h), radius, self.thumb_shadow_width, self.thumb_shadow_alpha)
+        p.push_clip_roundrect((0, 0), (w, h), radius)
+        p.paste(self.image, (0, 0), (w, h))
+        pcard = rqd.is_pcard
+        if pcard:
+            bar_h = round(24 * sy)
+            p.rect((0, h - bar_h), (w, bar_h), fill=(70, 70, 100, 255))
+            text = rqd.custom_text or f"Lv.{rqd.level}"
+            font_size = max(1, round(20 * sy))
+            font = get_font_desc(DEFAULT_BOLD_FONT, font_size)
+            y = ascender_top_to_painter_y(DEFAULT_BOLD_FONT, font_size, h - round(31 * sy))
+            p.text(text, (round(6 * sx), y), font=font, fill=WHITE)
+        # The overlays go through paste_with_alpha_blend, not paste: Pillow's paste(im, pos, im)
+        # lerps the DESTINATION alpha toward the layer's, so an anti-aliased frame/star edge
+        # would leave the composed thumbnail translucent there and the page background (and the
+        # drop shadow underneath) would bleed through as a halo. The legacy composer got away
+        # with plain pastes because it finished with img.putalpha(mask), hard-resetting alpha to
+        # opaque; the clip only multiplies alpha, so it cannot undo that. alpha_composite keeps
+        # dst alpha at 255 and is what the Skia backend already does for both paste variants.
+        if layers.frame is not None:
+            p.paste_with_alpha_blend(layers.frame, (0, 0), (w, h))
+        if pcard and rqd.train_rank and layers.rank is not None:
+            rank_w, rank_h = max(1, round(w * 0.35)), max(1, round(h * 0.35))
+            p.paste_with_alpha_blend(layers.rank, (w - rank_w, h - rank_h), (rank_w, rank_h))
+        if layers.attr is not None:
+            p.paste_with_alpha_blend(layers.attr, (round(sx), 0), (max(1, round(w * 0.22)), max(1, round(h * 0.25))))
+        rare_scale = 0.17 if not pcard else 0.15
+        rare_w, rare_h = max(1, round(w * rare_scale)), max(1, round(h * rare_scale))
+        hoffset, voffset = round(6 * sx), round((24 if pcard else 6) * sy)
+        for i in range(rare_count(rqd.rare)):
+            p.paste_with_alpha_blend(layers.rare, (hoffset + rare_w * i, h - rare_h - voffset), (rare_w, rare_h))
+        p.pop_clip()
+
+
+@dataclass(slots=True)
+class PlayerFrameLayers:
+    """头像框六部件的 header-only 图源引用（缺文件时为占位 PIL 图）。"""
+
+    base: AssetImageRef | Image.Image
+    centertop: AssetImageRef | Image.Image
+    leftbottom: AssetImageRef | Image.Image
+    lefttop: AssetImageRef | Image.Image
+    rightbottom: AssetImageRef | Image.Image
+    righttop: AssetImageRef | Image.Image
+
+
+async def get_player_frame_layers(frame_paths) -> PlayerFrameLayers:
+    r"""获取头像框六部件的图源引用（不解码像素）。
 
     Args
     ----
     frame_paths : PlayerFramePaths
         头像框各部件路径
-    frame_w : int
-        头像框宽度
     """
-    scale = 1.5
-    corner = 20
-    corner2 = 50
-    w = 700
-    border = 100
-    border2 = 80
-    inner_w = w - 2 * border
-
-    _t0 = time.perf_counter()
     base, ct, lb, lt, rb, rt = await asyncio.gather(
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.base),
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.centertop),
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.leftbottom),
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.lefttop),
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.rightbottom),
-        get_img_from_path(ASSETS_BASE_DIR, frame_paths.righttop),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.base),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.centertop),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.leftbottom),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.lefttop),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.rightbottom),
+        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.righttop),
     )
-    logger.debug("[perf] get_player_frame_image preload 6 parts: %.3fs", time.perf_counter() - _t0)
+    return PlayerFrameLayers(base=base, centertop=ct, leftbottom=lb, lefttop=lt, rightbottom=rb, righttop=rt)
 
-    ct = resize_keep_ratio(ct, scale, mode="scale")
-    lt = resize_keep_ratio(lt, scale, mode="scale")
-    lb = resize_keep_ratio(lb, scale, mode="scale")
-    rt = resize_keep_ratio(rt, scale, mode="scale")
-    rb = resize_keep_ratio(rb, scale, mode="scale")
 
-    bw = base.width
-    base_lt = base.crop((0, 0, corner, corner))
-    base_rt = base.crop((bw - corner, 0, bw, corner))
-    base_lb = base.crop((0, bw - corner, corner, bw))
-    base_rb = base.crop((bw - corner, bw - corner, bw, bw))
-    base_l = base.crop((0, corner, corner, bw - corner))
-    base_r = base.crop((bw - corner, corner, bw, bw - corner))
-    base_t = base.crop((corner, 0, bw - corner, corner))
-    base_b = base.crop((corner, bw - corner, bw - corner, bw))
+class PlayerFrameBox(Widget):
+    """玩家头像框，两个后端经 Painter 原语原生绘制（旧 700×700 Pillow 预合成的子树化）。
 
-    p = Painter(size=(w, w))
+    复刻旧 ``get_player_frame_image`` 的几何：700×700 逻辑画布上，base 按源角 20px 做
+    9-slice 放大到 50px 铺满 border=100 内的 500×500 内框，角落/顶部装饰件按 1.5× 贴在
+    border2=80 处，整体按 ``frame_w/500`` 缩放。这里直接在最终尺寸下算整数几何——每个
+    部件只重采样一次（替代旧的先合成再整图缩放），base 切片经 ``src_rect`` 直达两后端，
+    Skia 路径零 Python 解码、切片栅格进 Rust Moka 缓存跨请求复用。
+    """
 
-    p.move_region((border, border), (inner_w, inner_w))
-    p.paste(base_lt, (0, 0), (corner2, corner2))
-    p.paste(base_rt, (inner_w - corner2, 0), (corner2, corner2))
-    p.paste(base_lb, (0, inner_w - corner2), (corner2, corner2))
-    p.paste(base_rb, (inner_w - corner2, inner_w - corner2), (corner2, corner2))
-    p.paste(base_l.resize((corner2, inner_w - 2 * corner2)), (0, corner2))
-    p.paste(base_r.resize((corner2, inner_w - 2 * corner2)), (inner_w - corner2, corner2))
-    p.paste(base_t.resize((inner_w - 2 * corner2, corner2)), (corner2, 0))
-    p.paste(base_b.resize((inner_w - 2 * corner2, corner2)), (corner2, inner_w - corner2))
-    p.restore_region()
+    _SRC_CORNER = 20  # base 素材上的 9-slice 源角宽（像素，旧实现的 corner）
 
-    p.paste(lb, (border2, w - border2 - lb.height))
-    p.paste(rb, (w - border2 - rb.width, w - border2 - rb.height))
-    p.paste(lt, (border2, border2))
-    p.paste(rt, (w - border2 - rt.width, border2))
-    p.paste(ct, ((w - ct.width) // 2, border2 - ct.height // 2))
+    def __init__(self, layers: PlayerFrameLayers, frame_w: int) -> None:
+        super().__init__()
+        self.layers = layers
+        self._fscale = frame_w / 500  # 旧内框 inner_w=500 → 最终 frame_w
+        self.prefetch_image_sources = [
+            layers.base,
+            layers.centertop,
+            layers.leftbottom,
+            layers.lefttop,
+            layers.rightbottom,
+            layers.righttop,
+        ]
 
-    img = await p.get()
-    img = resize_keep_ratio(img, frame_w / inner_w, mode="scale")
-    return img
+    def _get_content_size(self) -> tuple[int, int]:
+        outer = max(1, round(700 * self._fscale))
+        return (outer, outer)
+
+    def _draw_content(self, p: Painter) -> None:
+        s = self._fscale
+        layers = self.layers
+        outer, _ = self._get_content_size()
+        border = round(100 * s)
+        inner = round(500 * s)
+        c2 = max(1, round(50 * s))
+        edge = max(1, inner - 2 * c2)
+        border2 = round(80 * s)
+
+        base = layers.base
+        bw, bh = base.size
+        c = max(1, min(self._SRC_CORNER, bw // 2, bh // 2))
+        far = border + inner - c2
+        # base 9-slice：四角 + 四边（拉伸）
+        p.paste_with_alpha_blend(base, (border, border), (c2, c2), src_rect=(0, 0, c, c))
+        p.paste_with_alpha_blend(base, (far, border), (c2, c2), src_rect=(bw - c, 0, bw, c))
+        p.paste_with_alpha_blend(base, (border, far), (c2, c2), src_rect=(0, bh - c, c, bh))
+        p.paste_with_alpha_blend(base, (far, far), (c2, c2), src_rect=(bw - c, bh - c, bw, bh))
+        p.paste_with_alpha_blend(base, (border, border + c2), (c2, edge), src_rect=(0, c, c, bh - c))
+        p.paste_with_alpha_blend(base, (far, border + c2), (c2, edge), src_rect=(bw - c, c, bw, bh - c))
+        p.paste_with_alpha_blend(base, (border + c2, border), (edge, c2), src_rect=(c, 0, bw - c, c))
+        p.paste_with_alpha_blend(base, (border + c2, far), (edge, c2), src_rect=(c, bh - c, bw - c, bh))
+
+        # 装饰件（旧实现先 1.5× 再整图 ×s，这里一步到位）
+        def dec_size(part) -> tuple[int, int]:
+            return (max(1, round(part.width * 1.5 * s)), max(1, round(part.height * 1.5 * s)))
+
+        lb_w, lb_h = dec_size(layers.leftbottom)
+        p.paste_with_alpha_blend(layers.leftbottom, (border2, outer - border2 - lb_h), (lb_w, lb_h))
+        rb_w, rb_h = dec_size(layers.rightbottom)
+        p.paste_with_alpha_blend(layers.rightbottom, (outer - border2 - rb_w, outer - border2 - rb_h), (rb_w, rb_h))
+        lt_w, lt_h = dec_size(layers.lefttop)
+        p.paste_with_alpha_blend(layers.lefttop, (border2, border2), (lt_w, lt_h))
+        rt_w, rt_h = dec_size(layers.righttop)
+        p.paste_with_alpha_blend(layers.righttop, (outer - border2 - rt_w, border2), (rt_w, rt_h))
+        ct_w, ct_h = dec_size(layers.centertop)
+        p.paste_with_alpha_blend(layers.centertop, ((outer - ct_w) // 2, border2 - ct_h // 2), (ct_w, ct_h))
 
 
 # 获取带框头像控件
 async def get_avatar_widget_with_frame(
-    is_frame: bool, frame_paths, avatar_img: Image.Image, avatar_w: int, frame_data: list[dict]
+    is_frame: bool, frame_paths, avatar_img: ImageSource, avatar_w: int, frame_data: list[dict]
 ) -> Frame:
-    frame_img = None
+    frame_layers = None
     if is_frame and frame_paths:
-        frame_img = await get_player_frame_image(frame_paths, avatar_w + 5)
+        frame_layers = await get_player_frame_layers(frame_paths)
 
     with Frame().set_size((avatar_w, avatar_w)).set_content_align("c").set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
-        if frame_img:
-            ImageBox(frame_img, use_alpha_blend=True)
+        if frame_layers is not None:
+            PlayerFrameBox(frame_layers, avatar_w + 5)
     return ret
 
 
@@ -507,7 +495,7 @@ def _build_profile_identity_text_module(ctx: _ProfileLayoutContext) -> Widget:
 
 
 async def _build_profile_rank_badge_module(ctx: _ProfileLayoutContext) -> Widget:
-    lv_rank_bg = await get_img_from_path(ASSETS_BASE_DIR, ctx.request.lv_rank_bg_path)
+    lv_rank_bg = await get_asset_image_ref(ASSETS_BASE_DIR, ctx.request.lv_rank_bg_path)
     badge_w = 180
     badge_h = max(1, int(lv_rank_bg.size[1] * badge_w / lv_rank_bg.size[0]))
     number_box_x = 104
@@ -601,10 +589,10 @@ async def _build_profile_honor_module(ctx: _ProfileLayoutContext) -> Widget:
 async def _build_profile_cards_module(ctx: _ProfileLayoutContext) -> Widget:
     root = HSplit().set_content_align("c").set_item_align("c").set_sep(6).set_padding((16, 0))
     _t0 = time.perf_counter()
-    card_imgs = await asyncio.gather(*[get_card_full_thumbnail(card) for card in ctx.pcards])
+    card_layers = await asyncio.gather(*[get_card_full_thumbnail_layers(card) for card in ctx.pcards])
     logger.debug("[perf] draw_main card_imgs %d: %.3fs", len(ctx.pcards), time.perf_counter() - _t0)
-    for card_img in card_imgs:
-        root.add_item(ImageBox(card_img, size=(90, 90), image_size_mode="fill", shadow=True))
+    for layers in card_layers:
+        root.add_item(CardFullThumbnailBox(layers, size=(90, 90), image_size_mode="fill", shadow=True))
     return root
 
 
@@ -632,9 +620,9 @@ async def _build_profile_play_icon_module(ctx: _ProfileLayoutContext) -> Widget:
     icon_column.add_item(Spacer(gh, gh))
     _t0 = time.perf_counter()
     icon_clear, icon_fc, icon_ap = await asyncio.gather(
-        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_clear_path),
-        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_fc_path),
-        get_img_from_path(ASSETS_BASE_DIR, ctx.request.icon_ap_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, ctx.request.icon_clear_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, ctx.request.icon_fc_path),
+        get_asset_image_ref(ASSETS_BASE_DIR, ctx.request.icon_ap_path),
     )
     logger.debug("[perf] draw_play play icons 3: %.3fs", time.perf_counter() - _t0)
     icon_column.add_item(ImageBox(icon_clear, size=(gh, gh)))
@@ -691,7 +679,7 @@ async def _build_profile_play_panel(ctx: _ProfileLayoutContext) -> Widget:
     return root
 
 
-async def _preload_profile_chara_icons(ctx: _ProfileLayoutContext) -> dict[str, Image.Image]:
+async def _preload_profile_chara_icons(ctx: _ProfileLayoutContext) -> dict[str, ImageSource]:
     chara_map = ctx.request.chara_rank_icon_path_map
     chara_paths: dict[str, str] = {}
     for chara, cid in CHARA_LIST:
@@ -707,7 +695,7 @@ async def _preload_profile_chara_icons(ctx: _ProfileLayoutContext) -> dict[str, 
     ordered_paths = list(chara_paths.keys())
     _t0 = time.perf_counter()
     images = (
-        await asyncio.gather(*[get_img_from_path(ASSETS_BASE_DIR, path) for path in ordered_paths])
+        await asyncio.gather(*[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in ordered_paths])
         if ordered_paths
         else []
     )
@@ -736,7 +724,7 @@ def _profile_stats_badge_width(text: str, *, font_size: int = 18) -> int:
 
 def _build_profile_character_grid_module(
     ctx: _ProfileLayoutContext,
-    chara_icon_cache: dict[str, Image.Image],
+    chara_icon_cache: dict[str, ImageSource],
 ) -> Widget:
     chara_map = ctx.request.chara_rank_icon_path_map
     grid = Grid(col_count=6).set_sep(h_sep=8, v_sep=7).set_padding(32)
@@ -778,7 +766,7 @@ def _build_profile_multi_live_module(
 
 def _build_profile_solo_live_module(
     ctx: _ProfileLayoutContext,
-    chara_icon_cache: dict[str, Image.Image],
+    chara_icon_cache: dict[str, ImageSource],
     side_panel_w: int | None,
     stats_score_w: int | None,
     solo_live_offset_y: int,
@@ -891,31 +879,20 @@ async def _build_profile_layout_modules(ctx: _ProfileLayoutContext) -> dict[str,
     }
 
 
-async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
-    r"""compose_profile_image
-
-    合成个人信息图片
-    Args
-    ----
-    rqd : ProfileRequest
-        合成个人信息图片所必须的数据
-
-    Returns
-    -------
-    PIL.Image.Image
-    """
+async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
+    """Build the profile widget tree (shared by the Pillow and Skia render paths)."""
     # 玩家基本信息
     profile = rqd.profile
     # 个人信息卡组
     pcards = rqd.pcards
     # 头像
-    avatar_img = await get_img_from_path(ASSETS_BASE_DIR, profile.leader_image_path)
+    avatar_img = await get_asset_image_ref(ASSETS_BASE_DIR, profile.leader_image_path)
     # 背景设置
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     bg_settings = rqd.bg_settings if rqd.bg_settings is not None else ProfileBgSettings()
     if bg_settings.img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, bg_settings.img_path, on_missing="raise")
+            bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, bg_settings.img_path, on_missing="raise")
             bg = ImageBg(bg_img, blur=False, fade=0)
         except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
@@ -971,7 +948,29 @@ async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
         rqd,
         extra_suffix="This background is user-uploaded." if bg_settings.img_path else None,
     )
-    return await canvas.get_img(1.5)
+    return canvas
+
+
+_PROFILE_SCALE = 1.5
+_PROFILE_ENDPOINT = "profile"
+
+
+async def compose_profile_image(rqd: ProfileRequest) -> Image.Image:
+    """合成个人信息图片 (Pillow 路径)。"""
+    return await (await _build_profile_canvas(rqd)).get_img(_PROFILE_SCALE)
+
+
+async def try_render_profile_payload(rqd: ProfileRequest) -> EncodedImagePayload | None:
+    """Skia 路径：经 IRPainter 渲染同一棵 widget 树；不可用时返回 None 回退 Pillow。
+
+    没有整页 payload 缓存,这是有意的:调用方 (cloud) 已按 payload 去重——命中就不会调到 drawing——
+    所以同一个 payload 不会来第二次,这里再加一层页面缓存永远不可能命中,而每次 miss 仍会 insert,
+    把真正会命中的条目挤出共享 LRU。跨请求的复用发生在更下层:Rust 的 Moka 栅格缓存和 Pillow 的
+    全局 resize 缓存按素材路径/尺寸缓存单个图层,那是跨用户共享的。"""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_profile_canvas(rqd)
+    return await render_canvas_payload(canvas, endpoint=_PROFILE_ENDPOINT, scale=_PROFILE_SCALE)
 
 
 def _profile_card_data_source_label(name: str | None) -> str:
@@ -985,7 +984,7 @@ def _profile_card_data_source_label(name: str | None) -> str:
 async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget | None:
     if not rqd.profile:
         return None
-    avatar_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
+    avatar_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
     return await get_avatar_widget_with_frame(
         is_frame=bool(rqd.profile.has_frame),
         frame_paths=None,
