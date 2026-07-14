@@ -1717,7 +1717,10 @@ def _collect_asset_refs(widget, out: dict) -> None:
             out[id(bg_img)] = (bg_img, None)
     for extra in getattr(widget, "prefetch_image_sources", None) or ():
         if isinstance(extra, AssetImageRef):
-            out[id(extra)] = (extra, None)
+            # setdefault, not assignment: a widget may list its own ``image`` among the extras
+            # (CardFullThumbnailBox does — ``layers.base`` is both), and an unhinted extra must not
+            # overwrite the display-size hint recorded for it above.
+            out.setdefault(id(extra), (extra, None))
     for child in getattr(widget, "items", None) or ():
         _collect_asset_refs(child, out)
 

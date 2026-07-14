@@ -9,7 +9,7 @@ import random
 from PIL import Image, ImageChops
 import pytest
 
-from src.sekai.base import utils
+from src.sekai.base import plot, utils
 from src.sekai.base.painter import Painter
 from src.sekai.base.plot import Canvas, FillBg, HSplit, ImageBox
 from src.sekai.base.utils import (
@@ -173,6 +173,30 @@ def test_asset_ref_resize_goes_through_global_cache(tmp_path):
     assert img.size == (8, 6)
     again = resolve_image_source_sync(ref, target_size=(8, 6))
     assert again.size == (8, 6)
+
+
+def test_prefetch_keeps_the_size_hint_when_a_widget_also_lists_its_own_image(tmp_path):
+    """A widget may name its own ``image`` among ``prefetch_image_sources`` — CardFullThumbnailBox
+    does, passing ``layers.base`` to super().__init__ *and* listing it first among the extras. Both
+    entries key on ``id(ref)``, so an assignment in the extras loop overwrites the display-size hint
+    recorded for the ImageBox and the asset gets prefetched (and cached) at full source size instead.
+
+    On card/box that is 1404 thumbnails decoded at source size: 88 MB instead of 13 MB, a thumbnail
+    cache thrashing at a 0% hit rate, and +700 MB of peak RSS at 8 concurrent renders."""
+    path = tmp_path / "thumb.png"
+    Image.new("RGBA", (256, 256), (1, 2, 3, 255)).save(path)
+    stat = path.stat()
+    ref = AssetImageRef(path=path, size=(256, 256), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
+
+    class _SelfListingBox(ImageBox):
+        def __init__(self) -> None:
+            super().__init__(ref, size=(48, 48), image_size_mode="fit")
+            self.prefetch_image_sources = [ref]  # the same object, exactly as CardFullThumbnailBox does
+
+    refs: dict = {}
+    plot._collect_asset_refs(_SelfListingBox(), refs)
+
+    assert [hint for _, hint in refs.values()] == [(48, 48)], "the extras loop clobbered the display-size hint"
 
 
 def _max_channel_delta(a: Image.Image, b: Image.Image) -> int:
