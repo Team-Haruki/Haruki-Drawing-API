@@ -125,10 +125,13 @@ rule:
 
 - `src/sekai/chart/drawer.py` — the chart pixels come from `pjsekai_scores_rs`; the IR only adds the watermark
   footer around them.
-- `src/sekai/honor/skia.py` — an absolute-coordinate composite that mirrors
-  `honor/drawer.py::_compose_full_honor_image_sync` (pure Pillow) node for node. **The layout therefore exists
-  twice**, so any honor geometry change must be made on both sides or the two backends drift; run the parity
-  sweep on every honor edit.
+- `src/sekai/honor/skia.py` — the badge's **watermark footer** only (a `SelfImage` strip of the badge's own
+  bottom rows plus two shadowed text lines — the widget tree cannot express that). The badge itself is a shared
+  widget subtree: `honor/widget.py::HonorBadgeBox`, built by `build_honor_badge_canvas()`, which **both** backends
+  consume — Pillow renders it with `get_img_sync()`, Skia splices its IR under the footer with
+  `IRBuilder.splice_root_children`. **The layout exists once.** (An earlier version of this file claimed honor
+  duplicated its layout in Pillow and IR; that stopped being true when honor moved onto the shared tree, and the
+  stale warning cost real time.)
 
 Card List is **not** one of them any more — it and Card Box have no dedicated scene builder and draw the shared
 `plot.py` widget tree like everything else.
