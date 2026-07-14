@@ -36,6 +36,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    collect_asset_signatures,
     get_asset_image_ref,
     get_composed_image_cached,
     put_composed_image_cache,
@@ -129,7 +130,11 @@ def _build_card_list_cache_key(rqd: CardListRequest) -> str:
         "term_limited_icon_path": rqd.term_limited_icon_path,
         "fes_limited_icon_path": rqd.fes_limited_icon_path,
     }
-    return build_rendered_image_cache_key("card_list", request_payload)
+    return build_rendered_image_cache_key(
+        "card_list",
+        request_payload,
+        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, request_payload),
+    )
 
 
 def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
@@ -181,7 +186,11 @@ def _build_card_box_cache_key(rqd: CardBoxRequest) -> str:
             else None
         ),
     }
-    return build_rendered_image_cache_key("card_box", request_payload)
+    return build_rendered_image_cache_key(
+        "card_box",
+        request_payload,
+        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, request_payload),
+    )
 
 
 def _safe_color(code: str | None, fallback: tuple[int, int, int, int] = (120, 140, 160, 255)):

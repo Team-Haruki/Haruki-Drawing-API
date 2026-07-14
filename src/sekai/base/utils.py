@@ -696,6 +696,42 @@ def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, An
     }
 
 
+_ASSET_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def collect_asset_signatures(base_path: Path, material: Any) -> dict[str, Any]:
+    """Stat every asset path mentioned anywhere in ``material`` (the cache key's request payload).
+
+    A cache key that carries only the request goes stale the moment an asset is REPLACED at a path
+    the request already names: the request is unchanged, so the key is unchanged, so the old picture
+    keeps being served until the entry expires (the TTL here is a week). The nastiest version is not
+    an art change but a missing asset -- the page renders a "?" placeholder, the asset later lands on
+    disk, and the placeholder is what everyone keeps getting.
+
+    Walking the key material instead of hand-listing the fields is deliberate: honor lists its
+    fourteen asset paths by name (``honor/drawer.py``), which is correct today and silently wrong the
+    day someone adds a fifteenth. Anything path-shaped in the key gets stat'd, automatically.
+
+    Cost is small next to what the cache is skipping: card/box mentions 1457 distinct assets and
+    stats them all in ~3 ms warm, against a ~26 ms key build and a 1-2 s render.
+    """
+    signatures: dict[str, Any] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, str):
+            if node.lower().endswith(_ASSET_SUFFIXES) and node not in signatures:
+                signatures[node] = get_image_asset_signature(base_path, node)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, (list, tuple)):
+            for value in node:
+                walk(value)
+
+    walk(material)
+    return signatures
+
+
 def get_composed_image_cached(cache_key: str) -> Image.Image | None:
     return _composed_image_cache.get(cache_key)
 

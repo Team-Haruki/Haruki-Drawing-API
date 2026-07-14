@@ -32,6 +32,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    collect_asset_signatures,
     get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
@@ -686,7 +687,11 @@ def _build_event_list_entry_cache_key(d, phase: str) -> str:
         "event": d.model_dump(mode="json"),
         "phase": phase,
     }
-    return build_rendered_image_cache_key("event_list_entry", request_payload)
+    return build_rendered_image_cache_key(
+        "event_list_entry",
+        request_payload,
+        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, request_payload),
+    )
 
 
 async def _preload_event_entry_assets(d) -> dict[str, object]:

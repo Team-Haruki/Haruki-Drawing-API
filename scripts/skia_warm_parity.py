@@ -28,11 +28,14 @@ Both backends are checked: Pillow has the image/thumb/resize/composed caches, Sk
 cache and the native Moka raster cache.
 
 WHAT THIS DOES NOT COVER -- do not read a green run as more than it is:
-  * The ~10 cases it excludes as nondeterministic (sk_*, gacha_detail, event_planner) draw a live
-    countdown, so it cannot compare them at all. They were checked by hand instead, across a
+  * Cases excluded as nondeterministic draw a live countdown, and WHICH ones get excluded varies
+    between runs: it depends on whether the clock happened to tick during that run. (One run
+    dropped all twelve sk_* plus gacha_detail and event_planner; the next compared every sk_* and
+    passed them, leaving only the two whose content moves by the second.) So a green run does not
+    mean a fixed set was checked. The countdown endpoints were verified by hand instead, across a
     deliberate 70s wait: the content moves with the clock, the warm render moves with it, and a
-    warm render equals a cold render taken at the same instant. Nothing is frozen. But that is a
-    one-off, not a gate. Pinning `now` behind a test hook would let this harness cover them.
+    warm render equals a cold render taken at the same instant -- nothing is frozen. That was a
+    one-off. Pinning `now` behind a test hook would let this harness cover them properly.
   * One payload per endpoint means a KEY COLLISION between two different payloads cannot show up
     here. That has to come from reading the key material, not from this sweep.
   * Nothing on disk is mutated, so asset-staleness (an asset file edited under a live cache) is
