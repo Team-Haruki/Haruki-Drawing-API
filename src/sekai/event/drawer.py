@@ -785,7 +785,7 @@ async def _build_event_list_canvas(rqd: EventListRequest) -> Canvas:
 
     row_count = math.ceil(math.sqrt(len(event_list)))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
-    style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(70, 70, 70))
+    style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
     now = request_now(rqd.timezone)
     entry_images = (
         await asyncio.gather(*[_get_event_list_entry_image(d, now, style1, style2) for d in event_list])

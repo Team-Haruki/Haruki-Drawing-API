@@ -171,7 +171,21 @@ uv run python -X gil=0 scripts/skia_parity_sweep.py            # baseline: {'ok'
 
 # Pillow-vs-Pillow against a baseline ref — catches the drift BOTH backends share (see traps)
 uv run python -X gil=0 scripts/skia_legacy_baseline.py --ref main [--only profile,card_list]
+
+# Warm-cache parity — the ONLY gate that renders with the caches ON. Run it on any cache change.
+uv run python -X gil=0 scripts/skia_warm_parity.py            # baseline: 53 ok / 10 nondeterministic, 0 drift
 ```
+
+**The parity sweep renders with the caches OFF.** `skia_parity_sweep.py` calls `bypass_caches()` on
+purpose (honest timings), so its 63/63 only ever proves that *re-rendering from scratch* is correct — it
+says nothing about the path production actually takes, which is a **cache hit**. A key that omits
+something the output depends on serves a different-but-perfectly-valid image and nothing errors.
+`skia_warm_parity.py` is the gate for that: cold reference per case, then two warm passes over all 63
+(forward, then **backward** — the backward pass makes each page render against a cache filled by 62
+*other* pages, which is what surfaces a key collision, a mutation-on-hit, or bleed through the single
+shared Rust raster pool). It excludes the ~10 endpoints that draw a live countdown, and it cannot see a
+collision between two *different* payloads (there is one payload per endpoint) — for those you have to
+read the key material.
 
 Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
 an index) and installed conditionally by the Docker build. Wheels are Python-version-specific: **upgrading
