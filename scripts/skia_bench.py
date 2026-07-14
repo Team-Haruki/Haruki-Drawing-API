@@ -48,6 +48,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.skia_parity_sweep import CASES, _load_mysekai_real, setup
 from scripts.skia_warm_parity import _bind, clear_all_caches
 from src.core.utils import _encode_image
+from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
 OUT = REPO_ROOT / "out" / "skia-bench"
@@ -68,6 +69,11 @@ async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dic
     async def skia_bytes() -> float | None:
         if cold:
             clear_all_caches()
+        # honor is the one endpoint left with a payload cache, and repeating the same request would
+        # HIT it -- reporting 0.05ms and a fake 22x, which is a cache lookup, not a render. (It
+        # would not hit in production either: honor's key folds in the watermark text, and that
+        # carries dt to the SECOND.) Empty it so this measures the render, which is what it claims.
+        clear_skia_payload_cache()
         t0 = time.perf_counter()
         payload = await getattr(tr_mod, case.try_render)(req)
         if payload is None:

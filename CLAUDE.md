@@ -185,7 +185,7 @@ uv run python -X gil=0 scripts/skia_legacy_baseline.py --ref main [--only profil
 uv run python -X gil=0 scripts/skia_warm_parity.py            # baseline: 53 ok / 10 nondeterministic, 0 drift
 
 # Pillow vs Skia timings. NOT the parity sweep — see below.
-uv run python -X gil=0 scripts/skia_bench.py [--cold]         # warm: 3.62x overall, 0 endpoints slower
+uv run python -X gil=0 scripts/skia_bench.py [--cold]         # warm: 3.65x overall; honor is the one loser
 ```
 
 **Never time anything with the parity sweep.** It used to print `elapsed_pillow` / `elapsed_skia` and

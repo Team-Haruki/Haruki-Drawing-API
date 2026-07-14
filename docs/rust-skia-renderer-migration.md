@@ -545,9 +545,14 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 >
 > | | 稳态(生产) | 冷启动 |
 > |---|---|---|
-> | 整体 | **3.62x** | 2.82x |
-> | 单页中位 | 170ms → 47ms (**4.05x**) | 182ms → 53ms (3.63x) |
-> | Skia 更慢的端点 | **0 个** | 4 个(honor 系,页面仅 1–3ms) |
+> | 整体 | **3.65x** | 2.73x |
+> | 单页中位 | 165ms → 44ms (**3.93x**) | 181ms → 49ms (3.60x) |
+> | Skia 更慢的端点 | **4 个(honor 系)** | 4 个(honor 系) |
+>
+> **honor 系是真的更慢**(1.1ms → 1.9~3.0ms,即 0.41~0.63x),两个 regime 都是。第一版基准把它报成
+> "快 9~22 倍"是因为 honor 是**唯一还有 payload 缓存**的端点,重复发同一个请求全是缓存命中(0.05ms),
+> 量的根本不是渲染。`skia_bench.py` 现在每次计时前清空 payload 缓存。
+> 顺带一提,**honor 的 payload 缓存在生产里也几乎不会命中**:它的键含水印文本,而水印带的 `DT` 精确到秒。
 
 2026-07-13 Rust 性能批次（目标栅格 cache / lazy asset / parallel prewarm / `mtpng`）：
 
