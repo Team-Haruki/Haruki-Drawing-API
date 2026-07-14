@@ -90,8 +90,13 @@
 
 **已改**(`configs.yaml` + `configs.docker.yaml` + `docker-compose.yaml`):
 `isolated_worker_pool_size: 8→4`、`readiness_unhealthy_rss_mb: 4096→1536`、`memory: 2G→4G`、`cpus: 2→4`。
-验收:4G 容器里混合负载(12×card/box + 8×deck/recommend,10 并发)**峰值 1790 MB = 限额的 44%,
-20 个响应全 OK,`oom_kill 0`**。
+
+**验收(2026-07-14 修完流式 bug 后在 4G 容器里重测)**:空转 `588 MB`;混合负载
+(12×card/box + 8×deck/recommend,10 并发)**峰值 `2039 MB` = 限额的 50%,20 个响应全 OK,`oom_kill 0`**。
+
+> 注意峰值比修复前(1790 MB)**高了 250 MB**。这是修复的直接后果,不是退步:响应快了 32 倍,
+> 同一时刻真正在渲染的请求就更多。**任何在旧代码上量的容量数字都偏低**,因为那时候大部分请求
+> 卡在发包上,根本没在画图。4G 仍有一倍余量。
 
 - [ ] **`/ready` 的 RSS 门是结构性瞎的**:`readiness_unhealthy_rss_mb` 读 `/proc/self/status` 的 VmRSS,
       **只看父进程**(`src/core/debug.py:189`)。而父进程峰值才 ~765 MB,真正会撑爆 cgroup 的是 heavy worker
