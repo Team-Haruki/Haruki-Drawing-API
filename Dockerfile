@@ -122,12 +122,24 @@ else:
     print(f"haruki_skia_renderer self-check passed (IR_CAPABILITY={capability} >= {required})")
 PY
 
+# 构建溯源。放在自检之后:ARG 的值每次构建都变,写在上面会让它下面的每一层缓存全部失效。
+# .github/workflows/docker.yml 一直在传这三个 --build-arg,但 Dockerfile 里没有对应的 ARG,
+# 所以它们被静默丢弃了 —— 金丝雀时 `docker inspect` 查不到镜像是哪个 commit 构的。
+ARG VERSION=dev
+ARG GIT_SHA=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.source="https://github.com/Team-Haruki/Haruki-Drawing-API"
+
 # 暴露端口
 EXPOSE 8000
 
-# 挂载data文件夹，也就是config中的base_dir，必须挂载到实体机上，且在screenshot-service中，也必须挂载该文件夹，二者必须保持名称一致
-
-VOLUME ["/app/haruki_drawing_api/data", "/app/haruki_drawing_api/config.yaml"]
+# 挂载 data 文件夹（即 config 中的 base_dir），必须挂载到实体机上。
+# 配置文件按需 bind-mount 到 /app/haruki_drawing_api/configs.yaml（见 docker-compose.yaml），
+# 不需要声明为 VOLUME —— 旧的 config.yaml（单数）这个路径根本没有代码读它，settings.py 读的是 configs.yaml。
+VOLUME ["/app/haruki_drawing_api/data"]
 
 # 使用自由线程解释器启动
 ENTRYPOINT ["/app/haruki_drawing_api/.venv/bin/python", "-X", "gil=0", "-m", "granian"]

@@ -19,8 +19,19 @@
 - [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;
       **当前=7**,`TriangleBg.tris`——旧 wheel 会 serde-skip 这个未知字段,画出**一个三角形都没有的背景**,
       而且是静默的;这正是握手要挡的那种事)。
-- [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开;
-      验收含 mysekai 端点 200(drawer.real.py 与镜像 API 配对是 CI 盲区)。
+- [x] **mysekai 真实实现 × 真实 HTTP**(2026-07-15,盲区已关):把 `drawer.real.py` 换到 `drawer.py` 的位置、
+      起 granian、打**真实路由**,8 条 mysekai 路由 **9/9 返回 200**、图片可解码、`Content-Length` 正确。
+      这以前是**零覆盖**:仓库里的 `drawer.py` 是抛 `NotImplementedError` 的 stub,CI 跑 stub,对拍则绕过路由
+      按路径直接加载 real——所以"真实实现配不配得上当前 API 表面"从来没有任何东西验过。
+      **它进不了 CI**(`drawer.real.py` 不在仓库里),所以必须是**发布前清单上的一条手工项**。
+- [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开。
+      部署时三条必查,漏了都是**静默**出错(不报警、不 500,只是悄悄不对):
+      ① **wheel 必须是 capability 7** —— 旧 wheel 握手失败会 fail-open 回 Pillow,服务正常、图也对,
+         只是白白慢 3.6 倍;唯一的信号是 `/render-stats` 里 `fallback` 计数飙升。
+      ② **`drawer.real.py` 必须挂上**(bind-mount 或改名),否则 8 条 mysekai 路由全 500。
+      ③ **内存限额必须真的落在绘图服务上** —— `deploy` 块此前一直挂在 screenshot-service 上(已修,`6c4e138`);
+         没有限额时容器的 `memory.max` 读作 `"max"`,`read_cgroup_memory()` 返回 `None`,
+         `readiness_unhealthy_cgroup_percent` 那道门**永远不会触发**。
 - [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
 
 ## 🔴 已修:每个图片响应都在按"行"切块(2026-07-14)
@@ -174,13 +185,17 @@
 - [x] 头像框 9-slice(2026-07-13):子树化取代 composed 缓存——`PlayerFrameBox` 经 `Painter.paste*` 新增的
       `src_rect` 参数在两后端最终尺寸直绘(700×700 中间合成消失;Skia 侧部件栅格进 Rust Moka 缓存跨请求复用,
       Pillow 侧走全局 resize 缓存),旧 `get_player_frame_image` 删除。
-- [x] **阶段 2 剩余安全/性能项**(2026-07-14,除 lifespan 字体自检外全部完成):
+- [x] **阶段 2 剩余安全/性能项**(2026-07-14,全部完成):
   - [x] N3:Rust 图片缓存已替换为 Moka 字节预算目标栅格缓存(2026-07-13，含 single-flight、mtime/size key、Rayon 预热和 stats/clear API)。
   - [x] 字体缺失响亮化(2026-07-14):Rust 解析不到字体时 ERROR 日志(带请求的字体名与试过的路径,按字体去重一次)
         + `AtomicU64` 计数,经 `renderer_cache_stats()` 的 `font_fallback_count`/`font_fallback_fonts` 和每次渲染的
         `native_metrics["font_fallbacks"]` 暴露;父进程在 `_record()` 里聚合进 `/render-stats` 的 `font_fallbacks`
         ——**必须走 payload 聚合**,因为 deck/生日卡在 spawn 出来的 heavy worker 里渲染,子进程的静态计数器父进程读不到。
-        仍保留 sans-serif 回退(fail-open 不变)。lifespan 字体自检暂未做。
+        仍保留 sans-serif 回退(fail-open 不变)。
+  - [x] **lifespan 字体自检**(已完成):`src/core/main.py:140 _self_check_fonts()`,由 lifespan 在 `main.py:255` 调用。
+        Pillow 解析不到**正文**字体 → `RuntimeError` 拒绝启动;只缺 emoji → ERROR 日志但继续服务;
+        只有**原生**渲染器解析不到 → 就地关掉 `use_skia_plot` 走 Pillow;探测本身出错则吞掉(fail-open)。
+        用例:`tests/test_font_self_check.py`。
   - [x] Skia 画布守卫(2026-07-14):**不是**照抄 Pillow 的 `CANVAS_SIZE_LIMIT`——真实 chart payload 已达
         5248×2704=14.2Mpx(Pillow 预算 16.8Mpx 的 85%),照抄只会把 Skia 唯一能渲的大图弹回 Pillow 再 assert → 500。
         改成 DoS 级边界(64 Mpx / 单边 32767),且判定放在**线程池任务内**(`_get_self_size()` 要走整棵树,
@@ -297,7 +312,27 @@
       **仍未做**:TriangleBg raster 缓存。现在种子可缓存了,但调色板按秒变,整张 bg 仍不可跨秒复用——
       要缓存得先决定"调色板是否也量化",那是个产品取舍,不是技术阻塞。
 
-## 🔵 新增:对 legacy 的像素基线(补上对拍的系统性盲区)
+## 🔵 对拍之外的三道门(补上 sweep 的系统性盲区)
+
+> `skia_parity_sweep.py` 只回答一个问题:**同一棵树,Pillow 和 Skia 画得一样吗**。它有三个结构性盲区,
+> 各由一道独立的门补上。四道门缺一不可。
+
+- [x] **`scripts/skia_warm_parity.py`**(2026-07-14):**缓存全开**跑。对拍调 `bypass_caches()`,**主动把
+      composed/disk/payload 缓存全关**(为了让计时诚实),所以它的 63/63 只证明"重新画一遍是对的",
+      **命中缓存拿回来的对不对,从来没有被验证过**——而命中才是生产的常态。做法:冷渲染做基准,再正序、
+      **逆序**各热跑一遍全部用例;逆序那趟让每个页面在**其他 62 个页面填满的缓存**上渲染,这才逼得出
+      key 碰撞、命中后被就地改写(PIL 图是按引用发出去的)、以及 Rust 共享栅格池的跨端点串味。
+      基线:0 drift。**注意被判"非确定"的用例每次不一样**(取决于跑的时候时钟跳没跳),绿 ≠ 固定的一组被查过。
+- [x] **`scripts/skia_bench.py`**(2026-07-15):**唯一的基准**。对拍的 `elapsed_pillow`/`elapsed_skia`
+      字段已删除——它们**两个方向同时错**:① 对拍先跑 Pillow 再跑 Skia,且不 bypass 图片解码缓存,
+      Pillow 付冷解码、Skia 白捡暖缓存(`mysekai_music_record` 报 10.39x,实际 1.12x);
+      ② `compose_*_image()` 返回 **PIL 图**、`try_render_*_payload()` 返回**已编码字节**,只给 Skia 记了
+      PNG 编码的账——凭空造出 6 个"Skia 更慢"的端点,一个都不存在(Pillow 编码 1536×880 要 110ms,
+      Skia 连画带编 44ms)。新基准两边都产出响应字节、都从热态起跑、交替顺序、min-of-N,带 `--cold`。
+      实测:**稳态 3.65x / 冷启动 2.73x**;honor 系是**唯一**真的慢于 Pillow 的端点(380×110 摊不掉
+      IR+FFI+encode 的固定开销),量它时必须清 payload 缓存,否则量到的是缓存命中。
+
+## 🔵 对 legacy 的像素基线(补上对拍的另一个盲区)
 
 - [x] **`scripts/skia_legacy_baseline.py`**(2026-07-14):在 main 的 git worktree 里跑同一批 payload 的
       **Pillow** 输出,与当前分支的 **Pillow** 输出逐像素对比。对拍 sweep 只比"当前树的 Pillow ↔ Skia",
