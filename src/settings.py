@@ -101,9 +101,6 @@ class DrawingSettings(BaseModel):
     composed_image_cache_size: int = 0  # 合成图片缓存条目数，0 表示关闭
     composed_image_cache_max_mb: int = 0  # 合成图片缓存总内存上限（MB），0 表示关闭
     composed_image_cache_ttl_seconds: int = 7 * 24 * 3600  # 合成图片缓存 TTL（秒）
-    use_process_pool: bool = False  # 是否启用进程池
-    process_pool_workers: int = 4  # 进程池工作进程数
-    process_pool_threshold: int = 2_000_000  # 像素阈值 (约 2000x1000)
     screenshot_api_path: str = "http://localhost:18080/screenshot"
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)

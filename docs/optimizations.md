@@ -32,6 +32,11 @@
 > - 进程池从来不在 `base/utils.py`：`src/sekai/base/utils.py` 只有 `_default_pool_executor`
 >   （`ThreadPoolExecutor`），`ProcessPoolExecutor` 一直是 `src/sekai/base/painter.py:43` 的
 >   `_painter_process_pool`，由 `shutdown_painter()` 关闭。
+> - **进程池已于 2026-07-14 整个删除**(`use_process_pool` / `process_pool_workers` /
+>   `process_pool_threshold` 与 `_painter_process_pool` 一并移除)。它是 GIL 时代的设计——存在意义就是
+>   绕开 GIL。3.14t 上没有 GIL 可绕,但把每张解码好的图 pickle 过进程边界的代价一分不少:实测并发 8 时
+>   吞吐 `1.35 → 2.00 r/s`(**+48%**),而全部 python 进程的 RSS 合计几乎不变(2384 vs 2325 MB)——
+>   它只是把内存挪进子进程。本节下文关于 `ProcessPoolExecutor` 的记述是当年的执行记录,保留不改。
 > - Painter 磁盘缓存**从未**基于 `diskcache`：`src/` 里没有、也从来没有过该依赖
 >   （`git log -S diskcache --all` 只命中一次修改本文档自身的提交）。它自始至终就是
 >   `PAINTER_CACHE_DIR` 下的 PNG 文件，靠 `glob("<cache_key>__*.png")` 命中 / 失效

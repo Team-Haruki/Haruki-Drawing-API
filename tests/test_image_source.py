@@ -248,27 +248,6 @@ def test_resize_cache_keys_on_the_resample_filter(tmp_path):
     assert _max_channel_delta(bilinear, bicubic) > 0  # the second call was not served the first's entry
 
 
-def test_process_pool_predispatch_materializes_refs(tmp_path):
-    from src.sekai.base.painter import _resolve_op_image_sources
-
-    path = tmp_path / "c.png"
-    Image.new("RGBA", (10, 8), (1, 2, 3, 255)).save(path)
-    stat = path.stat()
-    ref = AssetImageRef(path=path, size=(10, 8), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
-
-    p = Painter(size=(30, 30))
-    p.paste(ref, (0, 0), (20, 16))
-    p.paste_with_alpha_blend(ref, (0, 0), None, 0.5)
-    p.rect((0, 0), (5, 5), fill=(0, 0, 0, 255))
-    _resolve_op_image_sources(p.operations)
-
-    materialized = [op.args[0] for op in p.operations[:2]]
-    assert all(isinstance(m, Image.Image) for m in materialized)
-    assert materialized[0].size == (20, 16)  # resized via the global cache pre-dispatch
-    assert materialized[1].size == (10, 8)  # no target size -> full-size decode
-    assert p.operations[2].args[0] == (0, 0)  # non-paste ops untouched
-
-
 def _two_tone_ref(tmp_path, name="half.png") -> AssetImageRef:
     """20x10 asset: left half red, right half green."""
     src = Image.new("RGBA", (20, 10), (255, 0, 0, 255))
@@ -301,16 +280,3 @@ def test_painter_paste_with_alpha_blend_src_rect(tmp_path):
 
     img = asyncio.run(main())
     assert img.getpixel((4, 4)) == (255, 0, 0, 255)  # red slice this time
-
-
-def test_process_pool_predispatch_ships_full_pixels_for_src_rect(tmp_path):
-    from src.sekai.base.painter import _resolve_op_image_sources
-
-    ref = _two_tone_ref(tmp_path)
-    p = Painter(size=(30, 30))
-    p.paste(ref, (0, 0), (8, 8), src_rect=(10, 0, 20, 10))
-    _resolve_op_image_sources(p.operations)
-
-    # Crop happens in the worker-side impl, so the shipped pixels must be the full asset.
-    assert isinstance(p.operations[0].args[0], Image.Image)
-    assert p.operations[0].args[0].size == (20, 10)

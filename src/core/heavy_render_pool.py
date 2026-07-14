@@ -23,7 +23,6 @@ from src.settings import (
     ISOLATED_WORKER_QUEUE_TIMEOUT_SECONDS,
     JPG_QUALITY,
     REQUEST_HARD_TIMEOUT_SECONDS,
-    settings,
 )
 
 logger = logging.getLogger("src.core.heavy_render_pool")
@@ -124,13 +123,6 @@ def _encode_image_payload(image: Image.Image) -> EncodedImagePayload:
     )
 
 
-def _configure_worker_render_environment() -> None:
-    # Heavy requests already run inside isolated worker processes.
-    # Disable nested painter process-pool fanout there to avoid spawning
-    # grandchildren from worker processes.
-    settings.drawing.use_process_pool = False
-
-
 def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
     """Tag a worker-rendered Skia payload so the parent can log/count the backend.
 
@@ -147,7 +139,6 @@ def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
 
 
 def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
-    _configure_worker_render_environment()
     if kind == "deck_recommend":
         from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
         from src.sekai.deck.model import DeckRequest

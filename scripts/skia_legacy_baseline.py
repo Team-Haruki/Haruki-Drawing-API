@@ -103,10 +103,12 @@ def _prepare_worktree(ref: str, workdir: Path) -> Path:
             shutil.rmtree(dst)
         dst.symlink_to(src, target_is_directory=True)
 
-    # Turn the process pool OFF in the baseline's config, not via HARUKI_ env: the "env beats
-    # yaml" precedence fix only exists on THIS branch, so on an older baseline the yaml wins and
-    # the env var is ignored. A spawned worker in the throwaway worktree cannot import the tree it
-    # was launched from (BrokenProcessPool); the thread pool renders the same pixels anyway.
+    # Turn the process pool OFF in the BASELINE's config (a no-op on refs at or after its removal,
+    # but older baselines still ship `use_process_pool: true`). It has to be the yaml, not a
+    # HARUKI_ env var: the "env beats yaml" precedence fix only exists on this branch, so on an
+    # older baseline the yaml wins and the env var is ignored. A spawned worker in the throwaway
+    # worktree cannot import the tree it was launched from (BrokenProcessPool); the thread pool
+    # renders the same pixels anyway.
     config = tree / "configs.yaml"
     if config.exists():
         config.write_text(config.read_text().replace("use_process_pool: true", "use_process_pool: false"))

@@ -38,12 +38,12 @@ python scripts/concurrent_fetch_images.py --base-url http://127.0.0.1:8000 \
 
 **Three-layer structure**:
 - `src/core/` — FastAPI routers and endpoint definitions. `src/core/pjsk/` contains one router module per feature (card, music, profile, event, sk, chart, mysekai, etc.), all mounted under `/api/pjsk/`.
-- `src/sekai/` — Domain logic and image drawing. Each subdirectory (card, music, profile, sk, mysekai, ...) contains models and drawer/rendering code. `src/sekai/base/` provides shared Pillow utilities (`painter.py`, `draw.py`, `img_utils.py`, `plot.py`) and the thread/process pool executor + image cache infrastructure (`utils.py`). `src/sekai/skia_renderer/` is the Python half of the Skia backend — see the Skia chapter below.
+- `src/sekai/` — Domain logic and image drawing. Each subdirectory (card, music, profile, sk, mysekai, ...) contains models and drawer/rendering code. `src/sekai/base/` provides shared Pillow utilities (`painter.py`, `draw.py`, `img_utils.py`, `plot.py`) and the thread pool executor + image cache infrastructure (`utils.py`). `src/sekai/skia_renderer/` is the Python half of the Skia backend — see the Skia chapter below.
 - `src/settings.py` — Pydantic-settings singleton loaded from `configs.yaml`. Access via `from src.settings import settings` or convenience module-level exports (e.g. `ASSETS_BASE_DIR`, `DEFAULT_FONT`, `EXPORT_IMAGE_FORMAT`, `JPG_QUALITY`).
 
 **Key design decisions**:
 - Requires free-threaded Python (no-GIL). The lifespan handler calls `_ensure_nogil_runtime()` and refuses to start when the GIL is enabled.
-- CPU-intensive Pillow rendering is offloaded via `run_in_pool()` to a thread pool (and optionally a process pool gated by a pixel threshold) managed in `src/sekai/base/utils.py`.
+- CPU-intensive Pillow rendering is offloaded via `run_in_pool()` to the thread pool in `src/sekai/base/utils.py`. There is **no painter process pool** — it was a GIL-era design and was removed: on 3.14t there is no GIL to dodge, but pickling every decoded image across the boundary still cost ~48% of throughput at concurrency 8 while relocating, not saving, memory.
 - A separate **isolated subprocess pool** (`src/core/heavy_render_pool.py`) runs only the two crash-prone heavy tasks (`HeavyTaskKind = "deck_recommend" | "chara_birthday"`), with its own queue limit and hard timeout. Everything else stays in-process. Its `EncodedImagePayload` dataclass is also the common return type of the Skia `try_render_*_payload` functions, which is why most drawers import from this module.
 - All multi-step image loading should use `asyncio.gather` to overlap I/O + decoding across threads. See `docs/optimizations.md` §3.
 - Static assets (fonts, images, triangles) live in `data/` and are configured via `configs.yaml`. In Docker, the host data directory is mounted at `/pjskdata/Data`.
@@ -91,7 +91,6 @@ Notable `drawing.*` keys:
 - `isolated_worker_pool_size` / `isolated_worker_queue_limit` / `isolated_worker_queue_timeout_seconds` / `request_hard_timeout_seconds` — the heavy-task subprocess pool (`src/core/heavy_render_pool.py`).
 - `overload_max_inflight_requests` / `overload_retry_after_seconds` — optional overload guard; reject new requests with `503` once in-flight requests exceed the threshold.
 - `readiness_unhealthy_inflight_requests` / `readiness_unhealthy_rss_mb` / `readiness_unhealthy_asyncio_tasks` — readiness thresholds used by `/ready`; once exceeded, the service reports `503` so orchestration can stop routing more traffic.
-- `use_process_pool`, `process_pool_workers`, `process_pool_threshold` — optional process-pool offload for very large images.
 - `image_cache_size` / `image_cache_max_mb` — general image LRU.
 - `thumbnail_cache_size` / `thumbnail_cache_max_mb` — dedicated thumbnail LRU (recommend 4096 / 256MB).
 - `composed_image_cache_size` / `composed_image_cache_max_mb` / `composed_image_cache_ttl_seconds` — final-output cache.

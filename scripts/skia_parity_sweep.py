@@ -30,11 +30,6 @@ Run (repo root):
 
 from __future__ import annotations
 
-import os
-
-# Must be set before src.settings is imported.
-os.environ.setdefault("HARUKI_DRAWING__USE_PROCESS_POOL", "false")
-
 import argparse
 import asyncio
 from collections import Counter
@@ -229,7 +224,6 @@ CASES: tuple[Case, ...] = (
 
 def setup() -> None:
     """Disable the process pool and force every Skia gate on. Call once at start."""
-    settings.drawing.use_process_pool = False
     for flag in ("use_skia_plot",):
         if hasattr(settings.drawing, flag):
             setattr(settings.drawing, flag, True)

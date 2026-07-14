@@ -71,11 +71,7 @@ def _render_skia(nodes: list[dict], w: int, h: int) -> Image.Image:
 def _render_pillow(build, w: int, h: int) -> Image.Image:
     painter = Painter(size=(w, h))
     build(painter)
-    # Mirror Painter.get()'s image marshalling so paste ops carry their image.
-    image_dict: dict = {}
-    for op in painter.operations:
-        op.image_to_id(image_dict)
-    img = Painter._execute(painter.operations, None, painter.size, image_dict)
+    img = Painter._execute(painter.operations, None, painter.size)
     return img.convert("RGBA")
 
 

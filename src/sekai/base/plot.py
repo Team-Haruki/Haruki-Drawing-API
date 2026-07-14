@@ -1786,7 +1786,7 @@ class Canvas(Frame):
         assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
         p = Painter(size=size)
         self.draw(p)
-        img = Painter._execute(p.operations, None, size, {})
+        img = Painter._execute(p.operations, None, size)
         if scale:
             img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
         return img

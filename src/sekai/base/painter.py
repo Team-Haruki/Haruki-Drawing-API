@@ -1,8 +1,6 @@
-import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
 import colorsys
-from concurrent.futures import ProcessPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timedelta
@@ -11,7 +9,6 @@ import hashlib
 from io import BytesIO
 import logging
 import math
-from multiprocessing import get_context
 import os
 from pathlib import PurePath
 import random
@@ -32,40 +29,14 @@ from src.settings import (
     DEFAULT_FONT,  # noqa: F401
     DEFAULT_HEAVY_FONT,  # noqa: F401
     FONT_DIR,
-    settings,
 )
 
 from .img_utils import adjust_image_alpha_inplace
 from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
-# Process pool for CPU-intensive drawing operations
-_process_pool_ctx = get_context("spawn")
-_painter_process_pool: ProcessPoolExecutor | None = None
-_painter_process_pool_lock = threading.Lock()
-
-
-def get_painter_process_pool(max_workers: int | None = None) -> ProcessPoolExecutor:
-    """Get or create the painter process pool."""
-    global _painter_process_pool
-    if _painter_process_pool is not None:
-        return _painter_process_pool
-
-    with _painter_process_pool_lock:
-        if _painter_process_pool is None:
-            workers = max_workers or settings.drawing.process_pool_workers
-            _painter_process_pool = ProcessPoolExecutor(
-                max_workers=workers,
-                mp_context=_process_pool_ctx,
-            )
-    return _painter_process_pool
-
 
 def shutdown_painter() -> None:
-    """关闭 painter 模块持有的全局资源（进程池、磁盘缓存清理）"""
-    global _painter_process_pool
-    if _painter_process_pool is not None:
-        _painter_process_pool.shutdown(wait=False)
-        _painter_process_pool = None
+    """关闭 painter 模块持有的全局资源（磁盘缓存清理）"""
     Painter.cleanup_old_disk_cache()
 
 
@@ -614,33 +585,6 @@ class PainterOperation:
     args: list
     exclude_on_hash: bool
 
-    def image_to_id(self, img_dict: dict[int, Image.Image]) -> None:
-        if isinstance(self.args, tuple):
-            self.args = list(self.args)
-        for i in range(len(self.args)):
-            if isinstance(self.args[i], Image.Image):
-                img_id = id(self.args[i])
-                img_dict[img_id] = self.args[i]
-                self.args[i] = f"%%image%%{img_id}"
-
-    def id_to_image(self, img_dict: dict[int | str, Image.Image]) -> None:
-        if isinstance(self.args, tuple):
-            self.args = list(self.args)
-        for i in range(len(self.args)):
-            if isinstance(self.args[i], str) and self.args[i].startswith("%%image%%"):
-                img_id = int(self.args[i][9:])
-                self.args[i] = img_dict[img_id]
-
-
-# Queued ops whose FIRST arg is an ImageSource, mapped to the positional index of their
-# src_rect arg (None when the op has none — the mask of a push_mask is never cropped).
-_IMAGE_SOURCE_OPS: dict[str, int | None] = {
-    "_impl_paste": 6,
-    "_impl_paste_with_alpha_blend": 7,
-    "_impl_paste_src": 3,
-    "_impl_push_mask": None,
-}
-
 
 def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
     """Resolve a lazy paste source to pixels. An ``AssetImageRef`` with a concrete
@@ -651,27 +595,6 @@ def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
     if isinstance(source, AssetImageRef) and size and size[0] and size[1] and tuple(size) != tuple(source.size):
         return resolve_image_source_sync(source, target_size=(int(size[0]), int(size[1])))
     return resolve_image_source_sync(source)
-
-
-def _resolve_op_image_sources(operations: list["PainterOperation"]) -> None:
-    """Materialize lazy image refs in queued paste ops.
-
-    Called before ops cross a process boundary: spawn workers cannot reach this
-    process's image caches, so ship decoded pixels via ``image_to_id``/``image_dict``
-    (the pre-ImageSource behavior) instead of having every worker re-decode from
-    disk with a cold private cache."""
-    for op in operations:
-        if op.func in _IMAGE_SOURCE_OPS and op.args:
-            source = op.args[0]
-            if not isinstance(source, Image.Image):
-                if isinstance(op.args, tuple):
-                    op.args = list(op.args)
-                # A src_rect paste crops before the fit, so it must ship full-size pixels
-                # (the crop happens in the paste impl on the worker side).
-                rect_idx = _IMAGE_SOURCE_OPS[op.func]
-                has_src_rect = rect_idx is not None and len(op.args) > rect_idx and op.args[rect_idx] is not None
-                size = None if has_src_rect else (op.args[2] if len(op.args) > 2 else None)
-                op.args[0] = _resolve_paste_source(source, size)
 
 
 def _emoji_source_cache_key(kind: str, value: str) -> str:
@@ -829,23 +752,19 @@ class Painter:
         return self
 
     @staticmethod
-    def _execute(
-        operations: list[PainterOperation], img: Image.Image, size: tuple[int, int], image_dict: dict[str, Image.Image]
-    ) -> Image.Image:
+    def _execute(operations: list[PainterOperation], img: Image.Image, size: tuple[int, int]) -> Image.Image:
         t = datetime.now()
-        debug_print(f"Sub process enter memory usage: {get_memo_usage()} MB")
         if img is None:
             img = Image.new("RGBA", size, TRANSPARENT)
         p = Painter(img, size)
         for op in operations:
-            op.id_to_image(image_dict)
             p.offset = (op.offset[0] - p._clip_origin[0], op.offset[1] - p._clip_origin[1])
             p.size = op.size
             p.w, p.h = op.size
             func = getattr(p, op.func) if isinstance(op.func, str) else op.func
             func(*op.args)
         assert not p._clip_stack, "unbalanced push_clip_roundrect/push_mask"
-        debug_print(f"Sub process use time: {datetime.now() - t}")
+        debug_print(f"Painter._execute use time: {datetime.now() - t}")
         return p.img
 
     async def get(self, cache_key: str | None = None) -> Image.Image:
@@ -875,54 +794,18 @@ class Painter:
                                 logging.warning(f"Failed to remove cache file {p}: {e}")
                         debug_print(f"Cache mismatch, removed {len(paths)} files")
 
-        debug_print(f"Main process memory usage: {get_memo_usage()} MB")
+        debug_print(f"Memory usage: {get_memo_usage()} MB")
 
-        # 收集所有图片对象到字典中
-        image_dict: dict[str, Image.Image] = {}
         try:
-            # 根据图片大小选择执行方式
-            total_pixels = self.size[0] * self.size[1]
-            use_process_pool = (
-                settings.drawing.use_process_pool and total_pixels > settings.drawing.process_pool_threshold
-            )
-
-            if use_process_pool:
-                # Spawn workers can't see this process's image caches: resolve lazy
-                # refs to decoded pixels here (warm from prefetch_asset_refs) so they
-                # ship via image_dict instead of re-decoding cold in every worker.
-                await run_in_pool(_resolve_op_image_sources, self.operations)
-
-            for op in self.operations:
-                op.image_to_id(image_dict)
-            total_img_size = 0
-            for img in image_dict.values():
-                total_img_size += img.size[0] * img.size[1] * 4
-            debug_print(f"image_dict len: {len(image_dict)}, total size: {total_img_size // 1024 // 1024} MB")
-
             for op in self.operations:
                 debug_print(str(op))
 
             # 执行绘图操作
             t = datetime.now()
-
-            if use_process_pool:
-                loop = asyncio.get_event_loop()
-                pool = get_painter_process_pool()
-                self.img = await loop.run_in_executor(
-                    pool,
-                    Painter._execute,
-                    self.operations,
-                    self.img,
-                    self.size,
-                    image_dict,
-                )
-                debug_print(f"Painter executed in process pool in {datetime.now() - t}")
-            else:
-                self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size, image_dict)
-                debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
+            self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size)
+            debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
         finally:
             self.operations = []
-            image_dict.clear()
 
         # 保存缓存
         if cache_key is not None:
