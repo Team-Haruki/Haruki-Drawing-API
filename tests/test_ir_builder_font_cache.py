@@ -10,7 +10,6 @@ assertion below is what protects that.
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import threading
 
 from src.sekai.skia_renderer import ir_builder as irb
@@ -50,19 +49,33 @@ def test_font_cache_survives_across_builder_instances(real_fonts):
 def test_font_objects_are_not_shared_across_threads(real_fonts):
     """THE performance invariant. A FreeTypeFont shared between threads serializes every
     getlength()/getbbox() in the process (Pillow takes a per-object critical section), which
-    costs 4-5x throughput on the free-threaded build. Each thread must get its own object."""
-    fonts: list[int] = []
+    costs 4-5x throughput on the free-threaded build. Each thread must get its own object.
+
+    Four EXPLICIT threads, and the font objects are kept alive. Both matter, and this test was
+    flaky in CI without them:
+      * ``ThreadPoolExecutor(max_workers=4).map(fn, range(4))`` does not promise four threads. Its
+        workers are spawned lazily, so a fast task can be picked up by a thread that already
+        finished an earlier one — four tasks legitimately ran on two threads and the assertion
+        read ``2 == 4``.
+      * Storing ``id(font)`` and dropping the object lets CPython reuse the address once it is
+        collected, so two distinct fonts can report the same id.
+    """
+    fonts: list[object] = []
     lock = threading.Lock()
 
-    def work(_: int) -> None:
+    def work() -> None:
         font = _builder()._pil_font("default", 32)
         with lock:
-            fonts.append(id(font))
+            fonts.append(font)  # the OBJECT, not its id — an id is only unique while it is alive
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        list(pool.map(work, range(4)))
+    threads = [threading.Thread(target=work) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
-    assert len(set(fonts)) == 4, "font object is shared across threads — measurement will serialize"
+    assert len(fonts) == 4
+    assert len({id(f) for f in fonts}) == 4, "font object is shared across threads — measurement will serialize"
 
 
 def test_font_cache_key_is_resolved_name_not_role(real_fonts):
