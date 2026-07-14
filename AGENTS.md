@@ -117,10 +117,12 @@ Notable `drawing.*` keys:
 - `readiness_unhealthy_inflight_requests` / `readiness_unhealthy_cgroup_percent` / `readiness_unhealthy_asyncio_tasks` / `readiness_unhealthy_rss_mb` — readiness thresholds used by `/ready`; once exceeded, the service reports `503` so orchestration can stop routing more traffic. **The memory gate is `readiness_unhealthy_cgroup_percent`** (default 90): `read_cgroup_memory()` reads `memory.current` against `memory.max` (cgroup v2, falling back to v1's `usage_in_bytes`/`limit_in_bytes`), so it sees the whole container — including the heavy-render workers, which are separate processes and hold most of the memory (~500 MB each warm, versus a parent that idles at 267 MB while the cgroup is at 585 MB). It is a *percentage* precisely so it cannot be set above the hard limit and become unfirable. Outside a memory-limited cgroup (bare metal, macOS, unconstrained container) it reads `None` and the gate simply does not apply. **`readiness_unhealthy_rss_mb` is `0` (off) by design**: it reads `/proc/self/status` VmRSS — the *parent only* — which grows with concurrency (483/757/838/958 MB at 1/4/8/12 concurrent card/box), so it behaves like a miscalibrated concurrency gate that fires before the explicit `readiness_unhealthy_inflight_requests` one, while still being blind to the memory that actually fills the cgroup.
 - `image_cache_size` / `image_cache_max_mb` — general image LRU.
 - `thumbnail_cache_size` / `thumbnail_cache_max_mb` — dedicated thumbnail LRU (recommend 4096 / 256MB).
-- `composed_image_cache_size` / `composed_image_cache_max_mb` / `composed_image_cache_ttl_seconds` — final-output cache.
+- `composed_image_cache_size` / `composed_image_cache_max_mb` / `composed_image_cache_ttl_seconds` — the
+  decoded-**fragment** cache (event/vlive list entries, profile modules, honor's composed badge), *not* a
+  final-output cache. These same three keys also size the **Skia payload cache** (honor's encoded responses),
+  so zeroing any one of them disables **both** pools — see the cache chapter.
 - `export_image_format` — `"png"` or `"jpg"`.
 - `jpg_quality` — JPEG quality (1–100), only applied when format is `"jpg"`.
-- `screenshot_api_path` — URL of the companion screenshot service.
 - `use_skia_plot` — the Skia gate (default `true`). By convention it is **not** written into `configs.yaml`; flip it with `HARUKI_DRAWING__USE_SKIA_PLOT`. See the Skia chapter below.
 
 ## Proprietary File: `src/sekai/mysekai/drawer.py`

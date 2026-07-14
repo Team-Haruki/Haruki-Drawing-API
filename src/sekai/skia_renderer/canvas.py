@@ -47,8 +47,12 @@ def skia_plot_enabled() -> bool:
     return bool(settings.drawing.use_skia_plot)
 
 
-# Minimum IR capability this code emits (5 = capability 4 + SelfImage canvas snapshot).
-# An older wheel would silently drop features, so refuse it and fail open to Pillow.
+# Minimum IR capability this code emits. 5 added the SelfImage canvas snapshot, 6 the Porter-Duff
+# Src paste (Image.blend="src", i.e. Painter.paste_src), 7 the pre-generated TriangleBg.tris.
+# An older wheel SILENTLY drops the fields it does not know (serde skips them) — a capability-6
+# wheel would render a triangle background with no triangles in it — so refuse it and fail open
+# to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
+# (quick-check.yml, skia-wheels.yml). Bump all four together.
 REQUIRED_NATIVE_IR_CAPABILITY = 7
 
 

@@ -20,8 +20,11 @@
 - **绝大多数端点**(profile、card/list、card/box、card/detail、event、music、gacha、score、sk、mysekai …)
   走同一份 plot.py widget 树,经 IRPainter 输出 Render-IR 交 Rust Skia 解释器渲染——改一处两个后端同时生效。
   card/list 与 card/box **没有**专用 scene builder,同样画 widget 树。
-- **chart 是唯一手工拼 IR 的例外**(`src/sekai/chart/drawer.py:24,208`——直接 `IRBuilder(...)`,全文件不出现
-  plot/Canvas/IRPainter),而且有正当理由:图表像素来自 `pjsekai_scores_rs`,IR 只在外面加水印外壳。
+- **两处直接用 `IRBuilder`,但性质不同**(`tests/test_route_render_contract.py` 的 `_MAY_HAND_BUILD_IR` 就列这两个):
+  - `src/sekai/chart/drawer.py` —— **整个场景**都是手写的(全文件不出现 plot/Canvas/IRPainter)。有正当理由:
+    图表像素来自 `pjsekai_scores_rs`,IR 只在外面加水印外壳。
+  - `src/sekai/honor/skia.py` —— **只有水印页脚外壳**是手写的(`b.group` / `b.self_image` / 两行 `b.text`),
+    徽章本体是 `splice_root_children(badge)` 拼进来的 **widget 树 IR**。**不是第二套布局。**
 - **honor 已经不是双布局了**(2026-07-14 起,本条曾长期写反)。布局只有**一份**:
   `src/sekai/honor/widget.py::HonorBadgeBox`,由 `build_honor_badge_canvas()` 产出,**两个后端共用**——
   Pillow 走 `drawer.py` 的 `get_img_sync()`,Skia 走 `skia.py` 的 `splice_root_children()` 把同一棵树的 IR
@@ -34,7 +37,7 @@ Docker 条件安装 wheel + 构建期 IR capability 自检、扩展缺失时 fai
 `/render-stats` 逐端点计数 + image.response `backend=` 字段。
 
 **剩余的是生产验收而非代码**:PR #33 合并、带扩展镜像的全关金丝雀与放量验收,以及
-[`skia-migration-todo.md`](./skia-migration-todo.md) 里的收尾项(三角背景确定性播种、双池预算合并、Pillow 退役等)。
+[`skia-migration-todo.md`](./skia-migration-todo.md) 里的收尾项(双池预算合并、Pillow 退役等;**三角背景确定性播种已完成**,见 D3)。
 
 ## 已拍板决策
 
@@ -151,12 +154,18 @@ TYPEFACE_CACHE 锁外加载。
 
 ## 阶段 5 — 缓存补齐(2–3 天)
 
-**硬规则:Pillow 时代有 composed/disk 缓存的端点,未恢复等价缓存前禁止进放量名单。** 逐端点核实名单,
-至少含 **profile、event/list、vlive/list**(misc/alias-list 已接)。否则开关一开这些端点从"缓存命中"变
-"每请求全量重渲",CPU 不降反升,会得出"Skia 更慢"的假结论污染放量判断。
+> ⚠️ **本节的核心结论已被推翻(2026-07-14 / 07-15),整节保留仅作历史。** 详见
+> `skia-migration-todo.md` 的「整页 payload 缓存不做」与「已修:页面把时钟画进了缓存」。
 
-- 泛化 payload-cache 需给 try_render 调用点穿端点名+缓存键——与阶段 4 门控的端点名穿参**合并为一次签名改造**。
-- 考虑给 profile/event 的 Skia 结果缓存补磁盘层:放量期"改 env + 重启"频繁,纯内存缓存每次重启全冷。
+~~**硬规则:Pillow 时代有 composed/disk 缓存的端点,未恢复等价缓存前禁止进放量名单。**~~ **反了。**
+① **调用方(Haruki-Cloud)已经按 payload 去重**,同一个 payload 根本不会来第二次——drawing 侧再加一层
+整页缓存**永远不可能命中**,只会把共享 LRU 里真能命中的条目挤出去。
+② 更糟的是:**这些页面把墙钟画进了画布**(`add_request_watermark` 的秒级 `DT:` 页脚;card/list 还按
+`request_now()` 判「未上线」)。key 里带 `dt` 就永远不命中,不带 `dt` 就**发陈旧时间戳**——实测复现过:
+只有 `dt` 不同的两个请求共用一个 key,第二个拿到了第一个的时间戳;卡已经上线一小时,缓存还在发「未上线」。
+**所以那个"命中率"本身就是 bug 的产物。** chart / vlive-list / misc-alias-list / profile 的整页缓存已删,
+card/box 与 card/list 的也已删(`f088c41`),只剩 honor(它的 key 里烤进了水印文本,对时钟是诚实的)。
+跨请求复用发生在**更下层且跨用户共享**:Rust 的 Moka 目标栅格缓存 + Pillow 的全局 resize 缓存。
 - 双池预算按 D7:过渡期共享单预算(现状各吃满一份 = 翻倍)。
 - **头像框 9-slice 加 composed 缓存**(现在每个带框 /profile 请求重做 700×700 合成)——两个后端同时受益,立刻可做。
 

@@ -221,8 +221,11 @@
       带目标尺寸时走全局 resize 缓存),`Canvas.get_img` 绘制前并发预取树内 ref——ImageBox 的显示尺寸
       可布局前自算,预取直接温 resize 缓存条目而非全尺寸解码(696 张 jacket 全尺寸约 1.5GiB 会击穿字节
       预算边解码边驱逐;64×64 条目合计仅约 11MiB),music_list Pillow 回退 `3.4s -> 1.8s` 且无 RSS 峰值;
-      `music_list` 双构建(`use_asset_refs` 标志)已删除,同一棵树两后端可绘。进程池分发前在父进程物化
-      全部 ref(spawn worker 看不到父进程缓存,像素经 `image_dict` 传递,即重构前行为)。`EncodedImageRef`
+      `music_list` 双构建(`use_asset_refs` 标志)已删除,同一棵树两后端可绘。
+      ~~进程池分发前在父进程物化全部 ref(像素经 `image_dict` 传递)~~ —— **已失效**:painter 进程池连同
+      `image_dict` 编组已于 2026-07-14 整个删除(`7b553fa`),`image_dict` 在全仓库已无一处代码引用。
+      仅剩的跨进程池是 `src/core/heavy_render_pool.py` 的两个重任务,它跨边界传的是**请求 dict**,
+      由 worker 自己 validate 并从头渲染——**没有任何父进程侧的 ref 物化步骤,不要加回来**。`EncodedImageRef`
       以原始 encoded bytes 直传 Rust(`MemImage::Encoded`),无需 capability bump。
 - [x] **Moka 目标栅格缓存 + Rayon 并行预热**(2026-07-13):按 asset identity/source rect/target/sampling 缓存,
       696 项仅约 11.4 MiB;music_list 冷启动串行 raster build `6.36s -> 0.83s`,暴露 stats/clear API 与 native metrics。

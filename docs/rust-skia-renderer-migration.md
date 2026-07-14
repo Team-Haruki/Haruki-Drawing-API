@@ -135,7 +135,9 @@ flowchart LR
 - **布局归属** → 渐进式：解释器先行；Rust 暂留 card 网格布局并在内部 emit 节点树；之后逐端点把布局搬到 Python 的 `IRBuilder`，最终 Rust 收敛为纯解释器。
   （**该计划已走完**：Rust 侧现已无任何 card 布局代码，"Rust 暂留 card 网格布局"只是当时的过渡态。）
 - **Emoji** → MVP 用 Skia 彩色 emoji 字体走文本整形，不移植 pilmoji 的 CDN+磁盘缓存管线。
-- **TriangleBg RNG** → 确定性，按 `(宽, 高, 小时)` 播种（可被 composed image cache 命中）。
+- **TriangleBg RNG** → ~~确定性，按 `(宽, 高, 小时)` 播种~~ —— **两侧的 PRNG 最终都被删除了**（`d562865`）。
+  散布是**数据**：`src/sekai/base/triangle_bg.py` 在 Python 里生成一次（blake2b 种子，`hour` **量化到整点**，
+  另含 `time_color` / `main_hue` / `size_fixed_rate`），Pillow 直接画这份列表，Skia 经 `TriangleBg.tris` 画同一份（cap 7）。
 - **缓存** → ~~复用 configs 的 `IMAGE_CACHE_SIZE` / `THUMB_CACHE_SIZE` 预算，Rust 侧资产缓存用全局 LRU
   （键 `path,mtime,size,tw,th`）~~ —— **该计划未被采纳**。Rust 的栅格缓存是**独立于 Python 配置**的进程级
   Moka **按字节加权**缓存（`DEFAULT_RASTER_CACHE_MB = 256`、单项上限 `16 MiB`，由 `HARUKI_SKIA_RASTER_CACHE_MB` /
@@ -162,7 +164,8 @@ Rust 解释器骨架（本阶段新增，当时与 `render_card_list`/`render_ca
 
 移植顺序（按解锁端点数排序）：① Group + Rect/RoundRect → ② Image（最高频，改 NEAREST→cubic 采样 + fit 模式）→ ③ Text + FontRegistry → ④ Gradient + 渐变/adaptive 文本 → ⑤ BlurGlass → ⑥ 把 card_list/card_box 整体重建到解释器上 → ⑦ TriangleBg 对齐 → ⑧ Watermark → ⑨ PieSlice → ⑩ emoji + card detail 及之后。
 
-对拍验证：逐节点 fixture，单节点同时走 Pillow 与 `render_scene` 渲染；尺寸硬断言（1px 偏差即失败），SSIM 按节点设阈值（文字≥0.95、形状≥0.98、玻璃≥0.90），失败输出 `expected|actual|diff` 三联图；TriangleBg 只做统计分布对比（RNG 不同，不做 SSIM）。
+对拍验证：逐节点 fixture，单节点同时走 Pillow 与 `render_scene` 渲染；尺寸硬断言（1px 偏差即失败），SSIM 按节点设阈值（文字≥0.95、形状≥0.98、玻璃≥0.90），失败输出 `expected|actual|diff` 三联图；~~TriangleBg 只做统计分布对比（RNG 不同，不做 SSIM）~~ —— **已失效**：
+两个后端现在画的是**同一份**三角形列表（`base/triangle_bg.py` 一次生成），像素可直接比。
 
 ### v2 实施进度
 
@@ -237,7 +240,10 @@ Rust 解释器骨架（本阶段新增，当时与 `render_card_list`/`render_ca
 
 `music_list` 同进程 696 asset 基准：旧路径首次约 `6.17s`、后续约 `1.51-1.62s`，RSS 最终约 `2.0 GiB`；新路径首次约 `1.63s`、后续约 `0.62-0.64s`，Python image cache 约 `0.1 MiB`，Rust 696 项目标栅格约 `11.4 MiB`，进程 RSS 约 `0.30 GiB`。最终全量 sweep 的冷态结果为 Pillow `2.939s`、Skia `1.207s`（`2.44x`）。
 
-PNG encoder A/B（Skia level 3 / `mtpng` fast）：Chart `109.5ms -> 37.7ms`、Event Detail `86.7ms -> 14.8ms`、Music List `186.2ms -> 61.3ms`、MySekai Map `79.8ms -> 18.7ms`、MySekai Map Multi `200.5ms -> 42.4ms`。最终 `63/63` 真实 payload 尺寸与视觉对拍通过；代表运行中 62 个端点不慢于 Pillow，仅 `sk_winrate` 的 `scale=2x` 小图路径为 `0.78x`，下一批应处理 scene scale 直渲染而非 render 后整图 resize。
+PNG encoder A/B（Skia level 3 / `mtpng` fast）：Chart `109.5ms -> 37.7ms`、Event Detail `86.7ms -> 14.8ms`、Music List `186.2ms -> 61.3ms`、MySekai Map `79.8ms -> 18.7ms`、MySekai Map Multi `200.5ms -> 42.4ms`。最终 `63/63` 真实 payload 尺寸与视觉对拍通过。
+（**这句原本还有一串 Pillow↔Skia 加速比，已作废**——它们出自对拍脚本的计时，两个方向同时错，见文末「2026-07-15 更正」。
+`sk_winrate` 的 `0.78x` 是幻觉：`skia_bench.py` 实测稳态 `74.3ms -> 21.1ms`（`3.52x`）。PNG encoder 的 A/B 是
+Skia↔Skia 的前后对比，不受影响，保留。）
 
 ### Chart 单次编码与跨扩展零拷贝（2026-07-13）
 
@@ -652,8 +658,10 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 > 完整的收尾/生产化清单见 [`skia-migration-todo.md`](./skia-migration-todo.md)，这里只留与本文架构直接相关的项。
 
 - **`Scene.scale` 直渲染**：`interp.rs` 现在是"按 canvas 尺寸渲染后再整图 resize"（对齐 plot.py
-  `Canvas.get_img(scale)` 的语义），尚未改成 canvas matrix 直接按目标尺寸绘制。这是 `sk_winrate` 这类
-  `scale=2x` 小图端点唯一还慢于 Pillow 的原因。
+  `Canvas.get_img(scale)` 的语义），尚未改成 canvas matrix 直接按目标尺寸绘制。这是一次多余的重采样和
+  一次多余的整图分配——**但不是性能问题**：`skia_bench.py` 实测 `sk_winrate`（`scale=2.0`）Pillow `74.3ms`
+  vs Skia `21.1ms`（`3.52x`）。唯一真的慢于 Pillow 的是 **honor 系**（`0.41~0.63x`），因为 380×110 的徽章
+  摊不掉 IR + FFI + encode 的固定开销，与 `scale` 无关。
 - **文本 Font / measure cache**：Rust 每个 `Text` 节点仍现场 `Font::from_typeface`；typeface 本身已有进程级
   cache（cache miss 的字体读取已在锁外完成，见 `load_typeface_checked`）。
 - 是否在 JPG 输出场景单独做编码基准。
@@ -666,8 +674,10 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
   `add_request_watermark` 把秒级 `DT:` 水印烤进画布，任何丢掉 `dt` 的 key 都会发陈旧时间戳、保留 `dt` 的 key
   又永远不命中；而 Haruki-Cloud 已在调用前按 payload（忽略 `dt`）缓存，alias-list 更是**故意绕过**自己的缓存来
   避免陈旧水印，被本服务的缓存悄悄抵消。因此 chart、vlive/list、misc/alias-list 的整页缓存（含磁盘层）已删除，
-  profile 也不加整页 payload 缓存（见 `try_render_profile_payload` 的注释）；只有 card/box、card/list、honor
-  保留 Skia payload cache。跨请求复用发生在更下层：Rust 的 Moka 目标栅格缓存与 Pillow 的全局 resize 缓存。
+  profile 也不加整页 payload 缓存（见 `try_render_profile_payload` 的注释）；**card/box 与 card/list 的整页缓存
+  后来也按同一条理由删除**（`f088c41`——它们同样把 `DT:` 水印烤进画布，实测复现了「第二个请求拿到第一个的
+  时间戳」和「卡已上线一小时还在发未上线」），现在**只有 honor** 保留 Skia payload cache（它的 key 里显式
+  带 `|wm:{水印文本}`，对时钟是诚实的）。跨请求复用发生在更下层：Rust 的 Moka 目标栅格缓存与 Pillow 的全局 resize 缓存。
 - ~~Python `IRBuilder` font cache 仍是请求级~~ —— 现为 `get_pil_font()` 的按线程有界 LRU；**不要**合并成共享
   缓存（Pillow 的 per-object critical section 会在 free-threaded 下把测量串行化）。
 - ~~其余高基数端点的 lazy `AssetRef`~~ —— 已全量迁移（见进度表 Lazy AssetRef 行）。

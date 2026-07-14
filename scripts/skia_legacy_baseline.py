@@ -51,11 +51,12 @@ _ASSET_DIRS = ("data",)
 # Rendered with a fixed clock so a day/night background does not diff against itself.
 _RENDER_ENV = {"HARUKI_BG_TEST_HOUR": "12.0"}
 
-# The triangle background draws from the UNSEEDED global `random` module (painter.py
-# _impl_draw_random_triangle_bg), so two renders of the same tree differ by ~12% of pixels all on
-# their own. Seed it identically on both sides or every comparison is pure noise -- this is also
-# why the Pillow-vs-Skia parity sweep can only assert a loose mean diff on these endpoints: their
-# backgrounds never match at all.
+# The CURRENT tree does not need this: since d562865 the triangle scatter is generated once, in
+# Python (base/triangle_bg.py, seeded off the quantized hour), and both backends draw that same
+# list -- neither has a PRNG any more. But this harness renders the BASELINE ref too, and on an
+# older ref Pillow still scattered from the UNSEEDED global `random`, so two renders of the same
+# tree there differ by ~12% of pixels on their own. Seeding the global RNG keeps the baseline side
+# reproducible; on the current side it is a harmless no-op.
 _RNG_SEED = 12345
 
 _BASELINE_DRIVER = textwrap.dedent(

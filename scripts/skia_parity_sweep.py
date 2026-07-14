@@ -2,9 +2,13 @@
 
 Successor of the sprint-era ``out/skia-parity-sweep/`` tooling: same mechanism
 (in-process Skia gates forced on, composed caches bypassed, per-endpoint diff
-stats + side-by-side PNG), but driven by the 58 real request bodies produced by
+stats + side-by-side PNG), but driven by the 63 real request bodies produced by
 ``scripts/parity_payloads/`` (all pre-validated against the drawing pydantic
-models) and extended with per-path wall-clock timing.
+models).
+
+This is a CORRECTNESS gate and nothing else. It does not time anything (see run_case), and it
+renders with the caches OFF (``bypass_caches()``) — so it cannot see a cache that serves a wrong
+image either. Those are ``scripts/skia_bench.py`` and ``scripts/skia_warm_parity.py``.
 
 For every payload the harness:
     pil     = await compose_X_image(req)            # Pillow ground truth (timed)
