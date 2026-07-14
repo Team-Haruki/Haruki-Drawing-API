@@ -11,8 +11,10 @@ For every payload the harness:
     payload = await try_render_X_payload(req)       # Skia shadow-layer path (timed)
     diff(pil, decode(payload)) -> mean/max/p99/p999 ; save <name>_sbs.png
 
-Result rows: {endpoint, status, size_*, mean, max, p99, p999, elapsed_pillow,
-elapsed_skia, sbs, note?, error?}. Statuses: ok / size-mismatch / skia-none /
+Result rows: {endpoint, status, size_*, mean, max, p99, p999, sbs, note?, error?}.
+No timings: this is a correctness gate, and the ones it used to print were misleading
+in both directions at once (see run_case). Benchmarking is scripts/skia_bench.py.
+Statuses: ok / size-mismatch / skia-none /
 pillow-only / pillow-none / pillow-error / skia-error / build-error /
 harness-error / skipped / no-payload.
 
@@ -49,7 +51,6 @@ from io import BytesIO
 import json
 from pathlib import Path
 import sys
-import time
 import traceback
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -338,7 +339,17 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
 
     # Pillow ground truth (plus the route's raster watermark footer where the route adds one,
     # so both sides compare as the full route output)
-    t0 = time.perf_counter()
+    #
+    # NO TIMING HERE. This used to record elapsed_pillow / elapsed_skia and they misled everyone who
+    # read them, in two directions at once:
+    #   * Pillow renders FIRST and this sweep does not bypass the image/thumb/resize decode caches,
+    #     so Pillow paid every cold decode and Skia inherited a warm cache -- mysekai_music_record
+    #     read as 10.39x when it is really 1.12x.
+    #   * compose() returns a PIL.Image and try_render() returns ENCODED bytes, so Skia was charged
+    #     for the PNG encode and Pillow was not -- which invented six "Skia is slower" endpoints
+    #     that do not exist (mysekai_map: pillow spends 110 ms encoding what Skia encodes in 14 ms).
+    # A correctness gate renders each case once; an honest benchmark needs warm-up, repetition and a
+    # min-of-N. Those are different jobs. Benchmarking lives in scripts/skia_bench.py.
     try:
         pil = await compose(req)
         if pil is not None and case.route_watermark:
@@ -347,11 +358,9 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
             pil = await add_request_watermark_to_image(pil, req)
     except Exception as exc:
         row["status"] = "pillow-error"
-        row["elapsed_pillow"] = round(time.perf_counter() - t0, 3)
         row["error"] = f"{type(exc).__name__}: {exc}"
         row["trace"] = traceback.format_exc(limit=4)
         return row
-    row["elapsed_pillow"] = round(time.perf_counter() - t0, 3)
     if pil is None:
         row["status"] = "pillow-none"
         return row
@@ -364,16 +373,13 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
         _to_rgb(pil).save(pillow_png)
         row["pillow_png"] = pillow_png.name
         return row
-    t0 = time.perf_counter()
     try:
         payload = await try_render(req)
     except Exception as exc:
         row["status"] = "skia-error"
-        row["elapsed_skia"] = round(time.perf_counter() - t0, 3)
         row["error"] = f"{type(exc).__name__}: {exc}"
         row["trace"] = traceback.format_exc(limit=6)
         return row
-    row["elapsed_skia"] = round(time.perf_counter() - t0, 3)
     if payload is None:
         row["status"] = "skia-none"  # gate off / unsupported op / known-blocked fence
         return row
@@ -480,19 +486,14 @@ def write_summary_md(rows: list[dict], out_dir: Path) -> Path:
         group = grouped[status]
         lines.append(f"## {status} ({len(group)})")
         lines.append("")
-        lines.append("| endpoint | size | mean | p99 | pillow_s | skia_s | speedup | note |")
-        lines.append("|---|---|---|---|---|---|---|---|")
+        lines.append("| endpoint | size | mean | p99 | note |")
+        lines.append("|---|---|---|---|---|")
         for row in sorted(group, key=lambda r: r["endpoint"]):
             size = "x".join(str(v) for v in row["size_pil"]) if row.get("size_pil") else "-"
             if row.get("size_skia") and row.get("size_pil") != row.get("size_skia"):
                 size += " / " + "x".join(str(v) for v in row["size_skia"])
-            ep, es = row.get("elapsed_pillow"), row.get("elapsed_skia")
-            speedup = f"{ep / es:.2f}x" if ep and es else "-"
             note = row.get("note") or row.get("error") or ""
-            lines.append(
-                f"| {row['endpoint']} | {size} | {_fmt(row.get('mean'))} | {_fmt(row.get('p99'))} "
-                f"| {_fmt(ep)} | {_fmt(es)} | {speedup} | {note} |"
-            )
+            lines.append(f"| {row['endpoint']} | {size} | {_fmt(row.get('mean'))} | {_fmt(row.get('p99'))} | {note} |")
         lines.append("")
     path = out_dir / "SUMMARY.md"
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -513,9 +514,7 @@ async def sweep(only: set[str] | None, out_dir: Path, mysekai_real) -> list[dict
         row = await _run_one(case, mysekai_real, out_dir)
         rows.append(row)
         print(  # noqa: T201
-            f"{row.get('status', '?'):<12} {case.name:<38} mean={_fmt(row.get('mean')):<8} "
-            f"pillow={_fmt(row.get('elapsed_pillow'))}s skia={_fmt(row.get('elapsed_skia'))}s "
-            f"{row.get('error', '')}"
+            f"{row.get('status', '?'):<12} {case.name:<38} mean={_fmt(row.get('mean')):<8} {row.get('error', '')}"
         )
     return rows
 

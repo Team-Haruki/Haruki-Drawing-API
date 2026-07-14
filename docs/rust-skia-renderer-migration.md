@@ -535,6 +535,20 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 - 使用 PyPI 正式发布的 `pjsekai-scores-rs-skia-image 0.5.0` 重建环境后再次验收：Chart 尺寸一致、mean abs diff `0.029`，Pillow `0.338s`、Skia raw `0.197s`（约 `1.72x`）；结果位于 `out/chart-release-0.5.0/`。
 - 同一正式 wheel 环境下全量真实 payload sweep 为 `63/63 ok`、0 failure、0 个低于 `1.0x` 的端点；最小加速为 `help_render 1.07x`，最大为 `mysekai_music_record 7.71x`，Chart 为 `0.316s -> 0.180s`。结果位于 `out/parity-sweep-release-0.5.0/`。
 
+> ⚠️ **2026-07-15 更正:本文里所有出自对拍脚本的加速比都是错的**,而且两个方向的错叠在一起:
+> (1) 对拍**先跑 Pillow 再跑 Skia**,且不 bypass 图片解码缓存——Pillow 付冷解码,Skia 白捡暖缓存
+> (`mysekai_music_record` 的 `7.71x`/`10.39x` 实测只有 `1.12x`);
+> (2) `compose_*_image()` 返回 **PIL 图**、`try_render_*_payload()` 返回**已编码字节**,对拍只给 Skia
+> 记了 PNG 编码的账——Pillow 的编码贵得离谱(`mysekai_map` 1536×880:光栅 36.5ms + **编码 110.2ms**),
+> 于是凭空造出 6 个"Skia 更慢"的端点,它们**一个都不存在**。
+> 对拍的计时字段已删除(它是正确性门,不是基准),基准移到 **`scripts/skia_bench.py`**,两边都产出响应字节:
+>
+> | | 稳态(生产) | 冷启动 |
+> |---|---|---|
+> | 整体 | **3.62x** | 2.82x |
+> | 单页中位 | 170ms → 47ms (**4.05x**) | 182ms → 53ms (3.63x) |
+> | Skia 更慢的端点 | **0 个** | 4 个(honor 系,页面仅 1–3ms) |
+
 2026-07-13 Rust 性能批次（目标栅格 cache / lazy asset / parallel prewarm / `mtpng`）：
 
 - `uv run ruff check src/ tests/`：通过。

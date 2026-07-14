@@ -183,7 +183,21 @@ uv run python -X gil=0 scripts/skia_legacy_baseline.py --ref main [--only profil
 
 # Warm-cache parity — the ONLY gate that renders with the caches ON. Run it on any cache change.
 uv run python -X gil=0 scripts/skia_warm_parity.py            # baseline: 53 ok / 10 nondeterministic, 0 drift
+
+# Pillow vs Skia timings. NOT the parity sweep — see below.
+uv run python -X gil=0 scripts/skia_bench.py [--cold]         # warm: 3.62x overall, 0 endpoints slower
 ```
+
+**Never time anything with the parity sweep.** It used to print `elapsed_pillow` / `elapsed_skia` and
+every number in the migration doc came from them; they were wrong twice, in opposite directions. It renders
+Pillow *first* and does not bypass the decode caches, so Pillow paid for the cold decodes and Skia inherited
+a warm cache (`mysekai_music_record` read as 10.39x; it is 1.12x). And `compose_*_image()` returns a
+`PIL.Image` while `try_render_*_payload()` returns *encoded bytes*, so only Skia was charged for the PNG
+encode — which invented six "Skia is slower" endpoints that do not exist (Pillow spends **110 ms** encoding
+the 1536×880 mysekai map that Skia encodes in 14 ms; Pillow's PNG encoder is 19% of the whole Pillow path).
+The timings are gone from the sweep — it is a correctness gate — and `scripts/skia_bench.py` does the job
+properly: both sides produce response bytes, both start warm, min-of-N, and a `--cold` mode for first-request
+latency.
 
 **The parity sweep renders with the caches OFF.** `skia_parity_sweep.py` calls `bypass_caches()` on
 purpose (honest timings), so its 63/63 only ever proves that *re-rendering from scratch* is correct — it
