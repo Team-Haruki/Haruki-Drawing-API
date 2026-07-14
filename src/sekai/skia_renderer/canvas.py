@@ -174,9 +174,10 @@ async def render_canvas_payload(
     optional only so that an un-wired caller still renders; pass it.
 
     This is where every render outcome is recorded, so /render-stats and the ``backend=`` log
-    field cover every drawing endpoint. The three endpoints that keep a payload cache
-    (card/box, card/list, honor) return a cached payload before reaching here, and record it
-    themselves via ``record_skia_cache_hit``.
+    field cover every drawing endpoint. **honor** is the one endpoint that still keeps a payload
+    cache; it hand-builds its IR anyway and records through its own ``_record`` helper, so it never
+    reaches here. (card/box and card/list used to cache here too — their page caches were removed
+    because the page bakes in the wall clock.)
     """
     name = endpoint or "unknown"
     if not settings.drawing.use_skia_plot:
