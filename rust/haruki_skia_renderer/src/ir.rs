@@ -273,12 +273,58 @@ pub enum Node {
     PieSlice(PieSliceNode),
     Image(ImageNode),
     SelfImage(SelfImageNode),
+    SdfQuad(SdfQuadNode),
     Text(TextNode),
     Shadow(ShadowNode),
     BlurGlass(BlurGlassNode),
     TriangleBg(TriangleBgNode),
     ImageBg(ImageBgNode),
     Watermark(WatermarkNode),
+}
+
+/// Per-glyph TMP-SDF text shading quad (requires IR_CAPABILITY >= 9).
+///
+/// `field` references a raw **Alpha8** mem image (`mem:<key>`) holding the glyph's L field
+/// ALREADY warped/resampled to display size by Python — PIL's uint8 bicubic warp semantics stay
+/// on the Python side, and this node performs ZERO geometric resampling. The interpreter runs
+/// the TMP per-pixel shading (`clip(f*face_scale - face_w, 0, 1) * alpha`, plus the optional
+/// integer-shifted underlay pass), quantizes to a straight-alpha RGBA patch exactly like the
+/// Python reference (`rgba_from_premul`: f32 math, banker's rounding), and draws the patch
+/// src-over at integer `pos` with nearest sampling.
+///
+/// `pos` is the INTEGER top-left in the enclosing coordinate space (the group offset applies
+/// like `Image`); the emitter never nests this node inside a `Transform`.
+#[derive(Debug, Deserialize)]
+pub struct SdfQuadNode {
+    pub pos: Vec2,
+    /// `mem:<key>` reference to the pre-warped A8 field. Anything but a raw Alpha8 mem entry
+    /// fails the whole scene loudly (-> Python fail-open to Pillow).
+    pub field: String,
+    pub shading: SdfShading,
+}
+
+/// Scalar half of the TMP shading, mirroring Python's `TMPSdfShadingScalars`. Values arrive as
+/// f64 JSON numbers; the pixel loop casts each to f32 ONCE before the per-pixel math (numpy
+/// semantics), and all per-pixel arithmetic is f32.
+#[derive(Debug, Deserialize)]
+pub struct SdfShading {
+    pub face_color: [u8; 3],
+    pub face_scale: f64,
+    pub face_w: f64,
+    pub alpha: f64,
+    #[serde(default)]
+    pub underlay: Option<SdfUnderlay>,
+}
+
+/// Underlay (outline shadow) half of the TMP shading scalars.
+#[derive(Debug, Deserialize)]
+pub struct SdfUnderlay {
+    pub color: [u8; 3],
+    pub scale: f64,
+    pub w: f64,
+    /// Integer pixel translation of the field for the underlay sample:
+    /// `shifted[y][x] = field[y + shift[1]][x + shift[0]]`, out-of-bounds samples 0.0.
+    pub shift: [i32; 2],
 }
 
 /// Affine-transform subtree (requires IR_CAPABILITY >= 8).

@@ -136,6 +136,8 @@ fn render_scene(
     // Non-zero means this scene asked for a font that could not be resolved and rendered with
     // Skia's sans-serif instead: the output is wrong even though the request succeeded.
     metrics.set_item("font_fallbacks", rendered.metrics.font_fallbacks)?;
+    metrics.set_item("sdf_quad_count", rendered.metrics.sdf_quad_count)?;
+    metrics.set_item("sdf_quad_elapsed", rendered.metrics.sdf_quad_elapsed)?;
     dict.set_item("native_metrics", metrics)?;
     Ok(dict.unbind())
 }
@@ -167,7 +169,7 @@ fn extract_mem_image(
     if let Ok((width, height, bytes)) = value.extract::<(i32, i32, &[u8])>() {
         // Not an error: skip the image and let the rest of the scene render natively.
         if let Err(reason) =
-            validate_raw_image(width, height, width.max(0) as usize * 4, bytes.len())
+            validate_raw_image(width, height, width.max(0) as usize * 4, bytes.len(), 4)
         {
             eprintln!("[haruki_skia_renderer] skipping raw mem image ({width}x{height}): {reason}");
             return Ok(None);
@@ -190,9 +192,13 @@ fn extract_mem_image(
     if let Ok((width, height, row_bytes, color_type, alpha_type, owner)) =
         value.extract::<(i32, i32, usize, String, String, Py<PyAny>)>()
     {
-        let color_type = match color_type.as_str() {
-            "rgba8888" => ColorType::RGBA8888,
-            "bgra8888" => ColorType::BGRA8888,
+        let (color_type, bytes_per_pixel) = match color_type.as_str() {
+            "rgba8888" => (ColorType::RGBA8888, 4_usize),
+            "bgra8888" => (ColorType::BGRA8888, 4),
+            // A8 glyph fields (SdfQuad; RAW_BUFFER_CAPABILITY >= 2). Tight rows only: Python
+            // ships the L image's raw bytes, so any stride other than `width` is an emitter
+            // bug (a protocol violation, not a degenerate image) and errors loudly below.
+            "a8" => (ColorType::Alpha8, 1),
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(format!(
                     "unsupported raw image color type: {color_type}"
@@ -220,7 +226,13 @@ fn extract_mem_image(
                 "raw image buffer must be C-contiguous",
             ));
         }
-        let expected = match validate_raw_image(width, height, row_bytes, buffer.len_bytes()) {
+        let expected = match validate_raw_image(
+            width,
+            height,
+            row_bytes,
+            buffer.len_bytes(),
+            bytes_per_pixel,
+        ) {
             Ok(expected) => expected,
             Err(reason) => {
                 eprintln!(
@@ -229,6 +241,11 @@ fn extract_mem_image(
                 return Ok(None);
             }
         };
+        if color_type == ColorType::Alpha8 && row_bytes != width as usize {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "a8 raw image row_bytes ({row_bytes}) must equal width ({width})"
+            )));
+        }
 
         // `buffer.readonly()` describes the VIEW, not the exporter: `memoryview(ba).toreadonly()`
         // over a bytearray reports read-only while `ba[0] = x` still succeeds. Skia reads these
@@ -273,12 +290,13 @@ fn validate_raw_image(
     height: i32,
     row_bytes: usize,
     buffer_len: usize,
+    bytes_per_pixel: usize,
 ) -> Result<usize, String> {
     if width <= 0 || height <= 0 {
         return Err("raw image dimensions must be positive".to_string());
     }
     let min_row_bytes = (width as usize)
-        .checked_mul(4)
+        .checked_mul(bytes_per_pixel)
         .ok_or_else(|| "raw image dimensions overflow".to_string())?;
     if row_bytes < min_row_bytes {
         return Err("raw image row_bytes is too small".to_string());
@@ -301,7 +319,13 @@ fn validate_raw_image(
 /// exists to catch.
 /// 8 = Transform subtree + catmull_rom sampling; an older wheel fails the scene parse loudly
 /// on the unknown node kind (-> PyValueError -> Python fail-open to Pillow).
-pub const IR_CAPABILITY: u32 = 8;
+/// 9 = SdfQuad (TMP text shading) + A8 raw mem transport.
+pub const IR_CAPABILITY: u32 = 9;
+
+/// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
+/// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
+/// SdfQuad glyph fields.
+pub const RAW_BUFFER_CAPABILITY: u32 = 2;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -309,7 +333,7 @@ fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(renderer_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(clear_renderer_caches, m)?)?;
     m.add("IR_CAPABILITY", IR_CAPABILITY)?;
-    m.add("RAW_BUFFER_CAPABILITY", 1_u32)?;
+    m.add("RAW_BUFFER_CAPABILITY", RAW_BUFFER_CAPABILITY)?;
     Ok(())
 }
 
@@ -360,6 +384,9 @@ pub(crate) struct NativeMetrics {
     pub(crate) zero_blur_fast_paths: u64,
     /// Fonts this scene requested that could not be resolved (rendered with sans-serif).
     pub(crate) font_fallbacks: u64,
+    /// SdfQuad nodes shaded in this scene, and the seconds spent shading + drawing them.
+    pub(crate) sdf_quad_count: u64,
+    pub(crate) sdf_quad_elapsed: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -1544,10 +1571,14 @@ mod tests {
 
     #[test]
     fn validates_raw_image_stride_and_length() {
-        assert_eq!(validate_raw_image(3, 2, 16, 32).expect("valid"), 32);
-        assert!(validate_raw_image(3, 2, 11, 32).is_err());
-        assert!(validate_raw_image(3, 2, 12, 23).is_err());
-        assert!(validate_raw_image(0, 2, 12, 24).is_err());
+        assert_eq!(validate_raw_image(3, 2, 16, 32, 4).expect("valid"), 32);
+        assert!(validate_raw_image(3, 2, 11, 32, 4).is_err());
+        assert!(validate_raw_image(3, 2, 12, 23, 4).is_err());
+        assert!(validate_raw_image(0, 2, 12, 24, 4).is_err());
+        // Single-channel (a8) strides: minimum row is `width` bytes, not `width * 4`.
+        assert_eq!(validate_raw_image(3, 2, 3, 6, 1).expect("valid a8"), 6);
+        assert!(validate_raw_image(3, 2, 2, 6, 1).is_err());
+        assert!(validate_raw_image(3, 2, 3, 5, 1).is_err());
     }
 
     #[test]

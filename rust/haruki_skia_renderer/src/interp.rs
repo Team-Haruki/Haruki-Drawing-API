@@ -431,6 +431,13 @@ pub(crate) fn render_scene_inner(
     interp.metrics.font_fallbacks = interp.fonts.fallbacks;
     interp.metrics.setup_elapsed = total_started.elapsed().as_secs_f64();
 
+    // SdfQuad field references are validated up front so a bad one fails the WHOLE scene
+    // (-> PyRuntimeError -> Python fail-open to Pillow) instead of silently skipping glyphs.
+    if let Some(background) = &scene.background {
+        validate_sdf_quad_fields(background, &interp.mem_images)?;
+    }
+    validate_sdf_quad_fields(&scene.root, &interp.mem_images)?;
+
     prewarm_scene_images(scene, &mut interp);
 
     let draw_started = Instant::now();
@@ -481,7 +488,7 @@ pub(crate) fn render_scene_inner(
     rendered.metrics = metrics;
     if profile_enabled() {
         eprintln!(
-            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={} font_fallbacks={}",
+            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={} font_fallbacks={} sdf_quads={} sdf_quad_elapsed={:.4}s",
             rendered.metrics.total_elapsed,
             rendered.metrics.setup_elapsed,
             rendered.metrics.raster_prewarm_elapsed,
@@ -503,6 +510,8 @@ pub(crate) fn render_scene_inner(
             rendered.metrics.raster_cache_bytes,
             rendered.metrics.zero_blur_fast_paths,
             rendered.metrics.font_fallbacks,
+            rendered.metrics.sdf_quad_count,
+            rendered.metrics.sdf_quad_elapsed,
         );
     }
     Ok(rendered)
@@ -602,6 +611,12 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                     );
                 }
             }
+        }
+        Node::SdfQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_quad(surface, interp, quad, off);
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
         }
         Node::Text(text) => {
             let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
@@ -1003,6 +1018,172 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
     paint.set_color(Color::from_argb(alpha, c[0], c[1], c[2]));
     paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, node.sigma, true));
     canvas.draw_rrect(RRect::new_rect_xy(rect, node.radius, node.radius), &paint);
+}
+
+/// Walk the tree and hard-fail on any `SdfQuad` whose `field` is not a raw Alpha8 mem entry.
+/// The contract is strict on purpose: the field is per-request data the emitter just shipped,
+/// so a missing/mistyped one is an emitter bug — erroring the scene reaches Python's fail-open
+/// catch, while skipping would serve an image with glyphs silently missing.
+fn validate_sdf_quad_fields(
+    node: &Node,
+    mem_images: &HashMap<String, MemImage>,
+) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::SdfQuad(quad) => {
+            let Some(key) = quad.field.strip_prefix("mem:") else {
+                return Err(format!(
+                    "SdfQuad field must be a mem image reference: {}",
+                    quad.field
+                ));
+            };
+            match mem_images.get(key) {
+                Some(MemImage::Raw {
+                    color_type: ColorType::Alpha8,
+                    ..
+                }) => Ok(()),
+                Some(MemImage::Raw { color_type, .. }) => Err(format!(
+                    "SdfQuad field {} must be an Alpha8 raw mem image, got {color_type:?}",
+                    quad.field
+                )),
+                Some(MemImage::Encoded { .. }) => Err(format!(
+                    "SdfQuad field {} must be an Alpha8 raw mem image, got encoded bytes",
+                    quad.field
+                )),
+                None => Err(format!(
+                    "SdfQuad field references unknown mem image: {}",
+                    quad.field
+                )),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The SdfQuad per-pixel routine, factored out so the golden tests drive the exact code the
+/// render arm uses. `field` is the A8 field (row-major, `row_bytes` stride, values 0..255);
+/// the return value is the straight-alpha RGBA8888 patch (tight `width * 4` stride).
+///
+/// This must match Python's `shade_tmp_sdf_field` + `rgba_from_premul` bit-comparably
+/// (per-channel |delta| <= 1): scalars are pre-cast f64 -> f32 ONCE, every per-pixel operation
+/// is f32 with the same association order as the numpy expressions, and quantization uses
+/// banker's rounding (`round_ties_even`, numpy `rint`) — not half-up.
+pub(crate) fn shade_sdf_field(
+    field: &[u8],
+    width: usize,
+    height: usize,
+    row_bytes: usize,
+    shading: &SdfShading,
+) -> Vec<u8> {
+    let face_scale = shading.face_scale as f32;
+    let face_w = shading.face_w as f32;
+    let alpha = shading.alpha as f32;
+    let face_rgb = shading.face_color.map(|c| c as f32 / 255.0);
+    let underlay = shading.underlay.as_ref().map(|u| {
+        (
+            u.scale as f32,
+            u.w as f32,
+            u.shift,
+            u.color.map(|c| c as f32 / 255.0),
+        )
+    });
+
+    let mut patch = vec![0_u8; width * height * 4];
+    for y in 0..height {
+        let row = &field[y * row_bytes..y * row_bytes + width];
+        for x in 0..width {
+            let f = row[x] as f32 / 255.0;
+            let face_a = (f * face_scale - face_w).clamp(0.0, 1.0) * alpha;
+            let (under_a, under_rgb) = match &underlay {
+                Some((u_scale, u_w, shift, u_rgb)) => {
+                    // shifted[y][x] = field[y + sy][x + sx]; out-of-bounds samples 0.0.
+                    let sx = x as i64 + shift[0] as i64;
+                    let sy = y as i64 + shift[1] as i64;
+                    let shifted =
+                        if (0..width as i64).contains(&sx) && (0..height as i64).contains(&sy) {
+                            field[sy as usize * row_bytes + sx as usize] as f32 / 255.0
+                        } else {
+                            0.0
+                        };
+                    ((shifted * u_scale - u_w).clamp(0.0, 1.0) * alpha, *u_rgb)
+                }
+                None => (0.0, [0.0; 3]),
+            };
+            let out_a = face_a + under_a * (1.0 - face_a);
+            let px = &mut patch[(y * width + x) * 4..(y * width + x) * 4 + 4];
+            for c in 0..3 {
+                let premul = face_rgb[c] * face_a + under_rgb[c] * under_a * (1.0 - face_a);
+                // Straight-alpha quantization exactly like `rgba_from_premul`.
+                let rgb = if out_a > 1e-6 { premul / out_a } else { 0.0 };
+                px[c] = (rgb * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+            }
+            px[3] = (out_a * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+        }
+    }
+    patch
+}
+
+/// Shade an SdfQuad's pre-warped A8 field and draw the straight-alpha patch src-over at its
+/// integer position — nearest sampling, no AA, ZERO geometric resampling (the field arrives
+/// already at display size). The field reference was validated up front, so a miss here only
+/// happens for test-constructed scenes; it degrades to skipping the node like other draws.
+fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off: (f32, f32)) {
+    let Some(key) = node.field.strip_prefix("mem:") else {
+        return;
+    };
+    let Some(MemImage::Raw {
+        width,
+        height,
+        row_bytes,
+        color_type: ColorType::Alpha8,
+        data,
+        ..
+    }) = interp.mem_images.get(key)
+    else {
+        return;
+    };
+    let (w, h) = (*width as usize, *height as usize);
+    let bytes = data.as_bytes();
+    if bytes.len()
+        < row_bytes
+            .saturating_mul(h.saturating_sub(1))
+            .saturating_add(w)
+    {
+        eprintln!(
+            "haruki_skia_renderer: SdfQuad field buffer too small, node skipped: {}",
+            node.field
+        );
+        return;
+    }
+    let patch = shade_sdf_field(bytes, w, h, *row_bytes, &node.shading);
+    let info = ImageInfo::new(
+        (*width, *height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let Some(image) = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), w * 4)
+    else {
+        eprintln!(
+            "haruki_skia_renderer: SdfQuad patch image build failed, node skipped: {}",
+            node.field
+        );
+        return;
+    };
+    let paint = Paint::default();
+    surface.canvas().draw_image_with_sampling_options(
+        &image,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+        SamplingOptions::default(),
+        Some(&paint),
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -2218,5 +2399,240 @@ mod tests {
         // scene parse (-> PyValueError -> Python fail-open to Pillow), never skip the node.
         let json = scene_json(r#"{ "type": "Bogus" }"#);
         assert!(serde_json::from_str::<Scene>(&json).is_err());
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    /// Decode a fixture PNG to unpremultiplied RGBA (grayscale PNGs come back R=G=B=L, A=255).
+    ///
+    /// Deliberately SkCodec, not `Image::from_encoded` + `read_pixels`: the image path
+    /// rasterizes through PREMUL and corrupts straight-alpha RGB (the expected fixture's
+    /// `204 @ a=63` comes back 202), while the codec decodes into the requested unpremul
+    /// info natively and losslessly.
+    fn decode_fixture_rgba(name: &str) -> (Vec<u8>, i32, i32) {
+        let bytes = std::fs::read(fixture_path(name)).expect("fixture readable");
+        let mut codec =
+            skia_safe::Codec::from_data(Data::new_copy(&bytes)).expect("fixture decodes");
+        let dimensions = codec.dimensions();
+        let (w, h) = (dimensions.width, dimensions.height);
+        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = w as usize * 4;
+        let mut buf = vec![0u8; row * h as usize];
+        let result = codec.get_pixels_with_options(&info, &mut buf, row, None);
+        assert!(
+            matches!(result, skia_safe::codec::Result::Success),
+            "fixture pixel decode failed"
+        );
+        (buf, w, h)
+    }
+
+    /// Run the render arm's pixel routine over a golden fixture triple (field L-PNG + scalars
+    /// JSON emitted from the Python reference) and gate on per-channel |delta| <= 1 against the
+    /// Python-rendered expected RGBA. Returns the observed max delta.
+    fn run_sdf_quad_golden(name: &str) -> u8 {
+        let (field_rgba, fw, fh) = decode_fixture_rgba(&format!("sdf_quad_{name}_field.png"));
+        let field: Vec<u8> = field_rgba.chunks_exact(4).map(|px| px[0]).collect();
+        let (expected, ew, eh) = decode_fixture_rgba(&format!("sdf_quad_{name}_expected.png"));
+        assert_eq!((fw, fh), (ew, eh), "field/expected size mismatch");
+        let scalars =
+            std::fs::read_to_string(fixture_path(&format!("sdf_quad_{name}_scalars.json")))
+                .expect("scalars readable");
+        let shading: SdfShading = serde_json::from_str(&scalars).expect("scalars parse");
+        let actual = shade_sdf_field(&field, fw as usize, fh as usize, fw as usize, &shading);
+        assert_eq!(actual.len(), expected.len());
+        let mut max_delta = 0u8;
+        for (idx, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let delta = a.abs_diff(*e);
+            assert!(
+                delta <= 1,
+                "{name}: channel {} of pixel {} is off by {delta} (got {a}, want {e})",
+                idx % 4,
+                idx / 4,
+            );
+            max_delta = max_delta.max(delta);
+        }
+        println!("sdf_quad golden {name}: max_delta={max_delta}");
+        max_delta
+    }
+
+    #[test]
+    fn sdf_quad_golden_face_only() {
+        run_sdf_quad_golden("face_only");
+    }
+
+    #[test]
+    fn sdf_quad_golden_underlay() {
+        run_sdf_quad_golden("underlay");
+    }
+
+    #[test]
+    fn sdf_quad_golden_gradient_bold() {
+        run_sdf_quad_golden("gradient_bold");
+    }
+
+    #[test]
+    fn sdf_quad_underlay_shift_samples_shifted_positions() {
+        // 4x4 field of distinct bytes. The face pass is forced to zero (face_scale 0, face_w 1)
+        // and the underlay to identity (scale 1, w 0, alpha 1), so the patch alpha at (x, y)
+        // must be EXACTLY the shifted field byte: shifted[y][x] = field[y + sy][x + sx] with
+        // shift [1, -1], and out-of-bounds (row 0 / rightmost column) zero-filled.
+        let field: Vec<u8> = (0..16).map(|i| (i * 16) as u8).collect();
+        let shading = SdfShading {
+            face_color: [255, 0, 0],
+            face_scale: 0.0,
+            face_w: 1.0,
+            alpha: 1.0,
+            underlay: Some(SdfUnderlay {
+                color: [0, 0, 255],
+                scale: 1.0,
+                w: 0.0,
+                shift: [1, -1],
+            }),
+        };
+        let patch = shade_sdf_field(&field, 4, 4, 4, &shading);
+        let alpha_at = |x: usize, y: usize| patch[(y * 4 + x) * 4 + 3];
+        for x in 0..4 {
+            assert_eq!(
+                alpha_at(x, 0),
+                0,
+                "row 0 samples y=-1 and must be zero-filled"
+            );
+        }
+        for y in 0..4 {
+            assert_eq!(
+                alpha_at(3, y),
+                0,
+                "column 3 samples x=4 and must be zero-filled"
+            );
+        }
+        for y in 1..4 {
+            for x in 0..3 {
+                assert_eq!(
+                    alpha_at(x, y),
+                    field[(y - 1) * 4 + (x + 1)],
+                    "shifted sample at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    fn sdf_scene_json(field: &str) -> String {
+        bare_scene_json(
+            (16, 16),
+            &format!(
+                r#"{{ "type": "Group", "offset": [2, 3], "size": [16, 16], "children": [
+                     {{ "type": "SdfQuad", "pos": [1, 1], "field": "{field}",
+                        "shading": {{ "face_color": [255, 204, 0], "face_scale": 12.0,
+                                      "face_w": 4.9, "alpha": 0.9 }} }}
+                   ] }}"#
+            ),
+        )
+    }
+
+    /// `RenderedImage` has no `Debug`, so `expect_err` can't unwrap the error directly.
+    fn expect_scene_error(scene: &Scene, mem: HashMap<String, MemImage>) -> String {
+        match render_scene_inner(scene, mem) {
+            Err(err) => err,
+            Ok(_) => panic!("scene must error"),
+        }
+    }
+
+    fn a8_mem_image(width: i32, height: i32, bytes: &[u8]) -> MemImage {
+        MemImage::Raw {
+            width,
+            height,
+            row_bytes: width as usize,
+            color_type: ColorType::Alpha8,
+            alpha_type: AlphaType::Unpremul,
+            data: Data::new_copy(bytes),
+            _buffer: None,
+            _owner: None,
+        }
+    }
+
+    #[test]
+    fn sdf_quad_unknown_mem_image_errors() {
+        // A dangling field reference must fail the WHOLE scene (error, not panic, not skip).
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:nope")).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_wrong_color_type_errors() {
+        // A resolvable mem image of the wrong color type is just as much an emitter bug.
+        let mut mem = HashMap::new();
+        mem.insert(
+            "field".to_string(),
+            MemImage::Raw {
+                width: 2,
+                height: 2,
+                row_bytes: 8,
+                color_type: ColorType::RGBA8888,
+                alpha_type: AlphaType::Unpremul,
+                data: Data::new_copy(&[0u8; 16]),
+                _buffer: None,
+                _owner: None,
+            },
+        );
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:field")).expect("parses");
+        let err = expect_scene_error(&scene, mem);
+        assert!(err.contains("Alpha8"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_encoded_mem_image_errors() {
+        let mut mem = HashMap::new();
+        mem.insert(
+            "field".to_string(),
+            MemImage::Encoded {
+                data: Data::new_copy(&[0x89, b'P', b'N', b'G']),
+                _owner: None,
+            },
+        );
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:field")).expect("parses");
+        let err = expect_scene_error(&scene, mem);
+        assert!(err.contains("Alpha8"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_renders_a8_mem_field_at_integer_pos() {
+        // The tuple->MemImage extraction is cfg(not(test)), so cover the ColorType::Alpha8
+        // handling at the MemImage level: an 8x8 A8 field drawn at group (2,3) + pos (1,1).
+        // Over a transparent canvas src-over keeps the source alpha byte exactly (premul
+        // conversion preserves alpha), so the canvas alpha must equal the patch alpha.
+        let field: Vec<u8> = (0..64).map(|i| (i * 4) as u8).collect();
+        let mut mem = HashMap::new();
+        mem.insert("glyph".to_string(), a8_mem_image(8, 8, &field));
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:glyph")).expect("parses");
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        assert_eq!(rendered.metrics.sdf_quad_count, 1);
+        assert!(rendered.metrics.sdf_quad_elapsed >= 0.0);
+
+        let shading = SdfShading {
+            face_color: [255, 204, 0],
+            face_scale: 12.0,
+            face_w: 4.9,
+            alpha: 0.9,
+            underlay: None,
+        };
+        let patch = shade_sdf_field(&field, 8, 8, 8, &shading);
+        let (pixels, w, _) = decode_pixels(&rendered);
+        let mut nonzero = 0u32;
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let canvas_idx = ((y + 4) * w as usize + (x + 3)) * 4;
+                let patch_a = patch[(y * 8 + x) * 4 + 3];
+                assert_eq!(pixels[canvas_idx + 3], patch_a, "alpha at patch ({x}, {y})");
+                nonzero += u32::from(patch_a > 0);
+            }
+        }
+        assert!(nonzero > 0, "the shaded patch must not be empty");
+        // Nothing may land outside the 8x8 patch footprint at (3, 4).
+        assert_eq!(pixels[3], 0, "canvas origin must stay transparent");
     }
 }
