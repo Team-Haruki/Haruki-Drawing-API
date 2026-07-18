@@ -380,9 +380,12 @@ class IRBuilder:
         source_rect: tuple[float, float, float, float] | None = None,
         sampling: str = "linear_mipmap",
         blend: str = "src_over",
+        blur_sigma: float | Vec2 | None = None,
     ) -> Node:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
-        the mask-less ``Image.paste``); the default composites over it. Requires IR_CAPABILITY >= 6."""
+        the mask-less ``Image.paste``); the default composites over it. ``blur_sigma`` applies
+        a destination-space Gaussian blur to the image only; a scalar uses the same sigma on
+        both axes. Blur requires IR_CAPABILITY >= 10."""
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -403,6 +406,10 @@ class IRBuilder:
         if source_rect is not None:
             # Source-pixel crop window [x0, y0, x1, y1] applied before the fit (Pillow img.crop).
             node["source_rect"] = [float(v) for v in source_rect]
+        if blur_sigma is not None:
+            sigma = (float(blur_sigma), float(blur_sigma)) if isinstance(blur_sigma, (int, float)) else blur_sigma
+            if sigma[0] > 0 or sigma[1] > 0:
+                node["blur_sigma"] = [max(0.0, float(sigma[0])), max(0.0, float(sigma[1]))]
         return self._add(node)
 
     def self_image(

@@ -6,6 +6,7 @@ import asyncio
 from io import BytesIO
 import json
 
+import numpy as np
 from PIL import Image
 import pytest
 
@@ -163,6 +164,71 @@ def test_irpainter_asset_image_ref_emits_relative_path(tmp_path):
     scene, mem = p.build_scene()
     assert mem == {}
     assert scene["root"]["children"][0]["path"] == "icons/blue.png"
+
+
+def test_irpainter_imagebg_native_parity_and_raster_cache_isolation(tmp_path):
+    """A decorated background stays close to the Pillow oracle and out of the shared cache.
+
+    Render filtered -> unfiltered -> filtered with the same path/target. Exact repeatability
+    proves the Moka target raster contains only the resize, not a previous node's tint/blur.
+    The non-zero region catches filter halos leaking outside the destination rectangle.
+    """
+    from src.sekai.base.painter import Painter
+    from src.sekai.base.plot import ImageBg
+    from src.sekai.base.utils import get_asset_image_ref
+
+    width, height = 24, 18
+    source = Image.new("RGBA", (width, height))
+    source.putdata(
+        [
+            ((x * 47 + y * 13) % 256, (x * 19 + y * 61) % 256, (x * 83 + y * 7) % 256, 255)
+            for y in range(height)
+            for x in range(width)
+        ]
+    )
+    asset = tmp_path / "bg.png"
+    source.save(asset)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "bg.png", on_missing="raise"))
+    canvas_size = (80, 60)
+    region_pos = (13, 11)
+    region_size = (54, 36)
+    base_color = (17, 23, 31, 255)
+
+    def add_tree(painter, *, blur, fade):
+        painter.rect((0, 0), canvas_size, base_color)
+        painter.set_region(region_pos, region_size)
+        ImageBg(ref, mode="fill", blur=blur, fade=fade).draw(painter)
+        painter.restore_region()
+
+    def render_native(*, blur, fade):
+        painter = _painter(canvas_size, assets_base_dir=tmp_path)
+        add_tree(painter, blur=blur, fade=fade)
+        scene, mem = painter.build_scene()
+        assert mem == {}
+        result = _native.render_scene(json.dumps(scene).encode(), mem)
+        return Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+
+    pillow = Painter(size=canvas_size)
+    add_tree(pillow, blur=True, fade=0.1)
+    expected = Painter._execute(pillow.operations, None, canvas_size).convert("RGBA")
+
+    cold_filtered = render_native(blur=True, fade=0.1)
+    unfiltered = render_native(blur=False, fade=0)
+    warm_filtered = render_native(blur=True, fade=0.1)
+    unfiltered_again = render_native(blur=False, fade=0)
+
+    expected_px = np.asarray(expected).astype(np.int16)
+    actual_px = np.asarray(cold_filtered).astype(np.int16)
+    rgb_delta = np.abs(expected_px[:, :, :3] - actual_px[:, :, :3])
+    assert float(rgb_delta.mean()) <= 3.0
+    assert float(np.quantile(rgb_delta, 0.99)) <= 16.0
+    assert int(rgb_delta.max()) <= 32
+    assert np.array_equal(expected_px[:, :, 3], actual_px[:, :, 3])
+    assert cold_filtered.getpixel((4, 4)) == base_color  # blur did not escape the nested region
+
+    assert np.array_equal(np.asarray(cold_filtered), np.asarray(warm_filtered))
+    assert np.array_equal(np.asarray(unfiltered), np.asarray(unfiltered_again))
+    assert not np.array_equal(np.asarray(cold_filtered), np.asarray(unfiltered))
 
 
 def test_irpainter_clip_roundrect_group_relative_children():

@@ -6,7 +6,7 @@ import asyncio
 from io import BytesIO
 import random
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageEnhance, ImageFilter
 import pytest
 
 from src.sekai.base import plot, utils
@@ -53,6 +53,92 @@ def test_asset_image_ref_resolve_and_missing_placeholder(tmp_path):
     gone = AssetImageRef(path=tmp_path / "missing.png", size=(8, 6), mode="RGBA")
     placeholder = resolve_image_source_sync(gone)
     assert placeholder.size[0] > 0  # question-mark placeholder, not an exception
+
+
+def test_imagebg_keeps_asset_ref_lazy_and_emits_region_relative_effects(tmp_path, monkeypatch):
+    """ImageBg construction and IR lowering must never turn a healthy asset ref into mem pixels.
+
+    The non-root region also pins the fact that ImageBg is a generic WidgetBg, not a scene-level
+    whole-canvas background. Blur sigma follows the source->destination scale because Pillow
+    applies GaussianBlur(3) before resizing.
+    """
+    from src.sekai.skia_renderer import ir_painter
+    from src.sekai.skia_renderer.ir_painter import IRPainter
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+
+    path = tmp_path / "nested" / "bg.png"
+    path.parent.mkdir()
+    _noise_image(19, (20, 10)).save(path)
+    stat = path.stat()
+    ref = AssetImageRef(path=path, size=(20, 10), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
+
+    bg = plot.ImageBg(ref, align="br", mode="fit", blur=True, fade=0.1)
+    assert bg.img is ref
+    monkeypatch.setattr(
+        ir_painter,
+        "resolve_image_source_sync",
+        lambda *_args, **_kwargs: pytest.fail("healthy ImageBg asset ref decoded in Python"),
+    )
+
+    painter = IRPainter(
+        (60, 50),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+    painter.set_region((11, 7), (30, 20))
+    bg.draw(painter)
+    painter.restore_region()
+    scene, mem = painter.build_scene()
+
+    assert mem == {}
+    node = scene["root"]["children"][0]
+    assert node["type"] == "Image"
+    assert node["path"] == "nested/bg.png"
+    assert node["pos"] == [1, 7]  # region offset + bottom-right fit offset (-10, 0)
+    assert node["size"] == [40, 20]
+    assert node["sampling"] == "catmull_rom"
+    assert node["tint"] == {"color": [229, 229, 229, 255], "mode": "multiply", "strength": 1.0}
+    assert node["blur_sigma"] == [6.0, 6.0]
+
+
+def test_imagebg_fill_scales_blur_per_axis(tmp_path):
+    from src.sekai.skia_renderer.ir_painter import IRPainter
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+
+    path = tmp_path / "bg.png"
+    _noise_image(23, (20, 10)).save(path)
+    stat = path.stat()
+    ref = AssetImageRef(path=path, size=(20, 10), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
+    painter = IRPainter(
+        (50, 30),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+
+    plot.ImageBg(ref, mode="fill", blur=True, fade=0).draw(painter)
+    node = painter.build_scene()[0]["root"]["children"][0]
+    assert node["blur_sigma"] == [7.5, 9.0]
+
+
+def test_imagebg_pillow_replay_preserves_legacy_effect_order():
+    """Moving fade/blur out of the constructor must not move them after the resize."""
+    source = _noise_image(29, (20, 10))
+    painter = Painter(size=(60, 50))
+    painter.set_region((11, 7), (30, 20))
+    plot.ImageBg(source, align="br", mode="fit", blur=True, fade=0.1).draw(painter)
+    painter.restore_region()
+    actual = asyncio.run(painter.get())
+
+    effected = source.filter(ImageFilter.GaussianBlur(radius=3))
+    effected = ImageEnhance.Brightness(effected).enhance(0.9)
+    resized = effected.resize((40, 20))
+    expected = Image.new("RGBA", (60, 50), (0, 0, 0, 0))
+    expected.paste(resized, (1, 7), resized)
+    assert _max_channel_delta(actual, expected) == 0
 
 
 def test_imagebox_layout_uses_ref_size_without_decode():

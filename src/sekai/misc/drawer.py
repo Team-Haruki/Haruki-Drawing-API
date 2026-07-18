@@ -563,10 +563,10 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[Image.Image, ImageSource, ImageSource, list[Image.Image], dict[int, Image.Image], float]:
+) -> tuple[ImageSource, ImageSource, ImageSource, list[Image.Image], dict[int, Image.Image], float]:
     tasks = [
-        # card_image feeds ImageBg(fade=0.1), which brightness-adjusts pixels eagerly.
-        get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
+        # ImageBg keeps this lazy through the Skia path; Pillow resolves it during replay.
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
         *[

@@ -320,7 +320,8 @@ fn validate_raw_image(
 /// 8 = Transform subtree + catmull_rom sampling; an older wheel fails the scene parse loudly
 /// on the unknown node kind (-> PyValueError -> Python fail-open to Pillow).
 /// 9 = SdfQuad (TMP text shading) + A8 raw mem transport.
-pub const IR_CAPABILITY: u32 = 9;
+/// 10 = per-Image Gaussian blur decoration (ImageBg lazy-ref path).
+pub const IR_CAPABILITY: u32 = 10;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for

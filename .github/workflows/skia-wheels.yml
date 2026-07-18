@@ -84,7 +84,7 @@ jobs:
       - name: Smoke test wheel (import + IR capability handshake)
         run: |
           pip install dist/*.whl
-          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 9, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 10, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7

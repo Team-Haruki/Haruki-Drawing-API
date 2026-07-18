@@ -265,7 +265,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
 
     bg = SEKAI_BLUE_BG
     if rqd.bg_img_path:
-        bg_img = await get_gacha_image_or_unknown(rqd.bg_img_path)
+        bg_img = await get_gacha_image_ref_or_unknown(rqd.bg_img_path)
         bg = ImageBg(bg_img) if bg_img else SEKAI_BLUE_BG
 
     # 预加载所有图片（并行）

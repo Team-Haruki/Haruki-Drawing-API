@@ -197,8 +197,8 @@ flip the env var and restart; the image itself is unchanged. Renderer tunables: 
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_TEXT_HINTING`, `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **7**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 7). A too-old
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **10**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 10). A too-old
 extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
 self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
@@ -280,9 +280,11 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
   subtly wrong. That is exactly what `scripts/skia_legacy_baseline.py` exists for: it re-renders the same
   payloads with Pillow on a baseline ref (default `main`) in a throwaway worktree and diffs. Run it whenever you
   port an existing Pillow composition into the tree.
-- **`ImageBg` defaults to `fade=0.1`**, and fade/blur rewrite pixels in the *constructor*. Passing an
-  `AssetImageRef` there forces a full decode **on the event loop** and the ref never reaches the IR. Only pass a
-  ref to `ImageBg(..., blur=False, fade=0)`; otherwise keep `get_img_from_path`.
+- **`ImageBg` fade/blur belong to `Painter.image_bg`, not the widget constructor.** Pass an `AssetImageRef` even
+  with the default `fade=0.1` or with blur enabled; Pillow resolves it while replaying the Painter operation, and
+  `IRPainter` keeps the path lazy by emitting ordinary `Image` nodes with `catmull_rom` sampling, a multiply tint
+  (`floor((1 - fade) * 255)`), and source-to-destination-scaled `blur_sigma`. Do not reintroduce eager
+  `get_img_from_path` calls merely because an image is used as an `ImageBg`.
 - **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
   A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
 - **There are THREE paste primitives, not two.** Pillow's `paste(im, pos, im)` lerps the destination alpha toward

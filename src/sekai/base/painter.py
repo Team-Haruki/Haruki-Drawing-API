@@ -16,7 +16,7 @@ from urllib.request import Request, urlopen
 
 import emoji
 import numpy as np
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
 from pilmoji import Pilmoji, getsize as getsize_emoji
 from pilmoji.source import BaseSource, GoogleEmojiSource
@@ -954,6 +954,24 @@ class Painter:
             (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect),
         )
 
+    def image_bg(
+        self,
+        image: ImageSource,
+        align: ALIGN_TYPE = "c",
+        mode: Literal["fit", "fill", "fixed", "repeat"] = "fit",
+        blur: bool = False,
+        fade: float = 0.1,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Draw an image across the current region with ``ImageBg`` semantics.
+
+        Effects are deliberately part of the Painter operation instead of being applied by
+        ``plot.ImageBg.__init__``. Pillow therefore resolves a lazy source inside its render
+        worker, while IRPainter can keep an :class:`AssetImageRef` as a Rust-decoded path and
+        express the same fade/blur as image decorations.
+        """
+        return self.add_operation("_impl_image_bg", exclude_on_hash, (image, align, mode, blur, fade))
+
     def paste_with_alpha_blend(
         self,
         sub_img: ImageSource,
@@ -1241,6 +1259,47 @@ class Painter:
         else:
             self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
+
+    def _impl_image_bg(
+        self,
+        image: ImageSource,
+        align: ALIGN_TYPE = "c",
+        mode: Literal["fit", "fill", "fixed", "repeat"] = "fit",
+        blur: bool = False,
+        fade: float = 0.1,
+    ) -> Self:
+        """Pillow reference implementation for :meth:`image_bg`.
+
+        Keep the historical order exactly: decode -> GaussianBlur(3) -> brightness -> resize
+        and paste. In particular, applying the effects after ``_resolve_sub_img`` would move
+        them after the resize and change the Pillow oracle.
+        """
+        if not isinstance(image, Image.Image):
+            image = resolve_image_source_sync(image)
+        if blur:
+            image = image.filter(ImageFilter.GaussianBlur(radius=3))
+        if fade > 0:
+            image = ImageEnhance.Brightness(image).enhance(1 - fade)
+
+        ha, va = ALIGN_MAP[align]
+        if mode == "fit":
+            scale = max(self.w / image.width, self.h / image.height)
+            width, height = int(image.width * scale), int(image.height * scale)
+            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
+            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
+            return self._impl_paste(image, (x, y), (width, height))
+        if mode == "fill":
+            return self._impl_paste(image, (0, 0), self.size)
+        if mode == "fixed":
+            x = (self.w - image.width) // 2 if ha == "c" else (0 if ha == "l" else self.w - image.width)
+            y = (self.h - image.height) // 2 if va == "c" else (0 if va == "t" else self.h - image.height)
+            return self._impl_paste(image, (x, y))
+        if mode == "repeat":
+            for y in range(0, self.h, image.height):
+                for x in range(0, self.w, image.width):
+                    self._impl_paste(image, (x, y))
+            return self
+        raise ValueError(f"unsupported image background mode: {mode}")
 
     def _resolve_sub_img(
         self,

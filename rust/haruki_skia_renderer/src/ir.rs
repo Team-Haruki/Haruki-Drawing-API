@@ -444,6 +444,11 @@ pub struct ImageNode {
     /// Optional drop shadow from the image's alpha silhouette, drawn behind the image.
     #[serde(default)]
     pub shadow: Option<ImageShadow>,
+    /// Destination-space Gaussian sigma applied to the image after target rasterization.
+    /// The target raster cache stores the undecorated resize, so differently blurred users of
+    /// one asset cannot contaminate each other. Requires IR_CAPABILITY >= 10.
+    #[serde(default)]
+    pub blur_sigma: Vec2,
     /// Porter-Duff blend for the image itself. Default `SrcOver` (composite over what is there).
     /// `Src` REPLACES the destination in the drawn rect, all four channels verbatim — the
     /// Pillow-side equivalent of a mask-less `Image.paste`, which `Painter.paste_src` needs so

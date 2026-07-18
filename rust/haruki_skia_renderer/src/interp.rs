@@ -1612,6 +1612,15 @@ fn draw_image_placed(
     if let Some(tint) = &node.tint {
         paint.set_color_filter(tint_filter(tint));
     }
+    let has_blur = node.blur_sigma[0] > 0.0 || node.blur_sigma[1] > 0.0;
+    if has_blur {
+        paint.set_image_filter(image_filters::blur(
+            (node.blur_sigma[0].max(0.0), node.blur_sigma[1].max(0.0)),
+            TileMode::Clamp,
+            None,
+            None,
+        ));
+    }
     if node.blend == ImageBlend::Src {
         // Replace the destination rather than compositing over it, so `Painter.paste_src` means
         // the same thing on both backends. Anti-aliasing must be off: an AA edge under kSrc would
@@ -1619,7 +1628,20 @@ fn draw_image_placed(
         paint.set_blend_mode(BlendMode::Src);
         paint.set_anti_alias(false);
     }
+    let save_count = if has_blur {
+        // Pillow filters the finite source image and then pastes the finite result. Skia image
+        // filters can expand their output beyond the destination bounds, so clip that halo away
+        // to keep a blurred nested WidgetBg from leaking outside its own image rectangle.
+        let count = canvas.save();
+        canvas.clip_rect(dst, ClipOp::Intersect, false);
+        Some(count)
+    } else {
+        None
+    };
     canvas.draw_image_rect_with_sampling_options(image, src_arg, dst, sampling, &paint);
+    if let Some(count) = save_count {
+        canvas.restore_to_count(count);
+    }
 }
 
 /// Parse a Painter-style align string into (h, v) where h ∈ {-1,0,1} (l/c/r) and
@@ -2157,6 +2179,7 @@ mod tests {
               "fit": "crop",
               "sampling": "cubic",
               "source_rect": [2, 2, 40, 40],
+              "blur_sigma": [3.0, 1.5],
               "tint": { "color": [255, 128, 0, 255], "mode": "multiply" },
               "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } },
             { "type": "Image", "pos": [30, 4], "size": [20, 20], "path": "missing.png",

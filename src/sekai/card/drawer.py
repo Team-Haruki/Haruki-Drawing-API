@@ -605,12 +605,11 @@ async def _build_card_detail_canvas(
     small_style = TextStyle(font=DEFAULT_FONT, size=18, color=(70, 70, 70))
     tip_style = TextStyle(font=DEFAULT_FONT, size=18, color=(0, 0, 0))  # noqa: F841
 
-    # 使用传入的背景图片，如果没有则使用默认蓝色背景
-    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
-    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
+    # 使用传入的背景图片，如果没有则使用默认蓝色背景。ImageBg 的 fade/blur 已是
+    # shared Painter/IR 装饰，背景保持 ref，让 Skia 直接解码并缓存目标 raster。
     if rqd.background_image_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_image_path, on_missing="raise")
+            bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.background_image_path, on_missing="raise")
             bg = ImageBg(bg_img)
         except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
@@ -840,12 +839,10 @@ async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
     notice_label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0))
     notice_text_style = TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0))
 
-    # 使用传入的背景图片，如果没有则使用默认背景
-    # ImageBg 默认 fade=0.1，构造时就会 resolve + ImageEnhance.Brightness 改写像素，
-    # 传 ref 只会把整图解码从线程池挪到事件循环上，故这里保持即时解码。
+    # 使用传入的背景图片，如果没有则使用默认背景。ImageBg 可将 ref 直接发给 Rust。
     if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
+            bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
             bg = ImageBg(bg_img)
         except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG
@@ -1206,11 +1203,10 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
         panel_width = max(panel_width, profile_card._get_self_size()[0])
         panel_text_width = max(240, panel_width - 120)
 
-    # 使用传入的背景图片，如果没有则使用默认背景
-    # 同 compose_card_list_image：ImageBg 默认 fade=0.1 会在构造时改写像素，保持即时解码。
+    # 使用传入的背景图片，如果没有则使用默认背景。ImageBg 可将 ref 直接发给 Rust。
     if rqd.background_img_path:
         try:
-            bg_img = await get_img_from_path(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
+            bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
             bg = ImageBg(bg_img)
         except (FileNotFoundError, OSError, ValueError):
             bg = SEKAI_BLUE_BG

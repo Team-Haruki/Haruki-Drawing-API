@@ -36,7 +36,6 @@ from src.sekai.base.utils import (
     get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
-    get_img_from_path,
     get_readable_timedelta,
     put_composed_image_cache,
     put_composed_image_disk_cache,
@@ -210,10 +209,8 @@ async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
     # 并行加载所有活动图片
     _event_img_tasks = {}
     bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
-    # 即时解码,不能传 ref:这张图喂给 ImageBg(),而 ImageBg 的 fade 默认 0.1——构造时就会
-    # resolve_image_source_sync + ImageEnhance.Brightness 改写像素。传 ref 只会把整图解码从线程池
-    # 挪到事件循环上,且改写后的像素也进不了 IR(Skia 侧仍要走 mem 图),纯亏。
-    _event_img_tasks["bg"] = get_img_from_path(ASSETS_BASE_DIR, bg_path)
+    # ImageBg 的 fade/blur 已由共享 Painter 原语表达；保持 ref，Skia 直接解码路径。
+    _event_img_tasks["bg"] = get_asset_image_ref(ASSETS_BASE_DIR, bg_path)
     event_chara_path = (rqd.event_assets.event_ban_chara_img or "").strip()
     if use_story_bg and event_chara_path:
         _event_img_tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, event_chara_path)

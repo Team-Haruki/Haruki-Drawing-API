@@ -8,7 +8,7 @@ import logging
 from types import TracebackType
 from typing import Literal, Self, TypedDict
 
-from PIL import Image, ImageEnhance, ImageFilter, ImageFont
+from PIL import Image, ImageFont
 
 from .painter import (
     ALIGN_MAP,
@@ -112,56 +112,11 @@ class ImageBg(WidgetBg):
         self.align = align
         assert mode in ("fit", "fill", "fixed", "repeat")
         self.mode = mode
-        if blur or fade > 0:
-            # blur/fade mutate pixels, so a lazy ref must decode here; pass fade=0 to
-            # keep an AssetImageRef pass-through (path straight into the IR).
-            if not isinstance(self.img, Image.Image):
-                self.img = resolve_image_source_sync(self.img)
-            if blur:
-                self.img = self.img.filter(ImageFilter.GaussianBlur(radius=3))
-            if fade > 0:
-                self.img = ImageEnhance.Brightness(self.img).enhance(1 - fade)
+        self.blur = blur
+        self.fade = fade
 
     def draw(self, p: Painter) -> None:
-        if self.mode == "fit":
-            ha, va = ALIGN_MAP[self.align]
-            scale = max(p.w / self.img.size[0], p.h / self.img.size[1])
-            w, h = int(self.img.size[0] * scale), int(self.img.size[1] * scale)
-            if va == "c":
-                y = (p.h - h) // 2
-            elif va == "t":
-                y = 0
-            else:
-                y = p.h - h
-            if ha == "c":
-                x = (p.w - w) // 2
-            elif ha == "l":
-                x = 0
-            else:
-                x = p.w - w
-            p.paste(self.img, (x, y), (w, h))
-        if self.mode == "fill":
-            p.paste(self.img, (0, 0), p.size)
-        if self.mode == "fixed":
-            ha, va = ALIGN_MAP[self.align]
-            if va == "c":
-                y = (p.h - self.img.size[1]) // 2
-            elif va == "t":
-                y = 0
-            else:
-                y = p.h - self.img.size[1]
-            if ha == "c":
-                x = (p.w - self.img.size[0]) // 2
-            elif ha == "l":
-                x = 0
-            else:
-                x = p.w - self.img.size[0]
-            p.paste(self.img, (x, y))
-        if self.mode == "repeat":
-            w, h = self.img.size
-            for y in range(0, p.h, h):
-                for x in range(0, p.w, w):
-                    p.paste(self.img, (x, y))
+        p.image_bg(self.img, align=self.align, mode=self.mode, blur=self.blur, fade=self.fade)
 
 
 class RandomTriangleBg(WidgetBg):
