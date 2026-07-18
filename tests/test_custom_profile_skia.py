@@ -7,8 +7,9 @@ must fall back to the Pillow compose (preserving its canonical ValueError -> 400
 Skia path declines.
 
 The unit tests fake everything native. Only the final end-to-end test needs the built extension
-(IR_CAPABILITY >= 8, the Transform node) plus the real parity payload, and skips when either is
-missing so CI without fixtures stays green.
+(at the production ``REQUIRED_NATIVE_IR_CAPABILITY`` — the payload may exercise Transform,
+SdfQuad/A8 and image blur, and the production loader rejects anything older) plus the real
+parity payload, and skips when either is missing so CI without fixtures stays green.
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ import src.core.pjsk.profile as route_mod
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.custom_profile.skia import CUSTOM_PROFILE_ENDPOINT, try_render_custom_profile_card_payload
 from src.sekai.profile.model import CustomProfileCardRenderRequest
+from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
 from src.sekai.skia_renderer.render_stats import get_render_stats, reset_render_stats
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -191,8 +193,11 @@ def test_route_preserves_the_value_error_400(monkeypatch):
 
 
 @pytest.mark.skipif(
-    _native is None or getattr(_native, "IR_CAPABILITY", 0) < 8,
-    reason="haruki_skia_renderer not built at IR_CAPABILITY >= 8 (needs the Transform node)",
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason=(
+        "haruki_skia_renderer not built at the production REQUIRED_NATIVE_IR_CAPABILITY "
+        "(an older wheel would pass this gate and then be rejected by load_native_renderer)"
+    ),
 )
 @pytest.mark.skipif(not PAYLOAD_FILE.is_file(), reason="out/parity-payloads fixture not present")
 def test_native_end_to_end_renders_the_real_payload(monkeypatch):
