@@ -150,8 +150,18 @@
         接缝 `layer_transform_inputs`(布局数字单源,Pillow 重构后字节一致)。sweep 65 ok
         (含两 custom 案例,budget 断言)/warm parity 0 drift/cargo 19 测试/8 个新 pytest
         (含真实 native e2e)。暖速 1.06×(文字卡,栅格化仍占大头→Phase 2)~1.49×(无文字卡)。
-  - [ ] Phase 2(M):SdfQuad 节点(SkSL/像素循环)+ freetype-rs 度量——甩掉 fontTools 的
-        **全进程 GIL 重启风险**(实测确认),文字重卡估 10-40×。
+  - [x] Phase 2(2026-07-18,capability 8→9,**SdfQuad 部分**):`SdfQuad` 节点(**Rust 像素循环**
+        而非 SkSL——bit-parity 最可控)+ A8 raw-buffer 传输(RAW_BUFFER_CAPABILITY 1→2)。
+        设计定型:**Python 保留布局 + PIL uint8 双三次场变形,只把逐像素着色/合成搬 Rust**
+        (着色标量单源 `tmp_sdf_shading_scalars`,装饰 direct 路径接缝
+        `prepare_direct_sdf_quads`,双方 shade 语义 bit 级对齐:banker's 舍入、f64 标量→f32
+        逐像素)。金标三例(face/underlay+整数位移/gradient+bold)Δ≤1;装饰卡端到端
+        rgb max=2、alpha 精确;28 quad 着色 **6ms**(numpy 版 ~200ms)。合成符号卡整卡 1.57×
+        (真实符号卡 payload 采到后复测)。字节门:deco 重构前后 max_diff=0。
+  - [ ] Phase 2b(可选,原 Phase 2 的 freetype-rs 半):glyph_sdf.rs(freetype-rs + 精确
+        Felzenszwalb EDT + moka)+ `glyph:` 引用——彻底甩掉 fontTools 的**全进程 GIL 重启风险**。
+        Phase 0 的进程级字形缓存已把 fontTools 成本压成一次性,紧迫性下降;等真实符号卡
+        payload 与生产观察再定。
   - [x] 前置(2026-07-18,大部分落地):**response.json(真实 CN GetAnotherProfileResponse,
         2 张卡)取代了生产 dump 短窗**。已拉:cn custom_profile 资产 536M + tmp-font-assets 365M
         + static_images/customprofile(71 sprite,连带发现本地旧目录只有 9 个陈旧文件,已换
