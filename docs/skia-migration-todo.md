@@ -1,15 +1,25 @@
 # Skia 迁移剩余工作清单
 
-> 2026-07-12 盘点,2026-07-14 更新。迁移本体已完成:**63 用例对拍 63 ok / 0 失败(pillow-only 已归零)**。
+> 2026-07-12 盘点,2026-07-18 更新。迁移本体已完成:**65 个可渲染 payload 用例 65 ok / 0 失败**，
+> 另有 2 个 custom-profile 桶因缺真实 payload 记为 `no-payload`；pillow-only 已归零。
 > **`use_skia_plot` 是唯一的 Skia 门控,默认开**——`use_skia_card_list` / `skia_card_list_fallback_to_pillow` /
 > `use_skia_card_box` 已随手写 IR builder 一起从 settings.py 删除,不要再引用。card/box 与 card/list 现在都画
 > 共享 widget 树(无专用 scene builder),Chart raw-N32 单次编码已落地。
-> **注意**:**所有端点的布局都已收敛到共享 widget 树**(honor 于 2026-07-14 收尾)。`honor/skia.py` 与
-> `chart/drawer.py` 仍直接用 `IRBuilder`,但包的是 **widget 树表达不了的栅格页脚外壳**(水印条带 =
-> `SelfImage` 采样已渲染画布),不是第二套布局;详见 ⚪ 收尾与防漂移 的对应条目。
+> **注意**：所有拥有 `plot.py` 树的端点都已收敛到一棵共享 widget 树（honor 于 2026-07-14 收尾）。
+> 仍直接构造 IR 的例外有三处：`honor/skia.py` 与 `chart/drawer.py` 只是 widget 无法表达的栅格页脚薄壳
+> （水印条带 = `SelfImage` 采样已渲染画布），不是第二套布局；custom profile 则根本没有 `plot.py` 树，
+> 其唯一布局载体是 Unity card JSON，Python 与 Skia 共用同一份 flatten/raster 输入。
 > 本清单是切换后的收尾与生产化工作,按"挡在生产收益前面 → 端点残余 → 质量项 → 性能 → 收尾"排序。
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
+
+**2026-07-19 当前检查点**：IR capability 10；pyo3 已升 0.29.0（两条 Dependabot advisory 的修复版，
+零代码改动）；全量 Ruff 通过，pytest `383 passed / 2 skipped`；冷态 parity 为
+`65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
+`63 ok + 2 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`（`gacha_detail` 加入
+nondeterministic 行列：两次冷渲染隔分钟不一致，是倒计时内容随钟走——warm_fwd == warm_rev ==
+cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完成（见端点残余节）——drawer 层
+可转换的 eager 解码点就此清零，其余均为文档在案的刻意保留项。
 
 ## 🔴 挡在生产收益前面(不做这些,生产永远 fail-open 回退 Pillow)
 
@@ -17,8 +27,9 @@
 - [x] **CI 跑 native 测试**(2026-07-13,quick-check native-tests job:maturin develop + OFL 字体下载缓存 + 全量 pytest;素材类 parity 自动跳过)。
 - [x] **Docker 集成**(2026-07-13,docker.yml 先构 wheel → docker/skia-wheels → 镜像条件安装 + 构建期自检;无 wheel 时 fail-open 构建仍绿,双分支本地实测)。
 - [x] **IR capability 版本握手**(2026-07-13,native 暴露 IR_CAPABILITY,load_native_renderer 校验不足抛 ImportError 走 fail-open;
-      **当前=7**,`TriangleBg.tris`——旧 wheel 会 serde-skip 这个未知字段,画出**一个三角形都没有的背景**,
-      而且是静默的;这正是握手要挡的那种事)。
+      **当前=10**,`Image.blur_sigma`(8=`Transform`+`catmull_rom`,9=`SdfQuad`+A8 raw buffer)——旧 wheel 会
+      serde-skip 未知字段并静默画错;例如 capability 6 wheel 会丢 `TriangleBg.tris`,画出**一个三角形都没有的背景**。
+      这正是握手要挡的那种事)。
 - [x] **mysekai 真实实现 × 真实 HTTP**(2026-07-15,盲区已关):把 `drawer.real.py` 换到 `drawer.py` 的位置、
       起 granian、打**真实路由**,8 条 mysekai 路由 **9/9 返回 200**、图片可解码、`Content-Length` 正确。
       这以前是**零覆盖**:仓库里的 `drawer.py` 是抛 `NotImplementedError` 的 stub,CI 跑 stub,对拍则绕过路由
@@ -26,7 +37,7 @@
       **它进不了 CI**(`drawer.real.py` 不在仓库里),所以必须是**发布前清单上的一条手工项**。
 - [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开。
       部署时三条必查,漏了都是**静默**出错(不报警、不 500,只是悄悄不对):
-      ① **wheel 必须是 capability 7** —— 旧 wheel 握手失败会 fail-open 回 Pillow,服务正常、图也对,
+      ① **wheel 必须是 capability 10** —— 旧 wheel 握手失败会 fail-open 回 Pillow,服务正常、图也对,
          只是白白慢 3.6 倍;唯一的信号是 `/render-stats` 里 `fallback` 计数飙升。
       ② **`drawer.real.py` 必须挂上**(bind-mount 或改名),否则 8 条 mysekai 路由全 500。
       ③ **内存限额必须真的落在绘图服务上** —— `deploy` 块此前一直挂在 screenshot-service 上(已修,`6c4e138`);
@@ -132,13 +143,60 @@
 ## 🟡 端点残余
 
 - [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
-- [ ] **custom profile**(见可行性文档,渐进 0→2):
-  - [ ] Phase 0(S,纯 Python):进程级 TMP metadata/字形 SDF/load_font 缓存——冷 1.7s → ~0.2-0.5s。
-  - [ ] Phase 1(S~M):IR 加 Transform(矩阵)节点,合成层搬 Skia(mem 图 + 原生仿射)。
-  - [ ] Phase 2(M):SdfQuad 节点(SkSL/像素循环)+ freetype-rs 度量——甩掉 fontTools 的
-        **全进程 GIL 重启风险**(实测确认),文字重卡估 10-40×。
-  - [ ] 前置:从生产拉 tmp-font-assets/{region} + sprite + 真实卡 payload(本地全缺)。
+- [x] **custom profile Phase 0–2 当前范围**(2026-07-18,见可行性文档；Phase 2b 是独立可选后续):
+  - [x] Phase 0(2026-07-18,纯 Python):进程级缓存落地——`custom_profile/cache.py`
+        (BoundedCache + 字形 SDF/轮廓 L2 + sprite/atlas 池 + TMP 表缓存 + 线程本地字体),
+        renderer 五处接线,FreeTypeMetrics 加锁(先于本工作的并发竞态)。微基准
+        (`scripts/bench_custom_profile_glyph_cache.py`,合成 fixture + 真字体):轮廓
+        851ms → **0.02ms**,load_font 24ms → 0.5ms。`/cache/stats` 第六键
+        `custom_profile_caches`;knob 默认开启,归零即回滚。对抗性评审 6 条确认已修:
+        **负缓存只留 L1**(瞬态失败不得在不变签名下毒化进程池,有回归测试钉住)、
+        TMPFontAsset 补 frozen、清扫器假威胁注释纠正。13+1 个新测试;既有 1080 行零改动。
+  - [x] Phase 1(2026-07-18,capability 7→8):IR 加 **Transform(矩阵,正向语义)** 节点 +
+        `catmull_rom` 采样 + Transform 内跳过预栅格缓存/prewarm;`custom_profile/skia.py`
+        hand-built 场景(第三个 sanctioned exception):**无旋转元素 = Python 两步 BICUBIC 预缩 +
+        整数位贴(与 Pillow 逐像素对齐,实测 rgb max=1、alpha 精确)**,旋转元素走 Transform
+        单 pass(替代 resize+rotate+2× 超采样,合成注入 30° 实测 p99=7,预算 24 内);白底矩形
+        (render_card 是不透明白底)。踩过的坑:服务态 `position_scale=1.1181` 不是 1。
+        接缝 `layer_transform_inputs`(布局数字单源,Pillow 重构后字节一致)。sweep 65 ok
+        (含两 custom 案例,budget 断言)/warm parity 0 drift/cargo 19 测试/8 个新 pytest
+        (含真实 native e2e)。暖速 1.06×(文字卡,栅格化仍占大头→Phase 2)~1.49×(无文字卡)。
+  - [x] Phase 2(2026-07-18,capability 8→9,**SdfQuad 部分**):`SdfQuad` 节点(**Rust 像素循环**
+        而非 SkSL——bit-parity 最可控)+ A8 raw-buffer 传输(RAW_BUFFER_CAPABILITY 1→2)。
+        设计定型:**Python 保留布局 + PIL uint8 双三次场变形,只把逐像素着色/合成搬 Rust**
+        (着色标量单源 `tmp_sdf_shading_scalars`,装饰 direct 路径接缝
+        `prepare_direct_sdf_quads`,双方 shade 语义 bit 级对齐:banker's 舍入、f64 标量→f32
+        逐像素)。金标三例(face/underlay+整数位移/gradient+bold)Δ≤1;装饰卡端到端
+        rgb max=2、alpha 精确;28 quad 着色 **6ms**(numpy 版 ~200ms)。合成符号卡整卡 1.57×
+        (真实符号卡 payload 采到后复测)。字节门:deco 重构前后 max_diff=0。
+  - [ ] Phase 2b(独立可选后续,原 Phase 2 的 freetype-rs 半):glyph_sdf.rs(freetype-rs + 精确
+        Felzenszwalb EDT + moka)+ `glyph:` 引用——彻底甩掉 fontTools 的**全进程 GIL 重启风险**。
+        Phase 0 的进程级字形缓存已把 fontTools 成本压成一次性,紧迫性下降;等真实符号卡
+        payload 与生产观察再定。
+  - [x] 前置(2026-07-18,大部分落地):**response.json(真实 CN GetAnotherProfileResponse,
+        2 张卡)取代了生产 dump 短窗**。已拉:cn custom_profile 资产 536M + tmp-font-assets 365M
+        + static_images/customprofile(71 sprite,连带发现本地旧目录只有 9 个陈旧文件,已换
+        symlink 指向拉取版)+ sc masterdata 270M + 按清单定向拉的 member_cutout/member_small
+        ×5 bundle 与 honor_0078。`scripts/parity_payloads/gen_custom_profile.py` 从
+        response.json + masterdata 离线重建 Cloud 形态的 `resources`(同名索引内联 + 派生
+        imagePath/cardAssets/profileHonorRequests),**服务路径(masterdata=None)渲染与
+        masterdata 模式 CLI 基线逐字节一致(max_diff=0,两卡)**,解析探针零失败。sweep 四例:
+        custom_profile_card / _collections(有 payload,均已接 native path)+ _symbol / _stamps
+        (no-payload,等 dump 钩子采到用这些桶的卡)。
+        采集机制就位:`HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR`/`_PATHS` 中间件原始 body 落盘。
 - [x] mysekai msr_map 多图网格拼接迁 IR(2026-07-13,合并 widget 树 + 双后端 tile 裁剪,Pillow 基线 max_diff=0;drawer.real.py 不进 git,注意与镜像 API 配对)。
+- [x] **MySekai harvest point ref 化**（2026-07-19，production-local `drawer.real.py`，无 IR 字段/
+      capability 变更）：`get_asset_image_ref` 取代 `get_img_from_path`（512² fallback 判断走
+      `AssetImageRef.size` 读头探测），`get_img_resized_long_edge` 整段消失——长边算术在 Python 复算
+      （与 `resize_keep_ratio(mode="long")` 一致），绘制改
+      `ImageBox(ref, size=(tw,th), image_size_mode="fill", sampling="linear", use_alpha_blend=True,
+      alpha_adjust=...)` 保住 BILINEAR 语义；缺图 placeholder 走同一条 ImageBox 路径。门禁全过：
+      **Pillow-vs-Pillow 基线 max_delta=0**（改动在 untracked 文件里，基线 = 旧文件 vs 新文件各渲
+      一遍 Pillow，两例 changed_px=0）；冷 parity 65 ok（map mean 1.01→1.18、map_multi 0.97→1.17，
+      预算内——Skia 侧由 native 采样取代 Python 预缩，属预期漂移）；双后端 warm parity 0 drift；
+      真实 HTTP **9/9 全 200** 且日志 `backend=skia` ×9、Content-Length 正确。
+      **IR mem：map 8 项/465,152 B → 0 项/0 B，map_multi 42 项/2,515,968 B → 0 项/0 B（双双 -100%）**
+      ——msr_map 场景的 mem raster 至此清零，像素全部由 Rust 端按 path ref 解码/缓存。
 
 ## 🟠 生产化质量项(一次性切换时跳过的计划内容)
 
@@ -227,6 +285,24 @@
       仅剩的跨进程池是 `src/core/heavy_render_pool.py` 的两个重任务,它跨边界传的是**请求 dict**,
       由 worker 自己 validate 并从头渲染——**没有任何父进程侧的 ref 物化步骤,不要加回来**。`EncodedImageRef`
       以原始 encoded bytes 直传 Rust(`MemImage::Encoded`),无需 capability bump。
+- [x] **`ImageBg` fade/blur 保持 lazy ref**(2026-07-18,capability 9→10):像素效果从
+      `ImageBg.__init__` 移到共享 `Painter.image_bg`;Pillow replay 才 resolve,并保持历史
+      blur→brightness→resize 顺序。`IRPainter` 不走旧的全画布 `IRBuilder.image_bg`,而是发普通
+      `Image(path)` 节点:`catmull_rom` 采样、`floor((1-fade)*255)` multiply tint、按 source→destination
+      比例换算的 `blur_sigma`。Rust blur 是 Image 装饰,目标 raster cache 仍存未装饰 resize,不同 blur
+      消费者不会串味。card detail/list/box、event detail、gacha detail、chara-birthday 背景已改
+      `AssetImageRef`;本地 proprietary `mysekai/drawer.real.py` 的资源背景也已同步。
+- [x] **crop/sampling/tint 穿透 ImageBox/Painter**(2026-07-18,无 capability bump):`ImageBox` 与
+      `Painter.paste/paste_with_alpha_blend/paste_src` 新增共享 `source_rect`(xyxy、resize 前裁剪)、
+      `sampling`(`nearest|linear|catmull_rom`)与 `ImageTint`(`multiply|recolor`)装饰。production-local
+      MySekai site 改 ref+crop+linear+multiply,spawn marker 改 ref+recolor,与资源背景一起关掉 Python 解码/
+      RGBA 传输;resource/map/map_multi 对拍与双后端 warm parity 皆 3/3、0 drift,map/map_multi IR mem
+      分别约 -92.3%/-85.6%。无 padding 的 birthday card thumbnail 与 profile X icon 也已转 ref+linear。
+      misc alias jacket 与 birthday calendar icon **刻意不迁**:它们分别依赖 92→84、40→32 的
+      BILINEAR→BICUBIC 双阶段 resize;一次 lazy linear draw 会改变 oracle 像素,legacy baseline 已抓到漂移。
+      Pillow ref 预取同步把实际 resample 纳入 use key、跨对象 unique key 与 resize-cache 调用，避免
+      `sampling="linear"` 先无效预热 BICUBIC 再在 replay 串行生成 BILINEAR；RGB multiply tint 先规范成
+      RGBA，使隐式 alpha 与 Rust Modulate 一致。定向 image/IR 测试 40/40，全量门禁见页首检查点。
 - [x] **Moka 目标栅格缓存 + Rayon 并行预热**(2026-07-13):按 asset identity/source rect/target/sampling 缓存,
       696 项仅约 11.4 MiB;music_list 冷启动串行 raster build `6.36s -> 0.83s`,暴露 stats/clear API 与 native metrics。
 - [x] **mtpng PNG 编码替换**(2026-07-13):默认多线程 fast encode,保留 `HARUKI_SKIA_PNG_ENCODER=skia` 回退;
@@ -260,9 +336,12 @@
       Honor 单 pass(IR 新增 `SelfImage` 画布快照节点,IR_CAPABILITY 4→5,中间 PNG 和第二次 render 消除,
       对拍逐位一致)。Card List 回归共享树当时仍留最后评估,已于 2026-07-14 完成(见本节上一条)。
 - [x] **其余 builder 迁 `get_asset_image_ref`**(2026-07-13,详见 migration.md ✅7):card/mysekai/gacha/
-      score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**
-      (喂 `ImageBg(fade>0)` 的背景图、走 PIL 像素 API 的 `_circular_progress_avatar`/`concat_images`/
-      mysekai site_image/harvest point/spawn_img)——改了就是 bug。`on_missing="raise"` 语义收窄为
+      score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**——包括
+      走 PIL 像素 API 的 `_circular_progress_avatar`、gacha concat/fallback、honor mask/尺寸合成、misc alias
+      silhouette alpha-trim、mysekai harvest point(**已于 2026-07-19 ref 化**,见端点残余节),以及必须保持
+      双阶段重采样的 misc alias jacket / birthday calendar icon。MySekai site/spawn 已由共享图片装饰
+      ref 化;`ImageBg(fade/blur)` 也已于 2026-07-18 解禁并完成仓库与 production-local 背景调用点转换。
+      `on_missing="raise"` 语义收窄为
       "缺失/非图片"(不再覆盖"像素截断"),已在 gacha 回退链注明。
 - [x] **两处回退路径像素回归修复**(2026-07-13,详见 migration.md ✅8;对拍只比 Pillow↔Skia,均不暴露):
       ①ref paste 重采样从 BICUBIC 悄悄降级为 BILINEAR(新增 `PASTE_RESAMPLE`,resize 缓存 key 补 resample 维度);
@@ -369,7 +448,8 @@
       ②gaps.md 其余错误项亦已修正:gacha **无**条目级合成缓存、honor 的整图缓存仅 mem 无 disk、
       profile 模块预渲染(`profile/drawer.py:445 _build_cached_profile_module_image`,零调用方)是死代码。
 - [x] CLAUDE.md Skia 后端章节(2026-07-14,三份镜像文件同步:env-only 开关、wheel/CI 链路、capability 握手、
-      cargo test 链接配方、IR-first 规则,以及本轮踩到的 5 个陷阱——对拍的 legacy 盲区、ImageBg fade 默认值、
+      cargo test 链接配方、IR-first 规则,以及本轮踩到的 5 个陷阱——对拍的 legacy 盲区、ImageBg fade/blur
+      的 ref 穿透边界（2026-07-18 已移入 `Painter.image_bg`）、
       Painter.text 基线锚点、Pillow paste 拖低 dst alpha、resize 缓存按 resample 分键)。
 - [x] **结构性防呆 CI 测试**(2026-07-14,`tests/test_route_render_contract.py`):递归枚举全部 `/api/pjsk` 路由
       (FastAPI 不摊平被 include 的 router,得自己下钻),断言 ①每个绘图端点都调 `try_render_*_payload`

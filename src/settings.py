@@ -116,6 +116,17 @@ class DrawingSettings(BaseModel):
     custom_profile_shape_sprite_dir: Path | None = None
     custom_profile_unity_ui_sprite_dir: Path | None = None
     custom_profile_parallel_workers: int = 1
+    # custom profile 进程级缓存(字形 SDF/轮廓、sprite/atlas)。与其他缓存键不同,默认即开启:
+    # 该渲染器冷路径的 1.5s+ 就是这些缓存随请求丢弃造成的,归零任一对即禁用对应池(回滚开关)。
+    custom_profile_glyph_cache_size: int = 4096  # 字形 SDF/轮廓缓存条目数(两池各自适用),0 表示关闭
+    custom_profile_glyph_cache_max_mb: int = 64  # 字形缓存单池内存上限(MB),0 表示关闭
+    custom_profile_sprite_cache_size: int = 512  # sprite/atlas 解码缓存条目数,0 表示关闭
+    custom_profile_sprite_cache_max_mb: int = 128  # sprite/atlas 缓存内存上限(MB),0 表示关闭
+    # 请求体转储(采集对拍 payload/排障用):设为目录时把白名单路径前缀的原始请求 body 落盘。
+    # 生产走 HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR / _PATHS 短窗开启,采完即关。默认关闭。
+    # (tmp 清扫器只删注册过的文件、不扫目录,dump 放哪都不会被清;独立目录只是整洁。)
+    debug_dump_request_dir: Path | None = None
+    debug_dump_request_paths: str = ""  # 逗号分隔的路径前缀白名单;空 = 不转储
 
     @field_validator(
         "custom_profile_assets_dir",
@@ -123,6 +134,7 @@ class DrawingSettings(BaseModel):
         "custom_profile_tmp_font_metadata",
         "custom_profile_shape_sprite_dir",
         "custom_profile_unity_ui_sprite_dir",
+        "debug_dump_request_dir",
         mode="before",
     )
     @classmethod
@@ -265,6 +277,10 @@ CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_meta
 CUSTOM_PROFILE_SHAPE_SPRITE_DIR = settings.drawing.custom_profile_shape_sprite_dir
 CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR = settings.drawing.custom_profile_unity_ui_sprite_dir
 CUSTOM_PROFILE_PARALLEL_WORKERS = settings.drawing.custom_profile_parallel_workers
+CUSTOM_PROFILE_GLYPH_CACHE_SIZE = settings.drawing.custom_profile_glyph_cache_size
+CUSTOM_PROFILE_GLYPH_CACHE_MAX_BYTES = settings.drawing.custom_profile_glyph_cache_max_mb * 1024 * 1024
+CUSTOM_PROFILE_SPRITE_CACHE_SIZE = settings.drawing.custom_profile_sprite_cache_size
+CUSTOM_PROFILE_SPRITE_CACHE_MAX_BYTES = settings.drawing.custom_profile_sprite_cache_max_mb * 1024 * 1024
 
 # Server
 SERVER_HOST = settings.server.host

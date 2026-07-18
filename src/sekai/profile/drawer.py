@@ -52,7 +52,6 @@ from src.sekai.base.utils import (
     get_asset_image_ref,
     get_composed_image_cached,
     get_composed_image_disk_cached,
-    get_img_resized,
     get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
@@ -551,8 +550,8 @@ async def _build_profile_twitter_module(ctx: _ProfileLayoutContext) -> Widget:
         .set_w(300)
         .set_content_align("l")
     )
-    x_icon = await get_img_resized(ASSETS_BASE_DIR, ctx.request.x_icon_path, 24, 24)
-    root.add_item(ImageBox(x_icon.convert("RGBA"), image_size_mode="original").set_offset((16, 0)))
+    x_icon = await get_asset_image_ref(ASSETS_BASE_DIR, ctx.request.x_icon_path)
+    root.add_item(ImageBox(x_icon, image_size_mode="fill", size=(24, 24), sampling="linear").set_offset((16, 0)))
     return root
 
 

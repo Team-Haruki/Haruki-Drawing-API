@@ -211,7 +211,11 @@ pub enum Fit {
 pub enum ImageSampling {
     Nearest,
     Linear,
+    /// Mitchell cubic (B = C = 1/3). Must NOT be repurposed: `catmull_rom` exists precisely
+    /// because PIL BICUBIC is the Keys a=-0.5 kernel, which is Catmull-Rom, not Mitchell.
     Cubic,
+    /// Catmull-Rom cubic (B = 0, C = 0.5) — matches PIL BICUBIC (Keys a=-0.5).
+    CatmullRom,
     #[default]
     LinearMipmap,
 }
@@ -263,17 +267,87 @@ pub struct ImageShadow {
 #[serde(tag = "type")]
 pub enum Node {
     Group(GroupNode),
+    Transform(TransformNode),
     Rect(RectNode),
     RoundRect(RoundRectNode),
     PieSlice(PieSliceNode),
     Image(ImageNode),
     SelfImage(SelfImageNode),
+    SdfQuad(SdfQuadNode),
     Text(TextNode),
     Shadow(ShadowNode),
     BlurGlass(BlurGlassNode),
     TriangleBg(TriangleBgNode),
     ImageBg(ImageBgNode),
     Watermark(WatermarkNode),
+}
+
+/// Per-glyph TMP-SDF text shading quad (requires IR_CAPABILITY >= 9).
+///
+/// `field` references a raw **Alpha8** mem image (`mem:<key>`) holding the glyph's L field
+/// ALREADY warped/resampled to display size by Python — PIL's uint8 bicubic warp semantics stay
+/// on the Python side, and this node performs ZERO geometric resampling. The interpreter runs
+/// the TMP per-pixel shading (`clip(f*face_scale - face_w, 0, 1) * alpha`, plus the optional
+/// integer-shifted underlay pass), quantizes to a straight-alpha RGBA patch exactly like the
+/// Python reference (`rgba_from_premul`: f32 math, banker's rounding), and draws the patch
+/// src-over at integer `pos` with nearest sampling.
+///
+/// `pos` is the INTEGER top-left in the enclosing coordinate space (the group offset applies
+/// like `Image`); the emitter never nests this node inside a `Transform`.
+#[derive(Debug, Deserialize)]
+pub struct SdfQuadNode {
+    pub pos: Vec2,
+    /// `mem:<key>` reference to the pre-warped A8 field. Anything but a raw Alpha8 mem entry
+    /// fails the whole scene loudly (-> Python fail-open to Pillow).
+    pub field: String,
+    pub shading: SdfShading,
+}
+
+/// Scalar half of the TMP shading, mirroring Python's `TMPSdfShadingScalars`. Values arrive as
+/// f64 JSON numbers; the pixel loop casts each to f32 ONCE before the per-pixel math (numpy
+/// semantics), and all per-pixel arithmetic is f32.
+#[derive(Debug, Deserialize)]
+pub struct SdfShading {
+    pub face_color: [u8; 3],
+    pub face_scale: f64,
+    pub face_w: f64,
+    pub alpha: f64,
+    #[serde(default)]
+    pub underlay: Option<SdfUnderlay>,
+}
+
+/// Underlay (outline shadow) half of the TMP shading scalars.
+#[derive(Debug, Deserialize)]
+pub struct SdfUnderlay {
+    pub color: [u8; 3],
+    pub scale: f64,
+    pub w: f64,
+    /// Integer pixel translation of the field for the underlay sample:
+    /// `shifted[y][x] = field[y + shift[1]][x + shift[0]]`, out-of-bounds samples 0.0.
+    pub shift: [i32; 2],
+}
+
+/// Affine-transform subtree (requires IR_CAPABILITY >= 8).
+///
+/// `matrix = [a, b, c, d, e, f]` is the FORWARD local->parent mapping:
+/// `x' = a*lx + b*ly + c` ; `y' = d*lx + e*ly + f`. That is the PIL coefficient LAYOUT but
+/// with forward semantics — PIL's `Image.transform` tuple is the inverse mapping, while
+/// Skia's `concat` wants the forward one.
+///
+/// The enclosing group offset applies BEFORE the matrix:
+/// `save() -> translate(off) -> concat(matrix) -> children rendered with off=(0,0) -> restore`.
+///
+/// `SelfImage`, `BlurGlass` and adaptive `Text` are UNSUPPORTED inside a Transform: their
+/// device-bounds backdrop snapshots assume an identity CTM, so under a non-identity matrix
+/// they would capture the wrong canvas region (`SdfQuad` is likewise pre-warped to device
+/// space). The only emitter (custom profile) never nests them, and the interpreter enforces
+/// it up front (`validate_transform_subtrees`): such a scene fails WHOLE, routing an emitter
+/// regression into the Python fail-open path instead of a silently wrong image.
+#[derive(Debug, Deserialize)]
+pub struct TransformNode {
+    pub matrix: [f32; 6],
+    #[serde(default)]
+    pub children: Vec<Node>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -372,6 +446,11 @@ pub struct ImageNode {
     /// Optional drop shadow from the image's alpha silhouette, drawn behind the image.
     #[serde(default)]
     pub shadow: Option<ImageShadow>,
+    /// Destination-space Gaussian sigma applied to the image after target rasterization.
+    /// The target raster cache stores the undecorated resize, so differently blurred users of
+    /// one asset cannot contaminate each other. Requires IR_CAPABILITY >= 10.
+    #[serde(default)]
+    pub blur_sigma: Vec2,
     /// Porter-Duff blend for the image itself. Default `SrcOver` (composite over what is there).
     /// `Src` REPLACES the destination in the drawn rect, all four channels verbatim — the
     /// Pillow-side equivalent of a mask-less `Image.paste`, which `Painter.paste_src` needs so

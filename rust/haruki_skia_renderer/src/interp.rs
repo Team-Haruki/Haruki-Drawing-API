@@ -16,9 +16,9 @@ use pyo3::buffer::PyBuffer;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
-    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint,
-    PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode,
-    Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
+    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode,
+    Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob,
+    TileMode, Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
     image_filters, surfaces,
 };
 
@@ -322,6 +322,10 @@ struct Interp {
     mem_images: HashMap<String, MemImage>,
     canvas_w: f32,
     canvas_h: f32,
+    /// True while rendering inside a `Transform` subtree (non-identity CTM). Image draws must
+    /// then sample exactly once through the CTM, so `draw_image_node` skips the pre-rasterized
+    /// raster-cache path (which would resample its integral-size intermediate a second time).
+    in_transform: bool,
     metrics: NativeMetrics,
 }
 
@@ -421,10 +425,26 @@ pub(crate) fn render_scene_inner(
         mem_images,
         canvas_w: scene.canvas.width as f32,
         canvas_h: scene.canvas.height as f32,
+        in_transform: false,
         metrics: NativeMetrics::default(),
     };
     interp.metrics.font_fallbacks = interp.fonts.fallbacks;
     interp.metrics.setup_elapsed = total_started.elapsed().as_secs_f64();
+
+    // Device-bounds nodes inside Transform are rejected up front for the same reason as the
+    // SdfQuad field validation below: an emitter regression must fail the WHOLE scene
+    // (-> PyRuntimeError -> Python fail-open to Pillow), never render a silently wrong image.
+    if let Some(background) = &scene.background {
+        validate_transform_subtrees(background, false)?;
+    }
+    validate_transform_subtrees(&scene.root, false)?;
+
+    // SdfQuad field references are validated up front so a bad one fails the WHOLE scene
+    // (-> PyRuntimeError -> Python fail-open to Pillow) instead of silently skipping glyphs.
+    if let Some(background) = &scene.background {
+        validate_sdf_quad_fields(background, &interp.mem_images)?;
+    }
+    validate_sdf_quad_fields(&scene.root, &interp.mem_images)?;
 
     prewarm_scene_images(scene, &mut interp);
 
@@ -476,7 +496,7 @@ pub(crate) fn render_scene_inner(
     rendered.metrics = metrics;
     if profile_enabled() {
         eprintln!(
-            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={} font_fallbacks={}",
+            "haruki_skia_renderer.profile total={:.4}s setup={:.4}s prewarm={:.4}s draw={:.4}s scale={:.4}s encode={:.4}s asset_load={:.4}s raster_build={:.4}s raster_wait={:.4}s prewarm_req={} prewarm_hit={} prewarm_miss={} prewarm_coalesced={} cache_hit={} cache_miss={} cache_coalesced={} cache_bypass={} cache_entries={} cache_bytes={} zero_blur={} font_fallbacks={} sdf_quads={} sdf_quad_elapsed={:.4}s",
             rendered.metrics.total_elapsed,
             rendered.metrics.setup_elapsed,
             rendered.metrics.raster_prewarm_elapsed,
@@ -498,6 +518,8 @@ pub(crate) fn render_scene_inner(
             rendered.metrics.raster_cache_bytes,
             rendered.metrics.zero_blur_fast_paths,
             rendered.metrics.font_fallbacks,
+            rendered.metrics.sdf_quad_count,
+            rendered.metrics.sdf_quad_elapsed,
         );
     }
     Ok(rendered)
@@ -540,6 +562,25 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 surface.canvas().restore();
             }
         }
+        Node::Transform(node) => {
+            // Forward local->parent affine (see `TransformNode`). The enclosing group offset
+            // applies BEFORE the matrix; children then resolve entirely through the CTM, so
+            // they render with a zero offset (passing `off` down too would apply it twice).
+            let canvas = surface.canvas();
+            let save_count = canvas.save();
+            canvas.translate((off.0, off.1));
+            let m = node.matrix;
+            canvas.concat(&Matrix::new_all(
+                m[0], m[1], m[2], m[3], m[4], m[5], 0.0, 0.0, 1.0,
+            ));
+            let was_in_transform = interp.in_transform;
+            interp.in_transform = true;
+            for child in &node.children {
+                render_node(surface, interp, (0.0, 0.0), child);
+            }
+            interp.in_transform = was_in_transform;
+            surface.canvas().restore_to_count(save_count);
+        }
         Node::Rect(rect) => render_rect(surface.canvas(), rect, off),
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
         Node::PieSlice(pie) => render_pie_slice(surface.canvas(), pie, off),
@@ -578,6 +619,12 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                     );
                 }
             }
+        }
+        Node::SdfQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_quad(surface, interp, quad, off);
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
         }
         Node::Text(text) => {
             let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
@@ -702,6 +749,7 @@ fn image_sampling(mode: ImageSampling) -> SamplingOptions {
         ImageSampling::Nearest => SamplingOptions::default(),
         ImageSampling::Linear => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
         ImageSampling::Cubic => CubicResampler::mitchell().into(),
+        ImageSampling::CatmullRom => CubicResampler::catmull_rom().into(),
         ImageSampling::LinearMipmap => SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
     }
 }
@@ -980,6 +1028,206 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
     canvas.draw_rrect(RRect::new_rect_xy(rect, node.radius, node.radius), &paint);
 }
 
+/// Walk the tree and hard-fail on any `SdfQuad` whose `field` is not a raw Alpha8 mem entry.
+/// The contract is strict on purpose: the field is per-request data the emitter just shipped,
+/// so a missing/mistyped one is an emitter bug — erroring the scene reaches Python's fail-open
+/// catch, while skipping would serve an image with glyphs silently missing.
+/// Reject nodes that depend on an identity CTM inside a `Transform` subtree.
+///
+/// `SelfImage` / `BlurGlass` / adaptive `Text` snapshot device bounds, and `SdfQuad` is
+/// pre-warped to device space with integer placement; under a non-identity matrix they would
+/// sample the wrong canvas region or be double-transformed. The emitter (custom profile)
+/// never nests them — so one showing up is an emitter REGRESSION, and failing the WHOLE
+/// scene routes it into the Python fail-open path (Pillow) instead of a silently wrong
+/// image, the same doctrine as unknown node kinds and dangling SdfQuad field refs.
+fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), String> {
+    match node {
+        Node::SelfImage(_) if in_transform => {
+            Err("SelfImage inside Transform requires an identity CTM".to_string())
+        }
+        Node::BlurGlass(_) if in_transform => {
+            Err("BlurGlass inside Transform requires an identity CTM".to_string())
+        }
+        Node::SdfQuad(_) if in_transform => {
+            Err("SdfQuad inside Transform would be double-transformed".to_string())
+        }
+        Node::Text(text) if in_transform && text.adaptive.is_some() => {
+            Err("adaptive Text inside Transform requires an identity CTM".to_string())
+        }
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_transform_subtrees(child, in_transform)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_transform_subtrees(child, true)),
+        _ => Ok(()),
+    }
+}
+
+fn validate_sdf_quad_fields(
+    node: &Node,
+    mem_images: &HashMap<String, MemImage>,
+) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::SdfQuad(quad) => {
+            let Some(key) = quad.field.strip_prefix("mem:") else {
+                return Err(format!(
+                    "SdfQuad field must be a mem image reference: {}",
+                    quad.field
+                ));
+            };
+            match mem_images.get(key) {
+                Some(MemImage::Raw {
+                    color_type: ColorType::Alpha8,
+                    ..
+                }) => Ok(()),
+                Some(MemImage::Raw { color_type, .. }) => Err(format!(
+                    "SdfQuad field {} must be an Alpha8 raw mem image, got {color_type:?}",
+                    quad.field
+                )),
+                Some(MemImage::Encoded { .. }) => Err(format!(
+                    "SdfQuad field {} must be an Alpha8 raw mem image, got encoded bytes",
+                    quad.field
+                )),
+                None => Err(format!(
+                    "SdfQuad field references unknown mem image: {}",
+                    quad.field
+                )),
+            }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The SdfQuad per-pixel routine, factored out so the golden tests drive the exact code the
+/// render arm uses. `field` is the A8 field (row-major, `row_bytes` stride, values 0..255);
+/// the return value is the straight-alpha RGBA8888 patch (tight `width * 4` stride).
+///
+/// This must match Python's `shade_tmp_sdf_field` + `rgba_from_premul` bit-comparably
+/// (per-channel |delta| <= 1): scalars are pre-cast f64 -> f32 ONCE, every per-pixel operation
+/// is f32 with the same association order as the numpy expressions, and quantization uses
+/// banker's rounding (`round_ties_even`, numpy `rint`) — not half-up.
+pub(crate) fn shade_sdf_field(
+    field: &[u8],
+    width: usize,
+    height: usize,
+    row_bytes: usize,
+    shading: &SdfShading,
+) -> Vec<u8> {
+    let face_scale = shading.face_scale as f32;
+    let face_w = shading.face_w as f32;
+    let alpha = shading.alpha as f32;
+    let face_rgb = shading.face_color.map(|c| c as f32 / 255.0);
+    let underlay = shading.underlay.as_ref().map(|u| {
+        (
+            u.scale as f32,
+            u.w as f32,
+            u.shift,
+            u.color.map(|c| c as f32 / 255.0),
+        )
+    });
+
+    let mut patch = vec![0_u8; width * height * 4];
+    for y in 0..height {
+        let row = &field[y * row_bytes..y * row_bytes + width];
+        for x in 0..width {
+            let f = row[x] as f32 / 255.0;
+            let face_a = (f * face_scale - face_w).clamp(0.0, 1.0) * alpha;
+            let (under_a, under_rgb) = match &underlay {
+                Some((u_scale, u_w, shift, u_rgb)) => {
+                    // shifted[y][x] = field[y + sy][x + sx]; out-of-bounds samples 0.0.
+                    let sx = x as i64 + shift[0] as i64;
+                    let sy = y as i64 + shift[1] as i64;
+                    let shifted =
+                        if (0..width as i64).contains(&sx) && (0..height as i64).contains(&sy) {
+                            field[sy as usize * row_bytes + sx as usize] as f32 / 255.0
+                        } else {
+                            0.0
+                        };
+                    ((shifted * u_scale - u_w).clamp(0.0, 1.0) * alpha, *u_rgb)
+                }
+                None => (0.0, [0.0; 3]),
+            };
+            let out_a = face_a + under_a * (1.0 - face_a);
+            let px = &mut patch[(y * width + x) * 4..(y * width + x) * 4 + 4];
+            for c in 0..3 {
+                let premul = face_rgb[c] * face_a + under_rgb[c] * under_a * (1.0 - face_a);
+                // Straight-alpha quantization exactly like `rgba_from_premul`.
+                let rgb = if out_a > 1e-6 { premul / out_a } else { 0.0 };
+                px[c] = (rgb * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+            }
+            px[3] = (out_a * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+        }
+    }
+    patch
+}
+
+/// Shade an SdfQuad's pre-warped A8 field and draw the straight-alpha patch src-over at its
+/// integer position — nearest sampling, no AA, ZERO geometric resampling (the field arrives
+/// already at display size). The field reference was validated up front, so a miss here only
+/// happens for test-constructed scenes; it degrades to skipping the node like other draws.
+fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off: (f32, f32)) {
+    let Some(key) = node.field.strip_prefix("mem:") else {
+        return;
+    };
+    let Some(MemImage::Raw {
+        width,
+        height,
+        row_bytes,
+        color_type: ColorType::Alpha8,
+        data,
+        ..
+    }) = interp.mem_images.get(key)
+    else {
+        return;
+    };
+    let (w, h) = (*width as usize, *height as usize);
+    let bytes = data.as_bytes();
+    if bytes.len()
+        < row_bytes
+            .saturating_mul(h.saturating_sub(1))
+            .saturating_add(w)
+    {
+        eprintln!(
+            "haruki_skia_renderer: SdfQuad field buffer too small, node skipped: {}",
+            node.field
+        );
+        return;
+    }
+    let patch = shade_sdf_field(bytes, w, h, *row_bytes, &node.shading);
+    let info = ImageInfo::new(
+        (*width, *height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let Some(image) = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), w * 4)
+    else {
+        eprintln!(
+            "haruki_skia_renderer: SdfQuad patch image build failed, node skipped: {}",
+            node.field
+        );
+        return;
+    };
+    let paint = Paint::default();
+    surface.canvas().draw_image_with_sampling_options(
+        &image,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+        SamplingOptions::default(),
+        Some(&paint),
+    );
+}
+
 #[derive(Clone, Copy)]
 struct ImagePlacement {
     src: Option<Rect>,
@@ -1052,6 +1300,11 @@ fn collect_image_prewarm_requests<'a>(
         {
             requests.push(ImagePrewarmRequest { node: image, off });
         }
+        // Deliberately do NOT recurse into Transform: a prewarm target size is only meaningful
+        // under identity CTM — under the matrix the device footprint differs from the node's
+        // dst size, and `draw_image_node` skips the raster cache inside a Transform anyway, so
+        // a prewarmed entry could never be consumed.
+        Node::Transform(_) => {}
         _ => {}
     }
 }
@@ -1238,6 +1491,7 @@ fn sampling_key(mode: ImageSampling) -> u8 {
         ImageSampling::Linear => 1,
         ImageSampling::Cubic => 2,
         ImageSampling::LinearMipmap => 3,
+        ImageSampling::CatmullRom => 4,
     }
 }
 
@@ -1273,7 +1527,13 @@ fn draw_image_node(canvas: &Canvas, interp: &mut Interp, node: &ImageNode, off: 
     };
     let sampling = image_sampling(node.sampling);
 
-    if let Some((width, height)) = integral_target(placement.dst) {
+    // Inside a Transform the CTM is non-identity: the raster cache pre-rasterizes at the
+    // integral dst size and drawing that intermediate would resample it a SECOND time through
+    // the CTM. Sampling must happen exactly once (source pixels -> device through the matrix),
+    // so skip the cache and draw the decoded source directly.
+    if interp.in_transform {
+        interp.metrics.raster_cache_bypasses += 1;
+    } else if let Some((width, height)) = integral_target(placement.dst) {
         let src = placement.src.unwrap_or_else(|| {
             Rect::from_xywh(0.0, 0.0, descriptor.width as f32, descriptor.height as f32)
         });
@@ -1394,6 +1654,15 @@ fn draw_image_placed(
     if let Some(tint) = &node.tint {
         paint.set_color_filter(tint_filter(tint));
     }
+    let has_blur = node.blur_sigma[0] > 0.0 || node.blur_sigma[1] > 0.0;
+    if has_blur {
+        paint.set_image_filter(image_filters::blur(
+            (node.blur_sigma[0].max(0.0), node.blur_sigma[1].max(0.0)),
+            TileMode::Clamp,
+            None,
+            None,
+        ));
+    }
     if node.blend == ImageBlend::Src {
         // Replace the destination rather than compositing over it, so `Painter.paste_src` means
         // the same thing on both backends. Anti-aliasing must be off: an AA edge under kSrc would
@@ -1401,7 +1670,20 @@ fn draw_image_placed(
         paint.set_blend_mode(BlendMode::Src);
         paint.set_anti_alias(false);
     }
+    let save_count = if has_blur {
+        // Pillow filters the finite source image and then pastes the finite result. Skia image
+        // filters can expand their output beyond the destination bounds, so clip that halo away
+        // to keep a blurred nested WidgetBg from leaking outside its own image rectangle.
+        let count = canvas.save();
+        canvas.clip_rect(dst, ClipOp::Intersect, false);
+        Some(count)
+    } else {
+        None
+    };
     canvas.draw_image_rect_with_sampling_options(image, src_arg, dst, sampling, &paint);
+    if let Some(count) = save_count {
+        canvas.restore_to_count(count);
+    }
 }
 
 /// Parse a Painter-style align string into (h, v) where h ∈ {-1,0,1} (l/c/r) and
@@ -1939,6 +2221,7 @@ mod tests {
               "fit": "crop",
               "sampling": "cubic",
               "source_rect": [2, 2, 40, 40],
+              "blur_sigma": [3.0, 1.5],
               "tint": { "color": [255, 128, 0, 255], "mode": "multiply" },
               "shadow": { "alpha": 0.6, "offset": [4, 4], "sigma": 3.0, "color": [0,0,0,255] } },
             { "type": "Image", "pos": [30, 4], "size": [20, 20], "path": "missing.png",
@@ -1962,6 +2245,19 @@ mod tests {
 
         let cubic = image_sampling(ImageSampling::Cubic);
         assert!(cubic.use_cubic);
+        // "cubic" stays Mitchell (B = C = 1/3) — it must not be repurposed as Catmull-Rom.
+        assert_eq!(cubic.cubic.b, 1.0 / 3.0);
+        assert_eq!(cubic.cubic.c, 1.0 / 3.0);
+
+        let catmull = image_sampling(ImageSampling::CatmullRom);
+        assert!(catmull.use_cubic);
+        // Catmull-Rom = Keys a=-0.5 (PIL BICUBIC): B = 0, C = 0.5.
+        assert_eq!(catmull.cubic.b, 0.0);
+        assert_eq!(catmull.cubic.c, 0.5);
+
+        let parsed: ImageSampling =
+            serde_json::from_str("\"catmull_rom\"").expect("catmull_rom variant parses");
+        assert_eq!(parsed, ImageSampling::CatmullRom);
 
         let mipmap = image_sampling(ImageSampling::LinearMipmap);
         assert_eq!(mipmap.filter, FilterMode::Linear);
@@ -1977,7 +2273,10 @@ mod tests {
                 { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "same.png" }
               ] },
             { "type": "Image", "pos": [4, 28], "size": [24, 20], "path": "same.png" },
-            { "type": "Image", "pos": [30, 28], "size": [20, 20], "path": "mem:runtime" }
+            { "type": "Image", "pos": [30, 28], "size": [20, 20], "path": "mem:runtime" },
+            { "type": "Transform", "matrix": [1, 0, 0, 0, 1, 0], "children": [
+                { "type": "Image", "pos": [0, 0], "size": [20, 20], "path": "other.png" }
+              ] }
             "#,
         );
         let scene: Scene = serde_json::from_str(&json).expect("scene parses");
@@ -1985,6 +2284,8 @@ mod tests {
         let mut requests = Vec::new();
         collect_image_prewarm_requests(&scene.root, (0.0, 0.0), &mut seen, &mut requests);
 
+        // "other.png" sits under a Transform and must NOT be collected: its prewarm target
+        // size is meaningless under a non-identity CTM and the draw path skips the cache.
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].node.path, "same.png");
         assert_eq!(requests[1].node.size, [24.0, 20.0]);
@@ -2028,5 +2329,422 @@ mod tests {
         let json = scene_json("").replace("\"version\": 2", "\"version\": 1");
         let scene: Scene = serde_json::from_str(&json).expect("scene parses");
         assert!(render_scene_inner(&scene, HashMap::new()).is_err());
+    }
+
+    /// A scene without the TriangleBg background (transparent canvas) for pixel-exact tests.
+    fn bare_scene_json(canvas: (i32, i32), root: &str) -> String {
+        format!(
+            r#"{{
+                "version": 2,
+                "assets_base_dir": "/tmp/does-not-matter",
+                "export_format": "png",
+                "fonts": {{ "dir": "/tmp", "default": "missing", "bold": "missing" }},
+                "canvas": {{ "width": {}, "height": {} }},
+                "root": {root}
+            }}"#,
+            canvas.0, canvas.1
+        )
+    }
+
+    /// Decode a rendered PNG back to unpremultiplied RGBA pixels.
+    fn decode_pixels(rendered: &RenderedImage) -> (Vec<u8>, i32, i32) {
+        let data = Data::new_copy(rendered.bytes.as_bytes());
+        let image = Image::from_encoded(data).expect("png decodes");
+        let (w, h) = (image.width(), image.height());
+        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = w as usize * 4;
+        let mut buf = vec![0u8; row * h as usize];
+        assert!(image.read_pixels(&info, &mut buf, row, (0, 0), CachingHint::Allow));
+        (buf, w, h)
+    }
+
+    #[test]
+    fn transform_parses_and_renders() {
+        let json = scene_json(
+            r#"
+            { "type": "Transform", "matrix": [1, 0, 10, 0, 1, 6], "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [12, 8], "fill": [255, 0, 0, 255] }
+              ] }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.width, 64);
+        assert_eq!(
+            &rendered.bytes.as_bytes()[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+    }
+
+    #[test]
+    fn transform_matches_pretransformed_rect() {
+        // A rect under Transform(translate + rotate) must land where the forward corner math
+        // says: corner (lx, ly) -> (a*lx + b*ly + c, d*lx + e*ly + f).
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let (tx, ty) = (20.0_f32, 22.0_f32);
+        let (w, h) = (24.0_f32, 10.0_f32);
+        let json = bare_scene_json(
+            (64, 64),
+            &format!(
+                r#"{{ "type": "Transform", "matrix": [{cos}, {nsin}, {tx}, {sin}, {cos}, {ty}],
+                      "children": [
+                        {{ "type": "Rect", "pos": [0, 0], "size": [{w}, {h}],
+                           "fill": [30, 160, 90, 255] }}
+                      ] }}"#,
+                nsin = -sin,
+            ),
+        );
+        let rendered = render(&json);
+        let (pixels, pw, ph) = decode_pixels(&rendered);
+        assert_eq!((pw, ph), (64, 64));
+
+        // Reference: the same geometry via corner math, drawn as an AA path with no CTM.
+        let map = |lx: f32, ly: f32| Point::new(cos * lx - sin * ly + tx, sin * lx + cos * ly + ty);
+        let mut reference = surfaces::raster_n32_premul((64, 64)).expect("surface");
+        let corners = [map(0.0, 0.0), map(w, 0.0), map(w, h), map(0.0, h)];
+        let path = skia_safe::Path::polygon(&corners, true, None, None);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(255, 30, 160, 90));
+        reference.canvas().draw_path(&path, &paint);
+        let snap = reference.image_snapshot();
+        let info = ImageInfo::new((64, 64), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = 64 * 4;
+        let mut ref_pixels = vec![0u8; row * 64];
+        assert!(snap.read_pixels(&info, &mut ref_pixels, row, (0, 0), CachingHint::Allow));
+
+        // AA coverage may round differently between the CTM rect and the corner-math path on
+        // boundary pixels; interiors must agree. Tolerate a handful of edge pixels only.
+        let mismatched = pixels
+            .chunks_exact(4)
+            .zip(ref_pixels.chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 16))
+            .count();
+        assert!(mismatched < 20, "mismatched pixels: {mismatched}");
+        // Interior sanity: the transformed rect's center carries the fill color exactly.
+        let center = map(w * 0.5, h * 0.5);
+        let idx = ((center.y.round() as usize) * 64 + center.x.round() as usize) * 4;
+        assert_eq!(&pixels[idx..idx + 4], &[30, 160, 90, 255]);
+    }
+
+    #[test]
+    fn transform_children_see_zero_offset() {
+        // Group offset (7,3) -> translate; matrix scales by 2. The child's own pos must map
+        // through the matrix ONLY (device x = 7 + 2*lx), not be offset by the group again.
+        let json = bare_scene_json(
+            (64, 64),
+            r#"{ "type": "Group", "offset": [7, 3], "size": [64, 64], "children": [
+                 { "type": "Transform", "matrix": [2, 0, 0, 0, 2, 0], "children": [
+                     { "type": "Rect", "pos": [5, 5], "size": [10, 10], "fill": [255, 0, 0, 255] }
+                   ] }
+               ] }"#,
+        );
+        let rendered = render(&json);
+        let (pixels, w, _) = decode_pixels(&rendered);
+        let px = |x: usize, y: usize| {
+            let idx = (y * w as usize + x) * 4;
+            [
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            ]
+        };
+        // Correct placement: rect spans x 17..37, y 13..33.
+        assert_eq!(px(20, 15), [255, 0, 0, 255]);
+        assert_eq!(px(36, 32), [255, 0, 0, 255]);
+        // A double-applied offset would land it at x 31..51, y 19..39 instead.
+        assert_eq!(px(45, 36)[3], 0);
+        // And a dropped matrix (offset-only render) would fill x 12..22, y 8..18.
+        assert_eq!(px(14, 14)[3], 0);
+    }
+
+    #[test]
+    fn unknown_node_kind_fails_parse() {
+        // The loud failure is load-bearing: an older wheel meeting newer IR must fail the whole
+        // scene parse (-> PyValueError -> Python fail-open to Pillow), never skip the node.
+        let json = scene_json(r#"{ "type": "Bogus" }"#);
+        assert!(serde_json::from_str::<Scene>(&json).is_err());
+    }
+
+    fn fixture_path(name: &str) -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    /// Decode a fixture PNG to unpremultiplied RGBA (grayscale PNGs come back R=G=B=L, A=255).
+    ///
+    /// Deliberately SkCodec, not `Image::from_encoded` + `read_pixels`: the image path
+    /// rasterizes through PREMUL and corrupts straight-alpha RGB (the expected fixture's
+    /// `204 @ a=63` comes back 202), while the codec decodes into the requested unpremul
+    /// info natively and losslessly.
+    fn decode_fixture_rgba(name: &str) -> (Vec<u8>, i32, i32) {
+        let bytes = std::fs::read(fixture_path(name)).expect("fixture readable");
+        let mut codec =
+            skia_safe::Codec::from_data(Data::new_copy(&bytes)).expect("fixture decodes");
+        let dimensions = codec.dimensions();
+        let (w, h) = (dimensions.width, dimensions.height);
+        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = w as usize * 4;
+        let mut buf = vec![0u8; row * h as usize];
+        let result = codec.get_pixels_with_options(&info, &mut buf, row, None);
+        assert!(
+            matches!(result, skia_safe::codec::Result::Success),
+            "fixture pixel decode failed"
+        );
+        (buf, w, h)
+    }
+
+    /// Run the render arm's pixel routine over a golden fixture triple (field L-PNG + scalars
+    /// JSON emitted from the Python reference) and gate on per-channel |delta| <= 1 against the
+    /// Python-rendered expected RGBA. Returns the observed max delta.
+    fn run_sdf_quad_golden(name: &str) -> u8 {
+        let (field_rgba, fw, fh) = decode_fixture_rgba(&format!("sdf_quad_{name}_field.png"));
+        let field: Vec<u8> = field_rgba.chunks_exact(4).map(|px| px[0]).collect();
+        let (expected, ew, eh) = decode_fixture_rgba(&format!("sdf_quad_{name}_expected.png"));
+        assert_eq!((fw, fh), (ew, eh), "field/expected size mismatch");
+        let scalars =
+            std::fs::read_to_string(fixture_path(&format!("sdf_quad_{name}_scalars.json")))
+                .expect("scalars readable");
+        let shading: SdfShading = serde_json::from_str(&scalars).expect("scalars parse");
+        let actual = shade_sdf_field(&field, fw as usize, fh as usize, fw as usize, &shading);
+        assert_eq!(actual.len(), expected.len());
+        let mut max_delta = 0u8;
+        for (idx, (a, e)) in actual.iter().zip(expected.iter()).enumerate() {
+            let delta = a.abs_diff(*e);
+            assert!(
+                delta <= 1,
+                "{name}: channel {} of pixel {} is off by {delta} (got {a}, want {e})",
+                idx % 4,
+                idx / 4,
+            );
+            max_delta = max_delta.max(delta);
+        }
+        println!("sdf_quad golden {name}: max_delta={max_delta}");
+        max_delta
+    }
+
+    #[test]
+    fn sdf_quad_golden_face_only() {
+        run_sdf_quad_golden("face_only");
+    }
+
+    #[test]
+    fn sdf_quad_golden_underlay() {
+        run_sdf_quad_golden("underlay");
+    }
+
+    #[test]
+    fn sdf_quad_golden_gradient_bold() {
+        run_sdf_quad_golden("gradient_bold");
+    }
+
+    #[test]
+    fn sdf_quad_underlay_shift_samples_shifted_positions() {
+        // 4x4 field of distinct bytes. The face pass is forced to zero (face_scale 0, face_w 1)
+        // and the underlay to identity (scale 1, w 0, alpha 1), so the patch alpha at (x, y)
+        // must be EXACTLY the shifted field byte: shifted[y][x] = field[y + sy][x + sx] with
+        // shift [1, -1], and out-of-bounds (row 0 / rightmost column) zero-filled.
+        let field: Vec<u8> = (0..16).map(|i| (i * 16) as u8).collect();
+        let shading = SdfShading {
+            face_color: [255, 0, 0],
+            face_scale: 0.0,
+            face_w: 1.0,
+            alpha: 1.0,
+            underlay: Some(SdfUnderlay {
+                color: [0, 0, 255],
+                scale: 1.0,
+                w: 0.0,
+                shift: [1, -1],
+            }),
+        };
+        let patch = shade_sdf_field(&field, 4, 4, 4, &shading);
+        let alpha_at = |x: usize, y: usize| patch[(y * 4 + x) * 4 + 3];
+        for x in 0..4 {
+            assert_eq!(
+                alpha_at(x, 0),
+                0,
+                "row 0 samples y=-1 and must be zero-filled"
+            );
+        }
+        for y in 0..4 {
+            assert_eq!(
+                alpha_at(3, y),
+                0,
+                "column 3 samples x=4 and must be zero-filled"
+            );
+        }
+        for y in 1..4 {
+            for x in 0..3 {
+                assert_eq!(
+                    alpha_at(x, y),
+                    field[(y - 1) * 4 + (x + 1)],
+                    "shifted sample at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    fn sdf_scene_json(field: &str) -> String {
+        bare_scene_json(
+            (16, 16),
+            &format!(
+                r#"{{ "type": "Group", "offset": [2, 3], "size": [16, 16], "children": [
+                     {{ "type": "SdfQuad", "pos": [1, 1], "field": "{field}",
+                        "shading": {{ "face_color": [255, 204, 0], "face_scale": 12.0,
+                                      "face_w": 4.9, "alpha": 0.9 }} }}
+                   ] }}"#
+            ),
+        )
+    }
+
+    /// `RenderedImage` has no `Debug`, so `expect_err` can't unwrap the error directly.
+    #[test]
+    fn transform_rejects_self_image_child() {
+        // Device-bounds snapshots assume an identity CTM; inside a Transform the scene must
+        // fail WHOLE (-> Python fail-open), never render a silently wrong snapshot.
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [1.0, 0.0, 0.0, 1.0, 4.0, 2.0], "children": [
+                 { "type": "SelfImage", "pos": [0, 0], "size": [8, 8], "source_rect": [0, 0, 8, 8] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SelfImage"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_rejects_sdf_quad_through_nested_group() {
+        // The walk must carry the in-Transform flag through Group children, and the
+        // rejection must fire before SdfQuad field resolution (no mem image supplied).
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [0.5, 0.0, 0.0, 0.5, 0.0, 0.0], "children": [
+                 { "type": "Group", "offset": [2, 2], "size": [16, 16], "children": [
+                   { "type": "SdfQuad", "pos": [1, 1], "field": "mem:any",
+                     "shading": { "face_color": [255, 204, 0], "face_scale": 12.0,
+                                  "face_w": 4.9, "alpha": 0.9 } }
+                 ] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_still_renders_plain_children() {
+        // The preflight must not reject the supported Transform contents.
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [1.0, 0.0, 0.0, 1.0, 4.0, 2.0], "children": [
+                 { "type": "Rect", "pos": [0, 0], "size": [8, 8], "fill": [255, 0, 0, 255] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        render_scene_inner(&scene, HashMap::new()).expect("renders");
+    }
+
+    fn expect_scene_error(scene: &Scene, mem: HashMap<String, MemImage>) -> String {
+        match render_scene_inner(scene, mem) {
+            Err(err) => err,
+            Ok(_) => panic!("scene must error"),
+        }
+    }
+
+    fn a8_mem_image(width: i32, height: i32, bytes: &[u8]) -> MemImage {
+        MemImage::Raw {
+            width,
+            height,
+            row_bytes: width as usize,
+            color_type: ColorType::Alpha8,
+            alpha_type: AlphaType::Unpremul,
+            data: Data::new_copy(bytes),
+            _buffer: None,
+            _owner: None,
+        }
+    }
+
+    #[test]
+    fn sdf_quad_unknown_mem_image_errors() {
+        // A dangling field reference must fail the WHOLE scene (error, not panic, not skip).
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:nope")).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_wrong_color_type_errors() {
+        // A resolvable mem image of the wrong color type is just as much an emitter bug.
+        let mut mem = HashMap::new();
+        mem.insert(
+            "field".to_string(),
+            MemImage::Raw {
+                width: 2,
+                height: 2,
+                row_bytes: 8,
+                color_type: ColorType::RGBA8888,
+                alpha_type: AlphaType::Unpremul,
+                data: Data::new_copy(&[0u8; 16]),
+                _buffer: None,
+                _owner: None,
+            },
+        );
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:field")).expect("parses");
+        let err = expect_scene_error(&scene, mem);
+        assert!(err.contains("Alpha8"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_encoded_mem_image_errors() {
+        let mut mem = HashMap::new();
+        mem.insert(
+            "field".to_string(),
+            MemImage::Encoded {
+                data: Data::new_copy(&[0x89, b'P', b'N', b'G']),
+                _owner: None,
+            },
+        );
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:field")).expect("parses");
+        let err = expect_scene_error(&scene, mem);
+        assert!(err.contains("Alpha8"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn sdf_quad_renders_a8_mem_field_at_integer_pos() {
+        // The tuple->MemImage extraction is cfg(not(test)), so cover the ColorType::Alpha8
+        // handling at the MemImage level: an 8x8 A8 field drawn at group (2,3) + pos (1,1).
+        // Over a transparent canvas src-over keeps the source alpha byte exactly (premul
+        // conversion preserves alpha), so the canvas alpha must equal the patch alpha.
+        let field: Vec<u8> = (0..64).map(|i| (i * 4) as u8).collect();
+        let mut mem = HashMap::new();
+        mem.insert("glyph".to_string(), a8_mem_image(8, 8, &field));
+        let scene: Scene = serde_json::from_str(&sdf_scene_json("mem:glyph")).expect("parses");
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        assert_eq!(rendered.metrics.sdf_quad_count, 1);
+        assert!(rendered.metrics.sdf_quad_elapsed >= 0.0);
+
+        let shading = SdfShading {
+            face_color: [255, 204, 0],
+            face_scale: 12.0,
+            face_w: 4.9,
+            alpha: 0.9,
+            underlay: None,
+        };
+        let patch = shade_sdf_field(&field, 8, 8, 8, &shading);
+        let (pixels, w, _) = decode_pixels(&rendered);
+        let mut nonzero = 0u32;
+        for y in 0..8usize {
+            for x in 0..8usize {
+                let canvas_idx = ((y + 4) * w as usize + (x + 3)) * 4;
+                let patch_a = patch[(y * 8 + x) * 4 + 3];
+                assert_eq!(pixels[canvas_idx + 3], patch_a, "alpha at patch ({x}, {y})");
+                nonzero += u32::from(patch_a > 0);
+            }
+        }
+        assert!(nonzero > 0, "the shaded patch must not be empty");
+        // Nothing may land outside the 8x8 patch footprint at (3, 4).
+        assert_eq!(pixels[3], 0, "canvas origin must stay transparent");
     }
 }

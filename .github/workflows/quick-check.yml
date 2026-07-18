@@ -159,7 +159,7 @@ jobs:
         run: uv run maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
       - name: Verify native renderer capability handshake
-        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 7, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 10, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Run pytest with native renderer
         env:

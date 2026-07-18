@@ -563,21 +563,13 @@ def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[Image.Image, ImageSource, ImageSource, list[Image.Image], dict[int, Image.Image], float]:
+) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, Image.Image], float]:
     tasks = [
-        # card_image feeds ImageBg(fade=0.1), which brightness-adjusts pixels eagerly.
-        get_img_from_path(ASSETS_BASE_DIR, rqd.card_image_path),
+        # ImageBg keeps this lazy through the Skia path; Pillow resolves it during replay.
+        get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
-        *[
-            get_img_resized(
-                ASSETS_BASE_DIR,
-                card.thumbnail_path,
-                _BIRTHDAY_CARD_THUMB_SIZE,
-                _BIRTHDAY_CARD_THUMB_SIZE,
-            )
-            for card in rqd.cards
-        ],
+        *[get_asset_image_ref(ASSETS_BASE_DIR, card.thumbnail_path) for card in rqd.cards],
         *[
             get_img_resized(
                 ASSETS_BASE_DIR,
@@ -986,7 +978,13 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
                 with Grid(col_count=6).set_sep(4, 4):
                     for i, thumb in enumerate(card_thumbs):
                         with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
-                            ImageBox(thumb, size=(80, 80), shadow=True)
+                            ImageBox(
+                                thumb,
+                                image_size_mode="fill",
+                                size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
+                                shadow=True,
+                                sampling="linear",
+                            )
                             TextBox(f"{cards[i].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
 
             # 底部角色生日日历

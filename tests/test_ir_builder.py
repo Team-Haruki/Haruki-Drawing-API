@@ -122,12 +122,14 @@ def test_image_tint_shadow_and_text_extras():
         sampling="cubic",
         tint=image_tint((255, 0, 0, 255), "multiply"),
         shadow=image_shadow(0.5, (3, 3), 2.0),
+        blur_sigma=(3.0, 1.5),
     )
     img = b._root_children[-1]
     assert img["fit"] == "crop"
     assert img["sampling"] == "cubic"
     assert img["tint"]["mode"] == "multiply"
     assert img["shadow"]["sigma"] == 2.0
+    assert img["blur_sigma"] == [3.0, 1.5]
 
     b.text(
         "hi",

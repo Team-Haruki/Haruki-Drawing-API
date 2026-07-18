@@ -9,6 +9,7 @@ import ctypes.util
 import json
 import math
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,16 @@ Image.MAX_IMAGE_PIXELS = None
 
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets, honor_group_uses_scroll_level
 from src.sekai.honor.model import HonorRequest
+from src.sekai.profile.custom_profile.cache import (
+    GLYPH_CONTOUR_CACHE,
+    GLYPH_SDF_CACHE,
+    MISSING,
+    SPRITE_ATLAS_CACHE,
+    file_signature,
+    get_render_font,
+    get_tmp_font_tables,
+    optional_file_signature,
+)
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
@@ -546,6 +557,16 @@ class PreparedLayer:
 
 
 @dataclass(frozen=True)
+class LayerTransformInputs:
+    layer: Image.Image  # trimmed local raster (before any resize)
+    pivot: tuple[float, float]  # pivot in trimmed-layer coords
+    object_scale: tuple[float, float]  # (1.0, 1.0) when scale_consumed or absent
+    position_scale: tuple[float, float]  # (renderer.position_scale_x, position_scale_y)
+    angle: float  # degrees, rotation_sign already applied
+    anchor: tuple[float, float]  # unity_point(position) — canvas-space anchor
+
+
+@dataclass(frozen=True)
 class RenderedLayer:
     content: NativeContent
     status: str
@@ -712,7 +733,50 @@ class TMPDynamicGlyphSDF:
     sample_size: float
 
 
-@dataclass
+@dataclass(frozen=True)
+class TMPSdfUnderlayScalars:
+    """Underlay half of the TMP shading scalars; shift is the PRE-ROUNDED integer field
+    translation (banker's rounding, (0, 0) when |offset| < 0.5 short-circuits)."""
+
+    scale: float
+    w: float
+    shift_x: int
+    shift_y: int
+    color: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class TMPSdfShadingScalars:
+    """Scalar half of shade_tmp_sdf_field, shared verbatim with the Skia SdfQuad node: the
+    per-pixel evaluators on both backends compute ``clip(field*face_scale - face_w, 0, 1)*alpha``
+    (plus the underlay pass) from exactly these numbers. Scalars stay float64 here; the pixel
+    loops cast them to float32 before the elementwise math (numpy's implicit behavior)."""
+
+    face_scale: float
+    face_w: float
+    alpha: float
+    face_color: tuple[int, int, int]
+    underlay: TMPSdfUnderlayScalars | None
+
+
+@dataclass(frozen=True)
+class DirectSdfQuad:
+    """One decorative-path glyph, ready for per-pixel shading: ``field`` is the L field ALREADY
+    warped to display size (the exact array Pillow would shade), ``(left, top)`` the canvas-space
+    integer paste position, ``scalars`` the frozen shading scalars. This is the renderer half of
+    the Skia ``SdfQuad`` IR node — the node does zero geometric resampling."""
+
+    field: Image.Image
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
+# frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
+# cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
+# atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
+# after construction.
+@dataclass(frozen=True)
 class TMPFontAsset:
     name: str
     bundle: str
@@ -896,6 +960,10 @@ class FreeTypeMetrics:
         self.lib.FT_Render_Glyph.argtypes = [ctypes.POINTER(FTGlyphSlotRec), ctypes.c_int]
         self.lib.FT_Render_Glyph.restype = ctypes.c_int
         self._faces: dict[Path, ctypes.POINTER(FTFaceRec)] = {}
+        # The singleton is shared process-wide and FT_Set_Char_Size/FT_Load_Glyph mutate shared
+        # FT_Face state, so concurrent requests must serialize. Cheap in practice: with the
+        # process-level glyph caches, this path only runs on a cold glyph.
+        self._lock = threading.Lock()
 
     def close(self) -> None:
         for face in self._faces.values():
@@ -913,6 +981,10 @@ class FreeTypeMetrics:
         return face
 
     def glyph_metrics(self, path: Path, ch: str, font_size: float) -> TMPGlyphMetrics | None:
+        with self._lock:
+            return self._glyph_metrics_locked(path, ch, font_size)
+
+    def _glyph_metrics_locked(self, path: Path, ch: str, font_size: float) -> TMPGlyphMetrics | None:
         face = self._face(path)
         if self.lib.FT_Set_Char_Size(face, 0, int(round(font_size * 64.0)), 72, 72) != 0:
             return None
@@ -938,6 +1010,15 @@ class FreeTypeMetrics:
         )
 
     def glyph_bitmap(
+        self,
+        path: Path,
+        ch: str,
+        font_size: float,
+    ) -> tuple[Image.Image, int, int, TMPGlyphMetrics] | None:
+        with self._lock:
+            return self._glyph_bitmap_locked(path, ch, font_size)
+
+    def _glyph_bitmap_locked(
         self,
         path: Path,
         ch: str,
@@ -989,6 +1070,7 @@ class FreeTypeMetrics:
 
 _FREETYPE_METRICS: FreeTypeMetrics | None = None
 _FREETYPE_UNAVAILABLE = False
+_FREETYPE_INIT_LOCK = threading.Lock()
 
 
 def freetype_metrics() -> FreeTypeMetrics | None:
@@ -996,11 +1078,13 @@ def freetype_metrics() -> FreeTypeMetrics | None:
     if _FREETYPE_UNAVAILABLE:
         return None
     if _FREETYPE_METRICS is None:
-        try:
-            _FREETYPE_METRICS = FreeTypeMetrics()
-        except Exception:
-            _FREETYPE_UNAVAILABLE = True
-            return None
+        with _FREETYPE_INIT_LOCK:
+            if _FREETYPE_METRICS is None and not _FREETYPE_UNAVAILABLE:
+                try:
+                    _FREETYPE_METRICS = FreeTypeMetrics()
+                except Exception:
+                    _FREETYPE_UNAVAILABLE = True
+                    return None
     return _FREETYPE_METRICS
 
 
@@ -1032,16 +1116,26 @@ class TMPFontLibrary:
             if source_metadata_path is not None and source_metadata_path.exists()
             else None
         )
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        base = metadata_path.parent
-        source_assets: dict[str, list[TMPFontAsset]] | None = None
-        if source_metadata_path is not None and source_metadata_path != metadata_path:
-            source_assets = cls._load_assets(source_metadata_path)
-        assets = cls._load_assets(metadata_path)
+
+        # The parsed asset tables are shared process-wide: TMPFontAsset/TMPGlyphMetrics are
+        # frozen dataclasses (containers inside TMPFontAsset rely on the never-mutate-after-load
+        # convention); only this per-request library instance with its private
+        # _source_fonts/_source_metrics is fresh. The loader records every file it reads or
+        # probes so a replaced (or late-arriving) table invalidates the entry.
+        def _loader(record) -> tuple[dict[str, list[TMPFontAsset]], dict[str, list[TMPFontAsset]] | None]:
+            source: dict[str, list[TMPFontAsset]] | None = None
+            if source_metadata_path is not None and source_metadata_path != metadata_path:
+                source = cls._load_assets(source_metadata_path, record=record)
+            return cls._load_assets(metadata_path, record=record), source
+
+        assets, source_assets = get_tmp_font_tables(metadata_path, source_metadata_path, _loader)
         return cls(assets, source_assets, runtime_fonts_dir=runtime_fonts_dir)
 
     @classmethod
-    def _load_assets(cls, metadata_path: Path) -> dict[str, list[TMPFontAsset]]:
+    def _load_assets(cls, metadata_path: Path, record=None) -> dict[str, list[TMPFontAsset]]:
+        if record is None:
+            record = lambda path: None
+        record(metadata_path)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         base = metadata_path.parent
         materials = {
@@ -1050,15 +1144,15 @@ class TMPFontLibrary:
         assets: dict[str, list[TMPFontAsset]] = {}
         for row in metadata.get("tmp_font_assets", []):
             name = str(row.get("name", ""))
-            chars = cls._load_character_table(base, row)
+            chars = cls._load_character_table(base, row, record)
             face = row.get("face_info", {}) or {}
             material = materials.get(str(row.get("material"))) or {}
             floats = material.get("floats", {}) or {}
             asset = TMPFontAsset(
                 name=name,
                 bundle=str(row.get("bundle", "")),
-                source_font_path=cls._source_font_path(base, row),
-                atlas_paths=cls._atlas_paths(base, row),
+                source_font_path=cls._source_font_path(base, row, record),
+                atlas_paths=cls._atlas_paths(base, row, record),
                 atlas_population_mode=int(row.get("atlas_population_mode", 0) or 0),
                 atlas_width=float(row.get("atlas_width") or floats.get("_TextureWidth") or 0.0),
                 atlas_height=float(row.get("atlas_height") or floats.get("_TextureHeight") or 0.0),
@@ -1095,20 +1189,24 @@ class TMPFontLibrary:
         return assets
 
     @staticmethod
-    def _source_font_path(base: Path, row: dict[str, Any]) -> Path | None:
+    def _source_font_path(base: Path, row: dict[str, Any], record=None) -> Path | None:
         rel = row.get("source_font_data_path")
         if not rel:
             return None
         path = Path(str(rel)).expanduser()
         candidates = [path] if path.is_absolute() else [base / path, Path(__file__).resolve().parent / path]
         for candidate in candidates:
+            if record is not None:
+                record(candidate)  # a font that ARRIVES later must invalidate the cached tables
             if candidate.exists():
                 return candidate
         return None
 
     @staticmethod
-    def _atlas_paths(base: Path, row: dict[str, Any]) -> list[Path]:
+    def _atlas_paths(base: Path, row: dict[str, Any], record=None) -> list[Path]:
         atlas_dir = base / "atlases"
+        if record is not None:
+            record(atlas_dir)  # glob result baked into the tables; dir mtime moves on add/remove
         paths: list[Path] = []
         for path_id in row.get("atlas_textures", []) or []:
             matches = sorted(atlas_dir.glob(f"*_{path_id}.png"))
@@ -1117,13 +1215,16 @@ class TMPFontLibrary:
         return paths
 
     @staticmethod
-    def _load_character_table(base: Path, row: dict[str, Any]) -> dict[int, TMPGlyphMetrics]:
+    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
         char_rel = row.get("character_table_path")
         glyph_rel = row.get("glyph_table_path")
         if not char_rel or not glyph_rel:
             return {}
         char_path = base / str(char_rel)
         glyph_path = base / str(glyph_rel)
+        if record is not None:
+            record(char_path)
+            record(glyph_path)
         if not char_path.exists() or not glyph_path.exists():
             return {}
         chars = json.loads(char_path.read_text(encoding="utf-8"))
@@ -1740,7 +1841,9 @@ def triangle_sprite_alpha(path: Path) -> Image.Image:
 
 
 def load_font(path: Path, size: float) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(path), max(1, round(size)))
+    # Process-lifetime per-thread cache; previously this reopened the font file on every call
+    # (200-400 times per request), the second-largest cold-render cost.
+    return get_render_font(path, size)
 
 
 def smoothstep(edge0: float, edge1: float, value: float) -> float:
@@ -2008,8 +2111,12 @@ class PNGRenderer:
         self._sdf_alpha_cache: dict[tuple[Path, str, str, float, float], Image.Image] = {}
         self._shape_shader_basis_cache: dict[tuple[Path, str, str], tuple[Any, Any, Any]] = {}
         self._tmp_atlas_cache: dict[Path, Image.Image] = {}
+        # L1 in front of the process-level GLYPH_SDF_CACHE / GLYPH_CONTOUR_CACHE pools: lock-free
+        # per-request dicts keyed WITHOUT the font-file signature (this instance pins one asset
+        # snapshot). The L2 keys add the signature plus the metadata-derived shading inputs.
         self._tmp_dynamic_glyph_cache: dict[tuple[str, str, str, float], TMPDynamicGlyphSDF | None] = {}
         self._tmp_vector_glyph_cache: dict[tuple[str, str, float], tuple[list[Any], Any] | None] = {}
+        self._font_signature_memo: dict[str, tuple[int, int]] = {}
         self._tmp_render_char_cache: dict[tuple[str, str, bool], str] = {}
         self.native_audit: list[dict[str, Any]] = []
         self.tmp_layout_audit: list[dict[str, Any]] = []
@@ -2840,16 +2947,42 @@ class PNGRenderer:
         return result
 
     def unity_ui_sprite(self, name: str) -> Image.Image | None:
+        # The name -> path resolution (and the cached None verdict) stays instance-level: the
+        # candidate list depends on this renderer's region/sprite dirs. Only the decode goes
+        # through the process pool, keyed by file signature, shared read-only across requests.
         cached = self._unity_ui_sprite_cache.get(name)
         if cached is not None or name in self._unity_ui_sprite_cache:
             return cached
         for path in self.unity_ui_sprite_candidates(name):
             if path.exists():
-                sprite = Image.open(path).convert("RGBA")
+                sprite = self._decode_shared_image(path, "rgba")
                 self._unity_ui_sprite_cache[name] = sprite
                 return sprite
         self._unity_ui_sprite_cache[name] = None
         return None
+
+    def _decode_shared_image(self, path: Path, variant: str) -> Image.Image:
+        """Decode ``path`` via the process-level sprite/atlas pool (variant-aware, see cache.py).
+
+        A separate pool rather than the global image cache in src.sekai.base.utils: these are
+        decoded VARIANTS (full-RGBA convert, atlas alpha channel) and the global 6-tuple key has
+        no variant dimension, while its copy-on-get is pure waste for shared immutable images.
+        """
+        sig = optional_file_signature(path)
+        if sig == (-1, -1):  # deleted between exists() and stat: keep the historical error path
+            return self._decode_image_variant(path, variant)
+        cache_key = (str(path), *sig, variant)
+        image = SPRITE_ATLAS_CACHE.get(cache_key)
+        if image is MISSING:
+            image = self._decode_image_variant(path, variant)
+            SPRITE_ATLAS_CACHE.set(cache_key, image)
+        return image
+
+    @staticmethod
+    def _decode_image_variant(path: Path, variant: str) -> Image.Image:
+        if variant == "atlas_alpha":
+            return Image.open(path).convert("RGBA").getchannel("A")
+        return Image.open(path).convert("RGBA")
 
     def tint_image(
         self,
@@ -5793,13 +5926,12 @@ class PNGRenderer:
     ) -> tuple[Image.Image, tuple[float, float]]:
         return rotate_layer_about_pivot(layer, pivot, angle, premultiply_alpha=self.premultiply_alpha_transforms)
 
-    def prepare_transformed_layer(
+    def layer_transform_inputs(
         self,
         local: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
         object_data: dict[str, Any],
         content_kind: str | None = None,
-        allow_rotation_supersample: bool = False,
-    ) -> PreparedLayer | None:
+    ) -> LayerTransformInputs:
         layer, pivot = local[0], local[1]
         scale_consumed = len(local) >= 3 and bool(local[2])
         if content_kind not in {"general", "honor", "bonds_honor"}:
@@ -5807,7 +5939,31 @@ class PNGRenderer:
         scale = object_data.get("scale", {})
         sx = float(scale.get("x") or 1.0)
         sy = float(scale.get("y") or sx or 1.0)
-        if not scale_consumed and (sx != 1.0 or sy != 1.0):
+        if scale_consumed:
+            sx = 1.0
+            sy = 1.0
+        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
+        anchor = self.unity_point(object_data.get("position", {}))
+        return LayerTransformInputs(
+            layer=layer,
+            pivot=pivot,
+            object_scale=(sx, sy),
+            position_scale=(self.position_scale_x, self.position_scale_y),
+            angle=angle,
+            anchor=anchor,
+        )
+
+    def prepare_transformed_layer(
+        self,
+        local: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
+        object_data: dict[str, Any],
+        content_kind: str | None = None,
+        allow_rotation_supersample: bool = False,
+    ) -> PreparedLayer | None:
+        inputs = self.layer_transform_inputs(local, object_data, content_kind)
+        layer, pivot = inputs.layer, inputs.pivot
+        sx, sy = inputs.object_scale
+        if sx != 1.0 or sy != 1.0:
             new_w = max(1, round(layer.width * sx))
             new_h = max(1, round(layer.height * sy))
             layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
@@ -5817,14 +5973,15 @@ class PNGRenderer:
         # the offline screenshot target is the normalized profile capture size.
         # Scale the rendered local layer by the same unit-to-pixel ratio before
         # applying the RectTransform rotation, matching the Canvas capture path.
-        if abs(self.position_scale_x - 1.0) >= 1.0e-6 or abs(self.position_scale_y - 1.0) >= 1.0e-6:
-            new_w = max(1, round(layer.width * self.position_scale_x))
-            new_h = max(1, round(layer.height * self.position_scale_y))
+        psx, psy = inputs.position_scale
+        if abs(psx - 1.0) >= 1.0e-6 or abs(psy - 1.0) >= 1.0e-6:
+            new_w = max(1, round(layer.width * psx))
+            new_h = max(1, round(layer.height * psy))
             layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
-            pivot = (pivot[0] * self.position_scale_x, pivot[1] * self.position_scale_y)
+            pivot = (pivot[0] * psx, pivot[1] * psy)
 
-        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
-        x, y = self.unity_point(object_data.get("position", {}))
+        angle = inputs.angle
+        x, y = inputs.anchor
         if self.clip_canvas_transform:
             return self.prepare_canvas_clipped_transformed_layer(layer, pivot, angle, x, y, allow_rotation_supersample)
 
@@ -8242,7 +8399,7 @@ class PNGRenderer:
         cached = self._tmp_atlas_cache.get(path)
         if cached is not None:
             return cached
-        atlas = Image.open(path).convert("RGBA").getchannel("A")
+        atlas = self._decode_shared_image(path, "atlas_alpha")
         self._tmp_atlas_cache[path] = atlas
         return atlas
 
@@ -8386,17 +8543,19 @@ class PNGRenderer:
             out[dst_y0:dst_y1, dst_x0:dst_x1] = field[src_y0:src_y1, src_x0:src_x1]
         return out
 
-    def shade_tmp_sdf_field(
+    def tmp_sdf_shading_scalars(
         self,
-        field: Any,
         asset: TMPFontAsset | None,
         style: TextStyle,
         outline_color: str,
         outline_dilate: float,
         sdf_scale: float | None = None,
-    ) -> Image.Image:
-        import numpy as np
-
+    ) -> TMPSdfShadingScalars:
+        """The scalar half of shade_tmp_sdf_field — everything derived from asset/style before the
+        per-pixel math. Single source for the Pillow shader below AND the Skia SdfQuad node
+        (Phase 2): the fragile TMP material semantics live here once; both backends are dumb
+        ``clip(field*scale - w)`` evaluators of these numbers.
+        """
         gradient_scale = asset.gradient_scale if asset is not None else 6.0
         weight_normal = asset.weight_normal if asset is not None else 0.0
         weight_bold = asset.weight_bold if asset is not None else 0.75
@@ -8414,21 +8573,70 @@ class PNGRenderer:
         weight = weight_bold if style.bold else weight_normal
         bias = 0.5 - 0.5 * (weight * 0.25 + face_dilate) * scale_ratio_a
         face_w = bias * face_scale - 0.5
-        face_alpha = np.clip(field * face_scale - face_w, 0.0, 1.0) * style.alpha
 
+        underlay: TMPSdfUnderlayScalars | None = None
         if abs(outline_dilate) > 1.0e-6:
             underlay_scale = raw_scale / (underlay_softness * scale_ratio_c * raw_scale + 1.0)
             underlay_width = outline_dilate * scale_ratio_c * underlay_scale
             underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
             offset_x = -underlay_offset_x * scale_ratio_c * gradient_scale
             offset_y = -underlay_offset_y * scale_ratio_c * gradient_scale
-            underlay_field = self.shifted_sdf_field(field, offset_x, offset_y)
-            underlay_alpha = np.clip(underlay_field * underlay_scale - underlay_w, 0.0, 1.0) * style.alpha
+            # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
+            # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
+            if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
+                shift_x = shift_y = 0
+            else:
+                shift_x = int(round(offset_x))
+                shift_y = int(round(offset_y))
+            underlay = TMPSdfUnderlayScalars(
+                scale=underlay_scale,
+                w=underlay_w,
+                shift_x=shift_x,
+                shift_y=shift_y,
+                color=hex_to_rgba(outline_color, 1.0)[:3],
+            )
+        return TMPSdfShadingScalars(
+            face_scale=face_scale,
+            face_w=face_w,
+            alpha=style.alpha,
+            face_color=hex_to_rgba(style.color, 1.0)[:3],
+            underlay=underlay,
+        )
+
+    def shade_tmp_sdf_field(
+        self,
+        field: Any,
+        asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        sdf_scale: float | None = None,
+    ) -> Image.Image:
+        scalars = self.tmp_sdf_shading_scalars(asset, style, outline_color, outline_dilate, sdf_scale)
+        return self._shade_field_with_scalars(field, scalars)
+
+    def _shade_field_with_scalars(self, field: Any, scalars: TMPSdfShadingScalars) -> Image.Image:
+        """Array half of shade_tmp_sdf_field: per-pixel evaluation of the frozen scalars over a
+        float32 [0, 1] field. Single source for the Pillow shader AND the byte-identity reference
+        for the Skia SdfQuad node — the direct decorative path calls this with DirectSdfQuad."""
+        import numpy as np
+
+        face_alpha = np.clip(field * scalars.face_scale - scalars.face_w, 0.0, 1.0) * scalars.alpha
+
+        if scalars.underlay is not None:
+            u = scalars.underlay
+            # Re-enters shifted_sdf_field with the pre-rounded integer shift: int(round(int)) is
+            # exact and the <0.5 short-circuit maps to shift (0, 0), so behavior is unchanged.
+            underlay_field = self.shifted_sdf_field(field, float(u.shift_x), float(u.shift_y))
+            underlay_alpha = np.clip(underlay_field * u.scale - u.w, 0.0, 1.0) * scalars.alpha
         else:
             underlay_alpha = np.zeros_like(face_alpha)
 
-        face_rgba = np.array(hex_to_rgba(style.color, 1.0), dtype=np.float32) / 255.0
-        underlay_rgba = np.array(hex_to_rgba(outline_color, 1.0), dtype=np.float32) / 255.0
+        face_rgba = np.array([*scalars.face_color, 255], dtype=np.float32) / 255.0
+        # When underlay is None, underlay_alpha is all zeros, so the color term is multiplied out;
+        # (0, 0, 0) keeps the math bit-identical to the pre-split code's unused outline color.
+        underlay_color = scalars.underlay.color if scalars.underlay is not None else (0, 0, 0)
+        underlay_rgba = np.array([*underlay_color, 255], dtype=np.float32) / 255.0
         face_a = face_alpha * face_rgba[3]
         underlay_a = underlay_alpha * underlay_rgba[3]
         out_a = face_a + underlay_a * (1.0 - face_a)
@@ -8595,6 +8803,33 @@ class PNGRenderer:
         pad = max(1, round(sample_pad * display_scale))
         return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
 
+    def _font_signature(self, path: Path) -> tuple[int, int]:
+        """Per-instance memo of one os.stat per font file per request (L2 key component)."""
+        text = str(path)
+        sig = self._font_signature_memo.get(text)
+        if sig is None:
+            sig = optional_file_signature(path)
+            self._font_signature_memo[text] = sig
+        return sig
+
+    def _store_vector_glyph(self, key, l2_key, value):
+        # Negative results stay L1-only (per-request, the pre-cache behavior): the None sites
+        # sit behind broad except blocks, so a TRANSIENT failure (MemoryError/EMFILE/IO blip)
+        # would otherwise be laundered into a process-lifetime "font cannot produce this glyph"
+        # verdict under an unchanged file signature. Re-probing a genuinely missing glyph costs
+        # one fontTools/FT round per request — the price of never poisoning the pool.
+        self._tmp_vector_glyph_cache[key] = value
+        if value is not None:
+            GLYPH_CONTOUR_CACHE.set(l2_key, value)
+        return value
+
+    def _store_dynamic_glyph(self, key, l2_key, value):
+        # Same rule as _store_vector_glyph: only successful renders enter the process pool.
+        self._tmp_dynamic_glyph_cache[key] = value
+        if value is not None:
+            GLYPH_SDF_CACHE.set(l2_key, value)
+        return value
+
     def tmp_vector_glyph_contours(
         self,
         source_path: Path,
@@ -8604,12 +8839,17 @@ class PNGRenderer:
         key = (str(source_path), ch[0], round(sample_size, 4))
         if key in self._tmp_vector_glyph_cache:
             return self._tmp_vector_glyph_cache[key]
+        l2_key = (key[0], *self._font_signature(source_path), key[1], key[2])
+        l2_cached = GLYPH_CONTOUR_CACHE.get(l2_key)
+        if l2_cached is not MISSING:
+            self._tmp_vector_glyph_cache[key] = l2_cached
+            return l2_cached
         try:
             import numpy as np
             from fontTools.pens.recordingPen import DecomposingRecordingPen
             from fontTools.ttLib import TTFont
         except ImportError:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
 
         try:
@@ -8617,13 +8857,13 @@ class PNGRenderer:
             glyph_set = font.getGlyphSet()
             glyph_name = font.getBestCmap().get(ord(ch[0]))
             if not glyph_name:
-                self._tmp_vector_glyph_cache[key] = None
+                self._store_vector_glyph(key, l2_key, None)
                 return None
             pen = DecomposingRecordingPen(glyph_set)
             glyph_set[glyph_name].draw(pen)
             units_per_em = float(font["head"].unitsPerEm or 1000)
         except Exception:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
 
         scale = sample_size / max(1.0, units_per_em)
@@ -8734,14 +8974,16 @@ class PNGRenderer:
 
         close_contour()
         if not contours:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
         packed = [np.asarray(contour, dtype=np.float32) for contour in contours if len(contour) >= 2]
         if not packed:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
-        result = (packed, np)
-        self._tmp_vector_glyph_cache[key] = result
+        for arr in packed:
+            arr.flags.writeable = False  # shared across threads via the process pool
+        result = (tuple(packed), np)  # tuple: the container is shared too
+        self._store_vector_glyph(key, l2_key, result)
         return result
 
     def tmp_vector_glyph_sdf_field(
@@ -8819,6 +9061,22 @@ class PNGRenderer:
         if key in self._tmp_dynamic_glyph_cache:
             cached = self._tmp_dynamic_glyph_cache[key]
             return (cached, asset) if cached is not None else None
+        # L2 adds what the instance key pins implicitly: the font file's signature plus the
+        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
+        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
+        l2_key = (
+            key[0],
+            *self._font_signature(source_path),
+            key[1],
+            key[2],
+            key[3],
+            round(asset.gradient_scale, 4),
+            round(asset.atlas_padding, 4),
+        )
+        l2_cached = GLYPH_SDF_CACHE.get(l2_key)
+        if l2_cached is not MISSING:
+            self._tmp_dynamic_glyph_cache[key] = l2_cached
+            return (l2_cached, asset) if l2_cached is not None else None
 
         ft = freetype_metrics()
 
@@ -8842,7 +9100,7 @@ class PNGRenderer:
 
         native_bounds = glyph_bounds_at_size(sample_size)
         if native_bounds is None:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
         native_bbox, _, _, _ = native_bounds
         # Runtime TMP atlas rects behave like atlas_padding + 1 around the
@@ -8856,7 +9114,7 @@ class PNGRenderer:
                 pad=native_pad,
                 sample_size=sample_size,
             )
-            self._tmp_dynamic_glyph_cache[key] = cached
+            self._store_dynamic_glyph(key, l2_key, cached)
             return cached, asset
 
         supersample = max(1.0, TMP_DYNAMIC_SDF_SUPERSAMPLE)
@@ -8864,7 +9122,7 @@ class PNGRenderer:
         raster_pad = max(1, math.ceil(asset.atlas_padding * supersample))
         raster_bounds = glyph_bounds_at_size(raster_size)
         if raster_bounds is None:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
         raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
         if raster_glyph_mask is not None:
@@ -8888,7 +9146,7 @@ class PNGRenderer:
                 tmp_dynamic_sdf_alpha_threshold(asset),
             )
         except ImportError:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
 
         import numpy as np
@@ -8906,7 +9164,7 @@ class PNGRenderer:
             pad=native_pad,
             sample_size=sample_size,
         )
-        self._tmp_dynamic_glyph_cache[key] = cached
+        self._store_dynamic_glyph(key, l2_key, cached)
         return cached, asset
 
     def render_tmp_dynamic_sdf_run_from_glyphs(
@@ -9382,9 +9640,29 @@ class PNGRenderer:
         item: dict[str, Any],
         object_data: dict[str, Any],
     ) -> bool:
+        import numpy as np
+
+        quads = self.prepare_direct_sdf_quads(item, object_data)
+        if quads is None:
+            return False
+        for quad in quads:
+            field = np.asarray(quad.field, dtype=np.float32) / 255.0
+            canvas.alpha_composite(self._shade_field_with_scalars(field, quad.scalars), (quad.left, quad.top))
+        return True
+
+    def prepare_direct_sdf_quads(
+        self,
+        item: dict[str, Any],
+        object_data: dict[str, Any],
+    ) -> list[DirectSdfQuad] | None:
+        """Layout + per-glyph warp half of the direct decorative path. Returns None when the
+        element is not eligible for the direct path (caller falls back to the raster path);
+        degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
+        Shading/compositing stays out: Pillow feeds each quad to _shade_field_with_scalars, the
+        Skia emitter ships the same quads as SdfQuad IR nodes."""
         text_data = self.generate_text_data(item)
         if not text_data.text.strip():
-            return False
+            return None
         font_name = self.text_fonts.get(text_data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
         font_path = self.font_path_for(font_name)
         mesh_state = self.update_text_mesh_state(text_data, font_name)
@@ -9410,7 +9688,7 @@ class PNGRenderer:
         tokens = parse_tmp_text(text_data.text, base_style)
         lines = split_runs_by_line_with_style(tokens, base_style)
         if not lines:
-            return False
+            return None
 
         line_spacing = mesh_state.tmp_line_spacing
         outline_color = mesh_state.underlay_color
@@ -9456,7 +9734,7 @@ class PNGRenderer:
                 percent_margin_width,
             )
         if native_text_layout is None:
-            return False
+            return None
         mesh_text_layout = self.tmp_native_text_layout(
             layout_lines,
             font_name,
@@ -9469,13 +9747,13 @@ class PNGRenderer:
             percent_margin_width,
         )
         if mesh_text_layout is None:
-            return False
+            return None
 
         native_layout = (
             mesh_text_layout.line_layout if self.text_vertical_mode in {"tmp-native", "tmp-native-top"} else None
         )
         if native_layout is None:
-            return False
+            return None
         total_h = mesh_text_layout.accumulated_line_height
         content_h = native_text_layout.content_height
         pad = self.text_pad(base_size, outline_width)
@@ -9545,21 +9823,16 @@ class PNGRenderer:
             outline_dilate,
         )
         if direct_glyphs is None:
-            return False
+            return None
+        quads: list[DirectSdfQuad] = []
         for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
-            self.composite_tmp_sdf_field_direct(
-                canvas,
-                field_img,
-                glyph_asset,
-                style,
-                outline_color,
-                outline_dilate,
-                local_left,
-                local_top,
-                pivot,
-                object_data,
-            )
-        return True
+            warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+            if warped is None:
+                continue
+            warped_field, left, top = warped
+            scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+            quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
+        return quads
 
     def prepare_tmp_direct_sdf_glyphs(
         self,
@@ -9642,22 +9915,23 @@ class PNGRenderer:
         dy = (local_y - pivot[1]) * sy
         return x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t
 
-    def composite_tmp_sdf_field_direct(
+    def warp_tmp_sdf_field_direct(
         self,
-        canvas: Image.Image,
         field_img: Image.Image,
-        glyph_asset: TMPFontAsset | None,
-        style: TextStyle,
-        outline_color: str,
-        outline_dilate: float,
         local_left: float,
         local_top: float,
         pivot: tuple[float, float],
         object_data: dict[str, Any],
-    ) -> None:
+    ) -> tuple[Image.Image, int, int] | None:
+        """Warp half of the direct decorative path (single source, shared by
+        composite_tmp_sdf_field_direct and prepare_direct_sdf_quads): forward corners via
+        transformed_local_point, det guard, inverse affine, PIL BICUBIC transform with zero fill.
+        Returns ``(warped L field at display size, left, top)`` with the canvas-clamped integer
+        paste position, or None for a degenerate/fully clipped glyph (which is SKIPPED, not an
+        error)."""
         src_w, src_h = field_img.size
         if src_w <= 0 or src_h <= 0:
-            return
+            return None
 
         p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
         p10 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top)
@@ -9670,7 +9944,7 @@ class PNGRenderer:
         top = max(0, math.floor(min(y for _, y in corners)) - pad)
         bottom = min(self.canvas_h, math.ceil(max(y for _, y in corners)) + pad)
         if left >= right or top >= bottom:
-            return
+            return None
 
         m00 = (p10[0] - p00[0]) / src_w
         m10 = (p10[1] - p00[1]) / src_w
@@ -9678,7 +9952,7 @@ class PNGRenderer:
         m11 = (p01[1] - p00[1]) / src_h
         det = m00 * m11 - m01 * m10
         if abs(det) < 1.0e-9:
-            return
+            return None
         inv00 = m11 / det
         inv01 = -m01 / det
         inv10 = -m10 / det
@@ -9694,6 +9968,25 @@ class PNGRenderer:
             Image.Resampling.BICUBIC,
             fillcolor=0,
         )
+        return transformed_field, left, top
+
+    def composite_tmp_sdf_field_direct(
+        self,
+        canvas: Image.Image,
+        field_img: Image.Image,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+    ) -> None:
+        warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+        if warped is None:
+            return
+        transformed_field, left, top = warped
 
         import numpy as np
 

@@ -26,6 +26,7 @@ from typing import Any
 from PIL import Image
 
 from src.sekai.base.painter import (
+    ALIGN_MAP,
     AdaptiveTextColor,
     FontDesc,
     LinearGradient,
@@ -44,6 +45,7 @@ from src.sekai.skia_renderer.ir_builder import (
     adaptive_color,
     clip_rrect,
     image_shadow,
+    image_tint,
     linear_gradient,
     radial_gradient,
 )
@@ -272,7 +274,18 @@ class IRPainter(Painter):
         return self._fill(fill, apos, overlay_size)
 
     def _paste(
-        self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect=None, blend="src_over"
+        self,
+        sub_img,
+        pos,
+        size,
+        alpha,
+        use_shadow,
+        shadow_width,
+        shadow_alpha,
+        src_rect=None,
+        blend="src_over",
+        sampling=None,
+        tint=None,
     ):
         apos = self._abs(pos)
         if size:
@@ -286,6 +299,7 @@ class IRPainter(Painter):
             if use_shadow
             else None
         )
+        tint_node = image_tint(_rgba(tint.color), tint.mode) if tint is not None else None
         self._b.image(
             self._image_ref(sub_img),
             apos,
@@ -295,6 +309,8 @@ class IRPainter(Painter):
             shadow=shadow,
             source_rect=src_rect,
             blend=blend,
+            sampling=sampling or "linear_mipmap",
+            tint=tint_node,
         )
         return self
 
@@ -308,8 +324,71 @@ class IRPainter(Painter):
         shadow_alpha=0.6,
         src_rect=None,
         exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
     ):
-        return self._paste(sub_img, pos, size, None, use_shadow, shadow_width, shadow_alpha, src_rect)
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            None,
+            use_shadow,
+            shadow_width,
+            shadow_alpha,
+            src_rect,
+            sampling=sampling,
+            tint=tint,
+        )
+
+    def image_bg(self, image, align="c", mode="fit", blur=False, fade=0.1, exclude_on_hash=False):
+        """Emit ``ImageBg`` as ordinary Image nodes in the current Painter region.
+
+        The older scene-level ``IRBuilder.image_bg`` can only cover the whole canvas and bypasses
+        the target-raster cache. Keeping this on Image nodes preserves arbitrary widget offsets,
+        target raster reuse, and the shared-tree rule.
+        """
+        path = self._image_ref(image)
+        image_w, image_h = image.size
+        ha, va = ALIGN_MAP[align]
+        tint = None
+        if fade > 0:
+            multiplier = int(max(0.0, min(1.0, 1.0 - float(fade))) * 255)
+            tint = image_tint((multiplier, multiplier, multiplier, 255), "multiply")
+
+        def emit(pos, size, source_scale=(1.0, 1.0)):
+            sigma = (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
+            self._b.image(
+                path,
+                self._abs(pos),
+                size,
+                fit="stretch",
+                sampling="catmull_rom",
+                tint=tint,
+                blur_sigma=sigma,
+            )
+
+        if mode == "fit":
+            scale = max(self.w / image_w, self.h / image_h)
+            width, height = int(image_w * scale), int(image_h * scale)
+            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
+            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
+            emit((x, y), (width, height), (width / image_w, height / image_h))
+            return self
+        if mode == "fill":
+            emit((0, 0), self.size, (self.w / image_w, self.h / image_h))
+            return self
+        if mode == "fixed":
+            x = (self.w - image_w) // 2 if ha == "c" else (0 if ha == "l" else self.w - image_w)
+            y = (self.h - image_h) // 2 if va == "c" else (0 if va == "t" else self.h - image_h)
+            emit((x, y), (image_w, image_h))
+            return self
+        if mode == "repeat":
+            for y in range(0, self.h, image_h):
+                for x in range(0, self.w, image_w):
+                    emit((x, y), (image_w, image_h))
+            return self
+        raise SkiaUnsupported(f"unsupported image background mode: {mode}")
 
     def paste_with_alpha_blend(
         self,
@@ -322,8 +401,22 @@ class IRPainter(Painter):
         shadow_alpha=0.6,
         src_rect=None,
         exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
     ):
-        return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect)
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            alpha,
+            use_shadow,
+            shadow_width,
+            shadow_alpha,
+            src_rect,
+            sampling=sampling,
+            tint=tint,
+        )
 
     def _push_group(self, kind: str, apos: tuple[float, float]) -> None:
         self._group_origin_stack.append((kind, self._group_origin))
@@ -338,11 +431,33 @@ class IRPainter(Painter):
         self._b.pop_group()
         self._group_origin = origin
 
-    def paste_src(self, sub_img, pos, size=None, src_rect=None, exclude_on_hash=False):
+    def paste_src(
+        self,
+        sub_img,
+        pos,
+        size=None,
+        src_rect=None,
+        exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
+    ):
         # True Porter-Duff Src, same as the Pillow side: the drawn rect REPLACES the destination.
         # Src-over would only agree where the destination is empty, and a public Painter primitive
         # must not depend on the caller honouring a prose caveat to keep the two backends aligned.
-        return self._paste(sub_img, pos, size, None, False, 0, 0, src_rect, blend="src")
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            None,
+            False,
+            0,
+            0,
+            src_rect,
+            blend="src",
+            sampling=sampling,
+            tint=tint,
+        )
 
     def push_clip_roundrect(self, pos, size, radius, corners=(True, True, True, True), exclude_on_hash=False):
         apos = self._abs(pos)

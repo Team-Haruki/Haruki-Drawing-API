@@ -101,9 +101,14 @@ in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_imag
 `Painter`'s own disk cache (`PAINTER_CACHE_DIR`, swept via `Painter.cleanup_old_disk_cache()`).
 
 Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns exactly
-what `get_runtime_cache_stats()` builds, which is five keys: `image_cache`, `thumbnail_cache`,
-`composed_image_cache`, `composed_image_disk_cache`, and `skia_payload_cache` (a *fourth* in-memory pool, owned by
-the Skia chapter below — the three caches in the table above are not the whole dump). The `Painter` disk cache has no
+what `get_runtime_cache_stats()` builds, which is six keys: `image_cache`, `thumbnail_cache`,
+`composed_image_cache`, `composed_image_disk_cache`, `skia_payload_cache` (a *fourth* in-memory pool, owned by
+the Skia chapter below — the three caches in the table above are not the whole dump), and
+`custom_profile_caches` (the custom-profile renderer's process pools in
+`src/sekai/profile/custom_profile/cache.py`: parsed TMP metadata tables, glyph SDF/contours, sprite/atlas decodes —
+keyed with file signatures like everything else, sized by `custom_profile_glyph_cache_*` /
+`custom_profile_sprite_cache_*`, and unlike the other cache knobs **on by default**: the renderer's 1.5s+ cold path
+*was* these caches dying with each request). The `Painter` disk cache has no
 `stats()` and appears nowhere in `src/core/health.py`; to size it you have to look at the directory.
 
 ## Configuration
@@ -123,6 +128,16 @@ Notable `drawing.*` keys:
   so zeroing any one of them disables **both** pools — see the cache chapter.
 - `export_image_format` — `"png"` or `"jpg"`.
 - `jpg_quality` — JPEG quality (1–100), only applied when format is `"jpg"`.
+- `custom_profile_glyph_cache_size/_max_mb`, `custom_profile_sprite_cache_size/_max_mb` — the custom-profile
+  process pools (see the cache chapter). **On by default**; zero a pair to disable that pool (the rollback knob).
+- `debug_dump_request_dir` / `debug_dump_request_paths` — raw request-body capture for parity fixtures/debugging.
+  Off by default; enable via `HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR` + `_PATHS` (comma-separated path-prefix
+  whitelist) for a short window, then unset. Dumps carry raw player payloads, so the dedicated dir/files are
+  created owner-only (0700/0600) and every write prunes dumps older than 24h from that dir — forgetting to
+  unset the env must not leave bodies on disk indefinitely. (The tmp sweeper never scans directories, so this
+  self-pruning is the only retention the dumps get.)
+  The middleware dumps the *raw* bytes precisely because they are the parity fixture format (a route-level dump
+  would re-serialize the parsed model).
 - `use_skia_plot` — the Skia gate (default `true`). By convention it is **not** written into `configs.yaml`; flip it with `HARUKI_DRAWING__USE_SKIA_PLOT`. See the Skia chapter below.
 
 ## Proprietary File: `src/sekai/mysekai/drawer.py`
@@ -145,7 +160,7 @@ tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pi
 endpoint. Both backends draw the same tree. If a primitive is missing, add it to `Painter` **and** to
 `IRPainter` so both backends stay in step — do not special-case a backend inside a drawer with
 `isinstance(p, IRPainter)`. A hand-written scene builder (`IRBuilder` used directly, bypassing the tree *and*
-`IRPainter`) needs a specific justification; **two endpoints still do it** and they are the exceptions, not the
+`IRPainter`) needs a specific justification; **three endpoints still do it** and they are the exceptions, not the
 rule:
 
 - `src/sekai/chart/drawer.py` — the chart pixels come from `pjsekai_scores_rs`; the IR only adds the watermark
@@ -157,6 +172,20 @@ rule:
   `IRBuilder.splice_root_children`. **The layout exists once.** (An earlier version of this file claimed honor
   duplicated its layout in Pillow and IR; that stopped being true when honor moved onto the shared tree, and the
   stale warning cost real time.)
+- `src/sekai/profile/custom_profile/skia.py` — no plot.py tree exists to lower: the layout carrier is the Unity
+  card JSON, flattened and rasterized by the same `PNGRenderer` methods on BOTH backends
+  (`build_native_contents` / `render_content_for_card` / `layer_transform_inputs`); the scene only PLACES those
+  shared rasters. Unrotated elements (the vast majority — the service target carries a ~1.118 position scale on
+  everything) reproduce Pillow exactly: two-step BICUBIC pre-resize in Python + integer-position paste (measured
+  rgb max=1, alpha exact). Only ROTATED elements go through the `Transform` matrix node (capability 8), replacing
+  Pillow's resize + rotate + 2x supersample in one native pass under a relaxed budget. Don't "simplify" the
+  pre-resize into the matrix: PIL's resize scales its kernel with the ratio and the crisp integer-paste parity is
+  the point. Also remember the canvas base is OPAQUE WHITE (`render_card` starts from white, not transparent).
+  Decorative TMP texts additionally ride the `SdfQuad` node (capability 9): Python keeps the TMP layout AND the
+  PIL uint8-bicubic field warp (`prepare_direct_sdf_quads`), Rust runs only the per-pixel shading — the scalar
+  derivation exists once (`tmp_sdf_shading_scalars`) and both shade implementations match bit-comparably
+  (banker's rounding, f64 scalars cast to f32 per-pixel; golden fixtures in `rust/.../tests/fixtures`,
+  regenerated by `scripts/gen_sdf_quad_golden.py` whenever the shading math changes).
 
 Card List is **not** one of them any more — it and Card Box have no dedicated scene builder and draw the shared
 `plot.py` widget tree like everything else.
@@ -170,8 +199,8 @@ flip the env var and restart; the image itself is unchanged. Renderer tunables: 
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_TEXT_HINTING`, `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **7**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 7). A too-old
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **10**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 10). A too-old
 extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
 self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
@@ -203,14 +232,18 @@ PYLIB=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBD
 RUSTFLAGS="-L $PYLIB -C link-arg=-lpython3.14t" cargo test --release \
   --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
-# Parity sweep over 63 real payloads — the regression gate for ANY rendering change
-uv run python -X gil=0 scripts/skia_parity_sweep.py            # baseline: {'ok': 63}, 0 failures
+# Parity sweep over 65 renderable payloads — the regression gate for ANY rendering change
+# (+4 custom_profile cases: 2 native-capable with fixtures generated by
+#  scripts/parity_payloads/gen_custom_profile.py from response.json + local masterdata —
+#  verified byte-identical to the masterdata-mode CLI baseline — and 2 no-payload
+#  [symbol/stamps] awaiting a captured card that uses those buckets)
+uv run python -X gil=0 scripts/skia_parity_sweep.py            # baseline: 65 ok + 2 no-payload, 0 failures
 
 # Pillow-vs-Pillow against a baseline ref — catches the drift BOTH backends share (see traps)
 uv run python -X gil=0 scripts/skia_legacy_baseline.py --ref main [--only profile,card_list]
 
 # Warm-cache parity — the ONLY gate that renders with the caches ON. Run it on any cache change.
-uv run python -X gil=0 scripts/skia_warm_parity.py            # baseline: 53 ok / 10 nondeterministic, 0 drift
+uv run python -X gil=0 scripts/skia_warm_parity.py --backend both  # each: 64 ok + 1 nondeterministic + 2 no-payload; 0 drift
 
 # Pillow vs Skia timings. NOT the parity sweep — see below.
 uv run python -X gil=0 scripts/skia_bench.py [--cold]         # warm: 3.65x overall; honor is the one loser
@@ -228,11 +261,13 @@ properly: both sides produce response bytes, both start warm, min-of-N, and a `-
 latency.
 
 **The parity sweep renders with the caches OFF.** `skia_parity_sweep.py` calls `bypass_caches()` on
-purpose (honest timings), so its 63/63 only ever proves that *re-rendering from scratch* is correct — it
+purpose — correctness isolation: a warm cache must never mask a broken re-render path (the sweep measures
+nothing; timings live in `skia_bench.py`) — so an all-green sweep only ever proves that *re-rendering from
+scratch* is correct — it
 says nothing about the path production actually takes, which is a **cache hit**. A key that omits
 something the output depends on serves a different-but-perfectly-valid image and nothing errors.
-`skia_warm_parity.py` is the gate for that: cold reference per case, then two warm passes over all 63
-(forward, then **backward** — the backward pass makes each page render against a cache filled by 62
+`skia_warm_parity.py` is the gate for that: cold reference per case, then two warm passes over every renderable case
+(forward, then **backward** — the backward pass makes each page render against a cache filled by all the
 *other* pages, which is what surfaces a key collision, a mutation-on-hit, or bleed through the single
 shared Rust raster pool). It excludes the ~10 endpoints that draw a live countdown, and it cannot see a
 collision between two *different* payloads (there is one payload per endpoint) — for those you have to
@@ -245,13 +280,20 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
 **Traps that have already cost real debugging time:**
 
 - **The parity sweep only compares Pillow ↔ Skia on the *current* tree.** Drift that both backends share — e.g.
-  porting a Pillow composer to `Painter` primitives slightly wrong — renders 63/63 green while every image is
+  porting a Pillow composer to `Painter` primitives slightly wrong — leaves every current case green while every image is
   subtly wrong. That is exactly what `scripts/skia_legacy_baseline.py` exists for: it re-renders the same
   payloads with Pillow on a baseline ref (default `main`) in a throwaway worktree and diffs. Run it whenever you
   port an existing Pillow composition into the tree.
-- **`ImageBg` defaults to `fade=0.1`**, and fade/blur rewrite pixels in the *constructor*. Passing an
-  `AssetImageRef` there forces a full decode **on the event loop** and the ref never reaches the IR. Only pass a
-  ref to `ImageBg(..., blur=False, fade=0)`; otherwise keep `get_img_from_path`.
+- **`ImageBg` fade/blur belong to `Painter.image_bg`, not the widget constructor.** Pass an `AssetImageRef` even
+  with the default `fade=0.1` or with blur enabled; Pillow resolves it while replaying the Painter operation, and
+  `IRPainter` keeps the path lazy by emitting ordinary `Image` nodes with `catmull_rom` sampling, a multiply tint
+  (`floor((1 - fade) * 255)`), and source-to-destination-scaled `blur_sigma`. Do not reintroduce eager
+  `get_img_from_path` calls merely because an image is used as an `ImageBg`.
+- **Lazy image pixel operations belong on `ImageBox` / `Painter.paste*`.** Use `source_rect=(x0,y0,x1,y1)`,
+  explicit `sampling` (`nearest|linear|catmull_rom`), and `ImageTint(..., "multiply"|"recolor")` to keep an
+  `AssetImageRef` lazy through crop/resize/tint. Match the legacy pipeline, not just its last filter: misc alias
+  jackets and birthday calendar icons intentionally remain eager because padding makes them two-stage
+  BILINEAR→BICUBIC resizes (92→84 and 40→32); one lazy linear draw is not pixel-equivalent.
 - **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
   A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
 - **There are THREE paste primitives, not two.** Pillow's `paste(im, pos, im)` lerps the destination alpha toward

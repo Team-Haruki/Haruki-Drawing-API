@@ -4,7 +4,26 @@
 > 结论:**没有硬阻塞,分阶段可迁**;当初"排除 + 零上行价值"的旧结论被实测推翻。
 > 配套:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、[`skia-migration-todo.md`](./skia-migration-todo.md)。
 
-## 现状架构(src/sekai/profile/custom_profile/,~11.7k 行)
+> **2026-07-18 状态更新**：本文主体是实施前的可行性评估，以下架构与性能数字保留作基线；实际进度
+> 以本节和 `skia-migration-todo.md` 为准。
+
+## 当前落地状态（2026-07-18）
+
+- **Phase 0 已完成**：TMP metadata、字形 SDF/轮廓、sprite/atlas 与线程本地字体改为进程级有界缓存，
+  并接入 `/cache/stats`；fontTools 成本从每请求重复支付降为签名不变时的一次性成本。
+- **Phase 1 已完成**（IR capability 8）：新增 `Transform`。无旋转元素继续用 Python 两步 BICUBIC
+  预缩 + 整数位置贴图以保持 Pillow oracle；旋转元素改由 native matrix 单 pass 合成。
+- **Phase 2 已完成当前范围**（IR capability 9）：新增 `SdfQuad` 与 A8 raw-buffer transport。Python 保留
+  TMP 布局和 PIL uint8 双三次场变形，Rust 执行逐像素着色/合成；28 个 quad 着色约 6 ms。
+- **Phase 2b 暂缓且可选**：freetype-rs + 精确 EDT + glyph cache 可进一步去掉 fontTools 的全进程
+  GIL 风险，但 Phase 0 已显著降低紧迫性，应等待真实符号卡 payload 和生产 profile 再决定。
+- **数据与门禁**：已有两张真实 CN custom-profile 卡可离线重建；`custom_profile_card` 与
+  `_collections` 已进入全量 sweep，`_symbol` / `_stamps` 仍因缺真实 payload 记为 `no-payload`。
+  当前全量结果为 65 个可渲染用例 `ok`、0 failure，双后端 warm parity 为 0 cache drift/error。
+- **终态边界**：custom profile 已不是纯 Pillow 端点，但也不会强行套入 `plot.py` widget 树；它是有
+  具体理由的手写 scene 例外。PIL 预缩/AFFINE oracle 语义、TMP 布局和 SDF 场准备在 oracle 退役前保留。
+
+## 实施前架构快照(src/sekai/profile/custom_profile/,~11.7k 行)
 
 四层管线:端点(profile.py:55)→ drawer.py 异步 shim(**每请求新建 PNGRenderer**,整卡一个池任务)
 → `build_native_contents` 把 Unity 布局 JSON 的 **14 类元素桶**展平为按 Unity 绘制序排序的扁平元素树
@@ -18,7 +37,7 @@
 - `mini_chara`/`screen_filter` 两类元素至今未实现(渲染时跳过),迁移无需覆盖。
 - 复用 `src/sekai/honor/drawer`(Pillow)渲染内嵌称号。
 
-## 性能实测(2048×909,3.14t,macOS,中位数)
+## 实施前性能基线(2048×909,3.14t,macOS,中位数)
 
 | 场景 | 冷(=生产行为) | 暖(同 renderer 二渲) |
 |---|---|---|
@@ -50,7 +69,7 @@ custom_profile 是全仓唯一引 fontTools 的渲染模块。**
   禁止改用 Skia 字体度量(macOS CoreText 后端不一致)。
 - **先决缺口只有一个**:IR 的 Group 只有 offset+clip,**无矩阵/旋转**——Transform 节点是任何形态的前提。
 
-## 推荐路线(渐进,每步独立有收益)
+## 原推荐路线(渐进,每步独立有收益)
 
 | 阶段 | 内容 | 量级 | 收益 |
 |---|---|---|---|
@@ -63,7 +82,7 @@ custom_profile 是全仓唯一引 fontTools 的渲染模块。**
 **TMP 布局引擎(~1500 行纯浮点,6 月底刚经历"修了又整体回滚",全模块最脆弱区)留在 Python
 发字符 quad,不搬。**
 
-## 动手前置
+## 原动手前置
 
 1. **对拍数据只在生产**:本地五个 `custom_profile_*` 资产目录全缺,payload 无法离线构造
    (版面数据来自实时 Sekai API 的 userCustomProfileCards)。需从生产拉 `tmp-font-assets/{region}`

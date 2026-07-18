@@ -325,6 +325,61 @@ def should_reject_for_overload(path: str, inflight: int) -> str | None:
     return None
 
 
+# Raw dumps carry player payloads (names, IDs, profile text), so they must not outlive the
+# capture window by much even when the operator forgets to unset the env: every dump also
+# best-effort prunes .json files in the dedicated dump dir older than this.
+_DUMP_RETENTION_SECONDS = 24 * 3600
+
+
+def _prune_stale_dumps(dump_dir: Path) -> None:
+    """Best-effort retention sweep of the dedicated dump dir; never raises."""
+    cutoff = time.time() - _DUMP_RETENTION_SECONDS
+    try:
+        for entry in dump_dir.iterdir():
+            try:
+                if entry.suffix == ".json" and entry.is_file() and entry.stat().st_mtime < cutoff:
+                    entry.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        pass
+
+
+def _dump_request_body(path: str, request_id: str, body: bytes) -> None:
+    """Debug-only raw request capture; never raises, no-op unless configured via env.
+
+    The raw bytes ARE the parity fixture format (the sweep model_validates them), which is why
+    this lives in the middleware and not a route: a route-level dump would re-serialize the
+    parsed model with defaults/aliases applied. Enable with HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR
+    + _PATHS for a short window, collect, then unset (see the custom-profile migration plan).
+
+    Dumps contain raw player payloads, so the dir and files are owner-only (0700/0600) and each
+    write prunes dumps older than ``_DUMP_RETENTION_SECONDS`` from the dedicated dir.
+    """
+    try:
+        from src.settings import settings
+
+        dump_dir = settings.drawing.debug_dump_request_dir
+        if not dump_dir or not body:
+            return
+        prefixes = [p.strip() for p in settings.drawing.debug_dump_request_paths.split(",") if p.strip()]
+        if not any(path.startswith(prefix) for prefix in prefixes):
+            return
+        dump_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(dump_dir, 0o700)  # mkdir mode does not apply to a pre-existing dir
+        except OSError:
+            pass
+        _prune_stale_dumps(dump_dir)
+        slug = path.strip("/").replace("/", "_")
+        target = dump_dir / f"{slug}_{int(time.time())}_{request_id}.json"
+        fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(body)
+    except Exception:
+        logger.warning("request body dump failed", exc_info=True)
+
+
 def summarize_request_body(body: bytes, content_type: str | None) -> dict[str, Any]:
     content_type = (content_type or "").strip()
     digest = hashlib.sha256(body).hexdigest()[:16]
@@ -475,6 +530,7 @@ def install_debug_middleware(app: FastAPI) -> None:
             )
             watchdog_task = asyncio.create_task(watchdog.run())
             body = await request.body()
+            _dump_request_body(request.url.path, request_id, body)
             body_summary = summarize_request_body(body, request.headers.get("content-type"))
             focus_summary = extract_debug_request_focus(request.url.path, body, request.headers.get("content-type"))
             start_metrics = snapshot_process_metrics(include_asyncio=True)

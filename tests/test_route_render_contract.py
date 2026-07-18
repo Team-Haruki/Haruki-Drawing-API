@@ -43,11 +43,7 @@ def _drawing_routes() -> list[tuple[str, object]]:
 
 
 # Routes that legitimately do not render through the Skia shadow layer. Each needs a reason.
-_NO_SKIA_PATH = {
-    # A separate renderer entirely (fontTools / glyph-SDF pipeline). Porting it is Phase 0-2 of
-    # docs/custom-profile-skia-feasibility.md — not started, and blocked on production assets.
-    "/api/pjsk/profile/custom-profile-card": "custom profile card has its own renderer (feasibility doc)",
-}
+_NO_SKIA_PATH: dict[str, str] = {}
 
 # Routes whose render happens inside a spawned heavy-worker process, so the Skia call is in
 # heavy_render_pool, not in the route body. They DO go through the shadow layer.
@@ -99,6 +95,12 @@ _MAY_HAND_BUILD_IR = {
     # build_canvas_ir); the IR built here is ONLY the raster watermark footer the route adds after
     # the compose — a SelfImage snapshot of the canvas, which no widget can express.
     "src/sekai/honor/skia.py",
+    # The custom profile card has no plot.py tree to lower: its layout carrier is the Unity card
+    # JSON, flattened and rasterized by the existing PNGRenderer on BOTH backends (the scene here
+    # places those shared rasters with Transform nodes built from the same layer_transform_inputs
+    # numbers the Pillow compositor consumes). The Pillow renderer stays the parity baseline —
+    # same category as the chart/honor shells, argued in docs/custom-profile-skia-feasibility.md.
+    "src/sekai/profile/custom_profile/skia.py",
 }
 
 

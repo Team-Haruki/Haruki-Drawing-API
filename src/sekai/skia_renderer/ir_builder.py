@@ -283,6 +283,23 @@ class IRBuilder:
         finally:
             self.pop_group()
 
+    @contextmanager
+    def transform(self, matrix: Sequence[float]) -> Iterator[IRBuilder]:
+        """Affine subtree; ``matrix`` = forward local->parent ``[a, b, c, d, e, f]``:
+        ``x' = a*lx + b*ly + c ; y' = d*lx + e*ly + f`` (PIL coefficient LAYOUT, but forward
+        semantics — PIL's ``Image.transform`` tuple is the inverse; Skia ``concat`` wants forward).
+        Children render with the enclosing group offset applied BEFORE the matrix.
+        SelfImage, BlurGlass and adaptive Text are UNSUPPORTED inside a Transform — their
+        device-bounds snapshots assume an identity CTM. Requires IR_CAPABILITY >= 8."""
+        node: Node = {"type": "Transform", "matrix": [float(v) for v in matrix], "children": []}
+        self._add(node)
+        self._stack.append(node["children"])
+        try:
+            yield self
+        finally:
+            assert len(self._stack) > 1, "transform exit without a matching enter"
+            self._stack.pop()
+
     def rect(
         self,
         pos: Vec2,
@@ -363,9 +380,12 @@ class IRBuilder:
         source_rect: tuple[float, float, float, float] | None = None,
         sampling: str = "linear_mipmap",
         blend: str = "src_over",
+        blur_sigma: float | Vec2 | None = None,
     ) -> Node:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
-        the mask-less ``Image.paste``); the default composites over it. Requires IR_CAPABILITY >= 6."""
+        the mask-less ``Image.paste``); the default composites over it. ``blur_sigma`` applies
+        a destination-space Gaussian blur to the image only; a scalar uses the same sigma on
+        both axes. Blur requires IR_CAPABILITY >= 10."""
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -386,6 +406,10 @@ class IRBuilder:
         if source_rect is not None:
             # Source-pixel crop window [x0, y0, x1, y1] applied before the fit (Pillow img.crop).
             node["source_rect"] = [float(v) for v in source_rect]
+        if blur_sigma is not None:
+            sigma = (float(blur_sigma), float(blur_sigma)) if isinstance(blur_sigma, (int, float)) else blur_sigma
+            if sigma[0] > 0 or sigma[1] > 0:
+                node["blur_sigma"] = [max(0.0, float(sigma[0])), max(0.0, float(sigma[1]))]
         return self._add(node)
 
     def self_image(
@@ -407,6 +431,37 @@ class IRBuilder:
                 "sampling": sampling,
             }
         )
+
+    def sdf_quad(
+        self,
+        pos: Vec2,
+        field: str,
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """TMP-SDF text quad: shade an ALREADY display-warped A8 ``mem:`` field per pixel
+        (``clip(f*face_scale - face_w, 0, 1)*alpha`` + optional integer-shift underlay pass,
+        matching ``PNGRenderer._shade_field_with_scalars`` bit-comparably) and src-over the
+        straight-alpha patch at integer ``pos``. The node does no geometric resampling — the
+        PIL bicubic warp semantics stay in Python. ``underlay`` (when present):
+        ``{"color": [r,g,b], "scale": f, "w": f, "shift": [sx, sy]}``.
+        Requires IR_CAPABILITY >= 9."""
+        node: Node = {
+            "type": "SdfQuad",
+            "pos": _vec(pos),
+            "field": field,
+            "shading": {
+                "face_color": [int(v) for v in face_color],
+                "face_scale": float(face_scale),
+                "face_w": float(face_w),
+                "alpha": float(alpha),
+                "underlay": underlay,
+            },
+        }
+        return self._add(node)
 
     def splice_root_children(self, other: "IRBuilder") -> None:
         """Append another builder's root nodes into the current container as-is
