@@ -1,15 +1,22 @@
 # Skia 迁移剩余工作清单
 
-> 2026-07-12 盘点,2026-07-18 更新。迁移本体已完成:**63 用例对拍 63 ok / 0 失败(pillow-only 已归零)**。
+> 2026-07-12 盘点,2026-07-18 更新。迁移本体已完成:**65 个可渲染 payload 用例 65 ok / 0 失败**，
+> 另有 2 个 custom-profile 桶因缺真实 payload 记为 `no-payload`；pillow-only 已归零。
 > **`use_skia_plot` 是唯一的 Skia 门控,默认开**——`use_skia_card_list` / `skia_card_list_fallback_to_pillow` /
 > `use_skia_card_box` 已随手写 IR builder 一起从 settings.py 删除,不要再引用。card/box 与 card/list 现在都画
 > 共享 widget 树(无专用 scene builder),Chart raw-N32 单次编码已落地。
-> **注意**:**所有端点的布局都已收敛到共享 widget 树**(honor 于 2026-07-14 收尾)。`honor/skia.py` 与
-> `chart/drawer.py` 仍直接用 `IRBuilder`,但包的是 **widget 树表达不了的栅格页脚外壳**(水印条带 =
-> `SelfImage` 采样已渲染画布),不是第二套布局;详见 ⚪ 收尾与防漂移 的对应条目。
+> **注意**：所有拥有 `plot.py` 树的端点都已收敛到一棵共享 widget 树（honor 于 2026-07-14 收尾）。
+> 仍直接构造 IR 的例外有三处：`honor/skia.py` 与 `chart/drawer.py` 只是 widget 无法表达的栅格页脚薄壳
+> （水印条带 = `SelfImage` 采样已渲染画布），不是第二套布局；custom profile 则根本没有 `plot.py` 树，
+> 其唯一布局载体是 Unity card JSON，Python 与 Skia 共用同一份 flatten/raster 输入。
 > 本清单是切换后的收尾与生产化工作,按"挡在生产收益前面 → 端点残余 → 质量项 → 性能 → 收尾"排序。
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
+
+**2026-07-18 当前检查点**：IR capability 10；全量 Ruff 通过，pytest `376 passed / 2 skipped`；冷态
+parity 为 `65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
+`64 ok + 1 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`。本轮共享图片装饰和
+production-local MySekai site/spawn/background 已落地；下一处确定性最高的图片依赖收尾是 harvest point。
 
 ## 🔴 挡在生产收益前面(不做这些,生产永远 fail-open 回退 Pillow)
 
@@ -133,7 +140,7 @@
 ## 🟡 端点残余
 
 - [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
-- [ ] **custom profile**(见可行性文档,渐进 0→2):
+- [x] **custom profile Phase 0–2 当前范围**(2026-07-18,见可行性文档；Phase 2b 是独立可选后续):
   - [x] Phase 0(2026-07-18,纯 Python):进程级缓存落地——`custom_profile/cache.py`
         (BoundedCache + 字形 SDF/轮廓 L2 + sprite/atlas 池 + TMP 表缓存 + 线程本地字体),
         renderer 五处接线,FreeTypeMetrics 加锁(先于本工作的并发竞态)。微基准
@@ -159,7 +166,7 @@
         逐像素)。金标三例(face/underlay+整数位移/gradient+bold)Δ≤1;装饰卡端到端
         rgb max=2、alpha 精确;28 quad 着色 **6ms**(numpy 版 ~200ms)。合成符号卡整卡 1.57×
         (真实符号卡 payload 采到后复测)。字节门:deco 重构前后 max_diff=0。
-  - [ ] Phase 2b(可选,原 Phase 2 的 freetype-rs 半):glyph_sdf.rs(freetype-rs + 精确
+  - [ ] Phase 2b(独立可选后续,原 Phase 2 的 freetype-rs 半):glyph_sdf.rs(freetype-rs + 精确
         Felzenszwalb EDT + moka)+ `glyph:` 引用——彻底甩掉 fontTools 的**全进程 GIL 重启风险**。
         Phase 0 的进程级字形缓存已把 fontTools 成本压成一次性,紧迫性下降;等真实符号卡
         payload 与生产观察再定。
@@ -171,10 +178,15 @@
         response.json + masterdata 离线重建 Cloud 形态的 `resources`(同名索引内联 + 派生
         imagePath/cardAssets/profileHonorRequests),**服务路径(masterdata=None)渲染与
         masterdata 模式 CLI 基线逐字节一致(max_diff=0,两卡)**,解析探针零失败。sweep 四例:
-        custom_profile_card / _collections(pillow-only,有 payload)+ _symbol / _stamps
+        custom_profile_card / _collections(有 payload,均已接 native path)+ _symbol / _stamps
         (no-payload,等 dump 钩子采到用这些桶的卡)。
         采集机制就位:`HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR`/`_PATHS` 中间件原始 body 落盘。
 - [x] mysekai msr_map 多图网格拼接迁 IR(2026-07-13,合并 widget 树 + 双后端 tile 裁剪,Pillow 基线 max_diff=0;drawer.real.py 不进 git,注意与镜像 API 配对)。
+- [ ] **MySekai harvest point ref 化**：当前 production-local map 仍先 `get_img_from_path` 做 512² fallback
+      判断，再 `get_img_resized_long_edge` 产出 PIL mem 图。`AssetImageRef.size` 已足够做同一判断和目标尺寸
+      计算，可用 `ImageBox(ref, size=..., sampling="linear", alpha_adjust=...)` 保持旧 BILINEAR 语义；无需
+      新 IR 字段或 capability bump。门禁：map/map_multi legacy 基线、冷 parity、双后端 warm parity、
+      真实 HTTP 9/9，并记录 IR mem 前后值。
 
 ## 🟠 生产化质量项(一次性切换时跳过的计划内容)
 
@@ -269,7 +281,18 @@
       `Image(path)` 节点:`catmull_rom` 采样、`floor((1-fade)*255)` multiply tint、按 source→destination
       比例换算的 `blur_sigma`。Rust blur 是 Image 装饰,目标 raster cache 仍存未装饰 resize,不同 blur
       消费者不会串味。card detail/list/box、event detail、gacha detail、chara-birthday 背景已改
-      `AssetImageRef`;本地 proprietary `mysekai/drawer.real.py` 的背景调用点可按部署版本续迁。
+      `AssetImageRef`;本地 proprietary `mysekai/drawer.real.py` 的资源背景也已同步。
+- [x] **crop/sampling/tint 穿透 ImageBox/Painter**(2026-07-18,无 capability bump):`ImageBox` 与
+      `Painter.paste/paste_with_alpha_blend/paste_src` 新增共享 `source_rect`(xyxy、resize 前裁剪)、
+      `sampling`(`nearest|linear|catmull_rom`)与 `ImageTint`(`multiply|recolor`)装饰。production-local
+      MySekai site 改 ref+crop+linear+multiply,spawn marker 改 ref+recolor,与资源背景一起关掉 Python 解码/
+      RGBA 传输;resource/map/map_multi 对拍与双后端 warm parity 皆 3/3、0 drift,map/map_multi IR mem
+      分别约 -92.3%/-85.6%。无 padding 的 birthday card thumbnail 与 profile X icon 也已转 ref+linear。
+      misc alias jacket 与 birthday calendar icon **刻意不迁**:它们分别依赖 92→84、40→32 的
+      BILINEAR→BICUBIC 双阶段 resize;一次 lazy linear draw 会改变 oracle 像素,legacy baseline 已抓到漂移。
+      Pillow ref 预取同步把实际 resample 纳入 use key、跨对象 unique key 与 resize-cache 调用，避免
+      `sampling="linear"` 先无效预热 BICUBIC 再在 replay 串行生成 BILINEAR；RGB multiply tint 先规范成
+      RGBA，使隐式 alpha 与 Rust Modulate 一致。定向 image/IR 测试 40/40，全量门禁见页首检查点。
 - [x] **Moka 目标栅格缓存 + Rayon 并行预热**(2026-07-13):按 asset identity/source rect/target/sampling 缓存,
       696 项仅约 11.4 MiB;music_list 冷启动串行 raster build `6.36s -> 0.83s`,暴露 stats/clear API 与 native metrics。
 - [x] **mtpng PNG 编码替换**(2026-07-13):默认多线程 fast encode,保留 `HARUKI_SKIA_PNG_ENCODER=skia` 回退;
@@ -303,9 +326,11 @@
       Honor 单 pass(IR 新增 `SelfImage` 画布快照节点,IR_CAPABILITY 4→5,中间 PNG 和第二次 render 消除,
       对拍逐位一致)。Card List 回归共享树当时仍留最后评估,已于 2026-07-14 完成(见本节上一条)。
 - [x] **其余 builder 迁 `get_asset_image_ref`**(2026-07-13,详见 migration.md ✅7):card/mysekai/gacha/
-      score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**——现在
-      只包括走 PIL 像素 API 的 `_circular_progress_avatar`/`concat_images`/mysekai site_image/harvest point/
-      spawn_img。`ImageBg(fade/blur)` 已于 2026-07-18 解禁并完成仓库内六类背景调用点转换,不再是保留理由。
+      score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**——包括
+      走 PIL 像素 API 的 `_circular_progress_avatar`、gacha concat/fallback、honor mask/尺寸合成、misc alias
+      silhouette alpha-trim、mysekai harvest point,以及必须保持双阶段重采样的 misc alias jacket / birthday
+      calendar icon。MySekai site/spawn 已由共享图片装饰
+      ref 化;`ImageBg(fade/blur)` 也已于 2026-07-18 解禁并完成仓库与 production-local 背景调用点转换。
       `on_missing="raise"` 语义收窄为
       "缺失/非图片"(不再覆盖"像素截断"),已在 gacha 回退链注明。
 - [x] **两处回退路径像素回归修复**(2026-07-13,详见 migration.md ✅8;对拍只比 Pillow↔Skia,均不暴露):

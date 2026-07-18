@@ -10,7 +10,8 @@ from PIL import Image, ImageChops, ImageEnhance, ImageFilter
 import pytest
 
 from src.sekai.base import plot, utils
-from src.sekai.base.painter import Painter
+from src.sekai.base.img_utils import multiply_image_by_color
+from src.sekai.base.painter import ImageTint, Painter
 from src.sekai.base.plot import Canvas, FillBg, HSplit, ImageBox
 from src.sekai.base.utils import (
     AssetImageRef,
@@ -148,6 +149,63 @@ def test_imagebox_layout_uses_ref_size_without_decode():
     assert box.image is ref  # still lazy after layout
 
 
+def test_imagebox_asset_ref_crop_sampling_and_tint_stay_lazy_in_ir(tmp_path, monkeypatch):
+    """ImageBox decorations must lower to one path-backed Image node, not a mem raster."""
+    from src.sekai.skia_renderer import ir_painter
+    from src.sekai.skia_renderer.ir_painter import IRPainter
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+
+    asset = tmp_path / "maps" / "site.png"
+    asset.parent.mkdir()
+    _noise_image(37, (20, 12)).save(asset)
+    stat = asset.stat()
+    ref = AssetImageRef(
+        path=asset,
+        size=(20, 12),
+        mode="RGBA",
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+    box = ImageBox(
+        ref,
+        size=(12, 8),
+        image_size_mode="fill",
+        source_rect=(2, 2, 14, 10),
+        sampling="linear",
+        tint=ImageTint((128, 64, 255, 255), mode="multiply"),
+    )
+    monkeypatch.setattr(
+        ir_painter,
+        "resolve_image_source_sync",
+        lambda *_args, **_kwargs: pytest.fail("healthy decorated AssetImageRef decoded in Python"),
+    )
+    painter = IRPainter(
+        (12, 8),
+        assets_base_dir=str(tmp_path),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+
+    box.draw(painter)
+    scene, mem = painter.build_scene()
+
+    assert mem == {}
+    assert scene["root"]["children"] == [
+        {
+            "type": "Image",
+            "pos": [0.0, 0.0],
+            "size": [12, 8],
+            "path": "maps/site.png",
+            "fit": "stretch",
+            "sampling": "linear",
+            "alpha": 1.0,
+            "tint": {"color": [128, 64, 255, 255], "mode": "multiply", "strength": 1.0},
+            "source_rect": [2.0, 2.0, 14.0, 10.0],
+        }
+    ]
+
+
 def test_canvas_renders_lazy_refs_via_pillow():
     ref = get_encoded_image_ref(_png_bytes((20, 20), (0, 0, 255, 255)))
 
@@ -282,7 +340,36 @@ def test_prefetch_keeps_the_size_hint_when_a_widget_also_lists_its_own_image(tmp
     refs: dict = {}
     plot._collect_asset_refs(_SelfListingBox(), refs)
 
-    assert [hint for _, hint in refs.values()] == [(48, 48)], "the extras loop clobbered the display-size hint"
+    assert [hint for _, hint, _ in refs.values()] == [(48, 48)], "the extras loop clobbered the display-size hint"
+
+
+def test_prefetch_keeps_sampling_in_resize_cache_identity(tmp_path, monkeypatch):
+    """Linear and cubic consumers of one ref need separate, correctly warmed resize entries."""
+    path = tmp_path / "shared.png"
+    Image.new("RGBA", (64, 64), (1, 2, 3, 255)).save(path)
+    stat = path.stat()
+    ref = AssetImageRef(path=path, size=(64, 64), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
+    root = HSplit()
+    root.add_item(ImageBox(ref, size=(24, 24), image_size_mode="fill", sampling="linear"))
+    root.add_item(ImageBox(ref, size=(24, 24), image_size_mode="fill", sampling="catmull_rom"))
+    calls = []
+
+    def fake_resolve(source, target_size, resample):
+        calls.append((source, target_size, resample))
+        return Image.new("RGBA", target_size)
+
+    async def fake_run_in_pool(func, *args):
+        return func(*args)
+
+    monkeypatch.setattr(plot, "resolve_image_source_sync", fake_resolve)
+    monkeypatch.setattr(plot, "run_in_pool", fake_run_in_pool)
+
+    asyncio.run(plot.prefetch_asset_refs(root))
+
+    assert [(target, resample) for _, target, resample in calls] == [
+        ((24, 24), Image.Resampling.BILINEAR),
+        ((24, 24), Image.Resampling.BICUBIC),
+    ]
 
 
 def _max_channel_delta(a: Image.Image, b: Image.Image) -> int:
@@ -366,3 +453,181 @@ def test_painter_paste_with_alpha_blend_src_rect(tmp_path):
 
     img = asyncio.run(main())
     assert img.getpixel((4, 4)) == (255, 0, 0, 255)  # red slice this time
+
+
+def test_painter_crop_bilinear_multiply_matches_legacy_pixel_pipeline(tmp_path):
+    """The shared decoration order is crop -> resize -> tint -> paste on Pillow."""
+    source = _noise_image(41, (19, 15))
+    path = tmp_path / "site.png"
+    source.save(path)
+    stat = path.stat()
+    ref = AssetImageRef(
+        path=path,
+        size=source.size,
+        mode="RGBA",
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+    source_rect = (3, 2, 17, 13)
+    target_size = (23, 17)
+    color = (119, 211, 73, 255)
+
+    async def render():
+        painter = Painter(size=target_size)
+        painter.paste(
+            ref,
+            (0, 0),
+            target_size,
+            src_rect=source_rect,
+            sampling="linear",
+            tint=ImageTint(color, mode="multiply"),
+        )
+        return await painter.get()
+
+    actual = asyncio.run(render())
+    transformed = source.crop(source_rect).resize(target_size, Image.Resampling.BILINEAR)
+    transformed = multiply_image_by_color(transformed, color)
+    expected = Image.new("RGBA", target_size, (0, 0, 0, 0))
+    expected.paste(transformed, (0, 0), transformed)
+
+    assert _max_channel_delta(actual, expected) == 0
+
+
+def test_painter_recolor_preserves_source_alpha_and_alpha_composite_result(tmp_path):
+    source = Image.new("RGBA", (4, 2))
+    source.putdata(
+        [
+            (9, 17, 31, 0),
+            (40, 50, 60, 32),
+            (70, 80, 90, 128),
+            (100, 110, 120, 255),
+            (130, 140, 150, 224),
+            (160, 170, 180, 96),
+            (190, 200, 210, 1),
+            (220, 230, 240, 200),
+        ]
+    )
+    path = tmp_path / "mark.png"
+    source.save(path)
+    stat = path.stat()
+    ref = AssetImageRef(
+        path=path,
+        size=source.size,
+        mode="RGBA",
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+    tint = ImageTint((255, 32, 32, 255), mode="recolor")
+
+    async def render_src():
+        painter = Painter(size=source.size)
+        painter.paste_src(ref, (0, 0), tint=tint)
+        return await painter.get()
+
+    async def render_composited():
+        painter = Painter(size=(8, 6))
+        painter.rect((0, 0), (8, 6), fill=(11, 29, 47, 255))
+        painter.paste_with_alpha_blend(ref, (2, 2), tint=tint)
+        return await painter.get()
+
+    recolored = Image.new("RGBA", source.size, (255, 32, 32, 255))
+    recolored.putalpha(source.getchannel("A"))
+    actual_src = asyncio.run(render_src())
+    assert list(actual_src.getchannel("A").get_flattened_data()) == list(source.getchannel("A").get_flattened_data())
+    assert _max_channel_delta(actual_src, recolored) == 0
+
+    expected_composited = Image.new("RGBA", (8, 6), (11, 29, 47, 255))
+    expected_composited.alpha_composite(recolored, (2, 2))
+    assert _max_channel_delta(asyncio.run(render_composited()), expected_composited) == 0
+
+
+def test_painter_multiply_tint_scales_implicit_rgb_alpha():
+    """RGB has implicit alpha=255; multiply must modulate it like Skia's filter does."""
+
+    async def render():
+        painter = Painter(size=(2, 1))
+        painter.paste_src(
+            Image.new("RGB", (2, 1), (120, 80, 40)),
+            (0, 0),
+            tint=ImageTint((128, 64, 255, 96), mode="multiply"),
+        )
+        return await painter.get()
+
+    assert list(asyncio.run(render()).get_flattened_data()) == [
+        (60, 20, 40, 96),
+        (60, 20, 40, 96),
+    ]
+
+
+def test_painter_paste_with_alpha_blend_shadow_uses_pre_tint_silhouette(tmp_path):
+    """The drop shadow derives from the source alpha BEFORE tinting (matching _impl_paste
+    and the Rust untinted-silhouette shadow), so a tint must not move or fade it."""
+    source = Image.new("RGBA", (10, 8), (200, 40, 40, 255))
+    path = tmp_path / "badge.png"
+    source.save(path)
+    stat = path.stat()
+    ref = AssetImageRef(
+        path=path,
+        size=source.size,
+        mode="RGBA",
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+    interior = (10, 9, 20, 17)  # pos + source size
+
+    def render(tint):
+        async def go():
+            painter = Painter(size=(30, 26))
+            painter.rect((0, 0), (30, 26), fill=(255, 255, 255, 255))
+            painter.paste_with_alpha_blend(ref, (10, 9), use_shadow=True, shadow_width=6, tint=tint)
+            return await painter.get()
+
+        return asyncio.run(go())
+
+    untinted = render(None)
+    tinted = render(ImageTint((32, 32, 255, 128), mode="recolor"))
+
+    assert _max_channel_delta(untinted.crop(interior), tinted.crop(interior)) > 0  # the tint drew
+    cover = Image.new("RGBA", source.size, (0, 0, 0, 255))
+    masked_untinted, masked_tinted = untinted.copy(), tinted.copy()
+    masked_untinted.paste(cover, interior[:2])
+    masked_tinted.paste(cover, interior[:2])
+    assert _max_channel_delta(masked_untinted, masked_tinted) == 0  # shadow ring untouched by tint
+
+
+def test_painter_paste_src_sampling_selects_the_resize_kernel(tmp_path):
+    """``sampling`` must reach the actual resize on paste_src (via the ref resize-cache path),
+    and ``nearest`` must behave as PIL NEAREST — neither was exercised anywhere else."""
+    source = Image.new("RGBA", (2, 2))
+    source.putdata(
+        [
+            (255, 255, 255, 255),
+            (0, 0, 0, 255),
+            (0, 0, 0, 255),
+            (255, 255, 255, 255),
+        ]
+    )
+    path = tmp_path / "checker.png"
+    source.save(path)
+    stat = path.stat()
+    ref = AssetImageRef(
+        path=path,
+        size=source.size,
+        mode="RGBA",
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+
+    def render(sampling):
+        async def go():
+            painter = Painter(size=(8, 8))
+            painter.paste_src(ref, (0, 0), (8, 8), sampling=sampling)
+            return await painter.get()
+
+        return asyncio.run(go())
+
+    nearest = render("nearest")
+    linear = render("linear")
+    assert _max_channel_delta(nearest, source.resize((8, 8), Image.Resampling.NEAREST)) == 0
+    assert _max_channel_delta(linear, source.resize((8, 8), Image.Resampling.BILINEAR)) == 0
+    assert _max_channel_delta(nearest, linear) > 0

@@ -20,11 +20,14 @@ from .painter import (
     TRANSPARENT,
     Color,
     FontDesc,
+    ImageSampling,
+    ImageTint,
     LinearGradient,
     Painter,
     get_font,
     get_font_desc,
     get_text_size,
+    pillow_resample_for_image_sampling,
 )
 from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
@@ -1522,6 +1525,9 @@ class ImageBox(Widget):
         shadow=False,
         shadow_width=6,
         shadow_alpha=0.6,
+        source_rect: tuple[float, float, float, float] | None = None,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> None:
         """
         image_size_mode: 'fit', 'fill', 'original'
@@ -1535,6 +1541,9 @@ class ImageBox(Widget):
         self.image_size_mode = None
         self.use_alpha_blend = None
         self.alpha_adjust = None
+        self.source_rect = source_rect
+        self.sampling = sampling
+        self.tint = tint
         if isinstance(image, str):
             self.image = _open_image_copy(image)
         else:
@@ -1585,9 +1594,13 @@ class ImageBox(Widget):
         return self
 
     def _get_content_size(self) -> tuple[int, int] | None:
-        w, h = self.image.size
+        if self.source_rect is None:
+            w, h = self.image.size
+        else:
+            w = self.source_rect[2] - self.source_rect[0]
+            h = self.source_rect[3] - self.source_rect[1]
         if self.image_size_mode == "original":
-            return w, h
+            return int(w), int(h)
         elif self.image_size_mode == "fit":
             assert self.w is not None or self.h is not None, "Fit mode requires width or height"
             tw = self.w - self.h_padding * 2 if self.w else 1000000
@@ -1616,6 +1629,9 @@ class ImageBox(Widget):
                 use_shadow=self.shadow,
                 shadow_width=self.shadow_width,
                 shadow_alpha=self.shadow_alpha,
+                src_rect=self.source_rect,
+                sampling=self.sampling,
+                tint=self.tint,
             )
         else:
             p.paste(
@@ -1625,6 +1641,9 @@ class ImageBox(Widget):
                 use_shadow=self.shadow,
                 shadow_width=self.shadow_width,
                 shadow_alpha=self.shadow_alpha,
+                src_rect=self.source_rect,
+                sampling=self.sampling,
+                tint=self.tint,
             )
 
 
@@ -1649,6 +1668,10 @@ def _image_box_size_hint(widget) -> tuple[int, int] | None:
     the serial replay reads it (hundreds of list jackets exceed the byte budget)."""
     if not isinstance(widget, ImageBox):
         return None
+    if widget.source_rect is not None:
+        # A cropped paste must decode/crop before resizing; the whole-asset target-size cache
+        # entry would be the wrong pixels and cannot warm this operation.
+        return None
     try:
         w, h = widget._get_content_size()
     except Exception:
@@ -1660,24 +1683,35 @@ def _image_box_size_hint(widget) -> tuple[int, int] | None:
     return (int(w), int(h))
 
 
-def _collect_asset_refs(widget, out: dict) -> None:
+def _collect_asset_refs(widget, out: dict, seen_ids: set[int] | None = None) -> None:
     """Gather lazy AssetImageRefs held by a widget tree (ImageBox images, bg images,
-    and any widget-declared ``prefetch_image_sources`` extras) with target-size hints."""
+    and any widget-declared ``prefetch_image_sources`` extras) with target-size and
+    resampling hints. ``seen_ids`` mirrors ``{key[0] for key in out}`` across the
+    recursion so the extras dedupe stays O(1) per extra (a linear scan of ``out``
+    goes quadratic on a several-hundred-card box tree)."""
+    if seen_ids is None:
+        seen_ids = {key[0] for key in out}
     image = getattr(widget, "image", None)
     if isinstance(image, AssetImageRef):
-        out[id(image)] = (image, _image_box_size_hint(widget))
+        hint = _image_box_size_hint(widget)
+        resample = pillow_resample_for_image_sampling(widget.sampling) if hint is not None else 0
+        out[(id(image), hint, int(resample))] = (image, hint, resample)
+        seen_ids.add(id(image))
     for holder in (getattr(widget, "bg", None), getattr(widget, "item_bg", None)):
         bg_img = getattr(holder, "img", None)
         if isinstance(bg_img, AssetImageRef):
-            out[id(bg_img)] = (bg_img, None)
+            out[(id(bg_img), None, 0)] = (bg_img, None, 0)
+            seen_ids.add(id(bg_img))
     for extra in getattr(widget, "prefetch_image_sources", None) or ():
         if isinstance(extra, AssetImageRef):
-            # setdefault, not assignment: a widget may list its own ``image`` among the extras
-            # (CardFullThumbnailBox does — ``layers.base`` is both), and an unhinted extra must not
-            # overwrite the display-size hint recorded for it above.
-            out.setdefault(id(extra), (extra, None))
+            # A widget may list its own ``image`` among the extras (CardFullThumbnailBox does —
+            # ``layers.base`` is both). Do not add an unhinted full decode when that exact object
+            # already has a display-size hint, but retain genuinely distinct size/sampling uses.
+            if id(extra) not in seen_ids:
+                out[(id(extra), None, 0)] = (extra, None, 0)
+                seen_ids.add(id(extra))
     for child in getattr(widget, "items", None) or ():
-        _collect_asset_refs(child, out)
+        _collect_asset_refs(child, out, seen_ids)
 
 
 async def prefetch_asset_refs(root: Widget) -> None:
@@ -1685,14 +1719,16 @@ async def prefetch_asset_refs(root: Widget) -> None:
     concurrently — at the display size when known — so the serial Pillow draw hits
     warm caches instead of decoding inline op by op. No-op for trees without refs
     (the Skia path never calls this)."""
-    refs: dict[int, tuple[AssetImageRef, tuple[int, int] | None]] = {}
+    refs: dict[tuple, tuple[AssetImageRef, tuple[int, int] | None, Image.Resampling | int]] = {}
     _collect_asset_refs(root, refs)
     if not refs:
         return
-    unique: dict[tuple, tuple[AssetImageRef, tuple[int, int] | None]] = {}
-    for ref, hint in refs.values():
-        unique.setdefault((str(ref.path), ref.mtime_ns, ref.file_size, hint), (ref, hint))
-    await asyncio.gather(*(run_in_pool(resolve_image_source_sync, r, h) for r, h in unique.values()))
+    unique: dict[tuple, tuple[AssetImageRef, tuple[int, int] | None, Image.Resampling | int]] = {}
+    for ref, hint, resample in refs.values():
+        unique.setdefault((str(ref.path), ref.mtime_ns, ref.file_size, hint, int(resample)), (ref, hint, resample))
+    await asyncio.gather(
+        *(run_in_pool(resolve_image_source_sync, ref, hint, resample) for ref, hint, resample in unique.values())
+    )
 
 
 class Canvas(Frame):

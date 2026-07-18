@@ -274,7 +274,18 @@ class IRPainter(Painter):
         return self._fill(fill, apos, overlay_size)
 
     def _paste(
-        self, sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect=None, blend="src_over"
+        self,
+        sub_img,
+        pos,
+        size,
+        alpha,
+        use_shadow,
+        shadow_width,
+        shadow_alpha,
+        src_rect=None,
+        blend="src_over",
+        sampling=None,
+        tint=None,
     ):
         apos = self._abs(pos)
         if size:
@@ -288,6 +299,7 @@ class IRPainter(Painter):
             if use_shadow
             else None
         )
+        tint_node = image_tint(_rgba(tint.color), tint.mode) if tint is not None else None
         self._b.image(
             self._image_ref(sub_img),
             apos,
@@ -297,6 +309,8 @@ class IRPainter(Painter):
             shadow=shadow,
             source_rect=src_rect,
             blend=blend,
+            sampling=sampling or "linear_mipmap",
+            tint=tint_node,
         )
         return self
 
@@ -310,8 +324,22 @@ class IRPainter(Painter):
         shadow_alpha=0.6,
         src_rect=None,
         exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
     ):
-        return self._paste(sub_img, pos, size, None, use_shadow, shadow_width, shadow_alpha, src_rect)
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            None,
+            use_shadow,
+            shadow_width,
+            shadow_alpha,
+            src_rect,
+            sampling=sampling,
+            tint=tint,
+        )
 
     def image_bg(self, image, align="c", mode="fit", blur=False, fade=0.1, exclude_on_hash=False):
         """Emit ``ImageBg`` as ordinary Image nodes in the current Painter region.
@@ -373,8 +401,22 @@ class IRPainter(Painter):
         shadow_alpha=0.6,
         src_rect=None,
         exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
     ):
-        return self._paste(sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect)
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            alpha,
+            use_shadow,
+            shadow_width,
+            shadow_alpha,
+            src_rect,
+            sampling=sampling,
+            tint=tint,
+        )
 
     def _push_group(self, kind: str, apos: tuple[float, float]) -> None:
         self._group_origin_stack.append((kind, self._group_origin))
@@ -389,11 +431,33 @@ class IRPainter(Painter):
         self._b.pop_group()
         self._group_origin = origin
 
-    def paste_src(self, sub_img, pos, size=None, src_rect=None, exclude_on_hash=False):
+    def paste_src(
+        self,
+        sub_img,
+        pos,
+        size=None,
+        src_rect=None,
+        exclude_on_hash=False,
+        *,
+        sampling=None,
+        tint=None,
+    ):
         # True Porter-Duff Src, same as the Pillow side: the drawn rect REPLACES the destination.
         # Src-over would only agree where the destination is empty, and a public Painter primitive
         # must not depend on the caller honouring a prose caveat to keep the two backends aligned.
-        return self._paste(sub_img, pos, size, None, False, 0, 0, src_rect, blend="src")
+        return self._paste(
+            sub_img,
+            pos,
+            size,
+            None,
+            False,
+            0,
+            0,
+            src_rect,
+            blend="src",
+            sampling=sampling,
+            tint=tint,
+        )
 
     def push_clip_roundrect(self, pos, size, radius, corners=(True, True, True, True), exclude_on_hash=False):
         apos = self._abs(pos)

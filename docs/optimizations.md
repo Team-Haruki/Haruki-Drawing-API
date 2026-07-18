@@ -342,7 +342,12 @@ harvest_points resize: 0.01–0.05s / 请求（暖缓存）
 
 **`profile/drawer.py` — x_icon（24×24）**
 
-单张图标改用 `get_img_resized(... 24, 24)`。
+原有 `get_img_resized(... 24, 24)` 改为 `AssetImageRef + ImageBox(fill, sampling="linear")`。Pillow replay
+仍用原 BILINEAR 内核，Skia 路径则不再在 Python 解码和缓存这张图。
+
+同批次把 `misc/chara_birthday` 无 padding 的 80×80 card thumbnail 也改为 ref+linear；calendar icon
+与 alias jacket 刻意保留 `get_img_resized`：它们在 40/92 BILINEAR 预缩后还会因 4px padding 再缩到
+32/84（Painter 默认 BICUBIC）。折叠成一次 draw 会改变历史像素，不能用“显式 linear”直接替代。
 
 ### 实测效果（/map 端点，4 地图，~160 采集点）
 

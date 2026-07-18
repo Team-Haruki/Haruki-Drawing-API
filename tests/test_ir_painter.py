@@ -16,6 +16,7 @@ except ImportError:  # pragma: no cover - extension not built
     _native = None
 
 from src.sekai.base.draw import Canvas, TextBox, roundrect_bg
+from src.sekai.base.painter import ImageTint
 from src.sekai.base.plot import TextStyle, VSplit
 from src.sekai.base.utils import get_img_from_path
 from src.sekai.skia_renderer.ir_painter import IRPainter
@@ -229,6 +230,151 @@ def test_irpainter_imagebg_native_parity_and_raster_cache_isolation(tmp_path):
     assert np.array_equal(np.asarray(cold_filtered), np.asarray(warm_filtered))
     assert np.array_equal(np.asarray(unfiltered), np.asarray(unfiltered_again))
     assert not np.array_equal(np.asarray(cold_filtered), np.asarray(unfiltered))
+
+
+def test_irpainter_crop_sampling_and_tint_raster_cache_isolation(tmp_path):
+    """The target-raster cache key owns geometry/sampling, while tint stays draw-local.
+
+    Exercise one path, destination size and source rect in both orders. A stale target raster
+    or a tint baked into the cache makes at least one reverse pass differ from its cold render.
+    """
+    from src.sekai.base.utils import get_asset_image_ref
+
+    width, height = 23, 17
+    source = Image.new("RGBA", (width, height))
+    source.putdata(
+        [
+            (
+                (x * 47 + y * 13) % 256,
+                (x * 19 + y * 61) % 256,
+                (x * 83 + y * 7) % 256,
+                (x * 31 + y * 43 + 17) % 256,
+            )
+            for y in range(height)
+            for x in range(width)
+        ]
+    )
+    asset = tmp_path / "map.png"
+    source.save(asset)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "map.png", on_missing="raise"))
+    canvas_size = (15, 11)
+    source_rect = (2, 3, 20, 15)
+    base_color = (11, 29, 47, 255)
+    multiply = ImageTint((103, 207, 71, 255), mode="multiply")
+    recolor = ImageTint((255, 32, 32, 255), mode="recolor")
+    variants = [
+        ("plain-linear", None, "linear"),
+        ("multiply-linear", multiply, "linear"),
+        ("recolor-linear", recolor, "linear"),
+        ("plain-catmull", None, "catmull_rom"),
+        ("multiply-catmull", multiply, "catmull_rom"),
+        ("recolor-catmull", recolor, "catmull_rom"),
+    ]
+
+    def render(tint, sampling):
+        painter = _painter(canvas_size, assets_base_dir=tmp_path)
+        painter.rect((0, 0), canvas_size, fill=base_color)
+        painter.paste_with_alpha_blend(
+            ref,
+            (0, 0),
+            canvas_size,
+            src_rect=source_rect,
+            sampling=sampling,
+            tint=tint,
+        )
+        scene, mem = painter.build_scene()
+        node = scene["root"]["children"][1]
+        assert mem == {}
+        assert node["path"] == "map.png"
+        assert node["size"] == list(canvas_size)
+        assert node["source_rect"] == [float(v) for v in source_rect]
+        assert node["sampling"] == sampling
+        result = _native.render_scene(json.dumps(scene).encode(), mem)
+        return np.asarray(Image.open(BytesIO(result["image_bytes"])).convert("RGBA")).copy()
+
+    cold = {name: render(tint, sampling) for name, tint, sampling in variants}
+    for name, tint, sampling in reversed(variants):
+        assert np.array_equal(render(tint, sampling), cold[name]), name
+
+    for sampling in ("linear", "catmull"):
+        assert not np.array_equal(cold[f"plain-{sampling}"], cold[f"multiply-{sampling}"])
+        assert not np.array_equal(cold[f"multiply-{sampling}"], cold[f"recolor-{sampling}"])
+    for tint_name in ("plain", "multiply", "recolor"):
+        assert not np.array_equal(cold[f"{tint_name}-linear"], cold[f"{tint_name}-catmull"])
+
+
+def test_irpainter_multiply_tint_scales_implicit_rgb_alpha(tmp_path):
+    """An RGB asset's implicit alpha is modulated by tint alpha on both backends."""
+    from src.sekai.base.utils import get_asset_image_ref
+
+    asset = tmp_path / "rgb.png"
+    Image.new("RGB", (2, 1), (120, 80, 40)).save(asset)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "rgb.png", on_missing="raise"))
+    painter = _painter((2, 1), assets_base_dir=tmp_path)
+    painter.paste_src(ref, (0, 0), tint=ImageTint((128, 64, 255, 96), mode="multiply"))
+    scene, mem = painter.build_scene()
+
+    result = _native.render_scene(json.dumps(scene).encode(), mem)
+    image = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+
+    assert list(image.getchannel("A").get_flattened_data()) == [96, 96]
+
+
+def test_irpainter_paste_shadow_uses_pre_tint_silhouette(tmp_path):
+    """Rust builds the drop shadow from the untinted silhouette; tinting must only
+    change the pasted interior, never the shadow ring (mirrors the Pillow-side test)."""
+    from src.sekai.base.utils import get_asset_image_ref
+
+    asset = tmp_path / "badge.png"
+    Image.new("RGBA", (10, 8), (200, 40, 40, 255)).save(asset)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "badge.png", on_missing="raise"))
+    interior = (10, 9, 20, 17)  # pos + source size
+
+    def render(tint):
+        painter = _painter((30, 26), assets_base_dir=tmp_path)
+        painter.rect((0, 0), (30, 26), fill=(255, 255, 255, 255))
+        painter.paste_with_alpha_blend(ref, (10, 9), use_shadow=True, shadow_width=6, tint=tint)
+        scene, mem = painter.build_scene()
+        result = _native.render_scene(json.dumps(scene).encode(), mem)
+        return Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+
+    untinted = render(None)
+    tinted = render(ImageTint((32, 32, 255, 128), mode="recolor"))
+
+    assert not np.array_equal(np.asarray(untinted.crop(interior)), np.asarray(tinted.crop(interior)))  # the tint drew
+    cover = Image.new("RGBA", (10, 8), (0, 0, 0, 255))
+    masked_untinted, masked_tinted = untinted.copy(), tinted.copy()
+    masked_untinted.paste(cover, interior[:2])
+    masked_tinted.paste(cover, interior[:2])
+    assert np.array_equal(np.asarray(masked_untinted), np.asarray(masked_tinted))
+
+
+def test_irpainter_paste_src_nearest_matches_pillow_kernel(tmp_path):
+    """``sampling="nearest"`` on paste_src under a real 4x upscale is exact on the
+    native backend and identical to PIL NEAREST (no other test exercises nearest)."""
+    from src.sekai.base.utils import get_asset_image_ref
+
+    source = Image.new("RGBA", (2, 2))
+    source.putdata(
+        [
+            (255, 255, 255, 255),
+            (0, 0, 0, 255),
+            (0, 0, 0, 255),
+            (255, 255, 255, 255),
+        ]
+    )
+    asset = tmp_path / "checker.png"
+    source.save(asset)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "checker.png", on_missing="raise"))
+    painter = _painter((8, 8), assets_base_dir=tmp_path)
+    painter.paste_src(ref, (0, 0), (8, 8), sampling="nearest")
+    scene, mem = painter.build_scene()
+
+    result = _native.render_scene(json.dumps(scene).encode(), mem)
+    image = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+
+    expected = source.resize((8, 8), Image.Resampling.NEAREST)
+    assert np.array_equal(np.asarray(image), np.asarray(expected))
 
 
 def test_irpainter_clip_roundrect_group_relative_children():

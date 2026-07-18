@@ -29,9 +29,9 @@ from src.settings import (
     FONT_DIR,
 )
 
-from .img_utils import adjust_image_alpha_inplace
+from .img_utils import adjust_image_alpha_inplace, multiply_image_by_color
 from .triangle_bg import background_hour, build_triangle_bg, gradient_points
-from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
+from .utils import PASTE_RESAMPLE, AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
 
 def shutdown_painter() -> None:
@@ -193,6 +193,28 @@ _painter_emoji_bytes_cache: OrderedDict[str, bytes] = OrderedDict()
 Color = tuple[int, int, int, int] | tuple[int, int, int] | list[int]
 Position = tuple[int, int]
 Size = tuple[int, int]
+ImageSampling = Literal["nearest", "linear", "catmull_rom"]
+ImageTintMode = Literal["multiply", "recolor"]
+
+
+@dataclass(frozen=True)
+class ImageTint:
+    """Backend-neutral color decoration for an image paste.
+
+    ``multiply`` performs component-wise RGBA multiplication. ``recolor`` treats the source
+    alpha as a stencil, replaces RGB with ``color``, and lets the color alpha scale that stencil.
+    Both map directly to the existing Render-IR Image tint modes.
+    """
+
+    color: Color
+    mode: ImageTintMode = "multiply"
+
+    def __post_init__(self) -> None:
+        if len(self.color) not in (3, 4):
+            raise ValueError("image tint color must have 3 or 4 channels")
+        if self.mode not in ("multiply", "recolor"):
+            raise ValueError(f"unsupported image tint mode: {self.mode}")
+
 
 BLACK = (0, 0, 0, 255)
 WHITE = (255, 255, 255, 255)
@@ -585,14 +607,55 @@ class PainterOperation:
     exclude_on_hash: bool
 
 
-def _resolve_paste_source(source: ImageSource, size) -> Image.Image:
+_PIL_RESAMPLE_BY_SAMPLING: dict[ImageSampling, Image.Resampling] = {
+    "nearest": Image.Resampling.NEAREST,
+    "linear": Image.Resampling.BILINEAR,
+    "catmull_rom": Image.Resampling.BICUBIC,
+}
+
+
+def pillow_resample_for_image_sampling(sampling: ImageSampling | None) -> Image.Resampling | int:
+    return PASTE_RESAMPLE if sampling is None else _PIL_RESAMPLE_BY_SAMPLING[sampling]
+
+
+def _apply_image_tint(image: Image.Image, tint: ImageTint | None) -> Image.Image:
+    if tint is None:
+        return image
+    color = tuple(int(v) for v in tint.color)
+    if len(color) == 3:
+        color = (*color, 255)
+    if tint.mode == "multiply":
+        # Skia's Modulate filter multiplies the implicit opaque alpha of an RGB image too.
+        # Normalize to RGBA so a tint with alpha < 255 has the same meaning on Pillow.
+        source = image if image.mode == "RGBA" else image.convert("RGBA")
+        return multiply_image_by_color(source, color)
+    if tint.mode == "recolor":
+        source = image if image.mode == "RGBA" else image.convert("RGBA")
+        alpha = source.getchannel("A")
+        if color[3] != 255:
+            alpha = alpha.point(lambda value: int(value * color[3] / 255))
+        recolored = Image.new("RGBA", source.size, color)
+        recolored.putalpha(alpha)
+        return recolored
+    raise ValueError(f"unsupported image tint mode: {tint.mode}")
+
+
+def _resolve_paste_source(
+    source: ImageSource,
+    size,
+    resample: Image.Resampling | int = PASTE_RESAMPLE,
+) -> Image.Image:
     """Resolve a lazy paste source to pixels. An ``AssetImageRef`` with a concrete
     target size goes through the global resize cache, so layers shared across many
     widgets (rarity stars, card frames, attr icons) resize once per size."""
     if isinstance(source, Image.Image):
         return source
     if isinstance(source, AssetImageRef) and size and size[0] and size[1] and tuple(size) != tuple(source.size):
-        return resolve_image_source_sync(source, target_size=(int(size[0]), int(size[1])))
+        return resolve_image_source_sync(
+            source,
+            target_size=(int(size[0]), int(size[1])),
+            resample=resample,
+        )
     return resolve_image_source_sync(source)
 
 
@@ -944,14 +1007,18 @@ class Painter:
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
+        *,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
         """``src_rect`` crops the source to ``(x0, y0, x1, y1)`` in source pixels before
         the fit (both backends; the IR Image node's ``source_rect``), so slices of one
-        asset draw without a Python-side crop/decode."""
+        asset draw without a Python-side crop/decode. ``sampling`` selects the shared resize
+        kernel explicitly; ``tint`` is applied after crop/resize and before compositing."""
         return self.add_operation(
             "_impl_paste",
             exclude_on_hash,
-            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect),
+            (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect, sampling, tint),
         )
 
     def image_bg(
@@ -983,11 +1050,14 @@ class Painter:
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
+        *,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
         return self.add_operation(
             "_impl_paste_with_alpha_blend",
             exclude_on_hash,
-            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect),
+            (sub_img, pos, size, alpha, use_shadow, shadow_width, shadow_alpha, src_rect, sampling, tint),
         )
 
     def paste_src(
@@ -997,6 +1067,9 @@ class Painter:
         size: Size = None,
         src_rect: tuple[float, float, float, float] | None = None,
         exclude_on_hash: bool = False,
+        *,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
         """Porter-Duff **Src**: write all four channels verbatim, replacing the destination
         (Pillow: a mask-less ``Image.paste``). For the BASE layer of an absolute-coordinate
@@ -1012,7 +1085,11 @@ class Painter:
         The Skia backend draws it src-over, which is identical wherever the destination is empty
         — the only supported use — except that a premultiplied surface cannot carry rgb under
         zero alpha at all. That is the pre-existing backend divergence, not a new one."""
-        return self.add_operation("_impl_paste_src", exclude_on_hash, (sub_img, pos, size, src_rect))
+        return self.add_operation(
+            "_impl_paste_src",
+            exclude_on_hash,
+            (sub_img, pos, size, src_rect, sampling, tint),
+        )
 
     def push_clip_roundrect(
         self,
@@ -1230,8 +1307,10 @@ class Painter:
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
-        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect, sampling)
 
         if use_shadow:
             w, h = sub_img.size
@@ -1254,10 +1333,11 @@ class Painter:
             shadow.putalpha(blurred_shadow_mask)
             self.img.alpha_composite(shadow, (pos[0] + self.offset[0] - sw, pos[1] + self.offset[1] - sw))
 
-        if sub_img.mode == "RGBA":
-            self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]), sub_img)
+        drawn_img = _apply_image_tint(sub_img, tint)
+        if drawn_img.mode == "RGBA":
+            self.img.paste(drawn_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]), drawn_img)
         else:
-            self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+            self.img.paste(drawn_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
     def _impl_image_bg(
@@ -1306,7 +1386,9 @@ class Painter:
         sub_img: ImageSource,
         size: Size | None,
         src_rect: tuple[float, float, float, float] | None,
+        sampling: ImageSampling | None = None,
     ) -> Image.Image:
+        resample = pillow_resample_for_image_sampling(sampling)
         if src_rect is not None:
             # Crop precedes the fit, so the whole-asset resize cache does not apply here;
             # resolve full pixels (cache-decoded for refs) and crop the slice.
@@ -1314,7 +1396,7 @@ class Painter:
                 sub_img = resolve_image_source_sync(sub_img)
             sub_img = sub_img.crop(tuple(int(v) for v in src_rect))
         else:
-            sub_img = _resolve_paste_source(sub_img, size)
+            sub_img = _resolve_paste_source(sub_img, size, resample=resample)
         # Normalize the mode BEFORE resizing. Pillow forces NEAREST when resizing a palette ("P")
         # or bilevel ("1") image, so resizing first would resample the palette INDICES and only
         # then expand to RGBA — blocky edges and no alpha interpolation. Converting first lets the
@@ -1322,7 +1404,7 @@ class Painter:
         if sub_img.mode not in ("RGB", "RGBA"):
             sub_img = sub_img.convert("RGBA")
         if size and size != sub_img.size:
-            sub_img = sub_img.resize(size)
+            sub_img = sub_img.resize(size, resample)
         return sub_img
 
     def _impl_paste_src(
@@ -1331,8 +1413,11 @@ class Painter:
         pos: Position,
         size: Size = None,
         src_rect: tuple[float, float, float, float] | None = None,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
-        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect, sampling)
+        sub_img = _apply_image_tint(sub_img, tint)
         # No mask -> Pillow copies every channel, alpha included (Porter-Duff Src).
         self.img.paste(sub_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
@@ -1458,11 +1543,14 @@ class Painter:
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
         src_rect: tuple[float, float, float, float] | None = None,
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
     ) -> Self:
-        sub_img = self._resolve_sub_img(sub_img, size, src_rect)
+        sub_img = self._resolve_sub_img(sub_img, size, src_rect, sampling)
         pos = (pos[0] + self.offset[0], pos[1] + self.offset[1])
-        overlay = Image.new("RGBA", sub_img.size, (0, 0, 0, 0))
-        overlay.paste(sub_img, (0, 0))
+        drawn_img = _apply_image_tint(sub_img, tint)
+        overlay = Image.new("RGBA", drawn_img.size, (0, 0, 0, 0))
+        overlay.paste(drawn_img, (0, 0))
         if alpha is not None:
             overlay_alpha = overlay.split()[3]
             overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * alpha))
@@ -1473,8 +1561,18 @@ class Painter:
             sw = shadow_width
             lw, lh = w + sw * 2, h + sw * 2
             # 获取和图像相同形状的阴影mask
+            if sub_img.mode == "RGBA":
+                shadow_source_mask = sub_img.getchannel("A")
+            else:
+                shadow_source_mask = Image.new("L", sub_img.size, 255)
+            if alpha is not None:
+                shadow_source_mask = shadow_source_mask.point(lambda value: int(value * alpha))
             shadow_mask = Image.new("L", (lw, lh), 0)
-            shadow_mask.paste(Image.new("L", overlay.size, int(255 * shadow_alpha)), (sw, sw), overlay)
+            shadow_mask.paste(
+                Image.new("L", overlay.size, int(255 * shadow_alpha)),
+                (sw, sw),
+                shadow_source_mask,
+            )
             # 模糊获取阴影
             blurred_shadow_mask = shadow_mask.filter(ImageFilter.GaussianBlur(radius=sw // 2))
             # 删除内部阴影

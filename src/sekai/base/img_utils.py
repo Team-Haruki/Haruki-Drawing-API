@@ -20,7 +20,8 @@ def open_image(file_path: str | Path, load: bool = True) -> Image.Image:
 
 def multiply_image_by_color(img: Image.Image, color: tuple[int, ...]) -> Image.Image:
     """
-    将图像的每个像素乘以指定颜色的RGB值，A通道保持不变
+    将图像的每个像素按通道乘以指定颜色。传 RGB 颜色时补 A=255,A 通道保持不变;
+    传 RGBA 颜色时 A 通道同样参与相乘(``ImageTint("multiply")`` 依赖这一点对齐 Skia 的 Modulate)。
     """
     if img.mode.upper() not in ["RGB", "RGBA"]:
         img = img.convert("RGBA")
