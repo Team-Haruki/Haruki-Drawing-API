@@ -158,7 +158,7 @@ tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pi
 endpoint. Both backends draw the same tree. If a primitive is missing, add it to `Painter` **and** to
 `IRPainter` so both backends stay in step — do not special-case a backend inside a drawer with
 `isinstance(p, IRPainter)`. A hand-written scene builder (`IRBuilder` used directly, bypassing the tree *and*
-`IRPainter`) needs a specific justification; **two endpoints still do it** and they are the exceptions, not the
+`IRPainter`) needs a specific justification; **three endpoints still do it** and they are the exceptions, not the
 rule:
 
 - `src/sekai/chart/drawer.py` — the chart pixels come from `pjsekai_scores_rs`; the IR only adds the watermark
@@ -170,6 +170,15 @@ rule:
   `IRBuilder.splice_root_children`. **The layout exists once.** (An earlier version of this file claimed honor
   duplicated its layout in Pillow and IR; that stopped being true when honor moved onto the shared tree, and the
   stale warning cost real time.)
+- `src/sekai/profile/custom_profile/skia.py` — no plot.py tree exists to lower: the layout carrier is the Unity
+  card JSON, flattened and rasterized by the same `PNGRenderer` methods on BOTH backends
+  (`build_native_contents` / `render_content_for_card` / `layer_transform_inputs`); the scene only PLACES those
+  shared rasters. Unrotated elements (the vast majority — the service target carries a ~1.118 position scale on
+  everything) reproduce Pillow exactly: two-step BICUBIC pre-resize in Python + integer-position paste (measured
+  rgb max=1, alpha exact). Only ROTATED elements go through the `Transform` matrix node (capability 8), replacing
+  Pillow's resize + rotate + 2x supersample in one native pass under a relaxed budget. Don't "simplify" the
+  pre-resize into the matrix: PIL's resize scales its kernel with the ratio and the crisp integer-paste parity is
+  the point. Also remember the canvas base is OPAQUE WHITE (`render_card` starts from white, not transparent).
 
 Card List is **not** one of them any more — it and Card Box have no dedicated scene builder and draw the shared
 `plot.py` widget tree like everything else.

@@ -141,7 +141,15 @@
         `custom_profile_caches`;knob 默认开启,归零即回滚。对抗性评审 6 条确认已修:
         **负缓存只留 L1**(瞬态失败不得在不变签名下毒化进程池,有回归测试钉住)、
         TMPFontAsset 补 frozen、清扫器假威胁注释纠正。13+1 个新测试;既有 1080 行零改动。
-  - [ ] Phase 1(S~M):IR 加 Transform(矩阵)节点,合成层搬 Skia(mem 图 + 原生仿射)。
+  - [x] Phase 1(2026-07-18,capability 7→8):IR 加 **Transform(矩阵,正向语义)** 节点 +
+        `catmull_rom` 采样 + Transform 内跳过预栅格缓存/prewarm;`custom_profile/skia.py`
+        hand-built 场景(第三个 sanctioned exception):**无旋转元素 = Python 两步 BICUBIC 预缩 +
+        整数位贴(与 Pillow 逐像素对齐,实测 rgb max=1、alpha 精确)**,旋转元素走 Transform
+        单 pass(替代 resize+rotate+2× 超采样,合成注入 30° 实测 p99=7,预算 24 内);白底矩形
+        (render_card 是不透明白底)。踩过的坑:服务态 `position_scale=1.1181` 不是 1。
+        接缝 `layer_transform_inputs`(布局数字单源,Pillow 重构后字节一致)。sweep 65 ok
+        (含两 custom 案例,budget 断言)/warm parity 0 drift/cargo 19 测试/8 个新 pytest
+        (含真实 native e2e)。暖速 1.06×(文字卡,栅格化仍占大头→Phase 2)~1.49×(无文字卡)。
   - [ ] Phase 2(M):SdfQuad 节点(SkSL/像素循环)+ freetype-rs 度量——甩掉 fontTools 的
         **全进程 GIL 重启风险**(实测确认),文字重卡估 10-40×。
   - [x] 前置(2026-07-18,大部分落地):**response.json(真实 CN GetAnotherProfileResponse,
