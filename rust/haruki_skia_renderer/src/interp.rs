@@ -431,6 +431,14 @@ pub(crate) fn render_scene_inner(
     interp.metrics.font_fallbacks = interp.fonts.fallbacks;
     interp.metrics.setup_elapsed = total_started.elapsed().as_secs_f64();
 
+    // Device-bounds nodes inside Transform are rejected up front for the same reason as the
+    // SdfQuad field validation below: an emitter regression must fail the WHOLE scene
+    // (-> PyRuntimeError -> Python fail-open to Pillow), never render a silently wrong image.
+    if let Some(background) = &scene.background {
+        validate_transform_subtrees(background, false)?;
+    }
+    validate_transform_subtrees(&scene.root, false)?;
+
     // SdfQuad field references are validated up front so a bad one fails the WHOLE scene
     // (-> PyRuntimeError -> Python fail-open to Pillow) instead of silently skipping glyphs.
     if let Some(background) = &scene.background {
@@ -1024,6 +1032,40 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
 /// The contract is strict on purpose: the field is per-request data the emitter just shipped,
 /// so a missing/mistyped one is an emitter bug — erroring the scene reaches Python's fail-open
 /// catch, while skipping would serve an image with glyphs silently missing.
+/// Reject nodes that depend on an identity CTM inside a `Transform` subtree.
+///
+/// `SelfImage` / `BlurGlass` / adaptive `Text` snapshot device bounds, and `SdfQuad` is
+/// pre-warped to device space with integer placement; under a non-identity matrix they would
+/// sample the wrong canvas region or be double-transformed. The emitter (custom profile)
+/// never nests them — so one showing up is an emitter REGRESSION, and failing the WHOLE
+/// scene routes it into the Python fail-open path (Pillow) instead of a silently wrong
+/// image, the same doctrine as unknown node kinds and dangling SdfQuad field refs.
+fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), String> {
+    match node {
+        Node::SelfImage(_) if in_transform => {
+            Err("SelfImage inside Transform requires an identity CTM".to_string())
+        }
+        Node::BlurGlass(_) if in_transform => {
+            Err("BlurGlass inside Transform requires an identity CTM".to_string())
+        }
+        Node::SdfQuad(_) if in_transform => {
+            Err("SdfQuad inside Transform would be double-transformed".to_string())
+        }
+        Node::Text(text) if in_transform && text.adaptive.is_some() => {
+            Err("adaptive Text inside Transform requires an identity CTM".to_string())
+        }
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_transform_subtrees(child, in_transform)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_transform_subtrees(child, true)),
+        _ => Ok(()),
+    }
+}
+
 fn validate_sdf_quad_fields(
     node: &Node,
     mem_images: &HashMap<String, MemImage>,
@@ -2557,6 +2599,53 @@ mod tests {
     }
 
     /// `RenderedImage` has no `Debug`, so `expect_err` can't unwrap the error directly.
+    #[test]
+    fn transform_rejects_self_image_child() {
+        // Device-bounds snapshots assume an identity CTM; inside a Transform the scene must
+        // fail WHOLE (-> Python fail-open), never render a silently wrong snapshot.
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [1.0, 0.0, 0.0, 1.0, 4.0, 2.0], "children": [
+                 { "type": "SelfImage", "pos": [0, 0], "size": [8, 8], "source_rect": [0, 0, 8, 8] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SelfImage"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_rejects_sdf_quad_through_nested_group() {
+        // The walk must carry the in-Transform flag through Group children, and the
+        // rejection must fire before SdfQuad field resolution (no mem image supplied).
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [0.5, 0.0, 0.0, 0.5, 0.0, 0.0], "children": [
+                 { "type": "Group", "offset": [2, 2], "size": [16, 16], "children": [
+                   { "type": "SdfQuad", "pos": [1, 1], "field": "mem:any",
+                     "shading": { "face_color": [255, 204, 0], "face_scale": 12.0,
+                                  "face_w": 4.9, "alpha": 0.9 } }
+                 ] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_still_renders_plain_children() {
+        // The preflight must not reject the supported Transform contents.
+        let json = bare_scene_json(
+            (32, 24),
+            r#"{ "type": "Transform", "matrix": [1.0, 0.0, 0.0, 1.0, 4.0, 2.0], "children": [
+                 { "type": "Rect", "pos": [0, 0], "size": [8, 8], "fill": [255, 0, 0, 255] }
+               ] }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        render_scene_inner(&scene, HashMap::new()).expect("renders");
+    }
+
     fn expect_scene_error(scene: &Scene, mem: HashMap<String, MemImage>) -> String {
         match render_scene_inner(scene, mem) {
             Err(err) => err,

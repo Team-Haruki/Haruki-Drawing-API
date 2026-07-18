@@ -339,8 +339,10 @@ pub struct SdfUnderlay {
 ///
 /// `SelfImage`, `BlurGlass` and adaptive `Text` are UNSUPPORTED inside a Transform: their
 /// device-bounds backdrop snapshots assume an identity CTM, so under a non-identity matrix
-/// they would capture the wrong canvas region. The only emitter (custom profile) never
-/// nests them.
+/// they would capture the wrong canvas region (`SdfQuad` is likewise pre-warped to device
+/// space). The only emitter (custom profile) never nests them, and the interpreter enforces
+/// it up front (`validate_transform_subtrees`): such a scene fails WHOLE, routing an emitter
+/// regression into the Python fail-open path instead of a silently wrong image.
 #[derive(Debug, Deserialize)]
 pub struct TransformNode {
     pub matrix: [f32; 6],
