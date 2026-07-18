@@ -18,9 +18,11 @@ For every payload the harness:
 Result rows: {endpoint, status, size_*, mean, max, p99, p999, sbs, note?, error?}.
 No timings: this is a correctness gate, and the ones it used to print were misleading
 in both directions at once (see run_case). Benchmarking is scripts/skia_bench.py.
-Statuses: ok / size-mismatch / skia-none /
+Statuses: ok / over-budget / size-mismatch / skia-none /
 pillow-only / pillow-none / pillow-error / skia-error / build-error /
 harness-error / skipped / no-payload.
+(``over-budget``: a Case with an explicit ``budget=(mean, p99)`` whose skia-vs-pillow diff
+exceeds either ceiling; counts as a failure. Cases without a budget are scored as before.)
 
 Known deviations (not failures):
 - ``mysekai_*`` (except housing-competition): needs the gitignored
@@ -98,6 +100,7 @@ class Case:
     is_list: bool = False
     route_watermark: bool = False  # the route appends a raster watermark footer after compose
     note: str | None = None
+    budget: tuple[float, float] | None = None  # (mean, p99) diff ceiling; exceeding it -> "over-budget"
 
 
 def _case(
@@ -112,6 +115,7 @@ def _case(
     is_list: bool = False,
     route_watermark: bool = False,
     note: str | None = None,
+    budget: tuple[float, float] | None = None,
 ) -> Case:
     return Case(
         name=name,
@@ -124,6 +128,7 @@ def _case(
         is_list=is_list,
         route_watermark=route_watermark,
         note=note,
+        budget=budget,
     )
 
 
@@ -218,7 +223,11 @@ CASES: tuple[Case, ...] = (
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
-        try_render=None,
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        # Unrotated elements integer-paste the same Pillow-rasterized layers, so the only diff is
+        # LSB compositing rounding (measured rgb max=1, alpha exact); rotated elements would draw
+        # on the relaxed budget instead, but neither captured card carries a rotation.
+        budget=(2.0, 25.0),
     ),
     _case(
         "custom_profile_card_collections",
@@ -226,7 +235,8 @@ CASES: tuple[Case, ...] = (
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
-        try_render=None,
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        budget=(2.0, 25.0),
     ),
     _case(
         "custom_profile_card_symbol",
@@ -302,11 +312,12 @@ def _to_rgb(img: Image.Image) -> Image.Image:
 
 
 def _diff_stats(a: Image.Image, b: Image.Image) -> dict:
+    a_raw, b_raw = a, b
     a, b = _to_rgb(a), _to_rgb(b)
     if a.size != b.size:
         return {"size_match": False, "size_pil": list(a.size), "size_skia": list(b.size)}
     d = np.asarray(ImageChops.difference(a, b), dtype=np.float32)
-    return {
+    stats = {
         "size_match": True,
         "size_pil": list(a.size),
         "size_skia": list(b.size),
@@ -315,6 +326,15 @@ def _diff_stats(a: Image.Image, b: Image.Image) -> dict:
         "p99": round(float(np.percentile(d, 99)), 1),
         "p999": round(float(np.percentile(d, 99.9)), 1),
     }
+    # Supplemental alpha-plane diff, only when BOTH sides actually carry an alpha channel.
+    # The RGB keys above are computed exactly as before (over the RGB conversion).
+    if "A" in a_raw.getbands() and "A" in b_raw.getbands():
+        alpha_a = np.asarray(a_raw.convert("RGBA").getchannel("A"), dtype=np.float32)
+        alpha_b = np.asarray(b_raw.convert("RGBA").getchannel("A"), dtype=np.float32)
+        da = np.abs(alpha_a - alpha_b)
+        stats["alpha_mean"] = round(float(da.mean()), 3)
+        stats["alpha_max"] = round(float(da.max()), 1)
+    return stats
 
 
 def _save_sbs(out_dir: Path, name: str, pil: Image.Image, skia: Image.Image) -> str:
@@ -430,6 +450,15 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
     stats = _diff_stats(pil, skia)
     row.update(stats)
     row["status"] = "ok" if stats.get("size_match") else "size-mismatch"
+    if row["status"] == "ok" and case.budget is not None:
+        mean_budget, p99_budget = case.budget
+        if stats["mean"] > mean_budget or stats["p99"] > p99_budget:
+            row["status"] = "over-budget"
+            row["budget"] = [mean_budget, p99_budget]
+            row["error"] = (
+                f"diff over budget: mean {stats['mean']} (budget {mean_budget}), "
+                f"p99 {stats['p99']} (budget {p99_budget})"
+            )
     row["sbs"] = _save_sbs(out_dir, case.name, pil, skia)
     return row
 
@@ -495,6 +524,7 @@ def _summary_group_key(row: dict) -> str:
 
 _STATUS_ORDER = (
     "ok",
+    "over-budget",
     "size-mismatch",
     "skia-none",
     "skia-none (known-blocked)",
