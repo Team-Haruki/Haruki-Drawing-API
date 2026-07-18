@@ -47,6 +47,11 @@ drawing:
   custom_profile_shape_sprite_dir: data/asset/{region}-assets/startapp/custom_profile/shape
   custom_profile_unity_ui_sprite_dir: data/drawing/static_images/customprofile
   custom_profile_parallel_workers: 1
+  # custom profile 进程级缓存(字形 SDF/轮廓、sprite/atlas);任一对归零即禁用对应池
+  custom_profile_glyph_cache_size: 4096
+  custom_profile_glyph_cache_max_mb: 64
+  custom_profile_sprite_cache_size: 512
+  custom_profile_sprite_cache_max_mb: 128
 
 server:
   host: 0.0.0.0

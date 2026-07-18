@@ -9,6 +9,7 @@ import ctypes.util
 import json
 import math
 import sys
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,16 @@ Image.MAX_IMAGE_PIXELS = None
 
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets, honor_group_uses_scroll_level
 from src.sekai.honor.model import HonorRequest
+from src.sekai.profile.custom_profile.cache import (
+    GLYPH_CONTOUR_CACHE,
+    GLYPH_SDF_CACHE,
+    MISSING,
+    SPRITE_ATLAS_CACHE,
+    file_signature,
+    get_render_font,
+    get_tmp_font_tables,
+    optional_file_signature,
+)
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
@@ -712,7 +723,11 @@ class TMPDynamicGlyphSDF:
     sample_size: float
 
 
-@dataclass
+# frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
+# cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
+# atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
+# after construction.
+@dataclass(frozen=True)
 class TMPFontAsset:
     name: str
     bundle: str
@@ -896,6 +911,10 @@ class FreeTypeMetrics:
         self.lib.FT_Render_Glyph.argtypes = [ctypes.POINTER(FTGlyphSlotRec), ctypes.c_int]
         self.lib.FT_Render_Glyph.restype = ctypes.c_int
         self._faces: dict[Path, ctypes.POINTER(FTFaceRec)] = {}
+        # The singleton is shared process-wide and FT_Set_Char_Size/FT_Load_Glyph mutate shared
+        # FT_Face state, so concurrent requests must serialize. Cheap in practice: with the
+        # process-level glyph caches, this path only runs on a cold glyph.
+        self._lock = threading.Lock()
 
     def close(self) -> None:
         for face in self._faces.values():
@@ -913,6 +932,10 @@ class FreeTypeMetrics:
         return face
 
     def glyph_metrics(self, path: Path, ch: str, font_size: float) -> TMPGlyphMetrics | None:
+        with self._lock:
+            return self._glyph_metrics_locked(path, ch, font_size)
+
+    def _glyph_metrics_locked(self, path: Path, ch: str, font_size: float) -> TMPGlyphMetrics | None:
         face = self._face(path)
         if self.lib.FT_Set_Char_Size(face, 0, int(round(font_size * 64.0)), 72, 72) != 0:
             return None
@@ -938,6 +961,15 @@ class FreeTypeMetrics:
         )
 
     def glyph_bitmap(
+        self,
+        path: Path,
+        ch: str,
+        font_size: float,
+    ) -> tuple[Image.Image, int, int, TMPGlyphMetrics] | None:
+        with self._lock:
+            return self._glyph_bitmap_locked(path, ch, font_size)
+
+    def _glyph_bitmap_locked(
         self,
         path: Path,
         ch: str,
@@ -989,6 +1021,7 @@ class FreeTypeMetrics:
 
 _FREETYPE_METRICS: FreeTypeMetrics | None = None
 _FREETYPE_UNAVAILABLE = False
+_FREETYPE_INIT_LOCK = threading.Lock()
 
 
 def freetype_metrics() -> FreeTypeMetrics | None:
@@ -996,11 +1029,13 @@ def freetype_metrics() -> FreeTypeMetrics | None:
     if _FREETYPE_UNAVAILABLE:
         return None
     if _FREETYPE_METRICS is None:
-        try:
-            _FREETYPE_METRICS = FreeTypeMetrics()
-        except Exception:
-            _FREETYPE_UNAVAILABLE = True
-            return None
+        with _FREETYPE_INIT_LOCK:
+            if _FREETYPE_METRICS is None and not _FREETYPE_UNAVAILABLE:
+                try:
+                    _FREETYPE_METRICS = FreeTypeMetrics()
+                except Exception:
+                    _FREETYPE_UNAVAILABLE = True
+                    return None
     return _FREETYPE_METRICS
 
 
@@ -1032,16 +1067,26 @@ class TMPFontLibrary:
             if source_metadata_path is not None and source_metadata_path.exists()
             else None
         )
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        base = metadata_path.parent
-        source_assets: dict[str, list[TMPFontAsset]] | None = None
-        if source_metadata_path is not None and source_metadata_path != metadata_path:
-            source_assets = cls._load_assets(source_metadata_path)
-        assets = cls._load_assets(metadata_path)
+
+        # The parsed asset tables are shared process-wide: TMPFontAsset/TMPGlyphMetrics are
+        # frozen dataclasses (containers inside TMPFontAsset rely on the never-mutate-after-load
+        # convention); only this per-request library instance with its private
+        # _source_fonts/_source_metrics is fresh. The loader records every file it reads or
+        # probes so a replaced (or late-arriving) table invalidates the entry.
+        def _loader(record) -> tuple[dict[str, list[TMPFontAsset]], dict[str, list[TMPFontAsset]] | None]:
+            source: dict[str, list[TMPFontAsset]] | None = None
+            if source_metadata_path is not None and source_metadata_path != metadata_path:
+                source = cls._load_assets(source_metadata_path, record=record)
+            return cls._load_assets(metadata_path, record=record), source
+
+        assets, source_assets = get_tmp_font_tables(metadata_path, source_metadata_path, _loader)
         return cls(assets, source_assets, runtime_fonts_dir=runtime_fonts_dir)
 
     @classmethod
-    def _load_assets(cls, metadata_path: Path) -> dict[str, list[TMPFontAsset]]:
+    def _load_assets(cls, metadata_path: Path, record=None) -> dict[str, list[TMPFontAsset]]:
+        if record is None:
+            record = lambda path: None
+        record(metadata_path)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         base = metadata_path.parent
         materials = {
@@ -1050,15 +1095,15 @@ class TMPFontLibrary:
         assets: dict[str, list[TMPFontAsset]] = {}
         for row in metadata.get("tmp_font_assets", []):
             name = str(row.get("name", ""))
-            chars = cls._load_character_table(base, row)
+            chars = cls._load_character_table(base, row, record)
             face = row.get("face_info", {}) or {}
             material = materials.get(str(row.get("material"))) or {}
             floats = material.get("floats", {}) or {}
             asset = TMPFontAsset(
                 name=name,
                 bundle=str(row.get("bundle", "")),
-                source_font_path=cls._source_font_path(base, row),
-                atlas_paths=cls._atlas_paths(base, row),
+                source_font_path=cls._source_font_path(base, row, record),
+                atlas_paths=cls._atlas_paths(base, row, record),
                 atlas_population_mode=int(row.get("atlas_population_mode", 0) or 0),
                 atlas_width=float(row.get("atlas_width") or floats.get("_TextureWidth") or 0.0),
                 atlas_height=float(row.get("atlas_height") or floats.get("_TextureHeight") or 0.0),
@@ -1095,20 +1140,24 @@ class TMPFontLibrary:
         return assets
 
     @staticmethod
-    def _source_font_path(base: Path, row: dict[str, Any]) -> Path | None:
+    def _source_font_path(base: Path, row: dict[str, Any], record=None) -> Path | None:
         rel = row.get("source_font_data_path")
         if not rel:
             return None
         path = Path(str(rel)).expanduser()
         candidates = [path] if path.is_absolute() else [base / path, Path(__file__).resolve().parent / path]
         for candidate in candidates:
+            if record is not None:
+                record(candidate)  # a font that ARRIVES later must invalidate the cached tables
             if candidate.exists():
                 return candidate
         return None
 
     @staticmethod
-    def _atlas_paths(base: Path, row: dict[str, Any]) -> list[Path]:
+    def _atlas_paths(base: Path, row: dict[str, Any], record=None) -> list[Path]:
         atlas_dir = base / "atlases"
+        if record is not None:
+            record(atlas_dir)  # glob result baked into the tables; dir mtime moves on add/remove
         paths: list[Path] = []
         for path_id in row.get("atlas_textures", []) or []:
             matches = sorted(atlas_dir.glob(f"*_{path_id}.png"))
@@ -1117,13 +1166,16 @@ class TMPFontLibrary:
         return paths
 
     @staticmethod
-    def _load_character_table(base: Path, row: dict[str, Any]) -> dict[int, TMPGlyphMetrics]:
+    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
         char_rel = row.get("character_table_path")
         glyph_rel = row.get("glyph_table_path")
         if not char_rel or not glyph_rel:
             return {}
         char_path = base / str(char_rel)
         glyph_path = base / str(glyph_rel)
+        if record is not None:
+            record(char_path)
+            record(glyph_path)
         if not char_path.exists() or not glyph_path.exists():
             return {}
         chars = json.loads(char_path.read_text(encoding="utf-8"))
@@ -1740,7 +1792,9 @@ def triangle_sprite_alpha(path: Path) -> Image.Image:
 
 
 def load_font(path: Path, size: float) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(path), max(1, round(size)))
+    # Process-lifetime per-thread cache; previously this reopened the font file on every call
+    # (200-400 times per request), the second-largest cold-render cost.
+    return get_render_font(path, size)
 
 
 def smoothstep(edge0: float, edge1: float, value: float) -> float:
@@ -2008,8 +2062,12 @@ class PNGRenderer:
         self._sdf_alpha_cache: dict[tuple[Path, str, str, float, float], Image.Image] = {}
         self._shape_shader_basis_cache: dict[tuple[Path, str, str], tuple[Any, Any, Any]] = {}
         self._tmp_atlas_cache: dict[Path, Image.Image] = {}
+        # L1 in front of the process-level GLYPH_SDF_CACHE / GLYPH_CONTOUR_CACHE pools: lock-free
+        # per-request dicts keyed WITHOUT the font-file signature (this instance pins one asset
+        # snapshot). The L2 keys add the signature plus the metadata-derived shading inputs.
         self._tmp_dynamic_glyph_cache: dict[tuple[str, str, str, float], TMPDynamicGlyphSDF | None] = {}
         self._tmp_vector_glyph_cache: dict[tuple[str, str, float], tuple[list[Any], Any] | None] = {}
+        self._font_signature_memo: dict[str, tuple[int, int]] = {}
         self._tmp_render_char_cache: dict[tuple[str, str, bool], str] = {}
         self.native_audit: list[dict[str, Any]] = []
         self.tmp_layout_audit: list[dict[str, Any]] = []
@@ -2840,16 +2898,42 @@ class PNGRenderer:
         return result
 
     def unity_ui_sprite(self, name: str) -> Image.Image | None:
+        # The name -> path resolution (and the cached None verdict) stays instance-level: the
+        # candidate list depends on this renderer's region/sprite dirs. Only the decode goes
+        # through the process pool, keyed by file signature, shared read-only across requests.
         cached = self._unity_ui_sprite_cache.get(name)
         if cached is not None or name in self._unity_ui_sprite_cache:
             return cached
         for path in self.unity_ui_sprite_candidates(name):
             if path.exists():
-                sprite = Image.open(path).convert("RGBA")
+                sprite = self._decode_shared_image(path, "rgba")
                 self._unity_ui_sprite_cache[name] = sprite
                 return sprite
         self._unity_ui_sprite_cache[name] = None
         return None
+
+    def _decode_shared_image(self, path: Path, variant: str) -> Image.Image:
+        """Decode ``path`` via the process-level sprite/atlas pool (variant-aware, see cache.py).
+
+        A separate pool rather than the global image cache in src.sekai.base.utils: these are
+        decoded VARIANTS (full-RGBA convert, atlas alpha channel) and the global 6-tuple key has
+        no variant dimension, while its copy-on-get is pure waste for shared immutable images.
+        """
+        sig = optional_file_signature(path)
+        if sig == (-1, -1):  # deleted between exists() and stat: keep the historical error path
+            return self._decode_image_variant(path, variant)
+        cache_key = (str(path), *sig, variant)
+        image = SPRITE_ATLAS_CACHE.get(cache_key)
+        if image is MISSING:
+            image = self._decode_image_variant(path, variant)
+            SPRITE_ATLAS_CACHE.set(cache_key, image)
+        return image
+
+    @staticmethod
+    def _decode_image_variant(path: Path, variant: str) -> Image.Image:
+        if variant == "atlas_alpha":
+            return Image.open(path).convert("RGBA").getchannel("A")
+        return Image.open(path).convert("RGBA")
 
     def tint_image(
         self,
@@ -8242,7 +8326,7 @@ class PNGRenderer:
         cached = self._tmp_atlas_cache.get(path)
         if cached is not None:
             return cached
-        atlas = Image.open(path).convert("RGBA").getchannel("A")
+        atlas = self._decode_shared_image(path, "atlas_alpha")
         self._tmp_atlas_cache[path] = atlas
         return atlas
 
@@ -8595,6 +8679,33 @@ class PNGRenderer:
         pad = max(1, round(sample_pad * display_scale))
         return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
 
+    def _font_signature(self, path: Path) -> tuple[int, int]:
+        """Per-instance memo of one os.stat per font file per request (L2 key component)."""
+        text = str(path)
+        sig = self._font_signature_memo.get(text)
+        if sig is None:
+            sig = optional_file_signature(path)
+            self._font_signature_memo[text] = sig
+        return sig
+
+    def _store_vector_glyph(self, key, l2_key, value):
+        # Negative results stay L1-only (per-request, the pre-cache behavior): the None sites
+        # sit behind broad except blocks, so a TRANSIENT failure (MemoryError/EMFILE/IO blip)
+        # would otherwise be laundered into a process-lifetime "font cannot produce this glyph"
+        # verdict under an unchanged file signature. Re-probing a genuinely missing glyph costs
+        # one fontTools/FT round per request — the price of never poisoning the pool.
+        self._tmp_vector_glyph_cache[key] = value
+        if value is not None:
+            GLYPH_CONTOUR_CACHE.set(l2_key, value)
+        return value
+
+    def _store_dynamic_glyph(self, key, l2_key, value):
+        # Same rule as _store_vector_glyph: only successful renders enter the process pool.
+        self._tmp_dynamic_glyph_cache[key] = value
+        if value is not None:
+            GLYPH_SDF_CACHE.set(l2_key, value)
+        return value
+
     def tmp_vector_glyph_contours(
         self,
         source_path: Path,
@@ -8604,12 +8715,17 @@ class PNGRenderer:
         key = (str(source_path), ch[0], round(sample_size, 4))
         if key in self._tmp_vector_glyph_cache:
             return self._tmp_vector_glyph_cache[key]
+        l2_key = (key[0], *self._font_signature(source_path), key[1], key[2])
+        l2_cached = GLYPH_CONTOUR_CACHE.get(l2_key)
+        if l2_cached is not MISSING:
+            self._tmp_vector_glyph_cache[key] = l2_cached
+            return l2_cached
         try:
             import numpy as np
             from fontTools.pens.recordingPen import DecomposingRecordingPen
             from fontTools.ttLib import TTFont
         except ImportError:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
 
         try:
@@ -8617,13 +8733,13 @@ class PNGRenderer:
             glyph_set = font.getGlyphSet()
             glyph_name = font.getBestCmap().get(ord(ch[0]))
             if not glyph_name:
-                self._tmp_vector_glyph_cache[key] = None
+                self._store_vector_glyph(key, l2_key, None)
                 return None
             pen = DecomposingRecordingPen(glyph_set)
             glyph_set[glyph_name].draw(pen)
             units_per_em = float(font["head"].unitsPerEm or 1000)
         except Exception:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
 
         scale = sample_size / max(1.0, units_per_em)
@@ -8734,14 +8850,16 @@ class PNGRenderer:
 
         close_contour()
         if not contours:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
         packed = [np.asarray(contour, dtype=np.float32) for contour in contours if len(contour) >= 2]
         if not packed:
-            self._tmp_vector_glyph_cache[key] = None
+            self._store_vector_glyph(key, l2_key, None)
             return None
-        result = (packed, np)
-        self._tmp_vector_glyph_cache[key] = result
+        for arr in packed:
+            arr.flags.writeable = False  # shared across threads via the process pool
+        result = (tuple(packed), np)  # tuple: the container is shared too
+        self._store_vector_glyph(key, l2_key, result)
         return result
 
     def tmp_vector_glyph_sdf_field(
@@ -8819,6 +8937,22 @@ class PNGRenderer:
         if key in self._tmp_dynamic_glyph_cache:
             cached = self._tmp_dynamic_glyph_cache[key]
             return (cached, asset) if cached is not None else None
+        # L2 adds what the instance key pins implicitly: the font file's signature plus the
+        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
+        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
+        l2_key = (
+            key[0],
+            *self._font_signature(source_path),
+            key[1],
+            key[2],
+            key[3],
+            round(asset.gradient_scale, 4),
+            round(asset.atlas_padding, 4),
+        )
+        l2_cached = GLYPH_SDF_CACHE.get(l2_key)
+        if l2_cached is not MISSING:
+            self._tmp_dynamic_glyph_cache[key] = l2_cached
+            return (l2_cached, asset) if l2_cached is not None else None
 
         ft = freetype_metrics()
 
@@ -8842,7 +8976,7 @@ class PNGRenderer:
 
         native_bounds = glyph_bounds_at_size(sample_size)
         if native_bounds is None:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
         native_bbox, _, _, _ = native_bounds
         # Runtime TMP atlas rects behave like atlas_padding + 1 around the
@@ -8856,7 +8990,7 @@ class PNGRenderer:
                 pad=native_pad,
                 sample_size=sample_size,
             )
-            self._tmp_dynamic_glyph_cache[key] = cached
+            self._store_dynamic_glyph(key, l2_key, cached)
             return cached, asset
 
         supersample = max(1.0, TMP_DYNAMIC_SDF_SUPERSAMPLE)
@@ -8864,7 +8998,7 @@ class PNGRenderer:
         raster_pad = max(1, math.ceil(asset.atlas_padding * supersample))
         raster_bounds = glyph_bounds_at_size(raster_size)
         if raster_bounds is None:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
         raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
         if raster_glyph_mask is not None:
@@ -8888,7 +9022,7 @@ class PNGRenderer:
                 tmp_dynamic_sdf_alpha_threshold(asset),
             )
         except ImportError:
-            self._tmp_dynamic_glyph_cache[key] = None
+            self._store_dynamic_glyph(key, l2_key, None)
             return None
 
         import numpy as np
@@ -8906,7 +9040,7 @@ class PNGRenderer:
             pad=native_pad,
             sample_size=sample_size,
         )
-        self._tmp_dynamic_glyph_cache[key] = cached
+        self._store_dynamic_glyph(key, l2_key, cached)
         return cached, asset
 
     def render_tmp_dynamic_sdf_run_from_glyphs(

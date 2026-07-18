@@ -838,7 +838,8 @@ def get_runtime_cache_stats() -> dict[str, Any]:
     composed_stats = _composed_image_cache.stats()
     composed_disk_stats = _composed_image_disk_cache.stats()
     # Imported lazily: the Skia payload cache lives under src.sekai.skia_renderer, which imports
-    # this module transitively.
+    # this module transitively; the custom-profile pools live next to their renderer.
+    from src.sekai.profile.custom_profile.cache import get_custom_profile_cache_stats
     from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
 
     return {
@@ -847,6 +848,7 @@ def get_runtime_cache_stats() -> dict[str, Any]:
         "composed_image_cache": composed_stats,
         "composed_image_disk_cache": composed_disk_stats,
         "skia_payload_cache": get_skia_payload_cache_stats(),
+        "custom_profile_caches": get_custom_profile_cache_stats(),
     }
 
 
