@@ -13,10 +13,13 @@
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
 
-**2026-07-18 当前检查点**：IR capability 10；全量 Ruff 通过，pytest `376 passed / 2 skipped`；冷态
-parity 为 `65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
-`64 ok + 1 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`。本轮共享图片装饰和
-production-local MySekai site/spawn/background 已落地；下一处确定性最高的图片依赖收尾是 harvest point。
+**2026-07-19 当前检查点**：IR capability 10；pyo3 已升 0.29.0（两条 Dependabot advisory 的修复版，
+零代码改动）；全量 Ruff 通过，pytest `380 passed / 2 skipped`；冷态 parity 为
+`65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
+`63 ok + 2 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`（`gacha_detail` 加入
+nondeterministic 行列：两次冷渲染隔分钟不一致，是倒计时内容随钟走——warm_fwd == warm_rev ==
+cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完成（见端点残余节）——drawer 层
+可转换的 eager 解码点就此清零，其余均为文档在案的刻意保留项。
 
 ## 🔴 挡在生产收益前面(不做这些,生产永远 fail-open 回退 Pillow)
 
@@ -182,11 +185,18 @@ production-local MySekai site/spawn/background 已落地；下一处确定性最
         (no-payload,等 dump 钩子采到用这些桶的卡)。
         采集机制就位:`HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR`/`_PATHS` 中间件原始 body 落盘。
 - [x] mysekai msr_map 多图网格拼接迁 IR(2026-07-13,合并 widget 树 + 双后端 tile 裁剪,Pillow 基线 max_diff=0;drawer.real.py 不进 git,注意与镜像 API 配对)。
-- [ ] **MySekai harvest point ref 化**：当前 production-local map 仍先 `get_img_from_path` 做 512² fallback
-      判断，再 `get_img_resized_long_edge` 产出 PIL mem 图。`AssetImageRef.size` 已足够做同一判断和目标尺寸
-      计算，可用 `ImageBox(ref, size=..., sampling="linear", alpha_adjust=...)` 保持旧 BILINEAR 语义；无需
-      新 IR 字段或 capability bump。门禁：map/map_multi legacy 基线、冷 parity、双后端 warm parity、
-      真实 HTTP 9/9，并记录 IR mem 前后值。
+- [x] **MySekai harvest point ref 化**（2026-07-19，production-local `drawer.real.py`，无 IR 字段/
+      capability 变更）：`get_asset_image_ref` 取代 `get_img_from_path`（512² fallback 判断走
+      `AssetImageRef.size` 读头探测），`get_img_resized_long_edge` 整段消失——长边算术在 Python 复算
+      （与 `resize_keep_ratio(mode="long")` 一致），绘制改
+      `ImageBox(ref, size=(tw,th), image_size_mode="fill", sampling="linear", use_alpha_blend=True,
+      alpha_adjust=...)` 保住 BILINEAR 语义；缺图 placeholder 走同一条 ImageBox 路径。门禁全过：
+      **Pillow-vs-Pillow 基线 max_delta=0**（改动在 untracked 文件里，基线 = 旧文件 vs 新文件各渲
+      一遍 Pillow，两例 changed_px=0）；冷 parity 65 ok（map mean 1.01→1.18、map_multi 0.97→1.17，
+      预算内——Skia 侧由 native 采样取代 Python 预缩，属预期漂移）；双后端 warm parity 0 drift；
+      真实 HTTP **9/9 全 200** 且日志 `backend=skia` ×9、Content-Length 正确。
+      **IR mem：map 8 项/465,152 B → 0 项/0 B，map_multi 42 项/2,515,968 B → 0 项/0 B（双双 -100%）**
+      ——msr_map 场景的 mem raster 至此清零，像素全部由 Rust 端按 path ref 解码/缓存。
 
 ## 🟠 生产化质量项(一次性切换时跳过的计划内容)
 
@@ -328,8 +338,8 @@ production-local MySekai site/spawn/background 已落地；下一处确定性最
 - [x] **其余 builder 迁 `get_asset_image_ref`**(2026-07-13,详见 migration.md ✅7):card/mysekai/gacha/
       score/vlive/misc/stamp/profile/inventory 共 35 处转换;**刻意保留 eager 的位置见 migration.md**——包括
       走 PIL 像素 API 的 `_circular_progress_avatar`、gacha concat/fallback、honor mask/尺寸合成、misc alias
-      silhouette alpha-trim、mysekai harvest point,以及必须保持双阶段重采样的 misc alias jacket / birthday
-      calendar icon。MySekai site/spawn 已由共享图片装饰
+      silhouette alpha-trim、mysekai harvest point(**已于 2026-07-19 ref 化**,见端点残余节),以及必须保持
+      双阶段重采样的 misc alias jacket / birthday calendar icon。MySekai site/spawn 已由共享图片装饰
       ref 化;`ImageBg(fade/blur)` 也已于 2026-07-18 解禁并完成仓库与 production-local 背景调用点转换。
       `on_missing="raise"` 语义收窄为
       "缺失/非图片"(不再覆盖"像素截断"),已在 gacha 回退链注明。
