@@ -105,7 +105,8 @@ class _SceneAssembler:
     def __init__(self, builder: IRBuilder, canvas_size: tuple[int, int]) -> None:
         self.builder = builder
         self.canvas_size = canvas_size
-        self.mem_images: dict[str, tuple[int, int, bytes]] = {}
+        # RGBA raw 3-tuples plus A8 raw-buffer 6-tuples (capability 9) share the registry.
+        self.mem_images: dict[str, tuple] = {}
         self._direct_layer: Image.Image | None = None
 
     def _mem_ref(self, image: Image.Image) -> str:
@@ -128,6 +129,35 @@ class _SceneAssembler:
         ref = self._mem_ref(self._direct_layer)
         self.builder.image(ref, (0, 0), self.canvas_size, sampling="linear")
         self._direct_layer = None
+
+    def emit_sdf_quads(self, quads) -> None:
+        """Emit one decorative text element as native SdfQuad nodes (Phase 2): Python shipped the
+        display-warped A8 field per glyph, the node runs the shading pixel loop. The fields ride
+        the A8 raw-buffer transport (6-tuple, capability 9)."""
+        self.flush_direct_layer()
+        for quad in quads:
+            field = quad.field
+            key = f"m{len(self.mem_images)}"
+            self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
+            scalars = quad.scalars
+            underlay = None
+            if scalars.underlay is not None:
+                u = scalars.underlay
+                underlay = {
+                    "color": list(u.color),
+                    "scale": u.scale,
+                    "w": u.w,
+                    "shift": [u.shift_x, u.shift_y],
+                }
+            self.builder.sdf_quad(
+                (quad.left, quad.top),
+                f"mem:{key}",
+                scalars.face_color,
+                scalars.face_scale,
+                scalars.face_w,
+                scalars.alpha,
+                underlay,
+            )
 
     def emit_layer(self, layer: Image.Image, inputs: LayerTransformInputs, renderer: PNGRenderer) -> None:
         """Place one element layer.
@@ -189,7 +219,25 @@ class _SceneAssembler:
             self.builder.image(ref, (0, 0), layer.size, sampling="catmull_rom")
 
 
-def _build_scene(renderer: PNGRenderer, card: dict[str, Any]) -> tuple[bytes, dict[str, tuple[int, int, bytes]]]:
+def _direct_text_quads(renderer: PNGRenderer, content: Any):
+    """SdfQuad records for a decorative direct-raster text element, or None.
+
+    Mirrors render_content_direct_on_card's outer gates, then asks the shared seam
+    (prepare_direct_sdf_quads — the layout + PIL-warp half of the Pillow direct path) for the
+    per-glyph fields/scalars. None falls through to the Pillow-parity raster branches.
+    """
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return None
+    if not renderer.tmp_decorative_direct_raster:
+        return None
+    if renderer.text_layout != "tmp" or renderer.tmp_text_render_mode != "sdf":
+        return None
+    if not renderer.is_decorative_text_item(content.item):
+        return None
+    return renderer.prepare_direct_sdf_quads(content.item, content.object_data)
+
+
+def _build_scene(renderer: PNGRenderer, card: dict[str, Any]) -> tuple[bytes, dict[str, tuple]]:
     canvas_size = (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H))
     builder = _new_builder(*canvas_size)
     # render_card starts from an OPAQUE WHITE base (Image.new(..., (255, 255, 255, 255))), not a
@@ -198,10 +246,17 @@ def _build_scene(renderer: PNGRenderer, card: dict[str, Any]) -> tuple[bytes, di
     scene = _SceneAssembler(builder, canvas_size)
     card_ref = renderer.native_card_ref(card)
 
-    # Same walk as render_card's direct-raster loop: decorative TMP texts draw straight onto an
-    # accumulating full-canvas layer; everything else renders to a local layer and is placed by
-    # the shared layer_transform_inputs numbers. Audit records mirror the Pillow statuses.
+    # Same walk as render_card's direct-raster loop: decorative TMP texts become native SdfQuads
+    # (Phase 2 — Python keeps layout + the PIL field warp, the node shades per pixel); if the
+    # element is not quad-eligible the accumulating full-canvas direct layer takes it, and
+    # everything else renders to a local layer placed by the shared layer_transform_inputs
+    # numbers. Audit records mirror the Pillow statuses.
     for content in renderer.build_native_contents(card):
+        quads = _direct_text_quads(renderer, content)
+        if quads is not None:
+            renderer.record_native_audit(card_ref, content, "rendered-direct", None)
+            scene.emit_sdf_quads(quads)
+            continue
         if renderer.render_content_direct_on_card(scene.direct_layer(), content):
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
             continue

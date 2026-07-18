@@ -425,6 +425,37 @@ class IRBuilder:
             }
         )
 
+    def sdf_quad(
+        self,
+        pos: Vec2,
+        field: str,
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """TMP-SDF text quad: shade an ALREADY display-warped A8 ``mem:`` field per pixel
+        (``clip(f*face_scale - face_w, 0, 1)*alpha`` + optional integer-shift underlay pass,
+        matching ``PNGRenderer._shade_field_with_scalars`` bit-comparably) and src-over the
+        straight-alpha patch at integer ``pos``. The node does no geometric resampling — the
+        PIL bicubic warp semantics stay in Python. ``underlay`` (when present):
+        ``{"color": [r,g,b], "scale": f, "w": f, "shift": [sx, sy]}``.
+        Requires IR_CAPABILITY >= 9."""
+        node: Node = {
+            "type": "SdfQuad",
+            "pos": _vec(pos),
+            "field": field,
+            "shading": {
+                "face_color": [int(v) for v in face_color],
+                "face_scale": float(face_scale),
+                "face_w": float(face_w),
+                "alpha": float(alpha),
+                "underlay": underlay,
+            },
+        }
+        return self._add(node)
+
     def splice_root_children(self, other: "IRBuilder") -> None:
         """Append another builder's root nodes into the current container as-is
         (coordinates are absolute in both scenes — used to merge a pre-built

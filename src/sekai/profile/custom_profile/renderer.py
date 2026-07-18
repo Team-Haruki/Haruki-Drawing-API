@@ -733,6 +733,45 @@ class TMPDynamicGlyphSDF:
     sample_size: float
 
 
+@dataclass(frozen=True)
+class TMPSdfUnderlayScalars:
+    """Underlay half of the TMP shading scalars; shift is the PRE-ROUNDED integer field
+    translation (banker's rounding, (0, 0) when |offset| < 0.5 short-circuits)."""
+
+    scale: float
+    w: float
+    shift_x: int
+    shift_y: int
+    color: tuple[int, int, int]
+
+
+@dataclass(frozen=True)
+class TMPSdfShadingScalars:
+    """Scalar half of shade_tmp_sdf_field, shared verbatim with the Skia SdfQuad node: the
+    per-pixel evaluators on both backends compute ``clip(field*face_scale - face_w, 0, 1)*alpha``
+    (plus the underlay pass) from exactly these numbers. Scalars stay float64 here; the pixel
+    loops cast them to float32 before the elementwise math (numpy's implicit behavior)."""
+
+    face_scale: float
+    face_w: float
+    alpha: float
+    face_color: tuple[int, int, int]
+    underlay: TMPSdfUnderlayScalars | None
+
+
+@dataclass(frozen=True)
+class DirectSdfQuad:
+    """One decorative-path glyph, ready for per-pixel shading: ``field`` is the L field ALREADY
+    warped to display size (the exact array Pillow would shade), ``(left, top)`` the canvas-space
+    integer paste position, ``scalars`` the frozen shading scalars. This is the renderer half of
+    the Skia ``SdfQuad`` IR node — the node does zero geometric resampling."""
+
+    field: Image.Image
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
 # frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
 # cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
 # atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
@@ -8504,17 +8543,19 @@ class PNGRenderer:
             out[dst_y0:dst_y1, dst_x0:dst_x1] = field[src_y0:src_y1, src_x0:src_x1]
         return out
 
-    def shade_tmp_sdf_field(
+    def tmp_sdf_shading_scalars(
         self,
-        field: Any,
         asset: TMPFontAsset | None,
         style: TextStyle,
         outline_color: str,
         outline_dilate: float,
         sdf_scale: float | None = None,
-    ) -> Image.Image:
-        import numpy as np
-
+    ) -> TMPSdfShadingScalars:
+        """The scalar half of shade_tmp_sdf_field — everything derived from asset/style before the
+        per-pixel math. Single source for the Pillow shader below AND the Skia SdfQuad node
+        (Phase 2): the fragile TMP material semantics live here once; both backends are dumb
+        ``clip(field*scale - w)`` evaluators of these numbers.
+        """
         gradient_scale = asset.gradient_scale if asset is not None else 6.0
         weight_normal = asset.weight_normal if asset is not None else 0.0
         weight_bold = asset.weight_bold if asset is not None else 0.75
@@ -8532,21 +8573,70 @@ class PNGRenderer:
         weight = weight_bold if style.bold else weight_normal
         bias = 0.5 - 0.5 * (weight * 0.25 + face_dilate) * scale_ratio_a
         face_w = bias * face_scale - 0.5
-        face_alpha = np.clip(field * face_scale - face_w, 0.0, 1.0) * style.alpha
 
+        underlay: TMPSdfUnderlayScalars | None = None
         if abs(outline_dilate) > 1.0e-6:
             underlay_scale = raw_scale / (underlay_softness * scale_ratio_c * raw_scale + 1.0)
             underlay_width = outline_dilate * scale_ratio_c * underlay_scale
             underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
             offset_x = -underlay_offset_x * scale_ratio_c * gradient_scale
             offset_y = -underlay_offset_y * scale_ratio_c * gradient_scale
-            underlay_field = self.shifted_sdf_field(field, offset_x, offset_y)
-            underlay_alpha = np.clip(underlay_field * underlay_scale - underlay_w, 0.0, 1.0) * style.alpha
+            # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
+            # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
+            if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
+                shift_x = shift_y = 0
+            else:
+                shift_x = int(round(offset_x))
+                shift_y = int(round(offset_y))
+            underlay = TMPSdfUnderlayScalars(
+                scale=underlay_scale,
+                w=underlay_w,
+                shift_x=shift_x,
+                shift_y=shift_y,
+                color=hex_to_rgba(outline_color, 1.0)[:3],
+            )
+        return TMPSdfShadingScalars(
+            face_scale=face_scale,
+            face_w=face_w,
+            alpha=style.alpha,
+            face_color=hex_to_rgba(style.color, 1.0)[:3],
+            underlay=underlay,
+        )
+
+    def shade_tmp_sdf_field(
+        self,
+        field: Any,
+        asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        sdf_scale: float | None = None,
+    ) -> Image.Image:
+        scalars = self.tmp_sdf_shading_scalars(asset, style, outline_color, outline_dilate, sdf_scale)
+        return self._shade_field_with_scalars(field, scalars)
+
+    def _shade_field_with_scalars(self, field: Any, scalars: TMPSdfShadingScalars) -> Image.Image:
+        """Array half of shade_tmp_sdf_field: per-pixel evaluation of the frozen scalars over a
+        float32 [0, 1] field. Single source for the Pillow shader AND the byte-identity reference
+        for the Skia SdfQuad node — the direct decorative path calls this with DirectSdfQuad."""
+        import numpy as np
+
+        face_alpha = np.clip(field * scalars.face_scale - scalars.face_w, 0.0, 1.0) * scalars.alpha
+
+        if scalars.underlay is not None:
+            u = scalars.underlay
+            # Re-enters shifted_sdf_field with the pre-rounded integer shift: int(round(int)) is
+            # exact and the <0.5 short-circuit maps to shift (0, 0), so behavior is unchanged.
+            underlay_field = self.shifted_sdf_field(field, float(u.shift_x), float(u.shift_y))
+            underlay_alpha = np.clip(underlay_field * u.scale - u.w, 0.0, 1.0) * scalars.alpha
         else:
             underlay_alpha = np.zeros_like(face_alpha)
 
-        face_rgba = np.array(hex_to_rgba(style.color, 1.0), dtype=np.float32) / 255.0
-        underlay_rgba = np.array(hex_to_rgba(outline_color, 1.0), dtype=np.float32) / 255.0
+        face_rgba = np.array([*scalars.face_color, 255], dtype=np.float32) / 255.0
+        # When underlay is None, underlay_alpha is all zeros, so the color term is multiplied out;
+        # (0, 0, 0) keeps the math bit-identical to the pre-split code's unused outline color.
+        underlay_color = scalars.underlay.color if scalars.underlay is not None else (0, 0, 0)
+        underlay_rgba = np.array([*underlay_color, 255], dtype=np.float32) / 255.0
         face_a = face_alpha * face_rgba[3]
         underlay_a = underlay_alpha * underlay_rgba[3]
         out_a = face_a + underlay_a * (1.0 - face_a)
@@ -9550,9 +9640,29 @@ class PNGRenderer:
         item: dict[str, Any],
         object_data: dict[str, Any],
     ) -> bool:
+        import numpy as np
+
+        quads = self.prepare_direct_sdf_quads(item, object_data)
+        if quads is None:
+            return False
+        for quad in quads:
+            field = np.asarray(quad.field, dtype=np.float32) / 255.0
+            canvas.alpha_composite(self._shade_field_with_scalars(field, quad.scalars), (quad.left, quad.top))
+        return True
+
+    def prepare_direct_sdf_quads(
+        self,
+        item: dict[str, Any],
+        object_data: dict[str, Any],
+    ) -> list[DirectSdfQuad] | None:
+        """Layout + per-glyph warp half of the direct decorative path. Returns None when the
+        element is not eligible for the direct path (caller falls back to the raster path);
+        degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
+        Shading/compositing stays out: Pillow feeds each quad to _shade_field_with_scalars, the
+        Skia emitter ships the same quads as SdfQuad IR nodes."""
         text_data = self.generate_text_data(item)
         if not text_data.text.strip():
-            return False
+            return None
         font_name = self.text_fonts.get(text_data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
         font_path = self.font_path_for(font_name)
         mesh_state = self.update_text_mesh_state(text_data, font_name)
@@ -9578,7 +9688,7 @@ class PNGRenderer:
         tokens = parse_tmp_text(text_data.text, base_style)
         lines = split_runs_by_line_with_style(tokens, base_style)
         if not lines:
-            return False
+            return None
 
         line_spacing = mesh_state.tmp_line_spacing
         outline_color = mesh_state.underlay_color
@@ -9624,7 +9734,7 @@ class PNGRenderer:
                 percent_margin_width,
             )
         if native_text_layout is None:
-            return False
+            return None
         mesh_text_layout = self.tmp_native_text_layout(
             layout_lines,
             font_name,
@@ -9637,13 +9747,13 @@ class PNGRenderer:
             percent_margin_width,
         )
         if mesh_text_layout is None:
-            return False
+            return None
 
         native_layout = (
             mesh_text_layout.line_layout if self.text_vertical_mode in {"tmp-native", "tmp-native-top"} else None
         )
         if native_layout is None:
-            return False
+            return None
         total_h = mesh_text_layout.accumulated_line_height
         content_h = native_text_layout.content_height
         pad = self.text_pad(base_size, outline_width)
@@ -9713,21 +9823,16 @@ class PNGRenderer:
             outline_dilate,
         )
         if direct_glyphs is None:
-            return False
+            return None
+        quads: list[DirectSdfQuad] = []
         for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
-            self.composite_tmp_sdf_field_direct(
-                canvas,
-                field_img,
-                glyph_asset,
-                style,
-                outline_color,
-                outline_dilate,
-                local_left,
-                local_top,
-                pivot,
-                object_data,
-            )
-        return True
+            warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+            if warped is None:
+                continue
+            warped_field, left, top = warped
+            scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+            quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
+        return quads
 
     def prepare_tmp_direct_sdf_glyphs(
         self,
@@ -9810,22 +9915,23 @@ class PNGRenderer:
         dy = (local_y - pivot[1]) * sy
         return x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t
 
-    def composite_tmp_sdf_field_direct(
+    def warp_tmp_sdf_field_direct(
         self,
-        canvas: Image.Image,
         field_img: Image.Image,
-        glyph_asset: TMPFontAsset | None,
-        style: TextStyle,
-        outline_color: str,
-        outline_dilate: float,
         local_left: float,
         local_top: float,
         pivot: tuple[float, float],
         object_data: dict[str, Any],
-    ) -> None:
+    ) -> tuple[Image.Image, int, int] | None:
+        """Warp half of the direct decorative path (single source, shared by
+        composite_tmp_sdf_field_direct and prepare_direct_sdf_quads): forward corners via
+        transformed_local_point, det guard, inverse affine, PIL BICUBIC transform with zero fill.
+        Returns ``(warped L field at display size, left, top)`` with the canvas-clamped integer
+        paste position, or None for a degenerate/fully clipped glyph (which is SKIPPED, not an
+        error)."""
         src_w, src_h = field_img.size
         if src_w <= 0 or src_h <= 0:
-            return
+            return None
 
         p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
         p10 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top)
@@ -9838,7 +9944,7 @@ class PNGRenderer:
         top = max(0, math.floor(min(y for _, y in corners)) - pad)
         bottom = min(self.canvas_h, math.ceil(max(y for _, y in corners)) + pad)
         if left >= right or top >= bottom:
-            return
+            return None
 
         m00 = (p10[0] - p00[0]) / src_w
         m10 = (p10[1] - p00[1]) / src_w
@@ -9846,7 +9952,7 @@ class PNGRenderer:
         m11 = (p01[1] - p00[1]) / src_h
         det = m00 * m11 - m01 * m10
         if abs(det) < 1.0e-9:
-            return
+            return None
         inv00 = m11 / det
         inv01 = -m01 / det
         inv10 = -m10 / det
@@ -9862,6 +9968,25 @@ class PNGRenderer:
             Image.Resampling.BICUBIC,
             fillcolor=0,
         )
+        return transformed_field, left, top
+
+    def composite_tmp_sdf_field_direct(
+        self,
+        canvas: Image.Image,
+        field_img: Image.Image,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+    ) -> None:
+        warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+        if warped is None:
+            return
+        transformed_field, left, top = warped
 
         import numpy as np
 
