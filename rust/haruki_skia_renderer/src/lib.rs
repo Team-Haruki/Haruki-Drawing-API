@@ -299,7 +299,9 @@ fn validate_raw_image(
 /// wheel would parse the node, ignore the unknown field, and render a background with **no
 /// triangles at all** — silently, since serde skips unknown fields. Exactly what the handshake
 /// exists to catch.
-pub const IR_CAPABILITY: u32 = 7;
+/// 8 = Transform subtree + catmull_rom sampling; an older wheel fails the scene parse loudly
+/// on the unknown node kind (-> PyValueError -> Python fail-open to Pillow).
+pub const IR_CAPABILITY: u32 = 8;
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {

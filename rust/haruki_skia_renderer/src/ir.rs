@@ -211,7 +211,11 @@ pub enum Fit {
 pub enum ImageSampling {
     Nearest,
     Linear,
+    /// Mitchell cubic (B = C = 1/3). Must NOT be repurposed: `catmull_rom` exists precisely
+    /// because PIL BICUBIC is the Keys a=-0.5 kernel, which is Catmull-Rom, not Mitchell.
     Cubic,
+    /// Catmull-Rom cubic (B = 0, C = 0.5) — matches PIL BICUBIC (Keys a=-0.5).
+    CatmullRom,
     #[default]
     LinearMipmap,
 }
@@ -263,6 +267,7 @@ pub struct ImageShadow {
 #[serde(tag = "type")]
 pub enum Node {
     Group(GroupNode),
+    Transform(TransformNode),
     Rect(RectNode),
     RoundRect(RoundRectNode),
     PieSlice(PieSliceNode),
@@ -274,6 +279,27 @@ pub enum Node {
     TriangleBg(TriangleBgNode),
     ImageBg(ImageBgNode),
     Watermark(WatermarkNode),
+}
+
+/// Affine-transform subtree (requires IR_CAPABILITY >= 8).
+///
+/// `matrix = [a, b, c, d, e, f]` is the FORWARD local->parent mapping:
+/// `x' = a*lx + b*ly + c` ; `y' = d*lx + e*ly + f`. That is the PIL coefficient LAYOUT but
+/// with forward semantics — PIL's `Image.transform` tuple is the inverse mapping, while
+/// Skia's `concat` wants the forward one.
+///
+/// The enclosing group offset applies BEFORE the matrix:
+/// `save() -> translate(off) -> concat(matrix) -> children rendered with off=(0,0) -> restore`.
+///
+/// `SelfImage`, `BlurGlass` and adaptive `Text` are UNSUPPORTED inside a Transform: their
+/// device-bounds backdrop snapshots assume an identity CTM, so under a non-identity matrix
+/// they would capture the wrong canvas region. The only emitter (custom profile) never
+/// nests them.
+#[derive(Debug, Deserialize)]
+pub struct TransformNode {
+    pub matrix: [f32; 6],
+    #[serde(default)]
+    pub children: Vec<Node>,
 }
 
 #[derive(Debug, Deserialize)]

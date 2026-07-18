@@ -283,6 +283,23 @@ class IRBuilder:
         finally:
             self.pop_group()
 
+    @contextmanager
+    def transform(self, matrix: Sequence[float]) -> Iterator[IRBuilder]:
+        """Affine subtree; ``matrix`` = forward local->parent ``[a, b, c, d, e, f]``:
+        ``x' = a*lx + b*ly + c ; y' = d*lx + e*ly + f`` (PIL coefficient LAYOUT, but forward
+        semantics — PIL's ``Image.transform`` tuple is the inverse; Skia ``concat`` wants forward).
+        Children render with the enclosing group offset applied BEFORE the matrix.
+        SelfImage, BlurGlass and adaptive Text are UNSUPPORTED inside a Transform — their
+        device-bounds snapshots assume an identity CTM. Requires IR_CAPABILITY >= 8."""
+        node: Node = {"type": "Transform", "matrix": [float(v) for v in matrix], "children": []}
+        self._add(node)
+        self._stack.append(node["children"])
+        try:
+            yield self
+        finally:
+            assert len(self._stack) > 1, "transform exit without a matching enter"
+            self._stack.pop()
+
     def rect(
         self,
         pos: Vec2,

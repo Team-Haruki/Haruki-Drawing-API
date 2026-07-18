@@ -16,9 +16,9 @@ use pyo3::buffer::PyBuffer;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
-    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, MipmapMode, Paint,
-    PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode,
-    Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
+    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode,
+    Paint, PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob,
+    TileMode, Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
     image_filters, surfaces,
 };
 
@@ -322,6 +322,10 @@ struct Interp {
     mem_images: HashMap<String, MemImage>,
     canvas_w: f32,
     canvas_h: f32,
+    /// True while rendering inside a `Transform` subtree (non-identity CTM). Image draws must
+    /// then sample exactly once through the CTM, so `draw_image_node` skips the pre-rasterized
+    /// raster-cache path (which would resample its integral-size intermediate a second time).
+    in_transform: bool,
     metrics: NativeMetrics,
 }
 
@@ -421,6 +425,7 @@ pub(crate) fn render_scene_inner(
         mem_images,
         canvas_w: scene.canvas.width as f32,
         canvas_h: scene.canvas.height as f32,
+        in_transform: false,
         metrics: NativeMetrics::default(),
     };
     interp.metrics.font_fallbacks = interp.fonts.fallbacks;
@@ -539,6 +544,25 @@ fn render_node(surface: &mut Surface, interp: &mut Interp, off: (f32, f32), node
                 }
                 surface.canvas().restore();
             }
+        }
+        Node::Transform(node) => {
+            // Forward local->parent affine (see `TransformNode`). The enclosing group offset
+            // applies BEFORE the matrix; children then resolve entirely through the CTM, so
+            // they render with a zero offset (passing `off` down too would apply it twice).
+            let canvas = surface.canvas();
+            let save_count = canvas.save();
+            canvas.translate((off.0, off.1));
+            let m = node.matrix;
+            canvas.concat(&Matrix::new_all(
+                m[0], m[1], m[2], m[3], m[4], m[5], 0.0, 0.0, 1.0,
+            ));
+            let was_in_transform = interp.in_transform;
+            interp.in_transform = true;
+            for child in &node.children {
+                render_node(surface, interp, (0.0, 0.0), child);
+            }
+            interp.in_transform = was_in_transform;
+            surface.canvas().restore_to_count(save_count);
         }
         Node::Rect(rect) => render_rect(surface.canvas(), rect, off),
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
@@ -702,6 +726,7 @@ fn image_sampling(mode: ImageSampling) -> SamplingOptions {
         ImageSampling::Nearest => SamplingOptions::default(),
         ImageSampling::Linear => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
         ImageSampling::Cubic => CubicResampler::mitchell().into(),
+        ImageSampling::CatmullRom => CubicResampler::catmull_rom().into(),
         ImageSampling::LinearMipmap => SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
     }
 }
@@ -1052,6 +1077,11 @@ fn collect_image_prewarm_requests<'a>(
         {
             requests.push(ImagePrewarmRequest { node: image, off });
         }
+        // Deliberately do NOT recurse into Transform: a prewarm target size is only meaningful
+        // under identity CTM — under the matrix the device footprint differs from the node's
+        // dst size, and `draw_image_node` skips the raster cache inside a Transform anyway, so
+        // a prewarmed entry could never be consumed.
+        Node::Transform(_) => {}
         _ => {}
     }
 }
@@ -1238,6 +1268,7 @@ fn sampling_key(mode: ImageSampling) -> u8 {
         ImageSampling::Linear => 1,
         ImageSampling::Cubic => 2,
         ImageSampling::LinearMipmap => 3,
+        ImageSampling::CatmullRom => 4,
     }
 }
 
@@ -1273,7 +1304,13 @@ fn draw_image_node(canvas: &Canvas, interp: &mut Interp, node: &ImageNode, off: 
     };
     let sampling = image_sampling(node.sampling);
 
-    if let Some((width, height)) = integral_target(placement.dst) {
+    // Inside a Transform the CTM is non-identity: the raster cache pre-rasterizes at the
+    // integral dst size and drawing that intermediate would resample it a SECOND time through
+    // the CTM. Sampling must happen exactly once (source pixels -> device through the matrix),
+    // so skip the cache and draw the decoded source directly.
+    if interp.in_transform {
+        interp.metrics.raster_cache_bypasses += 1;
+    } else if let Some((width, height)) = integral_target(placement.dst) {
         let src = placement.src.unwrap_or_else(|| {
             Rect::from_xywh(0.0, 0.0, descriptor.width as f32, descriptor.height as f32)
         });
@@ -1962,6 +1999,19 @@ mod tests {
 
         let cubic = image_sampling(ImageSampling::Cubic);
         assert!(cubic.use_cubic);
+        // "cubic" stays Mitchell (B = C = 1/3) — it must not be repurposed as Catmull-Rom.
+        assert_eq!(cubic.cubic.b, 1.0 / 3.0);
+        assert_eq!(cubic.cubic.c, 1.0 / 3.0);
+
+        let catmull = image_sampling(ImageSampling::CatmullRom);
+        assert!(catmull.use_cubic);
+        // Catmull-Rom = Keys a=-0.5 (PIL BICUBIC): B = 0, C = 0.5.
+        assert_eq!(catmull.cubic.b, 0.0);
+        assert_eq!(catmull.cubic.c, 0.5);
+
+        let parsed: ImageSampling =
+            serde_json::from_str("\"catmull_rom\"").expect("catmull_rom variant parses");
+        assert_eq!(parsed, ImageSampling::CatmullRom);
 
         let mipmap = image_sampling(ImageSampling::LinearMipmap);
         assert_eq!(mipmap.filter, FilterMode::Linear);
@@ -1977,7 +2027,10 @@ mod tests {
                 { "type": "Image", "pos": [4, 4], "size": [20, 20], "path": "same.png" }
               ] },
             { "type": "Image", "pos": [4, 28], "size": [24, 20], "path": "same.png" },
-            { "type": "Image", "pos": [30, 28], "size": [20, 20], "path": "mem:runtime" }
+            { "type": "Image", "pos": [30, 28], "size": [20, 20], "path": "mem:runtime" },
+            { "type": "Transform", "matrix": [1, 0, 0, 0, 1, 0], "children": [
+                { "type": "Image", "pos": [0, 0], "size": [20, 20], "path": "other.png" }
+              ] }
             "#,
         );
         let scene: Scene = serde_json::from_str(&json).expect("scene parses");
@@ -1985,6 +2038,8 @@ mod tests {
         let mut requests = Vec::new();
         collect_image_prewarm_requests(&scene.root, (0.0, 0.0), &mut seen, &mut requests);
 
+        // "other.png" sits under a Transform and must NOT be collected: its prewarm target
+        // size is meaningless under a non-identity CTM and the draw path skips the cache.
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].node.path, "same.png");
         assert_eq!(requests[1].node.size, [24.0, 20.0]);
@@ -2028,5 +2083,140 @@ mod tests {
         let json = scene_json("").replace("\"version\": 2", "\"version\": 1");
         let scene: Scene = serde_json::from_str(&json).expect("scene parses");
         assert!(render_scene_inner(&scene, HashMap::new()).is_err());
+    }
+
+    /// A scene without the TriangleBg background (transparent canvas) for pixel-exact tests.
+    fn bare_scene_json(canvas: (i32, i32), root: &str) -> String {
+        format!(
+            r#"{{
+                "version": 2,
+                "assets_base_dir": "/tmp/does-not-matter",
+                "export_format": "png",
+                "fonts": {{ "dir": "/tmp", "default": "missing", "bold": "missing" }},
+                "canvas": {{ "width": {}, "height": {} }},
+                "root": {root}
+            }}"#,
+            canvas.0, canvas.1
+        )
+    }
+
+    /// Decode a rendered PNG back to unpremultiplied RGBA pixels.
+    fn decode_pixels(rendered: &RenderedImage) -> (Vec<u8>, i32, i32) {
+        let data = Data::new_copy(rendered.bytes.as_bytes());
+        let image = Image::from_encoded(data).expect("png decodes");
+        let (w, h) = (image.width(), image.height());
+        let info = ImageInfo::new((w, h), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = w as usize * 4;
+        let mut buf = vec![0u8; row * h as usize];
+        assert!(image.read_pixels(&info, &mut buf, row, (0, 0), CachingHint::Allow));
+        (buf, w, h)
+    }
+
+    #[test]
+    fn transform_parses_and_renders() {
+        let json = scene_json(
+            r#"
+            { "type": "Transform", "matrix": [1, 0, 10, 0, 1, 6], "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [12, 8], "fill": [255, 0, 0, 255] }
+              ] }
+            "#,
+        );
+        let rendered = render(&json);
+        assert_eq!(rendered.width, 64);
+        assert_eq!(
+            &rendered.bytes.as_bytes()[..8],
+            &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
+        );
+    }
+
+    #[test]
+    fn transform_matches_pretransformed_rect() {
+        // A rect under Transform(translate + rotate) must land where the forward corner math
+        // says: corner (lx, ly) -> (a*lx + b*ly + c, d*lx + e*ly + f).
+        let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+        let (tx, ty) = (20.0_f32, 22.0_f32);
+        let (w, h) = (24.0_f32, 10.0_f32);
+        let json = bare_scene_json(
+            (64, 64),
+            &format!(
+                r#"{{ "type": "Transform", "matrix": [{cos}, {nsin}, {tx}, {sin}, {cos}, {ty}],
+                      "children": [
+                        {{ "type": "Rect", "pos": [0, 0], "size": [{w}, {h}],
+                           "fill": [30, 160, 90, 255] }}
+                      ] }}"#,
+                nsin = -sin,
+            ),
+        );
+        let rendered = render(&json);
+        let (pixels, pw, ph) = decode_pixels(&rendered);
+        assert_eq!((pw, ph), (64, 64));
+
+        // Reference: the same geometry via corner math, drawn as an AA path with no CTM.
+        let map = |lx: f32, ly: f32| Point::new(cos * lx - sin * ly + tx, sin * lx + cos * ly + ty);
+        let mut reference = surfaces::raster_n32_premul((64, 64)).expect("surface");
+        let corners = [map(0.0, 0.0), map(w, 0.0), map(w, h), map(0.0, h)];
+        let path = skia_safe::Path::polygon(&corners, true, None, None);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(255, 30, 160, 90));
+        reference.canvas().draw_path(&path, &paint);
+        let snap = reference.image_snapshot();
+        let info = ImageInfo::new((64, 64), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let row = 64 * 4;
+        let mut ref_pixels = vec![0u8; row * 64];
+        assert!(snap.read_pixels(&info, &mut ref_pixels, row, (0, 0), CachingHint::Allow));
+
+        // AA coverage may round differently between the CTM rect and the corner-math path on
+        // boundary pixels; interiors must agree. Tolerate a handful of edge pixels only.
+        let mismatched = pixels
+            .chunks_exact(4)
+            .zip(ref_pixels.chunks_exact(4))
+            .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 16))
+            .count();
+        assert!(mismatched < 20, "mismatched pixels: {mismatched}");
+        // Interior sanity: the transformed rect's center carries the fill color exactly.
+        let center = map(w * 0.5, h * 0.5);
+        let idx = ((center.y.round() as usize) * 64 + center.x.round() as usize) * 4;
+        assert_eq!(&pixels[idx..idx + 4], &[30, 160, 90, 255]);
+    }
+
+    #[test]
+    fn transform_children_see_zero_offset() {
+        // Group offset (7,3) -> translate; matrix scales by 2. The child's own pos must map
+        // through the matrix ONLY (device x = 7 + 2*lx), not be offset by the group again.
+        let json = bare_scene_json(
+            (64, 64),
+            r#"{ "type": "Group", "offset": [7, 3], "size": [64, 64], "children": [
+                 { "type": "Transform", "matrix": [2, 0, 0, 0, 2, 0], "children": [
+                     { "type": "Rect", "pos": [5, 5], "size": [10, 10], "fill": [255, 0, 0, 255] }
+                   ] }
+               ] }"#,
+        );
+        let rendered = render(&json);
+        let (pixels, w, _) = decode_pixels(&rendered);
+        let px = |x: usize, y: usize| {
+            let idx = (y * w as usize + x) * 4;
+            [
+                pixels[idx],
+                pixels[idx + 1],
+                pixels[idx + 2],
+                pixels[idx + 3],
+            ]
+        };
+        // Correct placement: rect spans x 17..37, y 13..33.
+        assert_eq!(px(20, 15), [255, 0, 0, 255]);
+        assert_eq!(px(36, 32), [255, 0, 0, 255]);
+        // A double-applied offset would land it at x 31..51, y 19..39 instead.
+        assert_eq!(px(45, 36)[3], 0);
+        // And a dropped matrix (offset-only render) would fill x 12..22, y 8..18.
+        assert_eq!(px(14, 14)[3], 0);
+    }
+
+    #[test]
+    fn unknown_node_kind_fails_parse() {
+        // The loud failure is load-bearing: an older wheel meeting newer IR must fail the whole
+        // scene parse (-> PyValueError -> Python fail-open to Pillow), never skip the node.
+        let json = scene_json(r#"{ "type": "Bogus" }"#);
+        assert!(serde_json::from_str::<Scene>(&json).is_err());
     }
 }
