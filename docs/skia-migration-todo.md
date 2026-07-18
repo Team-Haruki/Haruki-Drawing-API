@@ -133,11 +133,28 @@
 
 - [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
 - [ ] **custom profile**(见可行性文档,渐进 0→2):
-  - [ ] Phase 0(S,纯 Python):进程级 TMP metadata/字形 SDF/load_font 缓存——冷 1.7s → ~0.2-0.5s。
+  - [x] Phase 0(2026-07-18,纯 Python):进程级缓存落地——`custom_profile/cache.py`
+        (BoundedCache + 字形 SDF/轮廓 L2 + sprite/atlas 池 + TMP 表缓存 + 线程本地字体),
+        renderer 五处接线,FreeTypeMetrics 加锁(先于本工作的并发竞态)。微基准
+        (`scripts/bench_custom_profile_glyph_cache.py`,合成 fixture + 真字体):轮廓
+        851ms → **0.02ms**,load_font 24ms → 0.5ms。`/cache/stats` 第六键
+        `custom_profile_caches`;knob 默认开启,归零即回滚。对抗性评审 6 条确认已修:
+        **负缓存只留 L1**(瞬态失败不得在不变签名下毒化进程池,有回归测试钉住)、
+        TMPFontAsset 补 frozen、清扫器假威胁注释纠正。13+1 个新测试;既有 1080 行零改动。
   - [ ] Phase 1(S~M):IR 加 Transform(矩阵)节点,合成层搬 Skia(mem 图 + 原生仿射)。
   - [ ] Phase 2(M):SdfQuad 节点(SkSL/像素循环)+ freetype-rs 度量——甩掉 fontTools 的
         **全进程 GIL 重启风险**(实测确认),文字重卡估 10-40×。
-  - [ ] 前置:从生产拉 tmp-font-assets/{region} + sprite + 真实卡 payload(本地全缺)。
+  - [x] 前置(2026-07-18,大部分落地):**response.json(真实 CN GetAnotherProfileResponse,
+        2 张卡)取代了生产 dump 短窗**。已拉:cn custom_profile 资产 536M + tmp-font-assets 365M
+        + static_images/customprofile(71 sprite,连带发现本地旧目录只有 9 个陈旧文件,已换
+        symlink 指向拉取版)+ sc masterdata 270M + 按清单定向拉的 member_cutout/member_small
+        ×5 bundle 与 honor_0078。`scripts/parity_payloads/gen_custom_profile.py` 从
+        response.json + masterdata 离线重建 Cloud 形态的 `resources`(同名索引内联 + 派生
+        imagePath/cardAssets/profileHonorRequests),**服务路径(masterdata=None)渲染与
+        masterdata 模式 CLI 基线逐字节一致(max_diff=0,两卡)**,解析探针零失败。sweep 四例:
+        custom_profile_card / _collections(pillow-only,有 payload)+ _symbol / _stamps
+        (no-payload,等 dump 钩子采到用这些桶的卡)。
+        采集机制就位:`HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR`/`_PATHS` 中间件原始 body 落盘。
 - [x] mysekai msr_map 多图网格拼接迁 IR(2026-07-13,合并 widget 树 + 双后端 tile 裁剪,Pillow 基线 max_diff=0;drawer.real.py 不进 git,注意与镜像 API 配对)。
 
 ## 🟠 生产化质量项(一次性切换时跳过的计划内容)
