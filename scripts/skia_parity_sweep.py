@@ -206,6 +206,44 @@ CASES: tuple[Case, ...] = (
     ),
     # ---- profile ----
     _case("profile", "profile", "profile", "ProfileRequest"),
+    # ---- custom profile (Pillow-only until the Phase-1 Skia scene lands). Payloads are built by
+    #      scripts/parity_payloads/gen_custom_profile.py from a real profile response
+    #      (response.json) + local masterdata: the Cloud-inlined `resources` index is masterdata
+    #      by other names plus derived asset paths, and the generated fixtures render
+    #      byte-identical to the masterdata-mode CLI baseline (verified max_diff=0). The symbol
+    #      and stamps variants await a captured card that uses them (debug dump hook). ----
+    _case(
+        "custom_profile_card",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render=None,
+    ),
+    _case(
+        "custom_profile_card_collections",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render=None,
+    ),
+    _case(
+        "custom_profile_card_symbol",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render=None,
+    ),
+    _case(
+        "custom_profile_card_stamps",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render=None,
+    ),
     # ---- score ----
     _case("score_control", "score", "score_control", "ScoreControlRequest"),
     _case("score_custom_room", "score", "custom_room_score_control", "CustomRoomScoreRequest"),
