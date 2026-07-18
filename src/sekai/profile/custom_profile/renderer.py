@@ -557,6 +557,16 @@ class PreparedLayer:
 
 
 @dataclass(frozen=True)
+class LayerTransformInputs:
+    layer: Image.Image  # trimmed local raster (before any resize)
+    pivot: tuple[float, float]  # pivot in trimmed-layer coords
+    object_scale: tuple[float, float]  # (1.0, 1.0) when scale_consumed or absent
+    position_scale: tuple[float, float]  # (renderer.position_scale_x, position_scale_y)
+    angle: float  # degrees, rotation_sign already applied
+    anchor: tuple[float, float]  # unity_point(position) — canvas-space anchor
+
+
+@dataclass(frozen=True)
 class RenderedLayer:
     content: NativeContent
     status: str
@@ -5877,13 +5887,12 @@ class PNGRenderer:
     ) -> tuple[Image.Image, tuple[float, float]]:
         return rotate_layer_about_pivot(layer, pivot, angle, premultiply_alpha=self.premultiply_alpha_transforms)
 
-    def prepare_transformed_layer(
+    def layer_transform_inputs(
         self,
         local: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
         object_data: dict[str, Any],
         content_kind: str | None = None,
-        allow_rotation_supersample: bool = False,
-    ) -> PreparedLayer | None:
+    ) -> LayerTransformInputs:
         layer, pivot = local[0], local[1]
         scale_consumed = len(local) >= 3 and bool(local[2])
         if content_kind not in {"general", "honor", "bonds_honor"}:
@@ -5891,7 +5900,31 @@ class PNGRenderer:
         scale = object_data.get("scale", {})
         sx = float(scale.get("x") or 1.0)
         sy = float(scale.get("y") or sx or 1.0)
-        if not scale_consumed and (sx != 1.0 or sy != 1.0):
+        if scale_consumed:
+            sx = 1.0
+            sy = 1.0
+        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
+        anchor = self.unity_point(object_data.get("position", {}))
+        return LayerTransformInputs(
+            layer=layer,
+            pivot=pivot,
+            object_scale=(sx, sy),
+            position_scale=(self.position_scale_x, self.position_scale_y),
+            angle=angle,
+            anchor=anchor,
+        )
+
+    def prepare_transformed_layer(
+        self,
+        local: tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
+        object_data: dict[str, Any],
+        content_kind: str | None = None,
+        allow_rotation_supersample: bool = False,
+    ) -> PreparedLayer | None:
+        inputs = self.layer_transform_inputs(local, object_data, content_kind)
+        layer, pivot = inputs.layer, inputs.pivot
+        sx, sy = inputs.object_scale
+        if sx != 1.0 or sy != 1.0:
             new_w = max(1, round(layer.width * sx))
             new_h = max(1, round(layer.height * sy))
             layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
@@ -5901,14 +5934,15 @@ class PNGRenderer:
         # the offline screenshot target is the normalized profile capture size.
         # Scale the rendered local layer by the same unit-to-pixel ratio before
         # applying the RectTransform rotation, matching the Canvas capture path.
-        if abs(self.position_scale_x - 1.0) >= 1.0e-6 or abs(self.position_scale_y - 1.0) >= 1.0e-6:
-            new_w = max(1, round(layer.width * self.position_scale_x))
-            new_h = max(1, round(layer.height * self.position_scale_y))
+        psx, psy = inputs.position_scale
+        if abs(psx - 1.0) >= 1.0e-6 or abs(psy - 1.0) >= 1.0e-6:
+            new_w = max(1, round(layer.width * psx))
+            new_h = max(1, round(layer.height * psy))
             layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
-            pivot = (pivot[0] * self.position_scale_x, pivot[1] * self.position_scale_y)
+            pivot = (pivot[0] * psx, pivot[1] * psy)
 
-        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
-        x, y = self.unity_point(object_data.get("position", {}))
+        angle = inputs.angle
+        x, y = inputs.anchor
         if self.clip_canvas_transform:
             return self.prepare_canvas_clipped_transformed_layer(layer, pivot, angle, x, y, allow_rotation_supersample)
 
