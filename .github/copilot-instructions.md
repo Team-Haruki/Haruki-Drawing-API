@@ -132,8 +132,10 @@ Notable `drawing.*` keys:
   process pools (see the cache chapter). **On by default**; zero a pair to disable that pool (the rollback knob).
 - `debug_dump_request_dir` / `debug_dump_request_paths` — raw request-body capture for parity fixtures/debugging.
   Off by default; enable via `HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR` + `_PATHS` (comma-separated path-prefix
-  whitelist) for a short window, then unset. (The tmp sweeper only removes files registered with it and never
-  scans directories, so the dump location is unconstrained — a dedicated dir is just tidier.)
+  whitelist) for a short window, then unset. Dumps carry raw player payloads, so the dedicated dir/files are
+  created owner-only (0700/0600) and every write prunes dumps older than 24h from that dir — forgetting to
+  unset the env must not leave bodies on disk indefinitely. (The tmp sweeper never scans directories, so this
+  self-pruning is the only retention the dumps get.)
   The middleware dumps the *raw* bytes precisely because they are the parity fixture format (a route-level dump
   would re-serialize the parsed model).
 - `use_skia_plot` — the Skia gate (default `true`). By convention it is **not** written into `configs.yaml`; flip it with `HARUKI_DRAWING__USE_SKIA_PLOT`. See the Skia chapter below.
@@ -259,7 +261,9 @@ properly: both sides produce response bytes, both start warm, min-of-N, and a `-
 latency.
 
 **The parity sweep renders with the caches OFF.** `skia_parity_sweep.py` calls `bypass_caches()` on
-purpose (honest timings), so an all-green sweep only ever proves that *re-rendering from scratch* is correct — it
+purpose — correctness isolation: a warm cache must never mask a broken re-render path (the sweep measures
+nothing; timings live in `skia_bench.py`) — so an all-green sweep only ever proves that *re-rendering from
+scratch* is correct — it
 says nothing about the path production actually takes, which is a **cache hit**. A key that omits
 something the output depends on serves a different-but-perfectly-valid image and nothing errors.
 `skia_warm_parity.py` is the gate for that: cold reference per case, then two warm passes over every renderable case

@@ -14,7 +14,7 @@
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
 
 **2026-07-19 当前检查点**：IR capability 10；pyo3 已升 0.29.0（两条 Dependabot advisory 的修复版，
-零代码改动）；全量 Ruff 通过，pytest `380 passed / 2 skipped`；冷态 parity 为
+零代码改动）；全量 Ruff 通过，pytest `383 passed / 2 skipped`；冷态 parity 为
 `65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
 `63 ok + 2 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`（`gacha_detail` 加入
 nondeterministic 行列：两次冷渲染隔分钟不一致，是倒计时内容随钟走——warm_fwd == warm_rev ==
