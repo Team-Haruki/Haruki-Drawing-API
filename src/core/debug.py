@@ -325,6 +325,30 @@ def should_reject_for_overload(path: str, inflight: int) -> str | None:
     return None
 
 
+def _dump_request_body(path: str, request_id: str, body: bytes) -> None:
+    """Debug-only raw request capture; never raises, no-op unless configured via env.
+
+    The raw bytes ARE the parity fixture format (the sweep model_validates them), which is why
+    this lives in the middleware and not a route: a route-level dump would re-serialize the
+    parsed model with defaults/aliases applied. Enable with HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR
+    + _PATHS for a short window, collect, then unset (see the custom-profile migration plan).
+    """
+    try:
+        from src.settings import settings
+
+        dump_dir = settings.drawing.debug_dump_request_dir
+        if not dump_dir or not body:
+            return
+        prefixes = [p.strip() for p in settings.drawing.debug_dump_request_paths.split(",") if p.strip()]
+        if not any(path.startswith(prefix) for prefix in prefixes):
+            return
+        dump_dir.mkdir(parents=True, exist_ok=True)
+        slug = path.strip("/").replace("/", "_")
+        (dump_dir / f"{slug}_{int(time.time())}_{request_id}.json").write_bytes(body)
+    except Exception:
+        logger.warning("request body dump failed", exc_info=True)
+
+
 def summarize_request_body(body: bytes, content_type: str | None) -> dict[str, Any]:
     content_type = (content_type or "").strip()
     digest = hashlib.sha256(body).hexdigest()[:16]
@@ -475,6 +499,7 @@ def install_debug_middleware(app: FastAPI) -> None:
             )
             watchdog_task = asyncio.create_task(watchdog.run())
             body = await request.body()
+            _dump_request_body(request.url.path, request_id, body)
             body_summary = summarize_request_body(body, request.headers.get("content-type"))
             focus_summary = extract_debug_request_focus(request.url.path, body, request.headers.get("content-type"))
             start_metrics = snapshot_process_metrics(include_asyncio=True)
