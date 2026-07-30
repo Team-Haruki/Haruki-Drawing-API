@@ -13,7 +13,7 @@ import matplotlib.patheffects as patheffects
 from matplotlib.ticker import FuncFormatter
 from PIL import Image
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,

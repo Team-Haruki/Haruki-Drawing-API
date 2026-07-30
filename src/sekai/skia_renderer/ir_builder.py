@@ -20,6 +20,8 @@ import re
 import threading
 from typing import Any
 
+from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
+
 Color = Sequence[int]
 Vec2 = Sequence[float]
 Node = dict[str, Any]
@@ -71,6 +73,7 @@ def get_pil_font(font_dir: str, name: str, size: float) -> Any:
     calling builder's font map, so a role is not a valid cache key. ``px`` is the integer pixel
     size actually handed to FreeType, so 32.0 and 32.4 share one entry.
     """
+    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
     px = max(1, round(float(size)))
     key = (font_dir, name, px)
     cache = _thread_font_cache()  # no lock: the dict is owned by this thread

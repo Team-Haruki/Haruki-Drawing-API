@@ -10,6 +10,8 @@ from typing import Literal, Self, TypedDict
 
 from PIL import Image, ImageFont
 
+from src.core.pillow_telemetry import PILLOW_TOUCH_IMAGE_DECODE, record_pillow_touch
+
 from .painter import (
     ALIGN_MAP,
     ALIGN_TYPE,
@@ -41,6 +43,7 @@ DEFAULT_SEP = 8
 
 def _open_image_copy(path: str) -> Image.Image:
     """Open image file safely and detach data from file descriptor."""
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
     with Image.open(path) as img:
         img.load()
         return img.copy()

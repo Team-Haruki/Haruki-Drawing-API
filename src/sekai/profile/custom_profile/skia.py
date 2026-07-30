@@ -32,7 +32,8 @@ from typing import Any
 
 from PIL import Image
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
+from src.core.pillow_telemetry import PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER, record_pillow_touch
 from src.sekai.base.utils import run_in_pool
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
@@ -110,6 +111,7 @@ class _SceneAssembler:
         self._direct_layer: Image.Image | None = None
 
     def _mem_ref(self, image: Image.Image) -> str:
+        record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
         rgba = image if image.mode == "RGBA" else image.convert("RGBA")
         key = f"m{len(self.mem_images)}"
         self.mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())

@@ -2,17 +2,17 @@
 
 Successor of the sprint-era ``out/skia-parity-sweep/`` tooling: same mechanism
 (in-process Skia gates forced on, composed caches bypassed, per-endpoint diff
-stats + side-by-side PNG), but driven by the 63 real request bodies produced by
-``scripts/parity_payloads/`` (all pre-validated against the drawing pydantic
-models).
+stats + side-by-side PNG), but driven by 65 real request bodies covering 67
+explicit cases produced by ``scripts/parity_payloads/`` (all captured bodies
+are pre-validated against the drawing pydantic models).
 
 This is a CORRECTNESS gate and nothing else. It does not time anything (see run_case), and it
 renders with the caches OFF (``bypass_caches()``) — so it cannot see a cache that serves a wrong
 image either. Those are ``scripts/skia_bench.py`` and ``scripts/skia_warm_parity.py``.
 
 For every payload the harness:
-    pil     = await compose_X_image(req)            # Pillow ground truth (timed)
-    payload = await try_render_X_payload(req)       # Skia shadow-layer path (timed)
+    pil     = await compose_X_image(req)            # Pillow ground truth
+    payload = await try_render_X_payload(req)       # Skia shadow-layer path
     diff(pil, decode(payload)) -> mean/max/p99/p999 ; save <name>_sbs.png
 
 Result rows: {endpoint, status, size_*, mean, max, p99, p999, sbs, note?, error?}.
@@ -21,12 +21,15 @@ in both directions at once (see run_case). Benchmarking is scripts/skia_bench.py
 Statuses: ok / over-budget / size-mismatch / skia-none /
 pillow-only / pillow-none / pillow-error / skia-error / build-error /
 harness-error / skipped / no-payload.
-(``over-budget``: a Case with an explicit ``budget=(mean, p99)`` whose skia-vs-pillow diff
-exceeds either ceiling; counts as a failure. Cases without a budget are scored as before.)
+(``over-budget``: a Case whose skia-vs-pillow diff exceeds its explicit
+``budget=(mean, p99)`` ceiling; counts as a failure.)
 
-Known deviations (not failures):
+Known deviations (not failures in the default development mode):
 - ``mysekai_*`` (except housing-competition): needs the gitignored
   ``src/sekai/mysekai/drawer.real.py``; the whole domain is ``skipped`` when absent.
+
+``--strict`` is the Pillow-removal gate. It accepts only ``ok`` rows and additionally
+requires complete case/budget/result coverage with no unmapped fixtures.
 
 CAVEAT: when local ``data/`` assets are incomplete, absolute pixel diffs mix
 genuine renderer drift with missing-asset artifacts. Treat the numbers as
@@ -34,6 +37,7 @@ layout/structure parity indicators, not photometric truth.
 
 Run (repo root):
     uv run python scripts/skia_parity_sweep.py [--only name1,name2] [--out-dir out/parity-sweep-real]
+    uv run python scripts/skia_parity_sweep.py --strict [--out-dir out/parity-sweep-real]
 """
 
 from __future__ import annotations
@@ -66,6 +70,7 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 from PIL import Image, ImageChops
 
+from scripts.skia_parity_budgets import PARITY_BUDGETS
 from src.settings import settings
 
 PAYLOAD_DIR = REPO_ROOT / "out" / "parity-payloads"
@@ -76,13 +81,13 @@ MYSEKAI_REAL = "mysekai-real"
 
 # Every cache getter a drawer module may consult before rebuilding. All are
 # monkeypatched to return None so both paths are actually exercised and the
-# timings are honest (composed LRU, composed disk cache, Skia payload cache).
+# both rendering paths are actually exercised (composed LRU, disk cache, Skia payload cache).
 _CACHE_GETTERS = ("get_composed_image_cached", "get_composed_image_disk_cached", "get_skia_payload_cached")
 
 _KNOWN_BLOCKED_PREFIX = "known-blocked"
 
-# Statuses that are expected/benign; anything else counts as a failure, except
-# skia-none rows explicitly annotated as known-blocked.
+# Statuses that remain expected/benign in the default development mode. Strict
+# release mode accepts only "ok".
 _OK_STATUSES = {"ok", "pillow-only", "skipped", "no-payload"}
 
 
@@ -100,7 +105,7 @@ class Case:
     is_list: bool = False
     route_watermark: bool = False  # the route appends a raster watermark footer after compose
     note: str | None = None
-    budget: tuple[float, float] | None = None  # (mean, p99) diff ceiling; exceeding it -> "over-budget"
+    budget: tuple[float, float] | None = None  # None is tolerated only outside --strict.
 
 
 def _case(
@@ -115,7 +120,6 @@ def _case(
     is_list: bool = False,
     route_watermark: bool = False,
     note: str | None = None,
-    budget: tuple[float, float] | None = None,
 ) -> Case:
     return Case(
         name=name,
@@ -128,7 +132,7 @@ def _case(
         is_list=is_list,
         route_watermark=route_watermark,
         note=note,
-        budget=budget,
+        budget=PARITY_BUDGETS.get(name),
     )
 
 
@@ -225,9 +229,8 @@ CASES: tuple[Case, ...] = (
         drawer="src.sekai.profile.custom_profile.drawer",
         try_render_module="src.sekai.profile.custom_profile.skia",
         # Unrotated elements integer-paste the same Pillow-rasterized layers, so the only diff is
-        # LSB compositing rounding (measured rgb max=1, alpha exact); rotated elements would draw
-        # on the relaxed budget instead, but neither captured card carries a rotation.
-        budget=(2.0, 25.0),
+        # LSB compositing rounding (measured rgb max=1, alpha exact); rotated elements use the
+        # shared relaxed custom-profile budget in skia_parity_budgets.py.
     ),
     _case(
         "custom_profile_card_collections",
@@ -236,7 +239,6 @@ CASES: tuple[Case, ...] = (
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
         try_render_module="src.sekai.profile.custom_profile.skia",
-        budget=(2.0, 25.0),
     ),
     _case(
         "custom_profile_card_symbol",
@@ -293,7 +295,7 @@ def setup() -> None:
 
 def bypass_caches(*modules) -> None:
     """Neutralize every composed/disk/Skia-payload cache getter on the given modules
-    so compose() and try_render() always rebuild and the timings are honest."""
+    so compose() and try_render() always rebuild instead of masking output drift."""
     for mod in modules:
         if mod is None:
             continue
@@ -394,7 +396,7 @@ def _load_mysekai_real():
 
 
 async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
-    """Run one endpoint through both paths (each individually timed) and return a row."""
+    """Run one endpoint through both rendering paths and return its parity row."""
     row: dict = {"endpoint": case.name}
     if case.note:
         row["note"] = case.note
@@ -500,13 +502,55 @@ async def _run_one(case: Case, mysekai_real, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _is_failure(row: dict) -> bool:
+def _is_failure(row: dict, *, strict: bool = False) -> bool:
     status = row.get("status", "")
+    if strict:
+        return status != "ok"
     if status in _OK_STATUSES:
         return False
     if status == "skia-none" and str(row.get("note", "")).startswith(_KNOWN_BLOCKED_PREFIX):
         return False
     return True
+
+
+def _strict_gate_issues(rows: list[dict], fixture_names: set[str], only: set[str] | None) -> list[str]:
+    """Return Pillow-removal coverage problems that are not represented by a row status."""
+    issues: list[str] = []
+    case_names = [case.name for case in CASES]
+    case_name_set = set(case_names)
+    duplicate_cases = sorted(name for name, count in Counter(case_names).items() if count > 1)
+    if duplicate_cases:
+        issues.append(f"duplicate CASES entries: {duplicate_cases}")
+
+    missing_budget_entries = sorted(case_name_set - PARITY_BUDGETS.keys())
+    missing_budget_bindings = sorted(case.name for case in CASES if case.budget is None)
+    missing_budgets = sorted(set(missing_budget_entries) | set(missing_budget_bindings))
+    if missing_budgets:
+        issues.append(f"CASES without explicit parity budgets: {missing_budgets}")
+
+    unused_budgets = sorted(PARITY_BUDGETS.keys() - case_name_set)
+    if unused_budgets:
+        issues.append(f"parity budgets without CASES entries: {unused_budgets}")
+
+    unmapped_fixtures = sorted(fixture_names - case_name_set)
+    if unmapped_fixtures:
+        issues.append(f"fixtures without CASES mappings: {unmapped_fixtures}")
+
+    if only is not None:
+        issues.append("--strict requires the full sweep; --only is a development-mode option")
+
+    row_names = [str(row.get("endpoint", "")) for row in rows]
+    duplicate_rows = sorted(name for name, count in Counter(row_names).items() if count > 1)
+    if duplicate_rows:
+        issues.append(f"duplicate result rows: {duplicate_rows}")
+    missing_rows = sorted(case_name_set - set(row_names))
+    if missing_rows:
+        issues.append(f"CASES without result rows: {missing_rows}")
+    unexpected_rows = sorted(set(row_names) - case_name_set)
+    if unexpected_rows:
+        issues.append(f"result rows without CASES entries: {unexpected_rows}")
+
+    return issues
 
 
 def _fmt(value, spec: str = "") -> str:
@@ -539,20 +583,35 @@ _STATUS_ORDER = (
 )
 
 
-def write_summary_md(rows: list[dict], out_dir: Path) -> Path:
+def write_summary_md(
+    rows: list[dict],
+    out_dir: Path,
+    *,
+    strict: bool = False,
+    strict_issues: list[str] | None = None,
+) -> Path:
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         grouped.setdefault(_summary_group_key(row), []).append(row)
 
-    failures = [r for r in rows if _is_failure(r)]
+    failures = [r for r in rows if _is_failure(r, strict=strict)]
     lines = [
         "# Skia parity sweep (real payloads)",
         "",
-        f"Payload dir: `{PAYLOAD_DIR.relative_to(REPO_ROOT)}` | cases: {len(rows)} | failures: {len(failures)}",
+        (
+            f"Payload dir: `{PAYLOAD_DIR.relative_to(REPO_ROOT)}` | mode: "
+            f"{'strict' if strict else 'development'} | cases: {len(rows)} | failures: {len(failures)}"
+        ),
         "",
-        "known-blocked / pillow-only / skipped rows are expected deviations, not failures.",
+        (
+            "Only `ok` rows are accepted in strict mode."
+            if strict
+            else "known-blocked / pillow-only / skipped / no-payload rows are expected deviations, not failures."
+        ),
         "",
     ]
+    if strict_issues:
+        lines.extend(["## Strict coverage issues", "", *[f"- {issue}" for issue in strict_issues], ""])
     order = [s for s in _STATUS_ORDER if s in grouped] + [s for s in grouped if s not in _STATUS_ORDER]
     for status in order:
         group = grouped[status]
@@ -578,7 +637,7 @@ def write_summary_md(rows: list[dict], out_dir: Path) -> Path:
 
 
 async def sweep(only: set[str] | None, out_dir: Path, mysekai_real) -> list[dict]:
-    """Serial on purpose: keeps the two per-case wall-clock timings uncontended."""
+    """Run serially to keep correctness output deterministic and resource use bounded."""
     rows: list[dict] = []
     for case in CASES:
         if only is not None and case.name not in only:
@@ -593,8 +652,13 @@ async def sweep(only: set[str] | None, out_dir: Path, mysekai_real) -> list[dict
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--only", help="comma-separated payload names to run (default: all)")
+    parser.add_argument("--only", help="development-only comma-separated payload names to run (default: all)")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="output directory for results/SBS images")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Pillow-removal gate: require all cases, budgets, fixtures and result rows; accept only status=ok",
+    )
     args = parser.parse_args()
 
     only: set[str] | None = None
@@ -609,7 +673,8 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     on_disk = {p.stem for p in PAYLOAD_DIR.glob("*.json")}
-    for unmapped in sorted(on_disk - {c.name for c in CASES}):
+    unmapped_fixtures = sorted(on_disk - {c.name for c in CASES})
+    for unmapped in unmapped_fixtures:
         print(f"[warn] payload without a case mapping: {unmapped}")  # noqa: T201
 
     try:
@@ -621,18 +686,23 @@ def main() -> int:
         bypass_caches(mysekai_real)
 
     rows = asyncio.run(sweep(only, out_dir, mysekai_real))
+    strict_issues = _strict_gate_issues(rows, on_disk, only) if args.strict else []
 
     results_path = out_dir / "results.json"
     with open(results_path, "w", encoding="utf-8") as fh:
         json.dump({"payload_dir": str(PAYLOAD_DIR), "cases": rows}, fh, ensure_ascii=False, indent=2)
-    summary_path = write_summary_md(rows, out_dir)
+    summary_path = write_summary_md(rows, out_dir, strict=args.strict, strict_issues=strict_issues)
 
     counts = Counter(_summary_group_key(r) for r in rows)
-    failures = sum(1 for r in rows if _is_failure(r))
+    failures = sum(1 for r in rows if _is_failure(r, strict=args.strict))
     print(f"\n=== status counts === {dict(counts)}")  # noqa: T201
-    print(f"failures (excluding known-blocked/pillow-only/skipped): {failures}")  # noqa: T201
+    print(f"failures ({'strict' if args.strict else 'development'} mode): {failures}")  # noqa: T201
+    if strict_issues:
+        print("strict coverage issues:")  # noqa: T201
+        for issue in strict_issues:
+            print(f"  - {issue}")  # noqa: T201
     print(f"results: {results_path}\nsummary: {summary_path}")  # noqa: T201
-    return 0
+    return 1 if failures or strict_issues else 0
 
 
 if __name__ == "__main__":

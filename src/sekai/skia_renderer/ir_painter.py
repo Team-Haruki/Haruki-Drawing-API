@@ -25,6 +25,11 @@ from typing import Any
 
 from PIL import Image
 
+from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_IRPAINTER_MEM_RASTER,
+    PILLOW_TOUCH_IRPAINTER_PIL_IMAGE,
+    record_pillow_touch,
+)
 from src.sekai.base.painter import (
     ALIGN_MAP,
     AdaptiveTextColor,
@@ -181,6 +186,7 @@ class IRPainter(Painter):
         entry = self._mem_by_id.get(id(img))
         if entry is not None and entry[0] is img:
             return f"mem:{entry[1]}"
+        record_pillow_touch(PILLOW_TOUCH_IRPAINTER_MEM_RASTER)
         key = f"m{len(self._mem_images)}"
         rgba = img if img.mode == "RGBA" else img.convert("RGBA")
         self._mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
@@ -188,6 +194,10 @@ class IRPainter(Painter):
         return f"mem:{key}"
 
     def _image_ref(self, img: Any) -> str:
+        if isinstance(img, Image.Image):
+            # Count the boundary even when a pristine cached PIL image can be replaced with
+            # its asset path. That request still depends on Pillow producing the source object.
+            record_pillow_touch(PILLOW_TOUCH_IRPAINTER_PIL_IMAGE)
         if isinstance(img, EncodedImageRef):
             entry = self._mem_by_id.get(id(img))
             if entry is not None and entry[0] is img:

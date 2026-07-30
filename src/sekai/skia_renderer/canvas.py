@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from src.core.debug import set_render_backend
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.triangle_bg import background_hour
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.ir_builder import IRBuilder

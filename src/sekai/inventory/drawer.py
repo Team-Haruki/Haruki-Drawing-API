@@ -3,7 +3,7 @@ import logging
 
 from PIL import Image
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_watermark, roundrect_bg
 from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, get_font, get_text_size
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit

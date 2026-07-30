@@ -21,6 +21,7 @@ from PIL.ImageFont import ImageFont as Font
 from pilmoji import Pilmoji, getsize as getsize_emoji
 from pilmoji.source import BaseSource, GoogleEmojiSource
 
+from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
 from src.settings import (
     DEFAULT_BOLD_FONT,  # noqa: F401
     DEFAULT_EMOJI_FONT,  # noqa: F401
@@ -424,6 +425,7 @@ def _measure_bbox(font: Font, text: str) -> tuple[int, int, int, int]:
 
 
 def get_text_size(font: Font, text: str) -> Size:
+    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
     if emoji.emoji_count(text) > 0:
         key = (_font_key(font), text)
         cached = _text_emoji_size_cache.get(key)
@@ -438,6 +440,7 @@ def get_text_size(font: Font, text: str) -> Size:
 
 
 def get_text_offset(font: Font, text: str) -> Position:
+    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
     bbox = _measure_bbox(font, text)
     return bbox[0], bbox[1]
 

@@ -1,5 +1,6 @@
 import asyncio
 from collections import OrderedDict
+import contextvars
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -19,6 +20,12 @@ from uuid import uuid4
 from PIL import Image, ImageDraw, ImageFont
 
 from src.core.debug import current_request_context, snapshot_process_metrics
+from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_IMAGE_DECODE,
+    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
+    PILLOW_TOUCH_PLACEHOLDER,
+    record_pillow_touch,
+)
 from src.settings import (
     ASSETS_BASE_DIR,
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
@@ -96,6 +103,7 @@ class EncodedImageRef:
 
 def get_encoded_image_ref(data: bytes) -> EncodedImageRef:
     """Wrap encoded image bytes into an :class:`EncodedImageRef` (header probe only)."""
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
     with Image.open(io.BytesIO(data)) as probe:
         return EncodedImageRef(data=data, size=probe.size, mode=probe.mode)
 
@@ -189,6 +197,7 @@ async def get_img_from_path(
 
 
 def _open_image_copy(path: Path) -> Image.Image:
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
     with Image.open(path) as img:
         img.load()
         return img.copy()
@@ -342,6 +351,7 @@ def _build_missing_placeholder_image(variant: str) -> Image.Image:
 
 
 def _get_missing_placeholder_image(path: str | None) -> Image.Image:
+    record_pillow_touch(PILLOW_TOUCH_PLACEHOLDER)
     variant = _guess_missing_placeholder_variant(path)
     with _missing_placeholder_lock:
         cached = _missing_placeholder_cache.get(variant)
@@ -1053,6 +1063,7 @@ def resolve_image_source_sync(
             _log_missing_image_once(str(source.path), exc)
             return _get_missing_placeholder_image(str(source.path))
     if isinstance(source, EncodedImageRef):
+        record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
         with Image.open(io.BytesIO(source.data)) as img:
             img.load()
             return img.copy()
@@ -1156,6 +1167,7 @@ def _load_asset_image_ref_cached(
     file_size: int,
 ) -> AssetImageRef:
     full_path = Path(full_path_str)
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
     with Image.open(full_path) as image:
         return AssetImageRef(path=full_path, size=image.size, mode=image.mode, mtime_ns=mtime_ns, file_size=file_size)
 
@@ -1468,6 +1480,7 @@ def plt_fig_to_image(fig, transparent=True) -> Image.Image:
     with io.BytesIO() as buf:
         fig.savefig(buf, transparent=transparent, format="png")
         buf.seek(0)
+        record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
         with Image.open(buf) as img:
             img.load()
             return img.copy()
@@ -1646,9 +1659,10 @@ async def run_in_pool(func, *args, pool=None):
         global _default_pool_executor
         pool = _default_pool_executor
     request_ctx = current_request_context()
+    context = contextvars.copy_context()
     started = time.perf_counter()
     try:
-        return await asyncio.get_running_loop().run_in_executor(pool, func, *args)
+        return await asyncio.get_running_loop().run_in_executor(pool, context.run, func, *args)
     finally:
         elapsed = time.perf_counter() - started
         if elapsed >= _SLOW_POOL_TASK_SECONDS:

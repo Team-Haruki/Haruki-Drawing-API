@@ -28,7 +28,7 @@ try:
 except ImportError:  # pragma: no cover - extension not built
     _native = None
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 import src.core.pjsk.profile as route_mod
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.custom_profile.skia import CUSTOM_PROFILE_ENDPOINT, try_render_custom_profile_card_payload
