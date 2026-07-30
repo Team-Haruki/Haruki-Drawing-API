@@ -28,6 +28,7 @@ fn linear_sampling() -> SamplingOptions {
 
 mod interp;
 mod ir;
+mod pillow_resize;
 mod text_metrics;
 
 /// Distinguishes an IR that failed to parse (caller error → ValueError) from one that failed
@@ -326,7 +327,8 @@ fn validate_raw_image(
 /// 12 = UnityImage intrinsic asset placement + isolated UnitySubscene composition.
 /// 13 = asset-backed SlicedImage nine-slice composition.
 /// 14 = Porter-Duff Src/SrcOver blending for Rect.
-pub const IR_CAPABILITY: u32 = 14;
+/// 15 = explicit Pillow-compatible Lanczos raster resize for Image and UnitySubscene.
+pub const IR_CAPABILITY: u32 = 15;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for

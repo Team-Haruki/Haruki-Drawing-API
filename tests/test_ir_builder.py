@@ -110,6 +110,34 @@ def test_unity_subscene_nests_children_and_placement():
     }
 
 
+def test_pillow_lanczos_sampling_is_serialized_explicitly():
+    b = _builder()
+    b.image(
+        "cards/art.png",
+        (-12, -8),
+        (144, 116),
+        fit="cover",
+        sampling="pillow_lanczos",
+        blend="src",
+    )
+    with b.unity_subscene(
+        size=(310, 480),
+        anchor=(78, 121),
+        object_scale=(156 / 310, 242 / 480),
+        post_scale=(1, 1),
+        rotation=0,
+        sampling="pillow_lanczos",
+    ):
+        b.image("cards/frame.png", (0, 0), (310, 480), sampling="pillow_lanczos")
+
+    image, subscene = b.build()["root"]["children"]
+    assert image["sampling"] == "pillow_lanczos"
+    assert image["fit"] == "cover"
+    assert image["blend"] == "src"
+    assert subscene["sampling"] == "pillow_lanczos"
+    assert subscene["children"][0]["sampling"] == "pillow_lanczos"
+
+
 def test_sliced_image_serializes_unity_border_tint_and_alpha():
     b = _builder()
     b.sliced_image(
@@ -237,6 +265,19 @@ def test_extra_fonts_and_watermark():
     assert wm["type"] == "Watermark"
     assert len(wm["lines"]) == 2
     assert wm["lines"][1]["align"] == "right"
+
+
+def test_extra_font_can_be_registered_idempotently_after_builder_creation(tmp_path):
+    b = _builder()
+    font_path = tmp_path / "font.ttf"
+    b.register_extra_font("tmp_dynamic", font_path)
+    b.register_extra_font("tmp_dynamic", font_path)
+
+    assert b.build()["fonts"]["extra"] == {"tmp_dynamic": str(font_path)}
+    with pytest.raises(ValueError, match="two different paths"):
+        b.register_extra_font("tmp_dynamic", tmp_path / "other.ttf")
+    with pytest.raises(ValueError, match="non-empty"):
+        b.register_extra_font(" ", font_path)
 
 
 def test_parse_colored_segments():

@@ -246,6 +246,10 @@ pub enum ImageSampling {
     Cubic,
     /// Catmull-Rom cubic (B = 0, C = 0.5) — matches PIL BICUBIC (Keys a=-0.5).
     CatmullRom,
+    /// Pillow's three-lobed Lanczos filter, including its straight-RGBA8 premultiply,
+    /// fixed-point coefficient, per-axis rounding, and unpremultiply pipeline. This is an
+    /// explicit raster operation rather than a Skia SamplingOptions value.
+    PillowLanczos,
     #[default]
     LinearMipmap,
 }

@@ -3,11 +3,13 @@
 The Unity card JSON remains the layout carrier. Asset-backed ``UnityImage`` and ``SdfShape``
 elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; decorative text
 uses native ``SdfQuad`` shading, and normal/birthday honors reuse the shared ``HonorBadgeBox``
-tree inside an isolated native subscene. Shared General prefabs replay native
-``SlicedImage``/sprite/Text/viewport operations with strict Rust font metrics. Still-unmigrated
-prefab/text/card/bonds-honor content is explicitly classified as hybrid and transported as
-bounded ``mem:`` rasters. A scene coverage report rejects any visible missing/unresolved
-element before Rust runs, so ``backend=skia`` cannot mean "successfully encoded a partial card".
+tree inside an isolated native subscene. Shared General/Card display lists replay native
+``SlicedImage``/sprite/Text/viewport/card operations with strict Rust font metrics and
+Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text.
+Still-unmigrated rich/decorative/static TMP, incomplete HonorDeck, and bonds-honor content is
+explicitly classified as hybrid and transported as bounded ``mem:`` rasters. A scene coverage
+report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
+cannot mean "successfully encoded a partial card".
 
 Honor dimensions come from the native asset-info API. An older wheel falls back to an explicitly
 telemetried Pillow header probe, so compatibility cannot masquerade as native-pure.
@@ -28,6 +30,7 @@ Fail-open: this function NEVER raises — every failure records exactly one outc
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import logging
 import math
@@ -46,6 +49,14 @@ from src.core.pillow_telemetry import (
 from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
 from src.sekai.honor.model import HonorRequest
 from src.sekai.honor.widget import build_honor_badge_canvas
+from src.sekai.profile.custom_profile.card_prefab import (
+    CardAlphaMaskOp,
+    CardCoverArtOp,
+    CardDisplayList,
+    CardRectOp,
+    CardSpriteOp,
+    CardTextOp,
+)
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralFontRef,
@@ -54,10 +65,16 @@ from src.sekai.profile.custom_profile.general_prefab import (
     GeneralTextOp,
     GeneralViewportOp,
     build_general_prefab_display_list,
+    story_favorite_asset_key,
+)
+from src.sekai.profile.custom_profile.honor_deck_prefab import (
+    build_honor_deck_plan,
+    honor_deck_request_candidates,
 )
 from src.sekai.profile.custom_profile.limits import ensure_raster_size
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
+    GENERAL_DECK_CARD_RENDER_SIZE,
     GENERAL_MUSIC_DIFFICULTIES,
     GENERAL_NATIVE_SIZES,
     GENERAL_PREFAB_PALETTE,
@@ -73,6 +90,7 @@ from src.sekai.profile.custom_profile.renderer import (
     unity_tint_rgba,
 )
 from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
+from src.sekai.profile.custom_profile.tmp_text_prefab import build_simple_tmp_text_display_list
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import build_canvas_ir, load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
@@ -120,9 +138,11 @@ _NATIVE_GENERAL_PREFABS = frozenset(
         "CharacterRankAndChallengeStageScroll",
         "MusicClearInfo",
         "MusicClearSelectTabInfo",
+        "StoryFavorite",
     }
 )
 _GENERAL_FONT_IR_NAME = "custom_profile_general"
+_NATIVE_CARD_GENERAL_PREFABS = frozenset({"LeaderCard", "Deck"})
 
 _HONOR_IMAGE_PATH_FIELDS = (
     ("honor_img", "honor_img_path"),
@@ -421,6 +441,47 @@ def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
     )
 
 
+def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Emit the strictly plain TMP subset as source-font Skia Text nodes.
+
+    Python remains the TMP layout oracle; no Pillow/NumPy glyph field, local RGBA surface,
+    resize, or ``mem:`` transport is created. Rich/decorative/effected text returns ``False`` and
+    continues through the existing compatibility path.
+    """
+
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    display_list = build_simple_tmp_text_display_list(renderer, content.item, content.object_data)
+    if display_list is None:
+        return False
+    try:
+        font_path = display_list.font.path.resolve(strict=True)
+    except OSError:
+        return False
+    if not font_path.is_file():
+        return False
+    font_name = f"custom_profile_tmp_{hashlib.sha256(str(font_path).encode()).hexdigest()[:16]}"
+
+    # Register and flush only after the display-list builder has completed every eligibility and
+    # layout check. An unsupported text must leave the scene untouched for the hybrid fallback.
+    scene.builder.register_extra_font(font_name, font_path)
+    scene.flush_direct_layer()
+    with scene.builder.transform(display_list.transform.matrix):
+        for op in display_list.ops:
+            scene.builder.text(
+                op.text,
+                op.pos,
+                "default",
+                op.size,
+                align=op.align,
+                baseline=op.baseline,
+                fill=op.fill,
+                letter_spacing=op.letter_spacing,
+                font_name=font_name,
+            )
+    return True
+
+
 def _relative_asset_path(path) -> str | None:
     try:
         return path.resolve().relative_to(ASSETS_BASE_DIR.resolve()).as_posix()
@@ -555,15 +616,23 @@ class _NativeGeneralTextMetrics:
     ) -> tuple[float, float, float, float]:
         return self.measure(text, font, size)["pillow_bbox"]
 
-    def text_placement(self, op: GeneralTextOp) -> tuple[str, float]:
+    def anchor_placement(
+        self,
+        *,
+        text: str,
+        pos: tuple[float, float],
+        size: int,
+        anchor: str | None,
+        font: GeneralFontRef = GeneralFontRef(),
+    ) -> tuple[str, float]:
         """Translate the Pillow ``draw.text`` anchor into IR alignment + alphabetic baseline."""
 
-        anchor = op.anchor or "la"
+        anchor = anchor or "la"
         if len(anchor) != 2 or anchor[0] not in "lmr" or anchor[1] not in "ams":
             raise ValueError(f"unsupported native General text anchor: {anchor!r}")
         align = {"l": "left", "m": "center", "r": "right"}[anchor[0]]
-        metric = self.measure(op.text, op.font, op.size)
-        y = float(op.pos[1])
+        metric = self.measure(text, font, size)
+        y = float(pos[1])
         if anchor[1] == "a":
             baseline = y + metric["ascent"]
         elif anchor[1] == "m":
@@ -571,6 +640,307 @@ class _NativeGeneralTextMetrics:
         else:
             baseline = y
         return align, baseline
+
+    def text_placement(self, op: GeneralTextOp) -> tuple[str, float]:
+        return self.anchor_placement(
+            text=op.text,
+            pos=op.pos,
+            size=op.size,
+            anchor=op.anchor,
+            font=op.font,
+        )
+
+
+def _existing_native_asset(path: Any) -> tuple[str, str | None]:
+    """Classify an optional filesystem resource before an IR scene is mutated.
+
+    ``outside`` is distinct from ``missing``: an explicitly supplied path that escapes the
+    configured asset root must decline the whole element instead of being silently omitted.
+    """
+
+    if path is None:
+        return "missing", None
+    candidate = Path(path)
+    asset_path = _relative_asset_path(candidate)
+    if asset_path is None:
+        return "outside", None
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return "missing", None
+    if not resolved.is_file():
+        return "missing", None
+    return "ready", asset_path
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCardDisplayList:
+    display_list: CardDisplayList
+    asset_paths: dict[int, str]
+    text_placements: dict[int, tuple[str, float]]
+
+
+def _prepare_native_card_display_list(
+    display_list: CardDisplayList,
+    metrics: _NativeGeneralTextMetrics | None,
+) -> _PreparedCardDisplayList | None:
+    """Resolve every card dependency without opening or decoding an image in Pillow."""
+
+    asset_paths: dict[int, str] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+    for op in display_list.ops:
+        op_key = id(op)
+        if isinstance(op, CardAlphaMaskOp):
+            # No active card path uses the legacy mask hook. Its rounded fallback and
+            # alpha-multiply contract need a dedicated shared native primitive before this
+            # opt-in API can be truthfully classified native.
+            return None
+        if isinstance(op, CardCoverArtOp):
+            status, asset_path = _existing_native_asset(op.path)
+            if status != "ready" or asset_path is None:
+                return None
+            if op.cover_align != (0.5, 0.5):
+                # Render IR Cover currently centers its source crop.
+                return None
+            asset_paths[op_key] = asset_path
+            continue
+        if isinstance(op, CardSpriteOp):
+            status, asset_path = _existing_native_asset(op.resource.path)
+            if status == "outside":
+                return None
+            if status != "ready":
+                fallback_status, asset_path = _existing_native_asset(op.resource.fallback_path)
+                if fallback_status == "outside":
+                    return None
+                status = fallback_status
+            if status == "ready" and asset_path is not None:
+                asset_paths[op_key] = asset_path
+            elif op.resource.resource_policy == "required":
+                return None
+            continue
+        if isinstance(op, CardTextOp):
+            if metrics is None:
+                return None
+            if op.font.name != "general" or not op.font.bold:
+                return None
+            text_placements[op_key] = metrics.anchor_placement(
+                text=op.text,
+                pos=op.pos,
+                size=op.size,
+                anchor=op.anchor,
+            )
+            continue
+        if not isinstance(op, CardRectOp):
+            return None
+        if op.radius > 0.0 and op.blend == "src":
+            translucent = (op.fill is not None and op.fill[3] < 255) or (op.outline is not None and op.outline[3] < 255)
+            if translucent:
+                # RoundRect has no Porter-Duff Src switch yet.
+                return None
+    return _PreparedCardDisplayList(display_list, asset_paths, text_placements)
+
+
+def _emit_prepared_card_ops(scene: _SceneAssembler, prepared: _PreparedCardDisplayList) -> None:
+    """Replay one natural-size card display list into the current isolated surface."""
+
+    display_list = prepared.display_list
+    sampling_map = {
+        "nearest": "nearest",
+        "bilinear": "linear",
+        "bicubic": "catmull_rom",
+        "lanczos": "pillow_lanczos",
+    }
+    for op in display_list.ops:
+        op_key = id(op)
+        if isinstance(op, CardCoverArtOp):
+            cover_w = max(1, round(op.cover_size[0]))
+            cover_h = max(1, round(op.cover_size[1]))
+            crop_left = max(0, round((cover_w - display_list.size[0]) * op.crop_align[0]))
+            crop_top = max(0, round((cover_h - display_list.size[1]) * op.crop_align[1]))
+            scene.builder.image(
+                prepared.asset_paths[op_key],
+                (-crop_left, -crop_top),
+                (cover_w, cover_h),
+                fit="cover",
+                sampling=sampling_map[op.sampling],
+                blend=op.blend,
+            )
+            continue
+        if isinstance(op, CardRectOp):
+            left, top, right, bottom = op.rect
+            if op.round_coordinates:
+                left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+            size = (max(0.0, right - left), max(0.0, bottom - top))
+            if op.radius > 0.0:
+                scene.builder.roundrect(
+                    (left, top),
+                    size,
+                    op.radius,
+                    fill=op.fill,
+                    stroke=op.outline,
+                    stroke_width=op.width,
+                )
+            else:
+                scene.builder.rect(
+                    (left, top),
+                    size,
+                    fill=op.fill,
+                    stroke=op.outline,
+                    stroke_width=op.width,
+                    blend=op.blend,
+                )
+            continue
+        if isinstance(op, CardTextOp):
+            align, baseline = prepared.text_placements[op_key]
+            scene.builder.text(
+                op.text,
+                (float(op.pos[0]), baseline),
+                "bold",
+                float(op.size),
+                align=align,
+                baseline="alphabetic",
+                fill=op.fill,
+                font_name=_GENERAL_FONT_IR_NAME,
+            )
+            continue
+        if not isinstance(op, CardSpriteOp):
+            raise TypeError(f"unsupported native card display-list op: {type(op).__name__}")
+        asset_path = prepared.asset_paths.get(op_key)
+        if asset_path is None:
+            continue
+        left, top, right, bottom = op.rect
+        scene.builder.image(
+            asset_path,
+            (round(left), round(top)),
+            (max(1, round(right - left)), max(1, round(bottom - top))),
+            sampling=sampling_map[op.sampling],
+        )
+
+
+def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
+    """Compose LeaderCard/Deck from their shared CardDisplayList without Pillow pixels."""
+
+    if content.kind != "general" or not content.object_data.get("visible", False):
+        return None
+    resource_for = getattr(renderer, "image_resource_for", None)
+    font_path_for = getattr(renderer, "general_font_path", None)
+    if not callable(resource_for) or not callable(font_path_for):
+        return None
+    resource = resource_for("general", content.item)
+    file_name = str(resource.get("fileName", "") or "")
+    if file_name not in _NATIVE_CARD_GENERAL_PREFABS:
+        return None
+
+    metrics = _NativeGeneralTextMetrics.create(font_path_for())
+    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]] = []
+    if file_name == "LeaderCard":
+        deck = renderer.profile_context.get("userDeck") or {}
+        card_id = int(deck.get("leader", 0) or 0) if isinstance(deck, dict) else 0
+        if card_id <= 0:
+            return None
+        display_list = renderer.build_profile_leader_card_display_list(card_id)
+        if display_list is None:
+            return None
+        prepared = _prepare_native_card_display_list(display_list, metrics)
+        if prepared is None:
+            return None
+        prepared_cards.append((prepared, (0, 0)))
+    else:
+        deck = renderer.profile_context.get("userDeck") or {}
+        if not isinstance(deck, dict):
+            return None
+        card_ids = [int(deck.get(f"member{i}", 0) or 0) for i in range(1, 6)]
+        card_lists: list[CardDisplayList] = []
+        for index, card_id in enumerate(card_ids):
+            display_list = renderer.build_profile_deck_card_display_list(card_id, leader=index == 0)
+            if display_list is None:
+                display_list = renderer.build_empty_profile_deck_card_display_list(GENERAL_DECK_CARD_RENDER_SIZE)
+            card_lists.append(display_list)
+        card_w, card_h = card_lists[0].render_size or card_lists[0].size
+        gap = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - card_w * 5) / 4.0)
+        total_w = card_w * 5 + gap * 4
+        start_x = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - total_w) / 2.0)
+        y = GENERAL_NATIVE_SIZES["Deck"][1] - card_h
+        for index, display_list in enumerate(card_lists):
+            prepared = _prepare_native_card_display_list(display_list, metrics)
+            if prepared is None:
+                return None
+            prepared_cards.append((prepared, (round(start_x + index * (card_w + gap)), round(y))))
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return None
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    outer_size = GENERAL_NATIVE_SIZES[file_name]
+    scene.flush_direct_layer()
+    with scene.builder.unity_subscene(
+        size=outer_size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        for prepared, (left, top) in prepared_cards:
+            display_list = prepared.display_list
+            render_size = display_list.render_size or display_list.size
+            if display_list.size == outer_size and (left, top) == (0, 0):
+                _emit_prepared_card_ops(scene, prepared)
+                continue
+            with scene.builder.unity_subscene(
+                size=display_list.size,
+                anchor=(left + render_size[0] / 2.0, top + render_size[1] / 2.0),
+                object_scale=(
+                    render_size[0] / display_list.size[0],
+                    render_size[1] / display_list.size[1],
+                ),
+                post_scale=(1.0, 1.0),
+                rotation=0.0,
+                sampling={
+                    "nearest": "nearest",
+                    "bilinear": "linear",
+                    "bicubic": "catmull_rom",
+                    "lanczos": "pillow_lanczos",
+                }[display_list.final_sampling],
+            ):
+                _emit_prepared_card_ops(scene, prepared)
+    return "native"
+
+
+def _emit_native_card_member(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Replay full/clip CardContentView from the same CardDisplayList as Pillow."""
+
+    if content.kind != "card_member" or not content.object_data.get("visible", False):
+        return False
+    display_list_for = getattr(renderer, "build_card_member_display_list", None)
+    font_path_for = getattr(renderer, "general_font_path", None)
+    if not callable(display_list_for) or not callable(font_path_for):
+        return False
+    display_list = display_list_for(content.item)
+    if display_list is None or display_list.render_size is not None:
+        return False
+    metrics = _NativeGeneralTextMetrics.create(font_path_for())
+    prepared = _prepare_native_card_display_list(display_list, metrics)
+    if prepared is None:
+        return False
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    scene.flush_direct_layer()
+    with scene.builder.unity_subscene(
+        size=display_list.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        _emit_prepared_card_ops(scene, prepared)
+    return True
 
 
 def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
@@ -604,6 +974,12 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
         for _nickname, character_id in CHARA_LIST:
             if character_id is not None:
                 asset_paths[f"character_rank_icon:{character_id}"] = renderer.chara_icon_path(character_id)
+    elif file_name == "StoryFavorite":
+        stories = renderer.profile_context.get("userStoryFavorites") or []
+        if isinstance(stories, list):
+            for story in stories:
+                if isinstance(story, dict):
+                    asset_paths[story_favorite_asset_key(story)] = renderer.story_favorite_image_path(story)
 
     display_list = build_general_prefab_display_list(
         file_name,
@@ -621,11 +997,14 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
             "music_clear": renderer.general_text("music_clear"),
             "music_full_combo": renderer.general_text("music_full_combo"),
             "music_all_perfect": renderer.general_text("music_all_perfect"),
+            "story_favorite_title": renderer.general_text("story_favorite_title"),
+            "not_set": renderer.general_text("not_set"),
         },
         metrics=metrics,
         palette=GENERAL_PREFAB_PALETTE,
         asset_paths=asset_paths,
         music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
+        story_favorite_resources=renderer.story_favorite_resources,
     )
     if display_list is None:
         return "noop"
@@ -656,12 +1035,21 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                 return None
             resource_paths[op_key] = None
         elif isinstance(op, GeneralAssetImageOp):
-            if op.path is not None:
-                asset_path = _relative_asset_path(Path(op.path))
-                if asset_path is None:
-                    return None
+            if op.fit == "cover" and op.align != (0.5, 0.5):
+                # IR Image cover is deliberately centered. A future non-centered display-list
+                # operation must decline instead of silently changing its crop.
+                return None
+            if op.clip_radius is not None:
+                # Pillow builds a discrete L mask with ImageDraw.rounded_rectangle and multiplies
+                # it into the resized alpha. Skia's anti-aliased rrect clip differs at the edge;
+                # keep banner-backed StoryFavorite hybrid until an exact mask primitive exists.
+                return None
+            asset_status, asset_path = _existing_native_asset(op.path)
+            if asset_status == "ready":
                 resource_paths[op_key] = asset_path
                 continue
+            if asset_status == "outside":
+                return None
             if op.resource_policy == "required":
                 return None
             resource_paths[op_key] = None
@@ -735,11 +1123,15 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                         emit_rounded_rect(op.fallback)
                     continue
                 left, top, right, bottom = op.rect
+                pos = (round(left), round(top))
+                size = (max(1, round(right - left)), max(1, round(bottom - top)))
+                sampling = "pillow_lanczos" if op.sampling == "lanczos" else sampling_map[op.sampling]
                 scene.builder.image(
                     asset_path,
-                    (round(left), round(top)),
-                    (max(1, round(right - left)), max(1, round(bottom - top))),
-                    sampling=sampling_map[op.sampling],
+                    pos,
+                    size,
+                    fit=op.fit,
+                    sampling=sampling,
                 )
                 continue
             if isinstance(op, GeneralViewportOp):
@@ -879,6 +1271,147 @@ def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
     return False
 
 
+def _native_profile_honor_badge(
+    renderer: PNGRenderer,
+    row: dict[str, Any],
+    *,
+    full_size: bool,
+) -> tuple[str, IRBuilder | None]:
+    """Resolve one HonorDeck slot with the exact Pillow request-key precedence.
+
+    ``"ready"`` carries an entirely asset-backed badge tree. ``"missing"`` means every profile
+    and ordinary-honor candidate was absent or lacked its required base. ``"hybrid"`` means a
+    renderable higher-priority request needs a badge mode or supplied resource the native path
+    cannot reproduce. Both non-ready states make the whole deck decline: an expected profile
+    slot may never disappear behind a native-success classification.
+    """
+
+    seq = int(row.get("seq", 0) or 0)
+    honor_id = int(row.get("honorId", 0) or 0)
+    level = int(row.get("honorLevel", 0) or 0)
+    candidates = honor_deck_request_candidates(
+        seq=seq,
+        honor_id=honor_id,
+        honor_level=level,
+        full_size=full_size,
+    )
+    seen_payloads: set[int] = set()
+    request_maps = (
+        (renderer.profile_honor_requests, candidates.profile_keys),
+        (renderer.honor_requests, candidates.ordinary_keys),
+    )
+    for request_map, keys in request_maps:
+        for key in keys:
+            payload = request_map.get(key)
+            if not isinstance(payload, dict) or id(payload) in seen_payloads:
+                continue
+            seen_payloads.add(id(payload))
+            request = HonorRequest.model_validate(payload)
+            if request.is_empty or request.honor_type not in {"normal", "birthday"}:
+                return "hybrid", None
+            source_status, images = _native_honor_sources(renderer, request)
+            if source_status == "unrenderable":
+                continue
+            if source_status != "ready" or images is None:
+                return "hybrid", None
+            canvas = build_honor_badge_canvas(request, images)
+            if canvas is None:
+                continue
+            badge_builder, badge_mem_images = build_canvas_ir(canvas, export_format="png")
+            if badge_mem_images:
+                return "hybrid", None
+            return "ready", badge_builder
+    return "missing", None
+
+
+def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
+    """Compose the profile HonorDeck prefab without a Pillow surface.
+
+    Slot requests are resolved before the scene is mutated. Every row in ``userProfileHonors``
+    is an expected slot: a missing, unsupported, or corrupt slot declines the whole element so
+    scene-completeness telemetry cannot call a partial deck native.
+    """
+
+    if content.kind != "general" or not content.object_data.get("visible", False):
+        return None
+    resource_for = getattr(renderer, "image_resource_for", None)
+    if not callable(resource_for):
+        return None
+    resource = resource_for("general", content.item)
+    if str(resource.get("fileName", "") or "") != "HonorDeck":
+        return None
+    plan = build_honor_deck_plan(renderer.profile_context.get("userProfileHonors", []) or [])
+    if plan is None:
+        return None
+
+    slots: list[tuple[IRBuilder, tuple[int, int, int, int]]] = []
+    for slot in plan.slots:
+        status, badge_builder = _native_profile_honor_badge(
+            renderer,
+            dict(slot.profile_row),
+            full_size=slot.full_size,
+        )
+        if status != "ready":
+            return None
+        assert badge_builder is not None
+        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
+        # size. Native custom-profile does not claim that filter yet; decline rather than
+        # silently substituting Catmull-Rom through a nested subscene.
+        if (badge_builder.width, badge_builder.height) != slot.target_size:
+            return None
+        slots.append(
+            (
+                badge_builder,
+                (
+                    *slot.target_xy,
+                    *slot.target_size,
+                ),
+            )
+        )
+
+    assert plan.panel is not None
+    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
+    background_asset = _relative_asset_path(background_path) if background_path is not None else None
+    if background_path is not None and background_asset is None:
+        return None
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return None
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    size = plan.natural_size
+    scene.flush_direct_layer()
+    with scene.builder.unity_subscene(
+        size=size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        if background_asset is not None:
+            scene.builder.sliced_image(
+                path=background_asset,
+                pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
+                size=(
+                    round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
+                    round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
+                ),
+                border=plan.panel.sliced_border,
+                tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
+            )
+        for badge_builder, (left, top, width, height) in slots:
+            with scene.builder.unity_subscene(
+                size=(badge_builder.width, badge_builder.height),
+                anchor=(left + width / 2.0, top + height / 2.0),
+                object_scale=(1.0, 1.0),
+                post_scale=(1.0, 1.0),
+                rotation=0.0,
+            ):
+                scene.builder.splice_root_children(badge_builder)
+    return "native"
+
+
 def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
     """Lower intrinsic-size ImageContentView assets without opening them in Pillow."""
 
@@ -1011,6 +1544,24 @@ def _build_scene(
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
+        if _emit_native_card_member(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        card_general_result = _emit_native_card_general(renderer, content, scene)
+        if card_general_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        honor_deck_result = _emit_native_honor_deck(renderer, content, scene)
+        if honor_deck_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if honor_deck_result == "noop":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
         general_result = _emit_native_general(renderer, content, scene)
         if general_result == "native":
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
@@ -1021,6 +1572,10 @@ def _build_scene(
             report.observe(content, "noop")
             continue
         if _emit_native_honor(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_simple_tmp_text(renderer, content, scene):
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue

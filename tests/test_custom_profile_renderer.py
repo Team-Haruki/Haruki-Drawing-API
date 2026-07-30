@@ -4,6 +4,7 @@ from PIL import Image
 import pytest
 
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
+from src.sekai.profile.custom_profile.card_prefab import CardAlphaMaskOp, CardCoverArtOp
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralTextOp,
@@ -537,6 +538,63 @@ def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path:
 
     assert candidates[0].endswith("/character/member_small/res010_no034/card_after_training.png")
     assert not any(path.endswith("/character/member/res010_no034/card_after_training.png") for path in candidates)
+
+
+def test_custom_profile_card_display_list_builders_are_stable_pillow_free_and_unmasked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userCards": [{"cardId": 915, "level": 60, "masterRank": 5}]},
+        resources={
+            "cards": {
+                915: {
+                    "id": 915,
+                    "assetBundleName": "res010_no034",
+                    "cardRarityType": "rarity_4",
+                    "attr": "cute",
+                }
+            }
+        },
+    )
+    art_path = tmp_path / "not-decoded-during-build.png"
+
+    def fail_decode(*_args, **_kwargs):
+        raise AssertionError("building a CardDisplayList must not decode Pillow images")
+
+    monkeypatch.setattr(renderer, "open_checked_image", fail_decode)
+    monkeypatch.setattr(renderer, "card_image_path_for_state", lambda *_args, **_kwargs: art_path)
+    monkeypatch.setattr(renderer, "card_member_image_path", lambda _item: art_path)
+    full = renderer.build_small_still_card_display_list(915, art_path, target_size=(940, 530))
+    deck = renderer.build_deck_card_display_list(
+        915,
+        art_path,
+        native_size=(330, 512),
+        art_size=(330.0, 512.0),
+        crop_align_y=0.0,
+        mask_sprite_name=None,
+        render_size=(156, 242),
+    )
+    leader = renderer.build_profile_leader_card_display_list(915)
+    profile_deck = renderer.build_profile_deck_card_display_list(915, leader=True)
+    clip = renderer.build_card_member_display_list({"id": 915, "type": 1, "showMasterRank": True})
+    full_member = renderer.build_card_member_display_list({"id": 915, "type": 2, "showMasterRank": True})
+    placeholder = renderer.build_empty_profile_deck_card_display_list((156, 242))
+
+    assert isinstance(full.ops[0], CardCoverArtOp)
+    assert isinstance(deck.ops[0], CardCoverArtOp)
+    assert deck.render_size == (156, 242)
+    assert not any(isinstance(op, CardAlphaMaskOp) for op in full.ops + deck.ops)
+    assert leader is not None
+    assert leader.size == (940, 530)
+    assert profile_deck is not None
+    assert profile_deck.render_size == (156, 242)
+    assert clip is not None
+    assert clip.size == (328, 520)
+    assert full_member is not None
+    assert full_member.size == (940, 530)
+    assert placeholder.size == (156, 242)
 
 
 def test_custom_profile_leader_card_uses_small_still_path(tmp_path: Path) -> None:

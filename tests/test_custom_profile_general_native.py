@@ -14,6 +14,7 @@ except ImportError:  # pragma: no cover - native CI job exercises this file
     _native = None
 
 from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
     begin_pillow_touch_scope,
     end_pillow_touch_scope,
 )
@@ -28,6 +29,8 @@ PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card.json
 COLLECTIONS_PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card_collections.json"
 SHARED_GENERAL_IDS = {2, 4, 13}
 STATS_GENERAL_IDS = {9, 10, 12}
+CARD_GENERAL_IDS = {3, 5}
+HONOR_DECK_GENERAL_IDS = {6}
 
 
 @pytest.fixture(autouse=True)
@@ -57,6 +60,30 @@ def _stats_general_request() -> CustomProfileCardRenderRequest:
             value.clear()
     layout["generals"] = [
         item for item in layout["generals"] if int(item.get("type", item.get("id", 0)) or 0) in STATS_GENERAL_IDS
+    ]
+    return CustomProfileCardRenderRequest.model_validate(raw)
+
+
+def _card_general_request() -> CustomProfileCardRenderRequest:
+    raw = json.loads(PAYLOAD_FILE.read_text(encoding="utf-8"))
+    layout = raw["card"]["customProfileCard"]
+    for key, value in layout.items():
+        if isinstance(value, list) and key != "generals":
+            value.clear()
+    layout["generals"] = [
+        item for item in layout["generals"] if int(item.get("type", item.get("id", 0)) or 0) in CARD_GENERAL_IDS
+    ]
+    return CustomProfileCardRenderRequest.model_validate(raw)
+
+
+def _honor_deck_general_request() -> CustomProfileCardRenderRequest:
+    raw = json.loads(PAYLOAD_FILE.read_text(encoding="utf-8"))
+    layout = raw["card"]["customProfileCard"]
+    for key, value in layout.items():
+        if isinstance(value, list) and key != "generals":
+            value.clear()
+    layout["generals"] = [
+        item for item in layout["generals"] if int(item.get("type", item.get("id", 0)) or 0) in HONOR_DECK_GENERAL_IDS
     ]
     return CustomProfileCardRenderRequest.model_validate(raw)
 
@@ -243,6 +270,131 @@ def test_stats_general_prefabs_are_native_pixel_pure_and_match_pillow(monkeypatc
     assert mean <= 2.0, mean
     assert p99 <= 25, p99
     assert diff.getchannel("A").getbbox() is None
+
+
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 1,
+    reason="UnitySubscene + native text metrics renderer is required",
+)
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file(), reason="custom profile parity fixture not present")
+def test_card_general_prefabs_are_native_pixel_pure_and_match_pillow(monkeypatch):
+    from src.settings import settings
+
+    request = _card_general_request()
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    captured: dict[str, object] = {}
+
+    class _NativeProxy:
+        ASSET_INFO_CAPABILITY = getattr(_native, "ASSET_INFO_CAPABILITY", 0)
+        TEXT_METRICS_CAPABILITY = getattr(_native, "TEXT_METRICS_CAPABILITY", 0)
+
+        def asset_image_info(self, *args):
+            return _native.asset_image_info(*args)
+
+        def measure_text_batch(self, *args):
+            return _native.measure_text_batch(*args)
+
+        def render_scene(self, ir_json, mem_images):
+            captured["ir_json"] = bytes(ir_json)
+            captured["mem_images"] = dict(mem_images)
+            return _native.render_scene(ir_json, mem_images)
+
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeProxy())
+
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert payload is not None
+    stats = get_render_stats()["endpoints"][skia_mod.CUSTOM_PROFILE_ENDPOINT]
+    assert stats["native_pure"] == 1
+    assert stats["native_hybrid"] == 0
+    assert stats["pillow_touch_reasons"] == {}
+    assert payload.native_metrics["custom_profile_native_elements"] == 2
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert payload.native_metrics["custom_profile_mem_images"] == 0
+    assert payload.native_metrics["custom_profile_mem_bytes"] == 0
+    assert captured["mem_images"] == {}
+    assert b"mem:" not in captured["ir_json"]
+
+    scene = json.loads(captured["ir_json"])
+    nodes = list(_walk_nodes(scene["root"]))
+    # LeaderCard has one outer isolated surface; Deck has one outer surface plus five
+    # compose-then-resize member surfaces.
+    assert sum(node["type"] == "UnitySubscene" for node in nodes) == 7
+    assert any(node["type"] == "Rect" and node.get("blend") == "src" for node in nodes)
+    assert all(node["font"]["name"] == "custom_profile_general" for node in nodes if node["type"] == "Text")
+
+    native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    diff = ImageChops.difference(pillow, native)
+    mean, p99 = _rgb_diff_metrics(pillow, native)
+    # The shared display list still names the historical Lanczos stages explicitly. Until the
+    # native Pillow-Lanczos kernel lands, Skia uses Catmull-Rom under this measured fixture gate.
+    assert mean <= 2.0, mean
+    assert p99 <= 30, p99
+    assert diff.getchannel("A").getbbox() is None
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="UnitySubscene-capable native renderer is required",
+)
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file(), reason="custom profile parity fixture not present")
+def test_real_honor_deck_fixture_declines_incomplete_slot_resources_atomically(monkeypatch):
+    from src.settings import settings
+
+    request = _honor_deck_general_request()
+    # The captured fixture has three expected rows but only profile:1. A partial native panel
+    # plus one badge would be a false-completeness bug; the whole 875x200 layer must stay hybrid.
+    assert len(request.profile_context["userProfileHonors"]) == 3
+    assert set(request.resources["profileHonorRequests"]) == {"profile:1"}
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    captured: dict[str, object] = {}
+
+    class _NativeProxy:
+        ASSET_INFO_CAPABILITY = getattr(_native, "ASSET_INFO_CAPABILITY", 0)
+        TEXT_METRICS_CAPABILITY = getattr(_native, "TEXT_METRICS_CAPABILITY", 0)
+
+        def asset_image_info(self, *args):
+            return _native.asset_image_info(*args)
+
+        def measure_text_batch(self, *args):
+            return _native.measure_text_batch(*args)
+
+        def render_scene(self, ir_json, mem_images):
+            captured["ir_json"] = bytes(ir_json)
+            captured["mem_images"] = dict(mem_images)
+            return _native.render_scene(ir_json, mem_images)
+
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeProxy())
+
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert payload is not None
+    stats = get_render_stats()["endpoints"][skia_mod.CUSTOM_PROFILE_ENDPOINT]
+    assert stats["native_pure"] == 0
+    assert stats["native_hybrid"] == 1
+    assert stats["pillow_touch_reasons"] == {PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER: {"renders": 1, "touches": 1}}
+    assert payload.native_metrics["custom_profile_native_elements"] == 0
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 1
+    assert payload.native_metrics["custom_profile_mem_images"] == 1
+    assert payload.native_metrics["custom_profile_mem_bytes"] == 700_000
+    assert len(captured["mem_images"]) == 1
+    assert b"mem:" in captured["ir_json"]
+
+    native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    diff = ImageChops.difference(pillow, native)
+    assert diff.getbbox() is None
 
 
 @pytest.mark.skipif(

@@ -17,12 +17,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol, TypeAlias
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 
 Color = tuple[int, int, int, int]
 Tint = tuple[float, float, float, float] | Color
 Rect = tuple[float, float, float, float]
 Sampling = Literal["nearest", "bilinear", "bicubic", "lanczos"]
+ImageFit = Literal["stretch", "cover"]
 ResourcePolicy = Literal["required", "optional", "fallback"]
 AssetPath = str | Path
 
@@ -104,7 +105,7 @@ class GeneralSpriteOp:
 class GeneralRoundedRectOp:
     rect: Rect
     radius: float
-    fill: Color
+    fill: Color | None
     outline: Color | None = None
     width: int = 1
     round_coordinates: bool = False
@@ -116,10 +117,19 @@ class GeneralAssetImageOp:
     path: AssetPath | None
     rect: Rect
     sampling: Sampling = "lanczos"
+    fit: ImageFit = "stretch"
+    align: tuple[float, float] = (0.5, 0.5)
+    clip_radius: float | None = None
     resource_policy: ResourcePolicy = "optional"
     fallback: GeneralRoundedRectOp | None = None
 
     def __post_init__(self) -> None:
+        if self.fit not in {"stretch", "cover"}:
+            raise ValueError(f"unsupported GeneralContentView image fit: {self.fit}")
+        if not all(0.0 <= value <= 1.0 for value in self.align):
+            raise ValueError("GeneralContentView image alignment must stay inside 0..1")
+        if self.clip_radius is not None and self.clip_radius < 0.0:
+            raise ValueError("GeneralContentView image clip radius cannot be negative")
         if self.resource_policy == "fallback" and self.fallback is None:
             raise ValueError("a fallback image resource needs a fallback operation")
         if self.resource_policy != "fallback" and self.fallback is not None:
@@ -641,6 +651,139 @@ def _vertical_scrollbar_ops(rect: Rect) -> list[GeneralPrefabOp]:
     ]
 
 
+def story_favorite_key(story: Mapping[str, Any]) -> str:
+    """Stable cloud-resource key used by both custom-profile render backends."""
+
+    return f"{story.get('storyType', '')}:{story.get('storyId', '')}"
+
+
+def story_favorite_asset_key(story: Mapping[str, Any]) -> str:
+    """Display-list dependency key for one resolved story banner."""
+
+    return f"story_favorite:{story_favorite_key(story)}"
+
+
+def ordered_story_favorites(stories: list[Any]) -> list[dict[str, Any]]:
+    """Preserve the service's historical share-slot ordering and invalid-row filtering."""
+
+    items = [story for story in stories if isinstance(story, dict)]
+    return sorted(items, key=lambda story: int(story.get("shareNo", story.get("share_no", 9999)) or 9999))
+
+
+def story_favorite_title(
+    story: Mapping[str, Any],
+    story_resources: Mapping[str, Mapping[str, Any]],
+) -> str:
+    resource = story_resources.get(story_favorite_key(story)) or {}
+    title = str(resource.get("title", "") or story.get("comment", "") or "").strip()
+    if title:
+        return title
+    return f"{story.get('storyType', '')} #{story.get('storyId', '')}".strip()
+
+
+def _story_favorite_ops(
+    size: tuple[int, int],
+    profile_context: Mapping[str, Any],
+    labels: Mapping[str, str],
+    metrics: GeneralTextMetrics,
+    palette: GeneralPrefabPalette,
+    asset_paths: Mapping[str, AssetPath | None],
+    story_resources: Mapping[str, Mapping[str, Any]],
+) -> list[GeneralPrefabOp] | None:
+    stories = profile_context.get("userStoryFavorites") or []
+    if not isinstance(stories, list):
+        return None
+
+    ops: list[GeneralPrefabOp] = [
+        _fit_text_op(
+            metrics,
+            (47, 10, 547, 66),
+            labels.get("story_favorite_title", "story_favorite_title"),
+            max_size=30,
+            min_size=18,
+            fill=palette.text,
+        ),
+        GeneralSpriteOp(
+            "bg_base_wh",
+            (40, 66, size[0] - 40, 70),
+            tint=palette.total_line_tint,
+            resource_policy="optional",
+        ),
+    ]
+    if not stories:
+        ops.append(
+            GeneralTextOp(
+                labels.get("not_set", "not_set"),
+                (size[0] / 2.0, size[1] / 2.0),
+                22,
+                palette.text,
+                "mm",
+            )
+        )
+        return ops
+
+    card_width, card_height = 403, 172
+    gap_x, gap_y = 24, 20
+    start_x, start_y = 25, 92
+    stories_in_order = ordered_story_favorites(stories)
+    for index, story in enumerate(stories_in_order):
+        column = index % 2
+        row = index // 2
+        left = start_x + column * (card_width + gap_x)
+        top = start_y + row * (card_height + gap_y)
+        rect = (left, top, left + card_width, top + card_height)
+        asset_key = story_favorite_asset_key(story)
+        banner_path = asset_paths.get(asset_key)
+        if banner_path is not None:
+            ops.extend(
+                (
+                    GeneralAssetImageOp(
+                        asset_key,
+                        banner_path,
+                        rect,
+                        sampling="lanczos",
+                        fit="cover",
+                        align=(0.5, 0.5),
+                        clip_radius=10,
+                        resource_policy="required",
+                    ),
+                    GeneralRoundedRectOp(
+                        rect,
+                        10,
+                        None,
+                        outline=(235, 242, 255, 210),
+                        width=2,
+                        round_coordinates=True,
+                    ),
+                )
+            )
+            continue
+
+        ops.extend(
+            (
+                GeneralSpriteOp(
+                    "bg_base_r16_wh",
+                    rect,
+                    tint=palette.input_tint,
+                    sliced_border=(21, 21, 21, 21),
+                    resource_policy="optional",
+                ),
+                _fit_text_op(
+                    metrics,
+                    (left + 18, top + 12, left + card_width - 18, top + card_height - 12),
+                    story_favorite_title(story, story_resources),
+                    max_size=24,
+                    min_size=13,
+                    fill=palette.text,
+                ),
+            )
+        )
+
+    if len(stories_in_order) > 8:
+        ops.extend(_vertical_scrollbar_ops((size[0] - 23, 92, size[0] - 17, size[1] - 25)))
+    return ops
+
+
 def _character_rank_and_challenge_stage_ops(
     size: tuple[int, int],
     profile_context: Mapping[str, Any],
@@ -1048,6 +1191,7 @@ def build_general_prefab_display_list(
     palette: GeneralPrefabPalette,
     asset_paths: Mapping[str, AssetPath | None] | None = None,
     music_difficulties: tuple[tuple[str, str, Color], ...] = (),
+    story_favorite_resources: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> GeneralPrefabDisplayList | None:
     """Build one supported GeneralContentView display list.
 
@@ -1057,6 +1201,7 @@ def build_general_prefab_display_list(
     """
 
     asset_paths = asset_paths or {}
+    story_favorite_resources = story_favorite_resources or {}
     if file_name == "EditUserName":
         ops = _edit_user_name_ops(size, profile_context, metrics, palette)
     elif file_name == "Comment":
@@ -1089,6 +1234,16 @@ def build_general_prefab_display_list(
         ops = _music_clear_info_ops(size, profile_context, labels, music_difficulties)
     elif file_name == "MusicClearSelectTabInfo":
         ops = _music_clear_select_tab_info_ops(size, profile_context, labels, music_difficulties, palette)
+    elif file_name == "StoryFavorite":
+        ops = _story_favorite_ops(
+            size,
+            profile_context,
+            labels,
+            metrics,
+            palette,
+            asset_paths,
+            story_favorite_resources,
+        )
     else:
         raise ValueError(f"unsupported shared GeneralContentView prefab: {file_name}")
     if ops is None:
@@ -1204,7 +1359,28 @@ class PillowGeneralPrefabAdapter(GeneralTextMetrics):
                     left, top, right, bottom = op.rect
                     width = max(1, round(right - left))
                     height = max(1, round(bottom - top))
-                    resized = source.resize((width, height), self._RESAMPLING[op.sampling])
+                    if op.fit == "cover":
+                        scale = max(width / source.width, height / source.height)
+                        resized = source.resize(
+                            (
+                                max(1, round(source.width * scale)),
+                                max(1, round(source.height * scale)),
+                            ),
+                            self._RESAMPLING[op.sampling],
+                        )
+                        crop_left = round((resized.width - width) * op.align[0])
+                        crop_top = round((resized.height - height) * op.align[1])
+                        resized = resized.crop((crop_left, crop_top, crop_left + width, crop_top + height))
+                    else:
+                        resized = source.resize((width, height), self._RESAMPLING[op.sampling])
+                    if op.clip_radius is not None:
+                        mask = Image.new("L", resized.size, 0)
+                        ImageDraw.Draw(mask).rounded_rectangle(
+                            (0, 0, width - 1, height - 1),
+                            radius=op.clip_radius,
+                            fill=255,
+                        )
+                        resized.putalpha(ImageChops.multiply(resized.getchannel("A"), mask))
                     target.alpha_composite(resized, (round(left), round(top)))
                     continue
                 if isinstance(op, GeneralViewportOp):

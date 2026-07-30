@@ -27,6 +27,23 @@
   scroll 变体：Pillow 和 Skia 消费同一份 General display list；Skia 使用原生字体度量、
   `SlicedImage` 九宫格、asset-backed sprite、IR Text 和递归 viewport/clip。scroll
   依然预检裁剪区外的全部角色行，缺失/损坏素材语义不因裁剪而改变。
+- `LeaderCard`、`Deck` 和直接 `card_member`：Pillow 与 Skia 消费同一份
+  `CardDisplayList`。卡面 cover、frame、属性、稀有度、等级和 master-rank 布局只保留
+  一份；Deck 的每张卡先在自然尺寸子场景完成，再按历史两段 Lanczos 顺序缩放。
+- `StoryFavorite`：Pillow 与 native adapter 消费同一份 General display list；空数据和
+  无横幅 fallback cell 可复用现有原生 sprite/Text。带横幅的请求仍严格 fallback：
+  Lanczos cover 已精确，但 Pillow 离散 L-mask 与 Skia rrect clip 的圆角边缘不同，不能
+  在没有精确 mask primitive 时冒充 pure native。
+- `HonorDeck`：共享 plan 固化 profile/ordinary request-key 优先级、panel 和三个 slot；
+  normal/birthday slot 可复用原生 `HonorBadgeBox`。所有 slot 在写场景前原子预检，禁止只画
+  出一部分 badge。
+- 严格普通 TMP 文本子集：动态源字体、无 rich/decorative、outline、underlay 或材质效果
+  的文本直接发出 IR Text，支持非均匀缩放与旋转，不再建立 RGBA `mem:` layer。超出该子集
+  仍明确走现有 SdfQuad/Pillow 路径。
+- `pillow_lanczos`：Rust 对 asset-backed Image stretch/居中 cover 和零旋转
+  `UnitySubscene` 实现 Pillow 12.3 兼容的 straight-RGBA Lanczos-3；所有源图、中间图、
+  crop、readback、Skia copy 和系数 scratch 都计入场景预算。不支持的组合直接令整场
+  fail-open，不允许静默换成 Catmull-Rom。
 - 最终场景合成与 PNG 编码。
 
 已补安全/正确性契约：
@@ -46,22 +63,22 @@
 
 | fixture | native 元素 | hybrid 元素 | `mem:` | 原始字节 |
 |---|---:|---:|---:|---:|
-| `custom_profile_card` | 4 | 4 | 4 | 4,545,392 |
+| `custom_profile_card` | 7 | 1 | 1 | 700,000 |
 | `custom_profile_card_collections` | 9 | 0 | 0 | 0 |
 
 两张卡均完整、无 missing/unresolved；collections 真实卡已经是 `native_pure`。Pillow
 对拍当前为：
 
-- `custom_profile_card`: mean 0.587, p99 6；
+- `custom_profile_card`: mean 0.813, p99 16；
 - `custom_profile_card_collections`: mean 1.307, p99 37。
 
-基础三项、统计三项和完整 collections 的专项门禁均已达到：
+基础三项、统计三项、Card/Deck、普通 TMP 文本和完整 collections 的专项门禁均已达到：
 
 - `native == visible`、`hybrid=0`、`mem_images=mem_bytes=0`；
 - IR 中没有 `mem:` 引用；
 - 请求级 Pillow touch snapshot 为空。
 
-当前握手为 `IR_CAPABILITY=14`、`ASSET_INFO_CAPABILITY=1`、
+当前握手为 `IR_CAPABILITY=15`、`ASSET_INFO_CAPABILITY=1`、
 `TEXT_METRICS_CAPABILITY=1`。旧 wheel 缺少任一必需能力时必须 fail-open，不能静默省略
 节点或把 Pillow 度量计成 native-pure。
 
@@ -81,34 +98,43 @@ normal/birthday 的 `UnitySubscene` 基础已经完成：先在自然尺寸透�
 - badge 内的 `paste_src` 会清掉主画布上透明角下面的既有像素；
 - 对每个子节点施加 CTM 不等价于“完整 badge 栅格化后再整体缩放”。
 
-剩余工作是把这套 emitter 接入 `HonorDeck` 的 profile slots，并把 bonds 背景/头像的
-resize-then-clip 操作补到共享 Painter/IR。每个 slot 必须声明 required/optional/fallback；
-真实 fixture 的三个 slot 目前只提供一个显式 request，不能把另外两个静默缺失计成完整。
+normal/birthday emitter 已接入 `HonorDeck` profile slots；真实 fixture 的三个 slot 目前仍只
+提供一个显式 request，所以该元素按设计完整 fallback，保留最后一张 700,000 字节 hybrid
+raster。补齐另外两个显式 request 后才允许将这张 fixture 计为 native-pure。
+
+bonds 已有不携带像素的几何 plan，明确表示“整图 resize → destination clip”，不能误写成
+IR `source_rect`（其语义是先 crop source 再 resize）。真正启用前仍有两个阻塞：
+
+- custom-profile 尚无 bonds main/sub 或 HonorDeck bonds slot 的真实 capture，本地也缺部分
+  sub 背景和 mask 素材；
+- frame/word/star 的历史 `paste(source, pos, source)` 是 alpha-lerp，并不等价于现有
+  `src_over`。在新增精确 blend 或用真实 fixture 证明预算前，不能把它冒充 pure native。
 
 ### B. Card Member 与 General Prefab
 
-- 把卡面 crop/cover、圆角 mask、frame、attr、rarity、master-rank、等级文字抽成共享
-  display list，供 Pillow 与 IR 两端消费。
+- 卡面 crop/cover、frame、attr、rarity、master-rank、等级文字已经抽成共享
+  `CardDisplayList` 并由 Pillow/IR 两端消费；当前活动路径没有 mask，迁移没有擅自增加圆角。
 - 基础、统计和 CharacterRank 系列已经完成共享 display list + 原生 replay，第二张真实
   fixture 的 6,541,908 字节 hybrid raster 已全部移除。
-- 第一张真实 fixture 的直接收益顺序是 `LeaderCard`（1,992,800 B）→ `Deck`
-  （757,944 B）→ `HonorDeck`（700,000 B）→ 普通 text（403,920 B）。卡牌布局必须先
-  抽成共享 `CardDisplayList`；不能在 `skia.py` 复制 Pillow composer。
-- 卡牌等级条需要 `Rect blend="src"`，该通用 IR 能力已随 capability 14 完成。剩余关键
-  能力是 cover/overlay/最终 Deck 缩放的 Pillow-compatible Lanczos，以及嵌套离屏 resize。
-- 当前 Leader/full 和 Deck/clip 三条历史路径都没有启用 mask；迁移不能顺手增加圆角，
-  否则两端会一起偏离现有输出。顶层 `card_member` 还没有真实 fixture，启用 native 前
-  必须补 capture。
+- 第一张真实 fixture 的 `LeaderCard`（1,992,800 B）、`Deck`（757,944 B）和普通 text
+  （403,920 B）已经清零；唯一剩余 raster 是资源不完整的 `HonorDeck`（700,000 B）。
+- 卡牌等级条的 `Rect blend="src"` 和精确 Pillow Lanczos 已完成。顶层 `card_member`
+  已有严格的 asset-backed synthetic 门禁，但仍缺真实 capture；发布 native 覆盖声明时
+  必须补 full/clip 各一张真实输入。
+- `StoryFavorite` 已完成共享布局；空数据/fallback-only 可走现有原生 primitives。横幅
+  圆角仍需 Pillow L-mask 兼容 primitive，且现有两张 capture 的 favorites 都为空；还需
+  补 banner、fallback、超过八项滚动三类真实 fixture。
 - 禁止在 drawer 内按 backend 分叉复制布局。
 
 ### C. TMP Text
 
-Python 暂时保留 TMP 解析和布局 oracle，逐步把像素工作移到 Rust：
+普通动态源字体的无效果子集已经直接使用 IR Text。Python 仍保留 TMP 解析和布局 oracle，
+其余像素工作按以下顺序继续移到 Rust：
 
-1. Rust 直接读取 atlas/dynamic glyph，移除 RGBA text layer；
-2. 把 glyph field warp 移入 Rust，移除 A8 `mem:`；
+1. Rust 直接读取 atlas/static/dynamic glyph，覆盖 rich/decorative 和 fallback bucket；
+2. 把 glyph field warp 移入 Rust，移除装饰文字的 A8 `mem:`；
 3. 将字体轮廓/EDT 与 glyph cache 移入 native；
-4. 最后替换 Pillow 字体度量，使普通与装饰 TMP 都不触碰 Pillow。
+4. 最后替换剩余 Pillow 字体度量，使普通与装饰 TMP 都不触碰 Pillow。
 
 每一步都要覆盖 rich tags、空行、alignment、outline/underlay、symbol、emoji、旋转和
 中日文字体。

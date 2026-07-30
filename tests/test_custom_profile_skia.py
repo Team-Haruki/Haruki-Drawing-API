@@ -39,6 +39,7 @@ from src.core.pillow_telemetry import (
     take_pillow_touch_snapshot,
 )
 import src.core.pjsk.profile as route_mod
+from src.sekai.profile.custom_profile.card_prefab import CardCoverArtOp, CardDisplayList
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
@@ -628,6 +629,155 @@ def test_native_honor_declines_when_a_supplied_overlay_is_missing(tmp_path, monk
     assert not report.complete
     assert report.native_elements == 0
     assert report.unresolved_elements == 1
+
+
+def test_native_honor_deck_declines_atomically_when_an_expected_slot_is_missing(monkeypatch):
+    badge = skia_mod._new_builder(180, 80)
+    badge.rect((0, 0), (180, 80), fill=(20, 40, 80, 255))
+    statuses = {1: ("ready", badge), 2: ("missing", None)}
+    monkeypatch.setattr(
+        skia_mod,
+        "_native_profile_honor_badge",
+        lambda renderer, row, *, full_size: statuses[int(row["seq"])],
+    )
+
+    class _Renderer:
+        def __init__(self):
+            self.profile_context = {"userProfileHonors": [{"seq": 1}, {"seq": 2}]}
+
+        def image_resource_for(self, kind, item):
+            return {"fileName": "HonorDeck"}
+
+        def center_rect(self, parent_size, center, size):
+            return PNGRenderer.center_rect(self, parent_size, center, size)
+
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 8 * 1024 * 1024)
+    content = NativeContent(1, "general", {}, {"visible": True})
+
+    assert skia_mod._emit_native_honor_deck(_Renderer(), content, scene) is None
+    assert builder.build()["root"]["children"] == []
+
+
+def test_native_honor_deck_emits_all_expected_slots_only_after_preflight(monkeypatch):
+    def fake_badge(renderer, row, *, full_size):
+        width = 380 if full_size else 180
+        badge = skia_mod._new_builder(width, 80)
+        badge.rect((0, 0), (width, 80), fill=(20 * int(row["seq"]), 40, 80, 255))
+        return "ready", badge
+
+    monkeypatch.setattr(skia_mod, "_native_profile_honor_badge", fake_badge)
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.1
+        position_scale_y = 1.2
+
+        def __init__(self):
+            self.profile_context = {"userProfileHonors": [{"seq": 1}, {"seq": 2}, {"seq": 3}]}
+
+        def image_resource_for(self, kind, item):
+            return {"fileName": "HonorDeck"}
+
+        def center_rect(self, parent_size, center, size):
+            return PNGRenderer.center_rect(self, parent_size, center, size)
+
+        def unity_ui_sprite_path(self, name):
+            return None
+
+        def unity_point(self, position):
+            return 160.0, 90.0
+
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 8 * 1024 * 1024)
+    content = NativeContent(
+        1,
+        "general",
+        {},
+        {
+            "visible": True,
+            "position": {"x": 0, "y": 0},
+            "scale": {"x": 1, "y": 1},
+            "rotation": {"z": 0, "w": 1},
+        },
+    )
+
+    assert skia_mod._emit_native_honor_deck(_Renderer(), content, scene) == "native"
+    outer = builder.build()["root"]["children"][0]
+    assert outer["type"] == "UnitySubscene"
+    assert len([node for node in outer["children"] if node["type"] == "UnitySubscene"]) == 3
+
+
+def test_native_card_member_replays_asset_backed_display_list_without_mem(tmp_path, monkeypatch):
+    art_path = tmp_path / "card.png"
+    Image.new("RGBA", (20, 12), (20, 80, 160, 255)).save(art_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    display_list = CardDisplayList(
+        "full",
+        (20, 10),
+        (CardCoverArtOp(art_path, (20.0, 10.0), blend="src"),),
+    )
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.25
+        position_scale_y = 1.25
+
+        def build_card_member_display_list(self, item):
+            return display_list
+
+        def general_font_path(self):
+            return None
+
+        def unity_point(self, position):
+            return 50.0, 40.0
+
+    builder = skia_mod._new_builder(100, 80)
+    scene = skia_mod._SceneAssembler(builder, (100, 80), 8 * 1024 * 1024)
+    content = NativeContent(
+        1,
+        "card_member",
+        {},
+        {
+            "visible": True,
+            "position": {"x": 0, "y": 0},
+            "scale": {"x": 1, "y": 1},
+            "rotation": {"z": 0, "w": 1},
+        },
+    )
+
+    assert skia_mod._emit_native_card_member(_Renderer(), content, scene)
+    assert scene.mem_images == {}
+    outer = builder.build()["root"]["children"][0]
+    assert outer["type"] == "UnitySubscene"
+    assert outer["size"] == [20, 10]
+    assert outer["children"][0]["type"] == "Image"
+    assert outer["children"][0]["path"] == "card.png"
+    assert outer["children"][0]["fit"] == "cover"
+    assert outer["children"][0]["blend"] == "src"
+
+
+def test_native_card_member_declines_missing_required_art_without_mutating_scene(tmp_path, monkeypatch):
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    display_list = CardDisplayList(
+        "full",
+        (20, 10),
+        (CardCoverArtOp(tmp_path / "missing.png", (20.0, 10.0), blend="src"),),
+    )
+
+    class _Renderer:
+        def build_card_member_display_list(self, item):
+            return display_list
+
+        def general_font_path(self):
+            return None
+
+    builder = skia_mod._new_builder(100, 80)
+    scene = skia_mod._SceneAssembler(builder, (100, 80), 8 * 1024 * 1024)
+    content = NativeContent(1, "card_member", {}, {"visible": True})
+
+    assert not skia_mod._emit_native_card_member(_Renderer(), content, scene)
+    assert builder.build()["root"]["children"] == []
 
 
 @pytest.mark.skipif(

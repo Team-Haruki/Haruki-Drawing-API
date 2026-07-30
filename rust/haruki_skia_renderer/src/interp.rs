@@ -23,6 +23,7 @@ use skia_safe::{
 };
 
 use crate::ir::*;
+use crate::pillow_resize::{PillowResizeLimits, resize_rgba8_pillow_lanczos};
 use crate::text_metrics::configured_text_font;
 use crate::{
     AssetDescriptor, NativeMetrics, RasterCacheOutcome, RenderedImage, decode_asset_descriptor,
@@ -252,6 +253,16 @@ struct UnityImageSource {
     height: i32,
 }
 
+/// Straight-alpha RGBA8 source retained for the explicit Pillow-Lanczos path.
+///
+/// A premultiplied Skia raster is not interchangeable here: Pillow quantizes its integer
+/// premultiply before filtering and unpremultiplies the result afterwards.
+struct PillowLanczosSource {
+    pixels: Vec<u8>,
+    width: i32,
+    height: i32,
+}
+
 /// Interpreter state shared across the node tree (assets, fonts, canvas dims).
 struct Interp {
     base: PathBuf,
@@ -268,6 +279,8 @@ struct Interp {
     /// Fully decoded straight-RGBA assets for UnityImage. Keeping these separate from the
     /// ordinary lazy image map makes corrupt pixel streams fail during scene preparation.
     unity_image_sources: HashMap<String, UnityImageSource>,
+    /// Fully decoded straight-RGBA assets referenced by Image(sampling="pillow_lanczos").
+    pillow_lanczos_sources: HashMap<String, PillowLanczosSource>,
     max_node_pixels: usize,
     max_scene_bytes: usize,
     /// Bytes retained for the lifetime of this render: the output surface, request-provided
@@ -373,6 +386,19 @@ impl Interp {
             ));
         }
         Ok(())
+    }
+
+    fn available_native_scene_bytes(&self, label: &str) -> Result<usize, String> {
+        let used = self
+            .retained_native_asset_bytes
+            .checked_add(self.active_native_runtime_bytes)
+            .ok_or_else(|| format!("{label} byte count overflow"))?;
+        self.max_scene_bytes.checked_sub(used).ok_or_else(|| {
+            format!(
+                "{label} has no bytes left in scene limit {}",
+                self.max_scene_bytes
+            )
+        })
     }
 
     fn retain_native_asset_bytes(&mut self, byte_count: usize, label: &str) -> Result<(), String> {
@@ -651,6 +677,7 @@ pub(crate) fn render_scene_inner(
         mem_images,
         sdf_shape_sources: HashMap::new(),
         unity_image_sources: HashMap::new(),
+        pillow_lanczos_sources: HashMap::new(),
         max_node_pixels,
         max_scene_bytes,
         retained_native_asset_bytes: retained_base_bytes,
@@ -671,8 +698,10 @@ pub(crate) fn render_scene_inner(
     // (-> PyRuntimeError -> Python fail-open to Pillow), never render a silently wrong image.
     if let Some(background) = &scene.background {
         validate_transform_subtrees(background, false)?;
+        validate_pillow_lanczos_usage(background, false)?;
     }
     validate_transform_subtrees(&scene.root, false)?;
+    validate_pillow_lanczos_usage(&scene.root, false)?;
 
     // SdfQuad field references are validated up front so a bad one fails the WHOLE scene
     // (-> PyRuntimeError -> Python fail-open to Pillow) instead of silently skipping glyphs.
@@ -681,10 +710,12 @@ pub(crate) fn render_scene_inner(
     }
     validate_sdf_quad_fields(&scene.root, &interp.mem_images)?;
     if let Some(background) = &scene.background {
+        prepare_pillow_lanczos_sources(background, &mut interp)?;
         prepare_unity_subscene_assets(background, &mut interp)?;
         prepare_sdf_shape_sources(background, &mut interp)?;
         prepare_unity_image_assets(background, &mut interp)?;
     }
+    prepare_pillow_lanczos_sources(&scene.root, &mut interp)?;
     prepare_unity_subscene_assets(&scene.root, &mut interp)?;
     prepare_sdf_shape_sources(&scene.root, &mut interp)?;
     prepare_unity_image_assets(&scene.root, &mut interp)?;
@@ -874,7 +905,9 @@ fn render_node(
                         &snap,
                         Some((&src_local, skia_safe::canvas::SrcRectConstraint::Strict)),
                         dst,
-                        image_sampling(node.sampling),
+                        skia_image_sampling(node.sampling).ok_or_else(|| {
+                            "SelfImage does not support pillow_lanczos sampling".to_string()
+                        })?,
                         &paint,
                     );
                 }
@@ -1008,16 +1041,19 @@ fn color_of(c: Color4) -> Color {
     Color::from_argb(c[3], c[0], c[1], c[2])
 }
 
-fn image_sampling(mode: ImageSampling) -> SamplingOptions {
+fn skia_image_sampling(mode: ImageSampling) -> Option<SamplingOptions> {
     // Bilinear + mipmaps. For mild downscales (thumbnails ~1.3x) this stays at the base
     // level and matches Pillow's soft BILINEAR character; for large downscales (skill icon
     // ~3x) the mipmaps area-average so it doesn't alias the way plain bilinear does.
     match mode {
-        ImageSampling::Nearest => SamplingOptions::default(),
-        ImageSampling::Linear => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-        ImageSampling::Cubic => CubicResampler::mitchell().into(),
-        ImageSampling::CatmullRom => CubicResampler::catmull_rom().into(),
-        ImageSampling::LinearMipmap => SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+        ImageSampling::Nearest => Some(SamplingOptions::default()),
+        ImageSampling::Linear => Some(SamplingOptions::new(FilterMode::Linear, MipmapMode::None)),
+        ImageSampling::Cubic => Some(CubicResampler::mitchell().into()),
+        ImageSampling::CatmullRom => Some(CubicResampler::catmull_rom().into()),
+        ImageSampling::PillowLanczos => None,
+        ImageSampling::LinearMipmap => {
+            Some(SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear))
+        }
     }
 }
 
@@ -1359,6 +1395,78 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
     }
 }
 
+/// Validate the deliberately narrow Pillow-Lanczos IR contract before any asset access or draw.
+///
+/// The compatibility resizer is a full-raster operation. Letting it flow into an ordinary Skia
+/// sampling call would silently change kernels, so every unsupported placement is a scene error
+/// and therefore reaches Python's fail-open Pillow path.
+fn validate_pillow_lanczos_usage(node: &Node, in_transform: bool) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_pillow_lanczos_usage(child, in_transform)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_pillow_lanczos_usage(child, true)),
+        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => {
+            if in_transform {
+                return Err("pillow_lanczos Image inside Transform is unsupported".to_string());
+            }
+            if !matches!(image.fit, Fit::Stretch | Fit::Cover) {
+                return Err(format!(
+                    "pillow_lanczos Image supports only stretch/cover fit, got {:?}",
+                    image.fit
+                ));
+            }
+            if image.source_rect.is_some() {
+                return Err(
+                    "pillow_lanczos Image does not support source_rect; resize the full raster \
+                     before cropping"
+                        .to_string(),
+                );
+            }
+            if image.tint.is_some()
+                || image.shadow.is_some()
+                || image.blur_sigma.iter().any(|value| *value != 0.0)
+            {
+                return Err(
+                    "pillow_lanczos Image does not support tint, shadow, or blur decorations"
+                        .to_string(),
+                );
+            }
+            if image.path.starts_with("mem:") {
+                return Err(
+                    "pillow_lanczos Image requires an asset-backed straight RGBA8 source"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
+        Node::UnityImage(image) if image.sampling == ImageSampling::PillowLanczos => Err(
+            "UnityImage does not support pillow_lanczos; use a zero-rotation UnitySubscene"
+                .to_string(),
+        ),
+        Node::UnitySubscene(subscene) => {
+            if subscene.sampling == ImageSampling::PillowLanczos {
+                let angle = subscene.rotation % 360.0;
+                if !angle.is_finite() || angle.abs() >= 1.0e-9 {
+                    return Err("pillow_lanczos UnitySubscene requires zero rotation".to_string());
+                }
+            }
+            subscene
+                .children
+                .iter()
+                .try_for_each(|child| validate_pillow_lanczos_usage(child, in_transform))
+        }
+        Node::SelfImage(image) if image.sampling == ImageSampling::PillowLanczos => {
+            Err("SelfImage does not support pillow_lanczos sampling".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 fn validate_sdf_quad_fields(
     node: &Node,
     mem_images: &HashMap<String, MemImage>,
@@ -1401,6 +1509,66 @@ fn validate_sdf_quad_fields(
                     quad.field
                 )),
             }
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Decode every explicit Pillow-Lanczos Image to straight RGBA8 before drawing starts.
+///
+/// General Image nodes are normally fail-soft. This sampling mode is not: a missing/corrupt
+/// source must fail the whole scene so CardDisplayList can retry through its Pillow fallback
+/// rather than returning a card with one silently absent layer.
+fn prepare_pillow_lanczos_sources(node: &Node, interp: &mut Interp) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
+        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => {
+            if interp.pillow_lanczos_sources.contains_key(&image.path) {
+                return Ok(());
+            }
+            let (descriptor, _) = interp.describe_asset(&image.path).map_err(|err| {
+                format!(
+                    "pillow_lanczos Image asset load failed: {} ({err})",
+                    image.path
+                )
+            })?;
+            let source_bytes = validate_strict_asset_size(
+                descriptor.width,
+                descriptor.height,
+                interp.max_node_pixels,
+                "pillow_lanczos Image source",
+            )?;
+            interp.ensure_native_scene_bytes(source_bytes, "pillow_lanczos Image source")?;
+            let started = Instant::now();
+            let (pixels, width, height) =
+                decode_asset_rgba_unpremul(&descriptor).map_err(|err| {
+                    format!(
+                        "pillow_lanczos Image asset decode failed: {} ({err})",
+                        image.path
+                    )
+                })?;
+            interp.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+            interp.retain_native_asset_bytes(source_bytes, "pillow_lanczos Image source")?;
+            interp.pillow_lanczos_sources.insert(
+                image.path.clone(),
+                PillowLanczosSource {
+                    pixels,
+                    width,
+                    height,
+                },
+            );
+            Ok(())
         }
         _ => Ok(()),
     }
@@ -1513,6 +1681,16 @@ fn prepare_strict_subscene_children(node: &Node, interp: &mut Interp) -> Result<
             .children
             .iter()
             .try_for_each(|child| prepare_strict_subscene_children(child, interp)),
+        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => interp
+            .pillow_lanczos_sources
+            .contains_key(&image.path)
+            .then_some(())
+            .ok_or_else(|| {
+                format!(
+                    "pillow_lanczos Image source was not prepared: {}",
+                    image.path
+                )
+            }),
         Node::Image(image) => prepare_strict_image_ref(&image.path, interp),
         Node::SlicedImage(image) => prepare_strict_image_ref(&image.path, interp),
         Node::ImageBg(image) => prepare_strict_image_ref(&image.path, interp),
@@ -2263,7 +2441,8 @@ fn draw_unity_raster(
     let mut paint = Paint::default();
     paint.set_anti_alias(true);
     paint.set_alpha_f(node.alpha.clamp(0.0, 1.0));
-    let sampling = image_sampling(node.sampling);
+    let sampling = skia_image_sampling(node.sampling)
+        .ok_or_else(|| "UnityImage does not support pillow_lanczos sampling".to_string())?;
     let mut resized = image.clone();
     if dimensions.first != (source_width, source_height) {
         resized = draw_source_to_raster(
@@ -2321,6 +2500,146 @@ fn draw_unity_raster(
     canvas.concat(&matrix);
     canvas.draw_image_with_sampling_options(&resized, (0.0, 0.0), sampling, Some(&paint));
     canvas.restore_to_count(save_count);
+    Ok(())
+}
+
+fn read_surface_straight_rgba8(surface: &mut Surface) -> Result<Vec<u8>, String> {
+    let (width, height) = (surface.width(), surface.height());
+    let byte_count = rgba_byte_len(width, height, "pillow_lanczos UnitySubscene readback")?;
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_lanczos UnitySubscene row size overflow".to_string())?;
+    let mut pixels = Vec::new();
+    pixels.try_reserve_exact(byte_count).map_err(|_| {
+        format!("pillow_lanczos UnitySubscene readback allocation rejected: {width}x{height}")
+    })?;
+    pixels.resize(byte_count, 0);
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    if !surface.read_pixels(&info, &mut pixels, row_bytes, (0, 0)) {
+        return Err("failed to read straight RGBA8 UnitySubscene pixels".to_string());
+    }
+    Ok(pixels)
+}
+
+/// Resize a runtime-owned straight RGBA8 buffer and transfer the byte accounting from the old
+/// Vec to the returned Vec. The Pillow resizer accounts for all of its additional scratch through
+/// `available_native_scene_bytes`; no Catmull-Rom draw is an error recovery path.
+fn resize_active_pillow_buffer(
+    interp: &mut Interp,
+    current: Vec<u8>,
+    current_size: (i32, i32),
+    destination_size: (i32, i32),
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    if current_size == destination_size {
+        return Ok(current);
+    }
+    let current_bytes = current.len();
+    let available = interp.available_native_scene_bytes(label)?;
+    let resized = pillow_resize_buffer(
+        &current,
+        current_size,
+        destination_size,
+        interp.max_node_pixels,
+        available,
+        label,
+    )?;
+    let resized_bytes = resized.len();
+    interp.push_native_runtime_bytes(resized_bytes, label)?;
+    drop(current);
+    interp.pop_native_runtime_bytes(current_bytes);
+    Ok(resized)
+}
+
+fn draw_pillow_lanczos_unity_subscene(
+    canvas: &Canvas,
+    interp: &mut Interp,
+    sub_surface: &mut Surface,
+    node: &UnitySubsceneNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let source_size = (sub_surface.width(), sub_surface.height());
+    let placement = UnityImageNode {
+        path: "<pillow-lanczos-unity-subscene>".to_string(),
+        anchor: node.anchor,
+        object_scale: node.object_scale,
+        post_scale: node.post_scale,
+        rotation: node.rotation,
+        sampling: node.sampling,
+        alpha: node.alpha,
+    };
+    validate_unity_image(&placement)?;
+    let dimensions = unity_image_dimensions(
+        &placement,
+        source_size.0,
+        source_size.1,
+        interp.max_node_pixels,
+    )?;
+    let source_bytes = rgba_byte_len(
+        source_size.0,
+        source_size.1,
+        "pillow_lanczos UnitySubscene readback",
+    )?;
+    interp.push_native_runtime_bytes(source_bytes, "pillow_lanczos UnitySubscene readback")?;
+    let mut pixels = read_surface_straight_rgba8(sub_surface)?;
+    let mut pixel_size = source_size;
+
+    if dimensions.first != pixel_size {
+        pixels = resize_active_pillow_buffer(
+            interp,
+            pixels,
+            pixel_size,
+            dimensions.first,
+            "pillow_lanczos UnitySubscene object-scale resize",
+        )?;
+        pixel_size = dimensions.first;
+    }
+    if dimensions.final_size != pixel_size {
+        pixels = resize_active_pillow_buffer(
+            interp,
+            pixels,
+            pixel_size,
+            dimensions.final_size,
+            "pillow_lanczos UnitySubscene post-scale resize",
+        )?;
+        pixel_size = dimensions.final_size;
+    }
+
+    let pixel_bytes = pixels.len();
+    interp
+        .push_native_runtime_bytes(pixel_bytes, "pillow_lanczos UnitySubscene Skia raster copy")?;
+    let info = ImageInfo::new(pixel_size, ColorType::RGBA8888, AlphaType::Unpremul, None);
+    let image = skia_safe::images::raster_from_data(
+        &info,
+        Data::new_copy(&pixels),
+        pixel_size.0 as usize * 4,
+    )
+    .ok_or_else(|| "failed to build pillow_lanczos UnitySubscene raster".to_string())?;
+    drop(pixels);
+    interp.pop_native_runtime_bytes(pixel_bytes);
+
+    let anchor = (node.anchor[0] + off.0, node.anchor[1] + off.1);
+    let pivot_x = source_size.0 as f32 * 0.5 * node.object_scale[0] * node.post_scale[0];
+    let pivot_y = source_size.1 as f32 * 0.5 * node.object_scale[1] * node.post_scale[1];
+    let left = (anchor.0 - pivot_x).round_ties_even();
+    let top = (anchor.1 - pivot_y).round_ties_even();
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false);
+    paint.set_alpha_f(node.alpha.clamp(0.0, 1.0));
+    canvas.draw_image_with_sampling_options(
+        &image,
+        (left, top),
+        SamplingOptions::default(),
+        Some(&paint),
+    );
+    drop(image);
+    interp.pop_native_runtime_bytes(pixel_bytes);
     Ok(())
 }
 
@@ -2386,8 +2705,18 @@ fn draw_unity_subscene(
         interp.strict_asset_depth = previous_strict_asset_depth;
         child_result?;
 
-        let image = sub_surface.image_snapshot();
-        draw_unity_raster(surface.canvas(), interp, &image, &placement, off)
+        if node.sampling == ImageSampling::PillowLanczos {
+            draw_pillow_lanczos_unity_subscene(
+                surface.canvas(),
+                interp,
+                &mut sub_surface,
+                node,
+                off,
+            )
+        } else {
+            let image = sub_surface.image_snapshot();
+            draw_unity_raster(surface.canvas(), interp, &image, &placement, off)
+        }
     })();
     interp.pop_native_runtime_bytes(surface_bytes);
     result
@@ -2580,7 +2909,9 @@ fn collect_image_prewarm_requests<'a>(
             }
         }
         Node::Image(image)
-            if !image.path.starts_with("mem:") && seen.insert(image_prewarm_key(image)) =>
+            if image.sampling != ImageSampling::PillowLanczos
+                && !image.path.starts_with("mem:")
+                && seen.insert(image_prewarm_key(image)) =>
         {
             requests.push(ImagePrewarmRequest { node: image, off });
         }
@@ -2627,7 +2958,7 @@ fn prewarm_image(base: &std::path::Path, request: &ImagePrewarmRequest<'_>) -> I
             src,
             width,
             height,
-            image_sampling(request.node.sampling),
+            skia_image_sampling(request.node.sampling)?,
             sampling_key(request.node.sampling),
         )
         .ok()
@@ -2780,7 +3111,226 @@ fn sampling_key(mode: ImageSampling) -> u8 {
         ImageSampling::Cubic => 2,
         ImageSampling::LinearMipmap => 3,
         ImageSampling::CatmullRom => 4,
+        ImageSampling::PillowLanczos => 5,
     }
+}
+
+fn pillow_resize_buffer(
+    source: &[u8],
+    source_size: (i32, i32),
+    destination_size: (i32, i32),
+    max_node_pixels: usize,
+    available_scene_bytes: usize,
+    label: &str,
+) -> Result<Vec<u8>, String> {
+    let output_bytes = validate_strict_asset_size(
+        destination_size.0,
+        destination_size.1,
+        max_node_pixels,
+        label,
+    )?;
+    if output_bytes > available_scene_bytes {
+        return Err(format!(
+            "{label} needs at least {output_bytes} output bytes; only \
+             {available_scene_bytes} bytes remain in the scene limit"
+        ));
+    }
+    let max_dimension = max_node_pixels.min(i32::MAX as usize).max(1);
+    resize_rgba8_pillow_lanczos(
+        source,
+        usize::try_from(source_size.0).map_err(|_| format!("{label} source width is invalid"))?,
+        usize::try_from(source_size.1).map_err(|_| format!("{label} source height is invalid"))?,
+        usize::try_from(destination_size.0)
+            .map_err(|_| format!("{label} destination width is invalid"))?,
+        usize::try_from(destination_size.1)
+            .map_err(|_| format!("{label} destination height is invalid"))?,
+        PillowResizeLimits::new(output_bytes, available_scene_bytes, max_dimension),
+    )
+    .map_err(|err| format!("{label} failed: {err}"))
+}
+
+fn crop_rgba8(
+    source: &[u8],
+    source_size: (i32, i32),
+    left: i32,
+    top: i32,
+    destination_size: (i32, i32),
+) -> Result<Vec<u8>, String> {
+    let (source_width, source_height) = source_size;
+    let (width, height) = destination_size;
+    if left < 0
+        || top < 0
+        || width <= 0
+        || height <= 0
+        || left
+            .checked_add(width)
+            .is_none_or(|right| right > source_width)
+        || top
+            .checked_add(height)
+            .is_none_or(|bottom| bottom > source_height)
+    {
+        return Err("pillow_lanczos cover crop is outside the resized raster".to_string());
+    }
+    let output_bytes = rgba_byte_len(width, height, "pillow_lanczos cover crop")?;
+    let source_stride = usize::try_from(source_width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_lanczos cover source stride overflow".to_string())?;
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_lanczos cover row size overflow".to_string())?;
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(output_bytes)
+        .map_err(|_| format!("pillow_lanczos cover crop allocation rejected: {width}x{height}"))?;
+    output.resize(output_bytes, 0);
+    for row in 0..height {
+        let source_start = usize::try_from(top + row)
+            .ok()
+            .and_then(|y| y.checked_mul(source_stride))
+            .and_then(|offset| {
+                usize::try_from(left)
+                    .ok()
+                    .and_then(|x| x.checked_mul(4))
+                    .and_then(|x| offset.checked_add(x))
+            })
+            .ok_or_else(|| "pillow_lanczos cover source offset overflow".to_string())?;
+        let destination_start = usize::try_from(row)
+            .ok()
+            .and_then(|row| row.checked_mul(row_bytes))
+            .ok_or_else(|| "pillow_lanczos cover destination offset overflow".to_string())?;
+        output[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&source[source_start..source_start + row_bytes]);
+    }
+    Ok(output)
+}
+
+/// Resize one explicit Image node through Pillow's full-raster Lanczos pipeline.
+///
+/// The returned Vec is registered in `active_native_runtime_bytes`; the caller must pop its
+/// length after it has copied the pixels into the Skia image used for the final integer paste.
+fn rasterize_pillow_lanczos_image(
+    interp: &mut Interp,
+    node: &ImageNode,
+    off: (f32, f32),
+) -> Result<(Vec<u8>, i32, i32, Rect), String> {
+    let source = interp
+        .pillow_lanczos_sources
+        .get(&node.path)
+        .ok_or_else(|| {
+            format!(
+                "pillow_lanczos Image source was not prepared: {}",
+                node.path
+            )
+        })?;
+    let placement = image_placement(source.width, source.height, node, off)
+        .ok_or_else(|| "pillow_lanczos Image has empty placement".to_string())?;
+    let destination_size = integral_target(placement.dst).ok_or_else(|| {
+        "pillow_lanczos Image requires integral destination edges and dimensions".to_string()
+    })?;
+    let source_size = (source.width, source.height);
+
+    let resized_size = match node.fit {
+        Fit::Stretch => destination_size,
+        Fit::Cover => {
+            let scale = (destination_size.0 as f64 / source.width as f64)
+                .max(destination_size.1 as f64 / source.height as f64);
+            let width = (source.width as f64 * scale).round_ties_even().max(1.0);
+            let height = (source.height as f64 * scale).round_ties_even().max(1.0);
+            if !width.is_finite()
+                || !height.is_finite()
+                || width > i32::MAX as f64
+                || height > i32::MAX as f64
+            {
+                return Err("pillow_lanczos cover dimensions overflow".to_string());
+            }
+            (width as i32, height as i32)
+        }
+        _ => {
+            return Err(format!(
+                "pillow_lanczos Image fit {:?} escaped validation",
+                node.fit
+            ));
+        }
+    };
+
+    let available = interp.available_native_scene_bytes("pillow_lanczos Image resize")?;
+    let resized = pillow_resize_buffer(
+        &source.pixels,
+        source_size,
+        resized_size,
+        interp.max_node_pixels,
+        available,
+        "pillow_lanczos Image resize",
+    )?;
+    let resized_bytes = resized.len();
+    interp.push_native_runtime_bytes(resized_bytes, "pillow_lanczos Image resized raster")?;
+
+    if node.fit == Fit::Stretch || resized_size == destination_size {
+        return Ok((
+            resized,
+            destination_size.0,
+            destination_size.1,
+            placement.dst,
+        ));
+    }
+
+    let crop_left = ((resized_size.0 - destination_size.0) as f64 * 0.5).round_ties_even() as i32;
+    let crop_top = ((resized_size.1 - destination_size.1) as f64 * 0.5).round_ties_even() as i32;
+    let crop_bytes = rgba_byte_len(
+        destination_size.0,
+        destination_size.1,
+        "pillow_lanczos cover crop",
+    )?;
+    interp.push_native_runtime_bytes(crop_bytes, "pillow_lanczos cover crop")?;
+    let cropped = crop_rgba8(
+        &resized,
+        resized_size,
+        crop_left,
+        crop_top,
+        destination_size,
+    )?;
+    drop(resized);
+    interp.pop_native_runtime_bytes(resized_bytes);
+    Ok((
+        cropped,
+        destination_size.0,
+        destination_size.1,
+        placement.dst,
+    ))
+}
+
+fn draw_pillow_lanczos_image(
+    canvas: &Canvas,
+    interp: &mut Interp,
+    node: &ImageNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let (pixels, width, height, dst) = rasterize_pillow_lanczos_image(interp, node, off)?;
+    let pixel_bytes = pixels.len();
+    interp.push_native_runtime_bytes(pixel_bytes, "pillow_lanczos Skia raster copy")?;
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let image =
+        skia_safe::images::raster_from_data(&info, Data::new_copy(&pixels), width as usize * 4)
+            .ok_or_else(|| "failed to build pillow_lanczos straight RGBA8 raster".to_string())?;
+    drop(pixels);
+    interp.pop_native_runtime_bytes(pixel_bytes);
+    draw_image_placed(
+        canvas,
+        &image,
+        ImagePlacement { src: None, dst },
+        SamplingOptions::default(),
+        node,
+    );
+    drop(image);
+    interp.pop_native_runtime_bytes(pixel_bytes);
+    Ok(())
 }
 
 fn draw_image_node(
@@ -2789,6 +3339,10 @@ fn draw_image_node(
     node: &ImageNode,
     off: (f32, f32),
 ) -> Result<(), String> {
+    if node.sampling == ImageSampling::PillowLanczos {
+        interp.metrics.raster_cache_bypasses += 1;
+        return draw_pillow_lanczos_image(canvas, interp, node, off);
+    }
     if node.path.starts_with("mem:") {
         interp.metrics.raster_cache_bypasses += 1;
         let Some(image) = interp.load_mem(&node.path) else {
@@ -2805,7 +3359,8 @@ fn draw_image_node(
                 canvas,
                 &image,
                 placement,
-                image_sampling(node.sampling),
+                skia_image_sampling(node.sampling)
+                    .ok_or_else(|| "unhandled pillow_lanczos Image".to_string())?,
                 node,
             );
         }
@@ -2833,7 +3388,8 @@ fn draw_image_node(
     let Some(placement) = image_placement(descriptor.width, descriptor.height, node, off) else {
         return Ok(());
     };
-    let sampling = image_sampling(node.sampling);
+    let sampling = skia_image_sampling(node.sampling)
+        .ok_or_else(|| "unhandled pillow_lanczos Image".to_string())?;
 
     // Inside a Transform the CTM is non-identity: the raster cache pre-rasterizes at the
     // integral dst size and drawing that intermediate would resample it a SECOND time through
@@ -3048,7 +3604,8 @@ fn draw_image_bg(canvas: &Canvas, image: &Image, cw: f32, ch: f32, node: &ImageB
         ));
     }
     let (ha, va) = parse_bg_align(&node.align);
-    let sampling = image_sampling(ImageSampling::default());
+    let sampling =
+        skia_image_sampling(ImageSampling::default()).expect("default image sampling is Skia");
     match node.mode {
         BgMode::Fit => {
             let scale = (cw / iw).max(ch / ih);
@@ -3487,6 +4044,44 @@ mod tests {
     }
 
     #[test]
+    fn rect_src_blend_replaces_destination_and_rejects_unknown_values() {
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [0, 0], "size": [64, 48],
+              "fill": [255, 0, 0, 255] },
+            { "type": "Rect", "pos": [4, 4], "size": [20, 20],
+              "fill": [0, 0, 255, 128] },
+            { "type": "Rect", "pos": [28, 4], "size": [20, 20],
+              "fill": [0, 0, 255, 128], "blend": "src" }
+            "#,
+        );
+        let rendered = render(&json);
+        let (pixels, width, _) = decode_pixels(&rendered);
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+
+        assert_eq!(
+            pixel(10, 10)[3],
+            255,
+            "SrcOver must retain opaque destination alpha"
+        );
+        assert_eq!(
+            pixel(34, 10),
+            &[0, 0, 255, 128],
+            "Src must replace all four destination channels"
+        );
+
+        let invalid = scene_json(
+            r#"{ "type": "Rect", "pos": [0, 0], "size": [1, 1],
+                 "fill": [0, 0, 0, 0], "blend": "multiply" }"#,
+        );
+        let error = serde_json::from_str::<Scene>(&invalid).expect_err("unknown blend must fail");
+        assert!(
+            error.to_string().contains("unknown variant `multiply`"),
+            "unexpected parse error: {error}"
+        );
+    }
+
+    #[test]
     fn skips_backdrop_work_for_zero_blur_glass() {
         let json = scene_json(
             r#"
@@ -3550,21 +4145,21 @@ mod tests {
 
     #[test]
     fn maps_image_sampling_modes() {
-        let nearest = image_sampling(ImageSampling::Nearest);
+        let nearest = skia_image_sampling(ImageSampling::Nearest).expect("Skia sampler");
         assert_eq!(nearest.filter, FilterMode::Nearest);
         assert_eq!(nearest.mipmap, MipmapMode::None);
 
-        let linear = image_sampling(ImageSampling::Linear);
+        let linear = skia_image_sampling(ImageSampling::Linear).expect("Skia sampler");
         assert_eq!(linear.filter, FilterMode::Linear);
         assert_eq!(linear.mipmap, MipmapMode::None);
 
-        let cubic = image_sampling(ImageSampling::Cubic);
+        let cubic = skia_image_sampling(ImageSampling::Cubic).expect("Skia sampler");
         assert!(cubic.use_cubic);
         // "cubic" stays Mitchell (B = C = 1/3) — it must not be repurposed as Catmull-Rom.
         assert_eq!(cubic.cubic.b, 1.0 / 3.0);
         assert_eq!(cubic.cubic.c, 1.0 / 3.0);
 
-        let catmull = image_sampling(ImageSampling::CatmullRom);
+        let catmull = skia_image_sampling(ImageSampling::CatmullRom).expect("Skia sampler");
         assert!(catmull.use_cubic);
         // Catmull-Rom = Keys a=-0.5 (PIL BICUBIC): B = 0, C = 0.5.
         assert_eq!(catmull.cubic.b, 0.0);
@@ -3574,7 +4169,15 @@ mod tests {
             serde_json::from_str("\"catmull_rom\"").expect("catmull_rom variant parses");
         assert_eq!(parsed, ImageSampling::CatmullRom);
 
-        let mipmap = image_sampling(ImageSampling::LinearMipmap);
+        let pillow: ImageSampling =
+            serde_json::from_str("\"pillow_lanczos\"").expect("pillow_lanczos variant parses");
+        assert_eq!(pillow, ImageSampling::PillowLanczos);
+        assert!(
+            skia_image_sampling(pillow).is_none(),
+            "Pillow Lanczos must never degrade to a Skia cubic sampler"
+        );
+
+        let mipmap = skia_image_sampling(ImageSampling::LinearMipmap).expect("Skia sampler");
         assert_eq!(mipmap.filter, FilterMode::Linear);
         assert_eq!(mipmap.mipmap, MipmapMode::Linear);
     }
@@ -3671,6 +4274,233 @@ mod tests {
         let mut buf = vec![0u8; row * h as usize];
         assert!(image.read_pixels(&info, &mut buf, row, (0, 0), CachingHint::Allow));
         (buf, w, h)
+    }
+
+    fn decode_file_pixels(path: &std::path::Path) -> (Vec<u8>, i32, i32) {
+        let encoded = std::fs::read(path).expect("fixture reads");
+        let image = Image::from_encoded(Data::new_copy(&encoded)).expect("fixture decodes");
+        let (width, height) = (image.width(), image.height());
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let row_bytes = width as usize * 4;
+        let mut pixels = vec![0; row_bytes * height as usize];
+        assert!(image.read_pixels(&info, &mut pixels, row_bytes, (0, 0), CachingHint::Allow));
+        (pixels, width, height)
+    }
+
+    #[test]
+    fn pillow_lanczos_image_stretch_matches_full_raster_resizer() {
+        let fixture = fixture_path("sdf_quad_face_only_field.png");
+        let fixture_dir = fixture
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "Image",
+            "path": "sdf_quad_face_only_field.png",
+            "pos": [0, 0],
+            "size": [17, 13],
+            "fit": "stretch",
+            "sampling": "pillow_lanczos"
+        }"#;
+        let json = bare_scene_json((17, 13), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+        let (actual, width, height) = decode_pixels(&rendered);
+        let (source, source_width, source_height) = decode_file_pixels(&fixture);
+        let expected = resize_rgba8_pillow_lanczos(
+            &source,
+            source_width as usize,
+            source_height as usize,
+            17,
+            13,
+            PillowResizeLimits::new(17 * 13 * 4, 128 * 1024, 4096),
+        )
+        .expect("reference resize");
+
+        assert_eq!((width, height), (17, 13));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pillow_lanczos_image_cover_resizes_full_source_then_crops_twice() {
+        let fixture = fixture_path("sdf_quad_face_only_field.png");
+        let fixture_dir = fixture
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "Image",
+            "path": "sdf_quad_face_only_field.png",
+            "pos": [-3, -1],
+            "size": [17, 9],
+            "fit": "cover",
+            "sampling": "pillow_lanczos"
+        }"#;
+        let json = bare_scene_json((11, 7), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+        let (actual, width, height) = decode_pixels(&rendered);
+
+        let (source, source_width, source_height) = decode_file_pixels(&fixture);
+        assert_eq!((source_width, source_height), (64, 64));
+        let resized = resize_rgba8_pillow_lanczos(
+            &source,
+            64,
+            64,
+            17,
+            17,
+            PillowResizeLimits::new(17 * 17 * 4, 128 * 1024, 4096),
+        )
+        .expect("reference cover resize");
+        let covered = crop_rgba8(&resized, (17, 17), 0, 4, (17, 9)).expect("center cover crop");
+        let expected = crop_rgba8(&covered, (17, 9), 3, 1, (11, 7)).expect("subscene crop");
+
+        assert_eq!((width, height), (11, 7));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pillow_lanczos_unity_subscene_applies_sequential_full_raster_resizes() {
+        let root = r#"{
+            "type": "UnitySubscene",
+            "size": [4, 4],
+            "anchor": [2, 1.5],
+            "object_scale": [1.75, 1.25],
+            "post_scale": [0.5714286, 0.6],
+            "rotation": 0,
+            "sampling": "pillow_lanczos",
+            "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [2, 4],
+                  "fill": [255, 0, 0, 255], "blend": "src" },
+                { "type": "Rect", "pos": [2, 0], "size": [2, 4],
+                  "fill": [0, 0, 255, 255], "blend": "src" }
+            ]
+        }"#;
+        let scene: Scene = serde_json::from_str(&bare_scene_json((4, 3), root)).expect("parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+        let (actual, width, height) = decode_pixels(&rendered);
+
+        let source: Vec<u8> = (0..4)
+            .flat_map(|_| {
+                [
+                    [255, 0, 0, 255],
+                    [255, 0, 0, 255],
+                    [0, 0, 255, 255],
+                    [0, 0, 255, 255],
+                ]
+                .into_iter()
+                .flatten()
+            })
+            .collect();
+        let first = resize_rgba8_pillow_lanczos(
+            &source,
+            4,
+            4,
+            7,
+            5,
+            PillowResizeLimits::new(7 * 5 * 4, 128 * 1024, 4096),
+        )
+        .expect("first resize");
+        let expected = resize_rgba8_pillow_lanczos(
+            &first,
+            7,
+            5,
+            4,
+            3,
+            PillowResizeLimits::new(4 * 3 * 4, 128 * 1024, 4096),
+        )
+        .expect("second resize");
+
+        assert_eq!((width, height), (4, 3));
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn pillow_lanczos_rejects_unsupported_semantics_and_missing_assets() {
+        let unsupported = r#"{
+            "type": "Image",
+            "path": "missing.png",
+            "pos": [0, 0],
+            "size": [4, 4],
+            "fit": "contain",
+            "sampling": "pillow_lanczos"
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((4, 4), unsupported)).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("supports only stretch/cover") && !err.contains("missing.png"),
+            "validation must precede asset access: {err}"
+        );
+
+        let rotated = r#"{
+            "type": "UnitySubscene",
+            "size": [4, 4],
+            "anchor": [2, 2],
+            "object_scale": [1, 1],
+            "post_scale": [1, 1],
+            "rotation": 10,
+            "sampling": "pillow_lanczos",
+            "children": []
+        }"#;
+        let scene: Scene = serde_json::from_str(&bare_scene_json((4, 4), rotated)).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("requires zero rotation"),
+            "unexpected error: {err}"
+        );
+
+        let missing = r#"{
+            "type": "Image",
+            "path": "missing.png",
+            "pos": [0, 0],
+            "size": [4, 4],
+            "fit": "stretch",
+            "sampling": "pillow_lanczos"
+        }"#;
+        let scene: Scene = serde_json::from_str(&bare_scene_json((4, 4), missing)).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("pillow_lanczos Image asset load failed") && err.contains("missing.png"),
+            "missing source must fail the whole scene: {err}"
+        );
+    }
+
+    #[test]
+    fn pillow_lanczos_resize_obeys_remaining_scene_budget() {
+        let fixture = fixture_path("sdf_quad_face_only_field.png");
+        let fixture_dir = fixture
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "Image",
+            "path": "sdf_quad_face_only_field.png",
+            "pos": [0, 0],
+            "size": [17, 13],
+            "fit": "stretch",
+            "sampling": "pillow_lanczos"
+        }"#;
+        let json = bare_scene_json((17, 13), root)
+            .replace("/tmp/does-not-matter", &fixture_dir)
+            .replace(
+                r#""root":"#,
+                r#""limits":{"max_node_pixels":8388608,"max_scene_bytes":18000},"root":"#,
+            );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("only 732 bytes remain") || err.contains("scene limit"),
+            "resize scratch/output must obey the scene budget: {err}"
+        );
     }
 
     #[test]

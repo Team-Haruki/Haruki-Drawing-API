@@ -16,6 +16,7 @@ from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 import os
+from pathlib import Path
 import re
 import threading
 from typing import Any
@@ -264,6 +265,19 @@ class IRBuilder:
         self._stack[-1].append(node)
         return node
 
+    def register_extra_font(self, name: str, path: str | Path) -> None:
+        """Register a request-resolved font before emitting nodes that reference ``name``."""
+
+        clean_name = str(name).strip()
+        if not clean_name:
+            raise ValueError("an extra font needs a non-empty name")
+        resolved_path = str(path)
+        extra = self._fonts.setdefault("extra", {})
+        existing = extra.get(clean_name)
+        if existing is not None and existing != resolved_path:
+            raise ValueError(f"extra font {clean_name!r} was registered with two different paths")
+        extra[clean_name] = resolved_path
+
     def push_group(
         self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None, mask: str | None = None
     ) -> Node:
@@ -407,7 +421,10 @@ class IRBuilder:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
         the mask-less ``Image.paste``); the default composites over it. ``blur_sigma`` applies
         a destination-space Gaussian blur to the image only; a scalar uses the same sigma on
-        both axes. Blur requires IR_CAPABILITY >= 10."""
+        both axes. ``sampling="pillow_lanczos"`` performs a strict, straight-RGBA8 Pillow
+        Lanczos raster resize and currently accepts only integral ``stretch``/centered ``cover``
+        asset placements without source_rect/decorations; unsupported input fails the scene open
+        to Pillow. Blur requires IR_CAPABILITY >= 10; Pillow Lanczos requires >= 15."""
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -508,7 +525,10 @@ class IRBuilder:
         """Render child nodes into an isolated natural-size surface, then place the snapshot.
 
         This preserves custom-profile's compose-then-resize contract and contains Porter-Duff
-        ``Src`` writes inside the subtree. Requires IR_CAPABILITY >= 12.
+        ``Src`` writes inside the subtree. ``sampling="pillow_lanczos"`` reads the completed
+        surface as straight RGBA8 and applies Pillow-compatible Lanczos at each sequential scale;
+        it requires zero rotation and fails the whole scene on an unsupported/budget-exceeding
+        operation. Requires IR_CAPABILITY >= 12 (Pillow Lanczos >= 15).
         """
 
         node: Node = {

@@ -52,12 +52,13 @@ def skia_plot_enabled() -> bool:
 # 8 = Transform subtree + catmull_rom sampling, 9 = SdfQuad (TMP text shading) + A8 raw mem
 # transport, 10 = per-Image Gaussian blur decoration (ImageBg lazy-ref path), 11 = asset-backed
 # custom-profile SdfShape rendering, 12 = UnityImage + UnitySubscene, 13 = SlicedImage,
-# 14 = Porter-Duff Src/SrcOver blending for Rect.
+# 14 = Porter-Duff Src/SrcOver blending for Rect, 15 = explicit Pillow-compatible Lanczos
+# resize for Image and UnitySubscene.
 # An older wheel SILENTLY drops the fields it does not know (serde skips them) — a capability-6
 # wheel would render a triangle background with no triangles in it — so refuse it and fail open
 # to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
 # (quick-check.yml, skia-wheels.yml). Bump all four together.
-REQUIRED_NATIVE_IR_CAPABILITY = 14
+REQUIRED_NATIVE_IR_CAPABILITY = 15
 
 
 def load_native_renderer():
