@@ -233,6 +233,8 @@ class IRBuilder:
         extra_fonts: dict[str, str] | None = None,
         export_format: str = "png",
         jpg_quality: int = 90,
+        max_node_pixels: int | None = None,
+        max_scene_bytes: int | None = None,
     ) -> None:
         self.width = int(width)
         self.height = int(height)
@@ -250,6 +252,13 @@ class IRBuilder:
         self._root_children: list[Node] = []
         self._stack: list[list[Node]] = [self._root_children]
         self._background: Node | None = None
+        self._limits: Node | None = None
+        if max_node_pixels is not None or max_scene_bytes is not None:
+            self._limits = {}
+            if max_node_pixels is not None:
+                self._limits["max_node_pixels"] = max(1, int(max_node_pixels))
+            if max_scene_bytes is not None:
+                self._limits["max_scene_bytes"] = max(1, int(max_scene_bytes))
 
     def _add(self, node: Node) -> Node:
         self._stack[-1].append(node)
@@ -310,13 +319,23 @@ class IRBuilder:
         fill: Color | Node | None = None,
         stroke: Color | Node | None = None,
         stroke_width: float = 1,
+        blend: str = "src_over",
     ) -> Node:
+        """Draw a rectangle, optionally replacing destination RGBA with ``blend="src"``.
+
+        Rect blend modes are intentionally closed so an emitter typo cannot be silently accepted
+        by a newer Python builder and then fail open only after reaching the native renderer.
+        """
+        if blend not in {"src_over", "src"}:
+            raise ValueError(f"unsupported Rect blend: {blend!r}")
         node: Node = {"type": "Rect", "pos": _vec(pos), "size": _vec(size)}
         if fill is not None:
             node["fill"] = _fill_value(fill)
         if stroke is not None:
             node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
+        if blend != "src_over":
+            node["blend"] = blend
         return self._add(node)
 
     def roundrect(
@@ -415,6 +434,102 @@ class IRBuilder:
                 node["blur_sigma"] = [max(0.0, float(sigma[0])), max(0.0, float(sigma[1]))]
         return self._add(node)
 
+    def unity_image(
+        self,
+        *,
+        path: str,
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Node:
+        """Place an intrinsic-size asset using custom-profile Unity transform scalars.
+
+        Rust resolves the source dimensions and performs the complete placement, so Python never
+        opens the asset or creates a raw ``mem:`` layer. Requires IR_CAPABILITY >= 11.
+        """
+        return self._add(
+            {
+                "type": "UnityImage",
+                "path": path,
+                "anchor": _vec(anchor),
+                "object_scale": _vec(object_scale),
+                "post_scale": _vec(post_scale),
+                "rotation": float(rotation),
+                "sampling": sampling,
+                "alpha": float(alpha),
+            }
+        )
+
+    def sliced_image(
+        self,
+        *,
+        path: str,
+        pos: Vec2,
+        size: Vec2,
+        border: tuple[int, int, int, int],
+        tint: Node | None = None,
+        alpha: float = 1.0,
+    ) -> Node:
+        """Resize an asset with Unity's 9-slice border contract.
+
+        ``border`` is ``(left, bottom, right, top)``. Each source region is resized
+        independently with PIL-BICUBIC-compatible Catmull-Rom sampling. A prefab tint should
+        use ``image_tint(color, "recolor")`` to match ``PNGRenderer.tint_image``. Requires
+        IR_CAPABILITY >= 13.
+        """
+
+        node: Node = {
+            "type": "SlicedImage",
+            "path": path,
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "border": [int(value) for value in border],
+            "alpha": float(alpha),
+        }
+        if tint is not None:
+            node["tint"] = tint
+        return self._add(node)
+
+    @contextmanager
+    def unity_subscene(
+        self,
+        *,
+        size: tuple[int, int],
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Iterator[IRBuilder]:
+        """Render child nodes into an isolated natural-size surface, then place the snapshot.
+
+        This preserves custom-profile's compose-then-resize contract and contains Porter-Duff
+        ``Src`` writes inside the subtree. Requires IR_CAPABILITY >= 12.
+        """
+
+        node: Node = {
+            "type": "UnitySubscene",
+            "size": [int(size[0]), int(size[1])],
+            "anchor": _vec(anchor),
+            "object_scale": _vec(object_scale),
+            "post_scale": _vec(post_scale),
+            "rotation": float(rotation),
+            "sampling": sampling,
+            "alpha": float(alpha),
+            "children": [],
+        }
+        self._add(node)
+        self._stack.append(node["children"])
+        try:
+            yield self
+        finally:
+            popped = self._stack.pop()
+            assert popped is node["children"]
+
     def self_image(
         self,
         pos: Vec2,
@@ -465,6 +580,48 @@ class IRBuilder:
             },
         }
         return self._add(node)
+
+    def sdf_shape(
+        self,
+        *,
+        path: str,
+        anchor: Vec2,
+        sdf_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        field_channel: str,
+        fill_color: Sequence[int],
+        fill_alpha: float,
+        outline_color: Sequence[int],
+        outline_alpha: float,
+        outer_fill_ratio: float,
+        face_dilate: float,
+        softness: float,
+    ) -> Node:
+        """Asset-backed custom-profile distance-field shape.
+
+        Rust decodes and independently samples the source R distance field and A mask, shades
+        them at ``sdf_scale``, then applies ``post_scale`` and rotation around the patch center.
+        No Pillow image or raw ``mem:`` raster crosses this boundary. Requires IR_CAPABILITY >= 11.
+        """
+        return self._add(
+            {
+                "type": "SdfShape",
+                "path": path,
+                "anchor": _vec(anchor),
+                "sdf_scale": _vec(sdf_scale),
+                "post_scale": _vec(post_scale),
+                "rotation": float(rotation),
+                "field_channel": field_channel,
+                "fill_color": [int(v) for v in fill_color],
+                "fill_alpha": float(fill_alpha),
+                "outline_color": [int(v) for v in outline_color],
+                "outline_alpha": float(outline_alpha),
+                "outer_fill_ratio": float(outer_fill_ratio),
+                "face_dilate": float(face_dilate),
+                "softness": float(softness),
+            }
+        )
 
     def splice_root_children(self, other: "IRBuilder") -> None:
         """Append another builder's root nodes into the current container as-is
@@ -820,4 +977,6 @@ class IRBuilder:
         }
         if self._background is not None:
             scene["background"] = self._background
+        if self._limits is not None:
+            scene["limits"] = self._limits
         return scene

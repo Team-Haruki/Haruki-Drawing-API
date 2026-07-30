@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.sekai.base.painter import get_font, get_text_size
-from src.sekai.skia_renderer.ir_builder import IRBuilder, linear_gradient
+from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint, linear_gradient
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 
@@ -63,6 +65,75 @@ def test_group_nesting_and_node_shapes():
     assert inner[1]["font"] == {"role": "bold", "size": 12}
     assert inner[1]["align"] == "center"
     assert inner[1]["baseline"] == "alphabetic"
+
+
+def test_rect_blend_serializes_src_and_rejects_unknown_values():
+    b = _builder()
+    b.rect((1, 2), (3, 4), fill=(1, 2, 3, 128), blend="src")
+
+    assert b.build()["root"]["children"][0]["blend"] == "src"
+    with pytest.raises(ValueError, match="unsupported Rect blend"):
+        b.rect((0, 0), (1, 1), blend="multiply")
+
+
+def test_unity_subscene_nests_children_and_placement():
+    b = _builder()
+    with b.unity_subscene(
+        size=(48, 24),
+        anchor=(60.5, 40.25),
+        object_scale=(1.25, 0.75),
+        post_scale=(1.1, 1.2),
+        rotation=-12.5,
+        sampling="catmull_rom",
+        alpha=0.8,
+    ):
+        b.rect((0, 0), (48, 24), fill=(1, 2, 3, 255))
+
+    node = b.build()["root"]["children"][0]
+    assert node == {
+        "type": "UnitySubscene",
+        "size": [48, 24],
+        "anchor": [60.5, 40.25],
+        "object_scale": [1.25, 0.75],
+        "post_scale": [1.1, 1.2],
+        "rotation": -12.5,
+        "sampling": "catmull_rom",
+        "alpha": 0.8,
+        "children": [
+            {
+                "type": "Rect",
+                "pos": [0, 0],
+                "size": [48, 24],
+                "fill": [1, 2, 3, 255],
+            }
+        ],
+    }
+
+
+def test_sliced_image_serializes_unity_border_tint_and_alpha():
+    b = _builder()
+    b.sliced_image(
+        path="ui/bg_base_r16_wh.png",
+        pos=(4.5, 6.25),
+        size=(548, 64),
+        border=(21, 21, 21, 21),
+        tint=image_tint((244, 246, 252, 230), "recolor"),
+        alpha=0.75,
+    )
+
+    assert b.build()["root"]["children"][0] == {
+        "type": "SlicedImage",
+        "path": "ui/bg_base_r16_wh.png",
+        "pos": [4.5, 6.25],
+        "size": [548, 64],
+        "border": [21, 21, 21, 21],
+        "tint": {
+            "color": [244, 246, 252, 230],
+            "mode": "recolor",
+            "strength": 1.0,
+        },
+        "alpha": 0.75,
+    }
 
 
 def test_background_omitted_when_unset():

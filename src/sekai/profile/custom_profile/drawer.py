@@ -7,11 +7,17 @@ from typing import Any
 from PIL import Image
 
 from src.sekai.base.utils import run_in_pool
+from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
 from src.sekai.profile.custom_profile.renderer import PROFILE_RENDER_VIEW_H, PROFILE_RENDER_VIEW_W, PNGRenderer
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.settings import (
     CUSTOM_PROFILE_ASSETS_DIR,
     CUSTOM_PROFILE_FONTS_DIR,
+    CUSTOM_PROFILE_MAX_ELEMENTS,
+    CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+    CUSTOM_PROFILE_MAX_SCALE,
+    CUSTOM_PROFILE_MAX_TEXT_LENGTH,
+    CUSTOM_PROFILE_MAX_TEXT_SIZE,
     CUSTOM_PROFILE_PARALLEL_WORKERS,
     CUSTOM_PROFILE_SHAPE_SPRITE_DIR,
     CUSTOM_PROFILE_TMP_FONT_METADATA,
@@ -101,6 +107,13 @@ def _render_custom_profile_card_sync(
     resources: dict[str, Any],
     region: str,
 ) -> Image.Image:
+    validate_custom_profile_card(
+        card,
+        max_elements=CUSTOM_PROFILE_MAX_ELEMENTS,
+        max_scale=CUSTOM_PROFILE_MAX_SCALE,
+        max_text_size=CUSTOM_PROFILE_MAX_TEXT_SIZE,
+        max_text_length=CUSTOM_PROFILE_MAX_TEXT_LENGTH,
+    )
     assets = _require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region)
     fonts = _require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region)
     tmp_font_metadata = _optional_region_file(
@@ -136,6 +149,7 @@ def _render_custom_profile_card_sync(
         origin_y=PROFILE_RENDER_VIEW_H / 2.0,
         unity_ui_sprite_dir=unity_ui_sprite_dir,
         region=region,
+        max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
     )
     return renderer.render_card(card)
 

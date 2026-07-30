@@ -1,20 +1,23 @@
-"""Skia Render-IR path for the /profile/custom-profile-card endpoint (Phase 1: composition).
+"""Progressive native Render-IR path for ``/profile/custom-profile-card``.
 
-The custom profile renderer is not a plot.py widget tree: it rasterizes Unity layout elements to
-local RGBA layers and affine-composites them (see ``PNGRenderer.render_card``). Phase 1 keeps the
-per-element rasterization in Python (``render_content_for_card`` — TMP-SDF text, prefab widgets,
-shapes are unchanged) and moves the COMPOSITING to Skia: every layer ships as a ``mem:`` raster
-placed by a ``Transform`` node built from the same ``layer_transform_inputs`` numbers the Pillow
-path consumes, replacing the PIL affine / 2x rotation-supersample / premul round-trips (and the
-Pillow PNG encode — the native pass encodes). Phase 2 will replace the text rasters with SdfQuad
-nodes.
+The Unity card JSON remains the layout carrier. Asset-backed ``UnityImage`` and ``SdfShape``
+elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; decorative text
+uses native ``SdfQuad`` shading, and normal/birthday honors reuse the shared ``HonorBadgeBox``
+tree inside an isolated native subscene. Shared General prefabs replay native
+``SlicedImage``/sprite/Text/viewport operations with strict Rust font metrics. Still-unmigrated
+prefab/text/card/bonds-honor content is explicitly classified as hybrid and transported as
+bounded ``mem:`` rasters. A scene coverage report rejects any visible missing/unresolved
+element before Rust runs, so ``backend=skia`` cannot mean "successfully encoded a partial card".
+
+Honor dimensions come from the native asset-info API. An older wheel falls back to an explicitly
+telemetried Pillow header probe, so compatibility cannot masquerade as native-pure.
 
 Parity-critical mirrors of the Pillow path:
 - Unrotated, unscaled layers are pasted at ROUNDED integer positions (the ``angle ~ 0`` branch of
   ``prepare_canvas_clipped_transformed_layer``); the scene emits those as plain integer-placed
   images with no Transform, so they stay pixel-crisp instead of drifting subpixel.
-- Minification (combined scale < ~0.98) keeps the Python two-step BICUBIC pre-resize: PIL's
-  ``resize`` scales its kernel with the ratio and Skia sampling through a CTM does not.
+- Hybrid minification (combined scale < ~0.98) keeps the Python two-step BICUBIC pre-resize;
+  ``UnityImage`` performs the same two sequential dimension rounds natively.
 - Decorative direct-raster TMP texts draw onto full-canvas PIL layers exactly as in
   ``render_card``; consecutive runs accumulate on one layer and flush in z-order.
 
@@ -24,27 +27,55 @@ Fail-open: this function NEVER raises — every failure records exactly one outc
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import logging
 import math
+from pathlib import Path
 import time
 from typing import Any
 
 from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
-from src.core.pillow_telemetry import PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER, record_pillow_touch
-from src.sekai.base.utils import run_in_pool
+from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
+    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
+    record_pillow_touch,
+)
+from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
+from src.sekai.honor.model import HonorRequest
+from src.sekai.honor.widget import build_honor_badge_canvas
+from src.sekai.profile.custom_profile.general_prefab import (
+    GeneralAssetImageOp,
+    GeneralFontRef,
+    GeneralRoundedRectOp,
+    GeneralSpriteOp,
+    GeneralTextOp,
+    GeneralViewportOp,
+    build_general_prefab_display_list,
+)
+from src.sekai.profile.custom_profile.limits import ensure_raster_size
 from src.sekai.profile.custom_profile.renderer import (
+    CHARA_LIST,
+    GENERAL_MUSIC_DIFFICULTIES,
+    GENERAL_NATIVE_SIZES,
+    GENERAL_PREFAB_PALETTE,
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
+    SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
     LayerTransformInputs,
     PNGRenderer,
+    bool_from_profile,
+    content_data_id,
     harden_rgba_alpha,
+    hex_to_rgba,
+    unity_tint_rgba,
 )
+from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
 from src.sekai.profile.model import CustomProfileCardRenderRequest
-from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
-from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.canvas import build_canvas_ir, load_native_renderer, payload_from_native, skia_plot_enabled
+from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
     OUTCOME_ERROR,
@@ -53,8 +84,17 @@ from src.sekai.skia_renderer.render_stats import (
     backend_for_outcome,
     record_native_metrics,
     record_render,
+    record_scene_completeness,
 )
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR, JPG_QUALITY
+from src.settings import (
+    ASSETS_BASE_DIR,
+    CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+    CUSTOM_PROFILE_MAX_SCENE_BYTES,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    FONT_DIR,
+    JPG_QUALITY,
+)
 
 logger = logging.getLogger("custom_profile.draw.perf")
 
@@ -67,6 +107,119 @@ CUSTOM_PROFILE_ENDPOINT = "custom_profile_card"
 # branch triggers at angle % 360 ~ 0; the minification carve-out keeps PIL resize semantics.
 _ANGLE_EPS = 1.0e-9
 _MIN_SCALE_FOLD = 0.98
+_REQUIRED_NATIVE_ASSET_INFO_CAPABILITY = 1
+_REQUIRED_NATIVE_TEXT_METRICS_CAPABILITY = 1
+_NATIVE_GENERAL_PREFABS = frozenset(
+    {
+        "EditUserName",
+        "Comment",
+        "TotalPower",
+        "MultiLive",
+        "ChallengeLive",
+        "CharacterRankAndChallengeStage",
+        "CharacterRankAndChallengeStageScroll",
+        "MusicClearInfo",
+        "MusicClearSelectTabInfo",
+    }
+)
+_GENERAL_FONT_IR_NAME = "custom_profile_general"
+
+_HONOR_IMAGE_PATH_FIELDS = (
+    ("honor_img", "honor_img_path"),
+    ("rank_img", "rank_img_path"),
+    ("frame_img", "frame_img_path"),
+    ("frame_degree_level_img", "frame_degree_level_img_path"),
+    ("scroll_img", "scroll_img_path"),
+    ("lv_img", "lv_img_path"),
+    ("lv6_img", "lv6_img_path"),
+)
+
+
+@dataclass(slots=True)
+class CustomProfileSceneReport:
+    elements_total: int = 0
+    visible_elements: int = 0
+    native_elements: int = 0
+    hybrid_elements: int = 0
+    noop_elements: int = 0
+    hidden_elements: int = 0
+    missing_elements: int = 0
+    unresolved_elements: int = 0
+    mem_images: int = 0
+    mem_bytes: int = 0
+    issues: list[dict[str, int | str]] = field(default_factory=list)
+
+    @property
+    def complete(self) -> bool:
+        classified_visible = (
+            self.native_elements
+            + self.hybrid_elements
+            + self.noop_elements
+            + self.missing_elements
+            + self.unresolved_elements
+        )
+        return (
+            self.visible_elements == classified_visible
+            and self.elements_total == self.visible_elements + self.hidden_elements
+            and self.missing_elements == 0
+            and self.unresolved_elements == 0
+        )
+
+    def observe(self, content: Any, classification: str) -> None:
+        if classification == "hidden":
+            self.hidden_elements += 1
+            return
+        self.visible_elements += 1
+        counter = {
+            "native": "native_elements",
+            "hybrid": "hybrid_elements",
+            "noop": "noop_elements",
+            "missing": "missing_elements",
+            "unresolved": "unresolved_elements",
+        }.get(classification, "unresolved_elements")
+        setattr(self, counter, getattr(self, counter) + 1)
+        if classification in {"missing", "unresolved"} and len(self.issues) < 16:
+            self.issues.append(
+                {
+                    "kind": str(content.kind),
+                    "status": classification,
+                    "data_id": content_data_id(content.kind, content.item),
+                    "layer": int(content.layer),
+                }
+            )
+
+    def metrics(self) -> dict[str, Any]:
+        issues_by_kind: dict[str, dict[str, int]] = {}
+        for issue in self.issues:
+            kind = str(issue["kind"])
+            status = str(issue["status"])
+            bucket = issues_by_kind.setdefault(kind, {"missing": 0, "unresolved": 0})
+            bucket[status] += 1
+        return {
+            "complete": int(self.complete),
+            "elements_total": self.elements_total,
+            "visible_elements": self.visible_elements,
+            "native_elements": self.native_elements,
+            "hybrid_elements": self.hybrid_elements,
+            "noop_elements": self.noop_elements,
+            "hidden_elements": self.hidden_elements,
+            "missing_elements": self.missing_elements,
+            "unresolved_elements": self.unresolved_elements,
+            "mem_images": self.mem_images,
+            "mem_bytes": self.mem_bytes,
+            "issues_by_kind": issues_by_kind,
+        }
+
+    def native_metrics(self) -> dict[str, int]:
+        return {
+            "custom_profile_complete": int(self.complete),
+            "custom_profile_visible_elements": self.visible_elements,
+            "custom_profile_native_elements": self.native_elements,
+            "custom_profile_hybrid_elements": self.hybrid_elements,
+            "custom_profile_noop_elements": self.noop_elements,
+            "custom_profile_mem_images": self.mem_images,
+            "custom_profile_mem_bytes": self.mem_bytes,
+        }
 
 
 def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
@@ -85,7 +238,7 @@ def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
         record_native_metrics(payload.native_metrics)
 
 
-def _new_builder(width: int, height: int) -> IRBuilder:
+def _new_builder(width: int, height: int, *, general_font_path: Path | None = None) -> IRBuilder:
     # export_format is HARDCODED png: the route pins PNG (the card is RGBA with real
     # transparency), regardless of the global EXPORT_IMAGE_FORMAT.
     return IRBuilder(
@@ -95,24 +248,38 @@ def _new_builder(width: int, height: int) -> IRBuilder:
         font_dir=str(FONT_DIR),
         default_font=DEFAULT_FONT,
         bold_font=DEFAULT_BOLD_FONT,
+        extra_fonts={_GENERAL_FONT_IR_NAME: str(general_font_path)} if general_font_path is not None else None,
         export_format="png",
         jpg_quality=JPG_QUALITY,
+        max_node_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+        max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
     )
 
 
 class _SceneAssembler:
     """Accumulates the z-ordered element scene: mem rasters + Transform placements."""
 
-    def __init__(self, builder: IRBuilder, canvas_size: tuple[int, int]) -> None:
+    def __init__(self, builder: IRBuilder, canvas_size: tuple[int, int], max_mem_bytes: int) -> None:
         self.builder = builder
         self.canvas_size = canvas_size
+        self.max_mem_bytes = max(1, int(max_mem_bytes))
+        self.mem_bytes = 0
         # RGBA raw 3-tuples plus A8 raw-buffer 6-tuples (capability 9) share the registry.
         self.mem_images: dict[str, tuple] = {}
         self._direct_layer: Image.Image | None = None
 
+    def _reserve_mem(self, byte_count: int) -> None:
+        total = self.mem_bytes + max(0, int(byte_count))
+        if total > self.max_mem_bytes:
+            raise ValueError(
+                f"custom profile native scene would retain {total} raw bytes; limit is {self.max_mem_bytes}"
+            )
+        self.mem_bytes = total
+
     def _mem_ref(self, image: Image.Image) -> str:
         record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
         rgba = image if image.mode == "RGBA" else image.convert("RGBA")
+        self._reserve_mem(rgba.width * rgba.height * 4)
         key = f"m{len(self.mem_images)}"
         self.mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
         return f"mem:{key}"
@@ -138,7 +305,9 @@ class _SceneAssembler:
         the A8 raw-buffer transport (6-tuple, capability 9)."""
         self.flush_direct_layer()
         for quad in quads:
+            record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
             field = quad.field
+            self._reserve_mem(field.width * field.height)
             key = f"m{len(self.mem_images)}"
             self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
             scalars = quad.scalars
@@ -239,33 +408,646 @@ def _direct_text_quads(renderer: PNGRenderer, content: Any):
     return renderer.prepare_direct_sdf_quads(content.item, content.object_data)
 
 
-def _build_scene(renderer: PNGRenderer, card: dict[str, Any]) -> tuple[bytes, dict[str, tuple]]:
+def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
+    """Check the direct-text gates without allocating the full-canvas scratch layer."""
+
+    return (
+        content.kind == "text"
+        and bool(content.object_data.get("visible", False))
+        and renderer.tmp_decorative_direct_raster
+        and renderer.text_layout == "tmp"
+        and renderer.tmp_text_render_mode == "sdf"
+        and renderer.is_decorative_text_item(content.item)
+    )
+
+
+def _relative_asset_path(path) -> str | None:
+    try:
+        return path.resolve().relative_to(ASSETS_BASE_DIR.resolve()).as_posix()
+    except (AttributeError, ValueError):
+        return None
+
+
+def _native_asset_info(asset_path: str) -> dict[str, Any] | None:
+    """Rust-side asset metadata, or ``None`` for an older wheel.
+
+    A wheel claiming the capability but returning a malformed result is broken and raises; only
+    a genuinely absent API takes the explicit Pillow-header compatibility path.
+    """
+
+    native = load_native_renderer()
+    info_fn = getattr(native, "asset_image_info", None)
+    capability = int(getattr(native, "ASSET_INFO_CAPABILITY", 0) or 0)
+    if capability < _REQUIRED_NATIVE_ASSET_INFO_CAPABILITY or not callable(info_fn):
+        return None
+    info = dict(info_fn(str(ASSETS_BASE_DIR), asset_path))
+    width = int(info.get("width", 0))
+    height = int(info.get("height", 0))
+    ensure_raster_size(
+        (width, height),
+        max_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+        label=f"custom profile native honor asset {asset_path}",
+    )
+    if int(info.get("mtime_ns", 0)) < 0 or int(info.get("file_size", 0)) < 0:
+        raise ValueError(f"native honor asset info returned an invalid file identity: {asset_path}")
+    return info
+
+
+def _header_only_asset_ref(path, asset_path: str) -> AssetImageRef:
+    """Build the image source the shared honor tree needs without decoding its pixels.
+
+    Current wheels obtain dimensions from Rust. An older wheel explicitly falls back to a
+    Pillow header probe and records that touch, so it cannot be mislabeled as native-pure.
+    """
+
+    resolved = path.resolve(strict=True)
+    if not resolved.is_file():
+        raise ValueError(f"custom profile honor asset is not a regular file: {resolved}")
+    native_info = _native_asset_info(asset_path)
+    if native_info is not None:
+        return AssetImageRef(
+            path=resolved,
+            size=(int(native_info["width"]), int(native_info["height"])),
+            mode=str(native_info.get("mode") or "RGBA"),
+            mtime_ns=int(native_info.get("mtime_ns", 0)),
+            file_size=int(native_info.get("file_size", 0)),
+        )
+
+    stat = resolved.stat()
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
+    with Image.open(resolved) as probe:
+        ensure_raster_size(
+            probe.size,
+            max_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+            label=f"custom profile honor asset {resolved.name}",
+        )
+        size = (int(probe.width), int(probe.height))
+        mode = str(probe.mode)
+    return AssetImageRef(
+        path=resolved,
+        size=size,
+        mode=mode,
+        mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
+    )
+
+
+class _NativeGeneralTextMetrics:
+    """Strict Skia font metrics used by the renderer-neutral General prefab builder."""
+
+    def __init__(self, measure, font_path: Path) -> None:
+        self._measure_batch = measure
+        self.font_path = font_path
+        self._cache: dict[tuple[str, int], dict[str, Any]] = {}
+
+    @classmethod
+    def create(cls, font_path: Path | None) -> _NativeGeneralTextMetrics | None:
+        if font_path is None:
+            return None
+        try:
+            resolved = font_path.resolve(strict=True)
+        except OSError:
+            return None
+        if not resolved.is_file():
+            return None
+        native = load_native_renderer()
+        measure = getattr(native, "measure_text_batch", None)
+        capability = int(getattr(native, "TEXT_METRICS_CAPABILITY", 0) or 0)
+        if capability < _REQUIRED_NATIVE_TEXT_METRICS_CAPABILITY or not callable(measure):
+            return None
+        return cls(measure, resolved)
+
+    def measure(self, text: str, font: GeneralFontRef, size: int) -> dict[str, Any]:
+        if font.name != "FOT-RodinNTLGPro-DB":
+            raise ValueError(f"unsupported native General prefab font: {font.name}")
+        key = (str(text), int(size))
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        results = list(
+            self._measure_batch(
+                str(self.font_path.parent),
+                str(self.font_path),
+                [(key[0], float(key[1]))],
+            )
+        )
+        if len(results) != 1:
+            raise ValueError("native text metrics returned the wrong batch length")
+        metric = dict(results[0])
+        bbox = tuple(float(value) for value in metric.get("pillow_bbox", ()))
+        if len(bbox) != 4 or not all(math.isfinite(value) for value in bbox):
+            raise ValueError("native text metrics returned an invalid Pillow-relative bbox")
+        ascent = float(metric.get("ascent", math.nan))
+        descent = float(metric.get("descent", math.nan))
+        if not math.isfinite(ascent) or not math.isfinite(descent) or ascent < 0.0 or descent < 0.0:
+            raise ValueError("native text metrics returned invalid ascent/descent values")
+        metric["pillow_bbox"] = bbox
+        metric["ascent"] = ascent
+        metric["descent"] = descent
+        self._cache[key] = metric
+        return metric
+
+    def text_bbox(
+        self,
+        text: str,
+        font: GeneralFontRef,
+        size: int,
+    ) -> tuple[float, float, float, float]:
+        return self.measure(text, font, size)["pillow_bbox"]
+
+    def text_placement(self, op: GeneralTextOp) -> tuple[str, float]:
+        """Translate the Pillow ``draw.text`` anchor into IR alignment + alphabetic baseline."""
+
+        anchor = op.anchor or "la"
+        if len(anchor) != 2 or anchor[0] not in "lmr" or anchor[1] not in "ams":
+            raise ValueError(f"unsupported native General text anchor: {anchor!r}")
+        align = {"l": "left", "m": "center", "r": "right"}[anchor[0]]
+        metric = self.measure(op.text, op.font, op.size)
+        y = float(op.pos[1])
+        if anchor[1] == "a":
+            baseline = y + metric["ascent"]
+        elif anchor[1] == "m":
+            baseline = y + (metric["ascent"] - metric["descent"]) * 0.5
+        else:
+            baseline = y
+        return align, baseline
+
+
+def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
+    """Replay shared GeneralContentView prefabs without a Pillow pixel surface.
+
+    ``"native"`` means a subscene was appended, ``"noop"`` preserves a prefab's historical
+    legal no-render result, and ``None`` declines to the compatibility renderer.
+    """
+
+    if content.kind != "general" or not content.object_data.get("visible", False):
+        return None
+    resource_for = getattr(renderer, "image_resource_for", None)
+    font_path_for = getattr(renderer, "general_font_path", None)
+    if not callable(resource_for) or not callable(font_path_for):
+        return None
+    resource = resource_for("general", content.item)
+    file_name = str(resource.get("fileName", "") or "")
+    if file_name not in _NATIVE_GENERAL_PREFABS:
+        return None
+    metrics = _NativeGeneralTextMetrics.create(font_path_for())
+    if metrics is None:
+        return None
+
+    asset_paths: dict[str, Path | None] = {}
+    if file_name == "ChallengeLive":
+        data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
+        if isinstance(data, dict):
+            character_id = int(data.get("characterId", 0) or 0)
+            asset_paths["challenge_character_icon"] = renderer.chara_icon_path(character_id)
+    elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+        for _nickname, character_id in CHARA_LIST:
+            if character_id is not None:
+                asset_paths[f"character_rank_icon:{character_id}"] = renderer.chara_icon_path(character_id)
+
+    display_list = build_general_prefab_display_list(
+        file_name,
+        size=GENERAL_NATIVE_SIZES[file_name],
+        profile_context=renderer.profile_context,
+        labels={
+            "comment_title": renderer.general_text("comment_title"),
+            "total_power": renderer.general_text("total_power"),
+            "multi_live_title": renderer.general_text("multi_live_title"),
+            "multi_live_count_suffix": renderer.general_text("multi_live_count_suffix"),
+            "challenge_live_title": renderer.general_text("challenge_live_title"),
+            "challenge_live_solo": renderer.general_text("challenge_live_solo"),
+            "character_rank_tab": renderer.general_text("character_rank_tab"),
+            "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
+            "music_clear": renderer.general_text("music_clear"),
+            "music_full_combo": renderer.general_text("music_full_combo"),
+            "music_all_perfect": renderer.general_text("music_all_perfect"),
+        },
+        metrics=metrics,
+        palette=GENERAL_PREFAB_PALETTE,
+        asset_paths=asset_paths,
+        music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
+    )
+    if display_list is None:
+        return "noop"
+
+    # Resolve every dependency before mutating the scene. Required resources decline the whole
+    # element; optional resources are omitted; fallback resources replay their rounded rectangle.
+    # A supplied path outside the asset root is never downgraded to "optional missing".
+    resource_paths: dict[int, str | None] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+
+    def walk_ops(ops):
+        for op in ops:
+            yield op
+            if isinstance(op, GeneralViewportOp):
+                yield from walk_ops(op.children)
+
+    for op in walk_ops(display_list.ops):
+        op_key = id(op)
+        if isinstance(op, GeneralSpriteOp):
+            path = renderer.unity_ui_sprite_path(op.name)
+            if path is not None:
+                asset_path = _relative_asset_path(path)
+                if asset_path is None:
+                    return None
+                resource_paths[op_key] = asset_path
+                continue
+            if op.resource_policy == "required":
+                return None
+            resource_paths[op_key] = None
+        elif isinstance(op, GeneralAssetImageOp):
+            if op.path is not None:
+                asset_path = _relative_asset_path(Path(op.path))
+                if asset_path is None:
+                    return None
+                resource_paths[op_key] = asset_path
+                continue
+            if op.resource_policy == "required":
+                return None
+            resource_paths[op_key] = None
+        elif isinstance(op, GeneralTextOp):
+            text_placements[op_key] = metrics.text_placement(op)
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return None
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+
+    def emit_rounded_rect(op: GeneralRoundedRectOp) -> None:
+        left, top, right, bottom = op.rect
+        if op.round_coordinates:
+            left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+        scene.builder.roundrect(
+            (left, top),
+            (max(0.0, right - left), max(0.0, bottom - top)),
+            op.radius,
+            fill=op.fill,
+            stroke=op.outline,
+            stroke_width=op.width,
+        )
+
+    sampling_map = {
+        "nearest": "nearest",
+        "bilinear": "linear",
+        "bicubic": "catmull_rom",
+        "lanczos": "catmull_rom",
+    }
+
+    def emit_ops(ops) -> None:
+        for op in ops:
+            op_key = id(op)
+            if isinstance(op, GeneralSpriteOp):
+                asset_path = resource_paths[op_key]
+                if asset_path is None:
+                    if op.fallback is not None:
+                        emit_rounded_rect(op.fallback)
+                    continue
+                left, top, right, bottom = op.rect
+                pos = (round(left), round(top))
+                size = (max(1, round(right - left)), max(1, round(bottom - top)))
+                tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
+                if op.sliced_border is not None:
+                    scene.builder.sliced_image(
+                        path=asset_path,
+                        pos=pos,
+                        size=size,
+                        border=op.sliced_border,
+                        tint=tint,
+                    )
+                else:
+                    scene.builder.image(
+                        asset_path,
+                        pos,
+                        size,
+                        sampling=sampling_map[op.sampling],
+                        tint=tint,
+                    )
+                continue
+            if isinstance(op, GeneralRoundedRectOp):
+                emit_rounded_rect(op)
+                continue
+            if isinstance(op, GeneralAssetImageOp):
+                asset_path = resource_paths[op_key]
+                if asset_path is None:
+                    if op.fallback is not None:
+                        emit_rounded_rect(op.fallback)
+                    continue
+                left, top, right, bottom = op.rect
+                scene.builder.image(
+                    asset_path,
+                    (round(left), round(top)),
+                    (max(1, round(right - left)), max(1, round(bottom - top))),
+                    sampling=sampling_map[op.sampling],
+                )
+                continue
+            if isinstance(op, GeneralViewportOp):
+                with scene.builder.group(
+                    offset=op.offset,
+                    size=op.viewport_size,
+                    clip={"kind": "rect"},
+                ):
+                    # Dependency preflight above deliberately walked every child, including
+                    # rows wholly outside this viewport. Replay does the same under a hard clip.
+                    emit_ops(op.children)
+                continue
+            if not isinstance(op, GeneralTextOp):
+                raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
+            align, baseline = text_placements[op_key]
+            scene.builder.text(
+                op.text,
+                (float(op.pos[0]), baseline),
+                "bold",
+                float(op.size),
+                align=align,
+                baseline="alphabetic",
+                fill=op.fill,
+                font_name=_GENERAL_FONT_IR_NAME,
+            )
+
+    scene.flush_direct_layer()
+    with scene.builder.unity_subscene(
+        size=display_list.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        emit_ops(display_list.ops)
+    return "native"
+
+
+def _native_honor_sources(
+    renderer: PNGRenderer,
+    request: HonorRequest,
+) -> tuple[str, dict[str, ImageSource | None] | None]:
+    """Resolve one normal/birthday request to lazy, root-confined image refs.
+
+    ``unrenderable`` means the required base is absent, matching the Pillow helper's ``None``
+    result so a lower-priority request key may still be tried. ``hybrid`` means the badge itself
+    is renderable but a supplied overlay is absent/outside the native asset root; declining the
+    whole element preserves request-key precedence and prevents ``backend=skia`` from silently
+    omitting that resource.
+    """
+
+    images: dict[str, ImageSource | None] = {}
+    for image_key, path_field in _HONOR_IMAGE_PATH_FIELDS:
+        raw_path = getattr(request, path_field)
+        if not raw_path:
+            images[image_key] = None
+            continue
+        path = renderer.resolve_request_asset_path(raw_path)
+        if path is None:
+            return ("unrenderable" if image_key == "honor_img" else "hybrid"), None
+        asset_path = _relative_asset_path(path)
+        if asset_path is None:
+            return "hybrid", None
+        images[image_key] = _header_only_asset_ref(path, asset_path)
+
+    if images.get("honor_img") is None:
+        return "unrenderable", None
+    return "ready", images
+
+
+def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Lower normal/birthday badges through the shared ``HonorBadgeBox`` tree.
+
+    The tree first renders at the badge's natural size inside ``UnitySubscene``. Rust then
+    applies the same two sequential Unity scale stages and center-pivot placement as the Pillow
+    custom-profile path. Bonds remain hybrid because their shared tree still performs
+    resize-then-crop operations in Python.
+    """
+
+    if content.kind != "honor" or not content.object_data.get("visible", False):
+        return False
+
+    # This first batch consumes the same resource-supplied request keys as
+    # PNGRenderer.compose_honor_image. Masterdata-derived request construction is not native
+    # yet; when these keys are absent the existing hybrid resolver remains authoritative.
+    honor_id = content_data_id("honor", content.item)
+    level = renderer.user_honor_level_for(honor_id)
+    full_size = bool_from_profile(content.item.get("fullSize", False))
+    keys = (renderer.honor_slot_key(honor_id, level, full_size), str(honor_id))
+    seen_payloads: set[int] = set()
+
+    for key in keys:
+        payload = renderer.honor_requests.get(key)
+        if not isinstance(payload, dict) or id(payload) in seen_payloads:
+            continue
+        seen_payloads.add(id(payload))
+        request = HonorRequest.model_validate(payload)
+
+        # Preserve request-key precedence: if the first renderable candidate is a bonds/empty
+        # badge, let the existing hybrid path consume it instead of skipping to a different
+        # lower-priority visual.
+        if request.is_empty or request.honor_type not in {"normal", "birthday"}:
+            return False
+
+        source_status, images = _native_honor_sources(renderer, request)
+        if source_status == "unrenderable":
+            continue
+        if source_status != "ready" or images is None:
+            return False
+
+        canvas = build_honor_badge_canvas(request, images)
+        if canvas is None:
+            continue
+        badge_builder, badge_mem_images = build_canvas_ir(canvas, export_format="png")
+        # Normal/birthday nodes are entirely asset-backed. A mem image here means a source
+        # vanished, escaped ASSETS_BASE_DIR, or unexpectedly rasterized in Python; none may be
+        # merged into the request scene and mislabeled as a native honor.
+        if badge_mem_images:
+            return False
+
+        scale = content.object_data.get("scale") or {}
+        sx = float(scale.get("x", 1.0))
+        sy = float(scale.get("y", sx))
+        if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+            return False
+        angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+        scene.flush_direct_layer()
+        with scene.builder.unity_subscene(
+            size=(badge_builder.width, badge_builder.height),
+            anchor=renderer.unity_point(content.object_data.get("position", {})),
+            object_scale=(sx, sy),
+            post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+            rotation=angle,
+        ):
+            scene.builder.splice_root_children(badge_builder)
+        return True
+    return False
+
+
+def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Lower intrinsic-size ImageContentView assets without opening them in Pillow."""
+
+    if not content.object_data.get("visible", False):
+        return False
+    path = None
+    if content.kind in {"general_background", "story_background", "stand_member", "other", "collection"}:
+        resource = renderer.image_resource_for(content.kind, content.item)
+        path = renderer.resource_path(resource)
+    elif content.kind == "stamp":
+        stamp_id = int(content.item.get("id", content.item.get("stampId", 0)) or 0)
+        stamp_asset = renderer.stamp_assets.get(stamp_id, {})
+        image_path = str(stamp_asset.get("imagePath", stamp_asset.get("image_path", "")) or "").strip()
+        if image_path:
+            path = renderer.resolve_request_asset_path(image_path)
+        if path is None:
+            path = renderer.stamp_resource_path(renderer.image_resource_for("stamp", content.item))
+    else:
+        return False
+    if path is None or (asset_path := _relative_asset_path(path)) is None:
+        return False
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x", 1.0))
+    sy = float(scale.get("y", sx))
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    scene.flush_direct_layer()
+    scene.builder.unity_image(
+        path=asset_path,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    )
+    return True
+
+
+def _emit_native_shape(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Lower the production SDF-shape configuration directly to an asset-backed Rust node."""
+
+    if (
+        content.kind != "shape"
+        or not content.object_data.get("visible", False)
+        or renderer.shape_outline_mode != "sdf"
+        or not renderer.shape_sdf_screen_fwidth
+    ):
+        return False
+    resource = renderer.shapes.get(int(content.item.get("id", 0)), {})
+    path = renderer.shape_resource_path(resource)
+    if path is None:
+        return False
+    resource_file = str(resource.get("fileName", "")).strip().lower()
+    if resource_file == "triangle" and renderer.triangle_mode != "asset":
+        return False
+    asset_path = _relative_asset_path(path)
+    if asset_path is None:
+        return False
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x", 1.0))
+    sy = float(scale.get("y", sx))
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    outline_size = max(0.0, min(1.0, float(content.item.get("outlineSize", 0.0) or 0.0)))
+    outer_fill_ratio = max(
+        0.0,
+        min(
+            1.0,
+            outline_size
+            * SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR
+            * renderer.shape_sdf_ratio_scale
+            * renderer.shape_sdf_outer_factor,
+        ),
+    )
+    face_dilate = max(
+        -1.0,
+        min(1.0, outline_size * renderer.shape_sdf_ratio_scale * renderer.shape_sdf_face_factor),
+    )
+    fill_color = renderer.colors.get(int(content.item.get("colorId", 0)), "#ffffff")
+    outline_color = renderer.colors.get(int(content.item.get("outlineColorId", 0)), "#ffffff")
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    scene.flush_direct_layer()
+    scene.builder.sdf_shape(
+        path=asset_path,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        sdf_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+        field_channel="alpha" if renderer.shape_sdf_source == "alpha" else "red",
+        fill_color=hex_to_rgba(fill_color, 1.0)[:3],
+        fill_alpha=float(content.item.get("alpha", 1.0)),
+        outline_color=hex_to_rgba(outline_color, 1.0)[:3],
+        outline_alpha=float(content.item.get("outlineAlpha", 0.0) or 0.0),
+        outer_fill_ratio=outer_fill_ratio,
+        face_dilate=face_dilate,
+        softness=max(0.0, renderer.shape_sdf_softness),
+    )
+    return True
+
+
+def _build_scene(
+    renderer: PNGRenderer,
+    card: dict[str, Any],
+) -> tuple[bytes, dict[str, tuple], CustomProfileSceneReport]:
     canvas_size = (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H))
-    builder = _new_builder(*canvas_size)
+    general_font_path_for = getattr(renderer, "general_font_path", None)
+    general_font_path = general_font_path_for() if callable(general_font_path_for) else None
+    builder = _new_builder(*canvas_size, general_font_path=general_font_path)
     # render_card starts from an OPAQUE WHITE base (Image.new(..., (255, 255, 255, 255))), not a
     # transparent canvas — the story background does not always cover the outermost pixels.
     builder.rect((0, 0), canvas_size, fill=(255, 255, 255, 255))
-    scene = _SceneAssembler(builder, canvas_size)
+    scene = _SceneAssembler(builder, canvas_size, CUSTOM_PROFILE_MAX_SCENE_BYTES)
     card_ref = renderer.native_card_ref(card)
+    contents = renderer.build_native_contents(card)
+    report = CustomProfileSceneReport(elements_total=len(contents))
 
     # Same walk as render_card's direct-raster loop: decorative TMP texts become native SdfQuads
     # (Phase 2 — Python keeps layout + the PIL field warp, the node shades per pixel); if the
     # element is not quad-eligible the accumulating full-canvas direct layer takes it, and
     # everything else renders to a local layer placed by the shared layer_transform_inputs
     # numbers. Audit records mirror the Pillow statuses.
-    for content in renderer.build_native_contents(card):
+    for content in contents:
+        if _emit_native_asset_image(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_shape(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        general_result = _emit_native_general(renderer, content, scene)
+        if general_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if general_result == "noop":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
+        if _emit_native_honor(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
         quads = _direct_text_quads(renderer, content)
         if quads is not None:
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-            scene.emit_sdf_quads(quads)
+            if quads:
+                scene.emit_sdf_quads(quads)
+                report.observe(content, "hybrid")
+            else:
+                report.observe(content, "noop")
             continue
-        if renderer.render_content_direct_on_card(scene.direct_layer(), content):
+        if _is_direct_text_candidate(renderer, content) and renderer.render_content_direct_on_card(
+            scene.direct_layer(), content
+        ):
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
+            report.observe(content, "hybrid")
             continue
         rendered = renderer.render_content_for_card(content)
         renderer.record_native_audit(card_ref, content, rendered.status, rendered.result)
         if not isinstance(rendered.result, tuple):
+            report.observe(
+                content,
+                rendered.status if rendered.status in {"hidden", "missing", "unresolved"} else "unresolved",
+            )
             continue
+        report.observe(content, "hybrid")
         inputs = renderer.layer_transform_inputs(rendered.result, content.object_data, content.kind)
         layer = inputs.layer
         if (
@@ -278,9 +1060,11 @@ def _build_scene(renderer: PNGRenderer, card: dict[str, Any]) -> tuple[bytes, di
             layer = harden_rgba_alpha(layer, renderer.tmp_decorative_alpha_harden)
         scene.emit_layer(layer, inputs, renderer)
     scene.flush_direct_layer()
+    report.mem_images = len(scene.mem_images)
+    report.mem_bytes = scene.mem_bytes
 
     ir_json = json.dumps(builder.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    return ir_json, scene.mem_images
+    return ir_json, scene.mem_images, report
 
 
 async def try_render_custom_profile_card_payload(
@@ -310,6 +1094,7 @@ async def try_render_custom_profile_card_payload(
         from src.settings import (
             CUSTOM_PROFILE_ASSETS_DIR,
             CUSTOM_PROFILE_FONTS_DIR,
+            CUSTOM_PROFILE_MAX_LAYER_PIXELS,
             CUSTOM_PROFILE_PARALLEL_WORKERS,
             CUSTOM_PROFILE_SHAPE_SPRITE_DIR,
             CUSTOM_PROFILE_TMP_FONT_METADATA,
@@ -339,20 +1124,50 @@ async def try_render_custom_profile_card_payload(
                 "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
             ),
             region=region,
+            max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
         )
-        ir_json, mem_images = _build_scene(renderer, card)
-        return native.render_scene(ir_json, mem_images)
+        ir_json, mem_images, report = _build_scene(renderer, card)
+        if not report.complete:
+            return None, report
+        return native.render_scene(ir_json, mem_images), report
 
     started = time.perf_counter()
     try:
-        result = await run_in_pool(_render)
-        payload = payload_from_native(result)
+        result, report = await run_in_pool(_render)
     except Exception:
         # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
         # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
         logger.exception("custom_profile_card backend=skia failed; falling back to Pillow")
         _record(OUTCOME_ERROR)
         return None
+    scene_metrics = report.metrics()
+    record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, scene_metrics)
+    if result is None:
+        from src.core.debug import current_request_context
+
+        context = current_request_context()
+        logger.warning(
+            "custom_profile.scene id=%s complete=false visible=%d native=%d hybrid=%d "
+            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues=%s",
+            context["request_id"],
+            report.visible_elements,
+            report.native_elements,
+            report.hybrid_elements,
+            report.missing_elements,
+            report.unresolved_elements,
+            report.mem_images,
+            report.mem_bytes,
+            report.issues,
+        )
+        _record(OUTCOME_FALLBACK)
+        return None
+    try:
+        payload = payload_from_native(result)
+    except Exception:
+        logger.exception("custom_profile_card backend=skia returned an invalid payload; falling back to Pillow")
+        _record(OUTCOME_ERROR)
+        return None
+    payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
     _record(OUTCOME_SKIA, payload)
     logger.info(
         "custom_profile_card backend=skia total=%.3fs bytes=%d image=%sx%s",

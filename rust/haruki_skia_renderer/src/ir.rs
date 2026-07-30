@@ -25,6 +25,11 @@ pub struct Scene {
     /// Optional flat background painted before the root tree (TriangleBg or cover image).
     #[serde(default)]
     pub background: Option<Node>,
+    /// Request-specific allocation limits for asset-backed native nodes. General scenes omit
+    /// this block and keep conservative defaults; custom-profile scenes pass their configured
+    /// layer/scene budgets so fail-open cannot silently widen the memory boundary.
+    #[serde(default)]
+    pub limits: SceneLimits,
     pub root: Node,
 }
 
@@ -38,6 +43,31 @@ fn default_jpg_quality() -> i32 {
 
 fn default_scale() -> f32 {
     1.0
+}
+
+const fn default_max_node_pixels() -> u64 {
+    8 * 1024 * 1024
+}
+
+const fn default_max_scene_bytes() -> u64 {
+    256 * 1024 * 1024
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SceneLimits {
+    #[serde(default = "default_max_node_pixels")]
+    pub max_node_pixels: u64,
+    #[serde(default = "default_max_scene_bytes")]
+    pub max_scene_bytes: u64,
+}
+
+impl Default for SceneLimits {
+    fn default() -> Self {
+        Self {
+            max_node_pixels: default_max_node_pixels(),
+            max_scene_bytes: default_max_scene_bytes(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,8 +302,12 @@ pub enum Node {
     RoundRect(RoundRectNode),
     PieSlice(PieSliceNode),
     Image(ImageNode),
+    SlicedImage(SlicedImageNode),
+    UnityImage(UnityImageNode),
+    UnitySubscene(UnitySubsceneNode),
     SelfImage(SelfImageNode),
     SdfQuad(SdfQuadNode),
+    SdfShape(SdfShapeNode),
     Text(TextNode),
     Shadow(ShadowNode),
     BlurGlass(BlurGlassNode),
@@ -325,6 +359,42 @@ pub struct SdfUnderlay {
     /// Integer pixel translation of the field for the underlay sample:
     /// `shifted[y][x] = field[y + shift[1]][x + shift[0]]`, out-of-bounds samples 0.0.
     pub shift: [i32; 2],
+}
+
+/// Asset-backed custom-profile distance-field shape (requires IR_CAPABILITY >= 11).
+///
+/// Unlike `SdfQuad`, Python does not pre-rasterize or warp this node. Rust decodes the source
+/// PNG as unpremultiplied RGBA, independently samples its R distance field and A texture mask,
+/// computes screen-space fwidth, shades the patch, and applies the Unity transform.
+#[derive(Debug, Deserialize)]
+pub struct SdfShapeNode {
+    pub path: String,
+    /// Final canvas-space position of the shape pivot.
+    pub anchor: Vec2,
+    /// Scale consumed while constructing the screen-space distance-field patch.
+    pub sdf_scale: Vec2,
+    /// Fixed Unity-unit-to-output-pixel scale applied after distance-field shading.
+    pub post_scale: Vec2,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub field_channel: SdfShapeFieldChannel,
+    pub fill_color: [u8; 3],
+    pub fill_alpha: f32,
+    pub outline_color: [u8; 3],
+    pub outline_alpha: f32,
+    pub outer_fill_ratio: f32,
+    pub face_dilate: f32,
+    #[serde(default)]
+    pub softness: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SdfShapeFieldChannel {
+    #[default]
+    Red,
+    Alpha,
 }
 
 /// Affine-transform subtree (requires IR_CAPABILITY >= 8).
@@ -379,6 +449,10 @@ pub struct RectNode {
     pub stroke: Option<Fill>,
     #[serde(default = "default_stroke_width")]
     pub stroke_width: f32,
+    /// Porter-Duff blend applied to both the fill and stroke. `Src` replaces the destination
+    /// channels inside the rectangle instead of compositing over them.
+    #[serde(default)]
+    pub blend: ImageBlend,
 }
 
 #[derive(Debug, Deserialize)]
@@ -457,6 +531,63 @@ pub struct ImageNode {
     /// that the two backends do not silently disagree wherever the destination is non-empty.
     #[serde(default)]
     pub blend: ImageBlend,
+}
+
+/// Asset-backed Unity 9-slice image.
+///
+/// `border` follows Unity's serialized order: `[left, bottom, right, top]`. Rust mirrors
+/// `PNGRenderer.resize_sliced_sprite`: clamp the borders against the source dimensions, shrink
+/// opposing borders proportionally when the target is smaller than their sum, crop the nine
+/// source regions, resize each independently with Catmull-Rom (PIL BICUBIC), and composite the
+/// completed target patch at the rounded destination position.
+#[derive(Debug, Deserialize)]
+pub struct SlicedImageNode {
+    pub path: String,
+    pub pos: Vec2,
+    pub size: Vec2,
+    pub border: [i32; 4],
+    #[serde(default)]
+    pub tint: Option<Tint>,
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+}
+
+/// Intrinsic-size asset placed with a custom-profile Unity transform.
+///
+/// Python resolves only the safe asset path and layout scalars; Rust discovers the source
+/// dimensions, decodes it, and performs the resize/rotation/composite without a PIL raster.
+#[derive(Debug, Deserialize)]
+pub struct UnityImageNode {
+    pub path: String,
+    pub anchor: Vec2,
+    pub object_scale: Vec2,
+    pub post_scale: Vec2,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub sampling: ImageSampling,
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+}
+
+/// Natural-size child scene rendered in isolation, then placed with custom-profile Unity
+/// transform semantics. The isolation is required for subtrees that use Porter-Duff Src:
+/// those writes must replace pixels only inside the transparent offscreen surface, never erase
+/// content already present on the parent card.
+#[derive(Debug, Deserialize)]
+pub struct UnitySubsceneNode {
+    pub size: [i32; 2],
+    pub anchor: Vec2,
+    pub object_scale: Vec2,
+    pub post_scale: Vec2,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default)]
+    pub sampling: ImageSampling,
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+    #[serde(default)]
+    pub children: Vec<Node>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]

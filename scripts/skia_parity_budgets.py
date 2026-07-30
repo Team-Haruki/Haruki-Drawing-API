@@ -5,10 +5,12 @@ The 63 ordinary budgets were derived from ``out/parity-sweep-real/results.json``
 * mean: ``max(0.25, accepted_mean * 1.15 + 0.1)``
 * p99: ``min(255, accepted_p99 * 1.05 + 2)``
 
-Values are rounded upward (mean to 0.001, p99 to 0.1). The four custom-profile
-variants deliberately retain the renderer's wider ``(2, 25)`` rotation budget;
-the symbol/stamps fixtures are not captured yet, but still need an explicit
-budget before they can enter the strict gate.
+Values are rounded upward (mean to 0.001, p99 to 0.1). Custom-profile variants
+retain a wider mean budget for transformed layers. The collections fixture has a
+separately calibrated p99 ceiling for its dense 23–31 px native Rodin text and
+26-cell rank grid; its accepted native-pure baseline is mean=1.307/p99=37. The symbol/stamps fixtures are
+not captured yet, but still need an explicit budget before they can enter the
+strict gate.
 """
 
 from __future__ import annotations
@@ -60,7 +62,7 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "mysekai_housing_competition": (1.912, 40.9),
     "profile": (2.514, 32.5),
     "custom_profile_card": (2.000, 25.0),
-    "custom_profile_card_collections": (2.000, 25.0),
+    "custom_profile_card_collections": (2.000, 40.9),
     "custom_profile_card_symbol": (2.000, 25.0),
     "custom_profile_card_stamps": (2.000, 25.0),
     "score_control": (4.565, 57.7),

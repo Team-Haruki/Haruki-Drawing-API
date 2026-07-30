@@ -12,7 +12,7 @@ use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader
 #[cfg(not(test))]
 use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use skia_safe::{
     AlphaType, BlurStyle, Canvas, ClipOp, Color, ColorType, Data, EncodedImageFormat, FilterMode,
     FontMgr, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point,
@@ -28,6 +28,7 @@ fn linear_sampling() -> SamplingOptions {
 
 mod interp;
 mod ir;
+mod text_metrics;
 
 /// Distinguishes an IR that failed to parse (caller error → ValueError) from one that failed
 /// to render (RuntimeError), now that both happen inside the same detached region.
@@ -321,20 +322,38 @@ fn validate_raw_image(
 /// on the unknown node kind (-> PyValueError -> Python fail-open to Pillow).
 /// 9 = SdfQuad (TMP text shading) + A8 raw mem transport.
 /// 10 = per-Image Gaussian blur decoration (ImageBg lazy-ref path).
-pub const IR_CAPABILITY: u32 = 10;
+/// 11 = asset-backed SdfShape custom-profile distance-field rendering.
+/// 12 = UnityImage intrinsic asset placement + isolated UnitySubscene composition.
+/// 13 = asset-backed SlicedImage nine-slice composition.
+/// 14 = Porter-Duff Src/SrcOver blending for Rect.
+pub const IR_CAPABILITY: u32 = 14;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
 /// SdfQuad glyph fields.
 pub const RAW_BUFFER_CAPABILITY: u32 = 2;
 
+/// Capability of the standalone, root-confined asset metadata API.
+/// 1 = `asset_image_info(base, relative_path)` returns dimensions + file identity without
+/// involving Pillow.
+pub const ASSET_INFO_CAPABILITY: u32 = 1;
+
+/// Capability of the standalone, strict native text-measurement API.
+/// 1 = `measure_text_batch(font_dir, font_name, [(text, size), ...])` returns advance,
+/// alphabetic-baseline ink bounds, Pillow-default-anchor bounds, and font metrics.
+pub const TEXT_METRICS_CAPABILITY: u32 = 1;
+
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_scene, m)?)?;
+    m.add_function(wrap_pyfunction!(asset_image_info, m)?)?;
+    m.add_function(wrap_pyfunction!(measure_text_batch, m)?)?;
     m.add_function(wrap_pyfunction!(renderer_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(clear_renderer_caches, m)?)?;
     m.add("IR_CAPABILITY", IR_CAPABILITY)?;
     m.add("RAW_BUFFER_CAPABILITY", RAW_BUFFER_CAPABILITY)?;
+    m.add("ASSET_INFO_CAPABILITY", ASSET_INFO_CAPABILITY)?;
+    m.add("TEXT_METRICS_CAPABILITY", TEXT_METRICS_CAPABILITY)?;
     Ok(())
 }
 
@@ -1189,8 +1208,239 @@ pub(crate) fn load_asset_descriptor(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AssetImageInfo {
+    width: i32,
+    height: i32,
+    mtime_ns: u128,
+    file_size: u64,
+}
+
+/// Inspect an asset through the same descriptor/dimension cache as scene rendering, while
+/// canonicalizing both sides first so a symlink cannot escape the caller-supplied asset root.
+fn load_confined_asset_image_info(base: &Path, path: &str) -> Result<AssetImageInfo, String> {
+    let candidate = resolve_asset_path(base, path)?;
+    let canonical_base = fs::canonicalize(base)
+        .map_err(|err| format!("failed to resolve asset root {}: {err}", base.display()))?;
+    let canonical_candidate = fs::canonicalize(&candidate)
+        .map_err(|err| format!("failed to resolve asset {}: {err}", candidate.display()))?;
+    let canonical_relative = canonical_candidate
+        .strip_prefix(&canonical_base)
+        .map_err(|_| {
+            format!(
+                "asset path escapes configured root {}: {path}",
+                canonical_base.display()
+            )
+        })?
+        .to_str()
+        .ok_or_else(|| {
+            format!(
+                "asset path is not valid UTF-8: {}",
+                canonical_candidate.display()
+            )
+        })?;
+    let loaded = load_asset_descriptor(&canonical_base, canonical_relative)?;
+    Ok(AssetImageInfo {
+        width: loaded.descriptor.width,
+        height: loaded.descriptor.height,
+        mtime_ns: loaded.descriptor.identity.mtime_ns,
+        file_size: loaded.descriptor.identity.file_size,
+    })
+}
+
+#[pyfunction]
+fn asset_image_info(py: Python<'_>, assets_base_dir: &str, path: &str) -> PyResult<Py<PyDict>> {
+    let base = PathBuf::from(assets_base_dir);
+    let relative = path.to_owned();
+    let info = py
+        .detach(|| load_confined_asset_image_info(&base, &relative))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let dict = PyDict::new(py);
+    dict.set_item("width", info.width)?;
+    dict.set_item("height", info.height)?;
+    // AssetImageRef.mode is only a layout hint on this path; Rust normalizes the decoded
+    // source to RGBA for rendering.
+    dict.set_item("mode", "RGBA")?;
+    dict.set_item("mtime_ns", info.mtime_ns)?;
+    dict.set_item("file_size", info.file_size)?;
+    Ok(dict.unbind())
+}
+
+/// Measure several strings with one strictly resolved typeface.
+///
+/// `requests` is a bounded list/tuple of `(text, size)` pairs.  Python strings are borrowed
+/// long enough to enforce the limits before they are copied; font loading and all Skia calls
+/// then run with the GIL detached.
+#[pyfunction]
+fn measure_text_batch(
+    py: Python<'_>,
+    font_dir: &str,
+    font_name: &str,
+    requests: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyList>> {
+    use text_metrics::{
+        MAX_TEXT_METRICS_BATCH, MAX_TEXT_METRICS_CHARS, MAX_TEXT_METRICS_FONT_PATH_BYTES,
+        TextMetricsRequest, measure_text_metrics_batch,
+    };
+
+    if font_dir.len() > MAX_TEXT_METRICS_FONT_PATH_BYTES {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "font directory exceeds {MAX_TEXT_METRICS_FONT_PATH_BYTES} UTF-8 bytes"
+        )));
+    }
+    if font_name.is_empty() || font_name.len() > MAX_TEXT_METRICS_FONT_PATH_BYTES {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "font name/path must contain 1..={MAX_TEXT_METRICS_FONT_PATH_BYTES} UTF-8 bytes"
+        )));
+    }
+    if !requests.is_instance_of::<PyList>() && !requests.is_instance_of::<PyTuple>() {
+        return Err(pyo3::exceptions::PyTypeError::new_err(
+            "text metric requests must be a list or tuple of (text, size) pairs",
+        ));
+    }
+    let count = requests.len()?;
+    if count > MAX_TEXT_METRICS_BATCH {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "text metrics batch has {count} entries; maximum is {MAX_TEXT_METRICS_BATCH}"
+        )));
+    }
+
+    let mut owned_requests = Vec::with_capacity(count);
+    for index in 0..count {
+        let item = requests.get_item(index)?;
+        if !item.is_instance_of::<PyList>() && !item.is_instance_of::<PyTuple>() {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "text metrics request {index} must be a (text, size) pair"
+            )));
+        }
+        if item.len()? != 2 {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "text metrics request {index} must contain exactly two items"
+            )));
+        }
+        let text_item = item.get_item(0)?;
+        let text: &str = text_item.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "text metrics request {index} text must be a string"
+            ))
+        })?;
+        // A Unicode scalar occupies at most four UTF-8 bytes.  Reject obviously oversized
+        // input before the O(n) scalar count and before copying it into Rust-owned memory.
+        if text.len() > MAX_TEXT_METRICS_CHARS * 4 || text.chars().count() > MAX_TEXT_METRICS_CHARS
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "text metrics request {index} exceeds {MAX_TEXT_METRICS_CHARS} characters"
+            )));
+        }
+        let size_item = item.get_item(1)?;
+        let size: f32 = size_item.extract().map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "text metrics request {index} size must be a real number"
+            ))
+        })?;
+        owned_requests.push(TextMetricsRequest {
+            text: text.to_owned(),
+            size,
+        });
+    }
+
+    let font_dir = font_dir.to_owned();
+    let font_name = font_name.to_owned();
+    let measured = py
+        .detach(|| measure_text_metrics_batch(&font_dir, &font_name, &owned_requests))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+
+    let results = PyList::empty(py);
+    for result in measured {
+        let dict = PyDict::new(py);
+        dict.set_item("advance", result.advance)?;
+        dict.set_item(
+            "ink_bbox",
+            (
+                result.ink_bbox[0],
+                result.ink_bbox[1],
+                result.ink_bbox[2],
+                result.ink_bbox[3],
+            ),
+        )?;
+        dict.set_item(
+            "pillow_bbox",
+            (
+                result.pillow_bbox[0],
+                result.pillow_bbox[1],
+                result.pillow_bbox[2],
+                result.pillow_bbox[3],
+            ),
+        )?;
+        dict.set_item("ascent", result.ascent)?;
+        dict.set_item("descent", result.descent)?;
+        dict.set_item("leading", result.leading)?;
+        dict.set_item("line_spacing", result.line_spacing)?;
+        dict.set_item("font_top", result.font_top)?;
+        dict.set_item("font_bottom", result.font_bottom)?;
+        dict.set_item("cap_height", result.cap_height)?;
+        dict.set_item("x_height", result.x_height)?;
+        results.append(dict)?;
+    }
+    Ok(results.unbind())
+}
+
 pub(crate) fn decode_asset_descriptor(descriptor: &AssetDescriptor) -> Result<Image, String> {
     decode_image_file(&descriptor.identity.full_path)
+}
+
+/// Decode an asset directly through SkCodec into straight RGBA.
+///
+/// This bypasses `Image::from_encoded`'s premultiplied raster path: SDF assets carry meaningful
+/// distance values in RGB even where alpha is low, and premultiplication would destroy them.
+pub(crate) fn decode_asset_rgba_unpremul(
+    descriptor: &AssetDescriptor,
+) -> Result<(Vec<u8>, i32, i32), String> {
+    let data = Data::from_filename(&descriptor.identity.full_path).ok_or_else(|| {
+        format!(
+            "failed to memory-map {}",
+            descriptor.identity.full_path.display()
+        )
+    })?;
+    let mut codec = skia_safe::Codec::from_data(data).ok_or_else(|| {
+        format!(
+            "failed to decode {}",
+            descriptor.identity.full_path.display()
+        )
+    })?;
+    let dimensions = codec.dimensions();
+    let (width, height) = (dimensions.width, dimensions.height);
+    if width <= 0 || height <= 0 {
+        return Err(format!(
+            "decoded image has invalid dimensions: {}",
+            descriptor.identity.full_path.display()
+        ));
+    }
+    let row_bytes = (width as usize)
+        .checked_mul(4)
+        .ok_or_else(|| "asset row size overflow".to_string())?;
+    let byte_len = row_bytes
+        .checked_mul(height as usize)
+        .ok_or_else(|| "asset pixel size overflow".to_string())?;
+    let mut pixels = Vec::new();
+    pixels
+        .try_reserve_exact(byte_len)
+        .map_err(|_| format!("asset pixel allocation rejected: {width}x{height}"))?;
+    pixels.resize(byte_len, 0);
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let result = codec.get_pixels_with_options(&info, &mut pixels, row_bytes, None);
+    if !matches!(result, skia_safe::codec::Result::Success) {
+        return Err(format!(
+            "failed to decode straight RGBA pixels from {}: {result:?}",
+            descriptor.identity.full_path.display()
+        ));
+    }
+    Ok((pixels, width, height))
 }
 
 fn normalized_float_bits(value: f32) -> u32 {
@@ -1241,7 +1491,7 @@ fn build_target_raster(
     draw_source_to_raster(&current, current_src, width, height, final_sampling)
 }
 
-fn draw_source_to_raster(
+pub(crate) fn draw_source_to_raster(
     source: &Image,
     source_rect: Rect,
     width: i32,
@@ -1528,6 +1778,24 @@ fn font_candidates(dir: &str, name: &str) -> Vec<PathBuf> {
 mod tests {
     use super::*;
 
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "haruki-skia-{label}-{}-{unique}",
+            std::process::id()
+        ))
+    }
+
+    fn write_test_png(path: &Path, width: i32, height: i32) {
+        let mut surface = surfaces::raster_n32_premul((width, height)).expect("surface");
+        surface.canvas().clear(Color::BLUE);
+        let encoded = encode_surface_mtpng(&mut surface).expect("png encode");
+        fs::write(path, encoded).expect("png write");
+    }
+
     #[test]
     fn rejects_absolute_asset_paths() {
         assert!(resolve_asset_path(Path::new("/tmp/base"), "/tmp/x.png").is_err());
@@ -1536,6 +1804,42 @@ mod tests {
     #[test]
     fn rejects_parent_asset_paths() {
         assert!(resolve_asset_path(Path::new("/tmp/base"), "../x.png").is_err());
+    }
+
+    #[test]
+    fn asset_image_info_reads_dimensions_and_file_identity() {
+        let base = unique_test_dir("asset-info");
+        fs::create_dir_all(&base).expect("temp base");
+        let image_path = base.join("badge.png");
+        write_test_png(&image_path, 17, 9);
+
+        let info = load_confined_asset_image_info(&base, "badge.png").expect("asset info");
+        assert_eq!((info.width, info.height), (17, 9));
+        assert!(info.file_size > 0);
+
+        fs::remove_file(image_path).expect("remove image");
+        fs::remove_dir(base).expect("remove base");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn asset_image_info_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = unique_test_dir("asset-info-symlink");
+        let base = root.join("base");
+        fs::create_dir_all(&base).expect("temp base");
+        let outside = root.join("outside.png");
+        write_test_png(&outside, 4, 3);
+        symlink(&outside, base.join("escape.png")).expect("symlink");
+
+        let error = load_confined_asset_image_info(&base, "escape.png").expect_err("must reject");
+        assert!(error.contains("escapes configured root"), "{error}");
+
+        fs::remove_file(base.join("escape.png")).expect("remove symlink");
+        fs::remove_file(outside).expect("remove outside");
+        fs::remove_dir(base).expect("remove base");
+        fs::remove_dir(root).expect("remove root");
     }
 
     #[test]

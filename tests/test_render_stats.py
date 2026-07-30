@@ -24,6 +24,7 @@ from src.sekai.skia_renderer.render_stats import (
     get_render_stats,
     record_native_metrics,
     record_render,
+    record_scene_completeness,
     record_worker_payload_backend,
     reset_render_stats,
 )
@@ -128,6 +129,34 @@ def test_reset_render_stats_clears_counters():
         },
         "font_fallbacks": 0,
     }
+
+
+def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
+    record_scene_completeness(
+        "custom_profile_card",
+        {
+            "complete": 0,
+            "elements_total": 3,
+            "visible_elements": 2,
+            "native_elements": 1,
+            "hidden_elements": 1,
+            "missing_elements": 1,
+            "mem_images": 1,
+            "mem_bytes": 64,
+            "issues_by_kind": {"stamp": {"missing": 1}},
+        },
+    )
+    record_render("custom_profile_card", "fallback")
+
+    scene = get_render_stats()["endpoints"]["custom_profile_card"]["scene_completeness"]
+    assert scene["checked"] == 1
+    assert scene["incomplete"] == 1
+    assert scene["missing_elements"] == 1
+    assert scene["issues_by_kind"] == {"stamp": {"missing": 1, "unresolved": 0}}
+
+    reset_render_stats()
+    record_render("card_list", "skia")
+    assert "scene_completeness" not in get_render_stats()["endpoints"]["card_list"]
 
 
 def test_font_fallbacks_are_aggregated_from_the_payload():
