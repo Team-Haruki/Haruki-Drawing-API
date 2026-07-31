@@ -145,8 +145,8 @@ def build_canvas_ir(
     font_dir: str | None = None,
     default_font: str | None = None,
     bold_font: str | None = None,
-    heavy_font: str | None | _UnsetFont = _UNSET_FONT,
-    emoji_font: str | None | _UnsetFont = _UNSET_FONT,
+    heavy_font: str | _UnsetFont | None = _UNSET_FONT,
+    emoji_font: str | _UnsetFont | None = _UNSET_FONT,
     jpg_quality: int | None = None,
 ) -> tuple[IRBuilder, dict[str, Any]]:
     """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
