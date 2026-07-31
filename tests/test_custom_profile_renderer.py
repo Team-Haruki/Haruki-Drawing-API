@@ -130,6 +130,100 @@ def _make_renderer(
     )
 
 
+def test_masterdata_honor_request_builder_does_not_decode_images(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    renderer.honors = {
+        123: {
+            "groupId": 7,
+            "assetbundleName": "honor_asset",
+            "honorRarity": "high",
+        }
+    }
+    renderer.honor_groups = {
+        7: {
+            "honorType": "character",
+            "backgroundAssetbundleName": "honor_background",
+        }
+    }
+    expected_paths = {
+        "honor": tmp_path / "degree_sub.png",
+        "rank": tmp_path / "rank_sub.png",
+        "frame": tmp_path / "frame_sub.png",
+        "scroll": tmp_path / "scroll.png",
+        "lv": tmp_path / "icon_degreeLv.png",
+        "lv6": tmp_path / "icon_degreeLv6.png",
+    }
+    monkeypatch.setattr(renderer, "honor_background_path", lambda *_: expected_paths["honor"])
+    monkeypatch.setattr(renderer, "honor_rank_path", lambda *_: expected_paths["rank"])
+    monkeypatch.setattr(renderer, "honor_frame_path", lambda *_: expected_paths["frame"])
+    monkeypatch.setattr(renderer, "first_region_asset", lambda *_: expected_paths["scroll"])
+    monkeypatch.setattr(
+        renderer,
+        "static_image_path",
+        lambda *parts: expected_paths["lv6" if "Lv6" in parts[-1] else "lv"],
+    )
+    monkeypatch.setattr(
+        renderer,
+        "open_rgba",
+        lambda *_: pytest.fail("request derivation must not decode an image"),
+    )
+
+    request = renderer.build_masterdata_honor_request(123, 4, False)
+
+    assert request is not None
+    assert request.honor_type == "normal"
+    assert request.group_type == "character"
+    assert request.honor_level == 4
+    assert request.honor_img_path == expected_paths["honor"].as_posix()
+    assert request.rank_img_path == expected_paths["rank"].as_posix()
+    assert request.frame_img_path == expected_paths["frame"].as_posix()
+    assert request.scroll_img_path == expected_paths["scroll"].as_posix()
+    assert request.lv_img_path == expected_paths["lv"].as_posix()
+    assert request.lv6_img_path == expected_paths["lv6"].as_posix()
+
+
+def test_masterdata_bonds_honor_request_builder_does_not_decode_images(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    renderer.bonds_honors = {
+        456: {
+            "id": 456,
+            "honorRarity": "middle",
+            "gameCharacterUnitId1": 11,
+            "gameCharacterUnitId2": 22,
+        }
+    }
+    renderer.game_character_units = {
+        11: {"gameCharacterId": 1},
+        22: {"gameCharacterId": 2},
+    }
+    monkeypatch.setattr(renderer, "user_bonds_honor_level_for", lambda *_: 3)
+    monkeypatch.setattr(renderer, "static_image_path", lambda *parts: tmp_path.joinpath(*parts))
+    monkeypatch.setattr(renderer, "first_region_asset", lambda rels: tmp_path / rels[0])
+    monkeypatch.setattr(
+        renderer,
+        "open_rgba",
+        lambda *_: pytest.fail("request derivation must not decode an image"),
+    )
+
+    request = renderer.build_masterdata_bonds_honor_request(
+        {"id": 456, "wordId": 0, "inverse": True},
+        False,
+    )
+
+    assert request is not None
+    assert request.honor_type == "bonds"
+    assert request.honor_level == 3
+    assert request.honor_rarity == "middle"
+    assert (request.chara_id, request.chara_id2) == ("22", "11")
+    assert request.bonds_bg_path == (tmp_path / "honor" / "bonds" / "2_sub.png").as_posix()
+    assert request.bonds_bg_path2 == (tmp_path / "honor" / "bonds" / "1_sub.png").as_posix()
+    assert request.chara_icon_path == (tmp_path / "bonds_honor" / "character" / "chr_sd_22_01.png").as_posix()
+    assert request.chara_icon_path2 == (tmp_path / "bonds_honor" / "character" / "chr_sd_11_01.png").as_posix()
+    assert request.word_img_path is None
+
+
 def test_custom_profile_request_asset_path_stays_inside_data_roots(tmp_path: Path) -> None:
     renderer = _make_renderer(tmp_path)
     safe = renderer.assets / "safe.png"

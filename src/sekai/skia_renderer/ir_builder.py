@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+import math
 import os
 from pathlib import Path
 import re
@@ -419,12 +420,57 @@ class IRBuilder:
         blur_sigma: float | Vec2 | None = None,
     ) -> Node:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
-        the mask-less ``Image.paste``); the default composites over it. ``blur_sigma`` applies
-        a destination-space Gaussian blur to the image only; a scalar uses the same sigma on
-        both axes. ``sampling="pillow_lanczos"`` performs a strict, straight-RGBA8 Pillow
-        Lanczos raster resize and currently accepts only integral ``stretch``/centered ``cover``
-        asset placements without source_rect/decorations; unsupported input fails the scene open
-        to Pillow. Blur requires IR_CAPABILITY >= 10; Pillow Lanczos requires >= 15."""
+        the mask-less ``Image.paste``); the default composites over it.
+
+        ``blend="paste_lerp"`` matches Pillow ``destination.paste(source, pos, source)`` by
+        interpolating all four *straight* RGBA channels with source alpha. It is intentionally
+        restricted to a positive integral, axis-aligned ``stretch`` placement with ``alpha=1``
+        and no source_rect/tint/shadow/blur; Rust preflights ancestor Group offsets and rejects
+        Transform or masked-Group nesting before drawing (ordinary Group clips and isolated
+        subscene local surfaces are supported). Skia surfaces are premultiplied, so RGB hidden beneath
+        alpha=0 cannot survive a surface round-trip and is explicitly outside this contract.
+
+        ``blur_sigma`` applies a destination-space Gaussian blur to the image only; a scalar uses
+        the same sigma on both axes. ``sampling="pillow_lanczos"`` performs a strict,
+        straight-RGBA8 Pillow Lanczos raster resize and currently accepts only integral
+        ``stretch``/centered ``cover`` asset placements without source_rect/decorations;
+        unsupported input fails the scene open to Pillow. Blur requires IR_CAPABILITY >= 10;
+        Pillow Lanczos requires >= 15; paste_lerp requires >= 16.
+        """
+        if blend not in {"src_over", "src", "paste_lerp"}:
+            raise ValueError(f"unsupported Image blend: {blend!r}")
+        if blend == "paste_lerp":
+            sigma = (
+                (float(blur_sigma), float(blur_sigma))
+                if isinstance(blur_sigma, (int, float))
+                else (0.0, 0.0)
+                if blur_sigma is None
+                else (float(blur_sigma[0]), float(blur_sigma[1]))
+            )
+            values = tuple(float(value) for value in (*pos, *size, *anchor))
+            left = values[0] - values[2] * values[4]
+            top = values[1] - values[3] * values[5]
+            edges = (left, top, left + values[2], top + values[3])
+            if fit != "stretch":
+                raise ValueError("paste_lerp Image requires fit='stretch'")
+            if float(alpha) != 1.0:
+                raise ValueError("paste_lerp Image requires alpha=1")
+            if (
+                source_rect is not None
+                or tint is not None
+                or shadow is not None
+                or any(value != 0.0 for value in sigma)
+            ):
+                raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
+            if (
+                values[2] <= 0.0
+                or values[3] <= 0.0
+                or any(
+                    not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
+                    for value in edges
+                )
+            ):
+                raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -531,6 +577,33 @@ class IRBuilder:
         operation. Requires IR_CAPABILITY >= 12 (Pillow Lanczos >= 15).
         """
 
+        self.push_unity_subscene(
+            size=size,
+            anchor=anchor,
+            object_scale=object_scale,
+            post_scale=post_scale,
+            rotation=rotation,
+            sampling=sampling,
+            alpha=alpha,
+        )
+        try:
+            yield self
+        finally:
+            self.pop_unity_subscene()
+
+    def push_unity_subscene(
+        self,
+        *,
+        size: tuple[int, int],
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Node:
+        """Push form of :meth:`unity_subscene` for Painter-style spanning operations."""
+
         node: Node = {
             "type": "UnitySubscene",
             "size": [int(size[0]), int(size[1])],
@@ -544,11 +617,93 @@ class IRBuilder:
         }
         self._add(node)
         self._stack.append(node["children"])
+        return node
+
+    def pop_unity_subscene(self) -> None:
+        assert len(self._stack) > 1, "pop_unity_subscene without a matching push"
+        self._stack.pop()
+
+    @contextmanager
+    def raster_subscene(
+        self,
+        *,
+        natural_size: tuple[int, int],
+        pos: Vec2,
+        dst_size: Vec2,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+        shadow: Node | None = None,
+    ) -> Iterator[IRBuilder]:
+        """Render children at ``natural_size`` on a transparent isolated raster.
+
+        The completed snapshot is sampled into logical ``pos``/``dst_size`` as one parent Image
+        draw. A Scene.scale remains the normal whole-page final resize and this node introduces
+        no hidden pre-resize. ``shadow`` uses :func:`image_shadow` semantics and is derived from
+        the completed snapshot's alpha silhouette.
+
+        The active builder stack points at this node's children inside the context, so
+        ``NativeSubtree.splice_into(builder, mem_sink, ...)`` can be called directly here.
+        Requires IR_CAPABILITY >= 17.
+        """
+
+        self.push_raster_subscene(
+            natural_size=natural_size,
+            pos=pos,
+            dst_size=dst_size,
+            sampling=sampling,
+            alpha=alpha,
+            shadow=shadow,
+        )
         try:
             yield self
         finally:
-            popped = self._stack.pop()
-            assert popped is node["children"]
+            self.pop_raster_subscene()
+
+    def push_raster_subscene(
+        self,
+        *,
+        natural_size: tuple[int, int],
+        pos: Vec2,
+        dst_size: Vec2,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+        shadow: Node | None = None,
+    ) -> Node:
+        """Push form of :meth:`raster_subscene` for Painter-style spanning operations."""
+
+        natural = (int(natural_size[0]), int(natural_size[1]))
+        logical_pos = (float(pos[0]), float(pos[1]))
+        logical_size = (float(dst_size[0]), float(dst_size[1]))
+        node_alpha = float(alpha)
+        if natural[0] <= 0 or natural[1] <= 0:
+            raise ValueError("RasterSubscene natural_size must be positive")
+        if not all(math.isfinite(value) for value in (*logical_pos, *logical_size, node_alpha)):
+            raise ValueError("RasterSubscene placement must be finite")
+        if logical_size[0] <= 0.0 or logical_size[1] <= 0.0:
+            raise ValueError("RasterSubscene dst_size must be positive")
+        if not 0.0 <= node_alpha <= 1.0:
+            raise ValueError("RasterSubscene alpha must be between 0 and 1")
+        if sampling == "pillow_lanczos":
+            raise ValueError("RasterSubscene does not support pillow_lanczos sampling")
+
+        node: Node = {
+            "type": "RasterSubscene",
+            "natural_size": [natural[0], natural[1]],
+            "pos": [logical_pos[0], logical_pos[1]],
+            "dst_size": [logical_size[0], logical_size[1]],
+            "sampling": sampling,
+            "alpha": node_alpha,
+            "children": [],
+        }
+        if shadow is not None:
+            node["shadow"] = shadow
+        self._add(node)
+        self._stack.append(node["children"])
+        return node
+
+    def pop_raster_subscene(self) -> None:
+        assert len(self._stack) > 1, "pop_raster_subscene without a matching push"
+        self._stack.pop()
 
     def self_image(
         self,

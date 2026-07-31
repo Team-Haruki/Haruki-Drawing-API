@@ -9,19 +9,19 @@ cache, and renders the tree with Pillow.
 import asyncio
 import logging
 
-from PIL import Image
-
 from src.sekai.base.utils import (
+    ImageSource,
     build_rendered_image_cache_key,
+    get_asset_image_ref,
     get_composed_image_cached,
     get_image_asset_signature,
-    get_img_from_path,
     put_composed_image_cache,
     run_in_pool,
 )
 from src.settings import ASSETS_BASE_DIR
 
 # 从 model.py 导入数据模型
+from .assets import HONOR_ASSET_MANIFEST, honor_asset_specs
 from .model import HonorRequest
 from .widget import (
     build_honor_badge_canvas,
@@ -39,26 +39,27 @@ logger = logging.getLogger(__name__)
 
 def compose_full_honor_image_from_loaded_assets(
     rqd: HonorRequest,
-    images: dict[str, Image.Image | None],
-) -> Image.Image | None:
-    """Synchronous compose from already-decoded images (the custom-profile renderer's path).
+    images: dict[str, ImageSource | None],
+):
+    """Synchronous compose from already-resolved sources (the custom-profile renderer's path).
 
-    Renders the shared widget tree with ``Canvas.get_img_sync`` — same tree, same ops, same
-    pixels as the async entry point below."""
+    Sources may be decoded images or lazy asset references. Renders the shared widget tree with
+    ``Canvas.get_img_sync`` — same tree, same ops, same pixels as the async entry point below."""
     canvas = build_honor_badge_canvas(rqd, images)
     if canvas is None:
         return None
     return canvas.get_img_sync()
 
 
-async def load_honor_images(rqd: HonorRequest) -> dict[str, Image.Image | None]:
-    """Decode every asset the request's branch needs, concurrently.
+async def load_honor_images(rqd: HonorRequest) -> dict[str, ImageSource | None]:
+    """Resolve every asset the request's branch needs, concurrently, without decoding pixels.
 
     Required assets raise (the caller surfaces the canonical error); only ``rank_img`` is
-    optional, and a missing one is logged and skipped, exactly as before."""
+    optional, and a missing one is logged and skipped, exactly as before. Pillow resolves these
+    lazy refs inside its render worker; IRPainter keeps them as asset paths for Rust."""
 
     async def load_honor_image(path: str | None):
-        return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="raise")
+        return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise")
 
     async def load_optional_image(path: str | None):
         if not path:
@@ -70,64 +71,23 @@ async def load_honor_images(rqd: HonorRequest) -> dict[str, Image.Image | None]:
             return None
 
     tasks: dict[str, object] = {}
-
-    if rqd.is_empty and rqd.empty_honor_path:
-        tasks["empty_honor"] = load_honor_image(rqd.empty_honor_path)
-    if rqd.lv_img_path:
-        tasks["lv_img"] = load_honor_image(rqd.lv_img_path)
-    if rqd.lv6_img_path:
-        tasks["lv6_img"] = load_honor_image(rqd.lv6_img_path)
-    if rqd.frame_img_path:
-        tasks["frame_img"] = load_honor_image(rqd.frame_img_path)
-
-    htype = rqd.honor_type
-    gtype = rqd.group_type
-    if htype == "birthday" and rqd.frame_degree_level_img_path:
-        tasks["frame_degree_level_img"] = load_honor_image(rqd.frame_degree_level_img_path)
-
-    if htype in ("normal", "birthday"):
-        if rqd.honor_img_path:
-            tasks["honor_img"] = load_honor_image(rqd.honor_img_path)
-        if rqd.rank_img_path:
-            tasks["rank_img"] = load_optional_image(rqd.rank_img_path)
-        if honor_group_uses_scroll_level(gtype) and rqd.scroll_img_path:
-            tasks["scroll_img"] = load_honor_image(rqd.scroll_img_path)
-    elif htype == "bonds":
-        if rqd.bonds_bg_path:
-            tasks["bonds_bg"] = load_honor_image(rqd.bonds_bg_path)
-        if rqd.bonds_bg_path2:
-            tasks["bonds_bg2"] = load_honor_image(rqd.bonds_bg_path2)
-        if rqd.chara_icon_path:
-            tasks["chara_icon_1"] = load_honor_image(rqd.chara_icon_path)
-        if rqd.chara_icon_path2:
-            tasks["chara_icon_2"] = load_honor_image(rqd.chara_icon_path2)
-        if rqd.mask_img_path:
-            tasks["mask_img"] = load_honor_image(rqd.mask_img_path)
-        if rqd.word_img_path:
-            tasks["word_img"] = load_honor_image(rqd.word_img_path)
+    for spec in honor_asset_specs(rqd):
+        raw_path = getattr(rqd, spec.path_field)
+        if not raw_path:
+            continue
+        loader = load_optional_image if spec.on_supplied_missing == "ignore" else load_honor_image
+        tasks[spec.image_key] = loader(raw_path)
 
     keys = list(tasks.keys())
     values = await asyncio.gather(*tasks.values()) if tasks else []
     return dict(zip(keys, values))
 
 
-def _build_full_honor_cache_key(rqd: HonorRequest) -> str:
+def build_full_honor_cache_key(rqd: HonorRequest) -> str:
     request_payload = rqd.model_dump(mode="json", exclude_none=False, exclude={"timezone"})
     asset_signatures = {
-        "honor_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.honor_img_path),
-        "rank_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.rank_img_path),
-        "lv_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.lv_img_path),
-        "lv6_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.lv6_img_path),
-        "empty_honor": get_image_asset_signature(ASSETS_BASE_DIR, rqd.empty_honor_path),
-        "scroll_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.scroll_img_path),
-        "word_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.word_img_path),
-        "chara_icon_1": get_image_asset_signature(ASSETS_BASE_DIR, rqd.chara_icon_path),
-        "chara_icon_2": get_image_asset_signature(ASSETS_BASE_DIR, rqd.chara_icon_path2),
-        "bonds_bg": get_image_asset_signature(ASSETS_BASE_DIR, rqd.bonds_bg_path),
-        "bonds_bg2": get_image_asset_signature(ASSETS_BASE_DIR, rqd.bonds_bg_path2),
-        "mask_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.mask_img_path),
-        "frame_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_img_path),
-        "frame_degree_level_img": get_image_asset_signature(ASSETS_BASE_DIR, rqd.frame_degree_level_img_path),
+        image_key: get_image_asset_signature(ASSETS_BASE_DIR, getattr(rqd, path_field))
+        for image_key, path_field in HONOR_ASSET_MANIFEST.items()
     }
     return build_rendered_image_cache_key(
         "full_honor_image",
@@ -136,8 +96,14 @@ def _build_full_honor_cache_key(rqd: HonorRequest) -> str:
     )
 
 
+async def build_honor_badge_canvas_from_request(rqd: HonorRequest):
+    """Resolve one request to the shared Honor badge canvas without rasterizing it."""
+
+    return build_honor_badge_canvas(rqd, await load_honor_images(rqd))
+
+
 async def compose_full_honor_image(rqd: HonorRequest):
-    cache_key = _build_full_honor_cache_key(rqd)
+    cache_key = build_full_honor_cache_key(rqd)
     cached = get_composed_image_cached(cache_key)
     if cached is not None:
         return cached
@@ -164,8 +130,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
         rqd.lv6_img_path,
     )
 
-    images = await load_honor_images(rqd)
-    canvas = build_honor_badge_canvas(rqd, images)
+    canvas = await build_honor_badge_canvas_from_request(rqd)
     if canvas is None:
         return None
     # The widget tree draws in a pool thread (Canvas.get_img -> Painter.get -> run_in_pool);

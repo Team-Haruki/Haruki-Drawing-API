@@ -537,14 +537,15 @@ fn sliced_image_geometry(
 
 /// Return the maximum concurrent native scratch bytes below this node. This pass is pure: it
 /// must run before strict child assets, SdfShape, UnityImage, or image prewarming can decode.
-/// Sibling scratch surfaces render sequentially, while nested UnitySubscene surfaces stay live.
-fn preflight_unity_subscene_peak(node: &Node, max_node_pixels: usize) -> Result<usize, String> {
+/// Sibling scratch surfaces render sequentially, while nested isolated subscene surfaces stay
+/// live until their child snapshots have been placed.
+fn preflight_isolated_subscene_peak(node: &Node, max_node_pixels: usize) -> Result<usize, String> {
     match node {
         Node::Group(group) => group.children.iter().try_fold(0usize, |peak, child| {
-            Ok::<usize, String>(peak.max(preflight_unity_subscene_peak(child, max_node_pixels)?))
+            Ok::<usize, String>(peak.max(preflight_isolated_subscene_peak(child, max_node_pixels)?))
         }),
         Node::Transform(transform) => transform.children.iter().try_fold(0usize, |peak, child| {
-            Ok::<usize, String>(peak.max(preflight_unity_subscene_peak(child, max_node_pixels)?))
+            Ok::<usize, String>(peak.max(preflight_isolated_subscene_peak(child, max_node_pixels)?))
         }),
         Node::UnitySubscene(subscene) => {
             let (width, height) = (subscene.size[0], subscene.size[1]);
@@ -598,12 +599,29 @@ fn preflight_unity_subscene_peak(node: &Node, max_node_pixels: usize) -> Result<
             }
             let child_peak = subscene.children.iter().try_fold(0usize, |peak, child| {
                 Ok::<usize, String>(
-                    peak.max(preflight_unity_subscene_peak(child, max_node_pixels)?),
+                    peak.max(preflight_isolated_subscene_peak(child, max_node_pixels)?),
                 )
             })?;
             surface_bytes
                 .checked_add(child_peak.max(placement_bytes))
                 .ok_or_else(|| "nested UnitySubscene byte count overflow".to_string())
+        }
+        Node::RasterSubscene(subscene) => {
+            let (width, height) = (subscene.natural_size[0], subscene.natural_size[1]);
+            let surface_bytes = validate_strict_asset_size(
+                width,
+                height,
+                max_node_pixels,
+                "RasterSubscene natural surface",
+            )?;
+            let child_peak = subscene.children.iter().try_fold(0usize, |peak, child| {
+                Ok::<usize, String>(
+                    peak.max(preflight_isolated_subscene_peak(child, max_node_pixels)?),
+                )
+            })?;
+            surface_bytes
+                .checked_add(child_peak)
+                .ok_or_else(|| "nested RasterSubscene byte count overflow".to_string())
         }
         Node::SlicedImage(image) => {
             sliced_target_size(image, max_node_pixels).map(|(_, bytes)| bytes)
@@ -629,6 +647,13 @@ pub(crate) fn render_scene_inner(
     let max_scene_bytes = usize::try_from(scene.limits.max_scene_bytes)
         .unwrap_or(usize::MAX)
         .max(1);
+    // Validate the generic isolate-then-place contract for the whole tree before memory sizing
+    // or any asset/font access. Scene.scale is a later whole-page resize, not an ancestor CTM.
+    if let Some(background) = &scene.background {
+        validate_raster_subscene_usage(background, false)?;
+    }
+    validate_raster_subscene_usage(&scene.root, false)?;
+
     let output_surface_bytes = rgba_byte_len(
         scene.canvas.width,
         scene.canvas.height,
@@ -653,20 +678,31 @@ pub(crate) fn render_scene_inner(
     let background_subscene_peak = scene
         .background
         .as_ref()
-        .map(|node| preflight_unity_subscene_peak(node, max_node_pixels))
+        .map(|node| preflight_isolated_subscene_peak(node, max_node_pixels))
         .transpose()?
         .unwrap_or_default();
-    let subscene_runtime_peak =
-        background_subscene_peak.max(preflight_unity_subscene_peak(&scene.root, max_node_pixels)?);
+    let subscene_runtime_peak = background_subscene_peak.max(preflight_isolated_subscene_peak(
+        &scene.root,
+        max_node_pixels,
+    )?);
     let preflight_total = retained_base_bytes
         .checked_add(subscene_runtime_peak)
         .ok_or_else(|| "scene preflight byte count overflow".to_string())?;
     if preflight_total > max_scene_bytes {
         return Err(format!(
-            "scene output, request buffers, optional scaled output, and UnitySubscene runtime require at least \
+            "scene output, request buffers, optional scaled output, and isolated-subscene runtime require at least \
              {preflight_total} bytes; scene limit is {max_scene_bytes}"
         ));
     }
+    // PasteLerp reads and rewrites destination pixels. Validate its deliberately narrow
+    // identity-CTM/integral contract for the WHOLE tree before allocating a surface, loading
+    // fonts/assets, or drawing anything; any unsupported emitter output must fail open to
+    // Pillow, never leave a partially-rendered native scene.
+    if let Some(background) = &scene.background {
+        validate_paste_lerp_usage(background, (0.0, 0.0), false, false)?;
+    }
+    validate_paste_lerp_usage(&scene.root, (0.0, 0.0), false, false)?;
+
     let mut surface = surfaces::raster_n32_premul((scene.canvas.width, scene.canvas.height))
         .ok_or_else(|| "failed to create raster surface".to_string())?;
     let mut interp = Interp {
@@ -681,7 +717,7 @@ pub(crate) fn render_scene_inner(
         max_node_pixels,
         max_scene_bytes,
         retained_native_asset_bytes: retained_base_bytes,
-        // Reserve the worst nested UnitySubscene peak while preparing retained assets. This
+        // Reserve the worst nested isolated-subscene peak while preparing retained assets. This
         // prevents source decodes from consuming the bytes the later offscreen surfaces need.
         active_native_runtime_bytes: subscene_runtime_peak,
         canvas_w: scene.canvas.width as f32,
@@ -872,10 +908,15 @@ fn render_node(
         Node::Rect(rect) => render_rect(surface.canvas(), rect, off),
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
         Node::PieSlice(pie) => render_pie_slice(surface.canvas(), pie, off),
+        Node::Image(image) if image.blend == ImageBlend::PasteLerp => {
+            interp.metrics.raster_cache_bypasses += 1;
+            draw_paste_lerp_image(surface, interp, image, off)?
+        }
         Node::Image(image) => draw_image_node(surface.canvas(), interp, image, off)?,
         Node::SlicedImage(image) => draw_sliced_image(surface.canvas(), interp, image, off)?,
         Node::UnityImage(image) => draw_unity_image(surface.canvas(), interp, image, off)?,
         Node::UnitySubscene(subscene) => draw_unity_subscene(surface, interp, subscene, off)?,
+        Node::RasterSubscene(subscene) => draw_raster_subscene(surface, interp, subscene, off)?,
         Node::SelfImage(node) => {
             let dst = Rect::from_xywh(
                 node.pos[0] + off.0,
@@ -1376,6 +1417,9 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
         Node::UnitySubscene(_) if in_transform => {
             Err("UnitySubscene inside Transform would apply its transform twice".to_string())
         }
+        Node::RasterSubscene(_) if in_transform => {
+            Err("RasterSubscene inside Transform is unsupported".to_string())
+        }
         Node::Text(text) if in_transform && text.adaptive.is_some() => {
             Err("adaptive Text inside Transform requires an identity CTM".to_string())
         }
@@ -1391,6 +1435,167 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
             .children
             .iter()
             .try_for_each(|child| validate_transform_subtrees(child, false)),
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_transform_subtrees(child, false)),
+        _ => Ok(()),
+    }
+}
+
+/// Validate the generic isolate-then-place raster boundary before any native resource access.
+///
+/// Scene.scale is intentionally absent from `in_transform`: on this renderer baseline it is a
+/// final whole-page raster resize. Explicit Transform nodes remain unsupported because their
+/// arbitrary matrix would make the node's logical destination contract ambiguous.
+fn validate_raster_subscene_usage(node: &Node, in_transform: bool) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| validate_raster_subscene_usage(child, in_transform)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| validate_raster_subscene_usage(child, true)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_raster_subscene_usage(child, false)),
+        Node::RasterSubscene(subscene) => {
+            if in_transform {
+                return Err("RasterSubscene inside Transform is unsupported".to_string());
+            }
+            if subscene.natural_size[0] <= 0 || subscene.natural_size[1] <= 0 {
+                return Err("RasterSubscene natural_size must be positive".to_string());
+            }
+            let placement = [
+                subscene.pos[0],
+                subscene.pos[1],
+                subscene.dst_size[0],
+                subscene.dst_size[1],
+                subscene.alpha,
+            ];
+            if placement.iter().any(|value| !value.is_finite()) {
+                return Err("RasterSubscene placement contains a non-finite scalar".to_string());
+            }
+            if subscene.dst_size[0] <= 0.0 || subscene.dst_size[1] <= 0.0 {
+                return Err("RasterSubscene dst_size must be positive".to_string());
+            }
+            if !(0.0..=1.0).contains(&subscene.alpha) {
+                return Err("RasterSubscene alpha must be between 0 and 1".to_string());
+            }
+            if subscene.sampling == ImageSampling::PillowLanczos {
+                return Err("RasterSubscene does not support pillow_lanczos sampling".to_string());
+            }
+            if let Some(shadow) = subscene.shadow {
+                let shadow_values = [
+                    shadow.alpha,
+                    shadow.offset[0],
+                    shadow.offset[1],
+                    shadow.sigma,
+                ];
+                if shadow_values.iter().any(|value| !value.is_finite())
+                    || !(0.0..=1.0).contains(&shadow.alpha)
+                    || shadow.sigma < 0.0
+                {
+                    return Err("RasterSubscene shadow parameters are invalid".to_string());
+                }
+            }
+            subscene
+                .children
+                .iter()
+                .try_for_each(|child| validate_raster_subscene_usage(child, false))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Validate the explicit Pillow `paste(source, pos, source)` compatibility path.
+///
+/// Its blend is defined over straight RGBA bytes, so it cannot be expressed as an ordinary
+/// Skia Porter-Duff mode. The interpreter reads the integral destination rectangle, performs
+/// Pillow's byte lerp, and writes the result back through the active clip. Fractional/device-
+/// transformed placements would require coverage semantics that are outside this contract.
+fn validate_paste_lerp_usage(
+    node: &Node,
+    off: (f32, f32),
+    in_transform: bool,
+    in_mask_layer: bool,
+) -> Result<(), String> {
+    match node {
+        Node::Group(group) => {
+            let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
+            let child_in_mask_layer = in_mask_layer || group.mask.is_some();
+            group.children.iter().try_for_each(|child| {
+                validate_paste_lerp_usage(child, child_off, in_transform, child_in_mask_layer)
+            })
+        }
+        Node::Transform(transform) => transform.children.iter().try_for_each(|child| {
+            validate_paste_lerp_usage(child, (0.0, 0.0), true, in_mask_layer)
+        }),
+        // A UnitySubscene renders its children into a fresh identity-CTM local surface. Its
+        // later Unity placement transforms the completed raster, not the PasteLerp operation.
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_paste_lerp_usage(child, (0.0, 0.0), false, false)),
+        // RasterSubscene is a fresh root surface: parent saveLayer state does not enter it, so
+        // straight-RGBA destination reads are safe inside this isolation boundary.
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_paste_lerp_usage(child, (0.0, 0.0), false, false)),
+        Node::Rect(rect) if rect.blend == ImageBlend::PasteLerp => {
+            Err("paste_lerp is supported only by Image nodes".to_string())
+        }
+        Node::Image(image) if image.blend == ImageBlend::PasteLerp => {
+            if in_transform {
+                return Err("paste_lerp Image inside Transform is unsupported".to_string());
+            }
+            if in_mask_layer {
+                return Err(
+                    "paste_lerp Image inside a masked Group saveLayer is unsupported".to_string(),
+                );
+            }
+            if image.fit != Fit::Stretch {
+                return Err(format!(
+                    "paste_lerp Image requires stretch fit, got {:?}",
+                    image.fit
+                ));
+            }
+            if image.alpha != 1.0 {
+                return Err("paste_lerp Image requires alpha=1".to_string());
+            }
+            if image.source_rect.is_some()
+                || image.tint.is_some()
+                || image.shadow.is_some()
+                || image.blur_sigma.iter().any(|value| *value != 0.0)
+            {
+                return Err(
+                    "paste_lerp Image does not support source_rect, tint, shadow, or blur"
+                        .to_string(),
+                );
+            }
+            let left = image.pos[0] + off.0 - image.size[0] * image.anchor[0];
+            let top = image.pos[1] + off.1 - image.size[1] * image.anchor[1];
+            let edges = [left, top, left + image.size[0], top + image.size[1]];
+            if image.size[0] <= 0.0
+                || image.size[1] <= 0.0
+                || edges.iter().any(|value| {
+                    !value.is_finite()
+                        || (*value - value.round()).abs() > 1.0e-3
+                        || f64::from(*value) < f64::from(i32::MIN)
+                        || f64::from(*value) > f64::from(i32::MAX)
+                })
+            {
+                return Err(
+                    "paste_lerp Image requires a positive integral destination rectangle"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        }
         _ => Ok(()),
     }
 }
@@ -1460,6 +1665,10 @@ fn validate_pillow_lanczos_usage(node: &Node, in_transform: bool) -> Result<(), 
                 .iter()
                 .try_for_each(|child| validate_pillow_lanczos_usage(child, in_transform))
         }
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_pillow_lanczos_usage(child, false)),
         Node::SelfImage(image) if image.sampling == ImageSampling::PillowLanczos => {
             Err("SelfImage does not support pillow_lanczos sampling".to_string())
         }
@@ -1481,6 +1690,10 @@ fn validate_sdf_quad_fields(
             .iter()
             .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
         Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::RasterSubscene(subscene) => subscene
             .children
             .iter()
             .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
@@ -1530,6 +1743,10 @@ fn prepare_pillow_lanczos_sources(node: &Node, interp: &mut Interp) -> Result<()
             .iter()
             .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
         Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
             .children
             .iter()
             .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
@@ -1601,10 +1818,10 @@ fn validate_strict_asset_size(
         .ok_or_else(|| format!("{label} byte count overflow"))
 }
 
-/// Fully decode one ordinary Image/mask used inside a UnitySubscene. General IR images are
-/// intentionally fail-soft, but a subscene is a single custom-profile element and must either
-/// render completely or fail the whole native scene.
-fn prepare_strict_image_ref(path: &str, interp: &mut Interp) -> Result<(), String> {
+/// Fully decode one ordinary Image/mask used inside an isolated subscene. General IR images are
+/// intentionally fail-soft, but an isolated subtree must either render completely or fail the
+/// whole native scene.
+fn prepare_strict_image_ref(path: &str, interp: &mut Interp, context: &str) -> Result<(), String> {
     if interp.direct_images.contains_key(path) {
         return Ok(());
     }
@@ -1614,27 +1831,27 @@ fn prepare_strict_image_ref(path: &str, interp: &mut Interp) -> Result<(), Strin
             Some(MemImage::Raw { .. }) => false,
             None => {
                 return Err(format!(
-                    "UnitySubscene image references unknown mem image: {path}"
+                    "{context} image references unknown mem image: {path}"
                 ));
             }
         };
         let image = interp
             .load_mem(path)
-            .ok_or_else(|| format!("UnitySubscene failed to decode mem image: {path}"))?;
+            .ok_or_else(|| format!("{context} failed to decode mem image: {path}"))?;
         let raster_bytes = validate_strict_asset_size(
             image.width(),
             image.height(),
             interp.max_node_pixels,
-            "UnitySubscene mem image",
+            &format!("{context} mem image"),
         )?;
         if encoded {
-            interp.ensure_native_scene_bytes(raster_bytes, "UnitySubscene decoded mem image")?;
+            interp
+                .ensure_native_scene_bytes(raster_bytes, &format!("{context} decoded mem image"))?;
             let raster = image
                 .make_raster_image(None, CachingHint::Disallow)
-                .ok_or_else(|| {
-                    format!("UnitySubscene failed to raster-decode mem image: {path}")
-                })?;
-            interp.retain_native_asset_bytes(raster_bytes, "UnitySubscene decoded mem image")?;
+                .ok_or_else(|| format!("{context} failed to raster-decode mem image: {path}"))?;
+            interp
+                .retain_native_asset_bytes(raster_bytes, &format!("{context} decoded mem image"))?;
             interp.direct_images.insert(path.to_string(), raster);
         }
         return Ok(());
@@ -1642,45 +1859,52 @@ fn prepare_strict_image_ref(path: &str, interp: &mut Interp) -> Result<(), Strin
 
     let (descriptor, source) = interp
         .describe_asset(path)
-        .map_err(|err| format!("UnitySubscene asset load failed: {path} ({err})"))?;
+        .map_err(|err| format!("{context} asset load failed: {path} ({err})"))?;
     let raster_bytes = validate_strict_asset_size(
         descriptor.width,
         descriptor.height,
         interp.max_node_pixels,
-        "UnitySubscene asset",
+        &format!("{context} asset"),
     )?;
-    interp.ensure_native_scene_bytes(raster_bytes, "UnitySubscene decoded asset")?;
+    interp.ensure_native_scene_bytes(raster_bytes, &format!("{context} decoded asset"))?;
     let encoded = source
         .map(Ok)
         .unwrap_or_else(|| decode_asset_descriptor(&descriptor))
-        .map_err(|err| format!("UnitySubscene asset decode failed: {path} ({err})"))?;
+        .map_err(|err| format!("{context} asset decode failed: {path} ({err})"))?;
     let raster = encoded
         .make_raster_image(None, CachingHint::Disallow)
-        .ok_or_else(|| format!("UnitySubscene asset raster decode failed: {path}"))?;
-    interp.retain_native_asset_bytes(raster_bytes, "UnitySubscene decoded asset")?;
+        .ok_or_else(|| format!("{context} asset raster decode failed: {path}"))?;
+    interp.retain_native_asset_bytes(raster_bytes, &format!("{context} decoded asset"))?;
     interp.direct_images.insert(path.to_string(), raster);
     Ok(())
 }
 
-fn prepare_strict_subscene_children(node: &Node, interp: &mut Interp) -> Result<(), String> {
+fn prepare_strict_subscene_children(
+    node: &Node,
+    interp: &mut Interp,
+    context: &str,
+) -> Result<(), String> {
     match node {
         Node::Group(group) => {
             if let Some(mask) = &group.mask {
-                prepare_strict_image_ref(mask, interp)?;
+                prepare_strict_image_ref(mask, interp, context)?;
             }
             group
                 .children
                 .iter()
-                .try_for_each(|child| prepare_strict_subscene_children(child, interp))
+                .try_for_each(|child| prepare_strict_subscene_children(child, interp, context))
         }
         Node::Transform(transform) => transform
             .children
             .iter()
-            .try_for_each(|child| prepare_strict_subscene_children(child, interp)),
+            .try_for_each(|child| prepare_strict_subscene_children(child, interp, context)),
         Node::UnitySubscene(subscene) => subscene
             .children
             .iter()
-            .try_for_each(|child| prepare_strict_subscene_children(child, interp)),
+            .try_for_each(|child| prepare_strict_subscene_children(child, interp, "UnitySubscene")),
+        Node::RasterSubscene(subscene) => subscene.children.iter().try_for_each(|child| {
+            prepare_strict_subscene_children(child, interp, "RasterSubscene")
+        }),
         Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => interp
             .pillow_lanczos_sources
             .contains_key(&image.path)
@@ -1691,9 +1915,9 @@ fn prepare_strict_subscene_children(node: &Node, interp: &mut Interp) -> Result<
                     image.path
                 )
             }),
-        Node::Image(image) => prepare_strict_image_ref(&image.path, interp),
-        Node::SlicedImage(image) => prepare_strict_image_ref(&image.path, interp),
-        Node::ImageBg(image) => prepare_strict_image_ref(&image.path, interp),
+        Node::Image(image) => prepare_strict_image_ref(&image.path, interp, context),
+        Node::SlicedImage(image) => prepare_strict_image_ref(&image.path, interp, context),
+        Node::ImageBg(image) => prepare_strict_image_ref(&image.path, interp, context),
         _ => Ok(()),
     }
 }
@@ -1711,7 +1935,10 @@ fn prepare_unity_subscene_assets(node: &Node, interp: &mut Interp) -> Result<(),
         Node::UnitySubscene(subscene) => subscene
             .children
             .iter()
-            .try_for_each(|child| prepare_strict_subscene_children(child, interp)),
+            .try_for_each(|child| prepare_strict_subscene_children(child, interp, "UnitySubscene")),
+        Node::RasterSubscene(subscene) => subscene.children.iter().try_for_each(|child| {
+            prepare_strict_subscene_children(child, interp, "RasterSubscene")
+        }),
         _ => Ok(()),
     }
 }
@@ -1783,6 +2010,10 @@ fn prepare_sdf_shape_sources(node: &Node, interp: &mut Interp) -> Result<(), Str
             .iter()
             .try_for_each(|child| prepare_sdf_shape_sources(child, interp)),
         Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_shape_sources(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
             .children
             .iter()
             .try_for_each(|child| prepare_sdf_shape_sources(child, interp)),
@@ -1920,6 +2151,10 @@ fn prepare_unity_image_assets(node: &Node, interp: &mut Interp) -> Result<(), St
             .iter()
             .try_for_each(|child| prepare_unity_image_assets(child, interp)),
         Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_unity_image_assets(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
             .children
             .iter()
             .try_for_each(|child| prepare_unity_image_assets(child, interp)),
@@ -2722,6 +2957,79 @@ fn draw_unity_subscene(
     result
 }
 
+fn draw_raster_subscene(
+    surface: &mut Surface,
+    interp: &mut Interp,
+    node: &RasterSubsceneNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let (width, height) = (node.natural_size[0], node.natural_size[1]);
+    let surface_bytes = validate_strict_asset_size(
+        width,
+        height,
+        interp.max_node_pixels,
+        "RasterSubscene natural surface",
+    )?;
+    interp.push_native_runtime_bytes(surface_bytes, "RasterSubscene natural surface")?;
+
+    let result = (|| {
+        let mut sub_surface = surfaces::raster_n32_premul((width, height))
+            .ok_or_else(|| format!("failed to create RasterSubscene surface {width}x{height}"))?;
+        sub_surface.canvas().clear(Color::TRANSPARENT);
+
+        let previous_canvas = (interp.canvas_w, interp.canvas_h);
+        let previous_in_transform = interp.in_transform;
+        let previous_strict_asset_depth = interp.strict_asset_depth;
+        interp.canvas_w = width as f32;
+        interp.canvas_h = height as f32;
+        interp.in_transform = false;
+        interp.strict_asset_depth = previous_strict_asset_depth.saturating_add(1);
+        let child_result = node
+            .children
+            .iter()
+            .try_for_each(|child| render_node(&mut sub_surface, interp, (0.0, 0.0), child));
+        interp.canvas_w = previous_canvas.0;
+        interp.canvas_h = previous_canvas.1;
+        interp.in_transform = previous_in_transform;
+        interp.strict_asset_depth = previous_strict_asset_depth;
+        child_result?;
+
+        let image = sub_surface.image_snapshot();
+        let dst = Rect::from_xywh(
+            node.pos[0] + off.0,
+            node.pos[1] + off.1,
+            node.dst_size[0],
+            node.dst_size[1],
+        );
+        let image_node = ImageNode {
+            pos: node.pos,
+            size: node.dst_size,
+            path: "<raster-subscene>".to_string(),
+            fit: Fit::Stretch,
+            sampling: node.sampling,
+            source_rect: None,
+            alpha: node.alpha,
+            anchor: [0.0, 0.0],
+            tint: None,
+            shadow: node.shadow,
+            blur_sigma: [0.0, 0.0],
+            blend: ImageBlend::SrcOver,
+        };
+        let sampling = skia_image_sampling(node.sampling)
+            .ok_or_else(|| "RasterSubscene does not support pillow_lanczos sampling".to_string())?;
+        draw_image_placed(
+            surface.canvas(),
+            &image,
+            ImagePlacement { src: None, dst },
+            sampling,
+            &image_node,
+        );
+        Ok(())
+    })();
+    interp.pop_native_runtime_bytes(surface_bytes);
+    result
+}
+
 /// The SdfQuad per-pixel routine, factored out so the golden tests drive the exact code the
 /// render arm uses. `field` is the A8 field (row-major, `row_bytes` stride, values 0..255);
 /// the return value is the straight-alpha RGBA8888 patch (tight `width * 4` stride).
@@ -2910,6 +3218,7 @@ fn collect_image_prewarm_requests<'a>(
         }
         Node::Image(image)
             if image.sampling != ImageSampling::PillowLanczos
+                && image.blend != ImageBlend::PasteLerp
                 && !image.path.starts_with("mem:")
                 && seen.insert(image_prewarm_key(image)) =>
         {
@@ -2920,10 +3229,10 @@ fn collect_image_prewarm_requests<'a>(
         // dst size, and `draw_image_node` skips the raster cache inside a Transform anyway, so
         // a prewarmed entry could never be consumed.
         Node::Transform(_) => {}
-        // UnitySubscene ordinary assets are fully decoded by the strict preflight and then drawn
-        // directly. Do not let fail-soft parallel prewarming duplicate their source/target
+        // Isolated-subscene ordinary assets are fully decoded by the strict preflight and then
+        // drawn directly. Do not let fail-soft parallel prewarming duplicate their source/target
         // rasters outside the per-scene memory budget.
-        Node::UnitySubscene(_) => {}
+        Node::UnitySubscene(_) | Node::RasterSubscene(_) => {}
         _ => {}
     }
 }
@@ -3331,6 +3640,215 @@ fn draw_pillow_lanczos_image(
     drop(image);
     interp.pop_native_runtime_bytes(pixel_bytes);
     Ok(())
+}
+
+/// Resolve and resize the source for Pillow's `paste(source, pos, source)` operation.
+///
+/// On success the returned straight-RGBA Vec owns one `active_native_runtime_bytes` charge,
+/// which the caller must pop after it has completed the destination lerp.
+fn rasterize_paste_lerp_source(
+    interp: &mut Interp,
+    node: &ImageNode,
+    off: (f32, f32),
+) -> Result<(Vec<u8>, i32, i32, Rect), String> {
+    if node.sampling == ImageSampling::PillowLanczos {
+        return rasterize_pillow_lanczos_image(interp, node, off);
+    }
+
+    let image = if node.path.starts_with("mem:") {
+        interp.load_mem(&node.path).ok_or_else(|| {
+            format!(
+                "paste_lerp Image failed to decode mem source: {}",
+                node.path
+            )
+        })?
+    } else if let Some(prepared) = interp.direct_images.get(&node.path) {
+        prepared.clone()
+    } else {
+        let (descriptor, source) = interp
+            .describe_asset(&node.path)
+            .map_err(|err| format!("paste_lerp Image asset load failed: {} ({err})", node.path))?;
+        let started = Instant::now();
+        let image = source
+            .map(Ok)
+            .unwrap_or_else(|| decode_asset_descriptor(&descriptor))
+            .map_err(|err| {
+                format!(
+                    "paste_lerp Image asset decode failed: {} ({err})",
+                    node.path
+                )
+            })?;
+        interp.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+        image
+    };
+    let placement = image_placement(image.width(), image.height(), node, off)
+        .ok_or_else(|| "paste_lerp Image source or destination is empty".to_string())?;
+    let (width, height) = integral_target(placement.dst)
+        .ok_or_else(|| "paste_lerp Image destination is not integral".to_string())?;
+    let byte_count = validate_strict_asset_size(
+        width,
+        height,
+        interp.max_node_pixels,
+        "paste_lerp source raster",
+    )?;
+    let accounted_bytes = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "paste_lerp source raster byte count overflow".to_string())?;
+    interp.push_native_runtime_bytes(accounted_bytes, "paste_lerp source raster and readback")?;
+    let result = (|| {
+        let raster =
+            if placement.src.is_none() && image.width() == width && image.height() == height {
+                image
+            } else {
+                let source = placement.src.unwrap_or_else(|| {
+                    Rect::from_xywh(0.0, 0.0, image.width() as f32, image.height() as f32)
+                });
+                draw_source_to_raster(
+                    &image,
+                    source,
+                    width,
+                    height,
+                    skia_image_sampling(node.sampling)
+                        .ok_or_else(|| "unhandled pillow_lanczos paste_lerp Image".to_string())?,
+                )?
+            };
+        let row_bytes = width as usize * 4;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(byte_count).map_err(|_| {
+            format!("paste_lerp source readback allocation rejected: {width}x{height}")
+        })?;
+        pixels.resize(byte_count, 0);
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        if !raster.read_pixels(&info, &mut pixels, row_bytes, (0, 0), CachingHint::Disallow) {
+            return Err("failed to read paste_lerp source as straight RGBA8".to_string());
+        }
+        Ok((pixels, width, height, placement.dst))
+    })();
+    match result {
+        Ok(result) => {
+            // The temporary source raster is gone; leave only the returned Vec charged.
+            interp.pop_native_runtime_bytes(byte_count);
+            Ok(result)
+        }
+        Err(err) => {
+            interp.pop_native_runtime_bytes(accounted_bytes);
+            Err(err)
+        }
+    }
+}
+
+/// Pillow's integer `BLEND(mask, dst, src)` helper: rounded `(dst*(255-mask)+src*mask)/255`.
+fn pillow_paste_lerp_byte(destination: u8, source: u8, mask: u8) -> u8 {
+    let value =
+        u32::from(destination) * (255 - u32::from(mask)) + u32::from(source) * u32::from(mask);
+    let biased = value + 128;
+    ((biased + (biased >> 8)) >> 8) as u8
+}
+
+/// Execute `destination.paste(source, pos, source)` over straight RGBA bytes.
+///
+/// The result image is drawn back with Porter-Duff Src so the active Group clip remains in
+/// force. Both the source and destination are read from Skia rasters as unpremultiplied RGBA;
+/// RGB hidden under alpha=0 has already been discarded by Skia's premultiplied surface model
+/// and therefore cannot be preserved by this compatibility operation.
+fn draw_paste_lerp_image(
+    surface: &mut Surface,
+    interp: &mut Interp,
+    node: &ImageNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let (source, source_width, source_height, dst) =
+        rasterize_paste_lerp_source(interp, node, off)?;
+    let source_bytes = source.len();
+    let result = (|| {
+        let full_left = dst.left.round() as i32;
+        let full_top = dst.top.round() as i32;
+        let full_right = dst.right.round() as i32;
+        let full_bottom = dst.bottom.round() as i32;
+        debug_assert_eq!(full_right - full_left, source_width);
+        debug_assert_eq!(full_bottom - full_top, source_height);
+
+        let left = full_left.clamp(0, surface.width());
+        let top = full_top.clamp(0, surface.height());
+        let right = full_right.clamp(0, surface.width());
+        let bottom = full_bottom.clamp(0, surface.height());
+        if right <= left || bottom <= top {
+            return Ok(());
+        }
+        let width = right - left;
+        let height = bottom - top;
+        let visible_bytes = rgba_byte_len(width, height, "paste_lerp visible destination")?;
+        let transient_bytes = visible_bytes
+            .checked_mul(2)
+            .ok_or_else(|| "paste_lerp visible destination byte count overflow".to_string())?;
+        interp.push_native_runtime_bytes(
+            transient_bytes,
+            "paste_lerp destination readback and Skia raster copy",
+        )?;
+        let visible_result = (|| {
+            let row_bytes = width as usize * 4;
+            let mut output = Vec::new();
+            output.try_reserve_exact(visible_bytes).map_err(|_| {
+                format!("paste_lerp destination readback allocation rejected: {width}x{height}")
+            })?;
+            output.resize(visible_bytes, 0);
+            let info = ImageInfo::new(
+                (width, height),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                None,
+            );
+            if !surface.read_pixels(&info, &mut output, row_bytes, (left, top)) {
+                return Err("failed to read paste_lerp destination as straight RGBA8".to_string());
+            }
+
+            let source_x = usize::try_from(left - full_left)
+                .map_err(|_| "paste_lerp source x offset overflow".to_string())?;
+            let source_y = usize::try_from(top - full_top)
+                .map_err(|_| "paste_lerp source y offset overflow".to_string())?;
+            let source_stride = source_width as usize * 4;
+            for y in 0..height as usize {
+                for x in 0..width as usize {
+                    let output_offset = (y * width as usize + x) * 4;
+                    let source_offset = (source_y + y) * source_stride + (source_x + x) * 4;
+                    let mask = source[source_offset + 3];
+                    for channel in 0..4 {
+                        output[output_offset + channel] = pillow_paste_lerp_byte(
+                            output[output_offset + channel],
+                            source[source_offset + channel],
+                            mask,
+                        );
+                    }
+                }
+            }
+
+            let image =
+                skia_safe::images::raster_from_data(&info, Data::new_copy(&output), row_bytes)
+                    .ok_or_else(|| {
+                        "failed to build paste_lerp straight RGBA8 raster".to_string()
+                    })?;
+            let mut paint = Paint::default();
+            paint.set_blend_mode(BlendMode::Src);
+            paint.set_anti_alias(false);
+            surface.canvas().draw_image_with_sampling_options(
+                &image,
+                (left as f32, top as f32),
+                SamplingOptions::default(),
+                Some(&paint),
+            );
+            Ok(())
+        })();
+        interp.pop_native_runtime_bytes(transient_bytes);
+        visible_result
+    })();
+    drop(source);
+    interp.pop_native_runtime_bytes(source_bytes);
+    result
 }
 
 fn draw_image_node(
@@ -4824,6 +5342,142 @@ mod tests {
         }
     }
 
+    #[test]
+    fn paste_lerp_blend_deserializes() {
+        let blend: ImageBlend = serde_json::from_str(r#""paste_lerp""#).expect("blend parses");
+        assert_eq!(blend, ImageBlend::PasteLerp);
+    }
+
+    #[test]
+    fn paste_lerp_uses_source_alpha_to_lerp_all_straight_channels() {
+        let root = r#"{
+            "type": "Group", "size": [1, 1], "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [1, 1],
+                  "fill": [0, 0, 255, 255], "blend": "src" },
+                { "type": "Image", "path": "mem:source", "pos": [0, 0],
+                  "size": [1, 1], "fit": "stretch", "sampling": "nearest",
+                  "blend": "paste_lerp" }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((1, 1), root)).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "source".to_string(),
+            rgba_mem_image(1, 1, &[255, 255, 255, 128]),
+        );
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        let (pixels, _, _) = decode_pixels(&rendered);
+        let expected = [128_u8, 128, 255, 191];
+        for (actual, expected) in pixels[..4].iter().zip(expected) {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "paste_lerp pixel differs: {:?}",
+                &pixels[..4]
+            );
+        }
+        assert_ne!(pixels[3], 255, "paste_lerp must also interpolate alpha");
+    }
+
+    #[test]
+    fn paste_lerp_preflights_unsupported_scene_before_asset_access() {
+        let root = r#"{
+            "type": "Image", "path": "missing.png", "pos": [0, 0],
+            "size": [8, 8], "fit": "contain", "blend": "paste_lerp"
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((8, 8), root)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("paste_lerp Image requires stretch fit")
+                && !err.contains("asset load failed"),
+            "unexpected error: {err}"
+        );
+
+        let transformed = r#"{
+            "type": "Transform", "matrix": [1, 0, 0, 1, 0, 0], "children": [{
+                "type": "Image", "path": "missing.png", "pos": [0, 0],
+                "size": [8, 8], "fit": "stretch", "blend": "paste_lerp"
+            }]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((8, 8), transformed)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("paste_lerp Image inside Transform") && !err.contains("asset load failed"),
+            "unexpected error: {err}"
+        );
+
+        let masked = r#"{
+            "type": "Group", "size": [8, 8], "mask": "missing-mask.png", "children": [{
+                "type": "Image", "path": "missing.png", "pos": [0, 0],
+                "size": [8, 8], "fit": "stretch", "blend": "paste_lerp"
+            }]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((8, 8), masked)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("paste_lerp Image inside a masked Group saveLayer")
+                && !err.contains("asset load failed"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn paste_lerp_respects_group_clip_and_runs_inside_unity_subscene() {
+        let clipped = r#"{
+            "type": "Group", "size": [2, 1], "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [2, 1],
+                  "fill": [255, 0, 0, 255], "blend": "src" },
+                { "type": "Group", "size": [1, 1], "clip": { "kind": "rect" },
+                  "children": [{
+                    "type": "Image", "path": "mem:source", "pos": [0, 0],
+                    "size": [2, 1], "fit": "stretch", "sampling": "nearest",
+                    "blend": "paste_lerp"
+                  }]
+                }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((2, 1), clipped)).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "source".to_string(),
+            rgba_mem_image(1, 1, &[0, 255, 0, 128]),
+        );
+        let rendered = render_scene_inner(&scene, mem).expect("clipped scene renders");
+        let (pixels, _, _) = decode_pixels(&rendered);
+        assert!(pixels[0].abs_diff(127) <= 1 && pixels[1].abs_diff(128) <= 1);
+        assert_eq!(&pixels[4..8], &[255, 0, 0, 255]);
+
+        let subscene = r#"{
+            "type": "UnitySubscene", "size": [1, 1], "anchor": [0.5, 0.5],
+            "object_scale": [1, 1], "post_scale": [1, 1], "rotation": 0,
+            "sampling": "nearest", "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [1, 1],
+                  "fill": [0, 0, 255, 255], "blend": "src" },
+                { "type": "Image", "path": "mem:source", "pos": [0, 0],
+                  "size": [1, 1], "fit": "stretch", "sampling": "nearest",
+                  "blend": "paste_lerp" }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((1, 1), subscene)).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "source".to_string(),
+            rgba_mem_image(1, 1, &[255, 255, 255, 128]),
+        );
+        let rendered = render_scene_inner(&scene, mem).expect("UnitySubscene renders");
+        let (pixels, _, _) = decode_pixels(&rendered);
+        assert!(
+            pixels[3].abs_diff(191) <= 1,
+            "unexpected pixel: {:?}",
+            &pixels[..4]
+        );
+    }
+
     fn test_sliced_image_node(size: [f32; 2], border: [i32; 4]) -> SlicedImageNode {
         SlicedImageNode {
             path: "mem:sprite".to_string(),
@@ -5347,6 +6001,269 @@ mod tests {
             pixel(3, 3),
             &[255, 0, 0, 255],
             "transparent Src inside the subscene must reveal, not erase, the parent"
+        );
+    }
+
+    #[test]
+    fn raster_subscene_contains_src_writes_and_is_safe_inside_masked_group() {
+        let root = r#"{
+            "type": "Group", "offset": [0, 0], "size": [4, 4], "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [4, 4],
+                  "fill": [0, 0, 255, 255], "blend": "src" },
+                { "type": "Group", "offset": [0, 0], "size": [4, 4],
+                  "mask": "mem:mask", "children": [
+                    { "type": "RasterSubscene", "natural_size": [2, 2],
+                      "pos": [1, 1], "dst_size": [2, 2], "sampling": "nearest",
+                      "children": [
+                        { "type": "Image", "path": "mem:layer", "pos": [0, 0],
+                          "size": [2, 2], "fit": "stretch", "sampling": "nearest",
+                          "blend": "src" }
+                      ] }
+                  ] }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((4, 4), root)).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "layer".to_string(),
+            rgba_mem_image(2, 2, &[255, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        );
+        mem.insert("mask".to_string(), rgba_mem_image(1, 1, &[255; 4]));
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        let (pixels, width, _) = decode_pixels(&rendered);
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+
+        assert_eq!(pixel(1, 1), &[255, 0, 0, 255]);
+        assert_eq!(
+            pixel(2, 1),
+            &[0, 0, 255, 255],
+            "transparent Src pixels must reveal, not erase, the opaque parent"
+        );
+        assert_eq!(pixel(1, 2), &[0, 0, 255, 255]);
+    }
+
+    #[test]
+    fn raster_subscene_scene_scale_matches_ordinary_image_final_resize() {
+        let root = r#"{
+            "type": "Group", "size": [4, 2], "children": [
+                { "type": "RasterSubscene", "natural_size": [4, 1],
+                  "pos": [0, 0], "dst_size": [2, 2], "sampling": "catmull_rom",
+                  "children": [
+                    { "type": "Image", "path": "mem:stripes", "pos": [0, 0],
+                      "size": [4, 1], "fit": "stretch", "sampling": "nearest",
+                      "blend": "src" }
+                  ] },
+                { "type": "Image", "path": "mem:stripes", "pos": [2, 0],
+                  "size": [2, 2], "fit": "stretch", "sampling": "catmull_rom" }
+            ]
+        }"#;
+        let json =
+            bare_scene_json((4, 2), root).replace("\"canvas\":", "\"scale\": 1.5, \"canvas\":");
+        let scene: Scene = serde_json::from_str(&json).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "stripes".to_string(),
+            rgba_mem_image(
+                4,
+                1,
+                &[
+                    0, 0, 0, 255, 255, 255, 255, 255, 0, 0, 0, 255, 255, 255, 255, 255,
+                ],
+            ),
+        );
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        let (pixels, width, height) = decode_pixels(&rendered);
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+
+        assert_eq!((width, height), (6, 3));
+        let raster_pixels: Vec<_> = (0..3).map(|x| pixel(x, 1).to_vec()).collect();
+        let direct_pixels: Vec<_> = (3..6).map(|x| pixel(x, 1).to_vec()).collect();
+        for (raster, direct) in raster_pixels.iter().zip(&direct_pixels) {
+            assert!(
+                raster
+                    .iter()
+                    .zip(direct)
+                    .all(|(left, right)| left.abs_diff(*right) <= 6),
+                "RasterSubscene must match an ordinary Image under final Scene.scale: \
+                 raster={raster_pixels:?} direct={direct_pixels:?}"
+            );
+        }
+        assert!(
+            raster_pixels.windows(2).any(|pair| pair[0] != pair[1]),
+            "high-frequency fixture must retain a comparison signal"
+        );
+    }
+
+    #[test]
+    fn raster_subscene_shadow_uses_completed_snapshot_alpha() {
+        let root = r#"{
+            "type": "RasterSubscene", "natural_size": [2, 2],
+            "pos": [1, 0], "dst_size": [2, 2], "sampling": "nearest",
+            "shadow": {
+                "alpha": 1, "offset": [3, 0], "sigma": 0,
+                "color": [255, 0, 0, 255]
+            },
+            "children": [
+                { "type": "Rect", "pos": [0, 0], "size": [1, 2],
+                  "fill": [255, 255, 255, 255], "blend": "src" }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((7, 2), root)).expect("scene parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+        let (pixels, width, _) = decode_pixels(&rendered);
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+
+        assert_eq!(pixel(1, 0), &[255, 255, 255, 255]);
+        assert_eq!(pixel(4, 0), &[255, 0, 0, 255]);
+        assert_eq!(
+            pixel(5, 0)[3],
+            0,
+            "shadow must follow the snapshot alpha, not its destination rectangle"
+        );
+    }
+
+    #[test]
+    fn raster_subscene_preflights_contract_before_child_asset_access() {
+        let invalid_cases = [
+            (
+                r#""natural_size":[1,1],"pos":[0,0],"dst_size":[-1,1]"#,
+                "dst_size",
+            ),
+            (
+                r#""natural_size":[1,1],"pos":[0,0],"dst_size":[1,1],"alpha":2"#,
+                "alpha",
+            ),
+            (
+                r#""natural_size":[1,1],"pos":[0,0],"dst_size":[1,1],
+                   "shadow":{"alpha":1,"offset":[0,0],"sigma":-1,"color":[0,0,0,255]}"#,
+                "shadow parameters",
+            ),
+            (
+                r#""natural_size":[1,1],"pos":[0,0],"dst_size":[1,1],
+                   "sampling":"pillow_lanczos""#,
+                "pillow_lanczos",
+            ),
+        ];
+        for (fields, expected) in invalid_cases {
+            let root = format!(
+                r#"{{"type":"RasterSubscene",{fields},"children":[
+                    {{"type":"Image","path":"missing.png","pos":[0,0],
+                      "size":[1,1],"fit":"stretch"}}
+                ]}}"#
+            );
+            let scene: Scene =
+                serde_json::from_str(&bare_scene_json((1, 1), &root)).expect("scene parses");
+            let err = expect_scene_error(&scene, HashMap::new());
+            assert!(
+                err.contains(expected) && !err.contains("missing.png"),
+                "contract must fail before child assets: {err}"
+            );
+        }
+
+        let masked_child = r#"{
+            "type": "RasterSubscene", "natural_size": [1, 1],
+            "pos": [0, 0], "dst_size": [1, 1], "children": [
+                { "type": "Group", "size": [1, 1], "mask": "missing-mask.png",
+                  "children": [
+                    { "type": "Image", "path": "missing.png", "pos": [0, 0],
+                      "size": [1, 1], "fit": "stretch", "blend": "paste_lerp" }
+                  ] }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((1, 1), masked_child)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("paste_lerp Image inside a masked Group saveLayer")
+                && !err.contains("missing.png"),
+            "nested masked Group must remain outside paste_lerp's contract: {err}"
+        );
+    }
+
+    #[test]
+    fn raster_subscene_is_strict_and_accounts_nested_surface_peak() {
+        let missing = r#"{
+            "type": "RasterSubscene", "natural_size": [4, 4],
+            "pos": [0, 0], "dst_size": [4, 4], "children": [
+                { "type": "Image", "path": "missing.png", "pos": [0, 0],
+                  "size": [4, 4], "fit": "stretch" }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((4, 4), missing)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("RasterSubscene asset load failed") && err.contains("missing.png"),
+            "unexpected error: {err}"
+        );
+
+        let nested = r#"{
+            "type": "RasterSubscene", "natural_size": [4, 4],
+            "pos": [0, 0], "dst_size": [4, 4], "children": [
+                { "type": "RasterSubscene", "natural_size": [4, 4],
+                  "pos": [0, 0], "dst_size": [4, 4], "children": [] }
+            ]
+        }"#;
+        let json = bare_scene_json((4, 4), nested).replace(
+            r#""root":"#,
+            r#""limits":{"max_node_pixels":16,"max_scene_bytes":191},"root":"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("scene limit"),
+            "64-byte output + 128-byte nested peak must exceed 191: {err}"
+        );
+
+        let transformed = r#"{
+            "type": "Transform", "matrix": [1, 0, 0, 1, 0, 0], "children": [
+                { "type": "RasterSubscene", "natural_size": [1, 1],
+                  "pos": [0, 0], "dst_size": [1, 1], "children": [] }
+            ]
+        }"#;
+        let scene: Scene =
+            serde_json::from_str(&bare_scene_json((1, 1), transformed)).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("RasterSubscene inside Transform"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn raster_subscene_allows_paste_lerp_child_under_scene_scale() {
+        let root = r#"{
+            "type": "Group", "size": [2, 2], "mask": "mem:mask", "children": [
+                { "type": "RasterSubscene", "natural_size": [1, 1],
+                  "pos": [0, 0], "dst_size": [2, 2], "sampling": "nearest",
+                  "children": [
+                    { "type": "Rect", "pos": [0, 0], "size": [1, 1],
+                      "fill": [0, 0, 255, 255], "blend": "src" },
+                    { "type": "Image", "path": "mem:source", "pos": [0, 0],
+                      "size": [1, 1], "fit": "stretch", "sampling": "nearest",
+                      "blend": "paste_lerp" }
+                  ] }
+            ]
+        }"#;
+        let json =
+            bare_scene_json((2, 2), root).replace("\"canvas\":", "\"scale\": 1.5, \"canvas\":");
+        let scene: Scene = serde_json::from_str(&json).expect("scene parses");
+        let mut mem = HashMap::new();
+        mem.insert(
+            "source".to_string(),
+            rgba_mem_image(1, 1, &[255, 255, 255, 128]),
+        );
+        mem.insert("mask".to_string(), rgba_mem_image(1, 1, &[255; 4]));
+        let rendered = render_scene_inner(&scene, mem).expect("renders");
+        let (pixels, width, height) = decode_pixels(&rendered);
+
+        assert_eq!((width, height), (3, 3));
+        assert!(
+            pixels[3].abs_diff(191) <= 1,
+            "unexpected paste_lerp result: {:?}",
+            &pixels[..4]
         );
     }
 

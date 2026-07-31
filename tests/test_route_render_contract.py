@@ -120,6 +120,9 @@ _MAY_HAND_BUILD_IR = {
     "src/sekai/skia_renderer/ir_builder.py",  # the builder itself
     "src/sekai/skia_renderer/ir_painter.py",  # the widget-tree lowering
     "src/sekai/skia_renderer/canvas.py",  # lowers a widget tree via build_canvas_ir()
+    # Generic composition carrier: lowers an arbitrary shared Canvas and atomically packages its
+    # detached nodes/memory references. It contains no endpoint layout of its own.
+    "src/sekai/skia_renderer/subtree.py",
     # The chart image comes from the pjsekai-scores-rs crate on BOTH backends; the IR here is only
     # the watermark footer shell around that raster, not a second layout of the chart.
     "src/sekai/chart/drawer.py",

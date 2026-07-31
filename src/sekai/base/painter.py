@@ -32,7 +32,15 @@ from src.settings import (
 
 from .img_utils import adjust_image_alpha_inplace, multiply_image_by_color
 from .triangle_bg import background_hour, build_triangle_bg, gradient_points
-from .utils import PASTE_RESAMPLE, AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
+from .utils import (
+    PASTE_RESAMPLE,
+    AssetImageRef,
+    ImageSource,
+    get_composed_image_cached,
+    put_composed_image_cache,
+    resolve_image_source_sync,
+    run_in_pool,
+)
 
 
 def shutdown_painter() -> None:
@@ -196,6 +204,7 @@ Position = tuple[int, int]
 Size = tuple[int, int]
 ImageSampling = Literal["nearest", "linear", "catmull_rom"]
 ImageTintMode = Literal["multiply", "recolor"]
+ImagePasteBlend = Literal["paste_lerp", "src_over", "src"]
 
 
 @dataclass(frozen=True)
@@ -1024,6 +1033,77 @@ class Painter:
             (sub_img, pos, size, use_shadow, shadow_width, shadow_alpha, src_rect, sampling, tint),
         )
 
+    def paste_canvas(
+        self,
+        canvas: Any,
+        pos: Position,
+        size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
+        exclude_on_hash: bool = False,
+        *,
+        sampling: ImageSampling | None = None,
+        cache_key: str | None = None,
+        require_asset_backed: bool = False,
+        skip_on_error: bool = False,
+    ) -> Self:
+        """Render a nested ``plot.Canvas`` in isolation, then paste its completed raster.
+
+        The nested canvas remains the layout carrier. Pillow renders it on demand inside the
+        current worker (optionally reusing the decoded-fragment cache), while IRPainter lowers
+        the same tree into a native isolated subtree. This is deliberately distinct from
+        flattening the child operations into the parent: Porter-Duff ``Src``, masks, final
+        resize sampling, and whole-image shadows all depend on the isolation boundary.
+        """
+
+        return self.add_operation(
+            "_impl_paste_canvas",
+            exclude_on_hash,
+            (
+                canvas,
+                pos,
+                size,
+                use_shadow,
+                shadow_width,
+                shadow_alpha,
+                sampling,
+                cache_key,
+                require_asset_backed,
+                skip_on_error,
+            ),
+        )
+
+    def paste_resized_clipped(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size,
+        clip_rect: tuple[int, int, int, int],
+        *,
+        blend: ImagePasteBlend = "src_over",
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Resize the FULL source, then clip it in destination coordinates and composite.
+
+        This is intentionally different from ``src_rect``: ``src_rect`` crops source pixels
+        before resizing, while this primitive first resizes the whole image to ``size`` at
+        ``pos`` and only then intersects it with ``clip_rect``.  Bonds-honor backgrounds and
+        character sprites depend on that order.
+
+        ``paste_lerp`` is Pillow's ``destination.paste(source, xy, source)`` arithmetic;
+        ``src_over`` is true alpha compositing and ``src`` replaces all four channels.
+        """
+        if blend not in ("paste_lerp", "src_over", "src"):
+            raise ValueError(f"unsupported clipped paste blend: {blend!r}")
+        return self.add_operation(
+            "_impl_paste_resized_clipped",
+            exclude_on_hash,
+            (sub_img, pos, size, clip_rect, blend, sampling, tint),
+        )
+
     def image_bg(
         self,
         image: ImageSource,
@@ -1343,6 +1423,54 @@ class Painter:
             self.img.paste(drawn_img, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
         return self
 
+    def _impl_paste_resized_clipped(
+        self,
+        sub_img: ImageSource,
+        pos: Position,
+        size: Size,
+        clip_rect: tuple[int, int, int, int],
+        blend: ImagePasteBlend = "src_over",
+        sampling: ImageSampling | None = None,
+        tint: ImageTint | None = None,
+    ) -> Self:
+        if blend not in ("paste_lerp", "src_over", "src"):
+            raise ValueError(f"unsupported clipped paste blend: {blend!r}")
+        drawn_img = _apply_image_tint(self._resolve_sub_img(sub_img, size, None, sampling), tint)
+        destination_x = int(pos[0] + self.offset[0])
+        destination_y = int(pos[1] + self.offset[1])
+        clip_left = int(clip_rect[0] + self.offset[0])
+        clip_top = int(clip_rect[1] + self.offset[1])
+        clip_right = int(clip_rect[2] + self.offset[0])
+        clip_bottom = int(clip_rect[3] + self.offset[1])
+        visible_left = max(0, destination_x, clip_left)
+        visible_top = max(0, destination_y, clip_top)
+        visible_right = min(self.img.width, destination_x + drawn_img.width, clip_right)
+        visible_bottom = min(self.img.height, destination_y + drawn_img.height, clip_bottom)
+        if visible_left >= visible_right or visible_top >= visible_bottom:
+            return self
+
+        cropped = drawn_img.crop(
+            (
+                visible_left - destination_x,
+                visible_top - destination_y,
+                visible_right - destination_x,
+                visible_bottom - destination_y,
+            )
+        )
+        destination = (visible_left, visible_top)
+        if blend == "src":
+            self.img.paste(cropped, destination)
+        elif blend == "paste_lerp":
+            if cropped.mode == "RGBA":
+                self.img.paste(cropped, destination, cropped)
+            else:
+                self.img.paste(cropped, destination)
+        else:
+            if cropped.mode != "RGBA":
+                cropped = cropped.convert("RGBA")
+            self.img.alpha_composite(cropped, destination)
+        return self
+
     def _impl_image_bg(
         self,
         image: ImageSource,
@@ -1620,6 +1748,43 @@ class Painter:
             self.img.alpha_composite(overlay, (pos[0], pos[1]))
 
         return self
+
+    def _impl_paste_canvas(
+        self,
+        canvas: Any,
+        pos: Position,
+        size: Size = None,
+        use_shadow: bool = False,
+        shadow_width: int = 8,
+        shadow_alpha: float = 0.6,
+        sampling: ImageSampling | None = None,
+        cache_key: str | None = None,
+        require_asset_backed: bool = False,
+        skip_on_error: bool = False,
+    ) -> Self:
+        del require_asset_backed  # Native-only purity constraint; Pillow already owns this path.
+        try:
+            child = get_composed_image_cached(cache_key) if cache_key else None
+            if child is None:
+                child = canvas.get_img_sync()
+                if cache_key:
+                    put_composed_image_cache(cache_key, child)
+            return self._impl_paste(
+                child,
+                pos,
+                size,
+                use_shadow,
+                shadow_width,
+                shadow_alpha,
+                None,
+                sampling,
+                None,
+            )
+        except Exception:
+            if not skip_on_error:
+                raise
+            logging.warning("skip broken nested canvas during Pillow render", exc_info=True)
+            return self
 
     def _impl_roundrect(
         self,

@@ -297,6 +297,30 @@ def test_painter_paste_src_writes_all_four_channels_verbatim():
     assert asyncio.run(blended()).getpixel((15, 10)) == (0, 0, 0, 0)  # the difference paste_src exists for
 
 
+def test_painter_paste_resized_clipped_lerps_after_full_resize():
+    source = Image.new("RGBA", (1, 1), (255, 255, 255, 128))
+    base = Image.new("RGBA", (4, 2), (0, 0, 255, 255))
+
+    async def main():
+        painter = Painter(size=(4, 2))
+        painter.paste_src(base, (0, 0))
+        painter.paste_resized_clipped(
+            source,
+            (0, 0),
+            (4, 2),
+            (1, 0, 3, 2),
+            blend="paste_lerp",
+            sampling="nearest",
+        )
+        return await painter.get()
+
+    image = asyncio.run(main())
+    assert image.getpixel((0, 0)) == (0, 0, 255, 255)
+    assert image.getpixel((3, 1)) == (0, 0, 255, 255)
+    assert image.getpixel((1, 0)) == (128, 128, 255, 191)
+    assert image.getpixel((2, 1)) == (128, 128, 255, 191)
+
+
 def test_painter_shadow_roundrect_draws_blur():
     async def main():
         p = Painter(size=(60, 60))

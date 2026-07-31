@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.sekai.base.painter import get_font, get_text_size
-from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint, linear_gradient
+from src.sekai.skia_renderer.ir_builder import IRBuilder, image_shadow, image_tint, linear_gradient
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 
@@ -76,6 +76,35 @@ def test_rect_blend_serializes_src_and_rejects_unknown_values():
         b.rect((0, 0), (1, 1), blend="multiply")
 
 
+def test_image_paste_lerp_serializes_only_for_integral_plain_stretch():
+    builder = _builder()
+    builder.image(
+        "badge.png",
+        (2, 3),
+        (20, 10),
+        fit="stretch",
+        sampling="nearest",
+        blend="paste_lerp",
+    )
+    assert builder.build()["root"]["children"][0]["blend"] == "paste_lerp"
+
+    invalid_calls = (
+        {"pos": (2.5, 3), "size": (20, 10)},
+        {"pos": (2, 3), "size": (0, 10)},
+        {"pos": (2, 3), "size": (20, 10), "fit": "contain"},
+        {"pos": (2, 3), "size": (20, 10), "alpha": 0.5},
+        {"pos": (2, 3), "size": (20, 10), "source_rect": (0, 0, 1, 1)},
+        {"pos": (2, 3), "size": (20, 10), "tint": image_tint((255, 0, 0, 255))},
+        {"pos": (2, 3), "size": (20, 10), "blur_sigma": 1.0},
+    )
+    for kwargs in invalid_calls:
+        with pytest.raises(ValueError, match="paste_lerp Image"):
+            _builder().image("badge.png", blend="paste_lerp", **kwargs)
+
+    with pytest.raises(ValueError, match="unsupported Image blend"):
+        _builder().image("badge.png", (0, 0), (1, 1), blend="multiply")
+
+
 def test_unity_subscene_nests_children_and_placement():
     b = _builder()
     with b.unity_subscene(
@@ -108,6 +137,45 @@ def test_unity_subscene_nests_children_and_placement():
             }
         ],
     }
+
+
+def test_raster_subscene_nests_children_and_validates_placement():
+    b = _builder()
+    with b.raster_subscene(
+        natural_size=(48, 24),
+        pos=(10.5, 20.25),
+        dst_size=(96, 48),
+        sampling="catmull_rom",
+        alpha=0.8,
+        shadow=image_shadow(0.5, (0, 0), 3.0),
+    ):
+        b.rect((0, 0), (48, 24), fill=(1, 2, 3, 255))
+
+    node = b.build()["root"]["children"][0]
+    assert node["type"] == "RasterSubscene"
+    assert node["natural_size"] == [48, 24]
+    assert node["pos"] == [10.5, 20.25]
+    assert node["dst_size"] == [96.0, 48.0]
+    assert node["sampling"] == "catmull_rom"
+    assert node["alpha"] == 0.8
+    assert node["shadow"]["sigma"] == 3.0
+    assert [child["type"] for child in node["children"]] == ["Rect"]
+
+    invalid_calls = (
+        {"natural_size": (0, 1), "pos": (0, 0), "dst_size": (1, 1)},
+        {"natural_size": (1, 1), "pos": (float("nan"), 0), "dst_size": (1, 1)},
+        {"natural_size": (1, 1), "pos": (0, 0), "dst_size": (-1, 1)},
+        {"natural_size": (1, 1), "pos": (0, 0), "dst_size": (1, 1), "alpha": 2},
+        {
+            "natural_size": (1, 1),
+            "pos": (0, 0),
+            "dst_size": (1, 1),
+            "sampling": "pillow_lanczos",
+        },
+    )
+    for kwargs in invalid_calls:
+        with pytest.raises(ValueError, match="RasterSubscene"):
+            _builder().push_raster_subscene(**kwargs)
 
 
 def test_pillow_lanczos_sampling_is_serialized_explicitly():

@@ -309,6 +309,7 @@ pub enum Node {
     SlicedImage(SlicedImageNode),
     UnityImage(UnityImageNode),
     UnitySubscene(UnitySubsceneNode),
+    RasterSubscene(RasterSubsceneNode),
     SelfImage(SelfImageNode),
     SdfQuad(SdfQuadNode),
     SdfShape(SdfShapeNode),
@@ -533,6 +534,13 @@ pub struct ImageNode {
     /// `Src` REPLACES the destination in the drawn rect, all four channels verbatim — the
     /// Pillow-side equivalent of a mask-less `Image.paste`, which `Painter.paste_src` needs so
     /// that the two backends do not silently disagree wherever the destination is non-empty.
+    /// `PasteLerp` is the deliberately narrow straight-RGBA compatibility path for
+    /// `destination.paste(source, pos, source)`: source alpha linearly interpolates ALL four
+    /// straight channels, including destination alpha. It is preflight-limited to integral,
+    /// axis-aligned stretch draws without decorations or a masked-Group saveLayer (ordinary
+    /// Group clips and isolated subscene local surfaces are supported). Skia stores surfaces
+    /// premultiplied, so RGB hidden below alpha=0 cannot survive a surface round-trip and is
+    /// not preserved.
     #[serde(default)]
     pub blend: ImageBlend,
 }
@@ -594,12 +602,36 @@ pub struct UnitySubsceneNode {
     pub children: Vec<Node>,
 }
 
+/// Natural-size children rendered into a transparent isolated raster, then sampled exactly
+/// once into an explicit logical destination rectangle on the parent canvas.
+///
+/// Unlike UnitySubscene this node has no custom-profile transform math: `pos` is the logical
+/// top-left and `dst_size` is the logical output size. The isolation contains Porter-Duff Src
+/// writes and straight-RGBA PasteLerp reads within the natural raster. `shadow` is applied once
+/// to the completed snapshot's alpha silhouette. A Scene.scale remains the scene's ordinary
+/// final-raster resize; this node does not add a hidden intermediate pre-resize.
+#[derive(Debug, Deserialize)]
+pub struct RasterSubsceneNode {
+    pub natural_size: [i32; 2],
+    pub pos: Vec2,
+    pub dst_size: Vec2,
+    #[serde(default)]
+    pub sampling: ImageSampling,
+    #[serde(default = "default_alpha")]
+    pub alpha: f32,
+    #[serde(default)]
+    pub shadow: Option<ImageShadow>,
+    #[serde(default)]
+    pub children: Vec<Node>,
+}
+
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageBlend {
     #[default]
     SrcOver,
     Src,
+    PasteLerp,
 }
 
 fn default_alpha() -> f32 {

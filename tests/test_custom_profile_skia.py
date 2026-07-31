@@ -85,6 +85,23 @@ def _png_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _native_subtree_from_builder(builder):
+    scene = builder.build()
+    return skia_mod.NativeSubtree(
+        size=(builder.width, builder.height),
+        nodes=tuple(scene["root"]["children"]),
+        fonts=scene["fonts"],
+        mem_images={},
+        assets_base_dir=scene["assets_base_dir"],
+    )
+
+
+def _walk_ir_nodes(nodes):
+    for node in nodes:
+        yield node
+        yield from _walk_ir_nodes(node.get("children", []))
+
+
 # ------------------------- fail-open outcomes (no native needed) -------------------------
 
 
@@ -437,15 +454,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
         tmp_decorative_alpha_harden = 1.0
 
         def __init__(self):
-            self.honor_requests = {
-                "123:2:sub": {
-                    "honor_type": honor_type,
-                    "honor_level": 2,
-                    "is_main_honor": False,
-                    "honor_img_path": base_path.as_posix(),
-                    "frame_img_path": frame_path.as_posix(),
-                }
-            }
+            self.honor_requests = {}
 
         def native_card_ref(self, card):
             return {}
@@ -459,6 +468,16 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
 
         def honor_slot_key(self, honor_id, level, full_size):
             return f"{honor_id}:{level}:{'main' if full_size else 'sub'}"
+
+        def build_masterdata_honor_request(self, honor_id, level, full_size):
+            assert (honor_id, level, full_size) == (123, 2, False)
+            return skia_mod.HonorRequest(
+                honor_type=honor_type,
+                honor_level=2,
+                is_main_honor=False,
+                honor_img_path=base_path.as_posix(),
+                frame_img_path=frame_path.as_posix(),
+            )
 
         def resolve_request_asset_path(self, raw_path):
             path = Path(raw_path)
@@ -497,7 +516,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
         end_pillow_touch_scope(token)
     scene = json.loads(ir_json)
     subscene = next(node for node in scene["root"]["children"] if node["type"] == "UnitySubscene")
-    subscene_paths = {node["path"] for node in subscene["children"] if node["type"] == "Image"}
+    subscene_paths = {node["path"] for node in _walk_ir_nodes(subscene["children"]) if node["type"] == "Image"}
 
     # The earlier hybrid element owns m0. The shared honor tree stays asset-backed and cannot
     # collide with (or overwrite) that request-memory key.
@@ -608,6 +627,9 @@ def test_native_honor_declines_when_a_supplied_overlay_is_missing(tmp_path, monk
         def honor_slot_key(self, honor_id, level, full_size):
             return f"{honor_id}:{level}:{'main' if full_size else 'sub'}"
 
+        def build_masterdata_honor_request(self, honor_id, level, full_size):
+            pytest.fail("an explicit hybrid candidate must stop before masterdata fallback")
+
         def resolve_request_asset_path(self, raw_path):
             path = Path(raw_path)
             return path.resolve() if path.is_file() else None
@@ -631,10 +653,117 @@ def test_native_honor_declines_when_a_supplied_overlay_is_missing(tmp_path, monk
     assert report.unresolved_elements == 1
 
 
+def test_native_bonds_honor_embeds_asset_backed_subtree_without_mem(tmp_path, monkeypatch):
+    import src.sekai.skia_renderer.canvas as canvas_mod
+
+    paths = {
+        "left": tmp_path / "left.png",
+        "right": tmp_path / "right.png",
+        "one": tmp_path / "one.png",
+        "two": tmp_path / "two.png",
+        "mask": tmp_path / "mask.png",
+    }
+    for name in ("left", "right", "mask"):
+        Image.new("RGBA", (180, 80), (30, 80, 160, 255)).save(paths[name])
+    for name in ("one", "two"):
+        Image.new("RGBA", (100, 100), (180, 80, 30, 192)).save(paths[name])
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    class _NativeInfo:
+        ASSET_INFO_CAPABILITY = 1
+
+        @staticmethod
+        def asset_image_info(base, relative):
+            path = (Path(base) / relative).resolve()
+            stat = path.stat()
+            with Image.open(path) as image:
+                width, height = image.size
+                mode = image.mode
+            return {
+                "width": width,
+                "height": height,
+                "mode": mode,
+                "mtime_ns": stat.st_mtime_ns,
+                "file_size": stat.st_size,
+            }
+
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeInfo())
+
+    content = NativeContent(
+        layer=1,
+        kind="bonds_honor",
+        item={"id": 456, "fullSize": False, "wordId": 0},
+        object_data={
+            "visible": True,
+            "position": {"x": 0, "y": 0},
+            "scale": {"x": 1, "y": 1},
+            "rotation": {"z": 0, "w": 1},
+        },
+    )
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.0
+        position_scale_y = 1.0
+
+        def __init__(self):
+            self.bonds_honor_requests = {}
+
+        def user_bonds_honor_level_for(self, honor_id):
+            assert honor_id == 456
+            return 3
+
+        def bonds_honor_slot_key(
+            self,
+            honor_id,
+            level,
+            full_size,
+            word_id,
+            inverse,
+            use_unit_virtual_singer=False,
+        ):
+            assert not use_unit_virtual_singer
+            return f"{honor_id}:{level}:{'main' if full_size else 'sub'}:{word_id}:{'reverse' if inverse else 'normal'}"
+
+        def build_masterdata_bonds_honor_request(self, item, full_size):
+            assert item == content.item
+            assert not full_size
+            return skia_mod.HonorRequest(
+                honor_type="bonds",
+                honor_level=3,
+                bonds_bg_path=paths["left"].as_posix(),
+                bonds_bg_path2=paths["right"].as_posix(),
+                chara_icon_path=paths["one"].as_posix(),
+                chara_icon_path2=paths["two"].as_posix(),
+                mask_img_path=paths["mask"].as_posix(),
+            )
+
+        def resolve_request_asset_path(self, raw_path):
+            path = Path(raw_path)
+            return path.resolve() if path.is_file() else None
+
+        def unity_point(self, position):
+            return 160.0, 90.0
+
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 8 * 1024 * 1024)
+
+    assert skia_mod._emit_native_honor(_Renderer(), content, scene)
+    assert scene.mem_images == {}
+    subscene = builder.build()["root"]["children"][0]
+    assert subscene["type"] == "UnitySubscene"
+
+    images = [node for node in _walk_ir_nodes(subscene["children"]) if node["type"] == "Image"]
+    assert images
+    assert all(not image["path"].startswith("mem:") for image in images)
+    assert any(image.get("blend") == "paste_lerp" for image in images)
+
+
 def test_native_honor_deck_declines_atomically_when_an_expected_slot_is_missing(monkeypatch):
     badge = skia_mod._new_builder(180, 80)
     badge.rect((0, 0), (180, 80), fill=(20, 40, 80, 255))
-    statuses = {1: ("ready", badge), 2: ("missing", None)}
+    statuses = {1: ("ready", _native_subtree_from_builder(badge)), 2: ("missing", None)}
     monkeypatch.setattr(
         skia_mod,
         "_native_profile_honor_badge",
@@ -664,7 +793,7 @@ def test_native_honor_deck_emits_all_expected_slots_only_after_preflight(monkeyp
         width = 380 if full_size else 180
         badge = skia_mod._new_builder(width, 80)
         badge.rect((0, 0), (width, 80), fill=(20 * int(row["seq"]), 40, 80, 255))
-        return "ready", badge
+        return "ready", _native_subtree_from_builder(badge)
 
     monkeypatch.setattr(skia_mod, "_native_profile_honor_badge", fake_badge)
 

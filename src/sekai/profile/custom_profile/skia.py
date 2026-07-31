@@ -2,12 +2,12 @@
 
 The Unity card JSON remains the layout carrier. Asset-backed ``UnityImage`` and ``SdfShape``
 elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; decorative text
-uses native ``SdfQuad`` shading, and normal/birthday honors reuse the shared ``HonorBadgeBox``
-tree inside an isolated native subscene. Shared General/Card display lists replay native
-``SlicedImage``/sprite/Text/viewport/card operations with strict Rust font metrics and
-Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text.
-Still-unmigrated rich/decorative/static TMP, incomplete HonorDeck, and bonds-honor content is
-explicitly classified as hybrid and transported as bounded ``mem:`` rasters. A scene coverage
+uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse the shared
+``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
+display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
+font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text.
+Still-unmigrated rich/decorative/static TMP and incomplete HonorDeck content is explicitly
+classified as hybrid and transported as bounded ``mem:`` rasters. A scene coverage
 report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
 cannot mean "successfully encoded a partial card".
 
@@ -29,6 +29,7 @@ Fail-open: this function NEVER raises — every failure records exactly one outc
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -47,6 +48,7 @@ from src.core.pillow_telemetry import (
     record_pillow_touch,
 )
 from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
+from src.sekai.honor.assets import resolve_honor_assets
 from src.sekai.honor.model import HonorRequest
 from src.sekai.honor.widget import build_honor_badge_canvas
 from src.sekai.profile.custom_profile.card_prefab import (
@@ -92,7 +94,7 @@ from src.sekai.profile.custom_profile.renderer import (
 from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
 from src.sekai.profile.custom_profile.tmp_text_prefab import build_simple_tmp_text_display_list
 from src.sekai.profile.model import CustomProfileCardRenderRequest
-from src.sekai.skia_renderer.canvas import build_canvas_ir, load_native_renderer, payload_from_native, skia_plot_enabled
+from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
@@ -104,6 +106,7 @@ from src.sekai.skia_renderer.render_stats import (
     record_render,
     record_scene_completeness,
 )
+from src.sekai.skia_renderer.subtree import NativeSubtree, NativeSubtreeError, lower_canvas_subtree
 from src.settings import (
     ASSETS_BASE_DIR,
     CUSTOM_PROFILE_MAX_LAYER_PIXELS,
@@ -143,16 +146,6 @@ _NATIVE_GENERAL_PREFABS = frozenset(
 )
 _GENERAL_FONT_IR_NAME = "custom_profile_general"
 _NATIVE_CARD_GENERAL_PREFABS = frozenset({"LeaderCard", "Deck"})
-
-_HONOR_IMAGE_PATH_FIELDS = (
-    ("honor_img", "honor_img_path"),
-    ("rank_img", "rank_img_path"),
-    ("frame_img", "frame_img_path"),
-    ("frame_degree_level_img", "frame_degree_level_img_path"),
-    ("scroll_img", "scroll_img_path"),
-    ("lv_img", "lv_img_path"),
-    ("lv6_img", "lv6_img_path"),
-)
 
 
 @dataclass(slots=True)
@@ -1174,66 +1167,100 @@ def _native_honor_sources(
     renderer: PNGRenderer,
     request: HonorRequest,
 ) -> tuple[str, dict[str, ImageSource | None] | None]:
-    """Resolve one normal/birthday request to lazy, root-confined image refs.
+    """Resolve one honor branch to lazy, root-confined image refs.
 
-    ``unrenderable`` means the required base is absent, matching the Pillow helper's ``None``
-    result so a lower-priority request key may still be tried. ``hybrid`` means the badge itself
-    is renderable but a supplied overlay is absent/outside the native asset root; declining the
-    whole element preserves request-key precedence and prevents ``backend=skia`` from silently
-    omitting that resource.
+    The backend-neutral manifest owns branch selection and required/optional semantics.
+    ``unrenderable`` may try a lower-priority request key; ``hybrid`` preserves the selected
+    request's precedence and declines the whole element.
     """
 
-    images: dict[str, ImageSource | None] = {}
-    for image_key, path_field in _HONOR_IMAGE_PATH_FIELDS:
-        raw_path = getattr(request, path_field)
-        if not raw_path:
-            images[image_key] = None
-            continue
-        path = renderer.resolve_request_asset_path(raw_path)
-        if path is None:
-            return ("unrenderable" if image_key == "honor_img" else "hybrid"), None
+    def source_factory(path):
         asset_path = _relative_asset_path(path)
         if asset_path is None:
-            return "hybrid", None
-        images[image_key] = _header_only_asset_ref(path, asset_path)
+            raise ValueError(f"honor asset is outside ASSETS_BASE_DIR: {path}")
+        return _header_only_asset_ref(path, asset_path)
 
-    if images.get("honor_img") is None:
-        return "unrenderable", None
-    return "ready", images
+    resolution = resolve_honor_assets(
+        request,
+        path_resolver=renderer.resolve_request_asset_path,
+        source_factory=source_factory,
+    )
+    return resolution.status, None if resolution.sources is None else dict(resolution.sources)
+
+
+def _native_honor_candidates(
+    renderer: PNGRenderer,
+    content: Any,
+) -> Iterator[HonorRequest | dict[str, Any] | None] | None:
+    """Honor requests in Pillow precedence order, with masterdata derivation last."""
+
+    full_size = bool_from_profile(content.item.get("fullSize", False))
+    if content.kind == "honor":
+        honor_id = content_data_id("honor", content.item)
+        level = renderer.user_honor_level_for(honor_id)
+        keys = (renderer.honor_slot_key(honor_id, level, full_size), str(honor_id))
+
+        def ordinary_candidates():
+            yield from (renderer.honor_requests.get(key) for key in keys)
+            build_request = getattr(renderer, "build_masterdata_honor_request", None)
+            yield build_request(honor_id, level, full_size) if callable(build_request) else None
+
+        return ordinary_candidates()
+    if content.kind != "bonds_honor":
+        return None
+
+    honor_id = content_data_id("bonds_honor", content.item)
+    level = renderer.user_bonds_honor_level_for(honor_id)
+    word_id = int(content.item.get("wordId", 0) or 0)
+    inverse = bool_from_profile(content.item.get("inverse", False))
+    use_unit_virtual_singer = bool_from_profile(content.item.get("useUnitVirtualSinger", False))
+    keys = [
+        renderer.bonds_honor_slot_key(
+            honor_id,
+            level,
+            full_size,
+            word_id,
+            inverse,
+            use_unit_virtual_singer,
+        )
+    ]
+    if use_unit_virtual_singer:
+        keys.append(renderer.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
+    keys.append(str(honor_id))
+
+    def bonds_candidates():
+        yield from (renderer.bonds_honor_requests.get(key) for key in keys)
+        build_request = getattr(renderer, "build_masterdata_bonds_honor_request", None)
+        yield build_request(content.item, full_size) if callable(build_request) else None
+
+    return bonds_candidates()
 
 
 def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
-    """Lower normal/birthday badges through the shared ``HonorBadgeBox`` tree.
+    """Lower normal, birthday, bonds, and empty badges through ``HonorBadgeBox``.
 
     The tree first renders at the badge's natural size inside ``UnitySubscene``. Rust then
     applies the same two sequential Unity scale stages and center-pivot placement as the Pillow
-    custom-profile path. Bonds remain hybrid because their shared tree still performs
-    resize-then-crop operations in Python.
+    custom-profile path. Bonds full-resize/destination-clip operations stay asset-backed.
     """
 
-    if content.kind != "honor" or not content.object_data.get("visible", False):
+    if not content.object_data.get("visible", False):
+        return False
+    candidates = _native_honor_candidates(renderer, content)
+    if candidates is None:
         return False
 
-    # This first batch consumes the same resource-supplied request keys as
-    # PNGRenderer.compose_honor_image. Masterdata-derived request construction is not native
-    # yet; when these keys are absent the existing hybrid resolver remains authoritative.
-    honor_id = content_data_id("honor", content.item)
-    level = renderer.user_honor_level_for(honor_id)
-    full_size = bool_from_profile(content.item.get("fullSize", False))
-    keys = (renderer.honor_slot_key(honor_id, level, full_size), str(honor_id))
-    seen_payloads: set[int] = set()
+    seen_candidates: set[int] = set()
 
-    for key in keys:
-        payload = renderer.honor_requests.get(key)
-        if not isinstance(payload, dict) or id(payload) in seen_payloads:
+    for candidate in candidates:
+        if candidate is None or id(candidate) in seen_candidates:
             continue
-        seen_payloads.add(id(payload))
-        request = HonorRequest.model_validate(payload)
-
-        # Preserve request-key precedence: if the first renderable candidate is a bonds/empty
-        # badge, let the existing hybrid path consume it instead of skipping to a different
-        # lower-priority visual.
-        if request.is_empty or request.honor_type not in {"normal", "birthday"}:
+        seen_candidates.add(id(candidate))
+        if isinstance(candidate, HonorRequest):
+            request = candidate
+        elif isinstance(candidate, dict):
+            request = HonorRequest.model_validate(candidate)
+        else:
             return False
 
         source_status, images = _native_honor_sources(renderer, request)
@@ -1244,12 +1271,10 @@ def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
 
         canvas = build_honor_badge_canvas(request, images)
         if canvas is None:
-            continue
-        badge_builder, badge_mem_images = build_canvas_ir(canvas, export_format="png")
-        # Normal/birthday nodes are entirely asset-backed. A mem image here means a source
-        # vanished, escaped ASSETS_BASE_DIR, or unexpectedly rasterized in Python; none may be
-        # merged into the request scene and mislabeled as a native honor.
-        if badge_mem_images:
+            return False
+        try:
+            badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
+        except NativeSubtreeError:
             return False
 
         scale = content.object_data.get("scale") or {}
@@ -1260,13 +1285,18 @@ def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
         angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
         scene.flush_direct_layer()
         with scene.builder.unity_subscene(
-            size=(badge_builder.width, badge_builder.height),
+            size=badge.size,
             anchor=renderer.unity_point(content.object_data.get("position", {})),
             object_scale=(sx, sy),
             post_scale=(renderer.position_scale_x, renderer.position_scale_y),
             rotation=angle,
         ):
-            scene.builder.splice_root_children(badge_builder)
+            badge.splice_into(
+                scene.builder,
+                scene.mem_images,
+                namespace="custom.honor.content",
+                require_asset_backed=True,
+            )
         return True
     return False
 
@@ -1276,7 +1306,7 @@ def _native_profile_honor_badge(
     row: dict[str, Any],
     *,
     full_size: bool,
-) -> tuple[str, IRBuilder | None]:
+) -> tuple[str, NativeSubtree | None]:
     """Resolve one HonorDeck slot with the exact Pillow request-key precedence.
 
     ``"ready"`` carries an entirely asset-backed badge tree. ``"missing"`` means every profile
@@ -1307,8 +1337,6 @@ def _native_profile_honor_badge(
                 continue
             seen_payloads.add(id(payload))
             request = HonorRequest.model_validate(payload)
-            if request.is_empty or request.honor_type not in {"normal", "birthday"}:
-                return "hybrid", None
             source_status, images = _native_honor_sources(renderer, request)
             if source_status == "unrenderable":
                 continue
@@ -1317,10 +1345,11 @@ def _native_profile_honor_badge(
             canvas = build_honor_badge_canvas(request, images)
             if canvas is None:
                 continue
-            badge_builder, badge_mem_images = build_canvas_ir(canvas, export_format="png")
-            if badge_mem_images:
+            try:
+                badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
+            except NativeSubtreeError:
                 return "hybrid", None
-            return "ready", badge_builder
+            return "ready", badge
     return "missing", None
 
 
@@ -1344,28 +1373,29 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     if plan is None:
         return None
 
-    slots: list[tuple[IRBuilder, tuple[int, int, int, int]]] = []
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
     for slot in plan.slots:
-        status, badge_builder = _native_profile_honor_badge(
+        status, badge = _native_profile_honor_badge(
             renderer,
             dict(slot.profile_row),
             full_size=slot.full_size,
         )
         if status != "ready":
             return None
-        assert badge_builder is not None
+        assert badge is not None
         # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
         # size. Native custom-profile does not claim that filter yet; decline rather than
         # silently substituting Catmull-Rom through a nested subscene.
-        if (badge_builder.width, badge_builder.height) != slot.target_size:
+        if badge.size != slot.target_size:
             return None
         slots.append(
             (
-                badge_builder,
+                badge,
                 (
                     *slot.target_xy,
                     *slot.target_size,
                 ),
+                slot.index,
             )
         )
 
@@ -1400,15 +1430,20 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
                 border=plan.panel.sliced_border,
                 tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
             )
-        for badge_builder, (left, top, width, height) in slots:
+        for badge, (left, top, width, height), slot_index in slots:
             with scene.builder.unity_subscene(
-                size=(badge_builder.width, badge_builder.height),
+                size=badge.size,
                 anchor=(left + width / 2.0, top + height / 2.0),
                 object_scale=(1.0, 1.0),
                 post_scale=(1.0, 1.0),
                 rotation=0.0,
             ):
-                scene.builder.splice_root_children(badge_builder)
+                badge.splice_into(
+                    scene.builder,
+                    scene.mem_images,
+                    namespace=f"custom.honor.deck.{slot_index}",
+                    require_asset_backed=True,
+                )
     return "native"
 
 

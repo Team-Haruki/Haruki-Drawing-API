@@ -30,6 +30,7 @@ from src.sekai.base.painter import (
 )
 from src.sekai.base.plot import (
     Canvas,
+    CanvasImageBox,
     ColoredTextBox,
     Frame,
     Grid,
@@ -57,7 +58,11 @@ from src.sekai.base.utils import (
     put_composed_image_disk_cache,
     truncate,
 )
-from src.sekai.honor.drawer import HonorRequest, compose_full_honor_image
+from src.sekai.honor.drawer import (
+    HonorRequest,
+    build_full_honor_cache_key,
+    build_honor_badge_canvas_from_request,
+)
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.sekai.skia_renderer.card_common import rare_count
 from src.settings import ASSETS_BASE_DIR
@@ -572,16 +577,31 @@ def _build_profile_word_module(ctx: _ProfileLayoutContext) -> Widget:
 
 async def _build_profile_honor_module(ctx: _ProfileLayoutContext) -> Widget:
     root = HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding((16, 0))
-    honor_imgs = await asyncio.gather(
-        *[compose_full_honor_image(honor) for honor in ctx.honors],
+    honor_canvases = await asyncio.gather(
+        *[build_honor_badge_canvas_from_request(honor) for honor in ctx.honors],
         return_exceptions=True,
     )
-    for img in honor_imgs:
-        if isinstance(img, Exception):
-            logger.warning("skip broken honor asset in profile image: %s", img)
+    for honor, honor_canvas in zip(ctx.honors, honor_canvases, strict=True):
+        if isinstance(honor_canvas, Exception):
+            logger.warning("skip broken honor asset in profile image: %s", honor_canvas)
             continue
-        if img:
-            root.add_item(ImageBox(img, size=(None, 48), shadow=True))
+        if honor_canvas is not None:
+            try:
+                cache_key = build_full_honor_cache_key(honor)
+            except Exception as exc:
+                logger.warning("skip honor with an invalid composed-cache key: %s", exc)
+                continue
+            root.add_item(
+                CanvasImageBox(
+                    honor_canvas,
+                    size=(None, 48),
+                    shadow=True,
+                    sampling="catmull_rom",
+                    cache_key=cache_key,
+                    require_asset_backed=True,
+                    skip_on_error=True,
+                )
+            )
     return root
 
 

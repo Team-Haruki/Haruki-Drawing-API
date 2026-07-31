@@ -328,7 +328,9 @@ fn validate_raw_image(
 /// 13 = asset-backed SlicedImage nine-slice composition.
 /// 14 = Porter-Duff Src/SrcOver blending for Rect.
 /// 15 = explicit Pillow-compatible Lanczos raster resize for Image and UnitySubscene.
-pub const IR_CAPABILITY: u32 = 15;
+/// 16 = explicit straight-RGBA Pillow `paste(source, pos, source)` Image blending.
+/// 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
+pub const IR_CAPABILITY: u32 = 17;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for

@@ -1,7 +1,12 @@
+from pathlib import Path
+
 from PIL import Image, ImageDraw
 
+from src.sekai.base.utils import AssetImageRef
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets
 from src.sekai.honor.model import HonorRequest
+from src.sekai.honor.widget import build_honor_badge_canvas
+from src.sekai.skia_renderer.canvas import build_canvas_ir
 
 
 def test_event_honor_draws_scroll_level() -> None:
@@ -129,3 +134,67 @@ def test_bonds_honor_mask_defines_the_badge_silhouette() -> None:
     # the icons sit at the bottom of the badge; their edges must not punch holes in it
     assert image.getpixel((70, 79))[3] == 255
     assert image.getpixel((310, 79))[3] == 255
+
+
+def _asset_ref(path: Path) -> AssetImageRef:
+    stat = path.stat()
+    with Image.open(path) as image:
+        return AssetImageRef(
+            path=path,
+            size=image.size,
+            mode=image.mode,
+            mtime_ns=stat.st_mtime_ns,
+            file_size=stat.st_size,
+        )
+
+
+def _walk_ir(node):
+    yield node
+    for child in node.get("children", ()):
+        yield from _walk_ir(child)
+
+
+def test_bonds_honor_lazy_sources_lower_to_asset_only_resize_then_clip_ir(tmp_path, monkeypatch) -> None:
+    import src.sekai.skia_renderer.canvas as canvas_mod
+
+    assets = {
+        "bonds_bg": Image.new("RGBA", (180, 80), (20, 40, 160, 255)),
+        "bonds_bg2": Image.new("RGBA", (180, 80), (180, 120, 20, 255)),
+        "chara_icon_1": _marker_icon(80, (255, 0, 0, 255)),
+        "chara_icon_2": _marker_icon(80, (0, 255, 0, 255)),
+        "mask_img": Image.new("RGBA", (180, 80), (255, 255, 255, 255)),
+        "frame_img": Image.new("RGBA", (180, 80), (255, 255, 255, 128)),
+        "lv_img": Image.new("RGBA", (14, 14), (255, 255, 255, 180)),
+    }
+    refs = {}
+    for key, image in assets.items():
+        path = tmp_path / f"{key}.png"
+        image.save(path)
+        refs[key] = _asset_ref(path)
+
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+    request = HonorRequest(
+        honor_type="bonds",
+        honor_rarity="middle",
+        honor_level=2,
+        is_main_honor=False,
+        chara_id="1",
+        chara_id2="2",
+    )
+    canvas = build_honor_badge_canvas(request, refs)
+    assert canvas is not None
+
+    builder, mem_images = build_canvas_ir(canvas, export_format="png")
+    scene = builder.build()
+    nodes = list(_walk_ir(scene["root"]))
+    images = [node for node in nodes if node.get("type") == "Image"]
+
+    assert mem_images == {}
+    assert images
+    assert all(not node["path"].startswith("mem:") for node in images)
+    assert all("source_rect" not in node for node in images)
+    assert any(node.get("blend") == "paste_lerp" for node in images)
+    assert sum(node.get("clip", {}).get("kind") == "rect" for node in nodes if node.get("type") == "Group") >= 4
+    masked_groups = [node for node in nodes if node.get("type") == "Group" and node.get("mask")]
+    assert len(masked_groups) == 1
+    assert [child["type"] for child in masked_groups[0]["children"]] == ["UnitySubscene"]

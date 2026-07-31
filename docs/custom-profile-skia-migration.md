@@ -20,8 +20,9 @@
   fwidth/outline 并合成；Python 不再建立按 scale 放大的 NumPy 数组。
 - `general_background`、`story_background`、`stand_member`、普通 `collection`、`other`、
   `stamp`：`UnityImage` 由 Rust 完整解码、顺序执行 object/post 两段缩放并放置。
-- 显式 `honorRequests` 中的 normal/birthday badge：共享 `HonorBadgeBox` 在严格
-  `UnitySubscene` 中渲染，不复制一套 IR 布局；Rust asset-info 代替 Pillow 图片头探测。
+- normal/birthday/bonds/empty badge：显式 request 与 masterdata 派生 request 都复用共享
+  `HonorBadgeBox` 的 asset-backed `NativeSubtree`，再放入严格 `UnitySubscene`；统一资源
+  manifest 负责分支、必需/可选素材和 hybrid 语义，Rust asset-info 代替 Pillow 图片头探测。
 - `EditUserName`、`Comment`、`TotalPower`、`MultiLive`、`ChallengeLive`、
   `MusicClearInfo`、`MusicClearSelectTabInfo`、`CharacterRankAndChallengeStage` 及其
   scroll 变体：Pillow 和 Skia 消费同一份 General display list；Skia 使用原生字体度量、
@@ -35,11 +36,17 @@
   Lanczos cover 已精确，但 Pillow 离散 L-mask 与 Skia rrect clip 的圆角边缘不同，不能
   在没有精确 mask primitive 时冒充 pure native。
 - `HonorDeck`：共享 plan 固化 profile/ordinary request-key 优先级、panel 和三个 slot；
-  normal/birthday slot 可复用原生 `HonorBadgeBox`。所有 slot 在写场景前原子预检，禁止只画
-  出一部分 badge。
+  所有 Honor 分支都可复用原生子树。所有 slot 在写场景前原子预检，禁止只画出一部分
+  badge。
+- 普通 `/profile` 也通过通用 `RasterSubscene` 嵌入同一棵 Honor 子树：子树在自然尺寸
+  隔离合成，随后只对完整 snapshot 做最终缩放和整图阴影；三个真实 fixture badge 不再
+  经过 Pillow 合成或 `mem:` 传输。
 - 严格普通 TMP 文本子集：动态源字体、无 rich/decorative、outline、underlay 或材质效果
   的文本直接发出 IR Text，支持非均匀缩放与旋转，不再建立 RGBA `mem:` layer。超出该子集
   仍明确走现有 SdfQuad/Pillow 路径。
+- `paste_lerp`：Rust 精确实现 Honor 历史
+  `destination.paste(source, pos, source)` 的 straight-RGBA 四通道插值；仅接受严格预检的
+  integral stretch，并由隔离子场景包含 Src/paste_lerp 对目的像素的读写。
 - `pillow_lanczos`：Rust 对 asset-backed Image stretch/居中 cover 和零旋转
   `UnitySubscene` 实现 Pillow 12.3 兼容的 straight-RGBA Lanczos-3；所有源图、中间图、
   crop、readback、Skia copy 和系数 scratch 都计入场景预算。不支持的组合直接令整场
@@ -78,7 +85,7 @@
 - IR 中没有 `mem:` 引用；
 - 请求级 Pillow touch snapshot 为空。
 
-当前握手为 `IR_CAPABILITY=15`、`ASSET_INFO_CAPABILITY=1`、
+当前握手为 `IR_CAPABILITY=17`、`ASSET_INFO_CAPABILITY=1`、
 `TEXT_METRICS_CAPABILITY=1`。旧 wheel 缺少任一必需能力时必须 fail-open，不能静默省略
 节点或把 Pillow 度量计成 native-pure。
 
@@ -90,25 +97,24 @@ Catmull-Rom 语义。它通过现有 custom-profile 预算，但在扩大静态�
 
 ### A. Honor / Bonds Honor
 
-normal/birthday 的 `UnitySubscene` 基础已经完成：先在自然尺寸透明离屏面渲染共享
-`HonorBadgeBox`，再复用 `UnityImage` 的两段缩放和 Unity placement。
+normal/birthday/bonds/empty 已完成共享子树：先在自然尺寸透明离屏面渲染
+`HonorBadgeBox`，再由 custom profile 的 `UnitySubscene` 执行两段缩放和 Unity
+placement；普通 `/profile` 则用 `RasterSubscene` 执行显式目标矩形和整图阴影。
 
-不能直接把 honor 子树 splice 到主画布：
+隔离节点是必要契约，不能直接把 Honor 子树摊平到主画布：
 
 - badge 内的 `paste_src` 会清掉主画布上透明角下面的既有像素；
 - 对每个子节点施加 CTM 不等价于“完整 badge 栅格化后再整体缩放”。
 
-normal/birthday emitter 已接入 `HonorDeck` profile slots；真实 fixture 的三个 slot 目前仍只
-提供一个显式 request，所以该元素按设计完整 fallback，保留最后一张 700,000 字节 hybrid
-raster。补齐另外两个显式 request 后才允许将这张 fixture 计为 native-pure。
+真实 fixture 的三个 `HonorDeck` slot 目前仍只提供一个显式 request，另外两个所需素材也不
+完整，所以该元素按设计完整 fallback，保留最后一张 700,000 字节 hybrid raster。补齐另外
+两个 request/素材后才允许将这张 fixture 计为 native-pure；禁止放宽原子预检来换取“部分
+原生”。
 
-bonds 已有不携带像素的几何 plan，明确表示“整图 resize → destination clip”，不能误写成
-IR `source_rect`（其语义是先 crop source 再 resize）。真正启用前仍有两个阻塞：
-
-- custom-profile 尚无 bonds main/sub 或 HonorDeck bonds slot 的真实 capture，本地也缺部分
-  sub 背景和 mask 素材；
-- frame/word/star 的历史 `paste(source, pos, source)` 是 alpha-lerp，并不等价于现有
-  `src_over`。在新增精确 blend 或用真实 fixture 证明预算前，不能把它冒充 pure native。
+bonds 的共享几何 plan 明确表示“整图 resize → destination clip”，没有误写成 IR
+`source_rect`（后者是先 crop source 再 resize）；frame/word/star 等覆盖层通过
+`paste_lerp` 保留历史 alpha-mask paste。代码路径已经原生化，发布覆盖声明前仍需补
+bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
 
 ### B. Card Member 与 General Prefab
 

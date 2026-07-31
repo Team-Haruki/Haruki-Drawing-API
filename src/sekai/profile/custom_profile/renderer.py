@@ -4390,6 +4390,33 @@ class PNGRenderer:
             return image
         if image := self.honor_request_image(self.honor_requests.get(str(honor_id))):
             return image
+
+        request = self.build_masterdata_honor_request(honor_id, level, full_size)
+        if request is None:
+            return None
+        images = {
+            "honor_img": self.open_rgba(Path(request.honor_img_path)) if request.honor_img_path else None,
+            "rank_img": self.open_rgba(Path(request.rank_img_path)) if request.rank_img_path else None,
+            "frame_img": self.open_rgba(Path(request.frame_img_path)) if request.frame_img_path else None,
+            "frame_degree_level_img": (
+                self.open_rgba(Path(request.frame_degree_level_img_path))
+                if request.frame_degree_level_img_path
+                else None
+            ),
+            "scroll_img": self.open_rgba(Path(request.scroll_img_path)) if request.scroll_img_path else None,
+            "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
+            "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
+        }
+        return compose_full_honor_image_from_loaded_assets(request, images)
+
+    def build_masterdata_honor_request(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+    ) -> HonorRequest | None:
+        """Derive an honor request from loaded masterdata without decoding or composing images."""
+
         if self.masterdata is None:
             return None
 
@@ -4446,16 +4473,7 @@ class PNGRenderer:
             lv_img_path=self.honor_request_path(lv_path),
             lv6_img_path=self.honor_request_path(lv6_path),
         )
-        images = {
-            "honor_img": self.open_rgba(honor_path),
-            "rank_img": self.open_rgba(rank_path),
-            "frame_img": self.open_rgba(frame_path),
-            "frame_degree_level_img": self.open_rgba(frame_degree_level_path),
-            "scroll_img": self.open_rgba(scroll_path),
-            "lv_img": self.open_rgba(lv_path),
-            "lv6_img": self.open_rgba(lv6_path),
-        }
-        return compose_full_honor_image_from_loaded_assets(request, images)
+        return request
 
     def honor_group_for(self, honor: dict[str, Any]) -> dict[str, Any] | None:
         return self.honor_groups.get(int(honor.get("groupId", 0) or 0))
@@ -4682,9 +4700,35 @@ class PNGRenderer:
                 return image
         if image := self.honor_request_image(self.bonds_honor_requests.get(str(honor_id))):
             return image
+
+        request = self.build_masterdata_bonds_honor_request(item, full_size)
+        if request is None:
+            return None
+        images = {
+            "bonds_bg": self.open_rgba(Path(request.bonds_bg_path)) if request.bonds_bg_path else None,
+            "bonds_bg2": self.open_rgba(Path(request.bonds_bg_path2)) if request.bonds_bg_path2 else None,
+            "chara_icon_1": self.open_rgba(Path(request.chara_icon_path)) if request.chara_icon_path else None,
+            "chara_icon_2": self.open_rgba(Path(request.chara_icon_path2)) if request.chara_icon_path2 else None,
+            "mask_img": self.open_rgba(Path(request.mask_img_path)) if request.mask_img_path else None,
+            "frame_img": self.open_rgba(Path(request.frame_img_path)) if request.frame_img_path else None,
+            "word_img": self.open_rgba(Path(request.word_img_path)) if request.word_img_path else None,
+            "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
+            "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
+        }
+        return compose_full_honor_image_from_loaded_assets(request, images)
+
+    def build_masterdata_bonds_honor_request(
+        self,
+        item: dict[str, Any],
+        full_size: bool,
+    ) -> HonorRequest | None:
+        """Derive a bonds-honor request from loaded masterdata without decoding or composing images."""
+
         if self.masterdata is None:
             return None
 
+        honor_id = content_data_id("bonds_honor", item)
+        level = self.user_bonds_honor_level_for(honor_id)
         honor = self.bonds_honors.get(honor_id)
         if not honor:
             return None
@@ -4742,18 +4786,7 @@ class PNGRenderer:
             lv_img_path=self.honor_request_path(lv_path),
             lv6_img_path=self.honor_request_path(lv6_path),
         )
-        images = {
-            "bonds_bg": self.open_rgba(bg_path),
-            "bonds_bg2": self.open_rgba(bg2_path),
-            "chara_icon_1": self.open_rgba(chara_icon_path),
-            "chara_icon_2": self.open_rgba(chara_icon_path2),
-            "mask_img": self.open_rgba(mask_path),
-            "frame_img": self.open_rgba(frame_path),
-            "word_img": self.open_rgba(word_path),
-            "lv_img": self.open_rgba(lv_path),
-            "lv6_img": self.open_rgba(lv6_path),
-        }
-        return compose_full_honor_image_from_loaded_assets(request, images)
+        return request
 
     def game_character_id_for_unit(self, unit_id: int) -> int:
         unit = self.game_character_units.get(unit_id)
