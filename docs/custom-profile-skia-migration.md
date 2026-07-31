@@ -70,16 +70,15 @@
 
 | fixture | native 元素 | hybrid 元素 | `mem:` | 原始字节 |
 |---|---:|---:|---:|---:|
-| `custom_profile_card` | 7 | 1 | 1 | 700,000 |
+| `custom_profile_card` | 8 | 0 | 0 | 0 |
 | `custom_profile_card_collections` | 9 | 0 | 0 | 0 |
 
-两张卡均完整、无 missing/unresolved；collections 真实卡已经是 `native_pure`。Pillow
-对拍当前为：
+两张卡均完整、无 missing/unresolved，且都已经是 `native_pure`。Pillow 对拍当前为：
 
-- `custom_profile_card`: mean 0.813, p99 16；
+- `custom_profile_card`: mean 0.844, p99 17；
 - `custom_profile_card_collections`: mean 1.307, p99 37。
 
-基础三项、统计三项、Card/Deck、普通 TMP 文本和完整 collections 的专项门禁均已达到：
+基础三项、统计三项、Card/Deck、HonorDeck、普通 TMP 文本和完整 collections 的专项门禁均已达到：
 
 - `native == visible`、`hybrid=0`、`mem_images=mem_bytes=0`；
 - IR 中没有 `mem:` 引用；
@@ -106,10 +105,12 @@ placement；普通 `/profile` 则用 `RasterSubscene` 执行显式目标矩形�
 - badge 内的 `paste_src` 会清掉主画布上透明角下面的既有像素；
 - 对每个子节点施加 CTM 不等价于“完整 badge 栅格化后再整体缩放”。
 
-真实 fixture 的三个 `HonorDeck` slot 目前仍只提供一个显式 request，另外两个所需素材也不
-完整，所以该元素按设计完整 fallback，保留最后一张 700,000 字节 hybrid raster。补齐另外
-两个 request/素材后才允许将这张 fixture 计为 native-pure；禁止放宽原子预检来换取“部分
-原生”。
+真实 fixture 的三个 `HonorDeck` slot 已补齐：原有 normal main，加上生产脱敏 capture
+中的两个 birthday sub（6833/6877）及六个 JP 公共素材。生成器的 `--honor-capture`
+会核对 capture schema、三个 slot、region、request-path 与素材全集，并拒绝覆盖内容不同
+的本地文件。该元素专项对拍为 RGB mean 0.0394、p99 1、alpha exact，
+`native_pure=1`、Pillow touch 为空、`mem_images=mem_bytes=0`；原子预检仍保留，缺任一
+slot/request/素材时整元素 fallback，禁止“部分原生”。
 
 bonds 的共享几何 plan 明确表示“整图 resize → destination clip”，没有误写成 IR
 `source_rect`（后者是先 crop source 再 resize）；frame/word/star 等覆盖层通过
@@ -122,8 +123,9 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
   `CardDisplayList` 并由 Pillow/IR 两端消费；当前活动路径没有 mask，迁移没有擅自增加圆角。
 - 基础、统计和 CharacterRank 系列已经完成共享 display list + 原生 replay，第二张真实
   fixture 的 6,541,908 字节 hybrid raster 已全部移除。
-- 第一张真实 fixture 的 `LeaderCard`（1,992,800 B）、`Deck`（757,944 B）和普通 text
-  （403,920 B）已经清零；唯一剩余 raster 是资源不完整的 `HonorDeck`（700,000 B）。
+- 第一张真实 fixture 的 `LeaderCard`（1,992,800 B）、`Deck`（757,944 B）、普通 text
+  （403,920 B）和 `HonorDeck`（700,000 B）已经全部清零；两张现有真实 fixture 均无
+  hybrid raster。
 - 卡牌等级条的 `Rect blend="src"` 和精确 Pillow Lanczos 已完成。顶层 `card_member`
   已有严格的 asset-backed synthetic 门禁，但仍缺真实 capture；发布 native 覆盖声明时
   必须补 full/clip 各一张真实输入。
