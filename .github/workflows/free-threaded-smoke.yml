@@ -55,7 +55,7 @@ jobs:
       # face and asserted the images were fine — it was validating a broken configuration.
       - name: Cache CI fonts
         id: font-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             data/SourceHanSansSC-Regular.otf

@@ -116,7 +116,7 @@ jobs:
       # Fonts are OFL/CC licensed and too large to vendor; download once and cache.
       - name: Cache CI fonts
         id: font-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             data/SourceHanSansSC-Regular.otf
