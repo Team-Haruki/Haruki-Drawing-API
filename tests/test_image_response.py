@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.core.utils import encoded_image_payload_to_response
 
 # 0x0A is what BytesIO would have split on. A real PNG carries one roughly every 256 bytes.

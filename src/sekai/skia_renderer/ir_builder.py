@@ -15,10 +15,14 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+import math
 import os
+from pathlib import Path
 import re
 import threading
 from typing import Any
+
+from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
 
 Color = Sequence[int]
 Vec2 = Sequence[float]
@@ -71,6 +75,7 @@ def get_pil_font(font_dir: str, name: str, size: float) -> Any:
     calling builder's font map, so a role is not a valid cache key. ``px`` is the integer pixel
     size actually handed to FreeType, so 32.0 and 32.4 share one entry.
     """
+    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
     px = max(1, round(float(size)))
     key = (font_dir, name, px)
     cache = _thread_font_cache()  # no lock: the dict is owned by this thread
@@ -230,6 +235,8 @@ class IRBuilder:
         extra_fonts: dict[str, str] | None = None,
         export_format: str = "png",
         jpg_quality: int = 90,
+        max_node_pixels: int | None = None,
+        max_scene_bytes: int | None = None,
     ) -> None:
         self.width = int(width)
         self.height = int(height)
@@ -247,10 +254,30 @@ class IRBuilder:
         self._root_children: list[Node] = []
         self._stack: list[list[Node]] = [self._root_children]
         self._background: Node | None = None
+        self._limits: Node | None = None
+        if max_node_pixels is not None or max_scene_bytes is not None:
+            self._limits = {}
+            if max_node_pixels is not None:
+                self._limits["max_node_pixels"] = max(1, int(max_node_pixels))
+            if max_scene_bytes is not None:
+                self._limits["max_scene_bytes"] = max(1, int(max_scene_bytes))
 
     def _add(self, node: Node) -> Node:
         self._stack[-1].append(node)
         return node
+
+    def register_extra_font(self, name: str, path: str | Path) -> None:
+        """Register a request-resolved font before emitting nodes that reference ``name``."""
+
+        clean_name = str(name).strip()
+        if not clean_name:
+            raise ValueError("an extra font needs a non-empty name")
+        resolved_path = str(path)
+        extra = self._fonts.setdefault("extra", {})
+        existing = extra.get(clean_name)
+        if existing is not None and existing != resolved_path:
+            raise ValueError(f"extra font {clean_name!r} was registered with two different paths")
+        extra[clean_name] = resolved_path
 
     def push_group(
         self, offset: Vec2 = (0, 0), size: Vec2 = (0, 0), clip: Node | None = None, mask: str | None = None
@@ -307,13 +334,23 @@ class IRBuilder:
         fill: Color | Node | None = None,
         stroke: Color | Node | None = None,
         stroke_width: float = 1,
+        blend: str = "src_over",
     ) -> Node:
+        """Draw a rectangle, optionally replacing destination RGBA with ``blend="src"``.
+
+        Rect blend modes are intentionally closed so an emitter typo cannot be silently accepted
+        by a newer Python builder and then fail open only after reaching the native renderer.
+        """
+        if blend not in {"src_over", "src"}:
+            raise ValueError(f"unsupported Rect blend: {blend!r}")
         node: Node = {"type": "Rect", "pos": _vec(pos), "size": _vec(size)}
         if fill is not None:
             node["fill"] = _fill_value(fill)
         if stroke is not None:
             node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
+        if blend != "src_over":
+            node["blend"] = blend
         return self._add(node)
 
     def roundrect(
@@ -383,9 +420,57 @@ class IRBuilder:
         blur_sigma: float | Vec2 | None = None,
     ) -> Node:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
-        the mask-less ``Image.paste``); the default composites over it. ``blur_sigma`` applies
-        a destination-space Gaussian blur to the image only; a scalar uses the same sigma on
-        both axes. Blur requires IR_CAPABILITY >= 10."""
+        the mask-less ``Image.paste``); the default composites over it.
+
+        ``blend="paste_lerp"`` matches Pillow ``destination.paste(source, pos, source)`` by
+        interpolating all four *straight* RGBA channels with source alpha. It is intentionally
+        restricted to a positive integral, axis-aligned ``stretch`` placement with ``alpha=1``
+        and no source_rect/tint/shadow/blur; Rust preflights ancestor Group offsets and rejects
+        Transform or masked-Group nesting before drawing (ordinary Group clips and isolated
+        subscene local surfaces are supported). Skia surfaces are premultiplied, so RGB hidden beneath
+        alpha=0 cannot survive a surface round-trip and is explicitly outside this contract.
+
+        ``blur_sigma`` applies a destination-space Gaussian blur to the image only; a scalar uses
+        the same sigma on both axes. ``sampling="pillow_lanczos"`` performs a strict,
+        straight-RGBA8 Pillow Lanczos raster resize and currently accepts only integral
+        ``stretch``/centered ``cover`` asset placements without source_rect/decorations;
+        unsupported input fails the scene open to Pillow. Blur requires IR_CAPABILITY >= 10;
+        Pillow Lanczos requires >= 15; paste_lerp requires >= 16.
+        """
+        if blend not in {"src_over", "src", "paste_lerp"}:
+            raise ValueError(f"unsupported Image blend: {blend!r}")
+        if blend == "paste_lerp":
+            sigma = (
+                (float(blur_sigma), float(blur_sigma))
+                if isinstance(blur_sigma, (int, float))
+                else (0.0, 0.0)
+                if blur_sigma is None
+                else (float(blur_sigma[0]), float(blur_sigma[1]))
+            )
+            values = tuple(float(value) for value in (*pos, *size, *anchor))
+            left = values[0] - values[2] * values[4]
+            top = values[1] - values[3] * values[5]
+            edges = (left, top, left + values[2], top + values[3])
+            if fit != "stretch":
+                raise ValueError("paste_lerp Image requires fit='stretch'")
+            if float(alpha) != 1.0:
+                raise ValueError("paste_lerp Image requires alpha=1")
+            if (
+                source_rect is not None
+                or tint is not None
+                or shadow is not None
+                or any(value != 0.0 for value in sigma)
+            ):
+                raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
+            if (
+                values[2] <= 0.0
+                or values[3] <= 0.0
+                or any(
+                    not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
+                    for value in edges
+                )
+            ):
+                raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -411,6 +496,214 @@ class IRBuilder:
             if sigma[0] > 0 or sigma[1] > 0:
                 node["blur_sigma"] = [max(0.0, float(sigma[0])), max(0.0, float(sigma[1]))]
         return self._add(node)
+
+    def unity_image(
+        self,
+        *,
+        path: str,
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Node:
+        """Place an intrinsic-size asset using custom-profile Unity transform scalars.
+
+        Rust resolves the source dimensions and performs the complete placement, so Python never
+        opens the asset or creates a raw ``mem:`` layer. Requires IR_CAPABILITY >= 11.
+        """
+        return self._add(
+            {
+                "type": "UnityImage",
+                "path": path,
+                "anchor": _vec(anchor),
+                "object_scale": _vec(object_scale),
+                "post_scale": _vec(post_scale),
+                "rotation": float(rotation),
+                "sampling": sampling,
+                "alpha": float(alpha),
+            }
+        )
+
+    def sliced_image(
+        self,
+        *,
+        path: str,
+        pos: Vec2,
+        size: Vec2,
+        border: tuple[int, int, int, int],
+        tint: Node | None = None,
+        alpha: float = 1.0,
+    ) -> Node:
+        """Resize an asset with Unity's 9-slice border contract.
+
+        ``border`` is ``(left, bottom, right, top)``. Each source region is resized
+        independently with PIL-BICUBIC-compatible Catmull-Rom sampling. A prefab tint should
+        use ``image_tint(color, "recolor")`` to match ``PNGRenderer.tint_image``. Requires
+        IR_CAPABILITY >= 13.
+        """
+
+        node: Node = {
+            "type": "SlicedImage",
+            "path": path,
+            "pos": _vec(pos),
+            "size": _vec(size),
+            "border": [int(value) for value in border],
+            "alpha": float(alpha),
+        }
+        if tint is not None:
+            node["tint"] = tint
+        return self._add(node)
+
+    @contextmanager
+    def unity_subscene(
+        self,
+        *,
+        size: tuple[int, int],
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Iterator[IRBuilder]:
+        """Render child nodes into an isolated natural-size surface, then place the snapshot.
+
+        This preserves custom-profile's compose-then-resize contract and contains Porter-Duff
+        ``Src`` writes inside the subtree. ``sampling="pillow_lanczos"`` reads the completed
+        surface as straight RGBA8 and applies Pillow-compatible Lanczos at each sequential scale;
+        it requires zero rotation and fails the whole scene on an unsupported/budget-exceeding
+        operation. Requires IR_CAPABILITY >= 12 (Pillow Lanczos >= 15).
+        """
+
+        self.push_unity_subscene(
+            size=size,
+            anchor=anchor,
+            object_scale=object_scale,
+            post_scale=post_scale,
+            rotation=rotation,
+            sampling=sampling,
+            alpha=alpha,
+        )
+        try:
+            yield self
+        finally:
+            self.pop_unity_subscene()
+
+    def push_unity_subscene(
+        self,
+        *,
+        size: tuple[int, int],
+        anchor: Vec2,
+        object_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+    ) -> Node:
+        """Push form of :meth:`unity_subscene` for Painter-style spanning operations."""
+
+        node: Node = {
+            "type": "UnitySubscene",
+            "size": [int(size[0]), int(size[1])],
+            "anchor": _vec(anchor),
+            "object_scale": _vec(object_scale),
+            "post_scale": _vec(post_scale),
+            "rotation": float(rotation),
+            "sampling": sampling,
+            "alpha": float(alpha),
+            "children": [],
+        }
+        self._add(node)
+        self._stack.append(node["children"])
+        return node
+
+    def pop_unity_subscene(self) -> None:
+        assert len(self._stack) > 1, "pop_unity_subscene without a matching push"
+        self._stack.pop()
+
+    @contextmanager
+    def raster_subscene(
+        self,
+        *,
+        natural_size: tuple[int, int],
+        pos: Vec2,
+        dst_size: Vec2,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+        shadow: Node | None = None,
+    ) -> Iterator[IRBuilder]:
+        """Render children at ``natural_size`` on a transparent isolated raster.
+
+        The completed snapshot is sampled into logical ``pos``/``dst_size`` as one parent Image
+        draw. A Scene.scale remains the normal whole-page final resize and this node introduces
+        no hidden pre-resize. ``shadow`` uses :func:`image_shadow` semantics and is derived from
+        the completed snapshot's alpha silhouette.
+
+        The active builder stack points at this node's children inside the context, so
+        ``NativeSubtree.splice_into(builder, mem_sink, ...)`` can be called directly here.
+        Requires IR_CAPABILITY >= 17.
+        """
+
+        self.push_raster_subscene(
+            natural_size=natural_size,
+            pos=pos,
+            dst_size=dst_size,
+            sampling=sampling,
+            alpha=alpha,
+            shadow=shadow,
+        )
+        try:
+            yield self
+        finally:
+            self.pop_raster_subscene()
+
+    def push_raster_subscene(
+        self,
+        *,
+        natural_size: tuple[int, int],
+        pos: Vec2,
+        dst_size: Vec2,
+        sampling: str = "catmull_rom",
+        alpha: float = 1.0,
+        shadow: Node | None = None,
+    ) -> Node:
+        """Push form of :meth:`raster_subscene` for Painter-style spanning operations."""
+
+        natural = (int(natural_size[0]), int(natural_size[1]))
+        logical_pos = (float(pos[0]), float(pos[1]))
+        logical_size = (float(dst_size[0]), float(dst_size[1]))
+        node_alpha = float(alpha)
+        if natural[0] <= 0 or natural[1] <= 0:
+            raise ValueError("RasterSubscene natural_size must be positive")
+        if not all(math.isfinite(value) for value in (*logical_pos, *logical_size, node_alpha)):
+            raise ValueError("RasterSubscene placement must be finite")
+        if logical_size[0] <= 0.0 or logical_size[1] <= 0.0:
+            raise ValueError("RasterSubscene dst_size must be positive")
+        if not 0.0 <= node_alpha <= 1.0:
+            raise ValueError("RasterSubscene alpha must be between 0 and 1")
+        if sampling == "pillow_lanczos":
+            raise ValueError("RasterSubscene does not support pillow_lanczos sampling")
+
+        node: Node = {
+            "type": "RasterSubscene",
+            "natural_size": [natural[0], natural[1]],
+            "pos": [logical_pos[0], logical_pos[1]],
+            "dst_size": [logical_size[0], logical_size[1]],
+            "sampling": sampling,
+            "alpha": node_alpha,
+            "children": [],
+        }
+        if shadow is not None:
+            node["shadow"] = shadow
+        self._add(node)
+        self._stack.append(node["children"])
+        return node
+
+    def pop_raster_subscene(self) -> None:
+        assert len(self._stack) > 1, "pop_raster_subscene without a matching push"
+        self._stack.pop()
 
     def self_image(
         self,
@@ -462,6 +755,48 @@ class IRBuilder:
             },
         }
         return self._add(node)
+
+    def sdf_shape(
+        self,
+        *,
+        path: str,
+        anchor: Vec2,
+        sdf_scale: Vec2,
+        post_scale: Vec2,
+        rotation: float,
+        field_channel: str,
+        fill_color: Sequence[int],
+        fill_alpha: float,
+        outline_color: Sequence[int],
+        outline_alpha: float,
+        outer_fill_ratio: float,
+        face_dilate: float,
+        softness: float,
+    ) -> Node:
+        """Asset-backed custom-profile distance-field shape.
+
+        Rust decodes and independently samples the source R distance field and A mask, shades
+        them at ``sdf_scale``, then applies ``post_scale`` and rotation around the patch center.
+        No Pillow image or raw ``mem:`` raster crosses this boundary. Requires IR_CAPABILITY >= 11.
+        """
+        return self._add(
+            {
+                "type": "SdfShape",
+                "path": path,
+                "anchor": _vec(anchor),
+                "sdf_scale": _vec(sdf_scale),
+                "post_scale": _vec(post_scale),
+                "rotation": float(rotation),
+                "field_channel": field_channel,
+                "fill_color": [int(v) for v in fill_color],
+                "fill_alpha": float(fill_alpha),
+                "outline_color": [int(v) for v in outline_color],
+                "outline_alpha": float(outline_alpha),
+                "outer_fill_ratio": float(outer_fill_ratio),
+                "face_dilate": float(face_dilate),
+                "softness": float(softness),
+            }
+        )
 
     def splice_root_children(self, other: "IRBuilder") -> None:
         """Append another builder's root nodes into the current container as-is
@@ -817,4 +1152,6 @@ class IRBuilder:
         }
         if self._background is not None:
             scene["background"] = self._background
+        if self._limits is not None:
+            scene["limits"] = self._limits
         return scene

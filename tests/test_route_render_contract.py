@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import inspect
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,12 +35,43 @@ def _walk(router, prefix: str = ""):
             continue
         path = getattr(route, "path", None)
         endpoint = getattr(route, "endpoint", None)
-        if path and endpoint:
+        if path is not None and endpoint is not None:
             yield prefix + path, endpoint
 
 
 def _drawing_routes() -> list[tuple[str, object]]:
     return [(p, fn) for p, fn in _walk(main_mod.app) if p.startswith("/api/pjsk")]
+
+
+def test_walk_keeps_empty_leaf_path():
+    endpoint = object()
+    leaf = SimpleNamespace(path="", endpoint=endpoint)
+    inner = SimpleNamespace(routes=[leaf])
+    included = SimpleNamespace(
+        original_router=inner,
+        include_context=SimpleNamespace(prefix="/api/pjsk/profile"),
+    )
+    router = SimpleNamespace(routes=[included])
+
+    assert list(_walk(router)) == [("/api/pjsk/profile", endpoint)]
+
+
+def test_drawing_route_walk_matches_registered_openapi_paths():
+    """The structural guards below must cover every registered drawing route."""
+    walked = {path for path, _endpoint in _drawing_routes()}
+    registered = {
+        path
+        for path, operations in main_mod.app.openapi()["paths"].items()
+        if path.startswith("/api/pjsk") and "post" in operations
+    }
+
+    missing = sorted(registered - walked)
+    unexpected = sorted(walked - registered)
+    assert walked == registered, (
+        "drawing-route traversal drifted from the routes registered in OpenAPI:\n"
+        f"  missing from structural guards: {missing}\n"
+        f"  not registered as POST routes: {unexpected}"
+    )
 
 
 # Routes that legitimately do not render through the Skia shadow layer. Each needs a reason.
@@ -88,6 +120,9 @@ _MAY_HAND_BUILD_IR = {
     "src/sekai/skia_renderer/ir_builder.py",  # the builder itself
     "src/sekai/skia_renderer/ir_painter.py",  # the widget-tree lowering
     "src/sekai/skia_renderer/canvas.py",  # lowers a widget tree via build_canvas_ir()
+    # Generic composition carrier: lowers an arbitrary shared Canvas and atomically packages its
+    # detached nodes/memory references. It contains no endpoint layout of its own.
+    "src/sekai/skia_renderer/subtree.py",
     # The chart image comes from the pjsekai-scores-rs crate on BOTH backends; the IR here is only
     # the watermark footer shell around that raster, not a second layout of the chart.
     "src/sekai/chart/drawer.py",

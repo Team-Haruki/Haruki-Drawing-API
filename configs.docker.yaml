@@ -47,6 +47,14 @@ drawing:
   custom_profile_shape_sprite_dir: /pjskdata/Data/asset/{region}-assets/startapp/custom_profile/shape
   custom_profile_unity_ui_sprite_dir: /pjskdata/Data/static_images/customprofile
   custom_profile_parallel_workers: 1
+  # 用户场景硬边界:防止异常 scale/元素数在裁剪前制造 GiB 级临时栅格
+  custom_profile_max_concurrent_requests: 1
+  custom_profile_max_elements: 256
+  custom_profile_max_scale: 8.0
+  custom_profile_max_text_size: 1024.0
+  custom_profile_max_text_length: 4096
+  custom_profile_max_layer_pixels: 8388608
+  custom_profile_max_scene_mb: 256
   # custom profile 进程级缓存(字形 SDF/轮廓、sprite/atlas);任一对归零即禁用对应池
   custom_profile_glyph_cache_size: 4096
   custom_profile_glyph_cache_max_mb: 64

@@ -25,6 +25,11 @@ from typing import Any
 
 from PIL import Image
 
+from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_IRPAINTER_MEM_RASTER,
+    PILLOW_TOUCH_IRPAINTER_PIL_IMAGE,
+    record_pillow_touch,
+)
 from src.sekai.base.painter import (
     ALIGN_MAP,
     AdaptiveTextColor,
@@ -107,6 +112,7 @@ class IRPainter(Painter):
         # _abs subtracts the accumulated origin so widget coords stay untouched.
         self._group_origin: tuple[float, float] = (0.0, 0.0)
         self._group_origin_stack: list[tuple[str, tuple[float, float]]] = []
+        self._canvas_subtree_index = 0
 
     # ---- output ----
 
@@ -181,6 +187,7 @@ class IRPainter(Painter):
         entry = self._mem_by_id.get(id(img))
         if entry is not None and entry[0] is img:
             return f"mem:{entry[1]}"
+        record_pillow_touch(PILLOW_TOUCH_IRPAINTER_MEM_RASTER)
         key = f"m{len(self._mem_images)}"
         rgba = img if img.mode == "RGBA" else img.convert("RGBA")
         self._mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
@@ -188,6 +195,10 @@ class IRPainter(Painter):
         return f"mem:{key}"
 
     def _image_ref(self, img: Any) -> str:
+        if isinstance(img, Image.Image):
+            # Count the boundary even when a pristine cached PIL image can be replaced with
+            # its asset path. That request still depends on Pillow producing the source object.
+            record_pillow_touch(PILLOW_TOUCH_IRPAINTER_PIL_IMAGE)
         if isinstance(img, EncodedImageRef):
             entry = self._mem_by_id.get(id(img))
             if entry is not None and entry[0] is img:
@@ -341,6 +352,114 @@ class IRPainter(Painter):
             tint=tint,
         )
 
+    def paste_canvas(
+        self,
+        canvas,
+        pos,
+        size=None,
+        use_shadow=False,
+        shadow_width=8,
+        shadow_alpha=0.6,
+        exclude_on_hash=False,
+        *,
+        sampling=None,
+        cache_key=None,
+        require_asset_backed=False,
+        skip_on_error=False,
+    ):
+        del exclude_on_hash, cache_key, skip_on_error
+        # Local import avoids the canvas -> IRPainter -> subtree -> canvas module cycle.
+        from src.sekai.skia_renderer.subtree import NativeSubtreeError, lower_canvas_subtree
+
+        parent_scene = self._b.build()
+        parent_fonts = parent_scene["fonts"]
+        try:
+            subtree = lower_canvas_subtree(
+                canvas,
+                require_asset_backed=require_asset_backed,
+                renderer_options={
+                    "assets_base_dir": parent_scene["assets_base_dir"],
+                    "font_dir": parent_fonts["dir"],
+                    "default_font": parent_fonts["default"],
+                    "bold_font": parent_fonts["bold"],
+                    "heavy_font": parent_fonts.get("heavy"),
+                    "emoji_font": parent_fonts.get("emoji"),
+                    "bg_hour": self._bg_hour,
+                    "export_format": parent_scene["export_format"],
+                    "jpg_quality": parent_scene["jpg_quality"],
+                },
+            )
+        except NativeSubtreeError as exc:
+            raise SkiaUnsupported(str(exc)) from exc
+
+        destination_size = subtree.size if size is None else size
+        shadow = (
+            image_shadow(
+                alpha=shadow_alpha,
+                offset=(0, 0),
+                sigma=max(0.5, shadow_width / 2),
+                color=(0, 0, 0, 255),
+            )
+            if use_shadow
+            else None
+        )
+        namespace = f"canvas_subtree.{self._canvas_subtree_index}"
+        self._canvas_subtree_index += 1
+        with self._b.raster_subscene(
+            natural_size=subtree.size,
+            pos=self._abs(pos),
+            dst_size=destination_size,
+            sampling=sampling or "linear_mipmap",
+            shadow=shadow,
+        ):
+            try:
+                subtree.splice_into(
+                    self._b,
+                    self._mem_images,
+                    namespace=namespace,
+                    require_asset_backed=require_asset_backed,
+                )
+            except NativeSubtreeError as exc:
+                raise SkiaUnsupported(str(exc)) from exc
+        return self
+
+    def paste_resized_clipped(
+        self,
+        sub_img,
+        pos,
+        size,
+        clip_rect,
+        *,
+        blend="src_over",
+        sampling=None,
+        tint=None,
+        exclude_on_hash=False,
+    ):
+        if blend not in {"paste_lerp", "src_over", "src"}:
+            raise SkiaUnsupported(f"unsupported clipped paste blend: {blend!r}")
+        clip_left, clip_top, clip_right, clip_bottom = (float(value) for value in clip_rect)
+        clip_size = (clip_right - clip_left, clip_bottom - clip_top)
+        if clip_size[0] <= 0 or clip_size[1] <= 0:
+            return self
+
+        clip_pos = self._abs((clip_left, clip_top))
+        image_pos = self._abs(pos)
+        tint_node = image_tint(_rgba(tint.color), tint.mode) if tint is not None else None
+        self._b.push_group(clip_pos, clip_size, clip={"kind": "rect"})
+        try:
+            self._b.image(
+                self._image_ref(sub_img),
+                (image_pos[0] - clip_pos[0], image_pos[1] - clip_pos[1]),
+                size,
+                fit="stretch",
+                blend=blend,
+                sampling=sampling or "linear_mipmap",
+                tint=tint_node,
+            )
+        finally:
+            self._b.pop_group()
+        return self
+
     def image_bg(self, image, align="c", mode="fit", blur=False, fade=0.1, exclude_on_hash=False):
         """Emit ``ImageBg`` as ordinary Image nodes in the current Painter region.
 
@@ -471,13 +590,26 @@ class IRPainter(Painter):
 
     def push_mask(self, mask, pos, size, exclude_on_hash=False):
         # Group{mask} = saveLayer + DstIn, i.e. the layer's alpha times the mask's — the same
-        # arithmetic Painter._impl_pop_mask applies with ImageChops.multiply.
+        # arithmetic Painter._impl_pop_mask applies with ImageChops.multiply. Its children first
+        # render into an identity, same-size UnitySubscene: paste_lerp needs readable destination
+        # pixels, while Skia's masked Group is a saveLayer whose pixels are not exposed through
+        # the owning Surface. The completed subscene is then masked as one ordinary image.
         apos = self._abs(pos)
-        self._b.push_group(apos, (float(size[0]), float(size[1])), mask=self._image_ref(mask))
+        resolved_size = (int(size[0]), int(size[1]))
+        self._b.push_group(apos, resolved_size, mask=self._image_ref(mask))
+        self._b.push_unity_subscene(
+            size=resolved_size,
+            anchor=(resolved_size[0] / 2.0, resolved_size[1] / 2.0),
+            object_scale=(1.0, 1.0),
+            post_scale=(1.0, 1.0),
+            rotation=0.0,
+            sampling="nearest",
+        )
         self._push_group("mask", apos)
         return self
 
     def pop_mask(self, exclude_on_hash=False):
+        self._b.pop_unity_subscene()
         self._pop_group("mask")
         return self
 

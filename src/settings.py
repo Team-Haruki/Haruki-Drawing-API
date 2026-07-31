@@ -116,6 +116,15 @@ class DrawingSettings(BaseModel):
     custom_profile_shape_sprite_dir: Path | None = None
     custom_profile_unity_ui_sprite_dir: Path | None = None
     custom_profile_parallel_workers: int = 1
+    # custom profile 是用户可控 Unity 场景。这里的限制是内存安全边界，不是性能调优项：
+    # 单个异常 scale 曾在裁剪前触发多份全尺寸 float32 栅格并把无 cgroup 限额的宿主机 OOM。
+    custom_profile_max_concurrent_requests: int = Field(default=1, ge=1)
+    custom_profile_max_elements: int = Field(default=256, ge=1)
+    custom_profile_max_scale: float = Field(default=8.0, gt=0)
+    custom_profile_max_text_size: float = Field(default=1024.0, gt=0)
+    custom_profile_max_text_length: int = Field(default=4096, ge=1)
+    custom_profile_max_layer_pixels: int = Field(default=8 * 1024 * 1024, ge=1)
+    custom_profile_max_scene_mb: int = Field(default=256, ge=1)
     # custom profile 进程级缓存(字形 SDF/轮廓、sprite/atlas)。与其他缓存键不同,默认即开启:
     # 该渲染器冷路径的 1.5s+ 就是这些缓存随请求丢弃造成的,归零任一对即禁用对应池(回滚开关)。
     custom_profile_glyph_cache_size: int = 4096  # 字形 SDF/轮廓缓存条目数(两池各自适用),0 表示关闭
@@ -277,6 +286,13 @@ CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_meta
 CUSTOM_PROFILE_SHAPE_SPRITE_DIR = settings.drawing.custom_profile_shape_sprite_dir
 CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR = settings.drawing.custom_profile_unity_ui_sprite_dir
 CUSTOM_PROFILE_PARALLEL_WORKERS = settings.drawing.custom_profile_parallel_workers
+CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS = settings.drawing.custom_profile_max_concurrent_requests
+CUSTOM_PROFILE_MAX_ELEMENTS = settings.drawing.custom_profile_max_elements
+CUSTOM_PROFILE_MAX_SCALE = settings.drawing.custom_profile_max_scale
+CUSTOM_PROFILE_MAX_TEXT_SIZE = settings.drawing.custom_profile_max_text_size
+CUSTOM_PROFILE_MAX_TEXT_LENGTH = settings.drawing.custom_profile_max_text_length
+CUSTOM_PROFILE_MAX_LAYER_PIXELS = settings.drawing.custom_profile_max_layer_pixels
+CUSTOM_PROFILE_MAX_SCENE_BYTES = settings.drawing.custom_profile_max_scene_mb * 1024 * 1024
 CUSTOM_PROFILE_GLYPH_CACHE_SIZE = settings.drawing.custom_profile_glyph_cache_size
 CUSTOM_PROFILE_GLYPH_CACHE_MAX_BYTES = settings.drawing.custom_profile_glyph_cache_max_mb * 1024 * 1024
 CUSTOM_PROFILE_SPRITE_CACHE_SIZE = settings.drawing.custom_profile_sprite_cache_size

@@ -11,7 +11,7 @@
 
 from PIL import Image
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 
 from .model import (
     MysekaiDoorUpgradeRequest,

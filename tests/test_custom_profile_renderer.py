@@ -1,10 +1,21 @@
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
+from src.sekai.profile.custom_profile.card_prefab import CardAlphaMaskOp, CardCoverArtOp
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
+from src.sekai.profile.custom_profile.general_prefab import (
+    GeneralTextOp,
+    GeneralViewportOp,
+    PillowGeneralPrefabAdapter,
+    build_general_prefab_display_list,
+)
 from src.sekai.profile.custom_profile.renderer import (
+    CHARA_LIST,
+    GENERAL_NATIVE_SIZES,
+    GENERAL_PREFAB_PALETTE,
     NativeContent,
     NativeUnresolvedContent,
     PNGRenderer,
@@ -117,6 +128,123 @@ def _make_renderer(
         region=region,
         **renderer_kwargs,
     )
+
+
+def test_masterdata_honor_request_builder_does_not_decode_images(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    renderer.honors = {
+        123: {
+            "groupId": 7,
+            "assetbundleName": "honor_asset",
+            "honorRarity": "high",
+        }
+    }
+    renderer.honor_groups = {
+        7: {
+            "honorType": "character",
+            "backgroundAssetbundleName": "honor_background",
+        }
+    }
+    expected_paths = {
+        "honor": tmp_path / "degree_sub.png",
+        "rank": tmp_path / "rank_sub.png",
+        "frame": tmp_path / "frame_sub.png",
+        "scroll": tmp_path / "scroll.png",
+        "lv": tmp_path / "icon_degreeLv.png",
+        "lv6": tmp_path / "icon_degreeLv6.png",
+    }
+    monkeypatch.setattr(renderer, "honor_background_path", lambda *_: expected_paths["honor"])
+    monkeypatch.setattr(renderer, "honor_rank_path", lambda *_: expected_paths["rank"])
+    monkeypatch.setattr(renderer, "honor_frame_path", lambda *_: expected_paths["frame"])
+    monkeypatch.setattr(renderer, "first_region_asset", lambda *_: expected_paths["scroll"])
+    monkeypatch.setattr(
+        renderer,
+        "static_image_path",
+        lambda *parts: expected_paths["lv6" if "Lv6" in parts[-1] else "lv"],
+    )
+    monkeypatch.setattr(
+        renderer,
+        "open_rgba",
+        lambda *_: pytest.fail("request derivation must not decode an image"),
+    )
+
+    request = renderer.build_masterdata_honor_request(123, 4, False)
+
+    assert request is not None
+    assert request.honor_type == "normal"
+    assert request.group_type == "character"
+    assert request.honor_level == 4
+    assert request.honor_img_path == expected_paths["honor"].as_posix()
+    assert request.rank_img_path == expected_paths["rank"].as_posix()
+    assert request.frame_img_path == expected_paths["frame"].as_posix()
+    assert request.scroll_img_path == expected_paths["scroll"].as_posix()
+    assert request.lv_img_path == expected_paths["lv"].as_posix()
+    assert request.lv6_img_path == expected_paths["lv6"].as_posix()
+
+
+def test_masterdata_bonds_honor_request_builder_does_not_decode_images(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    renderer.bonds_honors = {
+        456: {
+            "id": 456,
+            "honorRarity": "middle",
+            "gameCharacterUnitId1": 11,
+            "gameCharacterUnitId2": 22,
+        }
+    }
+    renderer.game_character_units = {
+        11: {"gameCharacterId": 1},
+        22: {"gameCharacterId": 2},
+    }
+    monkeypatch.setattr(renderer, "user_bonds_honor_level_for", lambda *_: 3)
+    monkeypatch.setattr(renderer, "static_image_path", lambda *parts: tmp_path.joinpath(*parts))
+    monkeypatch.setattr(renderer, "first_region_asset", lambda rels: tmp_path / rels[0])
+    monkeypatch.setattr(
+        renderer,
+        "open_rgba",
+        lambda *_: pytest.fail("request derivation must not decode an image"),
+    )
+
+    request = renderer.build_masterdata_bonds_honor_request(
+        {"id": 456, "wordId": 0, "inverse": True},
+        False,
+    )
+
+    assert request is not None
+    assert request.honor_type == "bonds"
+    assert request.honor_level == 3
+    assert request.honor_rarity == "middle"
+    assert (request.chara_id, request.chara_id2) == ("22", "11")
+    assert request.bonds_bg_path == (tmp_path / "honor" / "bonds" / "2_sub.png").as_posix()
+    assert request.bonds_bg_path2 == (tmp_path / "honor" / "bonds" / "1_sub.png").as_posix()
+    assert request.chara_icon_path == (tmp_path / "bonds_honor" / "character" / "chr_sd_22_01.png").as_posix()
+    assert request.chara_icon_path2 == (tmp_path / "bonds_honor" / "character" / "chr_sd_11_01.png").as_posix()
+    assert request.word_img_path is None
+
+
+def test_custom_profile_request_asset_path_stays_inside_data_roots(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    safe = renderer.assets / "safe.png"
+    _write_png(safe)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.png"
+    _write_png(outside)
+
+    assert renderer.resolve_request_asset_path(safe.as_posix()) == safe.resolve()
+    with pytest.raises(ValueError, match="outside configured data roots"):
+        renderer.resolve_request_asset_path(outside.as_posix())
+    with pytest.raises(ValueError, match="traversal"):
+        renderer.resolve_request_asset_path("../outside.png")
+
+
+def test_custom_profile_source_image_budget_runs_before_decode(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, max_layer_pixels=4)
+    source = renderer.assets / "too-large.png"
+    _write_png(source, (3, 2))
+
+    with pytest.raises(ValueError, match="source asset"):
+        renderer.open_rgba(source)
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:
@@ -506,6 +634,63 @@ def test_custom_profile_card_member_full_type_prefers_small_still_path(tmp_path:
     assert not any(path.endswith("/character/member/res010_no034/card_after_training.png") for path in candidates)
 
 
+def test_custom_profile_card_display_list_builders_are_stable_pillow_free_and_unmasked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userCards": [{"cardId": 915, "level": 60, "masterRank": 5}]},
+        resources={
+            "cards": {
+                915: {
+                    "id": 915,
+                    "assetBundleName": "res010_no034",
+                    "cardRarityType": "rarity_4",
+                    "attr": "cute",
+                }
+            }
+        },
+    )
+    art_path = tmp_path / "not-decoded-during-build.png"
+
+    def fail_decode(*_args, **_kwargs):
+        raise AssertionError("building a CardDisplayList must not decode Pillow images")
+
+    monkeypatch.setattr(renderer, "open_checked_image", fail_decode)
+    monkeypatch.setattr(renderer, "card_image_path_for_state", lambda *_args, **_kwargs: art_path)
+    monkeypatch.setattr(renderer, "card_member_image_path", lambda _item: art_path)
+    full = renderer.build_small_still_card_display_list(915, art_path, target_size=(940, 530))
+    deck = renderer.build_deck_card_display_list(
+        915,
+        art_path,
+        native_size=(330, 512),
+        art_size=(330.0, 512.0),
+        crop_align_y=0.0,
+        mask_sprite_name=None,
+        render_size=(156, 242),
+    )
+    leader = renderer.build_profile_leader_card_display_list(915)
+    profile_deck = renderer.build_profile_deck_card_display_list(915, leader=True)
+    clip = renderer.build_card_member_display_list({"id": 915, "type": 1, "showMasterRank": True})
+    full_member = renderer.build_card_member_display_list({"id": 915, "type": 2, "showMasterRank": True})
+    placeholder = renderer.build_empty_profile_deck_card_display_list((156, 242))
+
+    assert isinstance(full.ops[0], CardCoverArtOp)
+    assert isinstance(deck.ops[0], CardCoverArtOp)
+    assert deck.render_size == (156, 242)
+    assert not any(isinstance(op, CardAlphaMaskOp) for op in full.ops + deck.ops)
+    assert leader is not None
+    assert leader.size == (940, 530)
+    assert profile_deck is not None
+    assert profile_deck.render_size == (156, 242)
+    assert clip is not None
+    assert clip.size == (328, 520)
+    assert full_member is not None
+    assert full_member.size == (940, 530)
+    assert placeholder.size == (156, 242)
+
+
 def test_custom_profile_leader_card_uses_small_still_path(tmp_path: Path) -> None:
     small_path = (
         tmp_path
@@ -835,9 +1020,7 @@ def test_custom_profile_chara_rank_icons_can_be_passed_by_cloud(tmp_path: Path) 
     assert renderer.chara_rank_icon_path(21) == icon_path
 
 
-def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_tab(tmp_path: Path) -> None:
     renderer = _make_renderer(
         tmp_path,
         profile_context={
@@ -848,48 +1031,85 @@ def test_custom_profile_character_rank_component_keeps_challenge_stage_off_rank_
             ],
         },
     )
-    calls = []
-
-    def capture_cell(self, image, top_left, character_id, rank):
-        calls.append((round(top_left[0], 1), round(top_left[1], 1), character_id, rank))
-        image.alpha_composite(
-            Image.new("RGBA", (8, 8), (255, 0, 0, 255)),
-            (round(top_left[0]), round(top_left[1])),
-        )
-
-    monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", capture_cell)
 
     image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
+    first_pixels = image.tobytes()
+    renderer.profile_context["userChallengeLiveSoloStages"] = [{"characterId": 21, "rank": 150}]
+    second = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
 
     assert image.size == (908, 550)
     assert renderer.character_rank_map()[21] == 28
-    assert renderer.challenge_live_stage_map()[21] == 7
-    assert renderer.challenge_live_rank_for(21) == 7
-    assert calls[0] == (15.5, -0.5, 21, 28)
+    assert renderer.challenge_live_stage_map()[21] == 150
+    assert renderer.challenge_live_rank_for(21) == 150
+    assert second.tobytes() == first_pixels
+
+    adapter = PillowGeneralPrefabAdapter(renderer.general_font, renderer.paste_unity_sprite, renderer.open_rgba)
+    display_list = build_general_prefab_display_list(
+        "CharacterRankAndChallengeStageScroll",
+        size=GENERAL_NATIVE_SIZES["CharacterRankAndChallengeStageScroll"],
+        profile_context=renderer.profile_context,
+        labels={
+            "character_rank_tab": renderer.general_text("character_rank_tab"),
+            "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
+        },
+        metrics=adapter,
+        palette=GENERAL_PREFAB_PALETTE,
+        asset_paths={
+            f"character_rank_icon:{character_id}": renderer.chara_icon_path(character_id)
+            for _nickname, character_id in CHARA_LIST
+            if character_id is not None
+        },
+    )
+    assert display_list is not None
+    viewport = display_list.ops[4]
+    assert isinstance(viewport, GeneralViewportOp)
+    texts = [op.text for op in viewport.children if isinstance(op, GeneralTextOp)]
+    assert "28" in texts
+    assert "150" not in texts
+    assert adapter.render(display_list).tobytes() == second.tobytes()
 
 
-def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Path, monkeypatch) -> None:
-    renderer = _make_renderer(tmp_path)
-
-    def draw_marker(self, image, top_left, character_id, rank):
-        if character_id == 17:
-            image.alpha_composite(
-                Image.new("RGBA", (16, 16), (255, 0, 0, 255)),
-                (100, 400),
-            )
-        if character_id == 21:
-            image.alpha_composite(
-                Image.new("RGBA", (16, 16), (0, 0, 255, 255)),
-                (100, 500),
-            )
-
-    monkeypatch.setattr(PNGRenderer, "draw_profile_rank_and_stage_cell", draw_marker)
+def test_custom_profile_character_rank_scroll_masks_fifth_row_text(tmp_path: Path) -> None:
+    icon_path = tmp_path / "asset" / "cn-assets" / "startapp" / "custom_profile" / "icons" / "9.png"
+    _write_png_color(icon_path, (16, 16), (255, 0, 0, 255))
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={"userCharacters": [{"characterId": 9, "characterRank": 49}]},
+        resources={"charaRankIconPathMap": {"9": icon_path.as_posix()}},
+    )
 
     image = renderer.render_general_character_rank_and_challenge_stage(scroll=True)
 
     assert image.size == (908, 550)
-    assert _image_has_content_in_box(image, (120, 500, 140, 520))
-    assert not _image_has_content_in_box(image, (120, 604, 140, 624))
+    # Row five starts at content y=399.5. Its icon begins at y=404, so the first
+    # 16 pixels survive the 420-pixel viewport while its rank text at y=453 is masked.
+    assert image.getpixel((50, 512)) == (255, 0, 0, 255)
+    assert not _image_has_content_in_box(image, (24, 525, 884, 550))
+
+    adapter = PillowGeneralPrefabAdapter(renderer.general_font, renderer.paste_unity_sprite, renderer.open_rgba)
+    display_list = build_general_prefab_display_list(
+        "CharacterRankAndChallengeStageScroll",
+        size=GENERAL_NATIVE_SIZES["CharacterRankAndChallengeStageScroll"],
+        profile_context=renderer.profile_context,
+        labels={
+            "character_rank_tab": renderer.general_text("character_rank_tab"),
+            "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
+        },
+        metrics=adapter,
+        palette=GENERAL_PREFAB_PALETTE,
+        asset_paths={
+            f"character_rank_icon:{character_id}": renderer.chara_icon_path(character_id)
+            for _nickname, character_id in CHARA_LIST
+            if character_id is not None
+        },
+    )
+    assert display_list is not None
+    viewport = display_list.ops[4]
+    assert isinstance(viewport, GeneralViewportOp)
+    row_five_rank = next(op for op in viewport.children if isinstance(op, GeneralTextOp) and op.text == "49")
+    assert row_five_rank.pos == (140.5, 453.0)
+    assert row_five_rank.pos[1] > viewport.viewport_size[1]
+    assert adapter.render(display_list).tobytes() == image.tobytes()
 
 
 def test_custom_profile_character_rank_full_size_is_bottom_aligned(tmp_path: Path) -> None:
@@ -1226,7 +1446,7 @@ def test_custom_profile_api_uses_cropped_profile_viewport(tmp_path: Path, monkey
     monkeypatch.setattr(custom_profile_drawer, "CUSTOM_PROFILE_TMP_FONT_METADATA", None)
     monkeypatch.setattr(custom_profile_drawer, "PNGRenderer", FakePNGRenderer)
 
-    image = custom_profile_drawer._render_custom_profile_card_sync({}, {}, {}, "cn")
+    image = custom_profile_drawer._render_custom_profile_card_sync({"customProfileCard": {}}, {}, {}, "cn")
 
     assert image.size == (1, 1)
     assert captured["canvas_w"] == 2048

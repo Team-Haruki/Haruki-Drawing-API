@@ -16,13 +16,14 @@ Op-for-op notes (the Pillow output is the ground truth this reproduces pixel for
   would zero the rgb UNDER those transparent corners — which Pillow's paste-lerp reads back when
   the frame's AA edge crosses them (up to 228/255 on ~200 px). See ``Painter.paste_src``.
 - every OVERLAY (frame, level icons, rank, scroll, word, stars, the bonds left half, the empty
-  slot art) keeps the legacy ``img.paste(x, pos, x)`` alpha-lerp via ``Painter.paste``.
-- the two bonds chara icons are resized 0.8x and cropped at the mid-line IN PYTHON, in the legacy
-  order (resize-then-crop). Passing ``src_rect`` instead would crop in SOURCE pixels BEFORE the
-  fit — the opposite order, and the reason the hand-built IR drifted from Pillow by up to 52/255
-  on 2387 px. They go through ``paste_with_alpha_blend`` because they sit on the OPAQUE bonds
-  background, where src-over and Pillow's lerp give the same rgb; the lerp would additionally drag
-  the layer's alpha down at the icons' AA edges, and the mask is what defines the badge silhouette.
+  slot art) keeps the legacy ``img.paste(x, pos, x)`` alpha-lerp via the explicit
+  ``paste_resized_clipped(..., blend="paste_lerp")`` primitive.
+- the two bonds chara icons use the shared ``BondsHonorPlan`` and
+  ``Painter.paste_resized_clipped``: resize the FULL source 0.8x, then clip it at the destination
+  mid-line. Passing ``src_rect`` would crop in SOURCE pixels BEFORE the fit — the opposite order,
+  and the reason the old hand-built IR drifted from Pillow by up to 52/255 on 2387 px. The Pillow
+  adapter performs that operation directly; IR lowers it to a rectangular Group clip around a
+  full-source Image, so the native path does not create cropped ``mem:`` rasters.
 - ``push_mask``/``pop_mask`` (alpha multiply = Skia's DstIn) replaces
   ``img.putalpha(mask.split()[3])``. Because the masked layer is opaque (solid background + the
   src-over icons), multiply and putalpha's replace agree pixel for pixel — one mask semantic on
@@ -41,8 +42,6 @@ from __future__ import annotations
 
 import os
 
-from PIL import Image
-
 from src.sekai.base.painter import (
     WHITE,
     Painter,
@@ -50,17 +49,13 @@ from src.sekai.base.painter import (
     get_font,
     get_font_desc,
     get_text_size,
-    resize_keep_ratio,
 )
 from src.sekai.base.plot import Canvas, Widget
-from src.sekai.base.utils import ImageSource, resolve_image_source_sync
+from src.sekai.base.utils import ImageSource
 from src.settings import DEFAULT_BOLD_FONT
 
+from .bonds_plan import FullResizeClipOp, build_bonds_honor_plan
 from .model import HonorRequest
-
-# The bonds background is two halves: the right art full-bleed, the left art's left half on top,
-# overlapping the centre line by this much.
-BONDS_BACKGROUND_CENTER_OVERLAP = 3
 
 FCAP_TEXT_SIZE = 22
 FCAP_TEXT_TOP_Y = 46  # ImageDraw's "la" anchor y in the legacy composer
@@ -120,21 +115,38 @@ class HonorBadgeBox(Widget):
         self.rqd = rqd
         self.images = images
         self.badge_size = size
-        # NOTE no prefetch_image_sources here, on purpose: it would be dead weight. Canvas.get_img()
-        # is what runs the ref prefetch, and neither honor path calls it — the Pillow side uses
-        # get_img_sync() and the Skia side goes through build_canvas_ir(). Every honor image is a
-        # PIL image already (load_honor_images decodes them), so there is nothing to prefetch.
+        # NOTE no prefetch_image_sources here, on purpose: the Pillow path resolves lazy refs
+        # while replaying Painter operations in its worker, and IRPainter keeps the same refs
+        # lazy through native decode. Eager prefetch would defeat the Skia path's no-Pillow rule.
 
     def _get_content_size(self) -> tuple[int, int]:
         return self.badge_size
 
     # ---- shared pieces ----
 
+    def _paste_overlay(
+        self,
+        p: Painter,
+        source: ImageSource,
+        pos: tuple[int, int],
+        size: tuple[int, int] | None = None,
+    ) -> None:
+        """Honor's legacy mask-paste, kept explicit instead of relying on generic IR paste."""
+
+        resolved_size = _size_of(source) if size is None else size
+        p.paste_resized_clipped(
+            source,
+            pos,
+            resolved_size,
+            (0, 0, *self.badge_size),
+            blend="paste_lerp",
+        )
+
     def _add_frame(self, p: Painter, level: int | None = None) -> None:
         frame = self.images.get("frame_img")
         if frame is None:
             return
-        p.paste(frame, (8, 0) if self.rqd.honor_rarity == "low" else (0, 0))
+        self._paste_overlay(p, frame, (8, 0) if self.rqd.honor_rarity == "low" else (0, 0))
         if self.rqd.honor_type != "birthday":
             return
         icon = self.images.get("frame_degree_level_img")
@@ -143,7 +155,7 @@ class HonorBadgeBox(Widget):
         w, h = self.badge_size
         sz = 18
         for i in range(level):
-            p.paste(icon, (int(w / 2 - sz * level / 2 + i * sz), h - sz), (sz, sz))
+            self._paste_overlay(p, icon, (int(w / 2 - sz * level / 2 + i * sz), h - sz), (sz, sz))
 
     def _add_lv_star(self, p: Painter, level: int) -> None:
         if level > 10:
@@ -152,10 +164,10 @@ class HonorBadgeBox(Widget):
         lv6_img = self.images.get("lv6_img")
         if lv_img is not None:
             for i in range(0, min(level, 5)):
-                p.paste(lv_img, (50 + 16 * i, 61))
+                self._paste_overlay(p, lv_img, (50 + 16 * i, 61))
         if lv6_img is not None:
             for i in range(5, level):
-                p.paste(lv6_img, (50 + 16 * (i - 5), 61))
+                self._paste_overlay(p, lv6_img, (50 + 16 * (i - 5), 61))
 
     def _add_fcap_lv(self, p: Painter) -> None:
         text = str(self.rqd.fc_or_ap_level or "")
@@ -168,7 +180,7 @@ class HonorBadgeBox(Widget):
     # ---- branches ----
 
     def _draw_empty(self, p: Painter) -> None:
-        p.paste(self.images["empty_honor"], (3, 3))
+        self._paste_overlay(p, self.images["empty_honor"], (3, 3))
 
     def _draw_normal(self, p: Painter) -> None:
         rqd = self.rqd
@@ -185,82 +197,57 @@ class HonorBadgeBox(Widget):
                 rank_pos = (0, 0)
             else:
                 rank_pos = resolve_event_rank_position(_size_of(base), _size_of(rank_img), rqd.is_main_honor)
-            p.paste(rank_img, rank_pos)
+            self._paste_overlay(p, rank_img, rank_pos)
 
         if honor_group_uses_scroll_level(gtype):
             scroll_img = self.images.get("scroll_img")
             if scroll_img is not None:
-                p.paste(scroll_img, (215, 3) if rqd.is_main_honor else (37, 3))
+                self._paste_overlay(p, scroll_img, (215, 3) if rqd.is_main_honor else (37, 3))
             if gtype == "fc_ap" or scroll_img is not None:
                 self._add_fcap_lv(p)
         elif gtype in ("character", "achievement"):
             self._add_lv_star(p, rqd.honor_level)
 
-    def _draw_bonds_background(self, p: Painter) -> None:
-        left = resolve_image_source_sync(self.images["bonds_bg"])
-        right = self.images["bonds_bg2"]
-        w, h = self.badge_size
-        p.paste_src(right, (0, 0))
-        if left.size != (w, h):
-            left = left.resize((w, h), Image.Resampling.BILINEAR)
-        left_width = min(w, w // 2 + BONDS_BACKGROUND_CENTER_OVERLAP)
-        p.paste(left.crop((0, 0, left_width, h)), (0, 0))
+    def _draw_bonds_op(self, p: Painter, op: FullResizeClipOp) -> None:
+        source = self.images.get(op.source_key)
+        assert source is not None, f"bonds plan referenced an absent source: {op.source_key}"
+        p.paste_resized_clipped(
+            source,
+            op.destination_offset,
+            op.full_resize_size,
+            op.destination_clip,
+            blend=op.blend,
+            sampling=op.sampling,
+        )
 
     def _draw_bonds(self, p: Painter) -> None:
         rqd = self.rqd
-        w, h = self.badge_size
         c1_src = self.images.get("chara_icon_1")
         c2_src = self.images.get("chara_icon_2")
         mask_img = self.images.get("mask_img")
-
-        if c1_src is None or c2_src is None:
-            # The legacy composer returns the bare background (no mask/frame/word/stars).
-            self._draw_bonds_background(p)
-            return
-
-        c1_img = resolve_image_source_sync(c1_src)
-        c2_img = resolve_image_source_sync(c2_src)
-        # Legacy releases serialized chara_id as a string, so face_pos never matched.
-        # Keep the observed center-anchor layout instead of re-enabling that table.
-        c1_face = c1_img.size[0] // 2
-        c2_face = c2_img.size[0] // 2
-
-        scale = 0.8
-        c1_img = resize_keep_ratio(c1_img, scale, mode="scale")
-        c2_img = resize_keep_ratio(c2_img, scale, mode="scale")
-        c1w, c1h = c1_img.size
-        c2w, c2h = c2_img.size
-        c1_face = int(c1_face * scale)
-        c2_face = int(c2_face * scale)
-
-        offset_to_mid = 120 if rqd.is_main_honor else 30
-        mid = w // 2
-        c1_face_x = mid - offset_to_mid
-        c2_face_x = mid + offset_to_mid
-
-        overlap1 = (c1_face_x - c1_face + c1w) - mid
-        if overlap1 > 0:
-            c1_img = c1_img.crop((0, 0, c1w - overlap1, c1h))
-        overlap2 = mid - (c2_face_x - c2_face)
-        if overlap2 > 0:
-            c2_img = c2_img.crop((overlap2, 0, c2w, c2h))
-            c2_face -= overlap2
-
-        if mask_img is not None:
-            p.push_mask(mask_img, (0, 0), (w, h))
-        self._draw_bonds_background(p)
-        p.paste_with_alpha_blend(c1_img, (c1_face_x - c1_face, h - c1h))
-        p.paste_with_alpha_blend(c2_img, (c2_face_x - c2_face, h - c2h))
-        if mask_img is not None:
+        plan = build_bonds_honor_plan(
+            left_background_size=_size_of(self.images["bonds_bg"]),
+            right_background_size=_size_of(self.images["bonds_bg2"]),
+            chara_icon_1_size=None if c1_src is None else _size_of(c1_src),
+            chara_icon_2_size=None if c2_src is None else _size_of(c2_src),
+            is_main_honor=rqd.is_main_honor,
+            honor_rarity=str(rqd.honor_rarity or ""),
+            honor_level=int(rqd.honor_level or 0),
+            mask_size=None if mask_img is None else _size_of(mask_img),
+            frame_size=None if self.images.get("frame_img") is None else _size_of(self.images["frame_img"]),
+            word_size=None if self.images.get("word_img") is None else _size_of(self.images["word_img"]),
+            level_icon_size=None if self.images.get("lv_img") is None else _size_of(self.images["lv_img"]),
+            level6_icon_size=None if self.images.get("lv6_img") is None else _size_of(self.images["lv6_img"]),
+        )
+        if plan.mask is not None:
+            assert mask_img is not None
+            p.push_mask(mask_img, plan.mask.destination_offset, plan.mask.full_resize_size)
+        for op in plan.masked_ops:
+            self._draw_bonds_op(p, op)
+        if plan.mask is not None:
             p.pop_mask()
-
-        self._add_frame(p)
-        if rqd.is_main_honor:
-            word_img = self.images.get("word_img")
-            if word_img is not None:
-                ww, wh = _size_of(word_img)
-                p.paste(word_img, (int(190 - ww / 2), int(40 - wh / 2)))
-        self._add_lv_star(p, rqd.honor_level)
+        for op in plan.post_mask_ops:
+            self._draw_bonds_op(p, op)
 
     def _draw_content(self, p: Painter) -> None:
         if self.rqd.is_empty:

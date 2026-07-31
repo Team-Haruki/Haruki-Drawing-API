@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.core.pjsk import card as card_router
 from src.sekai.card import drawer as card_drawer
 from src.sekai.card.model import CardBasic, CardBoxRequest, UserCard

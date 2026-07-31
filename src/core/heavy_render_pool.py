@@ -11,11 +11,11 @@ import queue
 import threading
 import time
 import traceback
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from PIL import Image
-
+# Compatibility re-export for callers that still import the payload from this module.
+from src.core.image_payload import EncodedImagePayload
 from src.settings import (
     EXPORT_IMAGE_FORMAT,
     ISOLATED_WORKER_POOL_SIZE,
@@ -24,6 +24,9 @@ from src.settings import (
     JPG_QUALITY,
     REQUEST_HARD_TIMEOUT_SECONDS,
 )
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 logger = logging.getLogger("src.core.heavy_render_pool")
 
@@ -36,22 +39,6 @@ _WORKER_SHUTDOWN_GRACE_SECONDS = 3.0
 _heavy_pool_ctx = get_context("spawn")
 _heavy_render_pool: HeavyRenderWorkerPool | None = None
 _heavy_render_pool_lock = threading.Lock()
-
-
-@dataclass(slots=True)
-class EncodedImagePayload:
-    image_bytes: bytes
-    media_type: str
-    filename: str
-    image_width: int | None
-    image_height: int | None
-    image_mode: str | None
-    encode_elapsed: float
-    native_metrics: dict[str, int | float] | None = None
-    # skia | skia_cache | skia_fallback | pillow — stamped by the Skia render helper. Heavy tasks
-    # render in a spawned process where a contextvar is invisible to the parent, so the backend
-    # rides back on the payload; None means "not rendered by Skia" (the parent resolves it).
-    backend: str | None = None
 
 
 @dataclass(slots=True)
@@ -126,15 +113,18 @@ def _encode_image_payload(image: Image.Image) -> EncodedImagePayload:
 def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
     """Tag a worker-rendered Skia payload so the parent can log/count the backend.
 
-    The worker runs in a spawned process: its contextvar and its render_stats counters are
-    invisible to the parent, so the backend has to ride back on the payload. A drawer that goes
-    through ``render_cached_canvas_payload`` already set a precise value (skia / skia_cache);
-    anything else that produced a payload at all came from Skia.
+    The worker runs in a spawned process: its contextvars and render_stats counters are
+    invisible to the parent, so the backend and the request's consumed Pillow-touch snapshot
+    have to ride back on the payload. A drawer that goes through the shared helper already set
+    a precise backend (skia / skia_cache); anything else that produced a payload came from Skia.
     """
+    from src.core.pillow_telemetry import get_last_pillow_touch_snapshot
     from src.sekai.skia_renderer.render_stats import BACKEND_SKIA
 
     if not payload.backend:
         payload.backend = BACKEND_SKIA
+    snapshot = get_last_pillow_touch_snapshot()
+    payload.pillow_touch_counts = dict(snapshot.counts) if snapshot.scoped else None
     return payload
 
 
@@ -328,7 +318,7 @@ class HeavyRenderWorkerPool:
             from src.core.debug import set_render_backend
             from src.sekai.skia_renderer.render_stats import record_worker_payload_backend
 
-            payload.backend = record_worker_payload_backend(kind, payload.backend)
+            payload.backend = record_worker_payload_backend(kind, payload.backend, payload.pillow_touch_counts)
             set_render_backend(payload.backend)
             return payload
         except asyncio.CancelledError:

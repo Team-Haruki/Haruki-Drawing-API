@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.sekai.base.painter import get_font, get_text_size
-from src.sekai.skia_renderer.ir_builder import IRBuilder, linear_gradient
+from src.sekai.skia_renderer.ir_builder import IRBuilder, image_shadow, image_tint, linear_gradient
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 
@@ -63,6 +65,171 @@ def test_group_nesting_and_node_shapes():
     assert inner[1]["font"] == {"role": "bold", "size": 12}
     assert inner[1]["align"] == "center"
     assert inner[1]["baseline"] == "alphabetic"
+
+
+def test_rect_blend_serializes_src_and_rejects_unknown_values():
+    b = _builder()
+    b.rect((1, 2), (3, 4), fill=(1, 2, 3, 128), blend="src")
+
+    assert b.build()["root"]["children"][0]["blend"] == "src"
+    with pytest.raises(ValueError, match="unsupported Rect blend"):
+        b.rect((0, 0), (1, 1), blend="multiply")
+
+
+def test_image_paste_lerp_serializes_only_for_integral_plain_stretch():
+    builder = _builder()
+    builder.image(
+        "badge.png",
+        (2, 3),
+        (20, 10),
+        fit="stretch",
+        sampling="nearest",
+        blend="paste_lerp",
+    )
+    assert builder.build()["root"]["children"][0]["blend"] == "paste_lerp"
+
+    invalid_calls = (
+        {"pos": (2.5, 3), "size": (20, 10)},
+        {"pos": (2, 3), "size": (0, 10)},
+        {"pos": (2, 3), "size": (20, 10), "fit": "contain"},
+        {"pos": (2, 3), "size": (20, 10), "alpha": 0.5},
+        {"pos": (2, 3), "size": (20, 10), "source_rect": (0, 0, 1, 1)},
+        {"pos": (2, 3), "size": (20, 10), "tint": image_tint((255, 0, 0, 255))},
+        {"pos": (2, 3), "size": (20, 10), "blur_sigma": 1.0},
+    )
+    for kwargs in invalid_calls:
+        with pytest.raises(ValueError, match="paste_lerp Image"):
+            _builder().image("badge.png", blend="paste_lerp", **kwargs)
+
+    with pytest.raises(ValueError, match="unsupported Image blend"):
+        _builder().image("badge.png", (0, 0), (1, 1), blend="multiply")
+
+
+def test_unity_subscene_nests_children_and_placement():
+    b = _builder()
+    with b.unity_subscene(
+        size=(48, 24),
+        anchor=(60.5, 40.25),
+        object_scale=(1.25, 0.75),
+        post_scale=(1.1, 1.2),
+        rotation=-12.5,
+        sampling="catmull_rom",
+        alpha=0.8,
+    ):
+        b.rect((0, 0), (48, 24), fill=(1, 2, 3, 255))
+
+    node = b.build()["root"]["children"][0]
+    assert node == {
+        "type": "UnitySubscene",
+        "size": [48, 24],
+        "anchor": [60.5, 40.25],
+        "object_scale": [1.25, 0.75],
+        "post_scale": [1.1, 1.2],
+        "rotation": -12.5,
+        "sampling": "catmull_rom",
+        "alpha": 0.8,
+        "children": [
+            {
+                "type": "Rect",
+                "pos": [0, 0],
+                "size": [48, 24],
+                "fill": [1, 2, 3, 255],
+            }
+        ],
+    }
+
+
+def test_raster_subscene_nests_children_and_validates_placement():
+    b = _builder()
+    with b.raster_subscene(
+        natural_size=(48, 24),
+        pos=(10.5, 20.25),
+        dst_size=(96, 48),
+        sampling="catmull_rom",
+        alpha=0.8,
+        shadow=image_shadow(0.5, (0, 0), 3.0),
+    ):
+        b.rect((0, 0), (48, 24), fill=(1, 2, 3, 255))
+
+    node = b.build()["root"]["children"][0]
+    assert node["type"] == "RasterSubscene"
+    assert node["natural_size"] == [48, 24]
+    assert node["pos"] == [10.5, 20.25]
+    assert node["dst_size"] == [96.0, 48.0]
+    assert node["sampling"] == "catmull_rom"
+    assert node["alpha"] == 0.8
+    assert node["shadow"]["sigma"] == 3.0
+    assert [child["type"] for child in node["children"]] == ["Rect"]
+
+    invalid_calls = (
+        {"natural_size": (0, 1), "pos": (0, 0), "dst_size": (1, 1)},
+        {"natural_size": (1, 1), "pos": (float("nan"), 0), "dst_size": (1, 1)},
+        {"natural_size": (1, 1), "pos": (0, 0), "dst_size": (-1, 1)},
+        {"natural_size": (1, 1), "pos": (0, 0), "dst_size": (1, 1), "alpha": 2},
+        {
+            "natural_size": (1, 1),
+            "pos": (0, 0),
+            "dst_size": (1, 1),
+            "sampling": "pillow_lanczos",
+        },
+    )
+    for kwargs in invalid_calls:
+        with pytest.raises(ValueError, match="RasterSubscene"):
+            _builder().push_raster_subscene(**kwargs)
+
+
+def test_pillow_lanczos_sampling_is_serialized_explicitly():
+    b = _builder()
+    b.image(
+        "cards/art.png",
+        (-12, -8),
+        (144, 116),
+        fit="cover",
+        sampling="pillow_lanczos",
+        blend="src",
+    )
+    with b.unity_subscene(
+        size=(310, 480),
+        anchor=(78, 121),
+        object_scale=(156 / 310, 242 / 480),
+        post_scale=(1, 1),
+        rotation=0,
+        sampling="pillow_lanczos",
+    ):
+        b.image("cards/frame.png", (0, 0), (310, 480), sampling="pillow_lanczos")
+
+    image, subscene = b.build()["root"]["children"]
+    assert image["sampling"] == "pillow_lanczos"
+    assert image["fit"] == "cover"
+    assert image["blend"] == "src"
+    assert subscene["sampling"] == "pillow_lanczos"
+    assert subscene["children"][0]["sampling"] == "pillow_lanczos"
+
+
+def test_sliced_image_serializes_unity_border_tint_and_alpha():
+    b = _builder()
+    b.sliced_image(
+        path="ui/bg_base_r16_wh.png",
+        pos=(4.5, 6.25),
+        size=(548, 64),
+        border=(21, 21, 21, 21),
+        tint=image_tint((244, 246, 252, 230), "recolor"),
+        alpha=0.75,
+    )
+
+    assert b.build()["root"]["children"][0] == {
+        "type": "SlicedImage",
+        "path": "ui/bg_base_r16_wh.png",
+        "pos": [4.5, 6.25],
+        "size": [548, 64],
+        "border": [21, 21, 21, 21],
+        "tint": {
+            "color": [244, 246, 252, 230],
+            "mode": "recolor",
+            "strength": 1.0,
+        },
+        "alpha": 0.75,
+    }
 
 
 def test_background_omitted_when_unset():
@@ -166,6 +333,19 @@ def test_extra_fonts_and_watermark():
     assert wm["type"] == "Watermark"
     assert len(wm["lines"]) == 2
     assert wm["lines"][1]["align"] == "right"
+
+
+def test_extra_font_can_be_registered_idempotently_after_builder_creation(tmp_path):
+    b = _builder()
+    font_path = tmp_path / "font.ttf"
+    b.register_extra_font("tmp_dynamic", font_path)
+    b.register_extra_font("tmp_dynamic", font_path)
+
+    assert b.build()["fonts"]["extra"] == {"tmp_dynamic": str(font_path)}
+    with pytest.raises(ValueError, match="two different paths"):
+        b.register_extra_font("tmp_dynamic", tmp_path / "other.ttf")
+    with pytest.raises(ValueError, match="non-empty"):
+        b.register_extra_font(" ", font_path)
 
 
 def test_parse_colored_segments():

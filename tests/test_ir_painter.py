@@ -102,6 +102,76 @@ def test_irpainter_path_image_renders_without_mem_transport(tmp_path):
     source.close()
 
 
+def test_irpainter_paste_lerp_runs_asset_backed_inside_mask_subscene(tmp_path):
+    from src.sekai.base.utils import get_asset_image_ref
+
+    Image.new("RGBA", (2, 1), (0, 0, 255, 255)).save(tmp_path / "base.png")
+    Image.new("RGBA", (1, 1), (255, 255, 255, 128)).save(tmp_path / "overlay.png")
+    Image.new("RGBA", (2, 1), (255, 255, 255, 255)).save(tmp_path / "mask.png")
+    base = asyncio.run(get_asset_image_ref(tmp_path, "base.png", on_missing="raise"))
+    overlay = asyncio.run(get_asset_image_ref(tmp_path, "overlay.png", on_missing="raise"))
+    mask = asyncio.run(get_asset_image_ref(tmp_path, "mask.png", on_missing="raise"))
+
+    painter = _painter((2, 1), assets_base_dir=tmp_path)
+    painter.push_mask(mask, (0, 0), (2, 1))
+    painter.paste_src(base, (0, 0))
+    painter.paste_resized_clipped(
+        overlay,
+        (0, 0),
+        (2, 1),
+        (0, 0, 2, 1),
+        blend="paste_lerp",
+        sampling="nearest",
+    )
+    painter.pop_mask()
+    scene, mem = painter.build_scene()
+
+    assert mem == {}
+    masked_group = scene["root"]["children"][0]
+    assert masked_group["mask"] == "mask.png"
+    assert [node["type"] for node in masked_group["children"]] == ["UnitySubscene"]
+    result = _native.render_scene(json.dumps(scene).encode(), mem)
+    image = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+    for pixel in image.get_flattened_data():
+        assert all(actual == pytest.approx(expected, abs=1) for actual, expected in zip(pixel, (128, 128, 255, 191)))
+
+
+def test_irpainter_paste_canvas_emits_asset_backed_raster_subscene(tmp_path):
+    from src.sekai.base.plot import Canvas, ImageBox
+    from src.sekai.base.utils import get_asset_image_ref
+
+    Image.new("RGBA", (4, 3), (220, 40, 20, 255)).save(tmp_path / "badge.png")
+    ref = asyncio.run(get_asset_image_ref(tmp_path, "badge.png", on_missing="raise"))
+    child = Canvas(4, 3)
+    child.add_item(ImageBox(ref))
+
+    painter = _painter((16, 12), assets_base_dir=tmp_path)
+    painter.paste_canvas(
+        child,
+        (4, 3),
+        (8, 6),
+        use_shadow=True,
+        shadow_width=2,
+        sampling="catmull_rom",
+        require_asset_backed=True,
+    )
+    scene, mem = painter.build_scene()
+    node = scene["root"]["children"][0]
+
+    assert mem == {}
+    assert node["type"] == "RasterSubscene"
+    assert node["natural_size"] == [4, 3]
+    assert node["pos"] == [4.0, 3.0]
+    assert node["dst_size"] == [8.0, 6.0]
+    assert node["sampling"] == "catmull_rom"
+    assert node["shadow"]["sigma"] == 1.0
+    assert node["children"][0]["path"] == "badge.png"
+
+    result = _native.render_scene(json.dumps(scene).encode(), mem)
+    image = Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
+    assert image.getpixel((8, 6))[:3] == pytest.approx((220, 40, 20), abs=2)
+
+
 def test_irpainter_gradient_text_maps_to_glyph_overlay_fill():
     # Gradient text no longer raises SkiaUnsupported: the gradient endpoints are mapped
     # onto the glyph overlay (ink bbox + 10px) and the Rust Text node renders the
@@ -411,8 +481,8 @@ def test_irpainter_unbalanced_clip_raises_skia_unsupported():
 
 
 def test_irpainter_push_mask_emits_masked_group_and_multiplies_alpha():
-    """Painter.push_mask -> Group{mask} (saveLayer + DstIn), i.e. the same alpha multiply the
-    Pillow backend applies in _impl_pop_mask (see test_image_source)."""
+    """Painter.push_mask -> Group{mask} around an isolated child surface, preserving the same
+    alpha multiply Pillow applies while keeping destination-reading paste_lerp local."""
     mask = Image.new("RGBA", (40, 40), (0, 0, 0, 0))
     mask.paste(Image.new("RGBA", (20, 40), (255, 255, 255, 255)), (0, 0))  # left half opaque
 
@@ -427,7 +497,9 @@ def test_irpainter_push_mask_emits_masked_group_and_multiplies_alpha():
     assert group["offset"] == [0.0, 0.0]
     assert group["mask"].startswith("mem:")  # runtime image -> mem ref, and it must travel
     assert group["mask"][4:] in mem
-    assert group["children"][0]["pos"] == [0.0, 0.0]  # group-relative
+    isolate = group["children"][0]
+    assert isolate["type"] == "UnitySubscene"
+    assert isolate["children"][0]["pos"] == [0.0, 0.0]  # group-relative
 
     img = Image.open(BytesIO(_native.render_scene(json.dumps(scene).encode(), mem)["image_bytes"])).convert("RGBA")
     assert img.getpixel((10, 20)) == (255, 0, 0, 255)  # kept where the mask is opaque

@@ -5,7 +5,7 @@ import time
 
 from PIL import Image, ImageDraw
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base import (
     ASSETS_BASE_DIR,
     BG_PADDING,

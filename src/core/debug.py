@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope
 from src.settings import (
     OVERLOAD_MAX_INFLIGHT_REQUESTS,
     OVERLOAD_RETRY_AFTER_SECONDS,
@@ -75,6 +76,7 @@ class RequestContextTokens:
     method: contextvars.Token
     stage: contextvars.Token
     render_backend: contextvars.Token | None = None
+    pillow_telemetry: contextvars.Token | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -94,10 +96,13 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         method=_request_method_var.set(method),
         stage=_request_stage_var.set(RequestStageRef("middleware")),
         render_backend=_render_backend_var.set(DEFAULT_RENDER_BACKEND),
+        pillow_telemetry=begin_pillow_touch_scope(),
     )
 
 
 def pop_request_context(tokens: RequestContextTokens) -> None:
+    if tokens.pillow_telemetry is not None:
+        end_pillow_touch_scope(tokens.pillow_telemetry)
     _request_id_var.reset(tokens.request_id)
     _request_path_var.reset(tokens.path)
     _request_method_var.reset(tokens.method)

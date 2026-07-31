@@ -10,6 +10,8 @@ from typing import Literal, Self, TypedDict
 
 from PIL import Image, ImageFont
 
+from src.core.pillow_telemetry import PILLOW_TOUCH_IMAGE_DECODE, record_pillow_touch
+
 from .painter import (
     ALIGN_MAP,
     ALIGN_TYPE,
@@ -41,6 +43,7 @@ DEFAULT_SEP = 8
 
 def _open_image_copy(path: str) -> Image.Image:
     """Open image file safely and detach data from file descriptor."""
+    record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
     with Image.open(path) as img:
         img.load()
         return img.copy()
@@ -1645,6 +1648,81 @@ class ImageBox(Widget):
                 sampling=self.sampling,
                 tint=self.tint,
             )
+
+
+class CanvasImageBox(Widget):
+    """Place a nested :class:`Canvas` as one isolated image-like widget.
+
+    Both backends consume the nested widget tree. Pillow rasterizes it lazily from
+    :meth:`Painter.paste_canvas`; IRPainter lowers it to a native RasterSubscene, keeping
+    Porter-Duff operations local and applying the final resize/shadow to the completed badge.
+    """
+
+    def __init__(
+        self,
+        canvas: "Canvas",
+        image_size_mode: Literal["fit", "fill", "original"] | None = None,
+        size: tuple[int | None, int | None] | None = None,
+        *,
+        shadow: bool = False,
+        shadow_width: int = 6,
+        shadow_alpha: float = 0.6,
+        sampling: ImageSampling | None = None,
+        cache_key: str | None = None,
+        require_asset_backed: bool = False,
+        skip_on_error: bool = False,
+    ) -> None:
+        super().__init__()
+        self.canvas = canvas
+        self.image_size_mode = image_size_mode or ("fit" if size and (size[0] or size[1]) else "original")
+        if self.image_size_mode not in {"fit", "fill", "original"}:
+            raise ValueError(f"unsupported canvas image size mode: {self.image_size_mode!r}")
+        self.shadow = bool(shadow)
+        self.shadow_width = int(shadow_width)
+        self.shadow_alpha = float(shadow_alpha)
+        self.sampling = sampling
+        self.cache_key = cache_key
+        self.require_asset_backed = bool(require_asset_backed)
+        self.skip_on_error = bool(skip_on_error)
+        if size is not None:
+            self.set_size(size)
+        self.set_margin(0)
+        self.set_padding(0)
+
+    @property
+    def natural_size(self) -> tuple[int, int]:
+        return self.canvas._get_self_size()
+
+    def _get_content_size(self) -> tuple[int, int]:
+        width, height = self.natural_size
+        if self.image_size_mode == "original":
+            return width, height
+
+        assert self.w is not None or self.h is not None, f"{self.image_size_mode} mode requires width or height"
+        if self.image_size_mode == "fill" and self.w is not None and self.h is not None:
+            return self.w - self.h_padding * 2, self.h - self.v_padding * 2
+        target_width = self.w - self.h_padding * 2 if self.w else 1_000_000
+        target_height = self.h - self.v_padding * 2 if self.h else 1_000_000
+        scale = (
+            min(target_width / width, target_height / height)
+            if self.image_size_mode == "fit"
+            else max(target_width / width, target_height / height)
+        )
+        return int(width * scale), int(height * scale)
+
+    def _draw_content(self, p: Painter) -> None:
+        p.paste_canvas(
+            self.canvas,
+            (0, 0),
+            self._get_content_size(),
+            use_shadow=self.shadow,
+            shadow_width=self.shadow_width,
+            shadow_alpha=self.shadow_alpha,
+            sampling=self.sampling,
+            cache_key=self.cache_key,
+            require_asset_backed=self.require_asset_backed,
+            skip_on_error=self.skip_on_error,
+        )
 
 
 class Spacer(Widget):

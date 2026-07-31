@@ -52,7 +52,7 @@ async def cache_stats():
 
 @router.get("/render-stats")
 async def render_stats():
-    """Render backend stats: how many requests each endpoint served via Skia / cache / Pillow."""
+    """Render outcomes plus native-pure/native-hybrid Pillow dependency telemetry."""
     return {
         "status": "healthy",
         "renders": get_render_stats(),

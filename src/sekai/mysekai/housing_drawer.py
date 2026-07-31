@@ -3,7 +3,7 @@ import base64
 
 from PIL import Image
 
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.plot import Canvas, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.utils import EncodedImageRef, ImageSource, get_asset_image_ref, get_encoded_image_ref, run_in_pool

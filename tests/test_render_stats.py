@@ -11,7 +11,8 @@ import asyncio
 import pytest
 
 from src.core.debug import current_render_backend, pop_request_context, push_request_context
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
+from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
 import src.sekai.skia_renderer.canvas as canvas_mod
 from src.sekai.skia_renderer.payload_cache import (
     _SkiaPayloadCache,
@@ -23,6 +24,7 @@ from src.sekai.skia_renderer.render_stats import (
     get_render_stats,
     record_native_metrics,
     record_render,
+    record_scene_completeness,
     record_worker_payload_backend,
     reset_render_stats,
 )
@@ -86,6 +88,10 @@ def test_record_render_counts_per_endpoint_and_totals():
         "disabled": 0,
         "error": 0,
         "total": 3,
+        "native_pure": 0,
+        "native_hybrid": 0,
+        "native_unclassified": 3,
+        "pillow_touch_reasons": {},
     }
     assert stats["endpoints"]["profile"]["fallback"] == 1
     assert stats["endpoints"]["profile"]["disabled"] == 1
@@ -96,7 +102,11 @@ def test_record_render_counts_per_endpoint_and_totals():
         "fallback": 1,
         "disabled": 1,
         "error": 1,
+        "native_pure": 0,
+        "native_hybrid": 0,
+        "native_unclassified": 3,
         "total": 6,
+        "pillow_touch_reasons": {},
     }
 
 
@@ -111,9 +121,42 @@ def test_reset_render_stats_clears_counters():
     reset_render_stats()
     assert get_render_stats() == {
         "endpoints": {},
-        "totals": dict.fromkeys(("skia", "cache_hit", "fallback", "disabled", "error", "total"), 0),
+        "totals": {
+            **dict.fromkeys(("skia", "cache_hit", "fallback", "disabled", "error"), 0),
+            **dict.fromkeys(("native_pure", "native_hybrid", "native_unclassified"), 0),
+            "total": 0,
+            "pillow_touch_reasons": {},
+        },
         "font_fallbacks": 0,
     }
+
+
+def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
+    record_scene_completeness(
+        "custom_profile_card",
+        {
+            "complete": 0,
+            "elements_total": 3,
+            "visible_elements": 2,
+            "native_elements": 1,
+            "hidden_elements": 1,
+            "missing_elements": 1,
+            "mem_images": 1,
+            "mem_bytes": 64,
+            "issues_by_kind": {"stamp": {"missing": 1}},
+        },
+    )
+    record_render("custom_profile_card", "fallback")
+
+    scene = get_render_stats()["endpoints"]["custom_profile_card"]["scene_completeness"]
+    assert scene["checked"] == 1
+    assert scene["incomplete"] == 1
+    assert scene["missing_elements"] == 1
+    assert scene["issues_by_kind"] == {"stamp": {"missing": 1, "unresolved": 0}}
+
+    reset_render_stats()
+    record_render("card_list", "skia")
+    assert "scene_completeness" not in get_render_stats()["endpoints"]["card_list"]
 
 
 def test_font_fallbacks_are_aggregated_from_the_payload():
@@ -279,6 +322,33 @@ def test_worker_stamps_the_backend_on_a_skia_payload():
     assert _stamp_skia_backend(cached).backend == "skia_cache"
 
 
+def test_worker_carries_consumed_pillow_snapshot_to_parent():
+    """The child request scope is not visible in the parent process, so the consumed native
+    render snapshot must ride back on the picklable payload alongside the backend."""
+    from src.core.heavy_render_pool import _stamp_skia_backend
+
+    tokens = push_request_context("rid", "/api/pjsk/deck/recommend", "POST")
+    try:
+        record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
+        record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
+        record_render("worker_child", "skia")
+        payload = _stamp_skia_backend(_payload())
+    finally:
+        pop_request_context(tokens)
+
+    assert payload.pillow_touch_counts == {PILLOW_TOUCH_TEXT_METRIC: 2}
+
+    # Simulate the spawned-process boundary: child counters disappear, only the payload remains.
+    reset_render_stats()
+    record_worker_payload_backend("deck_recommend", payload.backend, payload.pillow_touch_counts)
+    parent_entry = get_render_stats()["endpoints"]["deck_recommend"]
+    assert parent_entry["native_hybrid"] == 1
+    assert parent_entry["pillow_touch_reasons"][PILLOW_TOUCH_TEXT_METRIC] == {
+        "renders": 1,
+        "touches": 2,
+    }
+
+
 def test_worker_payload_backend_is_replayed_in_the_parent(monkeypatch):
     """The heavy worker renders in another process, so the parent replays the payload backend."""
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
@@ -293,6 +363,7 @@ def test_worker_payload_backend_is_replayed_in_the_parent(monkeypatch):
     stats = get_render_stats()["endpoints"]
     assert stats["chara_birthday"]["skia"] == 1
     assert stats["chara_birthday"]["fallback"] == 1
+    assert stats["chara_birthday"]["native_unclassified"] == 1
     assert stats["deck_recommend"]["disabled"] == 1
 
 

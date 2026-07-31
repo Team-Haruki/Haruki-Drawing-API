@@ -37,6 +37,40 @@ def _render(children: list[dict], mem: dict | None = None, size=(W, H)) -> Image
     return Image.open(BytesIO(result["image_bytes"])).convert("RGBA")
 
 
+def test_rect_src_blend_replaces_destination_and_unknown_value_fails_parse():
+    img = _render(
+        [
+            {"type": "Rect", "pos": [0, 0], "size": [40, 20], "fill": [255, 0, 0, 255]},
+            {"type": "Rect", "pos": [0, 0], "size": [20, 20], "fill": [0, 0, 255, 128]},
+            {
+                "type": "Rect",
+                "pos": [20, 0],
+                "size": [20, 20],
+                "fill": [0, 0, 255, 128],
+                "blend": "src",
+            },
+        ],
+        size=(40, 20),
+    )
+
+    assert img.getpixel((10, 10))[3] == 255
+    assert img.getpixel((30, 10)) == (0, 0, 255, 128)
+
+    with pytest.raises(ValueError, match=r"unknown variant [`']multiply[`']"):
+        _render(
+            [
+                {
+                    "type": "Rect",
+                    "pos": [0, 0],
+                    "size": [1, 1],
+                    "fill": [0, 0, 0, 0],
+                    "blend": "multiply",
+                }
+            ],
+            size=(1, 1),
+        )
+
+
 def test_separate_gradient_matches_painter_field():
     from src.sekai.base.painter import LinearGradient
 

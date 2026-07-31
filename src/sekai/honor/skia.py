@@ -9,10 +9,10 @@ shadowed text lines). That footer samples the rendered canvas, so it is a ``Self
 and it is drawn in the SAME native pass: the badge sub-scene is spliced into the final builder
 (chart/drawer.py does the same).
 
-NOTE Python DOES decode pixels on this path: the shared badge tree resizes/crops the bonds chara
-icons in Python (in the legacy resize-then-crop order — doing it as an IR source_rect crop was
-crop-then-scale, which is what had drifted) and ships them as `mem:` rasters. They are small and go
-through the global image cache.
+The badge is lowered as a reusable asset-backed ``NativeSubtree``. Bonds character sprites keep
+their legacy full-resize-then-destination-clip order through rectangular Group clips around full
+Image nodes; Python neither decodes/crops them nor ships ``mem:`` rasters. Subtree lowering is
+required to be asset-backed before anything is spliced into the watermark scene.
 
 Any unsupported shape or unreadable *required* asset returns ``None`` so the caller falls back
 to the Pillow path, which raises the canonical user-visible error.
@@ -25,7 +25,7 @@ import logging
 import time
 
 from src.core.debug import set_render_backend
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
     WATERMARK_LINE_SEP,
@@ -37,7 +37,7 @@ from src.sekai.base.draw import (
 )
 from src.sekai.base.painter import get_font, get_text_size
 from src.sekai.base.utils import run_in_pool
-from src.sekai.skia_renderer.canvas import build_canvas_ir, load_native_renderer, payload_from_native, skia_plot_enabled
+from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import (
@@ -50,6 +50,7 @@ from src.sekai.skia_renderer.render_stats import (
     record_native_metrics,
     record_render,
 )
+from src.sekai.skia_renderer.subtree import lower_canvas_subtree
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, EXPORT_IMAGE_FORMAT, FONT_DIR, JPG_QUALITY
 
 from .model import HonorRequest
@@ -109,13 +110,13 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         return None
 
     # lazy: the drawer re-exports this module's entry point at its end
-    from src.sekai.honor.drawer import _build_full_honor_cache_key, load_honor_images
+    from src.sekai.honor.drawer import build_full_honor_cache_key, load_honor_images
     from src.sekai.honor.widget import build_honor_badge_canvas
 
     # The cached payload embeds the footer, so the key must cover everything the footer text
     # derives from (dt/timezone) on top of the Pillow composed key (which excludes timezone).
     watermark_text = build_request_watermark_text(rqd)
-    cache_key = f"{_build_full_honor_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}|wm:{watermark_text}"
+    cache_key = f"{build_full_honor_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}|wm:{watermark_text}"
     cached = get_skia_payload_cached(cache_key)
     if cached is not None:
         _record(OUTCOME_CACHE_HIT, cached)
@@ -136,8 +137,9 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         canvas = build_honor_badge_canvas(rqd, images)
         if canvas is None:
             return None
-        badge, mem_images = build_canvas_ir(canvas, export_format=EXPORT_IMAGE_FORMAT)
-        w, h = badge.width, badge.height
+        badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format=EXPORT_IMAGE_FORMAT)
+        w, h = badge.size
+        mem_images: dict[str, object] = {}
 
         # Single pass: badge nodes + stretched bottom-strip footer (a SelfImage snapshot of
         # the badge rows just rendered above it) + shadowed watermark lines (mirrors
@@ -149,7 +151,12 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         # outside it (the bonds chara icons overhang) must be cropped exactly as the Pillow
         # canvas bounds crop it.
         with b.group((0, 0), (w, h), clip={"kind": "rect"}):
-            b.splice_root_children(badge)
+            badge.splice_into(
+                b,
+                mem_images,
+                namespace="honor.badge",
+                require_asset_backed=True,
+            )
         sample_h = max(1, min(h, footer_h))
         b.self_image((0, h), (w, footer_h), source_rect=(0, h - sample_h, w, h))
         font = get_font(DEFAULT_FONT, font_size)
@@ -163,7 +170,8 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
             b.text(line, (lx + 1, ly + 1), "default", font_size, baseline="ascender", fill=(75, 75, 75, 255))
             b.text(line, (lx, ly), "default", font_size, baseline="ascender", fill=(255, 255, 255, 255))
         ir_json = json.dumps(b.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        # The badge tree ships the bonds chara icons as runtime (mem:) images; they must travel.
+        # Asset-backed subtree lowering guarantees this stays empty. Keep the explicit registry
+        # in the native call so any future memory-carrying subtree support remains deliberate.
         return native.render_scene(ir_json, mem_images)
 
     started = time.perf_counter()

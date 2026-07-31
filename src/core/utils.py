@@ -11,7 +11,7 @@ from src.core.debug import (
     set_request_stage,
     snapshot_process_metrics,
 )
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 

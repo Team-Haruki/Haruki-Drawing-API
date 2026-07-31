@@ -14,7 +14,7 @@ import logging
 from typing import Any
 
 from src.core.debug import set_render_backend
-from src.core.heavy_render_pool import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.triangle_bg import background_hour
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.ir_builder import IRBuilder
@@ -43,6 +43,13 @@ from src.settings import (
 logger = logging.getLogger("plot.draw.perf")
 
 
+class _UnsetFont:
+    pass
+
+
+_UNSET_FONT = _UnsetFont()
+
+
 def skia_plot_enabled() -> bool:
     return bool(settings.drawing.use_skia_plot)
 
@@ -50,12 +57,16 @@ def skia_plot_enabled() -> bool:
 # Minimum IR capability this code emits. 5 added the SelfImage canvas snapshot, 6 the Porter-Duff
 # Src paste (Image.blend="src", i.e. Painter.paste_src), 7 the pre-generated TriangleBg.tris,
 # 8 = Transform subtree + catmull_rom sampling, 9 = SdfQuad (TMP text shading) + A8 raw mem
-# transport, 10 = per-Image Gaussian blur decoration (ImageBg lazy-ref path).
+# transport, 10 = per-Image Gaussian blur decoration (ImageBg lazy-ref path), 11 = asset-backed
+# custom-profile SdfShape rendering, 12 = UnityImage + UnitySubscene, 13 = SlicedImage,
+# 14 = Porter-Duff Src/SrcOver blending for Rect, 15 = explicit Pillow-compatible Lanczos
+# resize for Image and UnitySubscene, 16 = straight-RGBA Pillow paste-mask blending for Image,
+# 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
 # An older wheel SILENTLY drops the fields it does not know (serde skips them) — a capability-6
 # wheel would render a triangle background with no triangles in it — so refuse it and fail open
 # to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
 # (quick-check.yml, skia-wheels.yml). Bump all four together.
-REQUIRED_NATIVE_IR_CAPABILITY = 10
+REQUIRED_NATIVE_IR_CAPABILITY = 17
 
 
 def load_native_renderer():
@@ -130,6 +141,13 @@ def build_canvas_ir(
     *,
     bg_hour: float | None = None,
     export_format: str | None = None,
+    assets_base_dir: str | None = None,
+    font_dir: str | None = None,
+    default_font: str | None = None,
+    bold_font: str | None = None,
+    heavy_font: str | None | _UnsetFont = _UNSET_FONT,
+    emoji_font: str | None | _UnsetFont = _UNSET_FONT,
+    jpg_quality: int | None = None,
 ) -> tuple[IRBuilder, dict[str, Any]]:
     """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
 
@@ -147,15 +165,15 @@ def build_canvas_ir(
         raise SkiaUnsupported(f"canvas {size[0]}x{size[1]} exceeds the Skia size guard")
     painter = IRPainter(
         size,
-        assets_base_dir=str(ASSETS_BASE_DIR),
-        font_dir=str(FONT_DIR),
-        default_font=DEFAULT_FONT,
-        bold_font=DEFAULT_BOLD_FONT,
-        heavy_font=DEFAULT_HEAVY_FONT,
-        emoji_font=DEFAULT_EMOJI_FONT,
+        assets_base_dir=str(ASSETS_BASE_DIR) if assets_base_dir is None else assets_base_dir,
+        font_dir=str(FONT_DIR) if font_dir is None else font_dir,
+        default_font=DEFAULT_FONT if default_font is None else default_font,
+        bold_font=DEFAULT_BOLD_FONT if bold_font is None else bold_font,
+        heavy_font=DEFAULT_HEAVY_FONT if isinstance(heavy_font, _UnsetFont) else heavy_font,
+        emoji_font=DEFAULT_EMOJI_FONT if isinstance(emoji_font, _UnsetFont) else emoji_font,
         bg_hour=background_hour() if bg_hour is None else bg_hour,
         export_format=EXPORT_IMAGE_FORMAT if export_format is None else export_format,
-        jpg_quality=JPG_QUALITY,
+        jpg_quality=JPG_QUALITY if jpg_quality is None else jpg_quality,
     )
     canvas.draw(painter)
     painter.assert_balanced()

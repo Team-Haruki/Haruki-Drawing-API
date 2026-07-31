@@ -30,6 +30,35 @@ from src.sekai.profile.custom_profile.cache import (
     get_tmp_font_tables,
     optional_file_signature,
 )
+from src.sekai.profile.custom_profile.card_prefab import (
+    CardAlphaMaskOp,
+    CardDisplayList,
+    CardFontRef,
+    CardPrefabResources,
+    CardSpriteRef,
+    PillowCardAdapter,
+    build_card_rarity_ops,
+    build_deck_card_display_list as build_deck_card_prefab_display_list,
+    build_deck_card_level_ops,
+    build_deck_card_overlay_ops,
+    build_deck_leader_label_op,
+    build_empty_deck_card_display_list,
+    build_full_card_display_list as build_full_card_prefab_display_list,
+    build_full_card_overlay_ops,
+)
+from src.sekai.profile.custom_profile.general_prefab import (
+    CHARA_LIST,
+    CHARACTER_RANK_CELL_SIZE,
+    GeneralPrefabPalette,
+    PillowGeneralPrefabAdapter,
+    build_general_prefab_display_list,
+    ordered_story_favorites as order_story_favorites,
+    story_favorite_asset_key,
+    story_favorite_key as build_story_favorite_key,
+    story_favorite_title as resolve_story_favorite_title,
+)
+from src.sekai.profile.custom_profile.honor_deck_prefab import build_honor_deck_plan
+from src.sekai.profile.custom_profile.limits import ensure_raster_size
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
@@ -166,6 +195,7 @@ SHAPE_SDF_FACE_FACTOR = SHAPE_NATIVE_FACE_DILATE_FACTOR
 # and DistanceFieldImage.Update pushes that field to the material every frame.
 SHAPE_SDF_SOFTNESS = 0.0
 SHAPE_SDF_SCREEN_FWIDTH = True
+DEFAULT_MAX_LAYER_PIXELS = 8 * 1024 * 1024
 LAYER_ROTATION_SUPERSAMPLE = 2.0
 RODIN_FONT_VARIANTS = ("ttf", "otf", "auto")
 TMP_BLOCK_MODES = ("large-em", "source-glyph", "em", "glyph")
@@ -349,44 +379,7 @@ GENERAL_MUSIC_DIFFICULTIES: tuple[tuple[str, str, tuple[int, int, int, int]], ..
     ("master", "MASTER", (166, 89, 214, 255)),
     ("append", "APPEND", (218, 116, 221, 255)),
 )
-CHARA_LIST: tuple[tuple[str | None, int | None], ...] = (
-    ("miku", 21),
-    ("rin", 22),
-    ("len", 23),
-    ("luka", 24),
-    ("meiko", 25),
-    ("kaito", 26),
-    (None, None),
-    (None, None),
-    ("ick", 1),
-    ("saki", 2),
-    ("hnm", 3),
-    ("shiho", 4),
-    ("mnr", 5),
-    ("hrk", 6),
-    ("airi", 7),
-    ("szk", 8),
-    ("khn", 9),
-    ("an", 10),
-    ("akt", 11),
-    ("toya", 12),
-    ("tks", 13),
-    ("emu", 14),
-    ("nene", 15),
-    ("rui", 16),
-    ("knd", 17),
-    ("mfy", 18),
-    ("ena", 19),
-    ("mzk", 20),
-)
 CHARA_ID2NICKNAME = {character_id: nickname for nickname, character_id in CHARA_LIST if nickname and character_id}
-CHARACTER_RANK_CELL_SIZE = (196.0, 85.0)
-CHARACTER_RANK_CELL_CENTER_X = (137.5, 348.5, 559.5, 770.5)
-CHARACTER_RANK_ROW_STEP = 100.0
-CHARACTER_RANK_NON_SCROLL_FIRST_CENTER_Y = 146.5
-CHARACTER_RANK_SCROLL_VIEWPORT = (24.0, 104.0, 884.0, 524.0)
-CHARACTER_RANK_SCROLL_CONTENT_SIZE = (860, 685)
-CHARACTER_RANK_SCROLL_FIRST_CENTER_Y = 42.0
 GENERAL_TEMPLATE_UNIT1_POSITIONS: dict[int, tuple[float, float]] = {
     # custom_profile/template/templatelayout.json unit 1.
     13: (-598.0, 330.0),
@@ -409,6 +402,13 @@ UNITY_UI_DARK_TINT = (0.266667, 0.266667, 0.4, 1.0)
 UNITY_UI_INPUT_TINT = (0.921569, 0.921569, 0.94902, 0.8)
 UNITY_UI_HONOR_TINT = (0.87451, 0.87451, 0.917647, 0.8)
 UNITY_UI_TOTAL_LINE_TINT = (0.654902, 0.654902, 0.737255, 1.0)
+GENERAL_PREFAB_PALETTE = GeneralPrefabPalette(
+    input_tint=UNITY_UI_INPUT_TINT,
+    dark_tint=UNITY_UI_DARK_TINT,
+    total_line_tint=UNITY_UI_TOTAL_LINE_TINT,
+    text=GENERAL_TEMPLATE_TEXT,
+    label_text=GENERAL_TEMPLATE_LABEL_TEXT,
+)
 GENERAL_DECK_CARD_NATIVE_SIZE = (330, 512)
 GENERAL_DECK_CARD_ART_SIZE = (330, 541.5380249023438)
 GENERAL_DECK_CARD_SCALE = 0.47269999980926514
@@ -1527,6 +1527,16 @@ def hex_to_rgba(color: str, alpha: float = 1.0) -> tuple[int, int, int, int]:
     )
 
 
+def unity_tint_rgba(
+    tint: tuple[float, float, float, float] | tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    """Normalize Unity's 0..1 float or 0..255 integer tint representation."""
+
+    if any(isinstance(value, float) and value <= 1.0 for value in tint):
+        return tuple(max(0, min(255, round(float(value) * 255.0))) for value in tint)
+    return tuple(max(0, min(255, round(float(value)))) for value in tint)
+
+
 def content_type_for_kind(kind: str) -> tuple[int, str]:
     return CONTENT_TYPES.get(kind, (0, "Invalid"))
 
@@ -1829,17 +1839,6 @@ def largest_component_mask(source: Image.Image, threshold: int = 16) -> Image.Im
     return Image.fromarray(keep, "L")
 
 
-def triangle_sprite_distance(path: Path) -> Image.Image:
-    field = Image.open(path).convert("RGB").getchannel("R")
-    keep = largest_component_mask(field, threshold=16)
-    return ImageChops.multiply(field, keep)
-
-
-def triangle_sprite_alpha(path: Path) -> Image.Image:
-    field = triangle_sprite_distance(path)
-    return sdf_threshold_alpha(field, 0.5, 0.02)
-
-
 def load_font(path: Path, size: float) -> ImageFont.FreeTypeFont:
     # Process-lifetime per-thread cache; previously this reopened the font file on every call
     # (200-400 times per request), the second-largest cold-render cost.
@@ -1976,6 +1975,7 @@ class PNGRenderer:
         premultiply_alpha_transforms: bool = DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS,
         tmp_decorative_direct_raster: bool = DEFAULT_TMP_DECORATIVE_DIRECT_RASTER,
         tmp_decorative_alpha_harden: float = 1.0,
+        max_layer_pixels: int = DEFAULT_MAX_LAYER_PIXELS,
     ) -> None:
         self.masterdata = masterdata
         self.resources = resources or {}
@@ -1995,6 +1995,7 @@ class PNGRenderer:
         self.premultiply_alpha_transforms = premultiply_alpha_transforms
         self.tmp_decorative_direct_raster = tmp_decorative_direct_raster
         self.tmp_decorative_alpha_harden = max(1.0, float(tmp_decorative_alpha_harden or 1.0))
+        self.max_layer_pixels = max(1, int(max_layer_pixels))
         self.text_pivot = text_pivot
         self.tmp_scale_mode = tmp_scale_mode
         self.rotation_sign = rotation_sign
@@ -2105,6 +2106,7 @@ class PNGRenderer:
         )
         self.static_images = self.resolve_static_images_root()
         self.unity_ui_sprite_dir = unity_ui_sprite_dir or DEFAULT_UNITY_UI_SPRITE_DIR
+        self._unity_ui_sprite_path_cache: dict[str, Path | None] = {}
         self._unity_ui_sprite_cache: dict[str, Image.Image | None] = {}
         self._shape_alpha_cache: dict[tuple[Path, str], Image.Image] = {}
         self._shape_field_cache: dict[tuple[Path, str, str], Image.Image] = {}
@@ -2287,9 +2289,19 @@ class PNGRenderer:
     def open_rgba(self, path: Path | None) -> Image.Image | None:
         if path is None or not path.exists():
             return None
+        return self.open_checked_image(path, "RGBA")
+
+    def open_checked_image(self, path: Path, mode: str) -> Image.Image:
+        """Decode one custom-profile asset only after its header passes the layer budget."""
+
         with Image.open(path) as image:
+            ensure_raster_size(
+                image.size,
+                max_pixels=self.max_layer_pixels,
+                label=f"custom profile source asset {path.name}",
+            )
             image.load()
-            return image.convert("RGBA")
+            return image.convert(mode)
 
     def data_root_candidates(self) -> list[Path]:
         candidates: list[Path] = []
@@ -2350,9 +2362,33 @@ class PNGRenderer:
         return result
 
     def resolve_request_asset_path(self, raw_path: str | None) -> Path | None:
+        raw = str(raw_path or "").strip()
+        if not raw:
+            return None
+        requested = Path(raw)
+        if any(part == ".." for part in requested.parts):
+            raise ValueError(f"custom profile asset path traversal is not allowed: {raw!r}")
+
+        allowed_roots: list[Path] = []
+        for root in (self.assets, self.game_assets, self.static_images, *self.data_root_candidates()):
+            try:
+                resolved_root = root.resolve(strict=True)
+            except OSError:
+                continue
+            if resolved_root not in allowed_roots:
+                allowed_roots.append(resolved_root)
+
+        rejected_existing: Path | None = None
         for path in self.request_asset_candidates(raw_path):
-            if path.exists():
-                return path
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                continue
+            if any(resolved == root or resolved.is_relative_to(root) for root in allowed_roots):
+                return resolved
+            rejected_existing = resolved
+        if rejected_existing is not None:
+            raise ValueError(f"custom profile asset path is outside configured data roots: {raw!r}")
         return None
 
     def open_request_rgba(self, raw_path: str | None) -> Image.Image | None:
@@ -2751,7 +2787,7 @@ class PNGRenderer:
                 required_inputs=("MasterResource", "asset bundle sprite PNG"),
                 generated_data=self.generate_image_data(kind, item, resource),
             )
-        image = Image.open(path).convert("RGBA")
+        image = self.open_checked_image(path, "RGBA")
         return image, (image.width / 2, image.height / 2)
 
     def render_general_content(
@@ -2803,29 +2839,90 @@ class PNGRenderer:
             labels = GENERAL_LABELS["jp"]
         return (labels or GENERAL_LABELS["cn"]).get(key, GENERAL_LABELS["cn"].get(key, key))
 
-    def general_font(self, size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    def general_font_candidates(self) -> list[Path]:
+        """Ordered GeneralContentView font candidates shared by both render backends."""
+
         if self.region in {"jp", "ja"}:
-            candidates = [
+            return [
                 self.fonts / "FOT-RodinNTLGPro-DB.otf",
                 self.fonts / "FOT-RodinNTLGPro-DB-alt.otf",
                 self.fonts / "FOT-RodinNTLGPro-DB.ttf",
                 self.font_path_for("FOT-RodinNTLGPro-DB"),
                 Path("/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc"),
             ]
-        else:
-            candidates = [
-                self.font_path_for("FOT-RodinNTLGPro-DB"),
-                self.fonts / "FOT-RodinNTLGPro-DB.ttf",
-                self.fonts / "FOT-RodinNTLGPro-DB.otf",
-                Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
-            ]
-        for path in candidates:
+        return [
+            self.font_path_for("FOT-RodinNTLGPro-DB"),
+            self.fonts / "FOT-RodinNTLGPro-DB.ttf",
+            self.fonts / "FOT-RodinNTLGPro-DB.otf",
+            Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
+        ]
+
+    def general_font_path(self) -> Path | None:
+        """Resolve the first configured GeneralContentView font without opening it."""
+
+        for path in self.general_font_candidates():
+            try:
+                if path.is_file():
+                    return path
+            except OSError:
+                continue
+        return None
+
+    def general_font(self, size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        for path in self.general_font_candidates():
             try:
                 if path.exists():
                     return ImageFont.truetype(str(path), size)
             except OSError:
                 continue
         return ImageFont.load_default()
+
+    def render_shared_general_prefab(self, file_name: str) -> Image.Image | None:
+        """Replay one migrated GeneralContentView from its renderer-neutral display list."""
+
+        asset_paths = {}
+        if file_name == "ChallengeLive":
+            data = self.profile_context.get("userChallengeLiveSoloResult") or {}
+            if isinstance(data, dict):
+                character_id = int(data.get("characterId", 0) or 0)
+                asset_paths["challenge_character_icon"] = self.chara_icon_path(character_id)
+        elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+            for _nickname, character_id in CHARA_LIST:
+                if character_id is not None:
+                    asset_paths[f"character_rank_icon:{character_id}"] = self.chara_icon_path(character_id)
+        elif file_name == "StoryFavorite":
+            stories = self.profile_context.get("userStoryFavorites") or []
+            if isinstance(stories, list):
+                for story in stories:
+                    if isinstance(story, dict):
+                        asset_paths[story_favorite_asset_key(story)] = self.story_favorite_image_path(story)
+        adapter = PillowGeneralPrefabAdapter(self.general_font, self.paste_unity_sprite, self.open_rgba)
+        display_list = build_general_prefab_display_list(
+            file_name,
+            size=GENERAL_NATIVE_SIZES[file_name],
+            profile_context=self.profile_context,
+            labels={
+                "comment_title": self.general_text("comment_title"),
+                "total_power": self.general_text("total_power"),
+                "multi_live_title": self.general_text("multi_live_title"),
+                "multi_live_count_suffix": self.general_text("multi_live_count_suffix"),
+                "challenge_live_title": self.general_text("challenge_live_title"),
+                "challenge_live_solo": self.general_text("challenge_live_solo"),
+                "character_rank_tab": self.general_text("character_rank_tab"),
+                "challenge_stage_tab": self.general_text("challenge_stage_tab"),
+                "music_clear": self.general_text("music_clear"),
+                "music_full_combo": self.general_text("music_full_combo"),
+                "music_all_perfect": self.general_text("music_all_perfect"),
+                "story_favorite_title": self.general_text("story_favorite_title"),
+                "not_set": self.general_text("not_set"),
+            },
+            metrics=adapter,
+            palette=GENERAL_PREFAB_PALETTE,
+            asset_paths=asset_paths,
+            music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
+            story_favorite_resources=self.story_favorite_resources,
+        )
+        return adapter.render(display_list) if display_list is not None else None
 
     def rect_transform_box(
         self,
@@ -2946,6 +3043,21 @@ class PNGRenderer:
             result.append(path)
         return result
 
+    def unity_ui_sprite_path(self, name: str) -> Path | None:
+        """Resolve a prefab sprite path without decoding image pixels."""
+
+        if name in self._unity_ui_sprite_path_cache:
+            return self._unity_ui_sprite_path_cache[name]
+        for path in self.unity_ui_sprite_candidates(name):
+            try:
+                if path.is_file():
+                    self._unity_ui_sprite_path_cache[name] = path
+                    return path
+            except OSError:
+                continue
+        self._unity_ui_sprite_path_cache[name] = None
+        return None
+
     def unity_ui_sprite(self, name: str) -> Image.Image | None:
         # The name -> path resolution (and the cached None verdict) stays instance-level: the
         # candidate list depends on this renderer's region/sprite dirs. Only the decode goes
@@ -2953,11 +3065,11 @@ class PNGRenderer:
         cached = self._unity_ui_sprite_cache.get(name)
         if cached is not None or name in self._unity_ui_sprite_cache:
             return cached
-        for path in self.unity_ui_sprite_candidates(name):
-            if path.exists():
-                sprite = self._decode_shared_image(path, "rgba")
-                self._unity_ui_sprite_cache[name] = sprite
-                return sprite
+        path = self.unity_ui_sprite_path(name)
+        if path is not None:
+            sprite = self._decode_shared_image(path, "rgba")
+            self._unity_ui_sprite_cache[name] = sprite
+            return sprite
         self._unity_ui_sprite_cache[name] = None
         return None
 
@@ -2978,11 +3090,10 @@ class PNGRenderer:
             SPRITE_ATLAS_CACHE.set(cache_key, image)
         return image
 
-    @staticmethod
-    def _decode_image_variant(path: Path, variant: str) -> Image.Image:
+    def _decode_image_variant(self, path: Path, variant: str) -> Image.Image:
         if variant == "atlas_alpha":
-            return Image.open(path).convert("RGBA").getchannel("A")
-        return Image.open(path).convert("RGBA")
+            return self.open_checked_image(path, "RGBA").getchannel("A")
+        return self.open_checked_image(path, "RGBA")
 
     def tint_image(
         self,
@@ -2990,11 +3101,7 @@ class PNGRenderer:
         tint: tuple[float, float, float, float] | tuple[int, int, int, int],
     ) -> Image.Image:
         rgba = image.convert("RGBA")
-        if any(isinstance(value, float) and value <= 1.0 for value in tint):
-            color = tuple(max(0, min(255, round(float(value) * 255.0))) for value in tint)
-        else:
-            color = tuple(max(0, min(255, round(float(value)))) for value in tint)
-        r, g, b, a = color
+        r, g, b, a = unity_tint_rgba(tint)
         alpha = ImageChops.multiply(rgba.getchannel("A"), Image.new("L", rgba.size, a))
         tinted = Image.new("RGBA", rgba.size, (r, g, b, 0))
         tinted.putalpha(alpha)
@@ -3323,121 +3430,13 @@ class PNGRenderer:
         return image
 
     def render_general_user_name(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["EditUserName"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        base_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5))
-        self.paste_unity_sprite(
-            image, "bg_base_r16_wh", base_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
-        )
-        name = str((self.profile_context.get("user") or {}).get("name", "") or "")
-        name = "".join(ch for ch in name if ch.isprintable())
-        text_rect = self.rect_transform_box(size, (0.5, 0.5), (0.5, 0.5), (18.5, 0.0), (509.0, 32.0), (0.5, 0.5))
-        self.draw_fit_text_rect(draw, text_rect, name, max_size=30, fill=GENERAL_TEMPLATE_TEXT)
-        icon_rect = self.rect_transform_box(size, (1.0, 0.5), (1.0, 0.5), (-16.0, 0.0), (42.0, 42.0), (1.0, 0.5))
-        self.draw_edit_mark(image, icon_rect)
-        return image
+        return self.render_shared_general_prefab("EditUserName")
 
     def render_general_comment(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["Comment"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        title_rect = self.rect_transform_box(size, (0.0, 1.0), (0.0, 1.0), (69.7, -13.5), (152.5, 32.0), (0.5, 0.5))
-        self.draw_center_text_rect(
-            draw, title_rect, self.general_text("comment_title"), size=22, fill=GENERAL_TEMPLATE_LABEL_TEXT
-        )
-        edit_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, -25.0), (0.0, -50.0), (0.5, 0.5))
-        self.paste_unity_sprite(
-            image, "bg_base_r16_wh", edit_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
-        )
-        comment = str((self.profile_context.get("userProfile") or {}).get("word", "") or "")
-        field_rect = self.rect_transform_box(
-            (edit_rect[2] - edit_rect[0], edit_rect[3] - edit_rect[1]),
-            (0.0, 0.0),
-            (1.0, 1.0),
-            (-22.0, 0.0),
-            (-76.0, -58.0),
-            (0.5, 0.5),
-        )
-        field_rect = (
-            field_rect[0] + edit_rect[0],
-            field_rect[1] + edit_rect[1],
-            field_rect[2] + edit_rect[0],
-            field_rect[3] + edit_rect[1],
-        )
-        font = self.general_font(30)
-        lines = self.wrap_general_text(comment, font, max(1, round(field_rect[2] - field_rect[0])))[:3]
-        y = round(field_rect[1])
-        for line in lines:
-            draw.text((round(field_rect[0]), y), line, font=font, fill=GENERAL_TEMPLATE_TEXT)
-            y += 40
-        icon_rect = self.rect_transform_box(
-            (edit_rect[2] - edit_rect[0], edit_rect[3] - edit_rect[1]),
-            (1.0, 1.0),
-            (1.0, 1.0),
-            (-17.0, -11.0),
-            (42.0, 42.0),
-            (1.0, 1.0),
-        )
-        icon_rect = (
-            icon_rect[0] + edit_rect[0],
-            icon_rect[1] + edit_rect[1],
-            icon_rect[2] + edit_rect[0],
-            icon_rect[3] + edit_rect[1],
-        )
-        self.draw_edit_mark(image, icon_rect)
-        return image
+        return self.render_shared_general_prefab("Comment")
 
     def render_general_total_power(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["TotalPower"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        title_font = self.general_font(30)
-        title = self.general_text("total_power")
-        title_bbox = draw.textbbox((0, 0), title, font=title_font)
-        title_w = max(1, title_bbox[2] - title_bbox[0])
-        title_h = title_bbox[3] - title_bbox[1]
-        title_left = -1.004974365234375
-        title_center_y = size[1] / 2.0
-        draw.text((title_left, title_center_y), title, font=title_font, fill=GENERAL_TEMPLATE_LABEL_TEXT, anchor="lm")
-        title_rect_w = title_w
-        line_rect = self.rect_transform_box(
-            size, (0.0, 0.5), (0.0, 0.5), (title_left + title_rect_w + 14.004974365234375, 0.0), (4.0, 32.0), (0.5, 0.5)
-        )
-        self.paste_unity_sprite(image, "bg_base_wh", line_rect, tint=UNITY_UI_TOTAL_LINE_TINT)
-        icon_rect = self.rect_transform_box(
-            size,
-            (0.0, 0.5),
-            (0.0, 0.5),
-            (title_left + title_rect_w + 50.004974365234375, 0.0),
-            (36.0, 42.0),
-            (0.5, 0.5),
-        )
-        self.draw_total_power_icon(image, icon_rect)
-        total = self.profile_context.get("totalPower") or {}
-        value = int(total.get("totalPower", 0) or 0) if isinstance(total, dict) else 0
-        text = f"{value}"
-        value_rect = self.rect_transform_box(
-            size,
-            (0.0, 0.5),
-            (0.0, 0.5),
-            (title_left + title_rect_w + 217.50497436523438, 0.0),
-            (160.0, 64.0),
-            (1.0, 0.5),
-        )
-        font = self.general_font(32)
-        draw.text(
-            (value_rect[2], (value_rect[1] + value_rect[3]) / 2.0),
-            text,
-            font=font,
-            fill=GENERAL_TEMPLATE_TEXT,
-            anchor="rm",
-        )
-        button_rect = self.rect_transform_box(
-            size, (0.0, 0.5), (0.0, 0.5), (title_left + title_rect_w + 267.60498046875, 0.0), (72.0, 72.0), (0.5, 0.5)
-        )
-        self.draw_info_button(image, button_rect)
-        return image
+        return self.render_shared_general_prefab("TotalPower")
 
     def render_general_leader_card(self) -> Image.Image | None:
         deck = self.profile_context.get("userDeck") or {}
@@ -3465,310 +3464,48 @@ class PNGRenderer:
         return image
 
     def render_general_honor_deck(self) -> Image.Image | None:
-        honors = sorted(
-            self.profile_context.get("userProfileHonors", []) or [], key=lambda row: int(row.get("seq", 0) or 0)
-        )
-        if not honors:
+        plan = build_honor_deck_plan(self.profile_context.get("userProfileHonors", []) or [])
+        if plan is None:
             return None
-        image = Image.new("RGBA", GENERAL_NATIVE_SIZES["HonorDeck"], (0, 0, 0, 0))
-        self.paste_unity_sprite(
-            image,
-            "bg_base_r16_wh",
-            (0.0, 0.0, float(image.width), float(image.height)),
-            tint=UNITY_UI_HONOR_TINT,
-            sliced_border=(21, 21, 21, 21),
-        )
-        rects = [
-            self.center_rect(image.size, (-188.0, 0.0), (380.0, 80.0)),
-            self.center_rect(image.size, (100.0, 0.0), (180.0, 80.0)),
-            self.center_rect(image.size, (288.0, 0.0), (180.0, 80.0)),
-        ]
-        for idx, row in enumerate(honors[:3]):
-            honor_id = int(row.get("honorId", 0) or 0)
-            level = int(row.get("honorLevel", 0) or 0)
-            badge = self.compose_profile_honor_image(row, full_size=idx == 0)
+        image = Image.new("RGBA", plan.natural_size, (0, 0, 0, 0))
+        if plan.panel is not None:
+            self.paste_unity_sprite(
+                image,
+                plan.panel.sprite_name,
+                plan.panel.target_rect,
+                tint=plan.panel.tint,
+                sliced_border=plan.panel.sliced_border,
+            )
+        for slot in plan.slots:
+            row = dict(slot.profile_row)
+            badge = self.compose_profile_honor_image(row, full_size=slot.full_size)
             if badge is None:
-                badge = self.compose_honor_image(honor_id, level, full_size=idx == 0)
+                badge = self.compose_honor_image(slot.honor_id, slot.honor_level, full_size=slot.full_size)
             if badge is None:
                 continue
-            self.paste_in_rect(image, badge, rects[idx])
+            self.paste_in_rect(image, badge, slot.target_rect)
         return image
 
     def render_general_music_clear_info(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["MusicClearInfo"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        rows = (
-            (self.general_text("music_clear"), "liveClear"),
-            (self.general_text("music_full_combo"), "fullCombo"),
-        )
-        counts = self.music_clear_count_map()
-        row_gap = 20
-        row_h = (size[1] - row_gap * (len(rows) - 1)) / len(rows)
-        for idx, (label, key) in enumerate(rows):
-            top = idx * (row_h + row_gap)
-            self.draw_music_clear_row(
-                image,
-                (0, top, size[0], top + row_h),
-                label,
-                key,
-                counts,
-                header_h=54,
-                value_inset_x=14,
-                value_top_gap=18,
-            )
-        return image
+        return self.render_shared_general_prefab("MusicClearInfo")
 
     def render_general_music_clear_select_tab_info(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["MusicClearSelectTabInfo"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-
-        tab_rect = (26, 0, size[0] - 22, 50)
-        self.paste_unity_sprite(
-            image,
-            "bg_base_r16_wh",
-            tab_rect,
-            tint=UNITY_UI_INPUT_TINT,
-            sliced_border=(21, 21, 21, 21),
-        )
-        segment_w = (tab_rect[2] - tab_rect[0]) / 3.0
-        selected_rect = (tab_rect[0], tab_rect[1], tab_rect[0] + segment_w, tab_rect[3])
-        self.paste_unity_sprite(
-            image,
-            "bg_base_r16_wh",
-            selected_rect,
-            tint=(244, 246, 252, 230),
-            sliced_border=(21, 21, 21, 21),
-        )
-        for index, label in enumerate(
-            (
-                self.general_text("music_clear"),
-                self.general_text("music_full_combo"),
-                self.general_text("music_all_perfect"),
-            )
-        ):
-            self.draw_center_text_rect(
-                draw,
-                (tab_rect[0] + segment_w * index, tab_rect[1], tab_rect[0] + segment_w * (index + 1), tab_rect[3]),
-                label,
-                size=23,
-                fill=GENERAL_TEMPLATE_TEXT if index == 0 else (255, 255, 255, 245),
-            )
-        for index in (1, 2):
-            x = tab_rect[0] + segment_w * index
-            draw.rounded_rectangle((x - 2, 10, x + 2, 41), radius=2, fill=(116, 122, 142, 130))
-        append_separator_x = size[0] - 142
-        draw.rounded_rectangle(
-            (append_separator_x - 1, 75, append_separator_x + 1, 154),
-            radius=1,
-            fill=(203, 106, 211, 180),
-        )
-
-        counts = self.music_clear_count_map()
-        self.draw_music_clear_value_strip(
-            image,
-            (26, 74, size[0] - 22, 158),
-            "liveClear",
-            counts,
-            cell_gap=8,
-            tag_h=34,
-        )
-        return image
+        return self.render_shared_general_prefab("MusicClearSelectTabInfo")
 
     def render_general_multi_live(self) -> Image.Image | None:
-        data = self.profile_context.get("userMultiLiveTopScoreCount") or {}
-        if not isinstance(data, dict):
-            return None
-        size = GENERAL_NATIVE_SIZES["MultiLive"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-
-        self.draw_fit_text_rect(
-            draw,
-            (20, 16, 280, 52),
-            self.general_text("multi_live_title"),
-            max_size=30,
-            min_size=18,
-            fill=GENERAL_TEMPLATE_TEXT,
-            anchor="lm",
-        )
-        self.paste_unity_sprite(
-            image,
-            "bg_base_wh",
-            (34, 62, size[0] - 34, 66),
-            tint=UNITY_UI_TOTAL_LINE_TINT,
-        )
-
-        def draw_stat(
-            root_center_x: float,
-            root_center_y: float,
-            label: str,
-            value: int,
-            *,
-            label_width: float = 130.0,
-            value_width: float = 142.0,
-        ) -> None:
-            label_left = root_center_x
-            label_top = root_center_y - 28.0
-            label_rect = (label_left, label_top, label_left + label_width, label_top + 56.0)
-            self.paste_unity_sprite(
-                image,
-                "bg_base_r16_wh",
-                label_rect,
-                tint=UNITY_UI_INPUT_TINT,
-                sliced_border=(21, 21, 21, 21),
-            )
-            self.draw_fit_text_rect(
-                draw,
-                (label_rect[0] + 10.0, label_rect[1] + 2.0, label_rect[2] - 10.0, label_rect[3] - 2.0),
-                label,
-                max_size=29,
-                min_size=17,
-                fill=(255, 255, 255, 255),
-                anchor="mm",
-            )
-            value_center_x = root_center_x + (210.0 if label == "MVP" else 207.0)
-            self.draw_fit_text_rect(
-                draw,
-                (
-                    value_center_x - value_width / 2.0,
-                    root_center_y - 30.0,
-                    value_center_x + value_width / 2.0,
-                    root_center_y + 30.0,
-                ),
-                f"{value}{self.general_text('multi_live_count_suffix')}",
-                max_size=30,
-                min_size=18,
-                fill=GENERAL_TEMPLATE_TEXT,
-                anchor="mm",
-            )
-
-        draw_stat(26.0, 118.0, "MVP", int(data.get("mvp", 0) or 0))
-        draw_stat(399.0, 118.0, "SUPER\nSTAR", int(data.get("superStar", 0) or 0))
-        return image
+        return self.render_shared_general_prefab("MultiLive")
 
     def render_general_challenge_live(self) -> Image.Image | None:
-        data = self.profile_context.get("userChallengeLiveSoloResult") or {}
-        if not isinstance(data, dict):
-            return None
-        character_id = int(data.get("characterId", 0) or 0)
-        high_score = int(data.get("highScore", 0) or 0)
-        if character_id <= 0 and high_score <= 0:
-            return None
-        size = GENERAL_NATIVE_SIZES["ChallengeLive"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.paste_unity_sprite(
-            image,
-            "bg_base_r16_wh",
-            (0.0, 0.0, float(size[0]), float(size[1])),
-            tint=(225, 238, 239, 205),
-            sliced_border=(21, 21, 21, 21),
-        )
-        draw = ImageDraw.Draw(image)
-        self.draw_fit_text_rect(
-            draw,
-            (28, 18, size[0] - 28, 58),
-            self.general_text("challenge_live_title"),
-            max_size=28,
-            min_size=18,
-            fill=GENERAL_TEMPLATE_TEXT,
-            anchor="lm",
-        )
-        self.paste_unity_sprite(image, "bg_base_wh", (24, 62, size[0] - 22, 66), tint=UNITY_UI_TOTAL_LINE_TINT)
-        solo_rect = (24, 96, 136, 144)
-        self.paste_unity_sprite(
-            image,
-            "bg_base_r16_wh",
-            solo_rect,
-            tint=(169, 171, 205, 235),
-            sliced_border=(21, 21, 21, 21),
-        )
-        self.draw_center_text_rect(
-            draw, solo_rect, self.general_text("challenge_live_solo"), size=25, fill=(255, 255, 255, 255)
-        )
-        icon_path = self.chara_icon_path(character_id)
-        if icon := self.open_rgba(icon_path):
-            self.paste_in_rect(image, icon, (158, 86, 222, 150))
-        self.draw_fit_text_rect(
-            draw,
-            (244, 92, size[0] - 30, 148),
-            f"{high_score}",
-            max_size=31,
-            min_size=20,
-            fill=GENERAL_TEMPLATE_TEXT,
-            anchor="lm",
-        )
-        return image
+        return self.render_shared_general_prefab("ChallengeLive")
 
     def render_general_character_rank_and_challenge_stage(self, scroll: bool = True) -> Image.Image:
         size_key = "CharacterRankAndChallengeStageScroll" if scroll else "CharacterRankAndChallengeStage"
-        size = GENERAL_NATIVE_SIZES[size_key]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        self.draw_character_rank_tabs(image, scroll=scroll)
-        ranks = self.character_rank_map()
-
-        if scroll:
-            content = Image.new("RGBA", CHARACTER_RANK_SCROLL_CONTENT_SIZE, (0, 0, 0, 0))
-            viewport_left, viewport_top, viewport_right, viewport_bottom = CHARACTER_RANK_SCROLL_VIEWPORT
-            for index, (_nickname, character_id) in enumerate(CHARA_LIST):
-                if character_id is None:
-                    continue
-                col = index % 4
-                row = index // 4
-                center_x = CHARACTER_RANK_CELL_CENTER_X[col] - viewport_left
-                center_y = CHARACTER_RANK_SCROLL_FIRST_CENTER_Y + row * CHARACTER_RANK_ROW_STEP
-                top_left = self.character_rank_cell_top_left(center_x, center_y)
-                self.draw_profile_rank_and_stage_cell(content, top_left, character_id, ranks.get(character_id, 0))
-            viewport = content.crop(
-                (0, 0, round(viewport_right - viewport_left), round(viewport_bottom - viewport_top))
-            )
-            image.alpha_composite(viewport, (round(viewport_left), round(viewport_top)))
-            self.draw_general_vertical_scrollbar(image, (885, 104, 891, 524))
-        else:
-            for index, (_nickname, character_id) in enumerate(CHARA_LIST):
-                if character_id is None:
-                    continue
-                col = index % 4
-                row = index // 4
-                center_x = CHARACTER_RANK_CELL_CENTER_X[col]
-                center_y = CHARACTER_RANK_NON_SCROLL_FIRST_CENTER_Y + row * CHARACTER_RANK_ROW_STEP
-                top_left = self.character_rank_cell_top_left(center_x, center_y)
-                self.draw_profile_rank_and_stage_cell(image, top_left, character_id, ranks.get(character_id, 0))
+        image = self.render_shared_general_prefab(size_key)
+        assert image is not None
         return image
 
     def render_general_story_favorite(self) -> Image.Image | None:
-        stories = self.profile_context.get("userStoryFavorites") or []
-        if not isinstance(stories, list):
-            return None
-        size = GENERAL_NATIVE_SIZES["StoryFavorite"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        self.draw_story_favorite_header(image)
-        font = self.general_font(22)
-        if not stories:
-            draw.text(
-                (size[0] / 2, size[1] / 2),
-                self.general_text("not_set"),
-                font=font,
-                fill=GENERAL_TEMPLATE_TEXT,
-                anchor="mm",
-            )
-            return image
-        ordered_stories = self.ordered_story_favorites(stories)
-        card_w, card_h = 403, 172
-        gap_x, gap_y = 24, 20
-        start_x, start_y = 25, 92
-        for index, story in enumerate(ordered_stories):
-            if not isinstance(story, dict):
-                continue
-            col = index % 2
-            row = index // 2
-            x = start_x + col * (card_w + gap_x)
-            y = start_y + row * (card_h + gap_y)
-            self.draw_story_favorite_cell(image, story, (x, y, x + card_w, y + card_h))
-        if len(ordered_stories) > 8:
-            self.draw_general_vertical_scrollbar(image, (size[0] - 23, 92, size[0] - 17, size[1] - 25))
-        return image
+        return self.render_shared_general_prefab("StoryFavorite")
 
     def draw_character_rank_tabs(self, image: Image.Image, *, scroll: bool) -> None:
         draw = ImageDraw.Draw(image)
@@ -3930,22 +3667,17 @@ class PNGRenderer:
         )
 
     def ordered_story_favorites(self, stories: list[Any]) -> list[dict[str, Any]]:
-        items = [story for story in stories if isinstance(story, dict)]
-        return sorted(items, key=lambda story: int(story.get("shareNo", story.get("share_no", 9999)) or 9999))
+        return order_story_favorites(stories)
 
     def story_favorite_key(self, story: dict[str, Any]) -> str:
-        return f"{story.get('storyType', '')}:{story.get('storyId', '')}"
+        return build_story_favorite_key(story)
 
     def story_favorite_resource(self, story: dict[str, Any]) -> dict[str, Any]:
         key = self.story_favorite_key(story)
         return self.story_favorite_resources.get(key) or {}
 
     def story_favorite_title(self, story: dict[str, Any]) -> str:
-        resource = self.story_favorite_resource(story)
-        title = str(resource.get("title", "") or story.get("comment", "") or "").strip()
-        if title:
-            return title
-        return f"{story.get('storyType', '')} #{story.get('storyId', '')}".strip()
+        return resolve_story_favorite_title(story, self.story_favorite_resources)
 
     def story_favorite_image_path(self, story: dict[str, Any]) -> Path | None:
         resource = self.story_favorite_resource(story)
@@ -4265,6 +3997,54 @@ class PNGRenderer:
         rank_path = self.static_images / "card" / f"train_rank_{master_rank}.png"
         return frame_path, attr_path, star_path, rank_path
 
+    def card_sprite_ref(
+        self,
+        name: str,
+        fallback_path: Path | None = None,
+    ) -> CardSpriteRef:
+        return CardSpriteRef(
+            name=name,
+            path=self.unity_ui_sprite_path(name),
+            fallback_path=fallback_path,
+        )
+
+    def card_prefab_resources(
+        self,
+        card_id: int,
+        art_path: Path | None,
+        *,
+        frame_size: str,
+        attr_size: int,
+        rank_size: str,
+        include_leader_label: bool = False,
+    ) -> CardPrefabResources:
+        card = self.card_master_for(card_id) or {}
+        frame_path, attr_path, star_path, rank_path = self.card_overlay_paths(card_id)
+        master_rank = self.card_master_rank(card_id)
+        return CardPrefabResources(
+            art_path=art_path,
+            frame=self.card_sprite_ref(self.card_frame_sprite_name(card, frame_size), frame_path),
+            attribute=self.card_sprite_ref(self.card_attr_sprite_name(card, attr_size), attr_path),
+            rarity=self.card_sprite_ref(self.card_star_sprite_name(card_id), star_path),
+            master_rank=(
+                self.card_sprite_ref(self.card_master_rank_sprite_name(card_id, rank_size), rank_path)
+                if master_rank > 0
+                else None
+            ),
+            leader_label=(self.card_sprite_ref("label_mark_leader_L_pk") if include_leader_label else None),
+        )
+
+    def card_pillow_adapter(self) -> PillowCardAdapter:
+        return PillowCardAdapter(
+            self.general_font,
+            self.paste_unity_sprite,
+            self.unity_ui_sprite,
+            self.open_rgba,
+        )
+
+    def render_card_display_list(self, display_list: CardDisplayList) -> Image.Image:
+        return self.card_pillow_adapter().render(display_list)
+
     def draw_card_rarity(
         self,
         image: Image.Image,
@@ -4273,65 +4053,41 @@ class PNGRenderer:
         positions: list[tuple[float, float, float, float]],
     ) -> None:
         count = self.rarity_star_count(self.card_master_for(card_id) or {})
-        star = self.unity_ui_sprite(self.card_star_sprite_name(card_id))
-        if star is None:
-            if star_path is None or not star_path.exists():
-                return
-            star = Image.open(star_path).convert("RGBA")
-        for rect in positions[:count]:
-            self.paste_in_rect(image, star, rect)
+        resource = self.card_sprite_ref(self.card_star_sprite_name(card_id), star_path)
+        self.card_pillow_adapter().apply_ops(
+            image,
+            build_card_rarity_ops(resource, positions, count),
+        )
 
     def draw_deck_leader_label(self, image: Image.Image) -> None:
-        rect = self.rect_transform_box(image.size, (1.0, 1.0), (1.0, 1.0), (0.0, 0.0), (164.0, 94.0), (1.0, 1.0))
-        self.paste_unity_sprite(image, "label_mark_leader_L_pk", rect)
+        self.card_pillow_adapter().apply_ops(
+            image,
+            (
+                build_deck_leader_label_op(
+                    image.size,
+                    self.card_sprite_ref("label_mark_leader_L_pk"),
+                ),
+            ),
+        )
 
     def card_level(self, card_id: int) -> int:
         return max(1, int((self.user_card_for(card_id) or {}).get("level", 1) or 1))
 
     def draw_deck_card_level(self, image: Image.Image, card_id: int) -> None:
-        draw = ImageDraw.Draw(image)
-        lv_rect = self.rect_transform_box(
-            image.size, (0.0, 0.0), (1.0, 0.0), (0.0, 0.0), (0.0, 56.38999938964844), (0.5, 0.0)
-        )
-        draw.rectangle(tuple(round(v) for v in lv_rect), fill=(38, 39, 62, 230))
-        text_rect = self.rect_transform_box(
-            (lv_rect[2] - lv_rect[0], lv_rect[3] - lv_rect[1]),
-            (0.0, 0.0),
-            (0.0, 1.0),
-            (12.9, 0.7),
-            (117.76000213623047, -9.569999694824219),
-            (0.0, 0.5),
-        )
-        text_rect = (
-            text_rect[0] + lv_rect[0],
-            text_rect[1] + lv_rect[1],
-            text_rect[2] + lv_rect[0],
-            text_rect[3] + lv_rect[1],
-        )
-        font = self.general_font(28)
-        draw.text(
-            (text_rect[0], (text_rect[1] + text_rect[3]) / 2.0),
-            f"Lv.{self.card_level(card_id)}",
-            font=font,
-            fill=(255, 255, 255, 255),
-            anchor="lm",
+        self.card_pillow_adapter().apply_ops(
+            image,
+            build_deck_card_level_ops(
+                image.size,
+                self.card_level(card_id),
+                font=CardFontRef(path=self.general_font_path()),
+            ),
         )
 
     def apply_card_frame_mask(self, image: Image.Image, sprite_name: str = "tex_mask_card_s") -> Image.Image:
-        mask_sprite = self.unity_ui_sprite(sprite_name)
-        if mask_sprite is None:
-            mask = Image.new("L", image.size, 0)
-            draw = ImageDraw.Draw(mask)
-            draw.rounded_rectangle(
-                (0, 0, image.width, image.height),
-                radius=max(1, round(min(image.width, image.height) * 0.03)),
-                fill=255,
-            )
-        else:
-            mask = mask_sprite.getchannel("A").resize(image.size, Image.Resampling.LANCZOS)
-        masked = image.copy()
-        masked.putalpha(ImageChops.multiply(masked.getchannel("A"), mask))
-        return masked
+        return self.card_pillow_adapter().apply_ops(
+            image,
+            (CardAlphaMaskOp(self.card_sprite_ref(sprite_name)),),
+        )
 
     def draw_deck_card_view_overlays(
         self,
@@ -4344,46 +4100,24 @@ class PNGRenderer:
     ) -> None:
         if not show_detail:
             return
-        card = self.card_master_for(card_id) or {}
-        frame_path, attr_path, star_path, rank_path = self.card_overlay_paths(card_id)
-        if (
-            not self.paste_unity_sprite(
-                image, self.card_frame_sprite_name(card, "M"), (0.0, 0.0, float(image.width), float(image.height))
-            )
-            and frame_path.exists()
-        ):
-            frame = Image.open(frame_path).convert("RGBA")
-            self.paste_in_rect(image, frame, (0.0, 0.0, float(image.width), float(image.height)))
-        attr_rect = self.rect_transform_box(
-            image.size,
-            (0.0, 1.0),
-            (0.0, 1.0),
-            (attr_x, 0.0),
-            (64.0, 68.0),
-            (0.0, 1.0),
+        resources = self.card_prefab_resources(
+            card_id,
+            None,
+            frame_size="M",
+            attr_size=64,
+            rank_size="S",
+            include_leader_label=leader,
         )
-        if not self.paste_unity_sprite(image, self.card_attr_sprite_name(card, 64), attr_rect) and attr_path.exists():
-            attr = Image.open(attr_path).convert("RGBA")
-            self.paste_in_rect(image, attr, attr_rect)
-        star_positions = []
-        star_size = 56.0 * 0.8
-        for idx in range(4):
-            left = 5.0 + idx * 40.0
-            bottom = 64.0
-            star_positions.append((left, image.height - bottom - star_size, left + star_size, image.height - bottom))
-        self.draw_card_rarity(image, card_id, star_path, star_positions)
-        rank_rect = self.rect_transform_box(
-            image.size, (1.0, 0.0), (1.0, 0.0), (1.4, 0.8), (88.0 * 0.95, 88.0 * 0.95), (1.0, 0.0)
+        self.card_pillow_adapter().apply_ops(
+            image,
+            build_deck_card_overlay_ops(
+                image.size,
+                resources,
+                self.rarity_star_count(self.card_master_for(card_id) or {}),
+                attr_x=attr_x,
+                leader=leader,
+            ),
         )
-        if self.card_master_rank(card_id) > 0:
-            if (
-                not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "S"), rank_rect)
-                and rank_path.exists()
-            ):
-                rank = Image.open(rank_path).convert("RGBA")
-                self.paste_in_rect(image, rank, rank_rect)
-        if leader:
-            self.draw_deck_leader_label(image)
 
     def compose_deck_card_view(
         self,
@@ -4399,80 +4133,76 @@ class PNGRenderer:
         mask_sprite_name: str | None = "tex_mask_card_s",
         render_size: tuple[int, int] | None = None,
     ) -> Image.Image:
-        source = Image.open(path).convert("RGBA")
-        art = self.resize_cover_aligned(source, art_size, align_x=0.5, align_y=0.5)
-        crop_left = max(0, round((art.width - native_size[0]) * 0.5))
-        crop_top = max(0, round((art.height - native_size[1]) * crop_align_y))
-        content = Image.new("RGBA", native_size, (0, 0, 0, 0))
-        content.alpha_composite(art.crop((crop_left, crop_top, crop_left + native_size[0], crop_top + native_size[1])))
-        if show_detail:
-            self.draw_deck_card_level(content, card_id)
-        native = self.apply_card_frame_mask(content, mask_sprite_name) if mask_sprite_name else content
-        self.draw_deck_card_view_overlays(
-            native,
+        return self.render_card_display_list(
+            self.build_deck_card_display_list(
+                card_id,
+                path,
+                native_size=native_size,
+                art_size=art_size,
+                crop_align_y=crop_align_y,
+                leader=leader,
+                show_detail=show_detail,
+                attr_x=attr_x,
+                mask_sprite_name=mask_sprite_name,
+                render_size=render_size,
+            )
+        )
+
+    def build_deck_card_display_list(
+        self,
+        card_id: int,
+        path: Path,
+        *,
+        native_size: tuple[int, int],
+        art_size: tuple[float, float],
+        crop_align_y: float,
+        leader: bool = False,
+        show_detail: bool = True,
+        attr_x: float = 3.70001220703125,
+        mask_sprite_name: str | None = "tex_mask_card_s",
+        render_size: tuple[int, int] | None = None,
+    ) -> CardDisplayList:
+        resources = self.card_prefab_resources(
             card_id,
+            path,
+            frame_size="M",
+            attr_size=64,
+            rank_size="S",
+            include_leader_label=leader,
+        )
+        return build_deck_card_prefab_display_list(
+            native_size=native_size,
+            art_size=art_size,
+            crop_align_y=crop_align_y,
+            resources=resources,
+            rarity_count=self.rarity_star_count(self.card_master_for(card_id) or {}),
+            level=self.card_level(card_id),
             leader=leader,
             show_detail=show_detail,
             attr_x=attr_x,
+            mask=(self.card_sprite_ref(mask_sprite_name) if mask_sprite_name is not None else None),
+            render_size=render_size,
+            font=CardFontRef(path=self.general_font_path()),
         )
-        if render_size is not None:
-            return native.resize(render_size, Image.Resampling.LANCZOS)
-        return native
 
     def draw_small_still_card_overlays(self, image: Image.Image, card_id: int, *, show_detail: bool = True) -> None:
         if not show_detail:
             return
-        card = self.card_master_for(card_id) or {}
-        frame_path, attr_path, star_path, master_path = self.card_overlay_paths(card_id)
-        if (
-            not self.paste_unity_sprite(
-                image, self.card_frame_sprite_name(card, "L"), (0.0, 0.0, float(image.width), float(image.height))
-            )
-            and frame_path.exists()
-        ):
-            frame = Image.open(frame_path).convert("RGBA")
-            self.paste_in_rect(image, frame, (0.0, 0.0, float(image.width), float(image.height)))
-        attr_rect = self.rect_transform_box(image.size, (1.0, 1.0), (1.0, 1.0), (-40.0, 0.0), (88.0, 92.0), (1.0, 1.0))
-        if not self.paste_unity_sprite(image, self.card_attr_sprite_name(card, 88), attr_rect) and attr_path.exists():
-            attr_img = Image.open(attr_path).convert("RGBA")
-            self.paste_in_rect(image, attr_img, attr_rect)
-        star_positions = [
-            (
-                24.2 + 0.37,
-                image.height - (17.0 + 10.75998592376709 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                image.height - (17.0 + 10.75998592376709),
-            ),
-            (
-                24.2 + 0.37,
-                image.height - (17.0 + 58.81999969482422 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                image.height - (17.0 + 58.81999969482422),
-            ),
-            (
-                24.2 + 0.37,
-                image.height - (17.0 + 106.88999938964844 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                image.height - (17.0 + 106.88999938964844),
-            ),
-            (
-                24.2 + 0.37,
-                image.height - (17.0 + 154.9600067138672 + 55.7599983215332),
-                24.2 + 0.37 + 55.7599983215332,
-                image.height - (17.0 + 154.9600067138672),
-            ),
-        ]
-        self.draw_card_rarity(image, card_id, star_path, star_positions)
-        master_rect = self.rect_transform_box(
-            image.size, (1.0, 0.0), (1.0, 0.0), (-24.0, 24.0), (104.0, 104.0), (1.0, 0.0)
+        resources = self.card_prefab_resources(
+            card_id,
+            None,
+            frame_size="L",
+            attr_size=88,
+            rank_size="L",
         )
-        if self.card_master_rank(card_id) > 0:
-            if (
-                not self.paste_unity_sprite(image, self.card_master_rank_sprite_name(card_id, "L"), master_rect)
-                and master_path.exists()
-            ):
-                rank_img = Image.open(master_path).convert("RGBA")
-                self.paste_in_rect(image, rank_img, master_rect)
+        self.card_pillow_adapter().apply_ops(
+            image,
+            build_full_card_overlay_ops(
+                image.size,
+                resources,
+                self.rarity_star_count(self.card_master_for(card_id) or {}),
+            ),
+        )
 
     def compose_profile_small_still_card(
         self,
@@ -4482,21 +4212,70 @@ class PNGRenderer:
         target_size: tuple[int, int] = FULL_CARD_MEMBER_NATIVE_SIZE,
         show_detail: bool = True,
     ) -> Image.Image:
-        base = self.resize_cover_aligned(Image.open(path).convert("RGBA"), target_size, align_x=0.5, align_y=0.5)
-        self.draw_small_still_card_overlays(base, card_id, show_detail=show_detail)
-        return base
+        return self.render_card_display_list(
+            self.build_small_still_card_display_list(
+                card_id,
+                path,
+                target_size=target_size,
+                show_detail=show_detail,
+            )
+        )
+
+    def build_small_still_card_display_list(
+        self,
+        card_id: int,
+        path: Path,
+        *,
+        target_size: tuple[int, int] = FULL_CARD_MEMBER_NATIVE_SIZE,
+        show_detail: bool = True,
+    ) -> CardDisplayList:
+        resources = self.card_prefab_resources(
+            card_id,
+            path,
+            frame_size="L",
+            attr_size=88,
+            rank_size="L",
+        )
+        return build_full_card_prefab_display_list(
+            size=target_size,
+            resources=resources,
+            rarity_count=self.rarity_star_count(self.card_master_for(card_id) or {}),
+            show_detail=show_detail,
+        )
 
     def compose_profile_card_still(self, card_id: int, target_size: tuple[int, int]) -> Image.Image | None:
+        display_list = self.build_profile_card_still_display_list(card_id, target_size)
+        return self.render_card_display_list(display_list) if display_list is not None else None
+
+    def build_profile_card_still_display_list(
+        self,
+        card_id: int,
+        target_size: tuple[int, int],
+    ) -> CardDisplayList | None:
         path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
         if path is None:
             return None
-        return self.compose_profile_small_still_card(card_id, path, target_size=target_size, show_detail=True)
+        return self.build_small_still_card_display_list(
+            card_id,
+            path,
+            target_size=target_size,
+            show_detail=True,
+        )
 
     def compose_profile_deck_card(self, card_id: int, leader: bool = False) -> Image.Image | None:
+        display_list = self.build_profile_deck_card_display_list(card_id, leader=leader)
+        return self.render_card_display_list(display_list) if display_list is not None else None
+
+    def build_profile_deck_card_display_list(
+        self,
+        card_id: int,
+        *,
+        leader: bool = False,
+    ) -> CardDisplayList | None:
         path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "deck")
         if path is None:
             return None
-        return self.compose_deck_card_view(
+        return self.build_deck_card_display_list(
             card_id,
             path,
             native_size=GENERAL_DECK_CARD_NATIVE_SIZE,
@@ -4517,19 +4296,20 @@ class PNGRenderer:
         return f"frame_rarity_{digits}.png"
 
     def empty_profile_deck_card(self, target_size: tuple[int, int]) -> Image.Image:
-        image = Image.new("RGBA", target_size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((0, 0, target_size[0] - 1, target_size[1] - 1), radius=8, fill=(226, 232, 240, 255))
-        draw.rounded_rectangle(
-            (0, 0, target_size[0] - 1, target_size[1] - 1), radius=8, outline=(170, 183, 198, 255), width=2
-        )
-        return image
+        return self.render_card_display_list(self.build_empty_profile_deck_card_display_list(target_size))
+
+    def build_empty_profile_deck_card_display_list(self, target_size: tuple[int, int]) -> CardDisplayList:
+        return build_empty_deck_card_display_list(target_size)
 
     def compose_profile_leader_card(self, card_id: int) -> Image.Image | None:
+        display_list = self.build_profile_leader_card_display_list(card_id)
+        return self.render_card_display_list(display_list) if display_list is not None else None
+
+    def build_profile_leader_card_display_list(self, card_id: int) -> CardDisplayList | None:
         path = self.card_image_path_for_state(card_id, self.card_default_after_training(card_id), "small")
         if path is None:
             return None
-        return self.compose_profile_small_still_card(
+        return self.build_small_still_card_display_list(
             card_id,
             path,
             target_size=GENERAL_NATIVE_SIZES["LeaderCard"],
@@ -4543,28 +4323,9 @@ class PNGRenderer:
         card_member_type = int(item.get("type", 0) or 0)
         expected_view = "ClipSizeCardContentView" if card_member_type == 1 else "FullSizeCardContentView"
         generated = self.generate_card_member_data(item)
-        card_id = content_data_id("card_member", item)
-        path = self.card_member_image_path(item)
-        if path:
-            if card_member_type == 1:
-                image = self.compose_deck_card_view(
-                    card_id,
-                    path,
-                    native_size=CLIP_CARD_MEMBER_NATIVE_SIZE,
-                    art_size=CLIP_CARD_MEMBER_ART_SIZE,
-                    crop_align_y=0.5,
-                    leader=False,
-                    show_detail=bool_from_profile(item.get("showMasterRank", False)),
-                    attr_x=8.0,
-                    mask_sprite_name=None,
-                )
-            else:
-                image = self.compose_profile_small_still_card(
-                    card_id,
-                    path,
-                    target_size=FULL_CARD_MEMBER_NATIVE_SIZE,
-                    show_detail=bool_from_profile(item.get("showMasterRank", False)),
-                )
+        display_list = self.build_card_member_display_list(item)
+        if display_list is not None:
+            image = self.render_card_display_list(display_list)
             return image, (image.width / 2, image.height / 2)
         return self.native_unresolved(
             "card_member",
@@ -4574,6 +4335,32 @@ class PNGRenderer:
             expected_size=PREFAB_NATIVE_SIZES.get(expected_view),
             required_inputs=("userCards", "cards.json", "character/member card assets"),
             generated_data=generated,
+        )
+
+    def build_card_member_display_list(self, item: dict[str, Any]) -> CardDisplayList | None:
+        card_member_type = int(item.get("type", 0) or 0)
+        card_id = content_data_id("card_member", item)
+        path = self.card_member_image_path(item)
+        if path is None:
+            return None
+        show_detail = bool_from_profile(item.get("showMasterRank", False))
+        if card_member_type == 1:
+            return self.build_deck_card_display_list(
+                card_id,
+                path,
+                native_size=CLIP_CARD_MEMBER_NATIVE_SIZE,
+                art_size=CLIP_CARD_MEMBER_ART_SIZE,
+                crop_align_y=0.5,
+                leader=False,
+                show_detail=show_detail,
+                attr_x=8.0,
+                mask_sprite_name=None,
+            )
+        return self.build_small_still_card_display_list(
+            card_id,
+            path,
+            target_size=FULL_CARD_MEMBER_NATIVE_SIZE,
+            show_detail=show_detail,
         )
 
     def render_honor_content(
@@ -4603,6 +4390,33 @@ class PNGRenderer:
             return image
         if image := self.honor_request_image(self.honor_requests.get(str(honor_id))):
             return image
+
+        request = self.build_masterdata_honor_request(honor_id, level, full_size)
+        if request is None:
+            return None
+        images = {
+            "honor_img": self.open_rgba(Path(request.honor_img_path)) if request.honor_img_path else None,
+            "rank_img": self.open_rgba(Path(request.rank_img_path)) if request.rank_img_path else None,
+            "frame_img": self.open_rgba(Path(request.frame_img_path)) if request.frame_img_path else None,
+            "frame_degree_level_img": (
+                self.open_rgba(Path(request.frame_degree_level_img_path))
+                if request.frame_degree_level_img_path
+                else None
+            ),
+            "scroll_img": self.open_rgba(Path(request.scroll_img_path)) if request.scroll_img_path else None,
+            "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
+            "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
+        }
+        return compose_full_honor_image_from_loaded_assets(request, images)
+
+    def build_masterdata_honor_request(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+    ) -> HonorRequest | None:
+        """Derive an honor request from loaded masterdata without decoding or composing images."""
+
         if self.masterdata is None:
             return None
 
@@ -4659,16 +4473,7 @@ class PNGRenderer:
             lv_img_path=self.honor_request_path(lv_path),
             lv6_img_path=self.honor_request_path(lv6_path),
         )
-        images = {
-            "honor_img": self.open_rgba(honor_path),
-            "rank_img": self.open_rgba(rank_path),
-            "frame_img": self.open_rgba(frame_path),
-            "frame_degree_level_img": self.open_rgba(frame_degree_level_path),
-            "scroll_img": self.open_rgba(scroll_path),
-            "lv_img": self.open_rgba(lv_path),
-            "lv6_img": self.open_rgba(lv6_path),
-        }
-        return compose_full_honor_image_from_loaded_assets(request, images)
+        return request
 
     def honor_group_for(self, honor: dict[str, Any]) -> dict[str, Any] | None:
         return self.honor_groups.get(int(honor.get("groupId", 0) or 0))
@@ -4895,9 +4700,35 @@ class PNGRenderer:
                 return image
         if image := self.honor_request_image(self.bonds_honor_requests.get(str(honor_id))):
             return image
+
+        request = self.build_masterdata_bonds_honor_request(item, full_size)
+        if request is None:
+            return None
+        images = {
+            "bonds_bg": self.open_rgba(Path(request.bonds_bg_path)) if request.bonds_bg_path else None,
+            "bonds_bg2": self.open_rgba(Path(request.bonds_bg_path2)) if request.bonds_bg_path2 else None,
+            "chara_icon_1": self.open_rgba(Path(request.chara_icon_path)) if request.chara_icon_path else None,
+            "chara_icon_2": self.open_rgba(Path(request.chara_icon_path2)) if request.chara_icon_path2 else None,
+            "mask_img": self.open_rgba(Path(request.mask_img_path)) if request.mask_img_path else None,
+            "frame_img": self.open_rgba(Path(request.frame_img_path)) if request.frame_img_path else None,
+            "word_img": self.open_rgba(Path(request.word_img_path)) if request.word_img_path else None,
+            "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
+            "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
+        }
+        return compose_full_honor_image_from_loaded_assets(request, images)
+
+    def build_masterdata_bonds_honor_request(
+        self,
+        item: dict[str, Any],
+        full_size: bool,
+    ) -> HonorRequest | None:
+        """Derive a bonds-honor request from loaded masterdata without decoding or composing images."""
+
         if self.masterdata is None:
             return None
 
+        honor_id = content_data_id("bonds_honor", item)
+        level = self.user_bonds_honor_level_for(honor_id)
         honor = self.bonds_honors.get(honor_id)
         if not honor:
             return None
@@ -4955,18 +4786,7 @@ class PNGRenderer:
             lv_img_path=self.honor_request_path(lv_path),
             lv6_img_path=self.honor_request_path(lv6_path),
         )
-        images = {
-            "bonds_bg": self.open_rgba(bg_path),
-            "bonds_bg2": self.open_rgba(bg2_path),
-            "chara_icon_1": self.open_rgba(chara_icon_path),
-            "chara_icon_2": self.open_rgba(chara_icon_path2),
-            "mask_img": self.open_rgba(mask_path),
-            "frame_img": self.open_rgba(frame_path),
-            "word_img": self.open_rgba(word_path),
-            "lv_img": self.open_rgba(lv_path),
-            "lv6_img": self.open_rgba(lv6_path),
-        }
-        return compose_full_honor_image_from_loaded_assets(request, images)
+        return request
 
     def game_character_id_for_unit(self, unit_id: int) -> int:
         unit = self.game_character_units.get(unit_id)
@@ -5037,7 +4857,7 @@ class PNGRenderer:
         collection_type = str(resource.get("customProfileResourceCollectionType", "none") or "none")
         path = self.resource_path(resource)
         if path:
-            image = Image.open(path).convert("RGBA")
+            image = self.open_checked_image(path, "RGBA")
             return image, (image.width / 2, image.height / 2)
         if collection_type == "omikuji":
             return self.render_omikuji_collection_content(item, resource)
@@ -5377,7 +5197,7 @@ class PNGRenderer:
         if image_path := str(stamp_asset.get("imagePath", stamp_asset.get("image_path", "")) or "").strip():
             path = self.resolve_request_asset_path(image_path)
             if path is not None:
-                image = Image.open(path).convert("RGBA")
+                image = self.open_checked_image(path, "RGBA")
                 return image, (image.width / 2, image.height / 2)
 
         resource = self.image_resource_for("stamp", item)
@@ -5393,7 +5213,7 @@ class PNGRenderer:
                 required_inputs=("stamps.json", "stamp sprite asset bundle"),
                 generated_data=self.generate_stamp_data(item, resource),
             )
-        image = Image.open(path).convert("RGBA")
+        image = self.open_checked_image(path, "RGBA")
         return image, (image.width / 2, image.height / 2)
 
     def render_dynamic_content(self, kind: str, item: dict[str, Any]) -> NativeUnresolvedContent:
@@ -5647,7 +5467,7 @@ class PNGRenderer:
     ) -> Image.Image:
         target_w = max(1, round(target_size[0]))
         target_h = max(1, round(target_size[1]))
-        src = Image.open(path).convert("RGBA")
+        src = self.open_checked_image(path, "RGBA")
         scale = (
             min(target_w / src.width, target_h / src.height)
             if contain
@@ -5754,11 +5574,14 @@ class PNGRenderer:
         if cached is not None:
             return cached
 
-        mask_img = Image.open(path).convert("RGBA")
+        mask_img = self.open_checked_image(path, "RGBA")
         if resource_file == "triangle" and self.triangle_mode == "sharp":
             alpha = sharp_triangle_alpha(mask_img.size)
         elif resource_file == "triangle" and self.triangle_mode == "sprite":
-            alpha = triangle_sprite_alpha(path)
+            field = mask_img.convert("RGB").getchannel("R")
+            alpha = sdf_threshold_alpha(
+                ImageChops.multiply(field, largest_component_mask(field, threshold=16)), 0.5, 0.02
+            )
         else:
             alpha = mask_img.getchannel("A")
         self._shape_alpha_cache[key] = alpha
@@ -5775,11 +5598,12 @@ class PNGRenderer:
             field = self.shape_alpha_mask(path, resource_file)
         else:
             if resource_file == "triangle" and self.triangle_mode == "sharp":
-                field = sharp_triangle_distance(Image.open(path).size)
+                field = sharp_triangle_distance(self.open_checked_image(path, "RGBA").size)
             elif resource_file == "triangle" and self.triangle_mode == "sprite":
-                field = triangle_sprite_distance(path)
+                source = self.open_checked_image(path, "RGB").getchannel("R")
+                field = ImageChops.multiply(source, largest_component_mask(source, threshold=16))
             else:
-                field = Image.open(path).convert("RGB").getchannel("R")
+                field = self.open_checked_image(path, "RGB").getchannel("R")
         self._shape_field_cache[key] = field
         return field
 
@@ -5906,6 +5730,7 @@ class PNGRenderer:
     def resize_layer_for_transform(
         self, layer: Image.Image, size: tuple[int, int], resample: Image.Resampling
     ) -> Image.Image:
+        size = ensure_raster_size(size, max_pixels=self.max_layer_pixels, label="custom profile transformed layer")
         if self.premultiply_alpha_transforms:
             return resize_rgba_premul(layer, size, resample)
         return layer.resize(size, resample)
@@ -5917,6 +5742,7 @@ class PNGRenderer:
         data: tuple[float, float, float, float, float, float],
         resample: Image.Resampling,
     ) -> Image.Image:
+        size = ensure_raster_size(size, max_pixels=self.max_layer_pixels, label="custom profile affine layer")
         if self.premultiply_alpha_transforms:
             return transform_rgba_premul(layer, size, Image.Transform.AFFINE, data, resample)
         return layer.transform(size, Image.Transform.AFFINE, data, resample, fillcolor=(0, 0, 0, 0))
@@ -6115,7 +5941,11 @@ class PNGRenderer:
             return None
         resource_file = str(resource.get("fileName", "")).strip().lower()
         alpha_mask = self.shape_alpha_mask(path, resource_file)
-        size = alpha_mask.size
+        size = ensure_raster_size(
+            alpha_mask.size,
+            max_pixels=self.max_layer_pixels,
+            label=f"custom profile shape {resource_file or path.name}",
+        )
         fill_color = self.colors.get(int(item.get("colorId", 0)), "#ffffff")
         fill_alpha_value = float(item.get("alpha", 1.0))
         fill = Image.new("RGBA", size, hex_to_rgba(fill_color, fill_alpha_value))
@@ -6128,7 +5958,11 @@ class PNGRenderer:
                 scale = item.get("objectData", {}).get("scale", {})
                 sx = float(scale.get("x") or 1.0)
                 sy = float(scale.get("y") or sx or 1.0)
-                output_size = (max(1, round(size[0] * sx)), max(1, round(size[1] * sy)))
+                output_size = ensure_raster_size(
+                    (max(1, round(size[0] * sx)), max(1, round(size[1] * sy))),
+                    max_pixels=self.max_layer_pixels,
+                    label=f"custom profile scaled shape {resource_file or path.name}",
+                )
                 scale_consumed = True
             base = self.render_distance_field_shape(
                 path,
@@ -6486,6 +6320,8 @@ class PNGRenderer:
         layout_mode: str = "preferred",
         outline_dilate: float = 0.0,
         margin_width: float | None = None,
+        *,
+        source_metrics_only: bool = False,
     ) -> TMPNativeTextLayout | None:
         if not lines:
             return None
@@ -6516,6 +6352,7 @@ class PNGRenderer:
                 current_em_scale,
                 outline_dilate,
                 native_margin_width,
+                source_metrics_only=source_metrics_only,
             )
             dominant_size = max(dominant_size, line_dominant_size)
             first_character_index = len(characters)
@@ -6553,6 +6390,7 @@ class PNGRenderer:
                         layout_mode,
                         current_em_scale,
                         outline_dilate,
+                        source_metrics_only=source_metrics_only,
                     )
                     characters.append(char_info)
                 next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
@@ -6618,6 +6456,7 @@ class PNGRenderer:
                     layout_mode,
                     current_em_scale,
                     outline_dilate,
+                    source_metrics_only=source_metrics_only,
                 )
                 characters.append(char_info)
                 line_break_adjusted_ascender = char_info.adjusted_ascender
@@ -6736,6 +6575,8 @@ class PNGRenderer:
         current_em_scale: float,
         outline_dilate: float,
         margin_width: float,
+        *,
+        source_metrics_only: bool = False,
     ) -> tuple[list[tuple[TextRun, float, float]], float, float, float, float]:
         run_metrics: list[tuple[TextRun, float, float]] = []
         x = self.tmp_native_line_initial_x(line, margin_width)
@@ -6753,6 +6594,13 @@ class PNGRenderer:
                 raw_bbox_right = raw_bbox_left + (source_metrics.width if source_metrics is not None else raw_advance)
                 raw_bbox_top = -self.tmp_native_style_extents(font_name, run.style)[0]
                 raw_bbox_bottom = -self.tmp_native_style_extents(font_name, run.style)[1]
+            elif source_metrics_only:
+                measure = self.measure_tmp_source_run(run, font_name, scaled_size, current_em_scale)
+                raw_advance = measure.advance
+                raw_bbox_left = measure.visual_left
+                raw_bbox_right = measure.visual_right
+                raw_bbox_top = measure.visual_top
+                raw_bbox_bottom = measure.visual_bottom
             else:
                 font = load_font(font_path, scaled_size)
                 measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
@@ -6763,7 +6611,14 @@ class PNGRenderer:
                 raw_bbox_bottom = measure.visual_bottom
             advance_scale_x = self.tmp_native_layout_advance_scale_x(run.style, layout_mode)
             vertex_scale_x = self.tmp_native_vertex_scale_x(run.style)
-            run_w = self.tmp_native_run_advance(run, font_name, font_path, current_em_scale, advance_scale_x)
+            run_w = self.tmp_native_run_advance(
+                run,
+                font_name,
+                font_path,
+                current_em_scale,
+                advance_scale_x,
+                source_metrics_only=source_metrics_only,
+            )
             if self.tmp_scale_mode in {"fx-native"}:
                 quad = self.tmp_native_fx_quad(
                     raw_bbox_left - vertex_padding,
@@ -6823,8 +6678,16 @@ class PNGRenderer:
         layout_mode: str,
         current_em_scale: float,
         outline_dilate: float,
+        *,
+        source_metrics_only: bool = False,
     ) -> tuple[TMPNativeCharacterInfo, float, float, float, int]:
-        metrics = self.tmp_native_glyph_metrics(font_name, font_path, char, style)
+        metrics = self.tmp_native_glyph_metrics(
+            font_name,
+            font_path,
+            char,
+            style,
+            source_metrics_only=source_metrics_only,
+        )
         baseline_offset = self.tmp_native_baseline_offset(style)
         element_ascender, element_descender = self.tmp_native_style_extents(font_name, style)
         element_ascender += baseline_offset
@@ -6969,6 +6832,8 @@ class PNGRenderer:
         font_path: Path,
         current_em_scale: float,
         advance_scale_x: float,
+        *,
+        source_metrics_only: bool = False,
     ) -> float:
         if self.use_em_block(run):
             font_size = run.style.size * self.tmp_font_scale
@@ -6982,7 +6847,13 @@ class PNGRenderer:
         x = 0.0
         last_index = len(run.text) - 1
         for idx, char in enumerate(run.text):
-            metrics = self.tmp_native_glyph_metrics(font_name, font_path, char, run.style)
+            metrics = self.tmp_native_glyph_metrics(
+                font_name,
+                font_path,
+                char,
+                run.style,
+                source_metrics_only=source_metrics_only,
+            )
             next_x = self.tmp_native_next_x_advance(
                 x,
                 char,
@@ -7029,10 +6900,23 @@ class PNGRenderer:
         font_path: Path,
         char: str,
         style: TextStyle,
+        *,
+        source_metrics_only: bool = False,
     ) -> TMPGlyphMetrics:
         if char in {"\r", "\n", "\x03"}:
             return self.tmp_zero_glyph_metrics()
         font_size = style.size * self.tmp_font_scale
+        if source_metrics_only:
+            metric_char = self.tmp_render_glyph_char(font_name, char, font_size)
+            metrics = self.tmp_font_library.source_glyph_metrics(
+                font_name,
+                metric_char,
+                font_size,
+                include_fallback=False,
+            )
+            if metrics is None:
+                raise ValueError(f"source font metrics are unavailable for U+{ord(char):04X}")
+            return metrics
         font = load_font(font_path, font_size)
         return self.glyph_layout_metrics(font, char, font_name, font_size)
 
@@ -8087,6 +7971,59 @@ class PNGRenderer:
         font_size: float,
     ) -> TMPGlyphMetrics:
         return self.glyph_layout_metrics_with_source(font, ch, font_name, font_size)[0]
+
+    def measure_tmp_source_run(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_size: float,
+        current_em_scale: float | None = None,
+    ) -> TMPRunMeasure:
+        """Measure a strict dynamic-font run without constructing a Pillow font object."""
+
+        metric_text = run.text or " "
+        cursor = 0.0
+        visual_left: float | None = None
+        visual_right: float | None = None
+        visual_top: float | None = None
+        visual_bottom: float | None = None
+        last_index = len(metric_text) - 1
+        for idx, ch in enumerate(metric_text):
+            metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
+            metrics = self.tmp_font_library.source_glyph_metrics(
+                font_name,
+                metric_char,
+                font_size,
+                include_fallback=False,
+            )
+            if metrics is None:
+                raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
+            advance = metrics.advance
+            glyph_origin_x = cursor
+            if run.style.mspace is not None:
+                mono_advance = self.tmp_mspace_advance(run.style.mspace)
+                glyph_origin_x += (mono_advance - advance) * 0.5
+                advance = mono_advance
+            if run.text and self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
+                raw_left = glyph_origin_x + metrics.bearing_x
+                raw_right = raw_left + metrics.width
+                top = -metrics.bearing_y
+                bottom = top + metrics.height
+                visual_left = raw_left if visual_left is None else min(visual_left, raw_left)
+                visual_right = raw_right if visual_right is None else max(visual_right, raw_right)
+                visual_top = top if visual_top is None else min(visual_top, top)
+                visual_bottom = bottom if visual_bottom is None else max(visual_bottom, bottom)
+            cursor += advance
+            if idx != last_index:
+                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
+
+        if not run.text:
+            return TMPRunMeasure(cursor, 0.0, cursor, 0.0, 0.0)
+        if visual_top is None or visual_bottom is None:
+            visual_top = visual_bottom = 0.0
+        if visual_left is None or visual_right is None:
+            visual_left = visual_right = 0.0
+        return TMPRunMeasure(cursor, visual_left, visual_right, visual_top, visual_bottom)
 
     def measure_tmp_run(
         self,
