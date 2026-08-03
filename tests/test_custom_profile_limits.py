@@ -90,6 +90,49 @@ def test_custom_profile_rejects_oversized_text_before_rendering() -> None:
         validate_custom_profile_card(card, **LIMITS)
 
 
+def _text_card(text: str, *, size: float = 96.0) -> dict:
+    card = _card()
+    card["customProfileCard"]["shapes"] = []
+    card["customProfileCard"]["texts"] = [
+        {
+            "text": text,
+            "size": size,
+            "objectData": {
+                "visible": True,
+                "layer": 1,
+                "position": {"x": 0, "y": 0},
+                "scale": {"x": 1, "y": 1},
+                "rotation": {"z": 0, "w": 1},
+            },
+        }
+    ]
+    return card
+
+
+@pytest.mark.parametrize(
+    ("text", "match"),
+    [
+        ("<size=4097>hello</size>", r"richText\.size"),
+        ("<scale=64.01>hello</scale>", r"richText\.scale"),
+        ("<size=nan>hello</size>", r"richText\.size"),
+        ("<rotate=inf>hello</rotate>", r"richText\.rotate"),
+        ("<cspace=1e308>hello</cspace>", r"richText\.cspace"),
+    ],
+)
+def test_custom_profile_rejects_unbounded_effective_rich_text_style(text: str, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        validate_custom_profile_card(_text_card(text), **LIMITS)
+
+
+def test_custom_profile_accepts_bounded_effective_rich_text_style() -> None:
+    validate_custom_profile_card(_text_card("<size=300><scale=6>hello</scale></size>"), **LIMITS)
+
+
 def test_custom_profile_raster_budget_rejects_allocation_before_it_happens() -> None:
     with pytest.raises(ValueError, match="16000000 pixels"):
         ensure_raster_size((4000, 4000), max_pixels=8 * 1024 * 1024, label="shape")
+
+
+def test_custom_profile_raster_budget_normalizes_nonfinite_dimension_error() -> None:
+    with pytest.raises(ValueError, match="finite integer dimensions"):
+        ensure_raster_size((math.inf, 1), max_pixels=8 * 1024 * 1024, label="shape")

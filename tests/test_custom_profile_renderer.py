@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from PIL import Image
 import pytest
@@ -245,6 +246,59 @@ def test_custom_profile_source_image_budget_runs_before_decode(tmp_path: Path) -
 
     with pytest.raises(ValueError, match="source asset"):
         renderer.open_rgba(source)
+
+
+def test_custom_profile_vector_sdf_budget_runs_before_numpy_allocation(tmp_path: Path, monkeypatch) -> None:
+    np = pytest.importorskip("numpy")
+    renderer = _make_renderer(tmp_path, max_layer_pixels=4)
+    monkeypatch.setattr(renderer, "tmp_vector_glyph_contours", lambda *_: ((), np))
+    monkeypatch.setattr(np, "meshgrid", lambda *_args, **_kwargs: pytest.fail("meshgrid must not allocate"))
+
+    with pytest.raises(ValueError, match="6 pixels"):
+        renderer.tmp_vector_glyph_sdf_field(
+            tmp_path / "font.ttf",
+            "x",
+            24.0,
+            (0, 0, 3, 2),
+            0,
+            SimpleNamespace(gradient_scale=1.0),
+        )
+
+
+def test_custom_profile_retained_raster_budget_rejects_before_next_allocation(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, max_scene_bytes=5)
+
+    assert renderer._reserve_retained_raster_bytes(2, 3, label="custom profile test") == 5
+    with pytest.raises(ValueError, match="would retain 6 bytes"):
+        renderer._reserve_retained_raster_bytes(3, 3, label="custom profile test")
+
+
+def test_custom_profile_warp_budget_runs_before_transform(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        canvas_w=64,
+        canvas_h=64,
+        origin_x=32,
+        origin_y=32,
+        position_scale_x=1.0,
+        position_scale_y=1.0,
+    )
+    field = Image.new("L", (4, 4), 255)
+    monkeypatch.setattr(Image.Image, "transform", lambda *_args, **_kwargs: pytest.fail("transform must not allocate"))
+
+    with pytest.raises(ValueError, match="remaining limit"):
+        renderer.warp_tmp_sdf_field_direct(
+            field,
+            0.0,
+            0.0,
+            (0.0, 0.0),
+            {
+                "position": {"x": 0, "y": 0},
+                "scale": {"x": 1, "y": 1},
+                "rotation": {"z": 0, "w": 1},
+            },
+            max_output_bytes=63,
+        )
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:

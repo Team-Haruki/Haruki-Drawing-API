@@ -1715,6 +1715,7 @@ async def try_render_custom_profile_card_payload(
             ),
             region=region,
             max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+            max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
         )
         ir_json, mem_images, report = _build_scene(renderer, card)
         if not report.complete:

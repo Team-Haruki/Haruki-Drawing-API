@@ -98,6 +98,7 @@ TMP_DECORATIVE_TEXT_CHARS = frozenset("●○■█▲△▼▽◣◢◤◥⌒�
 DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
 DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
 DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
+DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024
 TMP_DEFAULT_TEXT_BOX_W = 108.0
 TMP_TEXT_BOX_W_SIZE_FACTOR = 1.6
 TMP_LINE_HEIGHT_FACTOR = 1.0
@@ -1976,6 +1977,7 @@ class PNGRenderer:
         tmp_decorative_direct_raster: bool = DEFAULT_TMP_DECORATIVE_DIRECT_RASTER,
         tmp_decorative_alpha_harden: float = 1.0,
         max_layer_pixels: int = DEFAULT_MAX_LAYER_PIXELS,
+        max_scene_bytes: int = DEFAULT_MAX_SCENE_BYTES,
     ) -> None:
         self.masterdata = masterdata
         self.resources = resources or {}
@@ -1996,6 +1998,7 @@ class PNGRenderer:
         self.tmp_decorative_direct_raster = tmp_decorative_direct_raster
         self.tmp_decorative_alpha_harden = max(1.0, float(tmp_decorative_alpha_harden or 1.0))
         self.max_layer_pixels = max(1, int(max_layer_pixels))
+        self.max_scene_bytes = max(1, int(max_scene_bytes))
         self.text_pivot = text_pivot
         self.tmp_scale_mode = tmp_scale_mode
         self.rotation_sign = rotation_sign
@@ -2123,6 +2126,14 @@ class PNGRenderer:
         self.native_audit: list[dict[str, Any]] = []
         self.tmp_layout_audit: list[dict[str, Any]] = []
         self._current_card_ref: dict[str, int] = {}
+
+    def _reserve_retained_raster_bytes(self, current: int, additional: int, *, label: str) -> int:
+        """Reserve bytes for a list of live user-derived rasters before creating the next one."""
+
+        total = max(0, int(current)) + max(0, int(additional))
+        if total > self.max_scene_bytes:
+            raise ValueError(f"{label} would retain {total} bytes; limit is {self.max_scene_bytes}")
+        return total
 
     def load_resource_index(self, *names: str, filename: str | None = None) -> dict[int, dict[str, Any]]:
         for name in names:
@@ -6097,7 +6108,12 @@ class PNGRenderer:
 
         pad = self.text_pad(base_size, outline_width)
         content_w = max(1.0, max_x - min_x)
-        img = Image.new("RGBA", (math.ceil(content_w + pad * 2), math.ceil(max(1.0, total_h) + pad * 2)), (0, 0, 0, 0))
+        image_size = ensure_raster_size(
+            (math.ceil(content_w + pad * 2), math.ceil(max(1.0, total_h) + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile text layer",
+        )
+        img = Image.new("RGBA", image_size, (0, 0, 0, 0))
 
         for line_metrics, line_y, line_h in metrics:
             for run, x, _ in line_metrics:
@@ -6237,7 +6253,12 @@ class PNGRenderer:
         rect_origin_y = pad - mesh_top
         img_w = math.ceil(mesh_right - mesh_left + pad * 2)
         img_h = math.ceil(mesh_bottom - mesh_top + pad * 2)
-        img = Image.new("RGBA", (max(1, img_w), max(1, img_h)), (0, 0, 0, 0))
+        image_size = ensure_raster_size(
+            (max(1, img_w), max(1, img_h)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP text layer",
+        )
+        img = Image.new("RGBA", image_size, (0, 0, 0, 0))
         self.record_tmp_layout_audit(
             item,
             text_data,
@@ -8635,7 +8656,12 @@ class PNGRenderer:
 
         bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
         pad = self.tmp_display_padding(asset, outline_dilate, font_size)
-        field_img = Image.new("L", (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)), 0)
+        field_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP static SDF field",
+        )
+        field_img = Image.new("L", field_size, 0)
         for metrics, x, y, w, h in placements:
             atlas_path = asset.atlas_paths[min(metrics.atlas_index, len(asset.atlas_paths) - 1)]
             atlas = self.tmp_atlas_alpha(atlas_path)
@@ -8649,9 +8675,12 @@ class PNGRenderer:
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
 
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            field_img = field_img.resize(
-                (max(1, round(field_img.width * style.scale_x)), field_img.height), Image.Resampling.BICUBIC
+            scaled_size = ensure_raster_size(
+                (max(1, round(field_img.width * style.scale_x)), field_img.height),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile scaled TMP static SDF field",
             )
+            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
 
         import numpy as np
 
@@ -8690,6 +8719,11 @@ class PNGRenderer:
         )
         w = max(1, sample_bbox[2] - sample_bbox[0] + sample_pad * 2)
         h = max(1, sample_bbox[3] - sample_bbox[1] + sample_pad * 2)
+        w, h = ensure_raster_size(
+            (w, h),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP dynamic SDF mask",
+        )
         mask = Image.new("L", (w, h), 0)
         if self.tmp_scale_mode in {"fx-center", "fx-native"}:
             self.draw_text_mask_run_fx(
@@ -8723,13 +8757,15 @@ class PNGRenderer:
         display_scale = font_size / raster_size
         scale_x = style.scale_x if self.tmp_scale_mode == "x" else 1.0
         field_img = Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
-        field_img = field_img.resize(
+        display_size = ensure_raster_size(
             (
                 max(1, round(field_img.width * display_scale * scale_x)),
                 max(1, round(field_img.height * display_scale)),
             ),
-            Image.Resampling.BICUBIC,
+            max_pixels=self.max_layer_pixels,
+            label="custom profile displayed TMP dynamic SDF field",
         )
+        field_img = field_img.resize(display_size, Image.Resampling.BICUBIC)
         field = np.asarray(field_img, dtype=np.float32) / 255.0
         bbox = (
             math.floor(sample_bbox[0] * display_scale * scale_x),
@@ -8936,8 +8972,11 @@ class PNGRenderer:
         if outlines is None:
             return None
         contours, np = outlines
-        width = max(1, bbox[2] - bbox[0] + pad * 2)
-        height = max(1, bbox[3] - bbox[1] + pad * 2)
+        width, height = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP vector glyph field",
+        )
         xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
         px = float(bbox[0] - pad) + xs + 0.5
         py = -(float(bbox[1] - pad) + ys + 0.5)
@@ -9066,6 +9105,11 @@ class PNGRenderer:
             bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
             w = max(1, bbox_right - bbox_left + raster_pad * 2)
             h = max(1, bbox_bottom - bbox_top + raster_pad * 2)
+            w, h = ensure_raster_size(
+                (w, h),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile TMP dynamic glyph mask",
+            )
             mask = Image.new("L", (w, h), 0)
             mask.paste(raster_glyph_mask, (raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top))
         else:
@@ -9073,6 +9117,11 @@ class PNGRenderer:
             bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
             w = max(1, bbox_right - bbox_left + raster_pad * 2)
             h = max(1, bbox_bottom - bbox_top + raster_pad * 2)
+            w, h = ensure_raster_size(
+                (w, h),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile TMP dynamic glyph mask",
+            )
             mask = Image.new("L", (w, h), 0)
             draw = ImageDraw.Draw(mask)
             draw.text((raster_pad - bbox_left, raster_pad - bbox_top), ch[0], font=sample_font, fill=255)
@@ -9092,6 +9141,11 @@ class PNGRenderer:
         native_field_size = (
             max(1, native_bbox[2] - native_bbox[0] + native_pad * 2),
             max(1, native_bbox[3] - native_bbox[1] + native_pad * 2),
+        )
+        native_field_size = ensure_raster_size(
+            native_field_size,
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native glyph field",
         )
         if field_img.size != native_field_size:
             field_img = field_img.resize(native_field_size, Image.Resampling.BICUBIC)
@@ -9118,6 +9172,7 @@ class PNGRenderer:
             return None
         style = run.style
         glyphs: list[tuple[Image.Image, tuple[int, int, int, int], int, float]] = []
+        retained_glyph_bytes = 0
         cursor = 0.0
         min_x = 0.0
         min_y = 0.0
@@ -9147,13 +9202,15 @@ class PNGRenderer:
                     math.ceil(cached.bbox[3] * display_scale),
                 )
                 pad = max(1, round(cached.pad * display_scale))
-                field_img = cached.field.resize(
+                field_size = ensure_raster_size(
                     (
                         max(1, round(cached.field.width * display_scale)),
                         max(1, round(cached.field.height * display_scale)),
                     ),
-                    Image.Resampling.BICUBIC,
+                    max_pixels=self.max_layer_pixels,
+                    label="custom profile displayed TMP glyph field",
                 )
+                field_img = cached.field.resize(field_size, Image.Resampling.BICUBIC)
                 if abs(fx_scale_x - 1.0) >= 1.0e-6:
                     scaled_left, scaled_right = self.tmp_scale_x_bounds(
                         float(bbox[0]),
@@ -9166,15 +9223,22 @@ class PNGRenderer:
                         math.ceil(scaled_right),
                         bbox[3],
                     )
-                    field_img = field_img.resize(
+                    scaled_size = ensure_raster_size(
                         (
                             max(1, round(field_img.width * fx_scale_x)),
                             field_img.height,
                         ),
-                        Image.Resampling.BICUBIC,
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile scaled TMP glyph field",
                     )
+                    field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
                 import numpy as np
 
+                retained_glyph_bytes = self._reserve_retained_raster_bytes(
+                    retained_glyph_bytes,
+                    field_img.width * field_img.height * 4,
+                    label="custom profile TMP run",
+                )
                 field = np.asarray(field_img, dtype=np.float32) / 255.0
                 glyph = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate)
                 glyphs.append((glyph, bbox, pad, glyph_origin_x))
@@ -9191,9 +9255,14 @@ class PNGRenderer:
             return None
 
         bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
+        image_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + max_pad * 2), max(1, bbox[3] - bbox[1] + max_pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP dynamic glyph run",
+        )
         image = Image.new(
             "RGBA",
-            (max(1, bbox[2] - bbox[0] + max_pad * 2), max(1, bbox[3] - bbox[1] + max_pad * 2)),
+            image_size,
             (0, 0, 0, 0),
         )
         for glyph, glyph_bbox, glyph_pad, glyph_origin_x in glyphs:
@@ -9202,7 +9271,12 @@ class PNGRenderer:
             image.alpha_composite(glyph, (px, py))
 
         if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
-            image = image.resize((max(1, round(image.width * style.scale_x)), image.height), Image.Resampling.BICUBIC)
+            scaled_size = ensure_raster_size(
+                (max(1, round(image.width * style.scale_x)), image.height),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile scaled TMP dynamic glyph run",
+            )
+            image = image.resize(scaled_size, Image.Resampling.BICUBIC)
             bbox = (
                 math.floor(bbox[0] * style.scale_x),
                 bbox[1],
@@ -9254,6 +9328,11 @@ class PNGRenderer:
         pad = self.tmp_display_padding(asset, outline_dilate, font_size)
         w = max(1, bbox[2] - bbox[0] + pad * 2)
         h = max(1, bbox[3] - bbox[1] + pad * 2)
+        w, h = ensure_raster_size(
+            (w, h),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP SDF run mask",
+        )
         mask = Image.new("L", (w, h), 0)
         if self.tmp_scale_mode in {"fx-center", "fx-native"}:
             self.draw_text_mask_run_fx(mask, (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size)
@@ -9263,7 +9342,12 @@ class PNGRenderer:
             )
             if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
                 new_w = max(1, round(mask.width * style.scale_x))
-                mask = mask.resize((new_w, mask.height), Image.Resampling.BICUBIC)
+                scaled_size = ensure_raster_size(
+                    (new_w, mask.height),
+                    max_pixels=self.max_layer_pixels,
+                    label="custom profile scaled TMP SDF run mask",
+                )
+                mask = mask.resize(scaled_size, Image.Resampling.BICUBIC)
 
         try:
             field = alpha_mask_to_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
@@ -9293,7 +9377,11 @@ class PNGRenderer:
                 atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
                 atlas = self.tmp_atlas_alpha(atlas_path)
                 if char_info is not None:
-                    quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                    quad_w, quad_h = ensure_raster_size(
+                        self.tmp_native_unrotated_quad_size(char_info),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile TMP native glyph quad",
+                    )
                     atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
                     atlas_left = metrics.rect_x - atlas_pad
                     atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
@@ -9304,6 +9392,11 @@ class PNGRenderer:
                         atlas.height - atlas_top_unity,
                         atlas_right,
                         atlas.height - atlas_bottom_unity,
+                    )
+                    ensure_raster_size(
+                        (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile TMP atlas glyph crop",
                     )
                     field_img = atlas.crop(crop_box)
                     if field_img.size != (quad_w, quad_h):
@@ -9328,12 +9421,22 @@ class PNGRenderer:
                         math.ceil(top + height),
                     )
                     pad_x = pad_y = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
+                    field_size = ensure_raster_size(
+                        (max(1, bbox[2] - bbox[0] + pad_x * 2), max(1, bbox[3] - bbox[1] + pad_y * 2)),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile TMP atlas glyph field",
+                    )
                     field_img = Image.new(
                         "L",
-                        (max(1, bbox[2] - bbox[0] + pad_x * 2), max(1, bbox[3] - bbox[1] + pad_y * 2)),
+                        field_size,
                         0,
                     )
-                    glyph = crop.resize((width, height), Image.Resampling.BICUBIC)
+                    glyph_size = ensure_raster_size(
+                        (width, height),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile TMP atlas glyph",
+                    )
+                    glyph = crop.resize(glyph_size, Image.Resampling.BICUBIC)
                     field_img.paste(glyph, (pad_x + math.floor(left) - bbox[0], pad_y + math.floor(top) - bbox[1]))
             else:
                 return None
@@ -9360,7 +9463,11 @@ class PNGRenderer:
             )
             field_source = cached.field.crop(crop_box)
             if char_info is not None:
-                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                quad_w, quad_h = ensure_raster_size(
+                    self.tmp_native_unrotated_quad_size(char_info),
+                    max_pixels=self.max_layer_pixels,
+                    label="custom profile TMP native glyph quad",
+                )
                 field_img = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
                 bbox = (0, 0, field_img.width, field_img.height)
                 pad_x = pad_y = 0
@@ -9373,13 +9480,15 @@ class PNGRenderer:
                     math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
                 )
                 pad_x = pad_y = max(0, round(sample_crop_pad * display_scale))
-                field_img = field_source.resize(
+                field_size = ensure_raster_size(
                     (
                         max(1, round(field_source.width * display_scale)),
                         max(1, round(field_source.height * display_scale)),
                     ),
-                    Image.Resampling.BICUBIC,
+                    max_pixels=self.max_layer_pixels,
+                    label="custom profile displayed TMP glyph field",
                 )
+                field_img = field_source.resize(field_size, Image.Resampling.BICUBIC)
 
         scale_x = self.tmp_native_vertex_scale_x(style)
         if not native_quad_sized and abs(scale_x - 1.0) >= 1.0e-6:
@@ -9391,13 +9500,15 @@ class PNGRenderer:
                 bbox[3],
             )
             pad_x = max(1, round(pad_x * abs(scale_x)))
-            field_img = field_img.resize(
+            scaled_size = ensure_raster_size(
                 (
                     max(1, round(field_img.width * abs(scale_x))),
                     field_img.height,
                 ),
-                Image.Resampling.BICUBIC,
+                max_pixels=self.max_layer_pixels,
+                label="custom profile scaled TMP glyph field",
             )
+            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
 
         return field_img, glyph_asset, bbox, pad_x, pad_y
 
@@ -9762,11 +9873,24 @@ class PNGRenderer:
         if direct_glyphs is None:
             return None
         quads: list[DirectSdfQuad] = []
+        retained_field_bytes = sum(field.width * field.height for field, *_ in direct_glyphs)
         for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
-            warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+            warped = self.warp_tmp_sdf_field_direct(
+                field_img,
+                local_left,
+                local_top,
+                pivot,
+                object_data,
+                max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+            )
             if warped is None:
                 continue
             warped_field, left, top = warped
+            retained_field_bytes = self._reserve_retained_raster_bytes(
+                retained_field_bytes,
+                warped_field.width * warped_field.height,
+                label="custom profile TMP text",
+            )
             scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
             quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
         return quads
@@ -9789,6 +9913,7 @@ class PNGRenderer:
             characters_by_line.setdefault(char_info.line_index, []).append(char_info)
 
         direct_glyphs: list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] = []
+        retained_field_bytes = 0
         for line_info in layout.lines:
             line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
             x_origin = rect_origin_x + line_x
@@ -9802,6 +9927,16 @@ class PNGRenderer:
                 run = TextRun(char_info.char, style)
                 if self.use_em_block(run):
                     return None
+                quad_w, quad_h = ensure_raster_size(
+                    self.tmp_native_unrotated_quad_size(char_info),
+                    max_pixels=self.max_layer_pixels,
+                    label="custom profile TMP direct glyph field",
+                )
+                retained_field_bytes = self._reserve_retained_raster_bytes(
+                    retained_field_bytes,
+                    quad_w * quad_h,
+                    label="custom profile TMP text",
+                )
                 character_field = self.render_tmp_sdf_character_field(
                     font_name,
                     font_path,
@@ -9815,7 +9950,6 @@ class PNGRenderer:
                 if character_field is None:
                     return None
                 field_img, glyph_asset, _, _, _ = character_field
-                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
                 if field_img.size != (quad_w, quad_h):
                     field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
                 local_left = x_origin + min(
@@ -9859,6 +9993,8 @@ class PNGRenderer:
         local_top: float,
         pivot: tuple[float, float],
         object_data: dict[str, Any],
+        *,
+        max_output_bytes: int | None = None,
     ) -> tuple[Image.Image, int, int] | None:
         """Warp half of the direct decorative path (single source, shared by
         composite_tmp_sdf_field_direct and prepare_direct_sdf_quads): forward corners via
@@ -9898,6 +10034,16 @@ class PNGRenderer:
         f = inv10 * (left - p00[0]) + inv11 * (top - p00[1])
         out_w = max(1, right - left)
         out_h = max(1, bottom - top)
+        out_w, out_h = ensure_raster_size(
+            (out_w, out_h),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile warped TMP glyph field",
+        )
+        if max_output_bytes is not None and out_w * out_h > max(0, int(max_output_bytes)):
+            raise ValueError(
+                f"custom profile warped TMP glyph field would retain {out_w * out_h} bytes; "
+                f"remaining limit is {max(0, int(max_output_bytes))}"
+            )
         transformed_field = field_img.transform(
             (out_w, out_h),
             Image.Transform.AFFINE,
