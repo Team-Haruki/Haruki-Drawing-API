@@ -6132,6 +6132,23 @@ mod tests {
     }
 
     #[test]
+    fn sdf_quad_shading_patch_is_included_in_scene_budget() {
+        let field = vec![255_u8; 64];
+        let mut mem = HashMap::new();
+        mem.insert("glyph".to_string(), a8_mem_image(8, 8, &field));
+        let json = sdf_scene_json("mem:glyph").replace(
+            "\"root\":",
+            "\"limits\":{\"max_node_pixels\":64,\"max_scene_bytes\":1200},\"root\":",
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, mem);
+        assert!(
+            error.contains("SDF shading patch runtime"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn sdf_atlas_quad_runs_asset_pixel_pipeline_without_mem_image() {
         let fixture = fixture_path("sdf_quad_face_only_expected.png");
         let fixture_dir = fixture
@@ -6175,6 +6192,14 @@ mod tests {
                 "alpha differs at pixel {pixel_index}"
             );
         }
+
+        let mismatch_json = json.replace("\"atlas_size\": [64, 64]", "\"atlas_size\": [63, 64]");
+        let mismatch_scene: Scene = serde_json::from_str(&mismatch_json).expect("parses");
+        let error = expect_scene_error(&mismatch_scene, HashMap::new());
+        assert!(
+            error.contains("do not match metadata"),
+            "unexpected error: {error}"
+        );
     }
 
     fn test_sdf_shape_node() -> SdfShapeNode {
