@@ -312,6 +312,7 @@ pub enum Node {
     RasterSubscene(RasterSubsceneNode),
     SelfImage(SelfImageNode),
     SdfQuad(SdfQuadNode),
+    SdfAtlasQuad(SdfAtlasQuadNode),
     SdfShape(SdfShapeNode),
     Text(TextNode),
     Shadow(ShadowNode),
@@ -339,6 +340,30 @@ pub struct SdfQuadNode {
     /// `mem:<key>` reference to the pre-warped A8 field. Anything but a raw Alpha8 mem entry
     /// fails the whole scene loudly (-> Python fail-open to Pillow).
     pub field: String,
+    pub shading: SdfShading,
+}
+
+/// Asset-backed TMP-SDF glyph (requires IR_CAPABILITY >= 18).
+///
+/// Rust extracts the atlas alpha crop, performs Pillow-compatible BICUBIC resize to
+/// `field_size`, then applies Pillow-compatible BICUBIC affine warp into the device-space
+/// `pos`/`size` patch before running the same SDF shading as `SdfQuad`.  This removes Pillow
+/// pixel work and display-sized A8 `mem:` transport for static-atlas rich/decorative glyphs.
+#[derive(Debug, Deserialize)]
+pub struct SdfAtlasQuadNode {
+    pub path: String,
+    /// Metadata dimensions used by Python's Unity-bottom-origin crop conversion. A mismatch
+    /// with the decoded asset fails the whole scene instead of shifting the glyph silently.
+    pub atlas_size: [i32; 2],
+    /// Pillow-coordinate atlas crop `[left, top, right, bottom]`; out-of-image pixels are zero.
+    pub crop: [i32; 4],
+    /// Size of the unwarped glyph field after the atlas crop resize.
+    pub field_size: [i32; 2],
+    /// Device-space destination patch top-left and dimensions.
+    pub pos: Vec2,
+    pub size: [i32; 2],
+    /// Pillow `Image.Transform.AFFINE` inverse coefficients for the destination patch.
+    pub affine: [f64; 6],
     pub shading: SdfShading,
 }
 

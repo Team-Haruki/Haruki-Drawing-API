@@ -44,6 +44,7 @@ from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
+    DirectSdfAtlasQuad,
     LayerTransformInputs,
     NativeContent,
     PNGRenderer,
@@ -215,6 +216,57 @@ def test_sdf_quad_mem_field_records_pillow_touch():
         end_pillow_touch_scope(token)
 
     assert snapshot.counts[PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER] == 1
+
+
+def test_sdf_atlas_quad_emits_without_mem_or_pillow_touch(monkeypatch):
+    monkeypatch.setattr(skia_mod, "_relative_asset_path", lambda path: "tmp/atlas.png")
+    scalars = SimpleNamespace(
+        face_color=(255, 240, 220),
+        face_scale=1.25,
+        face_w=0.4,
+        alpha=0.75,
+        underlay=None,
+    )
+    quad = DirectSdfAtlasQuad(
+        atlas_path=Path("ignored.png"),
+        atlas_size=(64, 64),
+        crop=(-1, 2, 5, 8),
+        field_size=(7, 9),
+        size=(11, 13),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        left=3,
+        top=4,
+        scalars=scalars,
+    )
+
+    token = begin_pillow_touch_scope()
+    try:
+        scene = skia_mod._SceneAssembler(skia_mod._new_builder(32, 32), (32, 32), 1024)
+        assert scene.emit_sdf_quads([quad])
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    node = scene.builder.build()["root"]["children"][0]
+    assert node == {
+        "type": "SdfAtlasQuad",
+        "path": "tmp/atlas.png",
+        "atlas_size": [64, 64],
+        "crop": [-1, 2, 5, 8],
+        "field_size": [7, 9],
+        "pos": [3.0, 4.0],
+        "size": [11, 13],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [255, 240, 220],
+            "face_scale": 1.25,
+            "face_w": 0.4,
+            "alpha": 0.75,
+            "underlay": None,
+        },
+    }
 
 
 def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
