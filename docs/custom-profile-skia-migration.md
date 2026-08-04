@@ -155,6 +155,17 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
 
 ## 合并与上线门禁
 
+### 真实输入的保留边界
+
+后续补 symbol、stamp、card-member、bonds honor 和 StoryFavorite 覆盖时，不保留完整请求、
+完整 `customProfileCard`、`profile_context` 或资源总表。root-only 审阅进程只能通过
+`scripts/parity_payloads/custom_profile_category_fixture.py` 提取一个类别中明确选中的元素；
+输出 schema 会递归拒绝完整请求字段、任意 `user*` 字段和直接用户标识，并以 0600 写入。
+TMP symbol 文本只保留 TMP 标签、空白、标点和符号类别，普通字母、数字及中日文字会被替换。
+
+类别 fixture 的依赖也必须是人工裁剪后的该类别最小子集；禁止把 `resources` 或
+`profile_context` 换名后整体塞入 `dependencies`。完成有用的类别提取后应立即清除原始输入。
+
 每一批至少通过：
 
 ```bash
