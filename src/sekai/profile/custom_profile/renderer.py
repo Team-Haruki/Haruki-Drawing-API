@@ -773,6 +773,46 @@ class DirectSdfQuad:
     scalars: TMPSdfShadingScalars
 
 
+@dataclass(frozen=True)
+class TMPStaticAtlasField:
+    """Static TMP atlas glyph before pixel work.
+
+    ``crop`` uses Pillow's possibly out-of-bounds crop coordinates and ``field_size`` is the
+    BICUBIC-resized native glyph quad. The Skia path can carry this descriptor to Rust instead
+    of decoding, cropping, and resizing the atlas through Pillow.
+    """
+
+    atlas_path: Path
+    atlas_size: tuple[int, int]
+    crop: tuple[int, int, int, int]
+    field_size: tuple[int, int]
+
+
+@dataclass(frozen=True)
+class TMPFieldWarpPlan:
+    """Pillow AFFINE inverse matrix plus its clipped destination rectangle."""
+
+    affine: tuple[float, float, float, float, float, float]
+    size: tuple[int, int]
+    left: int
+    top: int
+
+
+@dataclass(frozen=True)
+class DirectSdfAtlasQuad:
+    """Static-atlas decorative glyph whose complete pixel pipeline runs in Rust."""
+
+    atlas_path: Path
+    atlas_size: tuple[int, int]
+    crop: tuple[int, int, int, int]
+    field_size: tuple[int, int]
+    size: tuple[int, int]
+    affine: tuple[float, float, float, float, float, float]
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
 # frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
 # cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
 # atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
@@ -9366,7 +9406,9 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
         char_info: TMPNativeCharacterInfo | None = None,
-    ) -> tuple[Image.Image, TMPFontAsset | None, tuple[int, int, int, int], int, int] | None:
+        *,
+        defer_static_atlas: bool = False,
+    ) -> tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, tuple[int, int, int, int], int, int] | None:
         run = TextRun(char, style)
         native_quad_sized = False
         glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
@@ -9375,7 +9417,6 @@ class PNGRenderer:
             metrics = glyph_asset.glyphs.get(ord(glyph_char[0]))
             if metrics is not None and metrics.rect_w > 0 and metrics.rect_h > 0:
                 atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
-                atlas = self.tmp_atlas_alpha(atlas_path)
                 if char_info is not None:
                     quad_w, quad_h = ensure_raster_size(
                         self.tmp_native_unrotated_quad_size(char_info),
@@ -9387,24 +9428,43 @@ class PNGRenderer:
                     atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
                     atlas_bottom_unity = metrics.rect_y - atlas_pad
                     atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
+                    if defer_static_atlas:
+                        atlas_width = round(glyph_asset.atlas_width)
+                        atlas_height = round(glyph_asset.atlas_height)
+                        if atlas_width <= 0 or atlas_height <= 0:
+                            return None
+                        atlas = None
+                    else:
+                        atlas = self.tmp_atlas_alpha(atlas_path)
+                        atlas_height = atlas.height
                     crop_box = (
                         atlas_left,
-                        atlas.height - atlas_top_unity,
+                        atlas_height - atlas_top_unity,
                         atlas_right,
-                        atlas.height - atlas_bottom_unity,
+                        atlas_height - atlas_bottom_unity,
                     )
                     ensure_raster_size(
                         (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
                         max_pixels=self.max_layer_pixels,
                         label="custom profile TMP atlas glyph crop",
                     )
-                    field_img = atlas.crop(crop_box)
-                    if field_img.size != (quad_w, quad_h):
-                        field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-                    bbox = (0, 0, field_img.width, field_img.height)
+                    if defer_static_atlas:
+                        field_img = TMPStaticAtlasField(
+                            atlas_path,
+                            (atlas_width, atlas_height),
+                            crop_box,
+                            (quad_w, quad_h),
+                        )
+                    else:
+                        assert atlas is not None
+                        field_img = atlas.crop(crop_box)
+                        if field_img.size != (quad_w, quad_h):
+                            field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+                    bbox = (0, 0, quad_w, quad_h)
                     pad_x = pad_y = 0
                     native_quad_sized = True
                 else:
+                    atlas = self.tmp_atlas_alpha(atlas_path)
                     atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
                     atlas_left = max(0, metrics.rect_x)
                     crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
@@ -9492,6 +9552,7 @@ class PNGRenderer:
 
         scale_x = self.tmp_native_vertex_scale_x(style)
         if not native_quad_sized and abs(scale_x - 1.0) >= 1.0e-6:
+            assert isinstance(field_img, Image.Image)
             scaled_left, scaled_right = self.tmp_scale_x_bounds(float(bbox[0]), float(bbox[2]), scale_x)
             bbox = (
                 math.floor(scaled_left),
@@ -9536,6 +9597,7 @@ class PNGRenderer:
         if character_field is None:
             return None
         field_img, glyph_asset, bbox, pad_x, pad_y = character_field
+        assert isinstance(field_img, Image.Image)
         import numpy as np
 
         field = np.asarray(field_img, dtype=np.float32) / 255.0
@@ -9702,12 +9764,14 @@ class PNGRenderer:
         self,
         item: dict[str, Any],
         object_data: dict[str, Any],
-    ) -> list[DirectSdfQuad] | None:
+        *,
+        defer_static_atlas: bool = False,
+    ) -> list[DirectSdfQuad | DirectSdfAtlasQuad] | None:
         """Layout + per-glyph warp half of the direct decorative path. Returns None when the
         element is not eligible for the direct path (caller falls back to the raster path);
         degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
-        Shading/compositing stays out: Pillow feeds each quad to _shade_field_with_scalars, the
-        Skia emitter ships the same quads as SdfQuad IR nodes."""
+        Shading/compositing stays out: Pillow feeds each raster quad to _shade_field_with_scalars;
+        the Skia emitter ships static descriptors as SdfAtlasQuad and dynamic fields as SdfQuad."""
         text_data = self.generate_text_data(item)
         if not text_data.text.strip():
             return None
@@ -9869,12 +9933,51 @@ class PNGRenderer:
             rect_origin_y,
             outline_color,
             outline_dilate,
+            defer_static_atlas=defer_static_atlas,
         )
         if direct_glyphs is None:
             return None
-        quads: list[DirectSdfQuad] = []
-        retained_field_bytes = sum(field.width * field.height for field, *_ in direct_glyphs)
+        quads: list[DirectSdfQuad | DirectSdfAtlasQuad] = []
+        retained_field_bytes = sum(
+            (
+                field.field_size[0] * field.field_size[1]
+                if isinstance(field, TMPStaticAtlasField)
+                else field.width * field.height
+            )
+            for field, *_ in direct_glyphs
+        )
         for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+            if isinstance(field_img, TMPStaticAtlasField):
+                plan = self.tmp_sdf_field_warp_plan(
+                    field_img.field_size,
+                    local_left,
+                    local_top,
+                    pivot,
+                    object_data,
+                    max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+                )
+                if plan is None:
+                    continue
+                retained_field_bytes = self._reserve_retained_raster_bytes(
+                    retained_field_bytes,
+                    plan.size[0] * plan.size[1],
+                    label="custom profile TMP text",
+                )
+                scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+                quads.append(
+                    DirectSdfAtlasQuad(
+                        atlas_path=field_img.atlas_path,
+                        atlas_size=field_img.atlas_size,
+                        crop=field_img.crop,
+                        field_size=field_img.field_size,
+                        size=plan.size,
+                        affine=plan.affine,
+                        left=plan.left,
+                        top=plan.top,
+                        scalars=scalars,
+                    )
+                )
+                continue
             warped = self.warp_tmp_sdf_field_direct(
                 field_img,
                 local_left,
@@ -9907,12 +10010,14 @@ class PNGRenderer:
         rect_origin_y: float,
         outline_color: str,
         outline_dilate: float,
-    ) -> list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] | None:
+        *,
+        defer_static_atlas: bool = False,
+    ) -> list[tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, TextStyle, float, float]] | None:
         characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
         for char_info in layout.characters:
             characters_by_line.setdefault(char_info.line_index, []).append(char_info)
 
-        direct_glyphs: list[tuple[Image.Image, TMPFontAsset | None, TextStyle, float, float]] = []
+        direct_glyphs: list[tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, TextStyle, float, float]] = []
         retained_field_bytes = 0
         for line_info in layout.lines:
             line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
@@ -9946,11 +10051,12 @@ class PNGRenderer:
                     outline_color,
                     outline_dilate,
                     char_info,
+                    defer_static_atlas=defer_static_atlas,
                 )
                 if character_field is None:
                     return None
                 field_img, glyph_asset, _, _, _ = character_field
-                if field_img.size != (quad_w, quad_h):
+                if isinstance(field_img, Image.Image) and field_img.size != (quad_w, quad_h):
                     field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
                 local_left = x_origin + min(
                     char_info.bottom_left_x,
@@ -9986,23 +10092,18 @@ class PNGRenderer:
         dy = (local_y - pivot[1]) * sy
         return x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t
 
-    def warp_tmp_sdf_field_direct(
+    def tmp_sdf_field_warp_plan(
         self,
-        field_img: Image.Image,
+        source_size: tuple[int, int],
         local_left: float,
         local_top: float,
         pivot: tuple[float, float],
         object_data: dict[str, Any],
         *,
         max_output_bytes: int | None = None,
-    ) -> tuple[Image.Image, int, int] | None:
-        """Warp half of the direct decorative path (single source, shared by
-        composite_tmp_sdf_field_direct and prepare_direct_sdf_quads): forward corners via
-        transformed_local_point, det guard, inverse affine, PIL BICUBIC transform with zero fill.
-        Returns ``(warped L field at display size, left, top)`` with the canvas-clamped integer
-        paste position, or None for a degenerate/fully clipped glyph (which is SKIPPED, not an
-        error)."""
-        src_w, src_h = field_img.size
+    ) -> TMPFieldWarpPlan | None:
+        """Build the pixel-free geometry plan shared by Pillow and native atlas fields."""
+        src_w, src_h = source_size
         if src_w <= 0 or src_h <= 0:
             return None
 
@@ -10044,14 +10145,42 @@ class PNGRenderer:
                 f"custom profile warped TMP glyph field would retain {out_w * out_h} bytes; "
                 f"remaining limit is {max(0, int(max_output_bytes))}"
             )
+        return TMPFieldWarpPlan(
+            affine=(inv00, inv01, c, inv10, inv11, f),
+            size=(out_w, out_h),
+            left=left,
+            top=top,
+        )
+
+    def warp_tmp_sdf_field_direct(
+        self,
+        field_img: Image.Image,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+        *,
+        max_output_bytes: int | None = None,
+    ) -> tuple[Image.Image, int, int] | None:
+        """Warp an L field with Pillow's BICUBIC affine path using the shared geometry plan."""
+        plan = self.tmp_sdf_field_warp_plan(
+            field_img.size,
+            local_left,
+            local_top,
+            pivot,
+            object_data,
+            max_output_bytes=max_output_bytes,
+        )
+        if plan is None:
+            return None
         transformed_field = field_img.transform(
-            (out_w, out_h),
+            plan.size,
             Image.Transform.AFFINE,
-            (inv00, inv01, c, inv10, inv11, f),
+            plan.affine,
             Image.Resampling.BICUBIC,
             fillcolor=0,
         )
-        return transformed_field, left, top
+        return transformed_field, plan.left, plan.top
 
     def composite_tmp_sdf_field_direct(
         self,

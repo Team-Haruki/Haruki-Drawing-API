@@ -22,6 +22,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
     PreparedLayer,
     RenderedLayer,
+    TMPStaticAtlasField,
     build_arg_parser,
     harden_rgba_alpha,
     resize_rgba_premul,
@@ -299,6 +300,45 @@ def test_custom_profile_warp_budget_runs_before_transform(tmp_path: Path, monkey
             },
             max_output_bytes=63,
         )
+
+
+def test_custom_profile_static_tmp_field_can_defer_all_atlas_pixels(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    atlas_path = tmp_path / "atlas.png"
+    metrics = SimpleNamespace(rect_x=10, rect_y=20, rect_w=6, rect_h=8, atlas_index=0)
+    asset = SimpleNamespace(atlas_paths=[atlas_path], atlas_width=128.0, atlas_height=64.0, glyphs={ord("A"): metrics})
+    char_info = SimpleNamespace(style=style)
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
+    monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: asset)
+    monkeypatch.setattr(renderer, "tmp_native_unrotated_quad_size", lambda *_: (12, 16))
+    monkeypatch.setattr(renderer, "tmp_native_atlas_padding", lambda *_: 2)
+    monkeypatch.setattr(renderer, "tmp_native_vertex_scale_x", lambda *_: 1.0)
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: pytest.fail("Pillow must not decode the atlas"))
+
+    prepared = renderer.render_tmp_sdf_character_field(
+        "font",
+        tmp_path / "font.ttf",
+        "A",
+        style,
+        24.0,
+        "#000000",
+        0.0,
+        char_info,
+        defer_static_atlas=True,
+    )
+
+    assert prepared is not None
+    field, prepared_asset, bbox, pad_x, pad_y = prepared
+    assert field == TMPStaticAtlasField(
+        atlas_path=atlas_path,
+        atlas_size=(128, 64),
+        crop=(8, 34, 18, 46),
+        field_size=(12, 16),
+    )
+    assert prepared_asset is asset
+    assert bbox == (0, 0, 12, 16)
+    assert (pad_x, pad_y) == (0, 0)
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:
