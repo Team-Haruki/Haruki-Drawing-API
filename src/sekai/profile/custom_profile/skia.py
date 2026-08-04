@@ -77,7 +77,6 @@ from src.sekai.profile.custom_profile.honor_deck_prefab import (
 from src.sekai.profile.custom_profile.limits import ensure_raster_size
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
-    DirectSdfAtlasQuad,
     GENERAL_DECK_CARD_RENDER_SIZE,
     GENERAL_MUSIC_DIFFICULTIES,
     GENERAL_NATIVE_SIZES,
@@ -86,6 +85,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_W,
     SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
     STATIC_IMAGE_CONTENT_KINDS,
+    DirectSdfAtlasQuad,
     LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
