@@ -23,6 +23,7 @@ use skia_safe::{
 };
 
 use crate::ir::*;
+use crate::pillow_gray::{resize_l_pillow_bicubic, transform_l_pillow_bicubic};
 use crate::pillow_resize::{PillowResizeLimits, resize_rgba8_pillow_lanczos};
 use crate::text_metrics::configured_text_font;
 use crate::{
@@ -247,6 +248,18 @@ struct SdfShapeSource {
     height: i32,
 }
 
+struct SdfAtlasSource {
+    alpha: Vec<u8>,
+    width: i32,
+    height: i32,
+}
+
+struct PreparedSdfAtlasField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
 struct UnityImageSource {
     image: Image,
     width: i32,
@@ -276,6 +289,10 @@ struct Interp {
     /// Straight-RGBA source pixels for asset-backed custom-profile shapes, decoded before any
     /// drawing so a missing/corrupt source fails the whole scene instead of dropping one layer.
     sdf_shape_sources: HashMap<String, SdfShapeSource>,
+    /// Alpha-only static TMP atlas sources and fully warped glyph fields. The latter are keyed
+    /// by the stable address of the parsed IR node for this render.
+    sdf_atlas_sources: HashMap<String, SdfAtlasSource>,
+    sdf_atlas_fields: HashMap<usize, PreparedSdfAtlasField>,
     /// Fully decoded straight-RGBA assets for UnityImage. Keeping these separate from the
     /// ordinary lazy image map makes corrupt pixel streams fail during scene preparation.
     unity_image_sources: HashMap<String, UnityImageSource>,
@@ -712,6 +729,8 @@ pub(crate) fn render_scene_inner(
         asset_descriptors: HashMap::new(),
         mem_images,
         sdf_shape_sources: HashMap::new(),
+        sdf_atlas_sources: HashMap::new(),
+        sdf_atlas_fields: HashMap::new(),
         unity_image_sources: HashMap::new(),
         pillow_lanczos_sources: HashMap::new(),
         max_node_pixels,
@@ -749,12 +768,28 @@ pub(crate) fn render_scene_inner(
         prepare_pillow_lanczos_sources(background, &mut interp)?;
         prepare_unity_subscene_assets(background, &mut interp)?;
         prepare_sdf_shape_sources(background, &mut interp)?;
+        prepare_sdf_atlas_fields(background, &mut interp)?;
         prepare_unity_image_assets(background, &mut interp)?;
     }
     prepare_pillow_lanczos_sources(&scene.root, &mut interp)?;
     prepare_unity_subscene_assets(&scene.root, &mut interp)?;
     prepare_sdf_shape_sources(&scene.root, &mut interp)?;
+    prepare_sdf_atlas_fields(&scene.root, &mut interp)?;
     prepare_unity_image_assets(&scene.root, &mut interp)?;
+    let mut sdf_shading_runtime_peak = max_sdf_quad_runtime_bytes(&scene.root, &interp.mem_images)?;
+    if let Some(background) = &scene.background {
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak
+            .max(max_sdf_quad_runtime_bytes(background, &interp.mem_images)?);
+    }
+    for field in interp.sdf_atlas_fields.values() {
+        let runtime_bytes = field
+            .width
+            .checked_mul(field.height)
+            .and_then(|pixels| pixels.checked_mul(8))
+            .ok_or_else(|| "SdfAtlasQuad shading runtime byte count overflow".to_string())?;
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak.max(runtime_bytes);
+    }
+    interp.ensure_native_scene_bytes(sdf_shading_runtime_peak, "SDF shading patch runtime")?;
     // Asset preparation retained everything needed by strict subscenes. Replace the reservation
     // with actual push/pop accounting during drawing.
     interp.active_native_runtime_bytes = 0;
@@ -957,6 +992,12 @@ fn render_node(
         Node::SdfQuad(quad) => {
             let started = Instant::now();
             draw_sdf_quad(surface, interp, quad, off);
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
+        }
+        Node::SdfAtlasQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_atlas_quad(surface, interp, quad, off)?;
             interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
             interp.metrics.sdf_quad_count += 1;
         }
@@ -1408,6 +1449,9 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
         Node::SdfQuad(_) if in_transform => {
             Err("SdfQuad inside Transform would be double-transformed".to_string())
         }
+        Node::SdfAtlasQuad(_) if in_transform => {
+            Err("SdfAtlasQuad inside Transform would be double-transformed".to_string())
+        }
         Node::SdfShape(_) if in_transform => {
             Err("SdfShape inside Transform would apply screen-space scale twice".to_string())
         }
@@ -1725,6 +1769,45 @@ fn validate_sdf_quad_fields(
         }
         _ => Ok(()),
     }
+}
+
+fn max_sdf_quad_runtime_bytes(
+    node: &Node,
+    mem_images: &HashMap<String, MemImage>,
+) -> Result<usize, String> {
+    let children = match node {
+        Node::Group(group) => Some(group.children.as_slice()),
+        Node::Transform(transform) => Some(transform.children.as_slice()),
+        Node::UnitySubscene(subscene) => Some(subscene.children.as_slice()),
+        Node::RasterSubscene(subscene) => Some(subscene.children.as_slice()),
+        _ => None,
+    };
+    if let Some(children) = children {
+        return children.iter().try_fold(0usize, |peak, child| {
+            Ok(peak.max(max_sdf_quad_runtime_bytes(child, mem_images)?))
+        });
+    }
+    let Node::SdfQuad(quad) = node else {
+        return Ok(0);
+    };
+    let key = quad.field.strip_prefix("mem:").ok_or_else(|| {
+        format!(
+            "SdfQuad field must be a mem image reference: {}",
+            quad.field
+        )
+    })?;
+    let MemImage::Raw { width, height, .. } = mem_images
+        .get(key)
+        .ok_or_else(|| format!("SdfQuad field references unknown mem image: {}", quad.field))?
+    else {
+        return Err(format!(
+            "SdfQuad field must be a raw mem image: {}",
+            quad.field
+        ));
+    };
+    rgba_byte_len(*width, *height, "SdfQuad shading patch")?
+        .checked_mul(2)
+        .ok_or_else(|| "SdfQuad shading runtime byte count overflow".to_string())
 }
 
 /// Decode every explicit Pillow-Lanczos Image to straight RGBA8 before drawing starts.
@@ -2051,6 +2134,218 @@ fn prepare_sdf_shape_sources(node: &Node, interp: &mut Interp) -> Result<(), Str
                 .get(&shape.path)
                 .ok_or_else(|| format!("SdfShape source was not prepared: {}", shape.path))?;
             sdf_shape_dimensions(shape, source.width, source.height, interp.max_node_pixels)?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sdf_atlas_node_key(node: &SdfAtlasQuadNode) -> usize {
+    node as *const SdfAtlasQuadNode as usize
+}
+
+fn validate_sdf_atlas_quad(
+    node: &SdfAtlasQuadNode,
+    max_node_pixels: usize,
+) -> Result<((usize, usize), (usize, usize), (usize, usize)), String> {
+    if node.path.starts_with("mem:") {
+        return Err("SdfAtlasQuad requires an asset-backed atlas".to_string());
+    }
+    if node
+        .pos
+        .iter()
+        .map(|value| f64::from(*value))
+        .chain(node.affine)
+        .any(|value| !value.is_finite())
+    {
+        return Err("SdfAtlasQuad contains a non-finite scalar".to_string());
+    }
+    let dimensions = |width: i64, height: i64, label: &str| -> Result<(usize, usize), String> {
+        if width <= 0 || height <= 0 {
+            return Err(format!("SdfAtlasQuad {label} dimensions must be positive"));
+        }
+        let width =
+            usize::try_from(width).map_err(|_| format!("SdfAtlasQuad {label} width overflows"))?;
+        let height = usize::try_from(height)
+            .map_err(|_| format!("SdfAtlasQuad {label} height overflows"))?;
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| format!("SdfAtlasQuad {label} pixel count overflows"))?;
+        if pixels > max_node_pixels {
+            return Err(format!(
+                "SdfAtlasQuad {label} {width}x{height} ({pixels} pixels) exceeds limit {max_node_pixels}"
+            ));
+        }
+        Ok((width, height))
+    };
+    let crop = dimensions(
+        i64::from(node.crop[2]) - i64::from(node.crop[0]),
+        i64::from(node.crop[3]) - i64::from(node.crop[1]),
+        "atlas crop",
+    )?;
+    dimensions(
+        i64::from(node.atlas_size[0]),
+        i64::from(node.atlas_size[1]),
+        "atlas metadata",
+    )?;
+    let field = dimensions(
+        i64::from(node.field_size[0]),
+        i64::from(node.field_size[1]),
+        "field",
+    )?;
+    let output = dimensions(
+        i64::from(node.size[0]),
+        i64::from(node.size[1]),
+        "warped field",
+    )?;
+    Ok((crop, field, output))
+}
+
+fn crop_sdf_atlas_alpha(
+    source: &SdfAtlasSource,
+    crop: [i32; 4],
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut output = vec![0_u8; width * height];
+    for destination_y in 0..height {
+        let source_y = i64::from(crop[1]) + destination_y as i64;
+        if !(0..i64::from(source.height)).contains(&source_y) {
+            continue;
+        }
+        for destination_x in 0..width {
+            let source_x = i64::from(crop[0]) + destination_x as i64;
+            if (0..i64::from(source.width)).contains(&source_x) {
+                output[destination_y * width + destination_x] =
+                    source.alpha[source_y as usize * source.width as usize + source_x as usize];
+            }
+        }
+    }
+    output
+}
+
+fn prepare_sdf_atlas_fields(node: &Node, interp: &mut Interp) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::SdfAtlasQuad(quad) => {
+            let (crop_size, field_size, output_size) =
+                validate_sdf_atlas_quad(quad, interp.max_node_pixels)?;
+            if !interp.sdf_atlas_sources.contains_key(&quad.path) {
+                let (descriptor, _) = interp.describe_asset(&quad.path)?;
+                let rgba_bytes = validate_strict_asset_size(
+                    descriptor.width,
+                    descriptor.height,
+                    interp.max_node_pixels,
+                    "SdfAtlasQuad atlas",
+                )?;
+                let alpha_bytes = rgba_bytes / 4;
+                interp.ensure_native_scene_bytes(
+                    rgba_bytes.checked_add(alpha_bytes).ok_or_else(|| {
+                        "SdfAtlasQuad atlas decode byte count overflow".to_string()
+                    })?,
+                    "SdfAtlasQuad atlas decode",
+                )?;
+                let started = Instant::now();
+                let (rgba, width, height) = decode_asset_rgba_unpremul(&descriptor)?;
+                interp.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+                if [width, height] != quad.atlas_size {
+                    return Err(format!(
+                        "SdfAtlasQuad atlas dimensions {width}x{height} do not match metadata {}x{}",
+                        quad.atlas_size[0], quad.atlas_size[1]
+                    ));
+                }
+                let alpha = rgba.chunks_exact(4).map(|pixel| pixel[3]).collect();
+                drop(rgba);
+                interp.retain_native_asset_bytes(alpha_bytes, "SdfAtlasQuad atlas alpha")?;
+                interp.sdf_atlas_sources.insert(
+                    quad.path.clone(),
+                    SdfAtlasSource {
+                        alpha,
+                        width,
+                        height,
+                    },
+                );
+            }
+            let crop_bytes = crop_size.0 * crop_size.1;
+            let field_bytes = field_size.0 * field_size.1;
+            let output_bytes = output_size.0 * output_size.1;
+            interp.ensure_native_scene_bytes(
+                crop_bytes
+                    .checked_add(field_bytes)
+                    .ok_or_else(|| "SdfAtlasQuad resize peak overflow".to_string())?,
+                "SdfAtlasQuad crop and resize",
+            )?;
+            interp.ensure_native_scene_bytes(
+                field_bytes
+                    .checked_add(output_bytes)
+                    .ok_or_else(|| "SdfAtlasQuad warp peak overflow".to_string())?,
+                "SdfAtlasQuad field warp",
+            )?;
+            let available = interp.available_native_scene_bytes("SdfAtlasQuad preparation")?;
+            let resize_available = available
+                .checked_sub(crop_bytes)
+                .ok_or_else(|| "SdfAtlasQuad crop exhausts the scene budget".to_string())?;
+            let resize_limits = PillowResizeLimits::new(
+                resize_available,
+                resize_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let source = interp
+                .sdf_atlas_sources
+                .get(&quad.path)
+                .ok_or_else(|| format!("SdfAtlasQuad atlas was not prepared: {}", quad.path))?;
+            let cropped = crop_sdf_atlas_alpha(source, quad.crop, crop_size.0, crop_size.1);
+            let field = resize_l_pillow_bicubic(
+                &cropped,
+                crop_size.0,
+                crop_size.1,
+                field_size.0,
+                field_size.1,
+                resize_limits,
+            )?;
+            drop(cropped);
+            let warp_available = available
+                .checked_sub(field_bytes)
+                .ok_or_else(|| "SdfAtlasQuad field exhausts the scene budget".to_string())?;
+            let warp_limits = PillowResizeLimits::new(
+                warp_available,
+                warp_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let warped = transform_l_pillow_bicubic(
+                &field,
+                field_size.0,
+                field_size.1,
+                output_size.0,
+                output_size.1,
+                quad.affine,
+                warp_limits,
+            )?;
+            drop(field);
+            interp.retain_native_asset_bytes(output_bytes, "SdfAtlasQuad warped field")?;
+            interp.sdf_atlas_fields.insert(
+                sdf_atlas_node_key(quad),
+                PreparedSdfAtlasField {
+                    pixels: warped,
+                    width: output_size.0,
+                    height: output_size.1,
+                },
+            );
             Ok(())
         }
         _ => Ok(()),
@@ -3097,6 +3392,45 @@ pub(crate) fn shade_sdf_field(
 /// integer position — nearest sampling, no AA, ZERO geometric resampling (the field arrives
 /// already at display size). The field reference was validated up front, so a miss here only
 /// happens for test-constructed scenes; it degrades to skipping the node like other draws.
+fn draw_shaded_sdf_patch(
+    surface: &mut Surface,
+    field: &[u8],
+    width: usize,
+    height: usize,
+    row_bytes: usize,
+    shading: &SdfShading,
+    pos: (f32, f32),
+) -> Result<(), String> {
+    if field.len()
+        < row_bytes
+            .saturating_mul(height.saturating_sub(1))
+            .saturating_add(width)
+    {
+        return Err("SDF field buffer is smaller than its declared dimensions".to_string());
+    }
+    let patch = shade_sdf_field(field, width, height, row_bytes, shading);
+    let image_width =
+        i32::try_from(width).map_err(|_| "SDF patch width overflows i32".to_string())?;
+    let image_height =
+        i32::try_from(height).map_err(|_| "SDF patch height overflows i32".to_string())?;
+    let info = ImageInfo::new(
+        (image_width, image_height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let image = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), width * 4)
+        .ok_or_else(|| "SDF patch image build failed".to_string())?;
+    let paint = Paint::default();
+    surface.canvas().draw_image_with_sampling_options(
+        &image,
+        pos,
+        SamplingOptions::default(),
+        Some(&paint),
+    );
+    Ok(())
+}
+
 fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off: (f32, f32)) {
     let Some(key) = node.field.strip_prefix("mem:") else {
         return;
@@ -3112,41 +3446,41 @@ fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off
     else {
         return;
     };
-    let (w, h) = (*width as usize, *height as usize);
-    let bytes = data.as_bytes();
-    if bytes.len()
-        < row_bytes
-            .saturating_mul(h.saturating_sub(1))
-            .saturating_add(w)
-    {
-        eprintln!(
-            "haruki_skia_renderer: SdfQuad field buffer too small, node skipped: {}",
-            node.field
-        );
-        return;
-    }
-    let patch = shade_sdf_field(bytes, w, h, *row_bytes, &node.shading);
-    let info = ImageInfo::new(
-        (*width, *height),
-        ColorType::RGBA8888,
-        AlphaType::Unpremul,
-        None,
-    );
-    let Some(image) = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), w * 4)
-    else {
-        eprintln!(
-            "haruki_skia_renderer: SdfQuad patch image build failed, node skipped: {}",
-            node.field
-        );
-        return;
-    };
-    let paint = Paint::default();
-    surface.canvas().draw_image_with_sampling_options(
-        &image,
+    if let Err(error) = draw_shaded_sdf_patch(
+        surface,
+        data.as_bytes(),
+        *width as usize,
+        *height as usize,
+        *row_bytes,
+        &node.shading,
         (node.pos[0] + off.0, node.pos[1] + off.1),
-        SamplingOptions::default(),
-        Some(&paint),
-    );
+    ) {
+        eprintln!(
+            "haruki_skia_renderer: SdfQuad node skipped ({}): {error}",
+            node.field
+        );
+    }
+}
+
+fn draw_sdf_atlas_quad(
+    surface: &mut Surface,
+    interp: &Interp,
+    node: &SdfAtlasQuadNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let field = interp
+        .sdf_atlas_fields
+        .get(&sdf_atlas_node_key(node))
+        .ok_or_else(|| format!("SdfAtlasQuad field was not prepared: {}", node.path))?;
+    draw_shaded_sdf_patch(
+        surface,
+        &field.pixels,
+        field.width,
+        field.height,
+        field.width,
+        &node.shading,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -5795,6 +6129,52 @@ mod tests {
         assert!(nonzero > 0, "the shaded patch must not be empty");
         // Nothing may land outside the 8x8 patch footprint at (3, 4).
         assert_eq!(pixels[3], 0, "canvas origin must stay transparent");
+    }
+
+    #[test]
+    fn sdf_atlas_quad_runs_asset_pixel_pipeline_without_mem_image() {
+        let fixture = fixture_path("sdf_quad_face_only_expected.png");
+        let fixture_dir = fixture
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "SdfAtlasQuad",
+            "path": "sdf_quad_face_only_expected.png",
+            "atlas_size": [64, 64],
+            "crop": [0, 0, 64, 64],
+            "field_size": [64, 64],
+            "pos": [0, 0],
+            "size": [64, 64],
+            "affine": [1, 0, 0, 0, 1, 0],
+            "shading": {
+                "face_color": [255, 255, 255],
+                "face_scale": 1,
+                "face_w": 0,
+                "alpha": 1,
+                "underlay": null
+            }
+        }"#;
+        let json = bare_scene_json((64, 64), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+
+        assert_eq!(rendered.metrics.sdf_quad_count, 1);
+        let (actual, width, height) = decode_pixels(&rendered);
+        let (source, source_width, source_height) =
+            decode_fixture_rgba("sdf_quad_face_only_expected.png");
+        assert_eq!((width, height), (source_width, source_height));
+        for (pixel_index, (actual_pixel, source_pixel)) in actual
+            .chunks_exact(4)
+            .zip(source.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(
+                actual_pixel[3], source_pixel[3],
+                "alpha differs at pixel {pixel_index}"
+            );
+        }
     }
 
     fn test_sdf_shape_node() -> SdfShapeNode {

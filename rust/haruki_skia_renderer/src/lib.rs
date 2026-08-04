@@ -28,6 +28,7 @@ fn linear_sampling() -> SamplingOptions {
 
 mod interp;
 mod ir;
+mod pillow_gray;
 mod pillow_resize;
 mod text_metrics;
 
@@ -330,7 +331,8 @@ fn validate_raw_image(
 /// 15 = explicit Pillow-compatible Lanczos raster resize for Image and UnitySubscene.
 /// 16 = explicit straight-RGBA Pillow `paste(source, pos, source)` Image blending.
 /// 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
-pub const IR_CAPABILITY: u32 = 17;
+/// 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp.
+pub const IR_CAPABILITY: u32 = 18;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
