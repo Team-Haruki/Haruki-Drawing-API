@@ -27,9 +27,12 @@ CATEGORY_BUCKETS: dict[str, str] = {
     "bonds_honor": "bondsHonors",
     "card_member_clip": "cardMembers",
     "card_member_full": "cardMembers",
+    "character_icon": "characterIcons",
+    "material": "materials",
     "stamp": "stamps",
     "story_favorite": "generals",
     "text_symbol": "texts",
+    "user_interface_icon": "userInterfaceIcons",
 }
 
 _ROOT_KEYS = frozenset({"schema_version", "kind", "category", "region", "items", "dependencies"})

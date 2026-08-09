@@ -252,6 +252,9 @@ CONTENT_TYPES: dict[str, tuple[int, str]] = {
     "stamp": (11, "Stamp"),
     "mini_chara": (12, "DynamicMiniChara"),
     "screen_filter": (12, "DynamicScreenFilter"),
+    "character_icon": (13, "CharacterIcon"),
+    "material": (14, "Material"),
+    "user_interface_icon": (15, "UserInterfaceIcon"),
 }
 STATIC_IMAGE_CONTENT_KINDS = {
     "general_background",
@@ -259,6 +262,9 @@ STATIC_IMAGE_CONTENT_KINDS = {
     "stand_member",
     "collection",
     "other",
+    "character_icon",
+    "material",
+    "user_interface_icon",
 }
 REGION_ASSET_STARTAPP = "startapp"
 REGION_ASSET_ONDEMAND = "ondemand"
@@ -287,6 +293,9 @@ IMAGE_CONTENT_TYPE_NAMES = {
     "collection": "Collection",
     "other": "Other",
     "stamp": "Stamp",
+    "character_icon": "CharacterIcon",
+    "material": "Material",
+    "user_interface_icon": "UserInterfaceIcon",
 }
 PREFAB_NATIVE_SIZES: dict[str, tuple[float, float]] = {
     "ClipSizeCardContentView": (328.0, 520.0),
@@ -444,6 +453,21 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
         "ImageContentView.Refresh",
     ),
     "story_background": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
+    "character_icon": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
+    "material": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
+    "user_interface_icon": (
         "CustomProfileUtility.BuildImageContentViewInternal",
         "CustomProfileUtility.InstantiateImageContent",
         "ImageContentView.Refresh",
@@ -2085,6 +2109,21 @@ class PNGRenderer:
         self.others = self.load_resource_index(
             "customProfileEtcResources", "custom_profile_etc_resources", filename="customProfileEtcResources.json"
         )
+        self.character_icons = self.load_resource_index(
+            "customProfileCharacterIconResources",
+            "custom_profile_character_icon_resources",
+            filename="customProfileCharacterIconResources.json",
+        )
+        self.materials = self.load_resource_index(
+            "customProfileMaterialResources",
+            "custom_profile_material_resources",
+            filename="customProfileMaterialResources.json",
+        )
+        self.user_interface_icons = self.load_resource_index(
+            "customProfileUserInterfaceIconResources",
+            "custom_profile_user_interface_icon_resources",
+            filename="customProfileUserInterfaceIconResources.json",
+        )
         self.stamps = self.load_resource_index("stamps", filename="stamps.json")
         self.cards = self.load_resource_index("cards", filename="cards.json")
         self.honors = self.load_resource_index("honors", filename="honors.json")
@@ -2612,6 +2651,9 @@ class PNGRenderer:
             ("bonds_honor", "bondsHonors"),
             ("collection", "collections"),
             ("other", "others"),
+            ("character_icon", "characterIcons"),
+            ("material", "materials"),
+            ("user_interface_icon", "userInterfaceIcons"),
             ("stamp", "stamps"),
             ("shape", "shapes"),
             ("text", "texts"),
@@ -2776,6 +2818,12 @@ class PNGRenderer:
             return self.collections.get(item_id, {})
         if kind == "other":
             return self.others.get(item_id, {})
+        if kind == "character_icon":
+            return self.character_icons.get(item_id, {})
+        if kind == "material":
+            return self.materials.get(item_id, {})
+        if kind == "user_interface_icon":
+            return self.user_interface_icons.get(item_id, {})
         if kind == "stamp":
             return self.stamps.get(item_id, {})
         return {}

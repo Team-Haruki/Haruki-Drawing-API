@@ -514,6 +514,66 @@ def test_custom_profile_resource_path_requires_cloud_image_path_without_masterda
     assert renderer.resource_path(renderer.general_bgs[1]) == bg_path
 
 
+def test_custom_profile_v67_image_buckets_use_cloud_resources(tmp_path: Path) -> None:
+    resource_specs = (
+        (
+            "characterIcons",
+            "character_icon",
+            "customProfileCharacterIconResources",
+            21,
+            "character_icon/profile_chr_icon_miku.png",
+        ),
+        (
+            "materials",
+            "material",
+            "customProfileMaterialResources",
+            1,
+            "material/profile_icon_item_0001.png",
+        ),
+        (
+            "userInterfaceIcons",
+            "user_interface_icon",
+            "customProfileUserInterfaceIconResources",
+            42,
+            "user_interface_icon/profile_icon_0042.png",
+        ),
+    )
+    resources: dict[str, dict[int, dict[str, object]]] = {}
+    layout: dict[str, list[dict[str, object]]] = {}
+    for layer, (bucket, _kind, resource_key, resource_id, relative_path) in enumerate(resource_specs, start=1):
+        image_path = tmp_path / "asset" / "jp-assets" / "startapp" / "custom_profile" / relative_path
+        _write_png(image_path)
+        resources[resource_key] = {
+            resource_id: {
+                "id": resource_id,
+                "imagePath": image_path.relative_to(tmp_path).as_posix(),
+            }
+        }
+        layout[bucket] = [
+            {
+                "id": resource_id,
+                "objectData": {
+                    "layer": layer,
+                    "visible": True,
+                    "position": {"x": 0, "y": 0},
+                    "scale": {"x": 1, "y": 1},
+                    "rotation": {"z": 0, "w": 1},
+                },
+            }
+        ]
+
+    renderer = _make_renderer(tmp_path, resources=resources, region="jp")
+    contents = renderer.build_native_contents({"customProfileCard": layout})
+
+    assert [content.kind for content in contents] == [spec[1] for spec in resource_specs]
+    for content in contents:
+        resource = renderer.image_resource_for(content.kind, content.item)
+        assert renderer.resource_path(resource) is not None
+        rendered = renderer.render_image_content(content.kind, content.item)
+        assert isinstance(rendered, tuple)
+        assert rendered[0].size == (3, 2)
+
+
 def test_custom_profile_card_member_candidates_match_cloud_small_still_paths(tmp_path: Path) -> None:
     _write_png(
         tmp_path
