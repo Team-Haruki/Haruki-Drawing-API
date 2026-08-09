@@ -574,6 +574,46 @@ def test_custom_profile_v67_image_buckets_use_cloud_resources(tmp_path: Path) ->
         assert rendered[0].size == (3, 2)
 
 
+def test_custom_profile_null_content_buckets_are_treated_as_empty(tmp_path: Path) -> None:
+    nullable_buckets = (
+        "generals",
+        "generalBackgrounds",
+        "storyBackgrounds",
+        "standMembers",
+        "cardMembers",
+        "honors",
+        "bondsHonors",
+        "collections",
+        "others",
+        "characterIcons",
+        "materials",
+        "userInterfaceIcons",
+        "stamps",
+        "texts",
+        "miniCharas",
+        "screenFilters",
+    )
+    layout = dict.fromkeys(nullable_buckets)
+    layout["shapes"] = [
+        {
+            "id": 1,
+            "objectData": {
+                "layer": 7,
+                "visible": True,
+                "position": {"x": 0, "y": 0},
+                "scale": {"x": 1, "y": 1},
+                "rotation": {"z": 0, "w": 1},
+            },
+        }
+    ]
+
+    renderer = _make_renderer(tmp_path)
+    contents = renderer.build_native_contents({"customProfileCard": layout})
+
+    assert [(content.kind, content.object_data["layer"]) for content in contents] == [("shape", 7)]
+    assert renderer.build_native_contents({"customProfileCard": None}) == []
+
+
 def test_custom_profile_card_member_candidates_match_cloud_small_still_paths(tmp_path: Path) -> None:
     _write_png(
         tmp_path

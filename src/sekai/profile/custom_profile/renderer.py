@@ -2640,7 +2640,7 @@ class PNGRenderer:
         }
 
     def build_native_contents(self, card: dict[str, Any]) -> list[NativeContent]:
-        layout = card["customProfileCard"]
+        layout = card.get("customProfileCard") or {}
         buckets = (
             ("general", "generals"),
             ("general_background", "generalBackgrounds"),
@@ -2662,7 +2662,7 @@ class PNGRenderer:
         )
         contents: list[NativeContent] = []
         for kind, key in buckets:
-            for item in layout.get(key, []):
+            for item in layout.get(key) or []:
                 object_data = item["objectData"]
                 contents.append(NativeContent(int(object_data["layer"]), kind, item, object_data))
         return sorted(contents, key=self.native_draw_order_key)
