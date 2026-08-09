@@ -83,6 +83,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
     SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
+    STATIC_IMAGE_CONTENT_KINDS,
     LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
@@ -1453,7 +1454,7 @@ def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneA
     if not content.object_data.get("visible", False):
         return False
     path = None
-    if content.kind in {"general_background", "story_background", "stand_member", "other", "collection"}:
+    if content.kind in STATIC_IMAGE_CONTENT_KINDS:
         resource = renderer.image_resource_for(content.kind, content.item)
         path = renderer.resource_path(resource)
     elif content.kind == "stamp":

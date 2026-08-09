@@ -59,6 +59,27 @@ def test_extract_category_fixture_keeps_only_selected_bucket_items() -> None:
     assert "private" not in serialized
 
 
+@pytest.mark.parametrize(
+    ("category", "bucket"),
+    [
+        ("character_icon", "characterIcons"),
+        ("material", "materials"),
+        ("user_interface_icon", "userInterfaceIcons"),
+    ],
+)
+def test_extract_category_fixture_supports_v67_image_buckets(category: str, bucket: str) -> None:
+    item = _item(layer=1)
+    payload = {
+        "region": "jp",
+        "card": {"customProfileCard": {bucket: [item]}},
+    }
+
+    fixture = extract_category_fixture(payload, category=category, indexes=[0])
+
+    assert fixture["category"] == category
+    assert fixture["items"] == [item]
+
+
 def test_symbol_fixture_removes_plain_letters_and_numbers_but_keeps_markup_and_symbols() -> None:
     fixture = build_category_fixture(
         category="text_symbol",

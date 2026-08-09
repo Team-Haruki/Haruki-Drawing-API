@@ -619,6 +619,9 @@ class Renderer:
         self.story_bgs = load_index(masterdata / "customProfileStoryBackgroundResources.json")
         self.collections = load_index(masterdata / "customProfileCollectionResources.json")
         self.others = load_index(masterdata / "customProfileEtcResources.json")
+        self.character_icons = load_index(masterdata / "customProfileCharacterIconResources.json")
+        self.materials = load_index(masterdata / "customProfileMaterialResources.json")
+        self.user_interface_icons = load_index(masterdata / "customProfileUserInterfaceIconResources.json")
         self.defined_masks = 0
         self.defs: list[str] = []
 
@@ -849,6 +852,20 @@ class Renderer:
             add(item, self.render_image("collection", item, self.collections.get(int(item.get("id", 0)), {})))
         for item in layout.get("others", []):
             add(item, self.render_image("other", item, self.others.get(int(item.get("id", 0)), {})))
+        for item in layout.get("characterIcons", []):
+            add(
+                item,
+                self.render_image("character_icon", item, self.character_icons.get(int(item.get("id", 0)), {})),
+            )
+        for item in layout.get("materials", []):
+            add(item, self.render_image("material", item, self.materials.get(int(item.get("id", 0)), {})))
+        for item in layout.get("userInterfaceIcons", []):
+            add(
+                item,
+                self.render_image(
+                    "user_interface_icon", item, self.user_interface_icons.get(int(item.get("id", 0)), {})
+                ),
+            )
         elements.sort(key=lambda pair: pair[0])
 
         debug = ""

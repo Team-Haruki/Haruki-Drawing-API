@@ -69,6 +69,15 @@ def test_custom_profile_rejects_too_many_elements() -> None:
         validate_custom_profile_card(card, **LIMITS)
 
 
+@pytest.mark.parametrize("bucket", ["characterIcons", "materials", "userInterfaceIcons"])
+def test_custom_profile_v67_image_buckets_count_toward_element_limit(bucket: str) -> None:
+    card = _card()
+    card["customProfileCard"][bucket] = card["customProfileCard"]["shapes"] * 4
+
+    with pytest.raises(ValueError, match="elements"):
+        validate_custom_profile_card(card, **LIMITS)
+
+
 def test_custom_profile_rejects_oversized_text_before_rendering() -> None:
     card = _card()
     card["customProfileCard"]["shapes"] = []
