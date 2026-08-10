@@ -6,20 +6,22 @@
 //! Reuses infrastructure from `lib.rs` (`pub(crate)` items): image decode,
 //! font loading, surface encode, blur glass, triangle background, cover image.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use moka::sync::Cache;
 #[cfg(not(test))]
 use pyo3::buffer::PyBuffer;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
-    Data, FilterMode, Font, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode, Paint,
-    PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode,
-    Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
-    image_filters, surfaces,
+    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode,
+    Paint, PaintStyle, PathVerb, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface,
+    TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, color_filters, gradient,
+    image::CachingHint, image_filters, surfaces,
 };
 
 use crate::ir::*;
@@ -90,6 +92,9 @@ struct FontRegistry {
     emoji: Option<Typeface>,
     /// Arbitrary named fonts (FontsIr.extra), addressable via FontRef.name.
     extra: HashMap<String, Typeface>,
+    /// Extra-font keys that resolved to sans-serif. SdfFontQuad is strict and must reject these
+    /// instead of generating a valid-looking field from the wrong face.
+    extra_fallbacks: HashSet<String>,
     /// How many of this scene's fonts could not be resolved and fell back to sans-serif.
     /// `load_typeface_checked` logs each distinct one at ERROR; this surfaces it per render.
     fallbacks: u64,
@@ -112,17 +117,23 @@ impl FontRegistry {
         // Only load an emoji typeface when explicitly configured (otherwise emoji codepoints
         // keep falling back to the main font, unchanged).
         let emoji = fonts.emoji.as_ref().map(|name| load(name));
-        let extra: HashMap<String, Typeface> = fonts
-            .extra
-            .iter()
-            .map(|(key, file)| (key.clone(), load(file)))
-            .collect();
+        let mut extra = HashMap::new();
+        let mut extra_fallbacks = HashSet::new();
+        for (key, file) in &fonts.extra {
+            let (typeface, fell_back) = load_typeface_checked(&fonts.dir, file);
+            fallbacks += u64::from(fell_back);
+            if fell_back {
+                extra_fallbacks.insert(key.clone());
+            }
+            extra.insert(key.clone(), typeface);
+        }
         Self {
             regular,
             bold,
             heavy,
             emoji,
             extra,
+            extra_fallbacks,
             fallbacks,
         }
     }
@@ -143,6 +154,18 @@ impl FontRegistry {
             return tf;
         }
         self.resolve(font.role)
+    }
+
+    fn resolve_sdf_font(&self, font: &FontRef) -> Result<&Typeface, String> {
+        let Some(name) = &font.name else {
+            return Ok(self.resolve(font.role));
+        };
+        if self.extra_fallbacks.contains(name) {
+            return Err(format!("SdfFontQuad font resolved to fallback: {name}"));
+        }
+        self.extra
+            .get(name)
+            .ok_or_else(|| format!("SdfFontQuad references an unregistered font: {name}"))
     }
 
     fn emoji_font(&self, size: f32) -> Option<Font> {
@@ -260,6 +283,90 @@ struct PreparedSdfAtlasField {
     height: usize,
 }
 
+struct PreparedSdfFontField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SdfFontFieldCacheKey {
+    typeface_id: u32,
+    glyph_id: u16,
+    font_size_bits: u32,
+    bbox: [i32; 4],
+    padding: i32,
+    spread_bits: u32,
+}
+
+struct SdfFontBaseField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    byte_size: u32,
+}
+
+const SDF_FONT_CURVE_STEPS: usize = 24;
+const SDF_FONT_MAX_DISTANCE_EVALUATIONS: usize = 64 * 1024 * 1024;
+
+const DEFAULT_SDF_FONT_CACHE_MB: u64 = 64;
+const DEFAULT_SDF_FONT_CACHE_MAX_ENTRY_MB: u64 = 4;
+const SDF_FONT_CACHE_MIB: u64 = 1024 * 1024;
+static SDF_FONT_FIELD_CACHE: OnceLock<Option<Cache<SdfFontFieldCacheKey, Arc<SdfFontBaseField>>>> =
+    OnceLock::new();
+static SDF_FONT_CACHE_LIMITS: OnceLock<(u64, u64)> = OnceLock::new();
+
+fn sdf_font_cache_limits() -> (u64, u64) {
+    *SDF_FONT_CACHE_LIMITS.get_or_init(|| {
+        let read_mb = |name: &str, default_mb: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default_mb)
+                .saturating_mul(SDF_FONT_CACHE_MIB)
+        };
+        (
+            read_mb("HARUKI_SKIA_SDF_FONT_CACHE_MB", DEFAULT_SDF_FONT_CACHE_MB),
+            read_mb(
+                "HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB",
+                DEFAULT_SDF_FONT_CACHE_MAX_ENTRY_MB,
+            ),
+        )
+    })
+}
+
+fn sdf_font_field_cache() -> Option<&'static Cache<SdfFontFieldCacheKey, Arc<SdfFontBaseField>>> {
+    SDF_FONT_FIELD_CACHE
+        .get_or_init(|| {
+            let (max_bytes, _) = sdf_font_cache_limits();
+            (max_bytes > 0).then(|| {
+                Cache::builder()
+                    .max_capacity(max_bytes)
+                    .weigher(|_, value: &Arc<SdfFontBaseField>| value.byte_size)
+                    .build()
+            })
+        })
+        .as_ref()
+}
+
+pub(crate) fn sdf_font_cache_snapshot() -> (u64, u64, u64, u64) {
+    let (max_bytes, max_entry_bytes) = sdf_font_cache_limits();
+    let (entries, bytes) = sdf_font_field_cache()
+        .map(|cache| {
+            cache.run_pending_tasks();
+            (cache.entry_count(), cache.weighted_size())
+        })
+        .unwrap_or_default();
+    (max_bytes, max_entry_bytes, entries, bytes)
+}
+
+pub(crate) fn clear_sdf_font_cache() {
+    if let Some(cache) = sdf_font_field_cache() {
+        cache.invalidate_all();
+        cache.run_pending_tasks();
+    }
+}
+
 struct UnityImageSource {
     image: Image,
     width: i32,
@@ -293,6 +400,8 @@ struct Interp {
     /// by the stable address of the parsed IR node for this render.
     sdf_atlas_sources: HashMap<String, SdfAtlasSource>,
     sdf_atlas_fields: HashMap<usize, PreparedSdfAtlasField>,
+    /// Fully warped dynamic source-font glyph fields, keyed by parsed IR node address.
+    sdf_font_fields: HashMap<usize, PreparedSdfFontField>,
     /// Fully decoded straight-RGBA assets for UnityImage. Keeping these separate from the
     /// ordinary lazy image map makes corrupt pixel streams fail during scene preparation.
     unity_image_sources: HashMap<String, UnityImageSource>,
@@ -731,6 +840,7 @@ pub(crate) fn render_scene_inner(
         sdf_shape_sources: HashMap::new(),
         sdf_atlas_sources: HashMap::new(),
         sdf_atlas_fields: HashMap::new(),
+        sdf_font_fields: HashMap::new(),
         unity_image_sources: HashMap::new(),
         pillow_lanczos_sources: HashMap::new(),
         max_node_pixels,
@@ -769,12 +879,14 @@ pub(crate) fn render_scene_inner(
         prepare_unity_subscene_assets(background, &mut interp)?;
         prepare_sdf_shape_sources(background, &mut interp)?;
         prepare_sdf_atlas_fields(background, &mut interp)?;
+        prepare_sdf_font_fields(background, &mut interp)?;
         prepare_unity_image_assets(background, &mut interp)?;
     }
     prepare_pillow_lanczos_sources(&scene.root, &mut interp)?;
     prepare_unity_subscene_assets(&scene.root, &mut interp)?;
     prepare_sdf_shape_sources(&scene.root, &mut interp)?;
     prepare_sdf_atlas_fields(&scene.root, &mut interp)?;
+    prepare_sdf_font_fields(&scene.root, &mut interp)?;
     prepare_unity_image_assets(&scene.root, &mut interp)?;
     let mut sdf_shading_runtime_peak = max_sdf_quad_runtime_bytes(&scene.root, &interp.mem_images)?;
     if let Some(background) = &scene.background {
@@ -787,6 +899,14 @@ pub(crate) fn render_scene_inner(
             .checked_mul(field.height)
             .and_then(|pixels| pixels.checked_mul(8))
             .ok_or_else(|| "SdfAtlasQuad shading runtime byte count overflow".to_string())?;
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak.max(runtime_bytes);
+    }
+    for field in interp.sdf_font_fields.values() {
+        let runtime_bytes = field
+            .width
+            .checked_mul(field.height)
+            .and_then(|pixels| pixels.checked_mul(8))
+            .ok_or_else(|| "SdfFontQuad shading runtime byte count overflow".to_string())?;
         sdf_shading_runtime_peak = sdf_shading_runtime_peak.max(runtime_bytes);
     }
     interp.ensure_native_scene_bytes(sdf_shading_runtime_peak, "SDF shading patch runtime")?;
@@ -998,6 +1118,12 @@ fn render_node(
         Node::SdfAtlasQuad(quad) => {
             let started = Instant::now();
             draw_sdf_atlas_quad(surface, interp, quad, off)?;
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
+        }
+        Node::SdfFontQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_font_quad(surface, interp, quad, off)?;
             interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
             interp.metrics.sdf_quad_count += 1;
         }
@@ -1451,6 +1577,9 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
         }
         Node::SdfAtlasQuad(_) if in_transform => {
             Err("SdfAtlasQuad inside Transform would be double-transformed".to_string())
+        }
+        Node::SdfFontQuad(_) if in_transform => {
+            Err("SdfFontQuad inside Transform would be double-transformed".to_string())
         }
         Node::SdfShape(_) if in_transform => {
             Err("SdfShape inside Transform would apply screen-space scale twice".to_string())
@@ -2344,6 +2473,473 @@ fn prepare_sdf_atlas_fields(node: &Node, interp: &mut Interp) -> Result<(), Stri
                     pixels: warped,
                     width: output_size.0,
                     height: output_size.1,
+                },
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sdf_font_node_key(node: &SdfFontQuadNode) -> usize {
+    node as *const SdfFontQuadNode as usize
+}
+
+#[derive(Clone, Copy)]
+struct SdfFontDimensions {
+    base: (usize, usize),
+    crop: (usize, usize),
+    field: (usize, usize),
+    output: (usize, usize),
+}
+
+fn validate_sdf_font_quad(
+    node: &SdfFontQuadNode,
+    max_node_pixels: usize,
+) -> Result<SdfFontDimensions, String> {
+    if node
+        .font
+        .name
+        .as_ref()
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err("SdfFontQuad requires a registered font name".to_string());
+    }
+    if !node.font.size.is_finite() || node.font.size <= 0.0 || node.font.size > 4096.0 {
+        return Err("SdfFontQuad font size is outside the native safety limit".to_string());
+    }
+    if !node.spread.is_finite() || node.spread <= 0.0 || node.spread > 4096.0 {
+        return Err("SdfFontQuad spread is outside the native safety limit".to_string());
+    }
+    if node.padding < 0 || node.crop_padding < 0 || node.crop_padding > node.padding {
+        return Err("SdfFontQuad padding is invalid".to_string());
+    }
+    if char::from_u32(node.codepoint).is_none() {
+        return Err(format!(
+            "SdfFontQuad codepoint is not a Unicode scalar: {}",
+            node.codepoint
+        ));
+    }
+    if node
+        .pos
+        .iter()
+        .map(|value| f64::from(*value))
+        .chain(node.affine)
+        .any(|value| !value.is_finite())
+    {
+        return Err("SdfFontQuad contains a non-finite scalar".to_string());
+    }
+
+    let bbox_width = i64::from(node.bbox[2]) - i64::from(node.bbox[0]);
+    let bbox_height = i64::from(node.bbox[3]) - i64::from(node.bbox[1]);
+    if bbox_width <= 0 || bbox_height <= 0 {
+        return Err("SdfFontQuad bbox must have positive dimensions".to_string());
+    }
+    let dimensions = |width: i64, height: i64, label: &str| -> Result<(usize, usize), String> {
+        if width <= 0 || height <= 0 {
+            return Err(format!("SdfFontQuad {label} dimensions must be positive"));
+        }
+        let width =
+            usize::try_from(width).map_err(|_| format!("SdfFontQuad {label} width overflows"))?;
+        let height =
+            usize::try_from(height).map_err(|_| format!("SdfFontQuad {label} height overflows"))?;
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| format!("SdfFontQuad {label} pixel count overflows"))?;
+        if pixels > max_node_pixels {
+            return Err(format!(
+                "SdfFontQuad {label} {width}x{height} ({pixels} pixels) exceeds limit {max_node_pixels}"
+            ));
+        }
+        Ok((width, height))
+    };
+    let base = dimensions(
+        bbox_width + i64::from(node.padding) * 2,
+        bbox_height + i64::from(node.padding) * 2,
+        "source field",
+    )?;
+    let crop = dimensions(
+        bbox_width + i64::from(node.crop_padding) * 2,
+        bbox_height + i64::from(node.crop_padding) * 2,
+        "cropped field",
+    )?;
+    let field = dimensions(
+        i64::from(node.field_size[0]),
+        i64::from(node.field_size[1]),
+        "resized field",
+    )?;
+    let output = dimensions(
+        i64::from(node.size[0]),
+        i64::from(node.size[1]),
+        "warped field",
+    )?;
+    Ok(SdfFontDimensions {
+        base,
+        crop,
+        field,
+        output,
+    })
+}
+
+fn sdf_outline_font(typeface: Typeface, size: f32) -> Font {
+    let mut font = Font::from_typeface(typeface, size);
+    // The legacy fontTools path used the unhinted design outline. Raster hinting here would
+    // make the cached SDF platform-dependent and move its edges away from that reference.
+    font.set_hinting(FontHinting::None)
+        .set_force_auto_hinting(false)
+        .set_embedded_bitmaps(false)
+        .set_subpixel(true)
+        .set_linear_metrics(true);
+    font
+}
+
+fn sdf_path_segment_count(path: &skia_safe::Path) -> Result<usize, String> {
+    path.iter().try_fold(0usize, |count, record| {
+        let added = match record.verb() {
+            PathVerb::Move => 0,
+            PathVerb::Line | PathVerb::Close => 1,
+            PathVerb::Quad | PathVerb::Conic | PathVerb::Cubic => SDF_FONT_CURVE_STEPS,
+        };
+        count
+            .checked_add(added)
+            .ok_or_else(|| "SdfFontQuad outline segment count overflow".to_string())
+    })
+}
+
+fn flatten_sdf_font_path(
+    path: &skia_safe::Path,
+    max_segment_bytes: usize,
+) -> Result<Vec<[f32; 4]>, String> {
+    let segment_count = sdf_path_segment_count(path)?;
+    let segment_bytes = segment_count
+        .checked_mul(std::mem::size_of::<[f32; 4]>())
+        .ok_or_else(|| "SdfFontQuad outline segment byte count overflow".to_string())?;
+    if segment_bytes > max_segment_bytes {
+        return Err(format!(
+            "SdfFontQuad outline requires {segment_bytes} bytes; limit is {max_segment_bytes}"
+        ));
+    }
+    let mut segments = Vec::with_capacity(segment_count);
+    for record in path.iter() {
+        let verb = record.verb();
+        let points = record.points();
+        let line = |segments: &mut Vec<[f32; 4]>, a: Point, b: Point| {
+            segments.push([a.x, a.y, b.x, b.y]);
+        };
+        match verb {
+            PathVerb::Move => {}
+            PathVerb::Line | PathVerb::Close => line(&mut segments, points[0], points[1]),
+            PathVerb::Quad => {
+                let [p0, p1, p2] = [points[0], points[1], points[2]];
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let next = Point::new(
+                        u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x,
+                        u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+            PathVerb::Conic => {
+                let [p0, p1, p2] = [points[0], points[1], points[2]];
+                let weight = record.conic_weight();
+                if !weight.is_finite() || weight <= 0.0 {
+                    return Err("SdfFontQuad outline has an invalid conic weight".to_string());
+                }
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let denominator = u * u + 2.0 * weight * u * t + t * t;
+                    let next = Point::new(
+                        (u * u * p0.x + 2.0 * weight * u * t * p1.x + t * t * p2.x) / denominator,
+                        (u * u * p0.y + 2.0 * weight * u * t * p1.y + t * t * p2.y) / denominator,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+            PathVerb::Cubic => {
+                let [p0, p1, p2, p3] = [points[0], points[1], points[2], points[3]];
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let next = Point::new(
+                        u * u * u * p0.x
+                            + 3.0 * u * u * t * p1.x
+                            + 3.0 * u * t * t * p2.x
+                            + t * t * t * p3.x,
+                        u * u * u * p0.y
+                            + 3.0 * u * u * t * p1.y
+                            + 3.0 * u * t * t * p2.y
+                            + t * t * t * p3.y,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+        }
+    }
+    if segments.is_empty() {
+        return Err("SdfFontQuad glyph outline is empty".to_string());
+    }
+    Ok(segments)
+}
+
+fn build_sdf_font_base_field(
+    path: &skia_safe::Path,
+    bbox: [i32; 4],
+    padding: i32,
+    spread: f32,
+    dimensions: (usize, usize),
+    max_segment_bytes: usize,
+) -> Result<SdfFontBaseField, String> {
+    let segment_count = sdf_path_segment_count(path)?;
+    let evaluations = dimensions
+        .0
+        .checked_mul(dimensions.1)
+        .and_then(|pixels| pixels.checked_mul(segment_count))
+        .ok_or_else(|| "SdfFontQuad distance evaluation count overflow".to_string())?;
+    if evaluations > SDF_FONT_MAX_DISTANCE_EVALUATIONS {
+        return Err(format!(
+            "SdfFontQuad requires {evaluations} distance evaluations; native limit is \
+             {SDF_FONT_MAX_DISTANCE_EVALUATIONS}"
+        ));
+    }
+    let segments = flatten_sdf_font_path(path, max_segment_bytes)?;
+    let (width, height) = dimensions;
+    let mut pixels = vec![0_u8; width * height];
+    pixels
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let py = (bbox[1] - padding) as f32 + y as f32 + 0.5;
+            for (x, output) in row.iter_mut().enumerate() {
+                let px = (bbox[0] - padding) as f32 + x as f32 + 0.5;
+                let mut min_distance = 1.0e9_f32;
+                let mut winding = 0_i32;
+                for [ax, ay, bx, by] in &segments {
+                    let vx = bx - ax;
+                    let vy = by - ay;
+                    let wx = px - ax;
+                    let wy = py - ay;
+                    let length_sq = vx * vx + vy * vy;
+                    let distance = if length_sq <= 1.0e-12 {
+                        (wx * wx + wy * wy).sqrt()
+                    } else {
+                        let t = ((wx * vx + wy * vy) / length_sq).clamp(0.0, 1.0);
+                        let dx = px - (ax + t * vx);
+                        let dy = py - (ay + t * vy);
+                        (dx * dx + dy * dy).sqrt()
+                    };
+                    min_distance = min_distance.min(distance);
+                    let cross = vx * (py - ay) - (px - ax) * vy;
+                    if *ay <= py && *by > py && cross > 0.0 {
+                        winding += 1;
+                    } else if *ay > py && *by <= py && cross < 0.0 {
+                        winding -= 1;
+                    }
+                }
+                let signed_distance = if winding != 0 {
+                    min_distance
+                } else {
+                    -min_distance
+                };
+                let value = (0.5 + signed_distance / (2.0 * spread)).clamp(0.0, 1.0);
+                *output = (value * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+            }
+        });
+    let byte_size = u32::try_from(pixels.len())
+        .map_err(|_| "SdfFontQuad base field exceeds the cache weight type".to_string())?;
+    Ok(SdfFontBaseField {
+        pixels,
+        width,
+        height,
+        byte_size,
+    })
+}
+
+fn crop_sdf_font_field(
+    source: &SdfFontBaseField,
+    offset: usize,
+    dimensions: (usize, usize),
+) -> Result<Vec<u8>, String> {
+    let (width, height) = dimensions;
+    if offset
+        .checked_add(width)
+        .is_none_or(|right| right > source.width)
+        || offset
+            .checked_add(height)
+            .is_none_or(|bottom| bottom > source.height)
+    {
+        return Err("SdfFontQuad crop exceeds the generated field".to_string());
+    }
+    let mut output = vec![0_u8; width * height];
+    for y in 0..height {
+        let source_start = (y + offset) * source.width + offset;
+        output[y * width..(y + 1) * width]
+            .copy_from_slice(&source.pixels[source_start..source_start + width]);
+    }
+    Ok(output)
+}
+
+fn prepare_sdf_font_fields(node: &Node, interp: &mut Interp) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::SdfFontQuad(quad) => {
+            let dimensions = validate_sdf_font_quad(quad, interp.max_node_pixels)?;
+            let ch = char::from_u32(quad.codepoint)
+                .ok_or_else(|| format!("invalid SdfFontQuad codepoint: {}", quad.codepoint))?;
+            let typeface = interp.fonts.resolve_sdf_font(&quad.font)?.clone();
+            let typeface_id = typeface.unique_id();
+            let font = sdf_outline_font(typeface, quad.font.size);
+            let glyph_id = font.unichar_to_glyph(ch as i32);
+            if glyph_id == 0 {
+                return Err(format!(
+                    "SdfFontQuad font does not cover codepoint U+{:04X}",
+                    quad.codepoint
+                ));
+            }
+            let path = font.get_path(glyph_id).ok_or_else(|| {
+                format!(
+                    "SdfFontQuad font has no outline for codepoint U+{:04X}",
+                    quad.codepoint
+                )
+            })?;
+            let key = SdfFontFieldCacheKey {
+                typeface_id,
+                glyph_id,
+                font_size_bits: quad.font.size.to_bits(),
+                bbox: quad.bbox,
+                padding: quad.padding,
+                spread_bits: quad.spread.to_bits(),
+            };
+            let base_bytes = dimensions.base.0 * dimensions.base.1;
+            let available = interp.available_native_scene_bytes("SdfFontQuad preparation")?;
+            let max_segment_bytes = available
+                .checked_sub(base_bytes)
+                .ok_or_else(|| "SdfFontQuad source field exhausts the scene budget".to_string())?;
+            let (_, max_cache_entry_bytes) = sdf_font_cache_limits();
+            let did_build = Cell::new(false);
+            let build = || {
+                did_build.set(true);
+                build_sdf_font_base_field(
+                    &path,
+                    quad.bbox,
+                    quad.padding,
+                    quad.spread,
+                    dimensions.base,
+                    max_segment_bytes,
+                )
+                .map(Arc::new)
+            };
+            let base = if base_bytes as u64 <= max_cache_entry_bytes {
+                match sdf_font_field_cache() {
+                    Some(cache) => {
+                        if let Some(field) = cache.get(&key) {
+                            interp.metrics.sdf_font_cache_hits += 1;
+                            field
+                        } else {
+                            let field = cache
+                                .try_get_with(key, build)
+                                .map_err(|error| (*error).clone())?;
+                            if did_build.get() {
+                                interp.metrics.sdf_font_cache_misses += 1;
+                            } else {
+                                interp.metrics.sdf_font_cache_coalesced += 1;
+                            }
+                            field
+                        }
+                    }
+                    None => {
+                        interp.metrics.sdf_font_cache_bypasses += 1;
+                        build()?
+                    }
+                }
+            } else {
+                interp.metrics.sdf_font_cache_bypasses += 1;
+                build()?
+            };
+
+            let crop_bytes = dimensions.crop.0 * dimensions.crop.1;
+            let field_bytes = dimensions.field.0 * dimensions.field.1;
+            let output_bytes = dimensions.output.0 * dimensions.output.1;
+            interp.ensure_native_scene_bytes(
+                crop_bytes
+                    .checked_add(field_bytes)
+                    .ok_or_else(|| "SdfFontQuad resize peak overflow".to_string())?,
+                "SdfFontQuad crop and resize",
+            )?;
+            interp.ensure_native_scene_bytes(
+                field_bytes
+                    .checked_add(output_bytes)
+                    .ok_or_else(|| "SdfFontQuad warp peak overflow".to_string())?,
+                "SdfFontQuad field warp",
+            )?;
+            let crop_offset = usize::try_from(quad.padding - quad.crop_padding)
+                .map_err(|_| "SdfFontQuad crop offset overflows".to_string())?;
+            let cropped = crop_sdf_font_field(&base, crop_offset, dimensions.crop)?;
+            let resize_available = available
+                .checked_sub(crop_bytes)
+                .ok_or_else(|| "SdfFontQuad crop exhausts the scene budget".to_string())?;
+            let resize_limits = PillowResizeLimits::new(
+                resize_available,
+                resize_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let field = resize_l_pillow_bicubic(
+                &cropped,
+                dimensions.crop.0,
+                dimensions.crop.1,
+                dimensions.field.0,
+                dimensions.field.1,
+                resize_limits,
+            )?;
+            drop(cropped);
+            let warp_available = available
+                .checked_sub(field_bytes)
+                .ok_or_else(|| "SdfFontQuad field exhausts the scene budget".to_string())?;
+            let warp_limits = PillowResizeLimits::new(
+                warp_available,
+                warp_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let warped = transform_l_pillow_bicubic(
+                &field,
+                dimensions.field.0,
+                dimensions.field.1,
+                dimensions.output.0,
+                dimensions.output.1,
+                quad.affine,
+                warp_limits,
+            )?;
+            drop(field);
+            interp.retain_native_asset_bytes(output_bytes, "SdfFontQuad warped field")?;
+            interp.sdf_font_fields.insert(
+                sdf_font_node_key(quad),
+                PreparedSdfFontField {
+                    pixels: warped,
+                    width: dimensions.output.0,
+                    height: dimensions.output.1,
                 },
             );
             Ok(())
@@ -3472,6 +4068,32 @@ fn draw_sdf_atlas_quad(
         .sdf_atlas_fields
         .get(&sdf_atlas_node_key(node))
         .ok_or_else(|| format!("SdfAtlasQuad field was not prepared: {}", node.path))?;
+    draw_shaded_sdf_patch(
+        surface,
+        &field.pixels,
+        field.width,
+        field.height,
+        field.width,
+        &node.shading,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+    )
+}
+
+fn draw_sdf_font_quad(
+    surface: &mut Surface,
+    interp: &Interp,
+    node: &SdfFontQuadNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let field = interp
+        .sdf_font_fields
+        .get(&sdf_font_node_key(node))
+        .ok_or_else(|| {
+            format!(
+                "SdfFontQuad field was not prepared for codepoint U+{:04X}",
+                node.codepoint
+            )
+        })?;
     draw_shaded_sdf_patch(
         surface,
         &field.pixels,
@@ -5582,6 +6204,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sdf_font_base_field_flattens_closed_outline_and_tracks_sign() {
+        let mut builder = skia_safe::PathBuilder::new();
+        builder
+            .move_to((0.0, 0.0))
+            .line_to((10.0, 0.0))
+            .line_to((10.0, 10.0))
+            .line_to((0.0, 10.0))
+            .close();
+        let path = builder.detach();
+        let segments = flatten_sdf_font_path(&path, 4 * std::mem::size_of::<[f32; 4]>())
+            .expect("rectangle flattens");
+        assert_eq!(segments.len(), 4, "Close must contribute the final edge");
+        let error = flatten_sdf_font_path(&path, 3 * std::mem::size_of::<[f32; 4]>())
+            .expect_err("segment budget must fail before allocation");
+        assert!(
+            error.contains("outline requires"),
+            "unexpected error: {error}"
+        );
+
+        let field = build_sdf_font_base_field(&path, [0, 0, 10, 10], 2, 2.0, (14, 14), 1024)
+            .expect("field builds");
+        assert!(field.pixels[7 * 14 + 7] > 240, "rectangle center is inside");
+        assert!(field.pixels[0] < 64, "padded corner is outside");
+
+        let error = match build_sdf_font_base_field(
+            &path,
+            [0, 0, 5000, 5000],
+            0,
+            2.0,
+            (5000, 5000),
+            1024,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("distance evaluation budget must fail before the field allocation"),
+        };
+        assert!(
+            error.contains("distance evaluations"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn sdf_font_root(extra: &str) -> String {
+        format!(
+            r#"{{
+                "type": "SdfFontQuad",
+                "font": {{ "role": "default", "name": "dynamic", "size": 32 }},
+                "codepoint": 65,
+                "bbox": [0, -24, 20, 4],
+                "padding": 4,
+                "crop_padding": 2,
+                "field_size": [20, 28],
+                "spread": 4,
+                "pos": [0, 0],
+                "size": [20, 28],
+                "affine": [1, 0, 0, 0, 1, 0],
+                "shading": {{
+                    "face_color": [255, 255, 255], "face_scale": 1,
+                    "face_w": 0, "alpha": 1
+                }}
+                {extra}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn sdf_font_quad_rejects_registered_font_fallback() {
+        let json = bare_scene_json((32, 32), &sdf_font_root("")).replace(
+            r#""fonts": { "dir": "/tmp", "default": "missing", "bold": "missing" }"#,
+            r#""fonts": { "dir": "/tmp", "default": "missing", "bold": "missing",
+                           "extra": { "dynamic": "also-missing" } }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            error.contains("resolved to fallback"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sdf_font_quad_rejects_invalid_codepoint_before_font_access() {
+        let root = sdf_font_root("").replace("\"codepoint\": 65", "\"codepoint\": 1114112");
+        let scene: Scene = serde_json::from_str(&bare_scene_json((32, 32), &root)).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            error.contains("Unicode scalar"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn sdf_scene_json(field: &str) -> String {
         bare_scene_json(
             (16, 16),
@@ -5628,6 +6341,20 @@ mod tests {
         let scene: Scene = serde_json::from_str(&json).expect("parses");
         let err = expect_scene_error(&scene, HashMap::new());
         assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_rejects_sdf_font_quad() {
+        let json = bare_scene_json(
+            (32, 32),
+            &format!(
+                r#"{{ "type": "Transform", "matrix": [1, 0, 0, 1, 0, 0], "children": [{}] }}"#,
+                sdf_font_root("")
+            ),
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(error.contains("SdfFontQuad"), "unexpected error: {error}");
     }
 
     #[test]

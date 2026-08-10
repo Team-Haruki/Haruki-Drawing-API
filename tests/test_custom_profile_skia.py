@@ -45,6 +45,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
     DirectSdfAtlasQuad,
+    DirectSdfFontQuad,
     LayerTransformInputs,
     NativeContent,
     PNGRenderer,
@@ -264,6 +265,70 @@ def test_sdf_atlas_quad_emits_without_mem_or_pillow_touch(monkeypatch):
             "face_scale": 1.25,
             "face_w": 0.4,
             "alpha": 0.75,
+            "underlay": None,
+        },
+    }
+
+
+def test_sdf_font_quad_emits_registered_font_without_mem_or_pillow_touch(tmp_path: Path, monkeypatch):
+    font_path = tmp_path / "tmp" / "dynamic.ttf"
+    font_path.parent.mkdir()
+    font_path.touch()
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    scalars = SimpleNamespace(
+        face_color=(250, 240, 230),
+        face_scale=1.5,
+        face_w=0.35,
+        alpha=0.8,
+        underlay=None,
+    )
+    quad = DirectSdfFontQuad(
+        font_path=font_path,
+        codepoint=ord("A"),
+        sample_size=64.0,
+        bbox=(-2, -48, 40, 8),
+        padding=6,
+        crop_padding=3,
+        field_size=(42, 56),
+        spread=4.9,
+        size=(48, 60),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        left=3,
+        top=4,
+        scalars=scalars,
+    )
+
+    token = begin_pillow_touch_scope()
+    try:
+        scene = skia_mod._SceneAssembler(skia_mod._new_builder(80, 80), (80, 80), 1024)
+        assert scene.emit_sdf_quads([quad])
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    built = scene.builder.build()
+    node = built["root"]["children"][0]
+    font_name = node["font"]["name"]
+    assert built["fonts"]["extra"] == {font_name: str(font_path.resolve())}
+    assert node == {
+        "type": "SdfFontQuad",
+        "font": {"role": "default", "name": font_name, "size": 64.0},
+        "codepoint": ord("A"),
+        "bbox": [-2, -48, 40, 8],
+        "padding": 6,
+        "crop_padding": 3,
+        "field_size": [42, 56],
+        "spread": 4.9,
+        "pos": [3.0, 4.0],
+        "size": [48, 60],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [250, 240, 230],
+            "face_scale": 1.5,
+            "face_w": 0.35,
+            "alpha": 0.8,
             "underlay": None,
         },
     }

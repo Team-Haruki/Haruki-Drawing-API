@@ -141,6 +141,19 @@ fn render_scene(
     metrics.set_item("font_fallbacks", rendered.metrics.font_fallbacks)?;
     metrics.set_item("sdf_quad_count", rendered.metrics.sdf_quad_count)?;
     metrics.set_item("sdf_quad_elapsed", rendered.metrics.sdf_quad_elapsed)?;
+    metrics.set_item("sdf_font_cache_hits", rendered.metrics.sdf_font_cache_hits)?;
+    metrics.set_item(
+        "sdf_font_cache_misses",
+        rendered.metrics.sdf_font_cache_misses,
+    )?;
+    metrics.set_item(
+        "sdf_font_cache_coalesced",
+        rendered.metrics.sdf_font_cache_coalesced,
+    )?;
+    metrics.set_item(
+        "sdf_font_cache_bypasses",
+        rendered.metrics.sdf_font_cache_bypasses,
+    )?;
     dict.set_item("native_metrics", metrics)?;
     Ok(dict.unbind())
 }
@@ -332,7 +345,8 @@ fn validate_raw_image(
 /// 16 = explicit straight-RGBA Pillow `paste(source, pos, source)` Image blending.
 /// 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
 /// 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp.
-pub const IR_CAPABILITY: u32 = 18;
+/// 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching.
+pub const IR_CAPABILITY: u32 = 19;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
@@ -413,6 +427,11 @@ pub(crate) struct NativeMetrics {
     /// SdfQuad nodes shaded in this scene, and the seconds spent shading + drawing them.
     pub(crate) sdf_quad_count: u64,
     pub(crate) sdf_quad_elapsed: f64,
+    /// Process-wide dynamic source-font SDF cache outcomes for this scene.
+    pub(crate) sdf_font_cache_hits: u64,
+    pub(crate) sdf_font_cache_misses: u64,
+    pub(crate) sdf_font_cache_coalesced: u64,
+    pub(crate) sdf_font_cache_bypasses: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1621,6 +1640,12 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     dict.set_item("raster_cache_oversample", snapshot.oversample)?;
     dict.set_item("raster_cache_entries", snapshot.entries)?;
     dict.set_item("raster_cache_bytes", snapshot.bytes)?;
+    let (sdf_max_bytes, sdf_max_entry_bytes, sdf_entries, sdf_bytes) =
+        interp::sdf_font_cache_snapshot();
+    dict.set_item("sdf_font_cache_max_bytes", sdf_max_bytes)?;
+    dict.set_item("sdf_font_cache_max_entry_bytes", sdf_max_entry_bytes)?;
+    dict.set_item("sdf_font_cache_entries", sdf_entries)?;
+    dict.set_item("sdf_font_cache_bytes", sdf_bytes)?;
     dict.set_item(
         "dimension_cache_entries",
         image_dimension_cache().entry_count(),
@@ -1641,6 +1666,7 @@ fn clear_renderer_caches() {
     let dimensions = image_dimension_cache();
     dimensions.invalidate_all();
     dimensions.run_pending_tasks();
+    interp::clear_sdf_font_cache();
 }
 
 fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {

@@ -143,7 +143,7 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
 ## 🟡 端点残余
 
 - [x] **honor 迁移**(2026-07-13,group(mask=) 原语 + src/sekai/honor/skia.py 场景 + 三变体 payload + 路由 skia 先行;四用例对拍 ok——最后一个 Pillow 合成端点清零)。
-- [x] **custom profile Phase 0–2 当前范围**(2026-07-18,见可行性文档；Phase 2b 是独立可选后续):
+- [x] **custom profile Phase 0–2c 当前范围**(2026-08-10,见可行性文档):
   - [x] Phase 0(2026-07-18,纯 Python):进程级缓存落地——`custom_profile/cache.py`
         (BoundedCache + 字形 SDF/轮廓 L2 + sprite/atlas 池 + TMP 表缓存 + 线程本地字体),
         renderer 五处接线,FreeTypeMetrics 加锁(先于本工作的并发竞态)。微基准
@@ -169,10 +169,14 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
         逐像素)。金标三例(face/underlay+整数位移/gradient+bold)Δ≤1;装饰卡端到端
         rgb max=2、alpha 精确;28 quad 着色 **6ms**(numpy 版 ~200ms)。合成符号卡整卡 1.57×
         (真实符号卡 payload 采到后复测)。字节门:deco 重构前后 max_diff=0。
-  - [ ] Phase 2b(独立可选后续,原 Phase 2 的 freetype-rs 半):glyph_sdf.rs(freetype-rs + 精确
-        Felzenszwalb EDT + moka)+ `glyph:` 引用——彻底甩掉 fontTools 的**全进程 GIL 重启风险**。
-        Phase 0 的进程级字形缓存已把 fontTools 成本压成一次性,紧迫性下降;等真实符号卡
-        payload 与生产观察再定。
+  - [x] Phase 2b(2026-08-10,capability 18):静态 TMP atlas 字形改为 asset-backed
+        `SdfAtlasQuad`;Rust 完成 alpha crop、Pillow-compatible L/BICUBIC resize/warp 与 shading,
+        Python 不再解码 atlas 或发送 A8 `mem:`。
+  - [x] Phase 2c(2026-08-10,capability 19):动态/回退源字体字形改为 `SdfFontQuad`;Rust 用
+        未 hint 的 Skia outline 按固定 24 段展开并直接生成 signed-distance field,再复用相同
+        resize/warp/shading。Moka 字形池默认 64 MiB/单项 4 MiB并暴露 hit/miss/coalesced/bypass;
+        缺字、字体 fallback、非法 Unicode、内存/像素/64M 距离计算超限都会整场 fail-open。
+        真实字体 2,400 像素与旧 fontTools/Pillow 字段逐字节一致,第二次请求命中 native cache。
   - [x] 前置(2026-07-18,大部分落地):**response.json(真实 CN GetAnotherProfileResponse,
         2 张卡)取代了生产 dump 短窗**。已拉:cn custom_profile 资产 536M + tmp-font-assets 365M
         + static_images/customprofile(71 sprite,连带发现本地旧目录只有 9 个陈旧文件,已换
