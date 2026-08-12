@@ -1,6 +1,6 @@
 # Custom Profile 全量 Skia 迁移
 
-更新：2026-08-04
+更新：2026-08-10
 
 ## 目标
 
@@ -47,7 +47,12 @@
 - rich/decorative TMP 的静态 atlas 字形：Python 只保留 TMP layout、裁剪框、目标尺寸、
   Pillow AFFINE 逆矩阵与着色参数；`SdfAtlasQuad` 在 Rust 中读取 atlas alpha，并执行与
   Pillow 12.3 L/BICUBIC 匹配的 crop-resize、warp 和 SDF shading。静态字形不再产生 A8
-  `mem:` 或 Pillow 像素操作；动态 glyph/EDT 仍明确走原有 hybrid `SdfQuad` 路径。
+  `mem:` 或 Pillow 像素操作。
+- rich/decorative TMP 的动态/回退源字体字形：Python 只选择严格位于数据根目录内的源字体、
+  codepoint、TMP bbox/padding、目标尺寸、warp 与 shading 参数；`SdfFontQuad` 在 Rust 中用
+  未 hint 的 Skia 字体轮廓按固定 24 段展开曲线，直接生成 uint8 signed-distance field，再
+  复用同一套 Pillow 12.3 兼容的 L/BICUBIC resize/warp。成功路径不再调用 fontTools/NumPy
+  contour grid、Pillow L image 或传输 A8 `mem:`。
 - `paste_lerp`：Rust 精确实现 Honor 历史
   `destination.paste(source, pos, source)` 的 straight-RGBA 四通道插值；仅接受严格预检的
   integral stretch，并由隔离子场景包含 Src/paste_lerp 对目的像素的读写。
@@ -67,8 +72,8 @@
 - 请求提供的素材路径 canonicalize 后必须位于配置的数据根目录；
 - 可见 `missing/unresolved` 元素会在调用 Rust 前令整场 fallback，禁止返回残缺的
   “Skia 成功”；
-- 动态 `SdfQuad` 的 Python/Pillow A8 field 会正确计入 hybrid telemetry；静态
-  `SdfAtlasQuad` 无 `mem:` 时按 native 计数；
+- 遗留 `SdfQuad` 的 Python/Pillow A8 field 会正确计入 hybrid telemetry；静态
+  `SdfAtlasQuad` 和动态 `SdfFontQuad` 无 `mem:` 时按 native 计数；
 - 修复普通元素误分配 2048×909 空 direct layer 的问题。
 
 两张现有真实 fixture 的当前观测：
@@ -89,9 +94,15 @@
 - IR 中没有 `mem:` 引用；
 - 请求级 Pillow touch snapshot 为空。
 
-当前握手为 `IR_CAPABILITY=18`、`ASSET_INFO_CAPABILITY=1`、
+当前握手为 `IR_CAPABILITY=19`、`ASSET_INFO_CAPABILITY=1`、
 `TEXT_METRICS_CAPABILITY=1`。旧 wheel 缺少任一必需能力时必须 fail-open，不能静默省略
 节点或把 Pillow 度量计成 native-pure。
+
+动态源字体 SDF 有独立的进程级 Moka cache，默认 64 MiB、单项 4 MiB，可用
+`HARUKI_SKIA_SDF_FONT_CACHE_MB` / `HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB` 回滚或调节；
+`renderer_cache_stats()` 暴露 entries/bytes/limits，单请求 native metrics 暴露
+hit/miss/coalesced/bypass。缺字、字体文件回退、非法 Unicode、超限 outline/field、超过
+64M 次距离计算或错误 Transform 嵌套都会令整场 fail-open，不能返回少字的“原生成功”。
 
 collection 的主要差异来自透明像素上的 straight-RGBA Pillow BICUBIC 与 Skia premul
 Catmull-Rom 语义。它通过现有 custom-profile 预算，但在扩大静态素材覆盖前仍需增加
@@ -141,15 +152,18 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
 
 ### C. TMP Text
 
-普通动态源字体的无效果子集已经直接使用 IR Text。rich/decorative 的静态 atlas 字形也已
-通过 `SdfAtlasQuad` 把 crop-resize、仿射 warp 与 shading 全部移入 Rust；Python 仍保留 TMP
-解析和布局 oracle。剩余工作按以下顺序继续：
+普通动态源字体的无效果子集已经直接使用 IR Text。rich/decorative 的静态 atlas 与动态
+source-font 字形也已分别通过 `SdfAtlasQuad` / `SdfFontQuad` 把 SDF 像素生成、crop-resize、
+仿射 warp 与 shading 全部移入 Rust；Python 仍保留 TMP 解析和布局 oracle。真实字体专项
+验证中，旧 fontTools/Pillow 字段与 `SdfFontQuad` 的 2,400 个像素逐字节一致，冷请求记录
+miss，第二次相同字形记录 hit。剩余工作按以下顺序继续：
 
 1. 用类别级最小 fixture 验证 static rich/decorative、symbol、旋转和 underlay；不保留
    完整请求、整卡、用户或 profile/resources 数据；
-2. 将 dynamic/fallback glyph 的字体轮廓、EDT 与 glyph cache 移入 native，消除剩余 A8
-   `mem:`；
-3. 最后替换剩余 Pillow 字体度量，使普通与装饰 TMP 都不触碰 Pillow。
+2. 用类别 fixture 覆盖 dynamic/fallback 的 symbol、中日文字体、缺字及 fallback font；
+   `SdfFontQuad` 实现与缓存本身已完成；
+3. 最后把装饰 TMP 剩余的 Python/FreeType/fontTools 度量选择收敛为严格 native batch，并
+   清点 em-block、emoji、材质效果等仍会落入遗留 `SdfQuad` 的类别。
 
 每一步都要覆盖 rich tags、空行、alignment、outline/underlay、symbol、emoji、旋转和
 中日文字体。

@@ -22,6 +22,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
     PreparedLayer,
     RenderedLayer,
+    TMPDynamicFontField,
     TMPStaticAtlasField,
     build_arg_parser,
     harden_rgba_alpha,
@@ -335,6 +336,54 @@ def test_custom_profile_static_tmp_field_can_defer_all_atlas_pixels(tmp_path: Pa
         atlas_size=(128, 64),
         crop=(8, 34, 18, 46),
         field_size=(12, 16),
+    )
+    assert prepared_asset is asset
+    assert bbox == (0, 0, 12, 16)
+    assert (pad_x, pad_y) == (0, 0)
+
+
+def test_custom_profile_dynamic_tmp_field_can_defer_all_glyph_pixels(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    font_path = tmp_path / "fonts" / "dynamic.ttf"
+    font_path.touch()
+    asset = SimpleNamespace(point_size=64.0, atlas_padding=3.0, gradient_scale=5.0)
+    metrics = SimpleNamespace(bearing_x=-1.2, bearing_y=10.5, width=8.4, height=12.6)
+    char_info = SimpleNamespace(style=style)
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
+    monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: None)
+    monkeypatch.setattr(renderer, "tmp_sdf_asset", lambda *_: asset)
+    monkeypatch.setattr(renderer.tmp_font_library, "metric_asset_candidates", lambda *_args, **_kwargs: [asset])
+    monkeypatch.setattr(renderer.tmp_font_library, "runtime_source_font_path", lambda *_: font_path)
+    monkeypatch.setattr(renderer.tmp_font_library, "_source_glyph_metrics_for_asset", lambda *_: metrics)
+    monkeypatch.setattr(renderer, "tmp_native_unrotated_quad_size", lambda *_: (12, 16))
+    monkeypatch.setattr(renderer, "tmp_native_atlas_padding", lambda *_: 2)
+    monkeypatch.setattr(renderer, "tmp_dynamic_glyph_sdf", lambda *_args, **_kwargs: pytest.fail("no glyph pixels"))
+    monkeypatch.setattr(renderer, "tmp_vector_glyph_contours", lambda *_: pytest.fail("no fontTools outlines"))
+
+    prepared = renderer.render_tmp_sdf_character_field(
+        "font",
+        font_path,
+        "A",
+        style,
+        24.0,
+        "#000000",
+        0.0,
+        char_info,
+        defer_dynamic_font=True,
+    )
+
+    assert prepared is not None
+    field, prepared_asset, bbox, pad_x, pad_y = prepared
+    assert field == TMPDynamicFontField(
+        font_path=font_path,
+        codepoint=ord("A"),
+        sample_size=64.0,
+        bbox=(-2, -11, 8, 3),
+        padding=4,
+        crop_padding=2,
+        field_size=(12, 16),
+        spread=4.9,
     )
     assert prepared_asset is asset
     assert bbox == (0, 0, 12, 16)

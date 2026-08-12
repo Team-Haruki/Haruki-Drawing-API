@@ -800,6 +800,59 @@ class IRBuilder:
             }
         )
 
+    def sdf_font_quad(
+        self,
+        *,
+        font_name: str,
+        codepoint: int,
+        sample_size: float,
+        bbox: Sequence[int],
+        padding: int,
+        crop_padding: int,
+        field_size: Sequence[int],
+        spread: float,
+        pos: Vec2,
+        size: Sequence[int],
+        affine: Sequence[float],
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """Source-font TMP-SDF glyph pipeline.
+
+        Rust resolves and flattens the registered font glyph, builds its signed-distance field,
+        applies Pillow-compatible BICUBIC crop-resize and affine warp, then shades it like
+        :meth:`sdf_quad`. Requires IR_CAPABILITY >= 19.
+        """
+        if len(bbox) != 4 or len(field_size) != 2 or len(size) != 2 or len(affine) != 6:
+            raise ValueError("invalid SdfFontQuad geometry")
+        if not font_name.strip():
+            raise ValueError("SdfFontQuad needs a registered font name")
+        return self._add(
+            {
+                "type": "SdfFontQuad",
+                "font": {"role": "default", "name": font_name, "size": float(sample_size)},
+                "codepoint": int(codepoint),
+                "bbox": [int(value) for value in bbox],
+                "padding": int(padding),
+                "crop_padding": int(crop_padding),
+                "field_size": [int(value) for value in field_size],
+                "spread": float(spread),
+                "pos": _vec(pos),
+                "size": [int(value) for value in size],
+                "affine": [float(value) for value in affine],
+                "shading": {
+                    "face_color": [int(value) for value in face_color],
+                    "face_scale": float(face_scale),
+                    "face_w": float(face_w),
+                    "alpha": float(alpha),
+                    "underlay": underlay,
+                },
+            }
+        )
+
     def sdf_shape(
         self,
         *,

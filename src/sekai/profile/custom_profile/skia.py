@@ -86,6 +86,7 @@ from src.sekai.profile.custom_profile.renderer import (
     SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
     STATIC_IMAGE_CONTENT_KINDS,
     DirectSdfAtlasQuad,
+    DirectSdfFontQuad,
     LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
@@ -330,6 +331,32 @@ class _SceneAssembler:
                     "w": u.w,
                     "shift": [u.shift_x, u.shift_y],
                 }
+            if isinstance(quad, DirectSdfFontQuad):
+                asset_path = _relative_asset_path(quad.font_path)
+                if asset_path is None:
+                    raise ValueError("custom profile TMP source font is outside the configured asset root")
+                resolved_path = (ASSETS_BASE_DIR / asset_path).resolve(strict=True)
+                font_name = f"custom_profile_sdf_{hashlib.sha256(str(resolved_path).encode()).hexdigest()[:16]}"
+                self.builder.register_extra_font(font_name, resolved_path)
+                self.builder.sdf_font_quad(
+                    font_name=font_name,
+                    codepoint=quad.codepoint,
+                    sample_size=quad.sample_size,
+                    bbox=quad.bbox,
+                    padding=quad.padding,
+                    crop_padding=quad.crop_padding,
+                    field_size=quad.field_size,
+                    spread=quad.spread,
+                    pos=(quad.left, quad.top),
+                    size=quad.size,
+                    affine=quad.affine,
+                    face_color=scalars.face_color,
+                    face_scale=scalars.face_scale,
+                    face_w=scalars.face_w,
+                    alpha=scalars.alpha,
+                    underlay=underlay,
+                )
+                continue
             if isinstance(quad, DirectSdfAtlasQuad):
                 asset_path = _relative_asset_path(quad.atlas_path)
                 if asset_path is None:
@@ -441,7 +468,12 @@ def _direct_text_quads(renderer: PNGRenderer, content: Any):
         return None
     if not renderer.is_decorative_text_item(content.item):
         return None
-    return renderer.prepare_direct_sdf_quads(content.item, content.object_data, defer_static_atlas=True)
+    return renderer.prepare_direct_sdf_quads(
+        content.item,
+        content.object_data,
+        defer_static_atlas=True,
+        defer_dynamic_font=True,
+    )
 
 
 def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:

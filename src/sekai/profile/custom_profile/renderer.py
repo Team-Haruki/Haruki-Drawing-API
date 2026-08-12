@@ -813,6 +813,26 @@ class TMPStaticAtlasField:
 
 
 @dataclass(frozen=True)
+class TMPDynamicFontField:
+    """Dynamic TMP glyph before pixel work.
+
+    Python selects the source font/asset and preserves the existing TMP layout geometry. Rust
+    resolves ``codepoint`` from the registered font, flattens its outline, builds the signed
+    distance field, crops it to ``crop_padding``, and resizes it to ``field_size``. No glyph
+    bitmap, NumPy contour grid, Pillow L image, or A8 ``mem:`` payload is created in Python.
+    """
+
+    font_path: Path
+    codepoint: int
+    sample_size: float
+    bbox: tuple[int, int, int, int]
+    padding: int
+    crop_padding: int
+    field_size: tuple[int, int]
+    spread: float
+
+
+@dataclass(frozen=True)
 class TMPFieldWarpPlan:
     """Pillow AFFINE inverse matrix plus its clipped destination rectangle."""
 
@@ -830,6 +850,25 @@ class DirectSdfAtlasQuad:
     atlas_size: tuple[int, int]
     crop: tuple[int, int, int, int]
     field_size: tuple[int, int]
+    size: tuple[int, int]
+    affine: tuple[float, float, float, float, float, float]
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
+@dataclass(frozen=True)
+class DirectSdfFontQuad:
+    """Dynamic source-font decorative glyph whose complete pixel pipeline runs in Rust."""
+
+    font_path: Path
+    codepoint: int
+    sample_size: float
+    bbox: tuple[int, int, int, int]
+    padding: int
+    crop_padding: int
+    field_size: tuple[int, int]
+    spread: float
     size: tuple[int, int]
     affine: tuple[float, float, float, float, float, float]
     left: int
@@ -9097,6 +9136,73 @@ class PNGRenderer:
         field = np.clip(0.5 + signed_distance / (2.0 * spread), 0.0, 1.0)
         return Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
 
+    def tmp_dynamic_font_field(
+        self,
+        font_name: str,
+        ch: str,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo,
+    ) -> tuple[TMPDynamicFontField, TMPFontAsset] | None:
+        """Build the pixel-free native descriptor for one dynamic/fallback TMP glyph."""
+
+        if self.use_em_block(TextRun(ch, style)):
+            return None
+        active = self.tmp_sdf_asset(font_name)
+        if active is None or not ch or ch == " ":
+            return None
+
+        glyph_char = ch[0]
+        selected: tuple[TMPFontAsset, Path, float, TMPGlyphMetrics] | None = None
+        for candidate in self.tmp_font_library.metric_asset_candidates(font_name, include_fallback=True):
+            source_path = self.tmp_font_library.runtime_source_font_path(candidate)
+            if source_path is None:
+                continue
+            sample_size = max(1.0, candidate.point_size)
+            metrics = self.tmp_font_library._source_glyph_metrics_for_asset(candidate, glyph_char, sample_size)
+            if metrics is not None:
+                selected = candidate, source_path, sample_size, metrics
+                break
+        if selected is None:
+            return None
+
+        asset, source_path, sample_size, metrics = selected
+        bbox = (
+            math.floor(metrics.bearing_x),
+            math.floor(-metrics.bearing_y),
+            math.ceil(metrics.bearing_x + metrics.width),
+            math.ceil(-metrics.bearing_y + metrics.height),
+        )
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            return None
+        padding = max(1, math.ceil(asset.atlas_padding + 1.0))
+        active_point_size = max(1.0, active.point_size)
+        atlas_pad = self.tmp_native_atlas_padding(asset, style, outline_dilate)
+        crop_padding = min(padding, max(0, round(atlas_pad * sample_size / active_point_size)))
+        field_size = ensure_raster_size(
+            self.tmp_native_unrotated_quad_size(char_info),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native dynamic glyph quad",
+        )
+        ensure_raster_size(
+            (bbox[2] - bbox[0] + padding * 2, bbox[3] - bbox[1] + padding * 2),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native dynamic glyph source",
+        )
+        return (
+            TMPDynamicFontField(
+                font_path=source_path,
+                codepoint=ord(glyph_char),
+                sample_size=sample_size,
+                bbox=bbox,
+                padding=padding,
+                crop_padding=crop_padding,
+                field_size=field_size,
+                spread=max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS),
+            ),
+            asset,
+        )
+
     def tmp_dynamic_glyph_sdf(
         self,
         font_name: str,
@@ -9456,7 +9562,17 @@ class PNGRenderer:
         char_info: TMPNativeCharacterInfo | None = None,
         *,
         defer_static_atlas: bool = False,
-    ) -> tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, tuple[int, int, int, int], int, int] | None:
+        defer_dynamic_font: bool = False,
+    ) -> (
+        tuple[
+            Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+            TMPFontAsset | None,
+            tuple[int, int, int, int],
+            int,
+            int,
+        ]
+        | None
+    ):
         run = TextRun(char, style)
         native_quad_sized = False
         glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
@@ -9549,54 +9665,69 @@ class PNGRenderer:
             else:
                 return None
         else:
-            dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
-            if dynamic is None:
-                return None
-            cached, glyph_asset = dynamic
-            active = self.tmp_sdf_asset(font_name)
-            asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
-            native_element_scale = self.tmp_native_element_scale(font_name, style.size)
-            display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
-            display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
-            sample_crop_pad = cached.pad
-            if char_info is not None:
-                atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
-                sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
-            sample_crop_pad = min(sample_crop_pad, cached.pad)
-            crop_box = (
-                max(0, cached.pad - sample_crop_pad),
-                max(0, cached.pad - sample_crop_pad),
-                min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
-                min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
-            )
-            field_source = cached.field.crop(crop_box)
-            if char_info is not None:
-                quad_w, quad_h = ensure_raster_size(
-                    self.tmp_native_unrotated_quad_size(char_info),
-                    max_pixels=self.max_layer_pixels,
-                    label="custom profile TMP native glyph quad",
+            if defer_dynamic_font and char_info is not None:
+                native_field = self.tmp_dynamic_font_field(
+                    font_name,
+                    glyph_char,
+                    style,
+                    outline_dilate,
+                    char_info,
                 )
-                field_img = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-                bbox = (0, 0, field_img.width, field_img.height)
+                if native_field is None:
+                    return None
+                field_img, glyph_asset = native_field
+                bbox = (0, 0, field_img.field_size[0], field_img.field_size[1])
                 pad_x = pad_y = 0
                 native_quad_sized = True
             else:
-                bbox = (
-                    math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
-                    math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
-                    math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
-                    math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
+                dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
+                if dynamic is None:
+                    return None
+                cached, glyph_asset = dynamic
+                active = self.tmp_sdf_asset(font_name)
+                asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
+                native_element_scale = self.tmp_native_element_scale(font_name, style.size)
+                display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
+                display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
+                sample_crop_pad = cached.pad
+                if char_info is not None:
+                    atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+                    sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
+                sample_crop_pad = min(sample_crop_pad, cached.pad)
+                crop_box = (
+                    max(0, cached.pad - sample_crop_pad),
+                    max(0, cached.pad - sample_crop_pad),
+                    min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
+                    min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
                 )
-                pad_x = pad_y = max(0, round(sample_crop_pad * display_scale))
-                field_size = ensure_raster_size(
-                    (
-                        max(1, round(field_source.width * display_scale)),
-                        max(1, round(field_source.height * display_scale)),
-                    ),
-                    max_pixels=self.max_layer_pixels,
-                    label="custom profile displayed TMP glyph field",
-                )
-                field_img = field_source.resize(field_size, Image.Resampling.BICUBIC)
+                field_source = cached.field.crop(crop_box)
+                if char_info is not None:
+                    quad_w, quad_h = ensure_raster_size(
+                        self.tmp_native_unrotated_quad_size(char_info),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile TMP native glyph quad",
+                    )
+                    field_img = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+                    bbox = (0, 0, field_img.width, field_img.height)
+                    pad_x = pad_y = 0
+                    native_quad_sized = True
+                else:
+                    bbox = (
+                        math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
+                        math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
+                        math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
+                        math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
+                    )
+                    pad_x = pad_y = max(0, round(sample_crop_pad * display_scale))
+                    field_size = ensure_raster_size(
+                        (
+                            max(1, round(field_source.width * display_scale)),
+                            max(1, round(field_source.height * display_scale)),
+                        ),
+                        max_pixels=self.max_layer_pixels,
+                        label="custom profile displayed TMP glyph field",
+                    )
+                    field_img = field_source.resize(field_size, Image.Resampling.BICUBIC)
 
         scale_x = self.tmp_native_vertex_scale_x(style)
         if not native_quad_sized and abs(scale_x - 1.0) >= 1.0e-6:
@@ -9814,7 +9945,8 @@ class PNGRenderer:
         object_data: dict[str, Any],
         *,
         defer_static_atlas: bool = False,
-    ) -> list[DirectSdfQuad | DirectSdfAtlasQuad] | None:
+        defer_dynamic_font: bool = False,
+    ) -> list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] | None:
         """Layout + per-glyph warp half of the direct decorative path. Returns None when the
         element is not eligible for the direct path (caller falls back to the raster path);
         degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
@@ -9982,19 +10114,55 @@ class PNGRenderer:
             outline_color,
             outline_dilate,
             defer_static_atlas=defer_static_atlas,
+            defer_dynamic_font=defer_dynamic_font,
         )
         if direct_glyphs is None:
             return None
-        quads: list[DirectSdfQuad | DirectSdfAtlasQuad] = []
+        quads: list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] = []
         retained_field_bytes = sum(
             (
                 field.field_size[0] * field.field_size[1]
-                if isinstance(field, TMPStaticAtlasField)
+                if isinstance(field, (TMPStaticAtlasField, TMPDynamicFontField))
                 else field.width * field.height
             )
             for field, *_ in direct_glyphs
         )
         for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+            if isinstance(field_img, TMPDynamicFontField):
+                plan = self.tmp_sdf_field_warp_plan(
+                    field_img.field_size,
+                    local_left,
+                    local_top,
+                    pivot,
+                    object_data,
+                    max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+                )
+                if plan is None:
+                    continue
+                retained_field_bytes = self._reserve_retained_raster_bytes(
+                    retained_field_bytes,
+                    plan.size[0] * plan.size[1],
+                    label="custom profile TMP text",
+                )
+                scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+                quads.append(
+                    DirectSdfFontQuad(
+                        font_path=field_img.font_path,
+                        codepoint=field_img.codepoint,
+                        sample_size=field_img.sample_size,
+                        bbox=field_img.bbox,
+                        padding=field_img.padding,
+                        crop_padding=field_img.crop_padding,
+                        field_size=field_img.field_size,
+                        spread=field_img.spread,
+                        size=plan.size,
+                        affine=plan.affine,
+                        left=plan.left,
+                        top=plan.top,
+                        scalars=scalars,
+                    )
+                )
+                continue
             if isinstance(field_img, TMPStaticAtlasField):
                 plan = self.tmp_sdf_field_warp_plan(
                     field_img.field_size,
@@ -10060,12 +10228,32 @@ class PNGRenderer:
         outline_dilate: float,
         *,
         defer_static_atlas: bool = False,
-    ) -> list[tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, TextStyle, float, float]] | None:
+        defer_dynamic_font: bool = False,
+    ) -> (
+        list[
+            tuple[
+                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+                TMPFontAsset | None,
+                TextStyle,
+                float,
+                float,
+            ]
+        ]
+        | None
+    ):
         characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
         for char_info in layout.characters:
             characters_by_line.setdefault(char_info.line_index, []).append(char_info)
 
-        direct_glyphs: list[tuple[Image.Image | TMPStaticAtlasField, TMPFontAsset | None, TextStyle, float, float]] = []
+        direct_glyphs: list[
+            tuple[
+                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+                TMPFontAsset | None,
+                TextStyle,
+                float,
+                float,
+            ]
+        ] = []
         retained_field_bytes = 0
         for line_info in layout.lines:
             line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
@@ -10100,6 +10288,7 @@ class PNGRenderer:
                     outline_dilate,
                     char_info,
                     defer_static_atlas=defer_static_atlas,
+                    defer_dynamic_font=defer_dynamic_font,
                 )
                 if character_field is None:
                     return None

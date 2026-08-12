@@ -313,6 +313,7 @@ pub enum Node {
     SelfImage(SelfImageNode),
     SdfQuad(SdfQuadNode),
     SdfAtlasQuad(SdfAtlasQuadNode),
+    SdfFontQuad(SdfFontQuadNode),
     SdfShape(SdfShapeNode),
     Text(TextNode),
     Shadow(ShadowNode),
@@ -363,6 +364,30 @@ pub struct SdfAtlasQuadNode {
     pub pos: Vec2,
     pub size: [i32; 2],
     /// Pillow `Image.Transform.AFFINE` inverse coefficients for the destination patch.
+    pub affine: [f64; 6],
+    pub shading: SdfShading,
+}
+
+/// Source-font TMP-SDF glyph (requires IR_CAPABILITY >= 19).
+///
+/// Python retains TMP parsing/layout and sends only controlled font/glyph geometry. Rust
+/// resolves the registered typeface, flattens its outline with the same fixed curve steps as
+/// the former fontTools path, builds the uint8 SDF field, then uses the same Pillow-compatible
+/// resize/affine-warp and shading pipeline as `SdfAtlasQuad`.
+#[derive(Debug, Deserialize)]
+pub struct SdfFontQuadNode {
+    pub font: FontRef,
+    pub codepoint: u32,
+    /// Baseline-relative glyph bounds `[left, top, right, bottom]` at `font.size`.
+    pub bbox: [i32; 4],
+    /// Full source-field padding and the smaller padding retained before `field_size` resize.
+    pub padding: i32,
+    pub crop_padding: i32,
+    pub field_size: [i32; 2],
+    /// Signed-distance spread in font pixels.
+    pub spread: f32,
+    pub pos: Vec2,
+    pub size: [i32; 2],
     pub affine: [f64; 6],
     pub shading: SdfShading,
 }

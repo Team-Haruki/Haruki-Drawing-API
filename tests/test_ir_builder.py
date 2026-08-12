@@ -232,6 +232,51 @@ def test_sliced_image_serializes_unity_border_tint_and_alpha():
     }
 
 
+def test_sdf_font_quad_serializes_registered_font_and_geometry():
+    builder = _builder()
+    builder.register_extra_font("tmp_dynamic", "/base/fonts/dynamic.ttf")
+    builder.sdf_font_quad(
+        font_name="tmp_dynamic",
+        codepoint=0x25CF,
+        sample_size=64.0,
+        bbox=(-2, -48, 40, 8),
+        padding=6,
+        crop_padding=3,
+        field_size=(42, 56),
+        spread=4.9,
+        pos=(3, 4),
+        size=(48, 60),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        face_color=(250, 240, 230),
+        face_scale=1.5,
+        face_w=0.35,
+        alpha=0.8,
+    )
+
+    scene = builder.build()
+    assert scene["fonts"]["extra"] == {"tmp_dynamic": "/base/fonts/dynamic.ttf"}
+    assert scene["root"]["children"][0] == {
+        "type": "SdfFontQuad",
+        "font": {"role": "default", "name": "tmp_dynamic", "size": 64.0},
+        "codepoint": 0x25CF,
+        "bbox": [-2, -48, 40, 8],
+        "padding": 6,
+        "crop_padding": 3,
+        "field_size": [42, 56],
+        "spread": 4.9,
+        "pos": [3.0, 4.0],
+        "size": [48, 60],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [250, 240, 230],
+            "face_scale": 1.5,
+            "face_w": 0.35,
+            "alpha": 0.8,
+            "underlay": None,
+        },
+    }
+
+
 def test_background_omitted_when_unset():
     assert "background" not in _builder().build()
 
