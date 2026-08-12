@@ -5,9 +5,10 @@ elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; de
 uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse the shared
 ``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
 display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
-font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text.
-Still-unmigrated rich/decorative/static TMP and incomplete HonorDeck content is explicitly
-classified as hybrid and transported as bounded ``mem:`` rasters. A scene coverage
+font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text;
+static-atlas rich/decorative glyphs use asset-backed ``SdfAtlasQuad`` nodes. Still-unmigrated
+dynamic/fallback rich TMP and incomplete HonorDeck content is explicitly classified as hybrid
+and transported as bounded ``mem:`` rasters. A scene coverage
 report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
 cannot mean "successfully encoded a partial card".
 
@@ -84,6 +85,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_W,
     SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
     STATIC_IMAGE_CONTENT_KINDS,
+    DirectSdfAtlasQuad,
     LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
@@ -313,17 +315,11 @@ class _SceneAssembler:
         self.builder.image(ref, (0, 0), self.canvas_size, sampling="linear")
         self._direct_layer = None
 
-    def emit_sdf_quads(self, quads) -> None:
-        """Emit one decorative text element as native SdfQuad nodes (Phase 2): Python shipped the
-        display-warped A8 field per glyph, the node runs the shading pixel loop. The fields ride
-        the A8 raw-buffer transport (6-tuple, capability 9)."""
+    def emit_sdf_quads(self, quads) -> bool:
+        """Emit one decorative text element and return whether every glyph is asset-native."""
         self.flush_direct_layer()
+        fully_native = True
         for quad in quads:
-            record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
-            field = quad.field
-            self._reserve_mem(field.width * field.height)
-            key = f"m{len(self.mem_images)}"
-            self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
             scalars = quad.scalars
             underlay = None
             if scalars.underlay is not None:
@@ -334,6 +330,31 @@ class _SceneAssembler:
                     "w": u.w,
                     "shift": [u.shift_x, u.shift_y],
                 }
+            if isinstance(quad, DirectSdfAtlasQuad):
+                asset_path = _relative_asset_path(quad.atlas_path)
+                if asset_path is None:
+                    raise ValueError("custom profile TMP atlas is outside the configured asset root")
+                self.builder.sdf_atlas_quad(
+                    path=asset_path,
+                    atlas_size=quad.atlas_size,
+                    crop=quad.crop,
+                    field_size=quad.field_size,
+                    pos=(quad.left, quad.top),
+                    size=quad.size,
+                    affine=quad.affine,
+                    face_color=scalars.face_color,
+                    face_scale=scalars.face_scale,
+                    face_w=scalars.face_w,
+                    alpha=scalars.alpha,
+                    underlay=underlay,
+                )
+                continue
+            fully_native = False
+            record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
+            field = quad.field
+            self._reserve_mem(field.width * field.height)
+            key = f"m{len(self.mem_images)}"
+            self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
             self.builder.sdf_quad(
                 (quad.left, quad.top),
                 f"mem:{key}",
@@ -343,6 +364,7 @@ class _SceneAssembler:
                 scalars.alpha,
                 underlay,
             )
+        return fully_native
 
     def emit_layer(self, layer: Image.Image, inputs: LayerTransformInputs, renderer: PNGRenderer) -> None:
         """Place one element layer.
@@ -419,7 +441,7 @@ def _direct_text_quads(renderer: PNGRenderer, content: Any):
         return None
     if not renderer.is_decorative_text_item(content.item):
         return None
-    return renderer.prepare_direct_sdf_quads(content.item, content.object_data)
+    return renderer.prepare_direct_sdf_quads(content.item, content.object_data, defer_static_atlas=True)
 
 
 def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
@@ -1619,8 +1641,7 @@ def _build_scene(
         if quads is not None:
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
             if quads:
-                scene.emit_sdf_quads(quads)
-                report.observe(content, "hybrid")
+                report.observe(content, "native" if scene.emit_sdf_quads(quads) else "hybrid")
             else:
                 report.observe(content, "noop")
             continue

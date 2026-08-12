@@ -1,6 +1,6 @@
 # Custom Profile 全量 Skia 迁移
 
-更新：2026-07-31
+更新：2026-08-04
 
 ## 目标
 
@@ -44,6 +44,10 @@
 - 严格普通 TMP 文本子集：动态源字体、无 rich/decorative、outline、underlay 或材质效果
   的文本直接发出 IR Text，支持非均匀缩放与旋转，不再建立 RGBA `mem:` layer。超出该子集
   仍明确走现有 SdfQuad/Pillow 路径。
+- rich/decorative TMP 的静态 atlas 字形：Python 只保留 TMP layout、裁剪框、目标尺寸、
+  Pillow AFFINE 逆矩阵与着色参数；`SdfAtlasQuad` 在 Rust 中读取 atlas alpha，并执行与
+  Pillow 12.3 L/BICUBIC 匹配的 crop-resize、warp 和 SDF shading。静态字形不再产生 A8
+  `mem:` 或 Pillow 像素操作；动态 glyph/EDT 仍明确走原有 hybrid `SdfQuad` 路径。
 - `paste_lerp`：Rust 精确实现 Honor 历史
   `destination.paste(source, pos, source)` 的 straight-RGBA 四通道插值；仅接受严格预检的
   integral stretch，并由隔离子场景包含 Src/paste_lerp 对目的像素的读写。
@@ -63,7 +67,8 @@
 - 请求提供的素材路径 canonicalize 后必须位于配置的数据根目录；
 - 可见 `missing/unresolved` 元素会在调用 Rust 前令整场 fallback，禁止返回残缺的
   “Skia 成功”；
-- `SdfQuad` 的 Python/Pillow A8 field 会正确计入 hybrid telemetry；
+- 动态 `SdfQuad` 的 Python/Pillow A8 field 会正确计入 hybrid telemetry；静态
+  `SdfAtlasQuad` 无 `mem:` 时按 native 计数；
 - 修复普通元素误分配 2048×909 空 direct layer 的问题。
 
 两张现有真实 fixture 的当前观测：
@@ -84,7 +89,7 @@
 - IR 中没有 `mem:` 引用；
 - 请求级 Pillow touch snapshot 为空。
 
-当前握手为 `IR_CAPABILITY=17`、`ASSET_INFO_CAPABILITY=1`、
+当前握手为 `IR_CAPABILITY=18`、`ASSET_INFO_CAPABILITY=1`、
 `TEXT_METRICS_CAPABILITY=1`。旧 wheel 缺少任一必需能力时必须 fail-open，不能静默省略
 节点或把 Pillow 度量计成 native-pure。
 
@@ -136,13 +141,15 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
 
 ### C. TMP Text
 
-普通动态源字体的无效果子集已经直接使用 IR Text。Python 仍保留 TMP 解析和布局 oracle，
-其余像素工作按以下顺序继续移到 Rust：
+普通动态源字体的无效果子集已经直接使用 IR Text。rich/decorative 的静态 atlas 字形也已
+通过 `SdfAtlasQuad` 把 crop-resize、仿射 warp 与 shading 全部移入 Rust；Python 仍保留 TMP
+解析和布局 oracle。剩余工作按以下顺序继续：
 
-1. Rust 直接读取 atlas/static/dynamic glyph，覆盖 rich/decorative 和 fallback bucket；
-2. 把 glyph field warp 移入 Rust，移除装饰文字的 A8 `mem:`；
-3. 将字体轮廓/EDT 与 glyph cache 移入 native；
-4. 最后替换剩余 Pillow 字体度量，使普通与装饰 TMP 都不触碰 Pillow。
+1. 用类别级最小 fixture 验证 static rich/decorative、symbol、旋转和 underlay；不保留
+   完整请求、整卡、用户或 profile/resources 数据；
+2. 将 dynamic/fallback glyph 的字体轮廓、EDT 与 glyph cache 移入 native，消除剩余 A8
+   `mem:`；
+3. 最后替换剩余 Pillow 字体度量，使普通与装饰 TMP 都不触碰 Pillow。
 
 每一步都要覆盖 rich tags、空行、alignment、outline/underlay、symbol、emoji、旋转和
 中日文字体。
@@ -190,8 +197,8 @@ uv run python -X gil=0 scripts/skia_parity_sweep.py \
 - `custom_profile_hybrid_elements == 0`；
 - `custom_profile_mem_images == custom_profile_mem_bytes == 0`；
 - IR JSON 不含 `mem:`，请求 Pillow touch snapshot 为空；
-- native 成功路径不调用 `render_content_for_card`、`prepare_direct_sdf_quads` 或任何
-  Pillow/NumPy 像素操作；
+- native 成功路径不调用 `render_content_for_card` 或任何 Pillow/NumPy 像素操作；
+  `prepare_direct_sdf_quads` 只允许承担布局/几何规划，不能生成像素；
 - `native_pure == skia` 请求数。
 
 上线采用同一个 `HARUKI_DRAWING__USE_SKIA_PLOT` 回滚开关，先在有明确 cgroup 内存限制的

@@ -756,6 +756,50 @@ class IRBuilder:
         }
         return self._add(node)
 
+    def sdf_atlas_quad(
+        self,
+        *,
+        path: str,
+        atlas_size: Sequence[int],
+        crop: Sequence[int],
+        field_size: Sequence[int],
+        pos: Vec2,
+        size: Sequence[int],
+        affine: Sequence[float],
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """Asset-backed TMP-SDF glyph pipeline.
+
+        Rust extracts the atlas alpha, applies Pillow-compatible BICUBIC crop-resize and affine
+        warp, then uses the same shading scalars as :meth:`sdf_quad`. Python carries only TMP
+        layout and geometry. Requires IR_CAPABILITY >= 18.
+        """
+        if len(atlas_size) != 2 or len(crop) != 4 or len(field_size) != 2 or len(size) != 2 or len(affine) != 6:
+            raise ValueError("invalid SdfAtlasQuad geometry")
+        return self._add(
+            {
+                "type": "SdfAtlasQuad",
+                "path": path,
+                "atlas_size": [int(value) for value in atlas_size],
+                "crop": [int(value) for value in crop],
+                "field_size": [int(value) for value in field_size],
+                "pos": _vec(pos),
+                "size": [int(value) for value in size],
+                "affine": [float(value) for value in affine],
+                "shading": {
+                    "face_color": [int(value) for value in face_color],
+                    "face_scale": float(face_scale),
+                    "face_w": float(face_w),
+                    "alpha": float(alpha),
+                    "underlay": underlay,
+                },
+            }
+        )
+
     def sdf_shape(
         self,
         *,
