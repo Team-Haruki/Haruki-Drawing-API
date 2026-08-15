@@ -51,6 +51,7 @@ from src.sekai.deck.model import (
 )
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
+    CardFullThumbnailLayers,
     get_card_full_thumbnail_layers,
     get_profile_card,
 )
@@ -60,6 +61,11 @@ from src.settings import ASSETS_BASE_DIR
 logger = logging.getLogger(__name__)
 _perf_logger = logging.getLogger("event.draw.perf")
 _EVENT_LIST_ENTRY_CACHE_NAMESPACE = "event_list_entry"
+_EVENT_LIST_CARD_SIZE = 30
+_EVENT_LIST_CARD_ID_WIDTH = 40
+_EVENT_LIST_CARD_ID_HEIGHT = 10
+_EVENT_LIST_CARD_ROW_HEIGHT = _EVENT_LIST_CARD_SIZE + _EVENT_LIST_CARD_ID_HEIGHT
+_EVENT_LIST_CARD_GRID_HEIGHT = _EVENT_LIST_CARD_ROW_HEIGHT * 2 + 1
 _DEFAULT_WL_CHAPTER_COLOR = (75, 75, 75, 255)
 _WL_PROGRESS_BORDER_COLOR = (75, 75, 75, 255)
 
@@ -710,6 +716,14 @@ async def _preload_event_entry_assets(d) -> dict[str, object]:
     return dict(zip(keys, values))
 
 
+def _add_event_list_card_cell(layers: CardFullThumbnailLayers, card_id_style: TextStyle) -> None:
+    with VSplit().set_padding(0).set_sep(0).set_content_align("c").set_item_align("c"):
+        CardFullThumbnailBox(layers, size=(_EVENT_LIST_CARD_SIZE, _EVENT_LIST_CARD_SIZE))
+        TextBox(f"#{layers.rqd.card_id}", card_id_style, overflow="shrink").set_padding(0).set_size(
+            (_EVENT_LIST_CARD_ID_WIDTH, _EVENT_LIST_CARD_ID_HEIGHT)
+        ).set_content_align("c")
+
+
 async def _compose_event_list_entry_image(
     d,
     loaded: dict[str, object],
@@ -729,11 +743,11 @@ async def _compose_event_list_entry_image(
                     card_layers = loaded.get("cards", [])
                     if card_layers:
                         for layers in card_layers:
-                            CardFullThumbnailBox(layers, size=(30, 30))
+                            _add_event_list_card_cell(layers, TextStyle(font=DEFAULT_FONT, size=7, color=(70, 70, 70)))
                 if not d.event_cards:
-                    Spacer(h=60)
+                    Spacer(h=_EVENT_LIST_CARD_GRID_HEIGHT)
                 if d.event_cards and len(d.event_cards) <= 3:
-                    Spacer(h=29)
+                    Spacer(h=_EVENT_LIST_CARD_GRID_HEIGHT - _EVENT_LIST_CARD_ROW_HEIGHT - 2)
             with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                 TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
                 TextBox(f"ID: {d.id} {d.event_type_name}", style2)
