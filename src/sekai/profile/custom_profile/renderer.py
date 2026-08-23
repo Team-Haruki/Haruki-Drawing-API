@@ -7816,6 +7816,37 @@ class PNGRenderer:
         height = max(1.0, top - bottom)
         return max(1, round(width)), max(1, round(height))
 
+    def tmp_direct_sdf_field_size(self, geometry_size: tuple[int, int]) -> tuple[int, int]:
+        """Bound a direct glyph's raster while preserving its separate logical geometry.
+
+        A TMP ``<scale>`` tag can make the logical quad much wider than the canvas.  Rasterizing
+        that entire off-screen quad is wasteful: the following affine pass clips it back to the
+        canvas.  One canvas diagonal per source axis retains enough samples for any rotation;
+        the warp plan still uses ``geometry_size`` for the destination corners.
+        """
+
+        geometry_w, geometry_h = geometry_size
+        if geometry_w <= 0 or geometry_h <= 0:
+            raise ValueError("custom profile TMP direct glyph geometry must be positive")
+
+        axis_limit = max(1, math.ceil(math.hypot(self.canvas_w, self.canvas_h)))
+        field_w = min(geometry_w, axis_limit)
+        field_h = min(geometry_h, axis_limit)
+        if field_w * field_h > self.max_layer_pixels:
+            scale = math.sqrt(self.max_layer_pixels / (field_w * field_h))
+            field_w = max(1, math.floor(field_w * scale))
+            field_h = max(1, math.floor(field_h * scale))
+            if field_w * field_h > self.max_layer_pixels:
+                if field_w >= field_h:
+                    field_w = max(1, self.max_layer_pixels // field_h)
+                else:
+                    field_h = max(1, self.max_layer_pixels // field_w)
+        return ensure_raster_size(
+            (field_w, field_h),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP direct glyph field",
+        )
+
     def tmp_layout_scale_y(self, style: TextStyle) -> float:
         return 1.0 if self.tmp_scale_mode in {"x", "fx-center", "fx-native"} else style.scale_x
 
@@ -9143,6 +9174,7 @@ class PNGRenderer:
         style: TextStyle,
         outline_dilate: float,
         char_info: TMPNativeCharacterInfo,
+        native_field_size: tuple[int, int] | None = None,
     ) -> tuple[TMPDynamicFontField, TMPFontAsset] | None:
         """Build the pixel-free native descriptor for one dynamic/fallback TMP glyph."""
 
@@ -9180,7 +9212,7 @@ class PNGRenderer:
         atlas_pad = self.tmp_native_atlas_padding(asset, style, outline_dilate)
         crop_padding = min(padding, max(0, round(atlas_pad * sample_size / active_point_size)))
         field_size = ensure_raster_size(
-            self.tmp_native_unrotated_quad_size(char_info),
+            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
             max_pixels=self.max_layer_pixels,
             label="custom profile TMP native dynamic glyph quad",
         )
@@ -9563,6 +9595,7 @@ class PNGRenderer:
         *,
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
+        native_field_size: tuple[int, int] | None = None,
     ) -> (
         tuple[
             Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
@@ -9583,7 +9616,7 @@ class PNGRenderer:
                 atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
                 if char_info is not None:
                     quad_w, quad_h = ensure_raster_size(
-                        self.tmp_native_unrotated_quad_size(char_info),
+                        native_field_size or self.tmp_native_unrotated_quad_size(char_info),
                         max_pixels=self.max_layer_pixels,
                         label="custom profile TMP native glyph quad",
                     )
@@ -9672,6 +9705,7 @@ class PNGRenderer:
                     style,
                     outline_dilate,
                     char_info,
+                    native_field_size,
                 )
                 if native_field is None:
                     return None
@@ -9703,7 +9737,7 @@ class PNGRenderer:
                 field_source = cached.field.crop(crop_box)
                 if char_info is not None:
                     quad_w, quad_h = ensure_raster_size(
-                        self.tmp_native_unrotated_quad_size(char_info),
+                        native_field_size or self.tmp_native_unrotated_quad_size(char_info),
                         max_pixels=self.max_layer_pixels,
                         label="custom profile TMP native glyph quad",
                     )
@@ -10127,7 +10161,7 @@ class PNGRenderer:
             )
             for field, *_ in direct_glyphs
         )
-        for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+        for field_img, glyph_asset, style, local_left, local_top, geometry_size in direct_glyphs:
             if isinstance(field_img, TMPDynamicFontField):
                 plan = self.tmp_sdf_field_warp_plan(
                     field_img.field_size,
@@ -10135,6 +10169,7 @@ class PNGRenderer:
                     local_top,
                     pivot,
                     object_data,
+                    geometry_size=geometry_size,
                     max_output_bytes=self.max_scene_bytes - retained_field_bytes,
                 )
                 if plan is None:
@@ -10170,6 +10205,7 @@ class PNGRenderer:
                     local_top,
                     pivot,
                     object_data,
+                    geometry_size=geometry_size,
                     max_output_bytes=self.max_scene_bytes - retained_field_bytes,
                 )
                 if plan is None:
@@ -10200,6 +10236,7 @@ class PNGRenderer:
                 local_top,
                 pivot,
                 object_data,
+                geometry_size=geometry_size,
                 max_output_bytes=self.max_scene_bytes - retained_field_bytes,
             )
             if warped is None:
@@ -10237,6 +10274,7 @@ class PNGRenderer:
                 TextStyle,
                 float,
                 float,
+                tuple[int, int],
             ]
         ]
         | None
@@ -10252,6 +10290,7 @@ class PNGRenderer:
                 TextStyle,
                 float,
                 float,
+                tuple[int, int],
             ]
         ] = []
         retained_field_bytes = 0
@@ -10268,14 +10307,11 @@ class PNGRenderer:
                 run = TextRun(char_info.char, style)
                 if self.use_em_block(run):
                     return None
-                quad_w, quad_h = ensure_raster_size(
-                    self.tmp_native_unrotated_quad_size(char_info),
-                    max_pixels=self.max_layer_pixels,
-                    label="custom profile TMP direct glyph field",
-                )
+                geometry_size = self.tmp_native_unrotated_quad_size(char_info)
+                field_size = self.tmp_direct_sdf_field_size(geometry_size)
                 retained_field_bytes = self._reserve_retained_raster_bytes(
                     retained_field_bytes,
-                    quad_w * quad_h,
+                    field_size[0] * field_size[1],
                     label="custom profile TMP text",
                 )
                 character_field = self.render_tmp_sdf_character_field(
@@ -10289,12 +10325,13 @@ class PNGRenderer:
                     char_info,
                     defer_static_atlas=defer_static_atlas,
                     defer_dynamic_font=defer_dynamic_font,
+                    native_field_size=field_size,
                 )
                 if character_field is None:
                     return None
                 field_img, glyph_asset, _, _, _ = character_field
-                if isinstance(field_img, Image.Image) and field_img.size != (quad_w, quad_h):
-                    field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+                if isinstance(field_img, Image.Image) and field_img.size != field_size:
+                    field_img = field_img.resize(field_size, Image.Resampling.BICUBIC)
                 local_left = x_origin + min(
                     char_info.bottom_left_x,
                     char_info.top_left_x,
@@ -10307,7 +10344,7 @@ class PNGRenderer:
                     char_info.top_right_y,
                     char_info.bottom_right_y,
                 )
-                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top))
+                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top, geometry_size))
         return direct_glyphs
 
     def transformed_local_point(
@@ -10337,17 +10374,21 @@ class PNGRenderer:
         pivot: tuple[float, float],
         object_data: dict[str, Any],
         *,
+        geometry_size: tuple[int, int] | None = None,
         max_output_bytes: int | None = None,
     ) -> TMPFieldWarpPlan | None:
         """Build the pixel-free geometry plan shared by Pillow and native atlas fields."""
         src_w, src_h = source_size
         if src_w <= 0 or src_h <= 0:
             return None
+        geometry_w, geometry_h = geometry_size or source_size
+        if geometry_w <= 0 or geometry_h <= 0:
+            return None
 
         p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
-        p10 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top)
-        p01 = self.transformed_local_point(object_data, pivot, local_left, local_top + src_h)
-        p11 = self.transformed_local_point(object_data, pivot, local_left + src_w, local_top + src_h)
+        p10 = self.transformed_local_point(object_data, pivot, local_left + geometry_w, local_top)
+        p01 = self.transformed_local_point(object_data, pivot, local_left, local_top + geometry_h)
+        p11 = self.transformed_local_point(object_data, pivot, local_left + geometry_w, local_top + geometry_h)
         corners = (p00, p10, p11, p01)
         pad = 2
         left = max(0, math.floor(min(x for x, _ in corners)) - pad)
@@ -10397,6 +10438,7 @@ class PNGRenderer:
         pivot: tuple[float, float],
         object_data: dict[str, Any],
         *,
+        geometry_size: tuple[int, int] | None = None,
         max_output_bytes: int | None = None,
     ) -> tuple[Image.Image, int, int] | None:
         """Warp an L field with Pillow's BICUBIC affine path using the shared geometry plan."""
@@ -10406,6 +10448,7 @@ class PNGRenderer:
             local_top,
             pivot,
             object_data,
+            geometry_size=geometry_size,
             max_output_bytes=max_output_bytes,
         )
         if plan is None:

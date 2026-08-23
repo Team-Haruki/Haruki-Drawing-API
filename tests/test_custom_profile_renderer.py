@@ -303,6 +303,113 @@ def test_custom_profile_warp_budget_runs_before_transform(tmp_path: Path, monkey
         )
 
 
+def test_custom_profile_direct_tmp_field_is_bounded_without_changing_geometry(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        canvas_w=2048,
+        canvas_h=1260,
+        max_layer_pixels=8_388_608,
+    )
+
+    assert renderer.tmp_direct_sdf_field_size((115_200, 1_920)) == (2_405, 1_920)
+
+
+def test_custom_profile_bounded_tmp_field_warp_preserves_logical_quad(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        canvas_w=200,
+        canvas_h=100,
+        origin_x=0,
+        origin_y=0,
+        position_scale_x=1.0,
+        position_scale_y=1.0,
+    )
+    object_data = {
+        "position": {"x": 0, "y": 0},
+        "scale": {"x": 1, "y": 1},
+        "rotation": {"z": 0, "w": 1},
+    }
+    full = renderer.tmp_sdf_field_warp_plan(
+        (800, 20),
+        -100.0,
+        10.0,
+        (0.0, 0.0),
+        object_data,
+    )
+    bounded = renderer.tmp_sdf_field_warp_plan(
+        (20, 20),
+        -100.0,
+        10.0,
+        (0.0, 0.0),
+        object_data,
+        geometry_size=(800, 20),
+    )
+
+    assert full is not None
+    assert bounded is not None
+    assert (bounded.size, bounded.left, bounded.top) == (full.size, full.left, full.top)
+    assert bounded.affine[0] == pytest.approx(full.affine[0] * 20 / 800)
+    assert bounded.affine[2] == pytest.approx(full.affine[2] * 20 / 800)
+    assert bounded.affine[4:] == pytest.approx(full.affine[4:])
+
+
+def test_custom_profile_direct_tmp_glyph_passes_bounded_field_and_logical_geometry(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, canvas_w=2048, canvas_h=1260)
+    style = _base_tmp_style()
+    char_info = SimpleNamespace(
+        line_index=0,
+        visible=True,
+        style=style,
+        char="A",
+        bottom_left_x=0.0,
+        top_left_x=0.0,
+        top_right_x=115_200.0,
+        bottom_right_x=115_200.0,
+        bottom_left_y=0.0,
+        top_left_y=1_920.0,
+        top_right_y=1_920.0,
+        bottom_right_y=0.0,
+    )
+    layout = SimpleNamespace(
+        characters=[char_info],
+        lines=[SimpleNamespace(index=0, width=115_200.0)],
+    )
+    atlas_path = tmp_path / "atlas.png"
+    expected_field_size = (2_405, 1_920)
+    monkeypatch.setattr(renderer, "tmp_native_unrotated_quad_size", lambda *_: (115_200, 1_920))
+
+    def fake_render(*_args, **kwargs):
+        assert kwargs["native_field_size"] == expected_field_size
+        return (
+            TMPStaticAtlasField(atlas_path, (1, 1), (0, 0, 1, 1), expected_field_size),
+            None,
+            (0, 0, *expected_field_size),
+            0,
+            0,
+        )
+
+    monkeypatch.setattr(renderer, "render_tmp_sdf_character_field", fake_render)
+
+    prepared = renderer.prepare_tmp_direct_sdf_glyphs(
+        "font",
+        tmp_path / "font.ttf",
+        layout,
+        [0.0],
+        "left",
+        115_200.0,
+        0.0,
+        0.0,
+        "#000000",
+        0.0,
+        defer_static_atlas=True,
+    )
+
+    assert prepared is not None
+    assert len(prepared) == 1
+    assert prepared[0][0].field_size == expected_field_size
+    assert prepared[0][5] == (115_200, 1_920)
+
+
 def test_custom_profile_static_tmp_field_can_defer_all_atlas_pixels(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path)
     style = _base_tmp_style()
