@@ -161,9 +161,10 @@ native-pure、无 `mem:`。HonorDeck 已验证原子 slot 预检和同一 bonds 
   已有严格的类别级 asset-backed 像素门禁：full/clip 分别覆盖 cover-resize/crop、透明素材、
   非等比缩放和旋转，均为 native-pure、无 `mem:`；生产覆盖声明仍须由新版本的
   `classifications_by_kind.card_member.native` 证明真实流量确实走过该路径，不保留整卡 capture。
-- `StoryFavorite` 已完成共享布局与原生离散圆角 mask；synthetic banner 的 mask alpha 已
-  逐字节对齐。现有两张 capture 的 favorites 都为空，发布类别覆盖声明前仍需补 banner、
-  fallback、超过八项滚动三类最小脱敏 fixture。
+- `StoryFavorite` 已完成共享布局与原生离散圆角 mask；类别级 fixture 同时覆盖 banner、
+  无 banner fallback cell、九项内容的子场景裁剪与滚动条、非等比缩放及旋转，不含完整请求或用户字段，
+  native 成功路径无 `mem:` 与 Pillow touch。生产覆盖声明仍须观察实际 `general.native`，
+  但不再需要保留完整 card capture。
 - 禁止在 drawer 内按 backend 分叉复制布局。
 
 ### C. TMP Text
@@ -175,17 +176,17 @@ shading 全部移入 Rust；Python 仍保留 TMP 解析和布局 oracle。真实
 fontTools/Pillow 字段与 `SdfFontQuad` 的 2,400 个像素逐字节一致，冷请求记录 miss，第二次
 相同字形记录 hit。Skia 稀疏路径现在强制 `source_metrics_only=True`，不会通过 Pillow
 FreeType 封装取度量；任何无法生成 asset/font descriptor 的字形都会令整场 fail-open，
-不能退回遗留 `SdfQuad` 后仍标成 native。剩余工作都是类别级覆盖数据：
+不能退回遗留 `SdfQuad` 后仍标成 native。
 
-1. 用类别级最小 fixture 验证 static rich/decorative、symbol、旋转和 underlay；不保留
-   完整请求、整卡、用户或 profile/resources 数据；
-2. 用类别 fixture 覆盖 dynamic/fallback 的 symbol、中日文字体、缺字及 fallback font；
-   `SdfFontQuad` 实现与缓存本身已完成；
-3. 用分类统计持续确认没有输入落入遗留 `SdfQuad`；默认 `tmp_block_mode=glyph`，em-block
-   仅是离线 CLI 的非生产实验模式。
+不含完整请求、整卡、用户字段或 profile context 的文本类别门禁现已覆盖：普通多行与空行、
+中日文字、非等比缩放和整元素旋转；静态 OnDemand atlas 的 rich color/symbol/字形旋转；
+动态 source font 的 symbol/日文；outline/underlay；主字体缺字时的 TMP fallback font；以及
+emoji 缺字替换为 `□`。严格 source-metrics 布局与 `SdfFontQuad` 现在共用 fallback 候选顺序，
+不会再因主字体缺字而在绘制前错误回落 Pillow。已有 layout 单元门禁继续覆盖 alignment 与
+rich-tag 间距语义；默认 `tmp_block_mode=glyph`，em-block 仅是离线 CLI 的非生产实验模式。
 
-每一步都要覆盖 rich tags、空行、alignment、outline/underlay、symbol、emoji、旋转和
-中日文字体。
+上线后仍需用分类统计持续确认没有输入落入遗留 `SdfQuad`，且 `text` 请求全部为
+native-pure、无 `mem:` 和 Pillow touch；这项生产证明只保留类别计数。
 
 ### D. Dynamic Content
 

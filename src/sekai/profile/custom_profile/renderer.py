@@ -6902,11 +6902,13 @@ class PNGRenderer:
         font_size = style.size * self.tmp_font_scale
         if source_metrics_only:
             metric_char = self.tmp_render_glyph_char(font_name, char, font_size)
+            # Keep strict native layout on the same glyph candidate as SdfFontQuad generation.
+            # A base font can legitimately delegate one character to its TMP fallback chain.
             metrics = self.tmp_font_library.source_glyph_metrics(
                 font_name,
                 metric_char,
                 font_size,
-                include_fallback=False,
+                include_fallback=True,
             )
             if metrics is None:
                 raise ValueError(f"source font metrics are unavailable for U+{ord(char):04X}")
@@ -8018,11 +8020,13 @@ class PNGRenderer:
         last_index = len(metric_text) - 1
         for idx, ch in enumerate(metric_text):
             metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
+            # The per-run bounds must follow the same fallback chain as the character quads;
+            # otherwise a renderable fallback glyph incorrectly rejects the entire native scene.
             metrics = self.tmp_font_library.source_glyph_metrics(
                 font_name,
                 metric_char,
                 font_size,
-                include_fallback=False,
+                include_fallback=True,
             )
             if metrics is None:
                 raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
