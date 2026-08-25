@@ -109,7 +109,7 @@ def _walk_ir_nodes(nodes):
 
 
 def test_missing_native_extension_records_fallback(monkeypatch):
-    """ImportError (missing wheel OR IR_CAPABILITY < 8) -> None + exactly one fallback."""
+    """ImportError (missing wheel or stale capability) -> None + exactly one fallback."""
     monkeypatch.setattr(skia_mod, "skia_plot_enabled", lambda: True)
 
     def _no_wheel():
@@ -187,7 +187,7 @@ def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp
         elements_total=1,
         visible_elements=1,
         missing_elements=1,
-        issues=[{"kind": "stamp", "status": "missing", "data_id": 1, "layer": 2}],
+        classifications_by_kind={"stamp": {"missing": 1}},
     )
     monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _Native())
     monkeypatch.setattr(skia_mod, "_build_scene", lambda renderer, card: (b"{}", {}, report))
@@ -385,8 +385,104 @@ def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
 
     assert len(mem_images) == 2
     assert sum(len(entry[2]) for entry in mem_images.values()) == 2 * 4 * 4 * 4
-    assert report.complete
+    assert not report.complete
     assert report.hybrid_elements == 2
+
+
+def test_scene_routes_non_decorative_tmp_through_sparse_native_quads(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "<color=#ffffff>ordinary rich text"},
+        object_data={"visible": True},
+    )
+    quad = object()
+    emitted = []
+
+    class _Renderer:
+        text_layout = "tmp"
+        tmp_text_render_mode = "sdf"
+
+        def __init__(self):
+            self.direct_calls = []
+            self.audit = []
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def prepare_direct_sdf_quads(self, item, object_data, **kwargs):
+            self.direct_calls.append((item, object_data, kwargs))
+            return [quad]
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("ordinary rich TMP must try the sparse native path first")
+
+        def record_native_audit(self, *args):
+            self.audit.append(args)
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+    monkeypatch.setattr(
+        skia_mod._SceneAssembler,
+        "emit_sdf_quads",
+        lambda _scene, quads: emitted.extend(quads) or True,
+    )
+    renderer = _Renderer()
+
+    _, mem_images, report = _build_scene(renderer, {})
+
+    assert mem_images == {}
+    assert renderer.direct_calls == [
+        (
+            content.item,
+            content.object_data,
+            {"defer_static_atlas": True, "defer_dynamic_font": True},
+        )
+    ]
+    assert emitted == [quad]
+    assert renderer.audit[-1][2:] == ("rendered-direct", None)
+    assert report.complete
+    assert report.native_elements == 1
+    assert report.noop_elements == 0
+    assert report.hybrid_elements == 0
+    assert report.metrics()["classifications_by_kind"] == {"text": {"native": 1}}
+
+
+def test_scene_classifies_raw_whitespace_text_as_native_noop(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "   \n\t"},
+        object_data={"visible": True},
+    )
+
+    class _Renderer:
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def generate_text_data(self, item):
+            return SimpleNamespace(text=item["text"])
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("whitespace-only text must not enter the Pillow renderer")
+
+        def record_native_audit(self, *args):
+            return None
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+
+    _, mem_images, report = _build_scene(_Renderer(), {})
+
+    assert mem_images == {}
+    assert report.complete
+    assert report.noop_elements == 1
+    assert report.missing_elements == 0
+    assert report.metrics()["classifications_by_kind"] == {"text": {"noop": 1}}
 
 
 def test_scene_oversized_tmp_layer_retries_as_sparse_native_quads(monkeypatch):
@@ -705,7 +801,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
     assert f"{honor_type}_base.png" in subscene_paths
     assert f"{honor_type}_frame.png" in subscene_paths
     assert PILLOW_TOUCH_IMAGE_HEADER_PROBE not in pillow_touches.counts
-    assert report.complete
+    assert not report.complete
     assert report.native_elements == 1
     assert report.hybrid_elements == 1
 
@@ -1385,7 +1481,12 @@ def test_native_end_to_end_renders_the_real_payload(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
     request = CustomProfileCardRenderRequest.model_validate(json.loads(PAYLOAD_FILE.read_text(encoding="utf-8")))
 
-    payload = asyncio.run(try_render_custom_profile_card_payload(request))
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(try_render_custom_profile_card_payload(request))
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
     assert payload is not None, "the real parity payload must render via Skia, not fall back"
     assert payload.media_type == "image/png"
     assert payload.backend == "skia"
@@ -1397,6 +1498,13 @@ def test_native_end_to_end_renders_the_real_payload(monkeypatch):
     stats = _endpoint_stats()
     assert stats["skia"] == 1
     assert stats["total"] == 1
+    assert stats["native_pure"] == 1
+    assert stats["native_hybrid"] == 0
+    assert stats["pillow_touch_reasons"] == {}
+    assert pillow_touches.counts == {}
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert payload.native_metrics["custom_profile_mem_images"] == 0
+    assert payload.native_metrics["custom_profile_mem_bytes"] == 0
 
 
 @pytest.mark.skipif(

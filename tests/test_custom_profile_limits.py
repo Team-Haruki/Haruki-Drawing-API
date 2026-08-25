@@ -137,6 +137,15 @@ def test_custom_profile_accepts_bounded_effective_rich_text_style() -> None:
     validate_custom_profile_card(_text_card("<size=300><scale=6>hello</scale></size>"), **LIMITS)
 
 
+@pytest.mark.parametrize("bucket", ["miniCharas", "screenFilters"])
+def test_custom_profile_rejects_unrenderable_dynamic_atlas_buckets(bucket: str) -> None:
+    card = _card()
+    card["customProfileCard"][bucket] = card["customProfileCard"]["shapes"]
+
+    with pytest.raises(ValueError, match=r"DynamicAtlasStudio"):
+        validate_custom_profile_card(card, **LIMITS)
+
+
 def test_custom_profile_raster_budget_rejects_allocation_before_it_happens() -> None:
     with pytest.raises(ValueError, match="16000000 pixels"):
         ensure_raster_size((4000, 4000), max_pixels=8 * 1024 * 1024, label="shape")

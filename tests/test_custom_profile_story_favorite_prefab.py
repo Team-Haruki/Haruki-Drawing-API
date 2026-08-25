@@ -1,6 +1,10 @@
+from io import BytesIO
+import json
 from pathlib import Path
+import re
 
 from PIL import Image, ImageDraw
+import pytest
 
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
@@ -17,7 +21,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
 )
 import src.sekai.profile.custom_profile.skia as skia_mod
-from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.ir_builder import IRBuilder, clip_pillow_rrect
 
 
 def _write_pattern(path: Path, size: tuple[int, int], seed: int) -> None:
@@ -213,7 +217,7 @@ def _walk_ir(node):
         yield from _walk_ir(child)
 
 
-def test_story_favorite_native_emitter_declines_inexact_rounded_banner_before_scene_mutation(
+def test_story_favorite_native_emitter_uses_discrete_rounded_banner_mask(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -242,9 +246,69 @@ def test_story_favorite_native_emitter_declines_inexact_rounded_banner_before_sc
         staticmethod(lambda font_path: _NativeMetricsStub()),
     )
 
-    assert skia_mod._emit_native_general(renderer, content, scene) is None
+    assert skia_mod._emit_native_general(renderer, content, scene) == "native"
     assert scene.mem_images == {}
-    assert builder.build()["root"]["children"] == []
+    nodes = list(_walk_ir(builder.build()["root"]))
+    mask_group = next(node for node in nodes if node.get("clip", {}).get("kind") == "pillow_rrect")
+    assert mask_group["clip"]["radius"] == 10.0
+    assert any(node["type"] == "Image" for node in _walk_ir(mask_group))
+
+
+@pytest.mark.parametrize(("size", "radius"), [((31, 23), 7), ((403, 112), 10), ((12, 12), 99)])
+def test_native_discrete_rounded_mask_matches_pillow(tmp_path: Path, size: tuple[int, int], radius: int) -> None:
+    native = pytest.importorskip("haruki_skia_renderer")
+    builder = IRBuilder(
+        size[0],
+        size[1],
+        assets_base_dir=str(tmp_path),
+        font_dir=str(tmp_path),
+        default_font="unused.ttf",
+        bold_font="unused.ttf",
+    )
+    with builder.group(size=size, clip=clip_pillow_rrect(radius)):
+        builder.rect((0, 0), size, fill=(255, 255, 255, 255))
+
+    result = native.render_scene(json.dumps(builder.build()).encode(), {})
+    actual = Image.open(BytesIO(result["image_bytes"])).convert("RGBA").getchannel("A")
+    expected = Image.new("L", size, 0)
+    ImageDraw.Draw(expected).rounded_rectangle(
+        (0, 0, size[0] - 1, size[1] - 1),
+        radius=radius,
+        fill=255,
+    )
+    assert actual.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize(
+    ("builder_limits", "message"),
+    [
+        ({"max_node_pixels": 100}, "pillow_rrect mask 20x20 (400 pixels) exceeds limit 100"),
+        (
+            {"max_scene_bytes": 4_000},
+            "pillow_rrect mask construction requires 3200 bytes; only 2400 bytes remain",
+        ),
+    ],
+)
+def test_native_discrete_rounded_mask_obeys_scene_limits(
+    tmp_path: Path,
+    builder_limits: dict[str, int],
+    message: str,
+) -> None:
+    native = pytest.importorskip("haruki_skia_renderer")
+    builder = IRBuilder(
+        20,
+        20,
+        assets_base_dir=str(tmp_path),
+        font_dir=str(tmp_path),
+        default_font="unused.ttf",
+        bold_font="unused.ttf",
+        **builder_limits,
+    )
+    with builder.group(size=(20, 20), clip=clip_pillow_rrect(4)):
+        builder.rect((0, 0), (20, 20), fill=(255, 255, 255, 255))
+
+    with pytest.raises(RuntimeError, match=re.escape(message)):
+        native.render_scene(json.dumps(builder.build()).encode(), {})
 
 
 def test_story_favorite_without_banner_can_use_existing_native_general_primitives(

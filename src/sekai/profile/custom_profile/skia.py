@@ -6,11 +6,10 @@ uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse th
 ``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
 display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
 font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text;
-static-atlas rich/decorative glyphs use asset-backed ``SdfAtlasQuad`` nodes. Still-unmigrated
-dynamic/fallback rich TMP and incomplete HonorDeck content is explicitly classified as hybrid
-and transported as bounded ``mem:`` rasters. A scene coverage
-report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
-cannot mean "successfully encoded a partial card".
+all remaining TMP/SDF text is offered to the asset-backed ``SdfAtlasQuad`` / ``SdfFontQuad``
+sparse-glyph path before compatibility rastering. Incomplete content is explicitly classified and
+rejected by a scene coverage report before Rust runs, so ``backend=skia`` cannot mean
+"successfully encoded a partial card".
 
 Honor dimensions come from the native asset-info API. An older wheel falls back to an explicitly
 telemetried Pillow header probe, so compatibility cannot masquerade as native-pure.
@@ -99,7 +98,7 @@ from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
 from src.sekai.profile.custom_profile.tmp_text_prefab import build_simple_tmp_text_display_list
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
-from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
+from src.sekai.skia_renderer.ir_builder import IRBuilder, clip_pillow_rrect, image_tint
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
     OUTCOME_ERROR,
@@ -164,7 +163,7 @@ class CustomProfileSceneReport:
     unresolved_elements: int = 0
     mem_images: int = 0
     mem_bytes: int = 0
-    issues: list[dict[str, int | str]] = field(default_factory=list)
+    classifications_by_kind: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -178,12 +177,30 @@ class CustomProfileSceneReport:
         return (
             self.visible_elements == classified_visible
             and self.elements_total == self.visible_elements + self.hidden_elements
+            and self.hybrid_elements == 0
             and self.missing_elements == 0
             and self.unresolved_elements == 0
+            and self.mem_images == 0
+            and self.mem_bytes == 0
         )
 
     def observe(self, content: Any, classification: str) -> None:
-        if classification == "hidden":
+        resolved_classification = (
+            classification
+            if classification
+            in {
+                "hidden",
+                "native",
+                "hybrid",
+                "noop",
+                "missing",
+                "unresolved",
+            }
+            else "unresolved"
+        )
+        kind_bucket = self.classifications_by_kind.setdefault(str(content.kind), {})
+        kind_bucket[resolved_classification] = kind_bucket.get(resolved_classification, 0) + 1
+        if resolved_classification == "hidden":
             self.hidden_elements += 1
             return
         self.visible_elements += 1
@@ -193,25 +210,16 @@ class CustomProfileSceneReport:
             "noop": "noop_elements",
             "missing": "missing_elements",
             "unresolved": "unresolved_elements",
-        }.get(classification, "unresolved_elements")
+        }.get(resolved_classification, "unresolved_elements")
         setattr(self, counter, getattr(self, counter) + 1)
-        if classification in {"missing", "unresolved"} and len(self.issues) < 16:
-            self.issues.append(
-                {
-                    "kind": str(content.kind),
-                    "status": classification,
-                    "data_id": content_data_id(content.kind, content.item),
-                    "layer": int(content.layer),
-                }
-            )
 
     def metrics(self) -> dict[str, Any]:
         issues_by_kind: dict[str, dict[str, int]] = {}
-        for issue in self.issues:
-            kind = str(issue["kind"])
-            status = str(issue["status"])
-            bucket = issues_by_kind.setdefault(kind, {"missing": 0, "unresolved": 0})
-            bucket[status] += 1
+        for kind, classifications in self.classifications_by_kind.items():
+            missing = int(classifications.get("missing", 0))
+            unresolved = int(classifications.get("unresolved", 0))
+            if missing or unresolved:
+                issues_by_kind[kind] = {"missing": missing, "unresolved": unresolved}
         return {
             "complete": int(self.complete),
             "elements_total": self.elements_total,
@@ -225,6 +233,9 @@ class CustomProfileSceneReport:
             "mem_images": self.mem_images,
             "mem_bytes": self.mem_bytes,
             "issues_by_kind": issues_by_kind,
+            "classifications_by_kind": {
+                kind: dict(sorted(counts.items())) for kind, counts in sorted(self.classifications_by_kind.items())
+            },
         }
 
     def native_metrics(self) -> dict[str, int]:
@@ -454,19 +465,17 @@ class _SceneAssembler:
 
 
 def _direct_text_quads(renderer: PNGRenderer, content: Any):
-    """SdfQuad records for a decorative direct-raster text element, or None.
+    """Sparse native glyph records for any TMP/SDF text element, or ``None``.
 
-    Mirrors render_content_direct_on_card's outer gates, then asks the shared seam
-    (prepare_direct_sdf_quads — the layout + PIL-warp half of the Pillow direct path) for the
-    per-glyph fields/scalars. None falls through to the Pillow-parity raster branches.
+    ``prepare_direct_sdf_quads`` is already the renderer-neutral sparse path used by Pillow for
+    decorative and oversized text. Restricting it here to ``is_decorative_text_item`` left
+    ordinary rich/effected TMP text as whole RGBA ``mem:`` layers even though the exact same
+    layout, warp, and shading descriptors were native-capable. Plain text still gets the cheaper
+    IR ``Text`` path first; this is the complete TMP fallback before any compatibility raster.
     """
     if content.kind != "text" or not content.object_data.get("visible", False):
         return None
-    if not renderer.tmp_decorative_direct_raster:
-        return None
     if renderer.text_layout != "tmp" or renderer.tmp_text_render_mode != "sdf":
-        return None
-    if not renderer.is_decorative_text_item(content.item):
         return None
     return renderer.prepare_direct_sdf_quads(
         content.item,
@@ -477,16 +486,29 @@ def _direct_text_quads(renderer: PNGRenderer, content: Any):
 
 
 def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
-    """Check the direct-text gates without allocating the full-canvas scratch layer."""
+    """Check the sparse TMP gates without allocating a Pillow scratch layer."""
 
     return (
         content.kind == "text"
         and bool(content.object_data.get("visible", False))
-        and renderer.tmp_decorative_direct_raster
         and renderer.text_layout == "tmp"
         and renderer.tmp_text_render_mode == "sdf"
-        and renderer.is_decorative_text_item(content.item)
     )
+
+
+def _is_empty_text_noop(renderer: PNGRenderer, content: Any) -> bool:
+    """Return whether a visible text item has no drawable source characters.
+
+    The compatibility renderer returns ``None`` for an empty/whitespace-only item. Treating that
+    as a missing element made an otherwise complete native scene fall back to Pillow, which then
+    drew exactly nothing. Keep tagged whitespace out of this shortcut because underline/strike
+    tags can make spaces visible; the raw whitespace-only case is unambiguously a no-op.
+    """
+
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    text = str(content.item.get("text", ""))
+    return not text.strip() and "<" not in text and ">" not in text
 
 
 def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
@@ -1087,11 +1109,6 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                 # IR Image cover is deliberately centered. A future non-centered display-list
                 # operation must decline instead of silently changing its crop.
                 return None
-            if op.clip_radius is not None:
-                # Pillow builds a discrete L mask with ImageDraw.rounded_rectangle and multiplies
-                # it into the resized alpha. Skia's anti-aliased rrect clip differs at the edge;
-                # keep banner-backed StoryFavorite hybrid until an exact mask primitive exists.
-                return None
             asset_status, asset_path = _existing_native_asset(op.path)
             if asset_status == "ready":
                 resource_paths[op_key] = asset_path
@@ -1174,13 +1191,30 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                 pos = (round(left), round(top))
                 size = (max(1, round(right - left)), max(1, round(bottom - top)))
                 sampling = "pillow_lanczos" if op.sampling == "lanczos" else sampling_map[op.sampling]
-                scene.builder.image(
-                    asset_path,
-                    pos,
-                    size,
-                    fit=op.fit,
-                    sampling=sampling,
-                )
+                if op.clip_radius is None:
+                    scene.builder.image(
+                        asset_path,
+                        pos,
+                        size,
+                        fit=op.fit,
+                        sampling=sampling,
+                    )
+                else:
+                    # The legacy composer multiplies a discrete ImageDraw L mask into the
+                    # resized alpha. ``pillow_rrect`` reproduces that contract in Rust without
+                    # a request-local Pillow raster or ``mem:`` image.
+                    with scene.builder.group(
+                        offset=pos,
+                        size=size,
+                        clip=clip_pillow_rrect(op.clip_radius),
+                    ):
+                        scene.builder.image(
+                            asset_path,
+                            (0, 0),
+                            size,
+                            fit=op.fit,
+                            sampling=sampling,
+                        )
                 continue
             if isinstance(op, GeneralViewportOp):
                 with scene.builder.group(
@@ -1665,6 +1699,10 @@ def _build_scene(
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
+        if _is_empty_text_noop(renderer, content):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
         if _emit_native_simple_tmp_text(renderer, content, scene):
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
@@ -1744,7 +1782,7 @@ async def try_render_custom_profile_card_payload(
     try:
         native = load_native_renderer()
     except ImportError as exc:
-        # Also where a too-old wheel (IR_CAPABILITY < 8, no Transform node) fails open.
+        # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
         logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
         _record(OUTCOME_FALLBACK)
         return None
@@ -1816,7 +1854,7 @@ async def try_render_custom_profile_card_payload(
         context = current_request_context()
         logger.warning(
             "custom_profile.scene id=%s complete=false visible=%d native=%d hybrid=%d "
-            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues=%s",
+            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues_by_kind=%s",
             context["request_id"],
             report.visible_elements,
             report.native_elements,
@@ -1825,7 +1863,7 @@ async def try_render_custom_profile_card_payload(
             report.unresolved_elements,
             report.mem_images,
             report.mem_bytes,
-            report.issues,
+            scene_metrics["issues_by_kind"],
         )
         _record(OUTCOME_FALLBACK)
         return None

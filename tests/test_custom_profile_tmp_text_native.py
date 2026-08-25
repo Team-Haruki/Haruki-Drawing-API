@@ -15,7 +15,6 @@ except ImportError:  # pragma: no cover - native CI job exercises this file
     _native = None
 
 from src.core.pillow_telemetry import (
-    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
     begin_pillow_touch_scope,
     end_pillow_touch_scope,
     take_pillow_touch_snapshot,
@@ -200,52 +199,45 @@ def test_real_plain_tmp_text_is_native_pixel_pure_and_matches_pillow(
     not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(),
     reason="custom-profile parity fixture and extracted TMP metadata are required",
 )
-def test_outline_tmp_text_is_rejected_by_native_subset_and_falls_back_atomically(monkeypatch):
+def test_outline_tmp_text_uses_sparse_native_glyphs_without_mem_transport(monkeypatch):
     from src.settings import settings
 
     request = _text_only_request(outline_size=0.2)
     pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
     proxy = _NativeProxy()
-    original_render = PNGRenderer.render_content_for_card
-    fallback_calls = 0
-
-    def _render_fallback(renderer, content):
-        nonlocal fallback_calls
-        fallback_calls += 1
-        return original_render(renderer, content)
 
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
     monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
-    monkeypatch.setattr(PNGRenderer, "render_content_for_card", _render_fallback)
-    monkeypatch.setattr(PNGRenderer, "prepare_direct_sdf_quads", _unexpected_raster)
+    monkeypatch.setattr(PNGRenderer, "render_content_for_card", _unexpected_raster)
     monkeypatch.setattr(PNGRenderer, "render_content_direct_on_card", _unexpected_raster)
 
     token = begin_pillow_touch_scope()
     try:
         payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        pillow_touches = take_pillow_touch_snapshot()
     finally:
         end_pillow_touch_scope(token)
 
     assert payload is not None
-    assert fallback_calls == 1
     stats = get_render_stats()["endpoints"][skia_mod.CUSTOM_PROFILE_ENDPOINT]
-    assert stats["native_pure"] == 0
-    assert stats["native_hybrid"] == 1
-    assert stats["pillow_touch_reasons"] == {PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER: {"renders": 1, "touches": 1}}
+    assert stats["native_pure"] == 1
+    assert stats["native_hybrid"] == 0
+    assert stats["pillow_touch_reasons"] == {}
+    assert pillow_touches.counts == {}
     assert payload.native_metrics["custom_profile_visible_elements"] == 1
-    assert payload.native_metrics["custom_profile_native_elements"] == 0
-    assert payload.native_metrics["custom_profile_hybrid_elements"] == 1
-    assert payload.native_metrics["custom_profile_mem_images"] == 1
-    assert payload.native_metrics["custom_profile_mem_bytes"] > 0
-    assert proxy.mem_images is not None
-    assert len(proxy.mem_images) == 1
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert payload.native_metrics["custom_profile_mem_images"] == 0
+    assert payload.native_metrics["custom_profile_mem_bytes"] == 0
+    assert proxy.mem_images == {}
     assert proxy.ir_json is not None
-    assert b"mem:" in proxy.ir_json
+    assert b"mem:" not in proxy.ir_json
 
     scene = json.loads(proxy.ir_json)
     assert not any(node["type"] == "Text" for node in _walk_nodes(scene["root"]))
+    assert any(node["type"] in {"SdfAtlasQuad", "SdfFontQuad"} for node in _walk_nodes(scene["root"]))
     native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
     mean, p99 = _rgb_diff_metrics(pillow, native)
-    assert mean == 0.0
-    assert p99 == 0
+    assert mean <= 0.7, mean
+    assert p99 <= 2, p99
     assert ImageChops.difference(pillow.getchannel("A"), native.getchannel("A")).getbbox() is None
