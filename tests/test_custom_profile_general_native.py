@@ -51,6 +51,30 @@ def _shared_general_request() -> CustomProfileCardRenderRequest:
     return CustomProfileCardRenderRequest.model_validate(raw)
 
 
+def _x_general_request() -> CustomProfileCardRenderRequest:
+    raw = json.loads(PAYLOAD_FILE.read_text(encoding="utf-8"))
+    layout = raw["card"]["customProfileCard"]
+    for value in layout.values():
+        if isinstance(value, list):
+            value.clear()
+    resource_id = 900_001
+    layout["generals"] = [
+        {
+            "type": resource_id,
+            "objectData": {
+                "visible": True,
+                "layer": 1,
+                "position": {"x": 0, "y": 0},
+                "scale": {"x": 1, "y": 1},
+                "rotation": {"z": 0, "w": 1},
+            },
+        }
+    ]
+    raw["resources"]["customProfilePlayerInfoResources"] = {str(resource_id): {"id": resource_id, "fileName": "X"}}
+    raw["profile_context"]["userProfile"] = {"twitterId": "category_fixture"}
+    return CustomProfileCardRenderRequest.model_validate(raw)
+
+
 def _stats_general_request() -> CustomProfileCardRenderRequest:
     raw = json.loads(COLLECTIONS_PAYLOAD_FILE.read_text(encoding="utf-8"))
     layout = raw["card"]["customProfileCard"]
@@ -203,6 +227,61 @@ def test_shared_general_prefabs_are_native_pixel_pure_and_match_pillow(monkeypat
     mean, p99 = _rgb_diff_metrics(pillow, native)
     assert mean <= 2.0, mean
     assert p99 <= 25, p99
+    assert diff.getchannel("A").getbbox() is None
+
+
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 1,
+    reason="SlicedImage + native text metrics renderer is required",
+)
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file(), reason="custom profile parity fixture not present")
+def test_x_general_category_is_native_pixel_pure_and_matches_shared_pillow(monkeypatch):
+    from src.settings import settings
+
+    request = _x_general_request()
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    captured: dict[str, object] = {}
+
+    class _NativeProxy:
+        ASSET_INFO_CAPABILITY = getattr(_native, "ASSET_INFO_CAPABILITY", 0)
+        TEXT_METRICS_CAPABILITY = getattr(_native, "TEXT_METRICS_CAPABILITY", 0)
+
+        def asset_image_info(self, *args):
+            return _native.asset_image_info(*args)
+
+        def measure_text_batch(self, *args):
+            return _native.measure_text_batch(*args)
+
+        def render_scene(self, ir_json, mem_images):
+            captured["ir_json"] = bytes(ir_json)
+            captured["mem_images"] = dict(mem_images)
+            return _native.render_scene(ir_json, mem_images)
+
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeProxy())
+
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert payload is not None
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert captured["mem_images"] == {}
+    scene = json.loads(captured["ir_json"])
+    nodes = list(_walk_nodes(scene["root"]))
+    assert any(node["type"] == "Text" and node["text"] == "X" for node in nodes)
+    assert any(node["type"] == "Text" and node["text"] == "@category_fixture" for node in nodes)
+
+    native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    diff = ImageChops.difference(pillow, native)
+    mean, p99 = _rgb_diff_metrics(pillow, native)
+    assert mean <= 1.0, mean
+    assert p99 <= 20, p99
     assert diff.getchannel("A").getbbox() is None
 
 

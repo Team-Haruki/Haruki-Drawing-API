@@ -46,6 +46,11 @@ from src.sekai.profile.custom_profile.card_prefab import (
     build_full_card_display_list as build_full_card_prefab_display_list,
     build_full_card_overlay_ops,
 )
+from src.sekai.profile.custom_profile.collection_prefab import (
+    OMIKUJI_RESULT_NATIVE_SIZE,
+    PillowOmikujiAdapter,
+    build_omikuji_display_list,
+)
 from src.sekai.profile.custom_profile.general_prefab import (
     CHARA_LIST,
     CHARACTER_RANK_CELL_SIZE,
@@ -305,23 +310,6 @@ PREFAB_NATIVE_SIZES: dict[str, tuple[float, float]] = {
     "CollectionCustomPrefabContentView": (178.0, 154.0),
     "DynamicProfileContentView": (178.0, 154.0),
 }
-OMIKUJI_UNIT_LABELS = {
-    "piapro": "VIRTUAL SINGER",
-    "light_sound": "Leo/need",
-    "idol": "MORE MORE JUMP!",
-    "street": "Vivid BAD SQUAD",
-    "theme_park": "Wonderlands x Showtime",
-    "school_refusal": "25ji, Nightcord de.",
-}
-OMIKUJI_UNIT_COLORS = {
-    "piapro": (51, 204, 187, 255),
-    "light_sound": (68, 85, 221, 255),
-    "idol": (136, 221, 68, 255),
-    "street": (238, 17, 102, 255),
-    "theme_park": (255, 153, 0, 255),
-    "school_refusal": (136, 68, 153, 255),
-}
-OMIKUJI_RESULT_NATIVE_SIZE = (1480.0, 490.0)
 CLIP_CARD_MEMBER_ART_SIZE = (328.0, 538.2559814453125)
 CLIP_CARD_MEMBER_NATIVE_SIZE = (
     round(PREFAB_NATIVE_SIZES["ClipSizeCardContentView"][0]),
@@ -3547,16 +3535,6 @@ class PNGRenderer:
     def draw_total_power_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "icon_deckPower_wh", rect, tint=UNITY_UI_DARK_TINT)
 
-    def draw_x_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
-        if self.paste_unity_sprite(image, "x_icon", rect, tint=UNITY_UI_DARK_TINT):
-            return
-        if self.paste_unity_sprite(image, "icon_twitter_wh", rect, tint=UNITY_UI_DARK_TINT):
-            return
-        draw = ImageDraw.Draw(image)
-        self.draw_center_text_rect(
-            draw, rect, "X", size=max(18, round(rect[3] - rect[1]) - 8), fill=GENERAL_TEMPLATE_TEXT
-        )
-
     def draw_info_button(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "btn_circle_h56_wh", rect)
         icon_rect = self.rect_transform_box(
@@ -3576,19 +3554,9 @@ class PNGRenderer:
         self.paste_unity_sprite(image, "icon_infomation_wh", icon_rect, tint=UNITY_UI_DARK_TINT)
 
     def render_general_x(self) -> Image.Image:
-        size = GENERAL_NATIVE_SIZES["X"]
-        image = Image.new("RGBA", size, (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        base_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5))
-        self.paste_unity_sprite(
-            image, "bg_base_r16_wh", base_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
-        )
-        icon_rect = self.rect_transform_box(size, (0.0, 0.5), (0.0, 0.5), (26.0, 0.0), (38.0, 38.0), (0.5, 0.5))
-        self.draw_x_icon(image, icon_rect)
-        twitter_id = str((self.profile_context.get("userProfile") or {}).get("twitterId", "") or "").strip()
-        text = f"@{twitter_id.removeprefix('@')}" if twitter_id else ""
-        text_rect = self.rect_transform_box(size, (0.5, 0.5), (0.5, 0.5), (26.0, 0.0), (430.0, 32.0), (0.5, 0.5))
-        self.draw_fit_text_rect(draw, text_rect, text, max_size=30, fill=GENERAL_TEMPLATE_TEXT)
+        image = self.render_shared_general_prefab("X")
+        if image is None:  # pragma: no cover - X has no missing-data no-op contract
+            raise RuntimeError("shared X GeneralContentView unexpectedly produced no display list")
         return image
 
     def render_general_user_name(self) -> Image.Image:
@@ -5124,7 +5092,7 @@ class PNGRenderer:
         file_name = file_path if file_path.lower().endswith(".png") else f"{file_path}.png"
         return self.first_region_asset((Path(bundle) / file_name,))
 
-    def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    def omikuji_font_candidates(self, *, decorative: bool = False) -> list[Path]:
         names = (
             ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
             if decorative
@@ -5163,192 +5131,46 @@ class PNGRenderer:
                     / "FOT-Omikuji_4956192661917990345.otf",
                 )
             )
-        for path in candidates:
+        return candidates
+
+    def omikuji_font_path(self, *, decorative: bool = False) -> Path | None:
+        for path in self.omikuji_font_candidates(decorative=decorative):
             try:
-                if path.exists():
-                    return ImageFont.truetype(str(path), size)
+                if path.is_file():
+                    return path
             except OSError:
                 continue
+        return self.general_font_path()
+
+    def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        path = self.omikuji_font_path(decorative=decorative)
+        if path is not None:
+            try:
+                return ImageFont.truetype(str(path), size)
+            except OSError:
+                pass
         return self.general_font(size, bold=not decorative)
 
-    def draw_omikuji_vertical_line(
-        self,
-        image: Image.Image,
-        x: float,
-        y: float,
-        text: str,
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-        fill: tuple[int, int, int, int],
-        *,
-        step: float,
-    ) -> None:
-        draw = ImageDraw.Draw(image)
-        cursor_y = y
-        rotate_chars = {"、", "。", "，", "．", "・", "：", "；", "！", "？", "ー"}
-        small_kana = set("ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
-        for ch in str(text or ""):
-            if ch in {" ", "\u3000"}:
-                cursor_y += step * 0.5
-                continue
-            if ch in rotate_chars:
-                bbox = draw.textbbox((0, 0), ch, font=font)
-                glyph = Image.new("RGBA", (max(1, bbox[2] - bbox[0] + 8), max(1, bbox[3] - bbox[1] + 8)), (0, 0, 0, 0))
-                glyph_draw = ImageDraw.Draw(glyph)
-                glyph_draw.text((4 - bbox[0], 4 - bbox[1]), ch, font=font, fill=fill)
-                glyph = glyph.rotate(90, expand=True)
-                image.alpha_composite(
-                    glyph, (round(x - glyph.width / 2), round(cursor_y - glyph.height / 2 + step * 0.28))
-                )
-            else:
-                offset_x = -step * 0.08 if ch in small_kana else 0.0
-                offset_y = step * 0.16 if ch in small_kana else 0.0
-                draw.text((x + offset_x, cursor_y + offset_y), ch, font=font, fill=fill, anchor="mm")
-            cursor_y += step
-
-    def draw_omikuji_vertical_columns(
-        self,
-        image: Image.Image,
-        right_x: float,
-        y: float,
-        lines: list[str] | tuple[str, ...],
-        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
-        fill: tuple[int, int, int, int],
-        *,
-        column_step: float,
-        char_step: float,
-    ) -> None:
-        for index, line in enumerate(lines):
-            if line:
-                self.draw_omikuji_vertical_line(
-                    image,
-                    right_x - index * column_step,
-                    y,
-                    line,
-                    font,
-                    fill,
-                    step=char_step,
-                )
-
-    def draw_omikuji_centered_lines(
-        self,
-        draw: ImageDraw.ImageDraw,
-        rect: tuple[int, int, int, int],
-        text: str,
-        *,
-        max_size: int,
-        min_size: int,
-        fill: tuple[int, int, int, int],
-        spacing: int = 1,
-    ) -> None:
-        lines = [line for line in str(text or "").splitlines() if line]
-        if not lines:
-            return
-        left, top, right, bottom = rect
-        for size in range(max_size, min_size - 1, -1):
-            font = self.omikuji_font(size)
-            boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
-            widths = [box[2] - box[0] for box in boxes]
-            heights = [box[3] - box[1] for box in boxes]
-            total_h = sum(heights) + spacing * max(0, len(lines) - 1)
-            if max(widths, default=0) <= right - left and total_h <= bottom - top:
-                y = top + (bottom - top - total_h) / 2.0
-                for line, box, line_h in zip(lines, boxes, heights, strict=True):
-                    draw.text(
-                        ((left + right) / 2.0, y - box[1]),
-                        line,
-                        font=font,
-                        fill=fill,
-                        anchor="ma",
-                    )
-                    y += line_h + spacing
-                return
-
-        font = self.omikuji_font(min_size)
-        y = top + 2
-        for line in lines:
-            draw.text(((left + right) / 2.0, y), line, font=font, fill=fill, anchor="ma")
-            y += min_size + spacing
-
     def draw_omikuji_result_view(self, omikuji: dict[str, Any], asset_paths: dict[str, Path]) -> Image.Image:
-        background = self.open_rgba(asset_paths.get("background"))
-        if background is None:
-            width, height = tuple(round(v) for v in OMIKUJI_RESULT_NATIVE_SIZE)
-            image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-        else:
-            image = background.copy()
-            width, height = image.size
-        draw = ImageDraw.Draw(image)
-
-        unit = str(omikuji.get("unit", "") or "")
-        accent = OMIKUJI_UNIT_COLORS.get(unit, (76, 181, 210, 255))
-        text_fill = (79, 79, 79, 255)
-
-        fortune_image = self.open_rgba(asset_paths.get("fortune"))
-        if fortune_image is not None:
-            target_h = max(1, round(height * 300.0 / 490.0))
-            if fortune_image.height != target_h:
-                fortune_image = fortune_image.resize(
-                    (max(1, round(fortune_image.width * target_h / fortune_image.height)), target_h),
-                    Image.Resampling.LANCZOS,
-                )
-            image.alpha_composite(fortune_image, (round(width * 1309.0 / 1480.0), round(height * 89.0 / 490.0)))
-
-        summary = str(omikuji.get("summary", "") or "")
-        summary_font = self.omikuji_font(round(height * 36.0 / 490.0))
-        self.draw_omikuji_vertical_columns(
-            image,
-            width * 1251.0 / 1480.0,
-            height * 49.0 / 490.0,
-            [line for line in summary.splitlines() if line],
-            summary_font,
-            text_fill,
-            column_step=width * 44.0 / 1480.0,
-            char_step=height * 29.5 / 490.0,
+        background_path = asset_paths["background"]
+        fortune_path = asset_paths["fortune"]
+        background = self.open_rgba(background_path)
+        fortune = self.open_rgba(fortune_path)
+        if background is None or fortune is None:
+            raise FileNotFoundError("required omikuji result-view assets are missing")
+        display_list = build_omikuji_display_list(
+            omikuji,
+            background_path=background_path,
+            background_size=background.size,
+            fortune_path=fortune_path,
+            fortune_size=fortune.size,
         )
-
-        rows = [
-            (str(omikuji.get("title3", "") or ""), str(omikuji.get("description3", "") or "")),
-            (str(omikuji.get("title2", "") or ""), str(omikuji.get("description2", "") or "")),
-            (str(omikuji.get("title1", "") or ""), str(omikuji.get("description1", "") or "")),
-        ]
-        title_font = self.omikuji_font(round(height * 40.0 / 490.0))
-        value_font = self.omikuji_font(round(height * 30.0 / 490.0))
-        title_lefts = (width * 430.0 / 1480.0, width * 584.0 / 1480.0, width * 736.0 / 1480.0)
-        title_top = height * 31.0 / 490.0
-        title_w = width * 44.0 / 1480.0
-        title_h = height * 94.0 / 490.0
-        for (title, value), title_left in zip(rows, title_lefts, strict=True):
-            if not title and not value:
-                continue
-            title_rect = (
-                round(title_left),
-                round(title_top),
-                round(title_left + title_w),
-                round(title_top + title_h),
-            )
-            draw.rectangle(title_rect, fill=accent)
-            clean_title = title.replace(" ", "")
-            if clean_title:
-                self.draw_omikuji_vertical_line(
-                    image,
-                    title_left + title_w / 2.0,
-                    title_top + height * 27.0 / 490.0,
-                    clean_title,
-                    title_font,
-                    (255, 255, 255, 255),
-                    step=height * 39.0 / 490.0,
-                )
-            if value:
-                self.draw_omikuji_vertical_line(
-                    image,
-                    title_left - width * 40.0 / 1480.0,
-                    height * 55.0 / 490.0,
-                    value,
-                    value_font,
-                    text_fill,
-                    step=height * 25.0 / 490.0,
-                )
-        return image
+        loaded = {background_path.resolve(): background, fortune_path.resolve(): fortune}
+        adapter = PillowOmikujiAdapter(
+            lambda size, decorative: self.omikuji_font(size, decorative=decorative),
+            lambda path: loaded.get(path.resolve()) or self.open_rgba(path),
+        )
+        return adapter.render(display_list)
 
     def render_stamp_content(
         self,
@@ -7133,6 +6955,8 @@ class PNGRenderer:
         dominant_size: float,
         outline_dilate: float,
         zero_margin_layout: TMPNativeTextLayout | None,
+        *,
+        source_metrics_only: bool = False,
     ) -> float | None:
         if not self.tmp_lines_have_percent_indent(lines) or zero_margin_layout is None:
             return None
@@ -7166,6 +6990,7 @@ class PNGRenderer:
                 "preferred",
                 outline_dilate,
                 margin_width,
+                source_metrics_only=source_metrics_only,
             )
             if layout is None:
                 return margin_width
@@ -10012,6 +9837,7 @@ class PNGRenderer:
         *,
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
+        source_metrics_only: bool = False,
     ) -> list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] | None:
         """Layout + per-glyph warp half of the sparse/direct TMP path. Returns None when the
         element is not eligible for the direct path (caller falls back to the raster path);
@@ -10068,6 +9894,7 @@ class PNGRenderer:
             "preferred",
             outline_dilate,
             None,
+            source_metrics_only=source_metrics_only,
         )
         percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
             layout_lines,
@@ -10078,6 +9905,7 @@ class PNGRenderer:
             dominant_size,
             outline_dilate,
             native_text_layout,
+            source_metrics_only=source_metrics_only,
         )
         if percent_margin_width is not None:
             native_text_layout = self.tmp_native_text_layout(
@@ -10090,6 +9918,7 @@ class PNGRenderer:
                 "preferred",
                 outline_dilate,
                 percent_margin_width,
+                source_metrics_only=source_metrics_only,
             )
         if native_text_layout is None:
             return None
@@ -10103,6 +9932,7 @@ class PNGRenderer:
             "mesh",
             outline_dilate,
             percent_margin_width,
+            source_metrics_only=source_metrics_only,
         )
         if mesh_text_layout is None:
             return None

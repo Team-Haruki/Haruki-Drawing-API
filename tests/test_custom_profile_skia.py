@@ -32,8 +32,6 @@ except ImportError:  # pragma: no cover - extension not built
 
 from src.core.image_payload import EncodedImagePayload
 from src.core.pillow_telemetry import (
-    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
-    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
     begin_pillow_touch_scope,
     end_pillow_touch_scope,
     take_pillow_touch_snapshot,
@@ -41,16 +39,13 @@ from src.core.pillow_telemetry import (
 import src.core.pjsk.profile as route_mod
 from src.sekai.profile.custom_profile.card_prefab import CardCoverArtOp, CardDisplayList
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
-from src.sekai.profile.custom_profile.limits import RasterSizeLimitError
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
     DirectSdfAtlasQuad,
     DirectSdfFontQuad,
-    LayerTransformInputs,
     NativeContent,
     PNGRenderer,
-    RenderedLayer,
 )
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.custom_profile.skia import (
@@ -200,7 +195,7 @@ def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp
     assert not _Native.called
 
 
-def test_sdf_quad_mem_field_records_pillow_touch():
+def test_legacy_sdf_quad_is_declined_without_mem_or_pillow_touch():
     token = begin_pillow_touch_scope()
     try:
         scene = skia_mod._SceneAssembler(skia_mod._new_builder(8, 8), (8, 8), 1024)
@@ -212,12 +207,15 @@ def test_sdf_quad_mem_field_records_pillow_touch():
             underlay=None,
         )
         quad = SimpleNamespace(field=Image.new("L", (2, 2), 255), left=1, top=1, scalars=scalars)
-        scene.emit_sdf_quads([quad])
+        emitted = scene.emit_sdf_quads([quad])
         snapshot = take_pillow_touch_snapshot()
     finally:
         end_pillow_touch_scope(token)
 
-    assert snapshot.counts[PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER] == 1
+    assert not emitted
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    assert scene.builder.build()["root"]["children"] == []
 
 
 def test_sdf_atlas_quad_emits_without_mem_or_pillow_touch(monkeypatch):
@@ -335,7 +333,7 @@ def test_sdf_font_quad_emits_registered_font_without_mem_or_pillow_touch(tmp_pat
     }
 
 
-def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
+def test_scene_declines_unsupported_content_without_rendering_pillow_layers():
     contents = [
         NativeContent(
             layer=index,
@@ -347,46 +345,25 @@ def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
     ]
 
     class _Renderer:
-        tmp_decorative_direct_raster = True
-        text_layout = "tmp"
-        tmp_text_render_mode = "sdf"
-        tmp_decorative_alpha_harden = 1.0
-
         def native_card_ref(self, card):
             return {}
 
         def build_native_contents(self, card):
             return contents
 
-        def render_content_direct_on_card(self, canvas, content):  # pragma: no cover - must not run
-            raise AssertionError("regular content must not allocate the direct-text canvas")
-
-        def render_content_for_card(self, content):
-            image = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
-            return RenderedLayer(content, "rendered", (image, (0.0, 0.0)))
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("Skia scene assembly must not invoke the Pillow renderer")
 
         def record_native_audit(self, *args):
             return None
 
-        def layer_transform_inputs(self, result, object_data, content_kind):
-            return LayerTransformInputs(
-                layer=result[0],
-                pivot=result[1],
-                object_scale=(1.0, 1.0),
-                position_scale=(1.0, 1.0),
-                angle=0.0,
-                anchor=(0.0, 0.0),
-            )
-
-        def is_decorative_text_item(self, item):
-            return False
-
     _, mem_images, report = _build_scene(_Renderer(), {})
 
-    assert len(mem_images) == 2
-    assert sum(len(entry[2]) for entry in mem_images.values()) == 2 * 4 * 4 * 4
+    assert mem_images == {}
     assert not report.complete
-    assert report.hybrid_elements == 2
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 2
+    assert report.metrics()["classifications_by_kind"] == {"general": {"unresolved": 2}}
 
 
 def test_scene_routes_non_decorative_tmp_through_sparse_native_quads(monkeypatch):
@@ -438,7 +415,11 @@ def test_scene_routes_non_decorative_tmp_through_sparse_native_quads(monkeypatch
         (
             content.item,
             content.object_data,
-            {"defer_static_atlas": True, "defer_dynamic_font": True},
+            {
+                "defer_static_atlas": True,
+                "defer_dynamic_font": True,
+                "source_metrics_only": True,
+            },
         )
     ]
     assert emitted == [quad]
@@ -485,18 +466,12 @@ def test_scene_classifies_raw_whitespace_text_as_native_noop(monkeypatch):
     assert report.metrics()["classifications_by_kind"] == {"text": {"noop": 1}}
 
 
-def test_scene_oversized_tmp_layer_retries_as_sparse_native_quads(monkeypatch):
+def test_scene_oversized_tmp_text_uses_sparse_native_quads_before_pillow(monkeypatch):
     content = NativeContent(
         layer=1,
         kind="text",
         item={"text": "<line-indent=98.4%><rotate=90>A"},
         object_data={"visible": True},
-    )
-    error = RasterSizeLimitError(
-        label="custom profile TMP text layer",
-        width=44_033,
-        height=309,
-        max_pixels=8_388_608,
     )
 
     class _Renderer:
@@ -514,11 +489,8 @@ def test_scene_oversized_tmp_layer_retries_as_sparse_native_quads(monkeypatch):
         def build_native_contents(self, card):
             return [content]
 
-        def is_decorative_text_item(self, item):
-            return False
-
-        def render_content_for_card(self, content):
-            raise error
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("sparse TMP preflight must happen before Pillow rendering")
 
         def prepare_direct_sdf_quads(self, item, object_data, **kwargs):
             self.direct_calls.append((item, object_data, kwargs))
@@ -537,7 +509,11 @@ def test_scene_oversized_tmp_layer_retries_as_sparse_native_quads(monkeypatch):
         (
             content.item,
             content.object_data,
-            {"defer_static_atlas": True, "defer_dynamic_font": True},
+            {
+                "defer_static_atlas": True,
+                "defer_dynamic_font": True,
+                "source_metrics_only": True,
+            },
         )
     ]
     assert renderer.audit[-1][2:] == ("rendered-direct", None)
@@ -672,7 +648,7 @@ def test_static_image_lowers_to_unity_asset_node_without_pillow_raster(tmp_path,
 
 
 @pytest.mark.parametrize("honor_type", ["normal", "birthday"])
-def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collision(
+def test_unsupported_element_cannot_allocate_mem_before_native_honor(
     honor_type,
     tmp_path,
     monkeypatch,
@@ -703,7 +679,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
 
     monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeInfo())
 
-    hybrid = NativeContent(
+    unsupported = NativeContent(
         layer=1,
         kind="card_member",
         item={"id": 9},
@@ -734,7 +710,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
             return {}
 
         def build_native_contents(self, card):
-            return [hybrid, honor]
+            return [unsupported, honor]
 
         def user_honor_level_for(self, honor_id):
             assert honor_id == 123
@@ -760,27 +736,11 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
         def unity_point(self, position):
             return (100.0, 200.0)
 
-        def render_content_for_card(self, content):
-            if content.kind == "honor":  # pragma: no cover - must not run
-                raise AssertionError("eligible honor must not enter the Pillow renderer")
-            image = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
-            return RenderedLayer(content, "rendered", (image, (2.0, 2.0)))
-
-        def layer_transform_inputs(self, result, object_data, content_kind):
-            return LayerTransformInputs(
-                layer=result[0],
-                pivot=result[1],
-                object_scale=(1.0, 1.0),
-                position_scale=(1.0, 1.0),
-                angle=0.0,
-                anchor=(2.0, 2.0),
-            )
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("Skia scene assembly must not invoke the Pillow renderer")
 
         def record_native_audit(self, *args):
             return None
-
-        def is_decorative_text_item(self, item):
-            return False
 
     token = begin_pillow_touch_scope()
     try:
@@ -792,21 +752,24 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
     subscene = next(node for node in scene["root"]["children"] if node["type"] == "UnitySubscene")
     subscene_paths = {node["path"] for node in _walk_ir_nodes(subscene["children"]) if node["type"] == "Image"}
 
-    # The earlier hybrid element owns m0. The shared honor tree stays asset-backed and cannot
-    # collide with (or overwrite) that request-memory key.
-    assert list(mem_images) == ["m0"]
+    assert mem_images == {}
     assert subscene["size"] == [100, 40]
     assert subscene["object_scale"] == [0.75, 1.25]
     assert subscene["post_scale"] == [1.1, 1.2]
     assert f"{honor_type}_base.png" in subscene_paths
     assert f"{honor_type}_frame.png" in subscene_paths
-    assert PILLOW_TOUCH_IMAGE_HEADER_PROBE not in pillow_touches.counts
+    assert pillow_touches.counts == {}
     assert not report.complete
     assert report.native_elements == 1
-    assert report.hybrid_elements == 1
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 1
+    assert report.metrics()["classifications_by_kind"] == {
+        "card_member": {"unresolved": 1},
+        "honor": {"native": 1},
+    }
 
 
-def test_old_native_wheel_header_probe_stays_telemetry_hybrid(tmp_path, monkeypatch):
+def test_old_native_wheel_declines_honor_without_pillow_header_probe(tmp_path, monkeypatch):
     asset_path = tmp_path / "badge.png"
     Image.new("RGBA", (17, 9), (20, 40, 80, 255)).save(asset_path)
     monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
@@ -818,14 +781,14 @@ def test_old_native_wheel_header_probe_stays_telemetry_hybrid(tmp_path, monkeypa
 
     token = begin_pillow_touch_scope()
     try:
-        ref = skia_mod._header_only_asset_ref(asset_path, "badge.png")
+        with pytest.raises(skia_mod._NativeAssetInfoUnavailable, match="asset-info"):
+            skia_mod._header_only_asset_ref(asset_path, "badge.png")
         snapshot = take_pillow_touch_snapshot()
     finally:
         end_pillow_touch_scope(token)
 
-    assert ref.size == (17, 9)
-    assert snapshot.native_purity == "hybrid"
-    assert snapshot.counts[PILLOW_TOUCH_IMAGE_HEADER_PROBE] == 1
+    assert snapshot.native_purity == "pure"
+    assert snapshot.counts == {}
 
 
 @pytest.mark.skipif(
@@ -908,14 +871,11 @@ def test_native_honor_declines_when_a_supplied_overlay_is_missing(tmp_path, monk
             path = Path(raw_path)
             return path.resolve() if path.is_file() else None
 
-        def render_content_for_card(self, content):
-            return RenderedLayer(content, "unresolved", None)
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("failed native honor preflight must decline before Pillow")
 
         def record_native_audit(self, *args):
             return None
-
-        def is_decorative_text_item(self, item):
-            return False
 
     ir_json, mem_images, report = _build_scene(_Renderer(), {})
     nodes = json.loads(ir_json)["root"]["children"]

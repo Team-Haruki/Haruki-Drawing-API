@@ -23,7 +23,7 @@
 - normal/birthday/bonds/empty badge：显式 request 与 masterdata 派生 request 都复用共享
   `HonorBadgeBox` 的 asset-backed `NativeSubtree`，再放入严格 `UnitySubscene`；统一资源
   manifest 负责分支、必需/可选素材和 hybrid 语义，Rust asset-info 代替 Pillow 图片头探测。
-- `EditUserName`、`Comment`、`TotalPower`、`MultiLive`、`ChallengeLive`、
+- `X`、`EditUserName`、`Comment`、`TotalPower`、`MultiLive`、`ChallengeLive`、
   `MusicClearInfo`、`MusicClearSelectTabInfo`、`CharacterRankAndChallengeStage` 及其
   scroll 变体：Pillow 和 Skia 消费同一份 General display list；Skia 使用原生字体度量、
   `SlicedImage` 九宫格、asset-backed sprite、IR Text 和递归 viewport/clip。scroll
@@ -38,6 +38,8 @@
 - `HonorDeck`：共享 plan 固化 profile/ordinary request-key 优先级、panel 和三个 slot；
   所有 Honor 分支都可复用原生子树。所有 slot 在写场景前原子预检，禁止只画出一部分
   badge。
+- `collection` 的 `omikuji` 动态 prefab：背景、签纸、分隔线及横排/竖排文字由 Pillow 与
+  Skia 共用同一份 display list；native 端只读取 Rust asset-info 并发出 asset/Text/Rect 节点。
 - 普通 `/profile` 也通过通用 `RasterSubscene` 嵌入同一棵 Honor 子树：子树在自然尺寸
   隔离合成，随后只对完整 snapshot 做最终缩放和整图阴影；三个真实 fixture badge 不再
   经过 Pillow 合成或 `mem:` 传输。
@@ -73,8 +75,8 @@
 - 请求提供的素材路径 canonicalize 后必须位于配置的数据根目录；
 - 可见 `missing/unresolved/hybrid`、任意 `mem:` 图或非零 `mem_bytes` 都会在调用 Rust 前令
   整场 fallback，禁止返回残缺或含 Pillow 像素的“Skia 成功”；
-- 遗留 `SdfQuad` 的 Python/Pillow A8 field 会正确计入 hybrid telemetry；静态
-  `SdfAtlasQuad` 和动态 `SdfFontQuad` 无 `mem:` 时按 native 计数；
+- 遗留 `SdfQuad` 的 Python/Pillow A8 field 不再允许进入 native scene；只接受静态
+  `SdfAtlasQuad` 和动态 `SdfFontQuad`，否则整场在 Rust 前 fail-open；
 - 修复普通元素误分配 2048×909 空 direct layer，以及空白 text 被误记为 missing 的问题；
 - `/render-stats` 只累计 `kind × classification` 分类计数，不记录请求、文本、资源路径或
   用户字段；
@@ -110,11 +112,10 @@
 hit/miss/coalesced/bypass。缺字、字体文件回退、非法 Unicode、超限 outline/field、超过
 64M 次距离计算或错误 Transform 嵌套都会令整场 fail-open，不能返回少字的“原生成功”。
 
-collection 的主要差异来自透明像素上的 straight-RGBA Pillow BICUBIC 与 Skia premul
-Catmull-Rom 语义。它通过现有 custom-profile 预算，但在扩大静态素材覆盖前仍需增加
-透明 bbox、缩小和旋转专项 fixture。
+普通静态 collection 仍需用类别 fixture 扩大透明 bbox、缩小和旋转覆盖；omikuji 的动态
+prefab 已改用共享 display list 和 Pillow-compatible Lanczos，不再依赖整块 Pillow raster。
 
-## 剩余迁移批次
+## 剩余覆盖证明（不是成功路径的 Pillow 代码）
 
 ### A. Honor / Bonds Honor
 
@@ -163,15 +164,16 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
 字形分别通过 `SdfAtlasQuad` / `SdfFontQuad` 把 SDF 像素生成、crop-resize、仿射 warp 与
 shading 全部移入 Rust；Python 仍保留 TMP 解析和布局 oracle。真实字体专项验证中，旧
 fontTools/Pillow 字段与 `SdfFontQuad` 的 2,400 个像素逐字节一致，冷请求记录 miss，第二次
-相同字形记录 hit。剩余工作按以下顺序继续：
+相同字形记录 hit。Skia 稀疏路径现在强制 `source_metrics_only=True`，不会通过 Pillow
+FreeType 封装取度量；任何无法生成 asset/font descriptor 的字形都会令整场 fail-open，
+不能退回遗留 `SdfQuad` 后仍标成 native。剩余工作都是类别级覆盖数据：
 
 1. 用类别级最小 fixture 验证 static rich/decorative、symbol、旋转和 underlay；不保留
    完整请求、整卡、用户或 profile/resources 数据；
 2. 用类别 fixture 覆盖 dynamic/fallback 的 symbol、中日文字体、缺字及 fallback font；
    `SdfFontQuad` 实现与缓存本身已完成；
-3. 最后把 TMP 剩余的 Python/FreeType/fontTools 度量选择收敛为严格 native batch，并用
-   分类统计确认没有输入落入遗留 `SdfQuad`；默认 `tmp_block_mode=glyph`，em-block 仅是离线
-   CLI 的非生产实验模式。
+3. 用分类统计持续确认没有输入落入遗留 `SdfQuad`；默认 `tmp_block_mode=glyph`，em-block
+   仅是离线 CLI 的非生产实验模式。
 
 每一步都要覆盖 rich tags、空行、alignment、outline/underlay、symbol、emoji、旋转和
 中日文字体。

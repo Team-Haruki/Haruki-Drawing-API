@@ -16,9 +16,9 @@
 - **门控**：`drawing.use_skia_plot`（`src/settings.py`，**默认 `True`**）是唯一的 Skia 门控。
   早期的 `use_skia_card_box` / `use_skia_card_list` / `skia_card_list_fallback_to_pillow` 已随专用场景
   构建器一起删除。
-- **原生能力版本**：`IR_CAPABILITY = 10`（5 = `SelfImage`，6 = `Image.blend="src"`，
-  7 = `TriangleBg.tris`，8 = `Transform` + `catmull_rom`，9 = `SdfQuad` + A8 raw buffer，
-  10 = `Image.blur_sigma`），`REQUIRED_NATIVE_IR_CAPABILITY = 10`；低于此版本的 wheel 拒绝加载并回退 Pillow。
+- **原生能力版本**：`IR_CAPABILITY = 20`，`REQUIRED_NATIVE_IR_CAPABILITY = 20`；当前能力包含
+  asset-backed Custom Profile shape/subscene、Pillow-compatible Lanczos、原生 asset/font SDF glyph
+  与离散圆角 mask。低于此版本的 wheel 拒绝加载并回退 Pillow。
   数字有**四处**硬编码需同步：`lib.rs`、`canvas.py`、`quick-check.yml`、`skia-wheels.yml`。
 - **对拍**：`scripts/skia_parity_sweep.py` 当前有 **65 个可渲染 payload 用例，65 ok / 0 失败**，另有
   2 个 custom-profile 桶因尚无真实 payload 记为 `no-payload`；已无 pillow-only 的可渲染用例。
@@ -48,7 +48,7 @@ Constraint A 刻意留在 Python —— `plot.py` 照常算布局，`IRPainter`�
 | 缺口 | 现状 | 是否挡生产 |
 |---|---|---|
 | **动图 GIF/APNG 输出** | 编码器只出单帧 PNG/JPEG。同时 Pillow 侧的 GIF/APNG helper 已从 `base/img_utils.py` 删除（零调用方）—— **两侧都没有动图能力**，无端点需要 | 否 |
-| **Custom profile 剩余 Python 边界** | 独立 Unity/TMP-SDF 栅格器（`src/sekai/profile/custom_profile/`），没有 `plot.py` widget 树，因此不是通用 IRPainter 影子层端点；但已接 Skia：Phase 1 用 `Transform` 原生合成，Phase 2 用 `SdfQuad` 原生着色。Python 刻意保留 Unity/TMP 布局、PIL 两步 BICUBIC 预缩与 uint8 SDF 场变形；可选 Phase 2b 才会继续迁字形 SDF/EDT | 否（见 [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)） |
+| **Custom profile 剩余 Python 边界** | 没有 `plot.py` widget 树，Unity JSON 与 Python TMP 布局仍是布局载体；但成功 native scene 已严格 asset/font-backed：共享 display list/subtree、`SdfAtlasQuad` / `SdfFontQuad` 和 Rust asset-info 取代 Pillow layer、A8 field、图片头及字体度量。不可原生表示的元素在 Rust 前令整场 fail-open | 否（见 [`custom-profile-skia-migration.md`](./custom-profile-skia-migration.md)） |
 | **Tier-2 原生图表** | `sk` player-trace/rank-trace 的 matplotlib 位图、`chart` 的 `pjsekai_scores_rs` 位图仍在 Python/crate 侧栅格化，作 mem 图传入；**外壳**（圆角白卡 / 图例列 / 水印页脚）已 IR 化 | 否 |
 | **「任意 Node 渲染结果作蒙版」** | `Group.mask` 只接受**图片** alpha（asset 路径或 `mem:<key>`），这已由公共原语 `Painter.push_mask/pop_mask` 在两端表达（Pillow=离屏缓冲 + `ImageChops.multiply`，Skia=`Group{mask}` DstIn）。唯一消费者（honor bonds 的 `putalpha(mask.split()[3])`）已覆盖，暂无更高价值消费者 | 否 |
 
@@ -142,7 +142,7 @@ Constraint A 刻意留在 Python —— `plot.py` 照常算布局，`IRPainter`�
 > **50 个已接 Skia 影子层**（门控 `use_skia_plot`，当时默认关）。仅 3 个未接：
 > `profile/custom-profile-card`、`chart`、`honor`。
 > —— **已过期**：`chart`（外壳）与 `honor`（完整 IR 路径 + `Group.mask` + 两遍水印页脚）此后均已迁入
-> Skia；custom profile 也已完成 Transform/SdfQuad 的 Phase 1/2 接入。当前为 65 个可渲染 payload
+> Skia；custom profile 的成功路径也已完成 asset/font-backed scene。当前为 65 个可渲染 payload
 > 全绿，另有 2 个 custom-profile 桶等待真实 payload。
 
 | 项 | 内容 | 验证 |
@@ -154,8 +154,8 @@ Constraint A 刻意留在 Python —— `plot.py` 照常算布局，`IRPainter`�
 | **收尾**：sk player-trace/rank-trace | 最后两个无 Skia 路径的 sk 端点 | mean<1 |
 
 当时判定为边际/超范围（**部分已过期**）：`gacha` 的 `concat_images([star]*n)` → HSplit；msr_map 多图网格
-转原生子组；`profile/custom_profile`（~10.5k 行 Unity 保真栅格器，SDF/TMP/仿射/blend —— 后续已完成
-Phase 0 缓存、Phase 1 Transform 与 Phase 2 SdfQuad，只有布局/预缩/场准备边界继续留在 Python）；
+转原生子组；`profile/custom_profile`（Unity/TMP 布局仍在 Python，像素生成、缩放、场准备与合成已在
+成功 native path 中迁到 asset/font-backed Rust scene）；
 `honor`（当时判「全缓存、bonds 需 alpha-mask，留 Pillow」—— **已过期**，honor 已迁）；`chart`
 （**已过期**，外壳已迁）；卡缩略图/profile 模块预渲染（**已过期**：缩略图已是 `CardFullThumbnailBox`
 子树，profile 模块预渲染是死代码）；GIF/APNG 导出（仍未做）；Tier-2 原生图表（仍未做）。
@@ -184,7 +184,7 @@ Phase 0 缓存、Phase 1 Transform 与 Phase 2 SdfQuad，只有布局/预缩/场
 | `misc/chara_birthday` | ✅ Skia(影子层,heavy worker) | W1；Canvas bg 是 `ImageBg(运行时卡图)`；2026-07-18 已改传 `AssetImageRef`，Skia 直接按路径解码，不再走 mem 图。抽检逐尺寸一致(672×752) |
 | `misc/alias_list` | ✅ Skia(影子层) | 收尾；运行时 alpha-trim 剪影走 mem 图。逐尺寸一致(1185×433)。**注**：当时的整页结果缓存此后已删除（调用方已按 payload 缓存，本地页级缓存必不命中） |
 | `gacha`(list/detail)、`event/list`、`vlive/list` | ✅ Skia(影子层) | W6 图中图。实测(20 条目暖缓存)Skia 全胜：vlive **2.46×**、gacha 1.60×、event/list 1.38×；并发 K8 优势放大。**注**：当时“条目本就是 `ImageBox(缓存PIL)`”只对 `event/list`、`vlive/list` 成立，`gacha` 并无条目级合成缓存（见上文[缓存与 Skia 路径的关系](#缓存与-skia-路径的关系现状)） |
-| `profile/custom`、`chart`、`honor` | ❌ 当时排除 | 三者此后均已接 Skia：`chart`/`honor` 使用共享树或薄外壳，custom profile 使用专用 Transform/SdfQuad scene |
+| `profile/custom`、`chart`、`honor` | ❌ 当时排除 | 三者此后均已接 Skia：`chart`/`honor` 使用共享树或薄外壳，custom profile 使用专用 asset/font-backed scene |
 
 ## 首轮能力矩阵（2026-06-23，现已全部关闭）
 

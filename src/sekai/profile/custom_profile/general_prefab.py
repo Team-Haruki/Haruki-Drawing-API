@@ -147,6 +147,21 @@ class GeneralTextOp:
 
 
 @dataclass(frozen=True, slots=True)
+class GeneralSpriteChoiceOp:
+    """First available Unity sprite, with a text fallback when none are mounted."""
+
+    names: tuple[str, ...]
+    rect: Rect
+    tint: Tint | None = None
+    sampling: Sampling = "lanczos"
+    fallback_text: GeneralTextOp | None = None
+
+    def __post_init__(self) -> None:
+        if not self.names or any(not str(name).strip() for name in self.names):
+            raise ValueError("a GeneralContentView sprite choice needs non-empty names")
+
+
+@dataclass(frozen=True, slots=True)
 class GeneralViewportOp:
     """A natural-size child canvas hard-cropped into a viewport on its parent.
 
@@ -168,7 +183,12 @@ class GeneralViewportOp:
 
 
 GeneralPrefabOp: TypeAlias = (
-    GeneralSpriteOp | GeneralRoundedRectOp | GeneralAssetImageOp | GeneralTextOp | GeneralViewportOp
+    GeneralSpriteOp
+    | GeneralSpriteChoiceOp
+    | GeneralRoundedRectOp
+    | GeneralAssetImageOp
+    | GeneralTextOp
+    | GeneralViewportOp
 )
 
 
@@ -342,6 +362,41 @@ def _edit_user_name_ops(
         ),
         _fit_text_op(metrics, text_rect, name, max_size=30, fill=palette.text),
         GeneralSpriteOp("icon_write_wh", icon_rect, tint=palette.dark_tint),
+    ]
+
+
+def _x_ops(
+    size: tuple[int, int],
+    profile_context: Mapping[str, Any],
+    metrics: GeneralTextMetrics,
+    palette: GeneralPrefabPalette,
+) -> list[GeneralPrefabOp]:
+    base_rect = rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5))
+    icon_rect = rect_transform_box(size, (0.0, 0.5), (0.0, 0.5), (26.0, 0.0), (38.0, 38.0), (0.5, 0.5))
+    twitter_id = str((profile_context.get("userProfile") or {}).get("twitterId", "") or "").strip()
+    text = f"@{twitter_id.removeprefix('@')}" if twitter_id else ""
+    text_rect = rect_transform_box(size, (0.5, 0.5), (0.5, 0.5), (26.0, 0.0), (430.0, 32.0), (0.5, 0.5))
+    icon_size = max(18, round(icon_rect[3] - icon_rect[1]) - 8)
+    return [
+        GeneralSpriteOp(
+            "bg_base_r16_wh",
+            base_rect,
+            tint=palette.input_tint,
+            sliced_border=(21, 21, 21, 21),
+        ),
+        GeneralSpriteChoiceOp(
+            ("x_icon", "icon_twitter_wh"),
+            icon_rect,
+            tint=palette.dark_tint,
+            fallback_text=GeneralTextOp(
+                "X",
+                ((icon_rect[0] + icon_rect[2]) / 2.0, (icon_rect[1] + icon_rect[3]) / 2.0),
+                icon_size,
+                palette.text,
+                "mm",
+            ),
+        ),
+        _fit_text_op(metrics, text_rect, text, max_size=30, fill=palette.text),
     ]
 
 
@@ -1202,7 +1257,9 @@ def build_general_prefab_display_list(
 
     asset_paths = asset_paths or {}
     story_favorite_resources = story_favorite_resources or {}
-    if file_name == "EditUserName":
+    if file_name == "X":
+        ops = _x_ops(size, profile_context, metrics, palette)
+    elif file_name == "EditUserName":
         ops = _edit_user_name_ops(size, profile_context, metrics, palette)
     elif file_name == "Comment":
         ops = _comment_ops(size, profile_context, labels, metrics, palette)
@@ -1346,6 +1403,27 @@ class PillowGeneralPrefabAdapter(GeneralTextMetrics):
                     )
                     if not pasted:
                         missing_resource(op.name, op.resource_policy, op.fallback)
+                    continue
+                if isinstance(op, GeneralSpriteChoiceOp):
+                    pasted = any(
+                        self._sprite_paster(
+                            target,
+                            name,
+                            op.rect,
+                            tint=op.tint,
+                            resample=self._RESAMPLING[op.sampling],
+                        )
+                        for name in op.names
+                    )
+                    if not pasted and op.fallback_text is not None:
+                        fallback = op.fallback_text
+                        draw.text(
+                            fallback.pos,
+                            fallback.text,
+                            font=self._font(fallback.font, fallback.size),
+                            fill=fallback.fill,
+                            anchor=fallback.anchor,
+                        )
                     continue
                 if isinstance(op, GeneralRoundedRectOp):
                     draw_rounded_rect(op)
