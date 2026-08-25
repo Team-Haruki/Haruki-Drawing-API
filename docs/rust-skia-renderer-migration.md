@@ -10,7 +10,7 @@
 
 - **迁移已全量完成**：`scripts/skia_parity_sweep.py` 当前有 65 个可渲染 payload 用例，结果为
   **65 ok / 0 failed**；另有 2 个 custom-profile 桶等待真实 payload，记为 `no-payload`。没有
-  pillow-only 的可渲染端点（honor 是最后一个通用端点，custom profile 的 Transform/SdfQuad 路径也已接入）。
+  pillow-only 的可渲染端点（honor 是最后一个通用端点，custom profile 的 asset/font-backed scene 也已接入）。
 - **门控只剩一个**：`settings.use_skia_plot`，**默认 `true`**。历史上的 `use_skia_card_box` /
   `use_skia_card_list` / `skia_card_list_fallback_to_pillow` 均已删除。扩展缺失、IR 校验失败或渲染
   失败时 fail-open 回退 Pillow 并打 ERROR。
@@ -22,20 +22,21 @@
   `src/sekai/honor/widget.py` 的 `HonorBadgeBox` 是唯一的 honor 布局，Pillow 与 Skia 都画它；
   `honor/skia.py` 只剩水印页脚外壳。Custom profile 没有 `plot.py` 树，唯一布局载体是 Unity card JSON。
 - **直接构造 IR 的例外只有三处**（`honor/skia.py`、`chart/drawer.py`、`profile/custom_profile/skia.py`）：
-  前两处是 widget 树无法表达的栅格薄壳，custom profile 则放置由同一 Unity JSON/renderer 管线准备的共享
-  raster/quad 输入；三者都没有复制一份端点布局：
+  前两处是 widget 树无法表达的栅格薄壳，custom profile 则从同一 Unity JSON 和共享 display
+  list/subtree 构造严格 asset/font-backed scene；三者都没有复制一份端点布局：
   - **chart**：谱面栅格由 `pjsekai-scores-rs` 产出，IR 只负责把它 + 水印页脚拼起来；Pillow 回退路径
     （`compose_music_chart_image` → `add_request_watermark_to_image`）共用同一批 `get_watermark_render_spec` 度量。
   - **honor**：徽章本体是共享 widget 树（`build_canvas_ir` 把它 lower 成 IR 后 `splice_root_children` 拼进来），
     手写的只有路由在 compose **之后**才加的水印页脚——它把画布自己的底部若干行拉伸成页脚条
     （`SelfImage` 节点，采样已渲染画布），任何 widget 都表达不了。
-  - **custom profile**：Python/Pillow 与 Skia 共用 `build_native_contents`、`render_content_for_card` 和
-    `layer_transform_inputs`；场景只负责放置这些共享 raster，以及把装饰 TMP 文本的共享 SDF field/scalars
-    交给 `SdfQuad` 着色。PIL 两步 BICUBIC 预缩是 oracle 语义，不应折叠进 Transform matrix。
+  - **custom profile**：两端共用 Unity z-order、Card/General/Collection display list 与 Honor subtree；
+    native scene 以路径、字体和几何描述 `UnityImage` / `SdfShape` / `SdfAtlasQuad` / `SdfFontQuad`，
+    不再接收 Pillow raster 或 `mem:` 图。Python 只保留 Unity/TMP 布局 oracle。
 - **Rust 是纯 IR 解释器**：PyO3 只暴露 `render_scene` / `renderer_cache_stats` / `clear_renderer_caches`。
-  `IR_CAPABILITY = 10`（Python 侧 `REQUIRED_NATIVE_IR_CAPABILITY = 10`），旧 wheel 自动 fail-open。
+  `IR_CAPABILITY = 20`（Python 侧 `REQUIRED_NATIVE_IR_CAPABILITY = 20`），旧 wheel 自动 fail-open。
   5→6 是 `Image.blend="src"`（`Painter.paste_src`），6→7 是 `TriangleBg.tris`，7→8 是 `Transform` +
-  `catmull_rom`，8→9 是 `SdfQuad` + A8 raw buffer，9→10 是 `Image.blur_sigma`。数字**四处硬编码**需同步：
+  `catmull_rom`，8→9 是 `SdfQuad` + A8 raw buffer，9→10 是 `Image.blur_sigma`；11→20 包含 Custom
+  Profile 的 `SdfShape`、subscene、Lanczos、asset/font SDF glyph 与 `pillow_rrect`。数字**四处硬编码**需同步：
   `lib.rs`、`canvas.py`、`quick-check.yml`、`skia-wheels.yml`。
 - **图片 lazy 边界已继续下沉**：`ImageBox` 与三种 `Painter.paste*` 共享 `source_rect`、显式 sampling 和
   `ImageTint(multiply|recolor)`；production-local MySekai resource background/site/spawn、birthday card
@@ -63,7 +64,8 @@
 
 - 本阶段不同时迁移 `/api/pjsk/card/detail`、custom profile、MySekai 私有 drawer。
   （现状：card/detail 与 MySekai drawer 均已迁移；`src/sekai/profile/custom_profile/` 仍是独立的
-  SVG/renderer 管线，但已通过专用 Transform/SdfQuad scene 接入 Render IR，不走通用 IRPainter。）
+  Unity/TMP renderer 管线，但成功路径已通过专用 asset/font-backed scene 接入 Render IR，不走通用
+  IRPainter。）
 - `CardBoxRequest.user_info` 会先保留 Pillow 路径，避免本阶段同时迁移 profile card。
   （现状：`try_render_box_payload` 走同一棵 widget 树，user_info profile card 已随树自然覆盖，不再回退。）
 - 不追求与 Pillow 输出逐像素一致，只要求尺寸一致、主体布局和可读性一致。
@@ -82,7 +84,8 @@
 所有拥有 `plot.py` 布局的端点都走共享 widget 树。`/honor` 与 `/chart` 额外套一层手写 IR 外壳，用来贴
 widget 树表达不了的栅格页脚（水印条带采样已渲染画布 = `SelfImage`）；honor 的徽章本体就是共享树，经
 `build_canvas_ir()` lower 后 splice 进外壳。Custom profile 没有 widget 树：Unity JSON 是唯一布局载体，
-Python 先生成两后端共用的 raster/quad 输入，Skia 专用 scene 只负责 Transform/SdfQuad 放置与着色。
+Python 生成共享 display list/subtree 和 TMP 几何；Skia 专用 scene 只接受 asset/font-backed 节点，
+无法原生表示的可见元素会令整场 fail-open。
 
 ```mermaid
 flowchart LR
@@ -104,9 +107,9 @@ flowchart LR
     A3 -- "回退" --> P2
     P2 --> H
 
-    A4["/profile/custom-profile-card"] --> J["Unity JSON -> shared raster/quad inputs"]
+    A4["/profile/custom-profile-card"] --> J["Unity JSON -> shared display lists / geometry"]
     J --> K{"use_skia_plot?"}
-    K -- "true" --> L["custom_profile/skia.py Transform + SdfQuad scene"]
+    K -- "true" --> L["custom_profile/skia.py asset/font-backed scene"]
     L --> E
     K -- "false / error" --> P3["PNGRenderer Pillow composer"]
     P3 --> H
@@ -292,8 +295,8 @@ Chart 原路径会在 `pjsekai-scores-rs` 中把 5248x2688 谱面编码为 PNG�
 - 审计当时 Card List 仍是独立手写 IR builder（两套布局）；**Card List 这一处已在同日的条目 9 结清**，
   **honor 的两套布局已在条目 12 结清**。Widget-tree 路径中只剩 `honor/skia.py` 与
   `chart/drawer.py` 的**栅格页脚外壳**直接用 `IRBuilder`——它们包的不是布局；第三个直接构造 IR 的
-  例外是 custom profile：它没有 widget 树，场景放置由 Unity JSON 管线在两后端共同准备的 raster/quad
-  （见「当前状态」）。
+  例外是 custom profile：它没有 widget 树，Unity JSON、共享 display list/subtree 与 TMP 几何仍是
+  唯一布局输入，native scene 只接受 asset/font-backed 节点（见「当前状态」）。
 
 已完成（2026-07-13，63/63 SBS 通过）：
 
@@ -407,9 +410,8 @@ Chart 原路径会在 `pjsekai-scores-rs` 中把 5248x2688 谱面编码为 PNG�
 2. 圆形头像/进度环、`concat_images`、mysekai phenom 图标（LANCZOS + 划线）等确实读取像素的合成，
    以及为保持历史双阶段重采样而保留的 misc alias jacket / birthday calendar icon，仍会在 Python 侧
    产出或持有 PIL raster（条目 7 列出的刻意保留项；harvest point 已于 2026-07-19 从这份名单中移除）。
-3. Custom profile 已用 native `Transform` / `SdfQuad` 合成和着色，但 Python 继续负责 Unity/TMP 布局、
-   PIL 两步 BICUBIC 预缩与 uint8 SDF 场变形。Phase 2b（freetype-rs + EDT）是等待真实符号卡和生产数据的
-   可选后续，不是当前生产 blocker。
+3. Custom profile 的成功 native scene 已不再生成 Pillow layer、A8 field、图片头或字体度量；Python
+   继续负责 Unity/TMP 布局。未覆盖类别只缺最小脱敏 fixture 证明，不是待迁的 Pillow 成功路径。
 
 ## 进度表
 

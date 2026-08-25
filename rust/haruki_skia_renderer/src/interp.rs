@@ -1002,16 +1002,21 @@ fn render_node(
     match node {
         Node::Group(group) => {
             let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
-            let mask_rect = group
-                .mask
-                .as_ref()
-                .map(|_| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
+            let pillow_rrect_radius = match group.clip.as_ref() {
+                Some(Clip::PillowRRect { radius }) => Some(*radius),
+                _ => None,
+            };
+            let mask_rect = (group.mask.is_some() || pillow_rrect_radius.is_some())
+                .then(|| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
             if let Some(rect) = mask_rect {
                 let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&rect);
                 surface.canvas().save_layer(&layer);
             }
-            let clipped = group.clip.is_some();
-            if let Some(clip) = &group.clip {
+            let geometric_clip = group
+                .clip
+                .as_ref()
+                .filter(|clip| !matches!(clip, Clip::PillowRRect { .. }));
+            if let Some(clip) = geometric_clip {
                 let canvas = surface.canvas();
                 canvas.save();
                 apply_clip(canvas, child_off, group.size, clip);
@@ -1019,17 +1024,35 @@ fn render_node(
             for child in &group.children {
                 render_node(surface, interp, child_off, child)?;
             }
-            if clipped {
+            if geometric_clip.is_some() {
                 surface.canvas().restore();
             }
             if let Some(rect) = mask_rect {
-                let mask_ref = group.mask.as_deref().unwrap_or_default();
-                if let Some(mask) = interp.load_direct(mask_ref) {
+                let generated_pillow_mask = pillow_rrect_radius.is_some();
+                let generated_mask = pillow_rrect_radius
+                    .map(|radius| {
+                        pillow_rounded_rectangle_mask(
+                            group.size,
+                            radius,
+                            interp.max_node_pixels,
+                            interp.available_native_scene_bytes("pillow_rrect mask")?,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(mask) = generated_mask.or_else(|| {
+                    group
+                        .mask
+                        .as_deref()
+                        .and_then(|mask_ref| interp.load_direct(mask_ref))
+                }) {
                     let mut keep = Paint::default();
-                    keep.set_anti_alias(true);
+                    // The generated mask already carries Pillow's discrete edge pixels, while
+                    // legacy external masks keep their historical filtered draw behavior.
+                    keep.set_anti_alias(!generated_pillow_mask);
                     keep.set_blend_mode(BlendMode::DstIn);
                     surface.canvas().draw_image_rect(&mask, None, rect, &keep);
                 } else {
+                    let mask_ref = group.mask.as_deref().unwrap_or_default();
                     if interp.strict_asset_depth > 0 {
                         surface.canvas().restore();
                         return Err(format!(
@@ -1293,7 +1316,274 @@ fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
             let radii = corner_radii(*radius, corners);
             canvas.clip_rrect(RRect::new_rect_radii(rect, &radii), ClipOp::Intersect, true);
         }
+        Clip::PillowRRect { .. } => {
+            // This variant is a discrete alpha mask, not a geometric clip. Group handles it
+            // through an isolated saveLayer before this helper is called.
+        }
     }
+}
+
+fn pillow_rounded_rectangle_mask(
+    size: Vec2,
+    radius: f32,
+    max_node_pixels: usize,
+    available_scene_bytes: usize,
+) -> Result<Image, String> {
+    if !size[0].is_finite() || !size[1].is_finite() || !radius.is_finite() {
+        return Err("pillow_rrect contains a non-finite scalar".to_string());
+    }
+    let width = size[0].round() as i32;
+    let height = size[1].round() as i32;
+    if width <= 0 || height <= 0 {
+        return Err("pillow_rrect Group dimensions must be positive".to_string());
+    }
+    let byte_count =
+        validate_strict_asset_size(width, height, max_node_pixels, "pillow_rrect mask")?;
+    // `Data::new_copy` briefly coexists with the source Vec. Guard that construction peak,
+    // not merely the one retained raster copy used by the following DstIn draw.
+    let construction_peak = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "pillow_rrect mask construction byte count overflow".to_string())?;
+    if construction_peak > available_scene_bytes {
+        return Err(format!(
+            "pillow_rrect mask construction requires {construction_peak} bytes; only \
+             {available_scene_bytes} bytes remain in the scene limit"
+        ));
+    }
+    let x1 = width - 1;
+    let y1 = height - 1;
+    let mut diameter = (radius.max(0.0) * 2.0).min(x1.min(y1) as f32).round() as i32;
+    let full_x = diameter >= x1 - 1;
+    if full_x {
+        diameter = x1;
+    }
+    let full_y = diameter >= y1 - 1;
+    if full_y {
+        diameter = y1;
+    }
+
+    let mut rows = if full_x && full_y {
+        pillow_filled_ellipse_rows(width, height)
+    } else if diameter <= 0 {
+        vec![(0, x1); height as usize]
+    } else {
+        let corner_rows = pillow_filled_ellipse_rows(diameter + 1, diameter + 1);
+        let radius_i = diameter / 2;
+        let mut rows = vec![(0, x1); height as usize];
+        for y in 0..=radius_i.min(y1) {
+            let left = corner_rows[y as usize].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        let corner_top = y1 - diameter;
+        for y in (y1 - radius_i).max(0)..=y1 {
+            let corner_y = (y - corner_top).clamp(0, diameter) as usize;
+            let left = corner_rows[corner_y].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        rows
+    };
+    if rows.len() != height as usize {
+        return Err("pillow_rrect ellipse raster returned the wrong row count".to_string());
+    }
+
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_rrect row byte count overflow".to_string())?;
+    debug_assert_eq!(row_bytes * height as usize, byte_count);
+    let mut rgba = vec![0_u8; byte_count];
+    for (y, (left, right)) in rows.drain(..).enumerate() {
+        for x in left.max(0)..=right.min(x1) {
+            let offset = y * row_bytes + x as usize * 4;
+            rgba[offset..offset + 4].fill(255);
+        }
+    }
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Premul,
+        None,
+    );
+    skia_safe::images::raster_from_data(&info, Data::new_copy(&rgba), row_bytes)
+        .ok_or_else(|| "pillow_rrect mask image construction failed".to_string())
+}
+
+#[derive(Clone, Copy)]
+struct PillowQuarterState {
+    cx: i32,
+    cy: i32,
+    ex: i32,
+    ey: i32,
+    a2: i64,
+    b2: i64,
+    a2b2: i64,
+    finished: bool,
+}
+
+impl PillowQuarterState {
+    fn new(a: i32, b: i32) -> Self {
+        if a < 0 || b < 0 {
+            return Self {
+                cx: 0,
+                cy: 0,
+                ex: 0,
+                ey: 0,
+                a2: 0,
+                b2: 0,
+                a2b2: 0,
+                finished: true,
+            };
+        }
+        let a2 = i64::from(a) * i64::from(a);
+        let b2 = i64::from(b) * i64::from(b);
+        Self {
+            cx: a,
+            cy: b % 2,
+            ex: a % 2,
+            ey: b,
+            a2,
+            b2,
+            a2b2: a2 * b2,
+            finished: false,
+        }
+    }
+
+    fn delta(&self, x: i64, y: i64) -> i64 {
+        (self.a2 * y * y + self.b2 * x * x - self.a2b2).abs()
+    }
+
+    fn next(&mut self) -> Option<(i32, i32)> {
+        if self.finished {
+            return None;
+        }
+        let result = (self.cx, self.cy);
+        if self.cx == self.ex && self.cy == self.ey {
+            self.finished = true;
+            return Some(result);
+        }
+        let mut nx = self.cx;
+        let mut ny = self.cy + 2;
+        let mut next_delta = self.delta(i64::from(nx), i64::from(ny));
+        if nx > 1 {
+            let diagonal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy + 2));
+            if next_delta > diagonal_delta {
+                nx = self.cx - 2;
+                ny = self.cy + 2;
+                next_delta = diagonal_delta;
+            }
+            let horizontal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy));
+            if next_delta > horizontal_delta {
+                nx = self.cx - 2;
+                ny = self.cy;
+            }
+        }
+        self.cx = nx;
+        self.cy = ny;
+        Some(result)
+    }
+}
+
+struct PillowEllipseState {
+    outer: PillowQuarterState,
+    inner: PillowQuarterState,
+    py: i32,
+    pl: i32,
+    pr: i32,
+    buffer: Vec<(i32, i32, i32)>,
+    finished: bool,
+    leftmost: i32,
+}
+
+impl PillowEllipseState {
+    fn new(a: i32, b: i32, width: i32) -> Self {
+        let leftmost = a % 2;
+        let mut outer = PillowQuarterState::new(a, b);
+        let first = outer.next();
+        Self {
+            outer,
+            inner: PillowQuarterState::new(a - 2 * (width - 1), b - 2 * (width - 1)),
+            py: first.map_or(0, |(_, y)| y),
+            pl: leftmost,
+            pr: first.map_or(0, |(x, _)| x),
+            buffer: Vec::with_capacity(4),
+            finished: width < 1 || first.is_none(),
+            leftmost,
+        }
+    }
+
+    fn next(&mut self) -> Option<(i32, i32, i32)> {
+        if self.buffer.is_empty() {
+            if self.finished {
+                return None;
+            }
+            let y = self.py;
+            let mut left = self.pl;
+            let right = self.pr;
+            let mut outer_next = None;
+            while let Some(point @ (_, cy)) = self.outer.next() {
+                outer_next = Some(point);
+                if cy > y {
+                    break;
+                }
+            }
+            if let Some((cx, cy)) = outer_next.filter(|(_, cy)| *cy > y) {
+                self.pr = cx;
+                self.py = cy;
+            } else {
+                self.finished = true;
+            }
+
+            let mut inner_next = None;
+            while let Some(point @ (cx, cy)) = self.inner.next() {
+                inner_next = Some(point);
+                if cy <= y {
+                    left = cx;
+                } else {
+                    break;
+                }
+            }
+            self.pl = inner_next
+                .filter(|(_, cy)| *cy > y)
+                .map_or(self.leftmost, |(cx, _)| cx);
+
+            if (left > 0 || left < right) && y > 0 {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, y, right));
+            }
+            if y > 0 {
+                self.buffer.push((-right, y, -left));
+            }
+            if left > 0 || left < right {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, -y, right));
+            }
+            self.buffer.push((-right, -y, -left));
+        }
+        self.buffer.pop()
+    }
+}
+
+fn pillow_filled_ellipse_rows(width: i32, height: i32) -> Vec<(i32, i32)> {
+    let a = width - 1;
+    let b = height - 1;
+    let mut rows = vec![(0, -1); height.max(0) as usize];
+    let mut state = PillowEllipseState::new(a, b, a + b);
+    while let Some((x0, y, x1)) = state.next() {
+        let row = (y + b) / 2;
+        if !(0..height).contains(&row) {
+            continue;
+        }
+        let left = (x0 + a) / 2;
+        let right = (x1 + a) / 2;
+        let slot = &mut rows[row as usize];
+        if slot.1 < slot.0 {
+            *slot = (left, right);
+        } else {
+            slot.0 = slot.0.min(left);
+            slot.1 = slot.1.max(right);
+        }
+    }
+    rows
 }
 
 /// Resolve a gradient spec to (colors, positions) where positions are strictly increasing.

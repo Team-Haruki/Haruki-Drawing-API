@@ -10,6 +10,7 @@ from src.sekai.profile.custom_profile.general_prefab import (
     GeneralPrefabDisplayList,
     GeneralPrefabPalette,
     GeneralRoundedRectOp,
+    GeneralSpriteChoiceOp,
     GeneralSpriteOp,
     GeneralTextOp,
     GeneralViewportOp,
@@ -105,6 +106,34 @@ def test_edit_user_name_display_list_keeps_fixture_fit_and_unity_geometry() -> N
     )
 
 
+def test_x_display_list_keeps_sprite_fallback_order_and_shared_text_layout() -> None:
+    display_list = build_general_prefab_display_list(
+        "X",
+        size=(548, 64),
+        profile_context={"userProfile": {"twitterId": "@sekai_test"}},
+        labels={},
+        metrics=FixtureMetrics(),
+        palette=PALETTE,
+    )
+
+    assert display_list is not None
+    assert display_list.ops == (
+        GeneralSpriteOp(
+            "bg_base_r16_wh",
+            (0.0, 0.0, 548.0, 64.0),
+            tint=PALETTE.input_tint,
+            sliced_border=(21, 21, 21, 21),
+        ),
+        GeneralSpriteChoiceOp(
+            ("x_icon", "icon_twitter_wh"),
+            (7.0, 13.0, 45.0, 51.0),
+            tint=PALETTE.dark_tint,
+            fallback_text=GeneralTextOp("X", (26.0, 32.0), 30, PALETTE.text, "mm"),
+        ),
+        GeneralTextOp("@sekai_test", (85, 32), 30, PALETTE.text, "lm"),
+    )
+
+
 def test_comment_display_list_keeps_literal_tags_wrap_and_geometry() -> None:
     display_list = _build("Comment", (638, 190))
 
@@ -195,6 +224,37 @@ def test_pillow_adapter_replays_ops_in_order_and_reuses_measured_font() -> None:
     assert calls == [("sprite", (0, 0, 4, 4), Image.Resampling.BICUBIC)]
     assert font_calls == [(12, True)]
     assert image.getbbox() is not None
+
+
+def test_pillow_adapter_sprite_choice_uses_first_available_then_text_fallback() -> None:
+    attempts: list[str] = []
+
+    def paste_sprite(image, name, rect, **kwargs):
+        del rect, kwargs
+        attempts.append(name)
+        if name != "second":
+            return False
+        ImageDraw.Draw(image).rectangle((0, 0, 3, 3), fill=(255, 0, 0, 255))
+        return True
+
+    adapter = PillowGeneralPrefabAdapter(lambda *_args: ImageFont.load_default(), paste_sprite)
+    choice = GeneralSpriteChoiceOp(
+        ("first", "second", "third"),
+        (0, 0, 4, 4),
+        fallback_text=GeneralTextOp("X", (2, 2), 12, (255, 255, 255, 255), "mm"),
+    )
+    image = adapter.render(GeneralPrefabDisplayList("choice", (8, 8), (choice,)))
+
+    assert attempts == ["first", "second"]
+    assert image.getbbox() is not None
+
+    attempts.clear()
+    fallback = PillowGeneralPrefabAdapter(
+        lambda *_args: ImageFont.load_default(),
+        lambda _image, name, _rect, **_kwargs: attempts.append(name) or False,
+    ).render(GeneralPrefabDisplayList("fallback", (16, 16), (choice,)))
+    assert attempts == ["first", "second", "third"]
+    assert fallback.getbbox() is not None
 
 
 def test_shared_general_prefab_rejects_an_unmigrated_name() -> None:

@@ -144,6 +144,10 @@ def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
             "mem_images": 1,
             "mem_bytes": 64,
             "issues_by_kind": {"stamp": {"missing": 1}},
+            "classifications_by_kind": {
+                "stamp": {"missing": 1},
+                "text": {"native": 1, "hybrid": 1},
+            },
         },
     )
     record_render("custom_profile_card", "fallback")
@@ -153,6 +157,10 @@ def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
     assert scene["incomplete"] == 1
     assert scene["missing_elements"] == 1
     assert scene["issues_by_kind"] == {"stamp": {"missing": 1, "unresolved": 0}}
+    assert scene["classifications_by_kind"] == {
+        "stamp": {"missing": 1},
+        "text": {"hybrid": 1, "native": 1},
+    }
 
     reset_render_stats()
     record_render("card_list", "skia")

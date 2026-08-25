@@ -6,23 +6,22 @@ uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse th
 ``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
 display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
 font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text;
-static-atlas rich/decorative glyphs use asset-backed ``SdfAtlasQuad`` nodes. Still-unmigrated
-dynamic/fallback rich TMP and incomplete HonorDeck content is explicitly classified as hybrid
-and transported as bounded ``mem:`` rasters. A scene coverage
-report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
-cannot mean "successfully encoded a partial card".
+all remaining TMP/SDF text is offered to the asset-backed ``SdfAtlasQuad`` / ``SdfFontQuad``
+sparse-glyph path. Incomplete content is explicitly classified and
+rejected by a scene coverage report before Rust runs, so ``backend=skia`` cannot mean
+"successfully encoded a partial card".
 
-Honor dimensions come from the native asset-info API. An older wheel falls back to an explicitly
-telemetried Pillow header probe, so compatibility cannot masquerade as native-pure.
+Honor dimensions come from the native asset-info API. An older wheel declines the native scene
+before rasterization; it cannot use a Pillow header probe and masquerade as native-pure.
 
 Parity-critical mirrors of the Pillow path:
 - Unrotated, unscaled layers are pasted at ROUNDED integer positions (the ``angle ~ 0`` branch of
   ``prepare_canvas_clipped_transformed_layer``); the scene emits those as plain integer-placed
   images with no Transform, so they stay pixel-crisp instead of drifting subpixel.
-- Hybrid minification (combined scale < ~0.98) keeps the Python two-step BICUBIC pre-resize;
-  ``UnityImage`` performs the same two sequential dimension rounds natively.
-- Decorative direct-raster TMP texts draw onto full-canvas PIL layers exactly as in
-  ``render_card``; consecutive runs accumulate on one layer and flush in z-order.
+- Unity asset nodes reproduce the compatibility path's two-step dimension rounding and sampling
+  without materializing request-local Pillow layers.
+- Every TMP/SDF text is either asset/font-backed native IR or classified unresolved before Rust;
+  the Skia attempt never transports request pixels through ``mem:`` images.
 
 Fail-open: this function NEVER raises — every failure records exactly one outcome and returns
 ``None`` so the route falls back to Pillow, which raises the canonical user-visible errors.
@@ -40,14 +39,7 @@ from pathlib import Path
 import time
 from typing import Any
 
-from PIL import Image
-
 from src.core.image_payload import EncodedImagePayload
-from src.core.pillow_telemetry import (
-    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
-    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
-    record_pillow_touch,
-)
 from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
 from src.sekai.honor.assets import resolve_honor_assets
 from src.sekai.honor.model import HonorRequest
@@ -60,10 +52,17 @@ from src.sekai.profile.custom_profile.card_prefab import (
     CardSpriteOp,
     CardTextOp,
 )
+from src.sekai.profile.custom_profile.collection_prefab import (
+    OmikujiAssetOp,
+    OmikujiRectOp,
+    OmikujiTextOp,
+    build_omikuji_display_list,
+)
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralFontRef,
     GeneralRoundedRectOp,
+    GeneralSpriteChoiceOp,
     GeneralSpriteOp,
     GeneralTextOp,
     GeneralViewportOp,
@@ -74,7 +73,7 @@ from src.sekai.profile.custom_profile.honor_deck_prefab import (
     build_honor_deck_plan,
     honor_deck_request_candidates,
 )
-from src.sekai.profile.custom_profile.limits import RasterSizeLimitError, ensure_raster_size
+from src.sekai.profile.custom_profile.limits import ensure_raster_size
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
     GENERAL_DECK_CARD_RENDER_SIZE,
@@ -87,11 +86,9 @@ from src.sekai.profile.custom_profile.renderer import (
     STATIC_IMAGE_CONTENT_KINDS,
     DirectSdfAtlasQuad,
     DirectSdfFontQuad,
-    LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
     content_data_id,
-    harden_rgba_alpha,
     hex_to_rgba,
     unity_tint_rgba,
 )
@@ -99,7 +96,7 @@ from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
 from src.sekai.profile.custom_profile.tmp_text_prefab import build_simple_tmp_text_display_list
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
-from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
+from src.sekai.skia_renderer.ir_builder import IRBuilder, clip_pillow_rrect, image_tint
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
     OUTCOME_ERROR,
@@ -128,14 +125,11 @@ logger = logging.getLogger("custom_profile.draw.perf")
 # exactly one per attempt.
 CUSTOM_PROFILE_ENDPOINT = "custom_profile_card"
 
-# Mirror of prepare_transformed_layer's branch thresholds (renderer.py): the exact-integer paste
-# branch triggers at angle % 360 ~ 0; the minification carve-out keeps PIL resize semantics.
-_ANGLE_EPS = 1.0e-9
-_MIN_SCALE_FOLD = 0.98
 _REQUIRED_NATIVE_ASSET_INFO_CAPABILITY = 1
 _REQUIRED_NATIVE_TEXT_METRICS_CAPABILITY = 1
 _NATIVE_GENERAL_PREFABS = frozenset(
     {
+        "X",
         "EditUserName",
         "Comment",
         "TotalPower",
@@ -149,7 +143,12 @@ _NATIVE_GENERAL_PREFABS = frozenset(
     }
 )
 _GENERAL_FONT_IR_NAME = "custom_profile_general"
+_OMIKUJI_FONT_IR_NAME = "custom_profile_omikuji"
 _NATIVE_CARD_GENERAL_PREFABS = frozenset({"LeaderCard", "Deck"})
+
+
+class _NativeAssetInfoUnavailable(RuntimeError):
+    """The installed wheel cannot provide Pillow-free asset dimensions."""
 
 
 @dataclass(slots=True)
@@ -164,7 +163,7 @@ class CustomProfileSceneReport:
     unresolved_elements: int = 0
     mem_images: int = 0
     mem_bytes: int = 0
-    issues: list[dict[str, int | str]] = field(default_factory=list)
+    classifications_by_kind: dict[str, dict[str, int]] = field(default_factory=dict)
 
     @property
     def complete(self) -> bool:
@@ -178,12 +177,30 @@ class CustomProfileSceneReport:
         return (
             self.visible_elements == classified_visible
             and self.elements_total == self.visible_elements + self.hidden_elements
+            and self.hybrid_elements == 0
             and self.missing_elements == 0
             and self.unresolved_elements == 0
+            and self.mem_images == 0
+            and self.mem_bytes == 0
         )
 
     def observe(self, content: Any, classification: str) -> None:
-        if classification == "hidden":
+        resolved_classification = (
+            classification
+            if classification
+            in {
+                "hidden",
+                "native",
+                "hybrid",
+                "noop",
+                "missing",
+                "unresolved",
+            }
+            else "unresolved"
+        )
+        kind_bucket = self.classifications_by_kind.setdefault(str(content.kind), {})
+        kind_bucket[resolved_classification] = kind_bucket.get(resolved_classification, 0) + 1
+        if resolved_classification == "hidden":
             self.hidden_elements += 1
             return
         self.visible_elements += 1
@@ -193,25 +210,16 @@ class CustomProfileSceneReport:
             "noop": "noop_elements",
             "missing": "missing_elements",
             "unresolved": "unresolved_elements",
-        }.get(classification, "unresolved_elements")
+        }.get(resolved_classification, "unresolved_elements")
         setattr(self, counter, getattr(self, counter) + 1)
-        if classification in {"missing", "unresolved"} and len(self.issues) < 16:
-            self.issues.append(
-                {
-                    "kind": str(content.kind),
-                    "status": classification,
-                    "data_id": content_data_id(content.kind, content.item),
-                    "layer": int(content.layer),
-                }
-            )
 
     def metrics(self) -> dict[str, Any]:
         issues_by_kind: dict[str, dict[str, int]] = {}
-        for issue in self.issues:
-            kind = str(issue["kind"])
-            status = str(issue["status"])
-            bucket = issues_by_kind.setdefault(kind, {"missing": 0, "unresolved": 0})
-            bucket[status] += 1
+        for kind, classifications in self.classifications_by_kind.items():
+            missing = int(classifications.get("missing", 0))
+            unresolved = int(classifications.get("unresolved", 0))
+            if missing or unresolved:
+                issues_by_kind[kind] = {"missing": missing, "unresolved": unresolved}
         return {
             "complete": int(self.complete),
             "elements_total": self.elements_total,
@@ -225,6 +233,9 @@ class CustomProfileSceneReport:
             "mem_images": self.mem_images,
             "mem_bytes": self.mem_bytes,
             "issues_by_kind": issues_by_kind,
+            "classifications_by_kind": {
+                kind: dict(sorted(counts.items())) for kind, counts in sorted(self.classifications_by_kind.items())
+            },
         }
 
     def native_metrics(self) -> dict[str, int]:
@@ -274,52 +285,21 @@ def _new_builder(width: int, height: int, *, general_font_path: Path | None = No
 
 
 class _SceneAssembler:
-    """Accumulates the z-ordered element scene: mem rasters + Transform placements."""
+    """Accumulate an asset/font-backed scene without request-local Pillow pixels."""
 
     def __init__(self, builder: IRBuilder, canvas_size: tuple[int, int], max_mem_bytes: int) -> None:
+        del canvas_size, max_mem_bytes
         self.builder = builder
-        self.canvas_size = canvas_size
-        self.max_mem_bytes = max(1, int(max_mem_bytes))
         self.mem_bytes = 0
-        # RGBA raw 3-tuples plus A8 raw-buffer 6-tuples (capability 9) share the registry.
+        # Subtree splice still accepts a registry, but Custom Profile native success requires
+        # it to stay empty. Any node that would need request pixels is declined atomically.
         self.mem_images: dict[str, tuple] = {}
-        self._direct_layer: Image.Image | None = None
-
-    def _reserve_mem(self, byte_count: int) -> None:
-        total = self.mem_bytes + max(0, int(byte_count))
-        if total > self.max_mem_bytes:
-            raise ValueError(
-                f"custom profile native scene would retain {total} raw bytes; limit is {self.max_mem_bytes}"
-            )
-        self.mem_bytes = total
-
-    def _mem_ref(self, image: Image.Image) -> str:
-        record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
-        rgba = image if image.mode == "RGBA" else image.convert("RGBA")
-        self._reserve_mem(rgba.width * rgba.height * 4)
-        key = f"m{len(self.mem_images)}"
-        self.mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
-        return f"mem:{key}"
-
-    def direct_layer(self) -> Image.Image:
-        """The accumulating full-canvas layer for decorative direct-raster texts."""
-        if self._direct_layer is None:
-            self._direct_layer = Image.new("RGBA", self.canvas_size, (0, 0, 0, 0))
-        return self._direct_layer
-
-    def flush_direct_layer(self) -> None:
-        """Emit the accumulated direct-raster layer as one identity-placed image (keeps z-order:
-        called before any transformed element is emitted on top of it)."""
-        if self._direct_layer is None:
-            return
-        ref = self._mem_ref(self._direct_layer)
-        self.builder.image(ref, (0, 0), self.canvas_size, sampling="linear")
-        self._direct_layer = None
 
     def emit_sdf_quads(self, quads) -> bool:
-        """Emit one decorative text element and return whether every glyph is asset-native."""
-        self.flush_direct_layer()
-        fully_native = True
+        """Atomically emit a text element only when every glyph is asset/font-backed."""
+
+        if any(not isinstance(quad, (DirectSdfFontQuad, DirectSdfAtlasQuad)) for quad in quads):
+            return False
         for quad in quads:
             scalars = quad.scalars
             underlay = None
@@ -376,117 +356,44 @@ class _SceneAssembler:
                     underlay=underlay,
                 )
                 continue
-            fully_native = False
-            record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
-            field = quad.field
-            self._reserve_mem(field.width * field.height)
-            key = f"m{len(self.mem_images)}"
-            self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
-            self.builder.sdf_quad(
-                (quad.left, quad.top),
-                f"mem:{key}",
-                scalars.face_color,
-                scalars.face_scale,
-                scalars.face_w,
-                scalars.alpha,
-                underlay,
-            )
-        return fully_native
-
-    def emit_layer(self, layer: Image.Image, inputs: LayerTransformInputs, renderer: PNGRenderer) -> None:
-        """Place one element layer.
-
-        Unrotated elements (the overwhelming majority — note position_scale is ~1.118 in the
-        service target, so almost every element carries scale) reproduce the Pillow sequence
-        exactly: the two-step BICUBIC pre-resize in Python, then a rounded integer-position
-        paste — pixel-parity by construction. Only ROTATED elements go through a Transform
-        matrix (Pillow resamples those anyway; the single native pass replaces its resize +
-        rotate + 2x supersample, under the relaxed rotated-content parity budget), with the
-        minification carve-out keeping PIL's kernel-scaling resize semantics.
-        """
-        self.flush_direct_layer()
-        pivot = inputs.pivot
-        sx = inputs.object_scale[0] * inputs.position_scale[0]
-        sy = inputs.object_scale[1] * inputs.position_scale[1]
-        angle = inputs.angle % 360.0
-        rotated = abs(angle) >= _ANGLE_EPS
-
-        if not rotated or min(sx, sy) < _MIN_SCALE_FOLD:
-            # Two SEPARATE sequential resizes, exactly like prepare_transformed_layer (combining
-            # them changes pixels; the Pillow path is the parity baseline).
-            osx, osy = inputs.object_scale
-            if osx != 1.0 or osy != 1.0:
-                new_w = max(1, round(layer.width * osx))
-                new_h = max(1, round(layer.height * osy))
-                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
-                pivot = (pivot[0] * osx, pivot[1] * osy)
-            psx, psy = inputs.position_scale
-            if abs(psx - 1.0) >= 1.0e-6 or abs(psy - 1.0) >= 1.0e-6:
-                new_w = max(1, round(layer.width * psx))
-                new_h = max(1, round(layer.height * psy))
-                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
-                pivot = (pivot[0] * psx, pivot[1] * psy)
-            sx = sy = 1.0
-
-        ax, ay = inputs.anchor
-        if not rotated:
-            # Pillow's angle~0 branch pastes at rounded integer positions; mirror it so
-            # unrotated content stays crisp (a float Transform would resample subpixel).
-            ref = self._mem_ref(layer)
-            self.builder.image(ref, (round(ax - pivot[0]), round(ay - pivot[1])), layer.size, sampling="linear")
-            return
-
-        theta = math.radians(angle)
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        px, py = pivot
-        matrix = (
-            cos_t * sx,
-            -sin_t * sy,
-            ax - cos_t * sx * px + sin_t * sy * py,
-            sin_t * sx,
-            cos_t * sy,
-            ay - sin_t * sx * px - cos_t * sy * py,
-        )
-        ref = self._mem_ref(layer)
-        with self.builder.transform(matrix):
-            self.builder.image(ref, (0, 0), layer.size, sampling="catmull_rom")
+        return True
 
 
 def _direct_text_quads(renderer: PNGRenderer, content: Any):
-    """SdfQuad records for a decorative direct-raster text element, or None.
+    """Sparse native glyph records for any TMP/SDF text element, or ``None``.
 
-    Mirrors render_content_direct_on_card's outer gates, then asks the shared seam
-    (prepare_direct_sdf_quads — the layout + PIL-warp half of the Pillow direct path) for the
-    per-glyph fields/scalars. None falls through to the Pillow-parity raster branches.
+    ``prepare_direct_sdf_quads`` is already the renderer-neutral sparse path used by Pillow for
+    decorative and oversized text. Restricting it here to ``is_decorative_text_item`` left
+    ordinary rich/effected TMP text as whole RGBA ``mem:`` layers even though the exact same
+    layout, warp, and shading descriptors were native-capable. Plain text still gets the cheaper
+    IR ``Text`` path first; this is the final native TMP option before the element is declined.
     """
     if content.kind != "text" or not content.object_data.get("visible", False):
         return None
-    if not renderer.tmp_decorative_direct_raster:
-        return None
     if renderer.text_layout != "tmp" or renderer.tmp_text_render_mode != "sdf":
-        return None
-    if not renderer.is_decorative_text_item(content.item):
         return None
     return renderer.prepare_direct_sdf_quads(
         content.item,
         content.object_data,
         defer_static_atlas=True,
         defer_dynamic_font=True,
+        source_metrics_only=True,
     )
 
 
-def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
-    """Check the direct-text gates without allocating the full-canvas scratch layer."""
+def _is_empty_text_noop(renderer: PNGRenderer, content: Any) -> bool:
+    """Return whether a visible text item has no drawable source characters.
 
-    return (
-        content.kind == "text"
-        and bool(content.object_data.get("visible", False))
-        and renderer.tmp_decorative_direct_raster
-        and renderer.text_layout == "tmp"
-        and renderer.tmp_text_render_mode == "sdf"
-        and renderer.is_decorative_text_item(content.item)
-    )
+    The compatibility renderer returns ``None`` for an empty/whitespace-only item. Treating that
+    as a missing element made an otherwise complete native scene fall back to Pillow, which then
+    drew exactly nothing. Keep tagged whitespace out of this shortcut because underline/strike
+    tags can make spaces visible; the raw whitespace-only case is unambiguously a no-op.
+    """
+
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    text = str(content.item.get("text", ""))
+    return not text.strip() and "<" not in text and ">" not in text
 
 
 def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
@@ -494,7 +401,7 @@ def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _Sc
 
     Python remains the TMP layout oracle; no Pillow/NumPy glyph field, local RGBA surface,
     resize, or ``mem:`` transport is created. Rich/decorative/effected text returns ``False`` and
-    continues through the existing compatibility path.
+    continues through the sparse asset/font-backed glyph path.
     """
 
     if content.kind != "text" or not content.object_data.get("visible", False):
@@ -510,10 +417,9 @@ def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _Sc
         return False
     font_name = f"custom_profile_tmp_{hashlib.sha256(str(font_path).encode()).hexdigest()[:16]}"
 
-    # Register and flush only after the display-list builder has completed every eligibility and
-    # layout check. An unsupported text must leave the scene untouched for the hybrid fallback.
+    # Register only after the display-list builder has completed every eligibility and layout
+    # check. An unsupported text must leave the scene untouched before the strict fallback.
     scene.builder.register_extra_font(font_name, font_path)
-    scene.flush_direct_layer()
     with scene.builder.transform(display_list.transform.matrix):
         for op in display_list.ops:
             scene.builder.text(
@@ -541,7 +447,8 @@ def _native_asset_info(asset_path: str) -> dict[str, Any] | None:
     """Rust-side asset metadata, or ``None`` for an older wheel.
 
     A wheel claiming the capability but returning a malformed result is broken and raises; only
-    a genuinely absent API takes the explicit Pillow-header compatibility path.
+    a genuinely absent API returns ``None`` so the whole native scene can fail open before any
+    Pillow header or pixel operation.
     """
 
     native = load_native_renderer()
@@ -555,7 +462,7 @@ def _native_asset_info(asset_path: str) -> dict[str, Any] | None:
     ensure_raster_size(
         (width, height),
         max_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-        label=f"custom profile native honor asset {asset_path}",
+        label=f"custom profile native asset {asset_path}",
     )
     if int(info.get("mtime_ns", 0)) < 0 or int(info.get("file_size", 0)) < 0:
         raise ValueError(f"native honor asset info returned an invalid file identity: {asset_path}")
@@ -563,54 +470,39 @@ def _native_asset_info(asset_path: str) -> dict[str, Any] | None:
 
 
 def _header_only_asset_ref(path, asset_path: str) -> AssetImageRef:
-    """Build the image source the shared honor tree needs without decoding its pixels.
-
-    Current wheels obtain dimensions from Rust. An older wheel explicitly falls back to a
-    Pillow header probe and records that touch, so it cannot be mislabeled as native-pure.
-    """
+    """Build the shared honor source strictly from Rust-side image metadata."""
 
     resolved = path.resolve(strict=True)
     if not resolved.is_file():
         raise ValueError(f"custom profile honor asset is not a regular file: {resolved}")
     native_info = _native_asset_info(asset_path)
-    if native_info is not None:
-        return AssetImageRef(
-            path=resolved,
-            size=(int(native_info["width"]), int(native_info["height"])),
-            mode=str(native_info.get("mode") or "RGBA"),
-            mtime_ns=int(native_info.get("mtime_ns", 0)),
-            file_size=int(native_info.get("file_size", 0)),
-        )
-
-    stat = resolved.stat()
-    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
-    with Image.open(resolved) as probe:
-        ensure_raster_size(
-            probe.size,
-            max_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-            label=f"custom profile honor asset {resolved.name}",
-        )
-        size = (int(probe.width), int(probe.height))
-        mode = str(probe.mode)
+    if native_info is None:
+        raise _NativeAssetInfoUnavailable("native asset-info capability is required")
     return AssetImageRef(
         path=resolved,
-        size=size,
-        mode=mode,
-        mtime_ns=stat.st_mtime_ns,
-        file_size=stat.st_size,
+        size=(int(native_info["width"]), int(native_info["height"])),
+        mode=str(native_info.get("mode") or "RGBA"),
+        mtime_ns=int(native_info.get("mtime_ns", 0)),
+        file_size=int(native_info.get("file_size", 0)),
     )
 
 
 class _NativeGeneralTextMetrics:
     """Strict Skia font metrics used by the renderer-neutral General prefab builder."""
 
-    def __init__(self, measure, font_path: Path) -> None:
+    def __init__(self, measure, font_path: Path, expected_font_name: str = "FOT-RodinNTLGPro-DB") -> None:
         self._measure_batch = measure
         self.font_path = font_path
+        self.expected_font_name = expected_font_name
         self._cache: dict[tuple[str, int], dict[str, Any]] = {}
 
     @classmethod
-    def create(cls, font_path: Path | None) -> _NativeGeneralTextMetrics | None:
+    def create(
+        cls,
+        font_path: Path | None,
+        *,
+        expected_font_name: str = "FOT-RodinNTLGPro-DB",
+    ) -> _NativeGeneralTextMetrics | None:
         if font_path is None:
             return None
         try:
@@ -624,10 +516,10 @@ class _NativeGeneralTextMetrics:
         capability = int(getattr(native, "TEXT_METRICS_CAPABILITY", 0) or 0)
         if capability < _REQUIRED_NATIVE_TEXT_METRICS_CAPABILITY or not callable(measure):
             return None
-        return cls(measure, resolved)
+        return cls(measure, resolved, expected_font_name)
 
     def measure(self, text: str, font: GeneralFontRef, size: int) -> dict[str, Any]:
-        if font.name != "FOT-RodinNTLGPro-DB":
+        if font.name != self.expected_font_name:
             raise ValueError(f"unsupported native General prefab font: {font.name}")
         key = (str(text), int(size))
         cached = self._cache.get(key)
@@ -922,7 +814,6 @@ def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _Scene
         return None
     angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
     outer_size = GENERAL_NATIVE_SIZES[file_name]
-    scene.flush_direct_layer()
     with scene.builder.unity_subscene(
         size=outer_size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -979,7 +870,6 @@ def _emit_native_card_member(renderer: PNGRenderer, content: Any, scene: _SceneA
     if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
         return False
     angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-    scene.flush_direct_layer()
     with scene.builder.unity_subscene(
         size=display_list.size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1082,15 +972,23 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
             if op.resource_policy == "required":
                 return None
             resource_paths[op_key] = None
+        elif isinstance(op, GeneralSpriteChoiceOp):
+            selected_path = None
+            for name in op.names:
+                path = renderer.unity_ui_sprite_path(name)
+                if path is None:
+                    continue
+                selected_path = _relative_asset_path(path)
+                if selected_path is None:
+                    return None
+                break
+            resource_paths[op_key] = selected_path
+            if selected_path is None and op.fallback_text is not None:
+                text_placements[id(op.fallback_text)] = metrics.text_placement(op.fallback_text)
         elif isinstance(op, GeneralAssetImageOp):
             if op.fit == "cover" and op.align != (0.5, 0.5):
                 # IR Image cover is deliberately centered. A future non-centered display-list
                 # operation must decline instead of silently changing its crop.
-                return None
-            if op.clip_radius is not None:
-                # Pillow builds a discrete L mask with ImageDraw.rounded_rectangle and multiplies
-                # it into the resized alpha. Skia's anti-aliased rrect clip differs at the edge;
-                # keep banner-backed StoryFavorite hybrid until an exact mask primitive exists.
                 return None
             asset_status, asset_path = _existing_native_asset(op.path)
             if asset_status == "ready":
@@ -1131,6 +1029,19 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
         "lanczos": "catmull_rom",
     }
 
+    def emit_text(op: GeneralTextOp) -> None:
+        align, baseline = text_placements[id(op)]
+        scene.builder.text(
+            op.text,
+            (float(op.pos[0]), baseline),
+            "bold",
+            float(op.size),
+            align=align,
+            baseline="alphabetic",
+            fill=op.fill,
+            font_name=_GENERAL_FONT_IR_NAME,
+        )
+
     def emit_ops(ops) -> None:
         for op in ops:
             op_key = id(op)
@@ -1161,6 +1072,21 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                         tint=tint,
                     )
                 continue
+            if isinstance(op, GeneralSpriteChoiceOp):
+                asset_path = resource_paths[op_key]
+                if asset_path is None:
+                    if op.fallback_text is not None:
+                        emit_text(op.fallback_text)
+                    continue
+                left, top, right, bottom = op.rect
+                scene.builder.image(
+                    asset_path,
+                    (round(left), round(top)),
+                    (max(1, round(right - left)), max(1, round(bottom - top))),
+                    sampling=sampling_map[op.sampling],
+                    tint=image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None,
+                )
+                continue
             if isinstance(op, GeneralRoundedRectOp):
                 emit_rounded_rect(op)
                 continue
@@ -1174,13 +1100,30 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                 pos = (round(left), round(top))
                 size = (max(1, round(right - left)), max(1, round(bottom - top)))
                 sampling = "pillow_lanczos" if op.sampling == "lanczos" else sampling_map[op.sampling]
-                scene.builder.image(
-                    asset_path,
-                    pos,
-                    size,
-                    fit=op.fit,
-                    sampling=sampling,
-                )
+                if op.clip_radius is None:
+                    scene.builder.image(
+                        asset_path,
+                        pos,
+                        size,
+                        fit=op.fit,
+                        sampling=sampling,
+                    )
+                else:
+                    # The legacy composer multiplies a discrete ImageDraw L mask into the
+                    # resized alpha. ``pillow_rrect`` reproduces that contract in Rust without
+                    # a request-local Pillow raster or ``mem:`` image.
+                    with scene.builder.group(
+                        offset=pos,
+                        size=size,
+                        clip=clip_pillow_rrect(op.clip_radius),
+                    ):
+                        scene.builder.image(
+                            asset_path,
+                            (0, 0),
+                            size,
+                            fit=op.fit,
+                            sampling=sampling,
+                        )
                 continue
             if isinstance(op, GeneralViewportOp):
                 with scene.builder.group(
@@ -1194,19 +1137,8 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
                 continue
             if not isinstance(op, GeneralTextOp):
                 raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
-            align, baseline = text_placements[op_key]
-            scene.builder.text(
-                op.text,
-                (float(op.pos[0]), baseline),
-                "bold",
-                float(op.size),
-                align=align,
-                baseline="alphabetic",
-                fill=op.fill,
-                font_name=_GENERAL_FONT_IR_NAME,
-            )
+            emit_text(op)
 
-    scene.flush_direct_layer()
     with scene.builder.unity_subscene(
         size=display_list.size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1235,11 +1167,14 @@ def _native_honor_sources(
             raise ValueError(f"honor asset is outside ASSETS_BASE_DIR: {path}")
         return _header_only_asset_ref(path, asset_path)
 
-    resolution = resolve_honor_assets(
-        request,
-        path_resolver=renderer.resolve_request_asset_path,
-        source_factory=source_factory,
-    )
+    try:
+        resolution = resolve_honor_assets(
+            request,
+            path_resolver=renderer.resolve_request_asset_path,
+            source_factory=source_factory,
+        )
+    except _NativeAssetInfoUnavailable:
+        return "hybrid", None
     return resolution.status, None if resolution.sources is None else dict(resolution.sources)
 
 
@@ -1338,7 +1273,6 @@ def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
         if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
             return False
         angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-        scene.flush_direct_layer()
         with scene.builder.unity_subscene(
             size=badge.size,
             anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1466,7 +1400,6 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
         return None
     angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
     size = plan.natural_size
-    scene.flush_direct_layer()
     with scene.builder.unity_subscene(
         size=size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1502,6 +1435,135 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     return "native"
 
 
+def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Replay the shared omikuji result-card display list without a Pillow surface."""
+
+    if content.kind != "collection" or not content.object_data.get("visible", False):
+        return False
+    resource = renderer.image_resource_for("collection", content.item)
+    if str(resource.get("customProfileResourceCollectionType", "none") or "none") != "omikuji":
+        return False
+    target_id = int(content.item.get("targetId", 0) or 0)
+    omikuji = renderer.omikujis.get(target_id)
+    if not isinstance(omikuji, dict):
+        return False
+    background_path = renderer.omikuji_background_asset_path(omikuji)
+    fortune_path = renderer.omikuji_asset_path(omikuji, "fortune")
+    if background_path is None or fortune_path is None:
+        return False
+    background_asset = _relative_asset_path(background_path)
+    fortune_asset = _relative_asset_path(fortune_path)
+    if background_asset is None or fortune_asset is None:
+        return False
+    background_info = _native_asset_info(background_asset)
+    fortune_info = _native_asset_info(fortune_asset)
+    if background_info is None or fortune_info is None:
+        return False
+    font_path = renderer.omikuji_font_path(decorative=False)
+    metrics = _NativeGeneralTextMetrics.create(font_path, expected_font_name="omikuji")
+    if metrics is None or font_path is None:
+        return False
+
+    display_list = build_omikuji_display_list(
+        omikuji,
+        background_path=background_path,
+        background_size=(int(background_info["width"]), int(background_info["height"])),
+        fortune_path=fortune_path,
+        fortune_size=(int(fortune_info["width"]), int(fortune_info["height"])),
+    )
+    asset_paths: dict[int, str] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+    font_ref = GeneralFontRef(name="omikuji")
+    for op in display_list.ops:
+        if isinstance(op, OmikujiAssetOp):
+            asset_path = _relative_asset_path(Path(op.path))
+            if asset_path is None:
+                return False
+            asset_paths[id(op)] = asset_path
+        elif isinstance(op, OmikujiTextOp):
+            if op.decorative:
+                return False
+            text_placements[id(op)] = metrics.anchor_placement(
+                text=op.text,
+                pos=op.pos if abs(op.rotation) < 1.0e-6 else (0.0, 0.0),
+                size=op.size,
+                anchor=op.anchor,
+                font=font_ref,
+            )
+
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+
+    scene.builder.register_extra_font(_OMIKUJI_FONT_IR_NAME, font_path)
+    with scene.builder.unity_subscene(
+        size=display_list.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        for op in display_list.ops:
+            if isinstance(op, OmikujiAssetOp):
+                left, top, right, bottom = op.rect
+                scene.builder.image(
+                    asset_paths[id(op)],
+                    (round(left), round(top)),
+                    (max(1, round(right - left)), max(1, round(bottom - top))),
+                    sampling={
+                        "nearest": "nearest",
+                        "bilinear": "linear",
+                        "bicubic": "catmull_rom",
+                        "lanczos": "pillow_lanczos",
+                    }[op.sampling],
+                    blend=op.blend,
+                )
+                continue
+            if isinstance(op, OmikujiRectOp):
+                left, top, right, bottom = op.rect
+                scene.builder.rect((left, top), (right - left, bottom - top), fill=op.fill)
+                continue
+
+            align, baseline = text_placements[id(op)]
+            if abs(op.rotation) < 1.0e-6:
+                scene.builder.text(
+                    op.text,
+                    (op.pos[0], baseline),
+                    "default",
+                    op.size,
+                    align=align,
+                    baseline="alphabetic",
+                    fill=op.fill,
+                    font_name=_OMIKUJI_FONT_IR_NAME,
+                )
+                continue
+            theta = math.radians(op.rotation)
+            with scene.builder.transform(
+                (
+                    math.cos(theta),
+                    -math.sin(theta),
+                    op.pos[0],
+                    math.sin(theta),
+                    math.cos(theta),
+                    op.pos[1],
+                )
+            ):
+                scene.builder.text(
+                    op.text,
+                    (0.0, baseline),
+                    "default",
+                    op.size,
+                    align=align,
+                    baseline="alphabetic",
+                    fill=op.fill,
+                    font_name=_OMIKUJI_FONT_IR_NAME,
+                )
+    return True
+
+
 def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
     """Lower intrinsic-size ImageContentView assets without opening them in Pillow."""
 
@@ -1530,7 +1592,6 @@ def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneA
     if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
         return False
     angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-    scene.flush_direct_layer()
     scene.builder.unity_image(
         path=asset_path,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1585,7 +1646,6 @@ def _emit_native_shape(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
     fill_color = renderer.colors.get(int(content.item.get("colorId", 0)), "#ffffff")
     outline_color = renderer.colors.get(int(content.item.get("outlineColorId", 0)), "#ffffff")
     angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-    scene.flush_direct_layer()
     scene.builder.sdf_shape(
         path=asset_path,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1620,13 +1680,19 @@ def _build_scene(
     contents = renderer.build_native_contents(card)
     report = CustomProfileSceneReport(elements_total=len(contents))
 
-    # Same walk as render_card's direct-raster loop: decorative TMP texts become native SdfQuads
-    # (Phase 2 — Python keeps layout + the PIL field warp, the node shades per pixel); if the
-    # element is not quad-eligible the accumulating full-canvas direct layer takes it, and
-    # everything else renders to a local layer placed by the shared layer_transform_inputs
-    # numbers. Audit records mirror the Pillow statuses.
+    # Walk the same z-ordered content list as render_card. Every successful element must lower to
+    # asset/font-backed IR. Unsupported content is classified before a Pillow layer is created;
+    # the strict coverage gate then declines the whole scene to the route-level Pillow fallback.
     for content in contents:
+        if not content.object_data.get("visible", False):
+            renderer.record_native_audit(card_ref, content, "hidden", None)
+            report.observe(content, "hidden")
+            continue
         if _emit_native_asset_image(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_omikuji_collection(renderer, content, scene):
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
@@ -1665,68 +1731,27 @@ def _build_scene(
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
+        if _is_empty_text_noop(renderer, content):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
         if _emit_native_simple_tmp_text(renderer, content, scene):
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
         quads = _direct_text_quads(renderer, content)
         if quads is not None:
-            renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-            if quads:
-                report.observe(content, "native" if scene.emit_sdf_quads(quads) else "hybrid")
-            else:
+            if not quads:
+                renderer.record_native_audit(card_ref, content, "rendered-direct", None)
                 report.observe(content, "noop")
-            continue
-        if _is_direct_text_candidate(renderer, content) and renderer.render_content_direct_on_card(
-            scene.direct_layer(), content
-        ):
-            renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-            report.observe(content, "hybrid")
-            continue
-        try:
-            rendered = renderer.render_content_for_card(content)
-        except RasterSizeLimitError as exc:
-            if (
-                exc.label == "custom profile TMP text layer"
-                and content.kind == "text"
-                and renderer.tmp_decorative_direct_raster
-                and renderer.text_layout == "tmp"
-                and renderer.tmp_text_render_mode == "sdf"
-            ):
-                quads = renderer.prepare_direct_sdf_quads(
-                    content.item,
-                    content.object_data,
-                    defer_static_atlas=True,
-                    defer_dynamic_font=True,
-                )
-                if quads is not None:
-                    renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-                    if quads:
-                        report.observe(content, "native" if scene.emit_sdf_quads(quads) else "hybrid")
-                    else:
-                        report.observe(content, "noop")
-                    continue
-            raise
-        renderer.record_native_audit(card_ref, content, rendered.status, rendered.result)
-        if not isinstance(rendered.result, tuple):
-            report.observe(
-                content,
-                rendered.status if rendered.status in {"hidden", "missing", "unresolved"} else "unresolved",
-            )
-            continue
-        report.observe(content, "hybrid")
-        inputs = renderer.layer_transform_inputs(rendered.result, content.object_data, content.kind)
-        layer = inputs.layer
-        if (
-            content.kind == "text"
-            and renderer.tmp_decorative_alpha_harden > 1.0
-            and renderer.is_decorative_text_item(content.item)
-        ):
-            # prepare_content_layer hardens AFTER the affine; hardening the local layer before it
-            # is the closest scene equivalent (non-default configs only; production is 1.0).
-            layer = harden_rgba_alpha(layer, renderer.tmp_decorative_alpha_harden)
-        scene.emit_layer(layer, inputs, renderer)
-    scene.flush_direct_layer()
+                continue
+            if scene.emit_sdf_quads(quads):
+                renderer.record_native_audit(card_ref, content, "rendered-direct", None)
+                report.observe(content, "native")
+                continue
+
+        renderer.record_native_audit(card_ref, content, "unresolved", None)
+        report.observe(content, "unresolved")
     report.mem_images = len(scene.mem_images)
     report.mem_bytes = scene.mem_bytes
 
@@ -1744,7 +1769,7 @@ async def try_render_custom_profile_card_payload(
     try:
         native = load_native_renderer()
     except ImportError as exc:
-        # Also where a too-old wheel (IR_CAPABILITY < 8, no Transform node) fails open.
+        # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
         logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
         _record(OUTCOME_FALLBACK)
         return None
@@ -1816,7 +1841,7 @@ async def try_render_custom_profile_card_payload(
         context = current_request_context()
         logger.warning(
             "custom_profile.scene id=%s complete=false visible=%d native=%d hybrid=%d "
-            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues=%s",
+            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues_by_kind=%s",
             context["request_id"],
             report.visible_elements,
             report.native_elements,
@@ -1825,7 +1850,7 @@ async def try_render_custom_profile_card_payload(
             report.unresolved_elements,
             report.mem_images,
             report.mem_bytes,
-            report.issues,
+            scene_metrics["issues_by_kind"],
         )
         _record(OUTCOME_FALLBACK)
         return None

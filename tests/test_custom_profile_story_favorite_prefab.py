@@ -1,7 +1,23 @@
+from io import BytesIO
+import json
+import math
 from pathlib import Path
+import re
+import shutil
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
+import pytest
 
+try:
+    import haruki_skia_renderer as _native
+except ImportError:  # pragma: no cover - native CI job exercises this file
+    _native = None
+
+from src.core.pillow_telemetry import (
+    begin_pillow_touch_scope,
+    end_pillow_touch_scope,
+    take_pillow_touch_snapshot,
+)
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralRoundedRectOp,
@@ -13,11 +29,14 @@ from src.sekai.profile.custom_profile.renderer import (
     GENERAL_NATIVE_SIZES,
     GENERAL_PREFAB_PALETTE,
     GENERAL_TEMPLATE_TEXT,
+    PROFILE_RENDER_VIEW_H,
+    PROFILE_RENDER_VIEW_W,
     NativeContent,
     PNGRenderer,
 )
 import src.sekai.profile.custom_profile.skia as skia_mod
-from src.sekai.skia_renderer.ir_builder import IRBuilder
+from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
+from src.sekai.skia_renderer.ir_builder import IRBuilder, clip_pillow_rrect
 
 
 def _write_pattern(path: Path, size: tuple[int, int], seed: int) -> None:
@@ -213,7 +232,132 @@ def _walk_ir(node):
         yield from _walk_ir(child)
 
 
-def test_story_favorite_native_emitter_declines_inexact_rounded_banner_before_scene_mutation(
+def _rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tuple[float, int]:
+    histogram = ImageChops.difference(reference, rendered).convert("RGB").histogram()
+    channel_pixels = reference.width * reference.height * 3
+    mean = sum(value * histogram[channel * 256 + value] for channel in range(3) for value in range(256))
+    mean /= channel_pixels
+    threshold = channel_pixels * 0.99
+    cumulative = 0
+    for value in range(256):
+        cumulative += sum(histogram[channel * 256 + value] for channel in range(3))
+        if cumulative >= threshold:
+            return mean, value
+    return mean, 255
+
+
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 1,
+    reason="UnitySubscene + native text metrics renderer is required",
+)
+def test_story_favorite_category_only_fixture_is_native_pixel_pure(tmp_path: Path, monkeypatch) -> None:
+    """Exercise banner, fallback cell, and scroll without retaining a complete profile request."""
+
+    font_source = (
+        Path(__file__).resolve().parent.parent
+        / "data"
+        / "asset"
+        / "cn-assets"
+        / "startapp"
+        / "custom_profile"
+        / "font"
+        / "FOT-RodinNTLGPro-DB.ttf"
+    )
+    if not font_source.is_file():
+        pytest.skip("Custom Profile General font fixture is unavailable")
+    font_path = tmp_path / "fonts" / font_source.name
+    font_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(font_source, font_path)
+
+    banner = tmp_path / "asset" / "cn-assets" / "startapp" / "event_story" / "banner.png"
+    _write_pattern(banner, (97, 53), 37)
+    stories: list[dict[str, object]] = [
+        {
+            "shareNo": share_no,
+            "storyType": "event_story",
+            "storyId": story_id,
+            "comment": f"Category {story_id}",
+        }
+        for share_no, story_id in zip(range(9, 0, -1), range(201, 210), strict=True)
+    ]
+    renderer = _make_renderer(
+        tmp_path,
+        stories=stories,
+        story_resources={
+            "event_story:209": {"title": "Banner", "imagePath": banner.as_posix()},
+            "event_story:208": {"title": "Fallback without banner"},
+        },
+    )
+    renderer.fonts = font_path.parent
+    renderer.image_resource_for = lambda kind, item: {"fileName": "StoryFavorite"}
+    renderer.record_native_audit = lambda *args: None
+
+    angle = 8.0
+    object_data = {
+        "visible": True,
+        "position": {"x": 44.5, "y": -18.25},
+        "scale": {"x": 0.74, "y": 0.81},
+        "rotation": {
+            "z": math.sin(math.radians(angle) / 2.0),
+            "w": math.cos(math.radians(angle) / 2.0),
+        },
+    }
+    content = NativeContent(1, "general", {"id": 1}, object_data)
+    renderer.native_card_ref = lambda card: {}
+    renderer.build_native_contents = lambda card: [content]
+
+    natural = renderer.render_general_story_favorite()
+    assert natural is not None
+    prepared = renderer.prepare_transformed_layer(
+        (natural, (natural.width / 2.0, natural.height / 2.0)),
+        object_data,
+        "general",
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = skia_mod._build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {"general": {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+    scene = json.loads(ir_json)
+    nodes = list(_walk_ir(scene["root"]))
+    assert any(node.get("clip", {}).get("kind") == "pillow_rrect" for node in nodes)
+    assert any(
+        node.get("type") == "SlicedImage" and str(node.get("path", "")).endswith("bg_base_round_vertical_h6_wh.png")
+        for node in nodes
+    )
+    assert any(
+        node.get("type") == "SlicedImage" and str(node.get("path", "")).endswith("bg_base_round_vertical_h8_wh.png")
+        for node in nodes
+    )
+
+    native_image = Image.open(BytesIO(native_result["image_bytes"])).convert("RGBA")
+    mean, p99 = _rgb_diff_metrics(pillow_image, native_image)
+    assert mean <= 2.0, (mean, p99)
+    assert p99 <= 30, (mean, p99)
+    assert ImageChops.difference(pillow_image.getchannel("A"), native_image.getchannel("A")).getbbox() is None
+
+
+def test_story_favorite_native_emitter_uses_discrete_rounded_banner_mask(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -242,9 +386,69 @@ def test_story_favorite_native_emitter_declines_inexact_rounded_banner_before_sc
         staticmethod(lambda font_path: _NativeMetricsStub()),
     )
 
-    assert skia_mod._emit_native_general(renderer, content, scene) is None
+    assert skia_mod._emit_native_general(renderer, content, scene) == "native"
     assert scene.mem_images == {}
-    assert builder.build()["root"]["children"] == []
+    nodes = list(_walk_ir(builder.build()["root"]))
+    mask_group = next(node for node in nodes if node.get("clip", {}).get("kind") == "pillow_rrect")
+    assert mask_group["clip"]["radius"] == 10.0
+    assert any(node["type"] == "Image" for node in _walk_ir(mask_group))
+
+
+@pytest.mark.parametrize(("size", "radius"), [((31, 23), 7), ((403, 112), 10), ((12, 12), 99)])
+def test_native_discrete_rounded_mask_matches_pillow(tmp_path: Path, size: tuple[int, int], radius: int) -> None:
+    native = pytest.importorskip("haruki_skia_renderer")
+    builder = IRBuilder(
+        size[0],
+        size[1],
+        assets_base_dir=str(tmp_path),
+        font_dir=str(tmp_path),
+        default_font="unused.ttf",
+        bold_font="unused.ttf",
+    )
+    with builder.group(size=size, clip=clip_pillow_rrect(radius)):
+        builder.rect((0, 0), size, fill=(255, 255, 255, 255))
+
+    result = native.render_scene(json.dumps(builder.build()).encode(), {})
+    actual = Image.open(BytesIO(result["image_bytes"])).convert("RGBA").getchannel("A")
+    expected = Image.new("L", size, 0)
+    ImageDraw.Draw(expected).rounded_rectangle(
+        (0, 0, size[0] - 1, size[1] - 1),
+        radius=radius,
+        fill=255,
+    )
+    assert actual.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize(
+    ("builder_limits", "message"),
+    [
+        ({"max_node_pixels": 100}, "pillow_rrect mask 20x20 (400 pixels) exceeds limit 100"),
+        (
+            {"max_scene_bytes": 4_000},
+            "pillow_rrect mask construction requires 3200 bytes; only 2400 bytes remain",
+        ),
+    ],
+)
+def test_native_discrete_rounded_mask_obeys_scene_limits(
+    tmp_path: Path,
+    builder_limits: dict[str, int],
+    message: str,
+) -> None:
+    native = pytest.importorskip("haruki_skia_renderer")
+    builder = IRBuilder(
+        20,
+        20,
+        assets_base_dir=str(tmp_path),
+        font_dir=str(tmp_path),
+        default_font="unused.ttf",
+        bold_font="unused.ttf",
+        **builder_limits,
+    )
+    with builder.group(size=(20, 20), clip=clip_pillow_rrect(4)):
+        builder.rect((0, 0), (20, 20), fill=(255, 255, 255, 255))
+
+    with pytest.raises(RuntimeError, match=re.escape(message)):
+        native.render_scene(json.dumps(builder.build()).encode(), {})
 
 
 def test_story_favorite_without_banner_can_use_existing_native_general_primitives(

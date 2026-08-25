@@ -166,6 +166,16 @@ def clip_rrect(radius: float, corners: Sequence[bool] = (True, True, True, True)
     return {"kind": "rrect", "radius": float(radius), "corners": [bool(c) for c in corners]}
 
 
+def clip_pillow_rrect(radius: float) -> Node:
+    """A discrete Pillow ``ImageDraw.rounded_rectangle`` mask for a Group.
+
+    Unlike :func:`clip_rrect`, this is an integer-pixel mask applied with ``DstIn``. It exists
+    for legacy compositions whose alpha contract is the non-antialiased L-mode mask rather
+    than Skia's coverage-antialiased rounded clip.
+    """
+    return {"kind": "pillow_rrect", "radius": float(radius)}
+
+
 def adaptive_color(
     light: Color = (255, 255, 255, 255), dark: Color = (0, 0, 0, 255), threshold: float = 0.4, pixelwise: bool = False
 ) -> Node:

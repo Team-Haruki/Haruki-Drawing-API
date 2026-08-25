@@ -32,6 +32,13 @@ CONTENT_BUCKETS = (
     "screenFilters",
 )
 
+# These editor-only buckets require a live Unity DynamicAtlasStudio render target and uvRect.
+# GetAnotherProfileResponse (the production input) does not expose them, Haruki-Cloud's typed
+# ProfileCardData cannot forward them, and the compatibility renderer has always skipped them as
+# unresolved. Reject a handcrafted request explicitly instead of claiming a successful image
+# that silently omitted content or reviving Pillow for an input it cannot render either.
+UNSUPPORTED_DYNAMIC_BUCKETS = frozenset({"miniCharas", "screenFilters"})
+
 # TMP tags in real cards intentionally exceed the outer editor fields for decorative effects.
 # Keep compatibility headroom while still rejecting the orders-of-magnitude values that can
 # turn one glyph into a multi-gigabyte raster. Renderer-side pixel guards remain authoritative.
@@ -156,6 +163,10 @@ def validate_custom_profile_card(
             continue
         if not isinstance(items, list):
             raise ValueError(f"card.customProfileCard.{bucket} must be an array")
+        if bucket in UNSUPPORTED_DYNAMIC_BUCKETS and items:
+            raise ValueError(
+                f"card.customProfileCard.{bucket} is unsupported without Unity DynamicAtlasStudio texture data"
+            )
         element_count += len(items)
         if element_count > max_elements:
             raise ValueError(f"custom profile has {element_count} elements; limit is {max_elements}")

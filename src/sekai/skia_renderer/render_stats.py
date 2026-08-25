@@ -88,6 +88,14 @@ _SCENE_SUM_KEYS: tuple[str, ...] = (
     "mem_images",
     "mem_bytes",
 )
+_SCENE_CLASSIFICATIONS: tuple[str, ...] = (
+    "hidden",
+    "native",
+    "hybrid",
+    "noop",
+    "missing",
+    "unresolved",
+)
 
 
 def backend_for_outcome(outcome: str) -> str:
@@ -147,6 +155,23 @@ def record_scene_completeness(endpoint: str, metrics: dict | None) -> None:
                     issue_counts[status] = count
             if issue_counts:
                 issues[kind] = issue_counts
+    raw_classifications = metrics.get("classifications_by_kind")
+    classifications: dict[str, dict[str, int]] = {}
+    if isinstance(raw_classifications, dict):
+        for raw_kind, raw_counts in raw_classifications.items():
+            kind = str(raw_kind or "").strip()
+            if not kind or not isinstance(raw_counts, dict):
+                continue
+            classification_counts: dict[str, int] = {}
+            for status in _SCENE_CLASSIFICATIONS:
+                try:
+                    count = max(0, int(raw_counts.get(status, 0) or 0))
+                except (TypeError, ValueError):
+                    count = 0
+                if count:
+                    classification_counts[status] = count
+            if classification_counts:
+                classifications[kind] = classification_counts
 
     with _lock:
         bucket = _scene_completeness.setdefault(
@@ -157,6 +182,7 @@ def record_scene_completeness(endpoint: str, metrics: dict | None) -> None:
                 "incomplete": 0,
                 **dict.fromkeys(_SCENE_SUM_KEYS, 0),
                 "issues_by_kind": {},
+                "classifications_by_kind": {},
             },
         )
         bucket["checked"] += 1
@@ -168,6 +194,11 @@ def record_scene_completeness(endpoint: str, metrics: dict | None) -> None:
             kind_bucket = aggregate_issues.setdefault(kind, {"missing": 0, "unresolved": 0})
             for status, count in counts.items():
                 kind_bucket[status] += count
+        aggregate_classifications = bucket["classifications_by_kind"]
+        for kind, counts in classifications.items():
+            kind_bucket = aggregate_classifications.setdefault(kind, {})
+            for status, count in counts.items():
+                kind_bucket[status] = kind_bucket.get(status, 0) + count
 
 
 def record_render(
@@ -277,9 +308,17 @@ def get_render_stats() -> dict:
             scene_completeness = _scene_completeness.get(name)
             if scene_completeness is not None:
                 entry["scene_completeness"] = {
-                    **{key: value for key, value in scene_completeness.items() if key != "issues_by_kind"},
+                    **{
+                        key: value
+                        for key, value in scene_completeness.items()
+                        if key not in {"issues_by_kind", "classifications_by_kind"}
+                    },
                     "issues_by_kind": {
                         kind: dict(counts) for kind, counts in sorted(scene_completeness["issues_by_kind"].items())
+                    },
+                    "classifications_by_kind": {
+                        kind: dict(sorted(counts.items()))
+                        for kind, counts in sorted(scene_completeness["classifications_by_kind"].items())
                     },
                 }
             endpoints[name] = entry
