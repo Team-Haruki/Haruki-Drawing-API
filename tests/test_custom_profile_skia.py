@@ -647,6 +647,165 @@ def test_static_image_lowers_to_unity_asset_node_without_pillow_raster(tmp_path,
     assert report.native_elements == 1
 
 
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="current native renderer is required",
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "general_background",
+        "story_background",
+        "stand_member",
+        "collection",
+        "other",
+        "character_icon",
+        "material",
+        "user_interface_icon",
+        "stamp",
+    ],
+)
+def test_static_category_only_fixture_is_native_pixel_pure_with_transform(kind, tmp_path, monkeypatch):
+    """Every direct-image category uses the same asset-only scene path.
+
+    This deliberately builds one category element rather than retaining a complete profile
+    request.  The transparent source, non-uniform downscale and rotation cover the operations
+    that the two existing whole-card fixtures do not exercise for every image bucket.
+    """
+
+    asset_path = tmp_path / "category" / f"{kind}.png"
+    asset_path.parent.mkdir(parents=True)
+    source = Image.new("RGBA", (71, 53), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(source)
+    draw.rounded_rectangle((2, 3, 62, 47), radius=9, fill=(34, 126, 211, 181), outline=(245, 92, 61, 255), width=3)
+    draw.polygon(((8, 42), (34, 7), (67, 45)), fill=(242, 205, 72, 137))
+    source.save(asset_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    angle = 17.0
+    object_data = {
+        "visible": True,
+        "position": {"x": 137.25, "y": -69.75},
+        "scale": {"x": 0.63, "y": 0.81},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(layer=1, kind=kind, item={"id": 1}, object_data=object_data)
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = PROFILE_RENDER_VIEW_W / 1830.0
+        position_scale_y = PROFILE_RENDER_VIEW_H / 813.0
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def __init__(self):
+            self.stamp_assets = {1: {"imagePath": asset_path.as_posix()}}
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def image_resource_for(self, content_kind, item):
+            return {"imagePath": asset_path.as_posix()}
+
+        def resource_path(self, resource):
+            return asset_path
+
+        def resolve_request_asset_path(self, raw_path):
+            return asset_path if Path(raw_path) == asset_path else None
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible direct-image content must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {kind: {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (source, (source.width / 2.0, source.height / 2.0)),
+        object_data,
+        kind,
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+
+    white = Image.new("RGBA", pillow_image.size, (255, 255, 255, 255))
+    pillow_bbox = ImageChops.difference(pillow_image, white).convert("RGB").getbbox()
+    native_bbox = ImageChops.difference(native_image, white).convert("RGB").getbbox()
+    assert pillow_bbox is not None
+    assert native_bbox is not None
+    content_bbox = (
+        min(pillow_bbox[0], native_bbox[0]),
+        min(pillow_bbox[1], native_bbox[1]),
+        max(pillow_bbox[2], native_bbox[2]),
+        max(pillow_bbox[3], native_bbox[3]),
+    )
+    histogram = ImageChops.difference(pillow_image, native_image).crop(content_bbox).convert("RGB").histogram()
+    channel_pixels = (content_bbox[2] - content_bbox[0]) * (content_bbox[3] - content_bbox[1]) * 3
+    mean = sum(value * histogram[channel * 256 + value] for channel in range(3) for value in range(256))
+    mean /= channel_pixels
+    threshold = channel_pixels * 0.99
+    seen = 0
+    p99 = 0
+    for value in range(256):
+        seen += sum(histogram[channel * 256 + value] for channel in range(3))
+        if seen >= threshold:
+            p99 = value
+            break
+
+    # Rotated Custom Profile layers intentionally use one native matrix pass instead of
+    # Pillow's resize + rotate + supersample pipeline. This adversarial transparent fixture
+    # establishes the element-local relaxed budget; the whole-card release budget remains
+    # tighter because unchanged white pixels are included there.
+    assert mean <= 3.1, (kind, mean, p99)
+    assert p99 <= 33, (kind, mean, p99)
+
+
 @pytest.mark.parametrize("honor_type", ["normal", "birthday"])
 def test_unsupported_element_cannot_allocate_mem_before_native_honor(
     honor_type,

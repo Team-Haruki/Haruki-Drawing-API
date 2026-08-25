@@ -96,6 +96,12 @@
 - `custom_profile_card`: mean 0.844, p99 17；
 - `custom_profile_card_collections`: mean 1.307, p99 37。
 
+另有不含完整请求、profile context 或用户字段的合成类别门禁，逐一覆盖
+`general_background`、`story_background`、`stand_member`、静态 `collection`、`other`、
+`character_icon`、`material`、`user_interface_icon` 和 `stamp`。每类都使用透明素材、非等比
+缩小和 17° 旋转，结果均为 `native`、无 `mem:`、Pillow touch 为空；元素局部 RGB
+mean=2.993、p99=32，处于旋转层的显式宽松预算内。该门禁只保留类别输入，不依赖或保存整卡数据。
+
 基础三项、统计三项、Card/Deck、HonorDeck、普通 TMP 文本和完整 collections 的专项门禁均已达到：
 
 - `native == visible`、`hybrid=0`、`mem_images=mem_bytes=0`；
@@ -112,8 +118,8 @@
 hit/miss/coalesced/bypass。缺字、字体文件回退、非法 Unicode、超限 outline/field、超过
 64M 次距离计算或错误 Transform 嵌套都会令整场 fail-open，不能返回少字的“原生成功”。
 
-普通静态 collection 仍需用类别 fixture 扩大透明 bbox、缩小和旋转覆盖；omikuji 的动态
-prefab 已改用共享 display list 和 Pillow-compatible Lanczos，不再依赖整块 Pillow raster。
+普通静态 collection 与其余直接图片桶已经用类别 fixture 覆盖透明 bbox、缩小和旋转；omikuji
+的动态 prefab 已改用共享 display list 和 Pillow-compatible Lanczos，不再依赖整块 Pillow raster。
 
 ## 剩余覆盖证明（不是成功路径的 Pillow 代码）
 
@@ -214,6 +220,20 @@ uv run maturin develop --release \
 uv run python -X gil=0 scripts/skia_parity_sweep.py \
   --only custom_profile_card,custom_profile_card_collections
 ```
+
+RC 累积足够请求后，把 `/render-stats` 的聚合响应直接交给严格门禁；脚本不读取请求体，
+`--require-kind` 只检查已观察到的类别计数：
+
+```bash
+curl -fsS http://127.0.0.1:8000/render-stats | \
+  uv run python scripts/check_custom_profile_native_stats.py --min-requests 100 \
+    --require-kind general --require-kind story_background --require-kind collection \
+    --require-kind shape --require-kind text
+```
+
+对 rare 类别可在观察窗内追加 `card_member`、`honor`、`bonds_honor`、`stamp`、
+`character_icon`、`material`、`user_interface_icon`；没有观察到就保持未证明，不能用整卡数据
+补写为“已覆盖”。
 
 新增内容桶必须带独立 fixture；最终 strict gate 应断言：
 
