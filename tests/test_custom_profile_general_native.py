@@ -18,6 +18,7 @@ from src.core.pillow_telemetry import (
     end_pillow_touch_scope,
 )
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
+from src.sekai.profile.custom_profile.renderer import GENERAL_NATIVE_SIZES
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
@@ -133,6 +134,17 @@ def _rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tuple[fl
         if cumulative >= threshold:
             return mean, value
     return mean, 255
+
+
+def test_every_compat_general_prefab_is_registered_on_a_native_path() -> None:
+    shared = set(skia_mod._NATIVE_GENERAL_PREFABS)
+    card = set(skia_mod._NATIVE_CARD_GENERAL_PREFABS)
+    honor_deck = {"HonorDeck"}
+
+    assert shared.isdisjoint(card)
+    assert shared.isdisjoint(honor_deck)
+    assert card.isdisjoint(honor_deck)
+    assert shared | card | honor_deck == set(GENERAL_NATIVE_SIZES)
 
 
 def test_old_native_wheel_declines_general_text_metrics_without_pillow_compat(monkeypatch, tmp_path):
