@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,7 @@ from src.sekai.profile.custom_profile.general_prefab import (
     PillowGeneralPrefabAdapter,
     build_general_prefab_display_list,
 )
+from src.sekai.profile.custom_profile.limits import RasterSizeLimitError
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
     GENERAL_NATIVE_SIZES,
@@ -353,6 +355,43 @@ def test_custom_profile_bounded_tmp_field_warp_preserves_logical_quad(tmp_path: 
     assert bounded.affine[4:] == pytest.approx(full.affine[4:])
 
 
+def test_custom_profile_tmp_field_warp_uses_rotated_logical_corners(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        canvas_w=100,
+        canvas_h=100,
+        origin_x=50,
+        origin_y=50,
+        position_scale_x=1.0,
+        position_scale_y=1.0,
+    )
+    object_data = {
+        "position": {"x": 0, "y": 0},
+        "scale": {"x": 1, "y": 1},
+        "rotation": {"z": 0, "w": 1},
+    }
+    corners = ((-10.0, -5.0), (5.0, -10.0), (10.0, 5.0), (-5.0, 10.0))
+
+    plan = renderer.tmp_sdf_field_warp_plan(
+        (10, 20),
+        -10.0,
+        -10.0,
+        (0.0, 0.0),
+        object_data,
+        geometry_size=(20, 20),
+        geometry_corners=corners,
+    )
+
+    assert plan is not None
+    assert (plan.left, plan.top, plan.size) == (38, 38, (24, 24))
+    inv00, inv01, c, inv10, inv11, f = plan.affine
+    for point, expected in zip(corners[:3], ((0.0, 0.0), (10.0, 0.0), (10.0, 20.0)), strict=True):
+        out_x = point[0] + 50.0 - plan.left
+        out_y = point[1] + 50.0 - plan.top
+        assert inv00 * out_x + inv01 * out_y + c == pytest.approx(expected[0])
+        assert inv10 * out_x + inv11 * out_y + f == pytest.approx(expected[1])
+
+
 def test_custom_profile_direct_tmp_glyph_passes_bounded_field_and_logical_geometry(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path, canvas_w=2048, canvas_h=1260)
     style = _base_tmp_style()
@@ -408,6 +447,90 @@ def test_custom_profile_direct_tmp_glyph_passes_bounded_field_and_logical_geomet
     assert len(prepared) == 1
     assert prepared[0][0].field_size == expected_field_size
     assert prepared[0][5] == (115_200, 1_920)
+    assert prepared[0][6] is None
+
+
+def test_custom_profile_direct_tmp_glyph_keeps_rich_text_rotation_corners(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, canvas_w=200, canvas_h=100)
+    style = replace(_base_tmp_style(), rotate=90.0)
+    char_info = SimpleNamespace(
+        line_index=0,
+        visible=True,
+        style=style,
+        char="A",
+        bottom_left_x=10.0,
+        top_left_x=0.0,
+        top_right_x=0.0,
+        bottom_right_x=10.0,
+        bottom_left_y=0.0,
+        top_left_y=0.0,
+        top_right_y=10.0,
+        bottom_right_y=10.0,
+    )
+    layout = SimpleNamespace(
+        characters=[char_info],
+        lines=[SimpleNamespace(index=0, width=10.0)],
+    )
+    atlas_path = tmp_path / "atlas.png"
+    monkeypatch.setattr(renderer, "tmp_native_unrotated_quad_size", lambda *_: (10, 10))
+    monkeypatch.setattr(
+        renderer,
+        "render_tmp_sdf_character_field",
+        lambda *_args, **_kwargs: (
+            TMPStaticAtlasField(atlas_path, (1, 1), (0, 0, 1, 1), (10, 10)),
+            None,
+            (0, 0, 10, 10),
+            0,
+            0,
+        ),
+    )
+
+    prepared = renderer.prepare_tmp_direct_sdf_glyphs(
+        "font",
+        tmp_path / "font.ttf",
+        layout,
+        [20.0],
+        "left",
+        10.0,
+        0.0,
+        0.0,
+        "#000000",
+        0.0,
+        defer_static_atlas=True,
+    )
+
+    assert prepared is not None
+    assert prepared[0][6] == ((0.0, 20.0), (0.0, 10.0), (10.0, 10.0), (10.0, 20.0))
+
+
+def test_custom_profile_oversized_tmp_layer_falls_back_to_sparse_direct_render(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, canvas_w=64, canvas_h=32)
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "<line-indent=98%>A"},
+        object_data={"visible": True},
+    )
+    error = RasterSizeLimitError(
+        label="custom profile TMP text layer",
+        width=44_033,
+        height=309,
+        max_pixels=8_388_608,
+    )
+    sparse_calls: list[RasterSizeLimitError] = []
+    monkeypatch.setattr(renderer, "build_native_contents", lambda _card: [content])
+    monkeypatch.setattr(renderer, "render_content_direct_on_card", lambda *_args: False)
+    monkeypatch.setattr(renderer, "render_and_prepare_content_for_card", lambda _content: (_ for _ in ()).throw(error))
+    monkeypatch.setattr(
+        renderer,
+        "render_oversized_tmp_text_direct",
+        lambda _canvas, _content, exc: sparse_calls.append(exc) is None,
+    )
+
+    image = renderer.render_card({"customProfileCard": {}})
+
+    assert image.size == (64, 32)
+    assert sparse_calls == [error]
 
 
 def test_custom_profile_static_tmp_field_can_defer_all_atlas_pixels(tmp_path: Path, monkeypatch) -> None:

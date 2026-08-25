@@ -39,6 +39,18 @@ _TMP_RICH_TEXT_SIZE_HEADROOM = 4.0
 _TMP_RICH_TEXT_SCALE_HEADROOM = 8.0
 
 
+class RasterSizeLimitError(ValueError):
+    """A named raster allocation exceeded the configured per-layer pixel budget."""
+
+    def __init__(self, *, label: str, width: int, height: int, max_pixels: int) -> None:
+        self.label = label
+        self.width = width
+        self.height = height
+        self.pixels = width * height
+        self.max_pixels = max_pixels
+        super().__init__(f"{label} would allocate {width}x{height} ({self.pixels} pixels); limit is {max_pixels}")
+
+
 def _finite_number(value: Any, label: str) -> float:
     try:
         number = float(value)
@@ -210,5 +222,5 @@ def ensure_raster_size(size: tuple[int, int], *, max_pixels: int, label: str) ->
         raise ValueError(f"{label} must have positive dimensions, got {width}x{height}")
     pixels = width * height
     if pixels > max_pixels:
-        raise ValueError(f"{label} would allocate {width}x{height} ({pixels} pixels); limit is {max_pixels}")
+        raise RasterSizeLimitError(label=label, width=width, height=height, max_pixels=max_pixels)
     return width, height

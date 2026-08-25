@@ -74,7 +74,7 @@ from src.sekai.profile.custom_profile.honor_deck_prefab import (
     build_honor_deck_plan,
     honor_deck_request_candidates,
 )
-from src.sekai.profile.custom_profile.limits import ensure_raster_size
+from src.sekai.profile.custom_profile.limits import RasterSizeLimitError, ensure_raster_size
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
     GENERAL_DECK_CARD_RENDER_SIZE,
@@ -1683,7 +1683,30 @@ def _build_scene(
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
             report.observe(content, "hybrid")
             continue
-        rendered = renderer.render_content_for_card(content)
+        try:
+            rendered = renderer.render_content_for_card(content)
+        except RasterSizeLimitError as exc:
+            if (
+                exc.label == "custom profile TMP text layer"
+                and content.kind == "text"
+                and renderer.tmp_decorative_direct_raster
+                and renderer.text_layout == "tmp"
+                and renderer.tmp_text_render_mode == "sdf"
+            ):
+                quads = renderer.prepare_direct_sdf_quads(
+                    content.item,
+                    content.object_data,
+                    defer_static_atlas=True,
+                    defer_dynamic_font=True,
+                )
+                if quads is not None:
+                    renderer.record_native_audit(card_ref, content, "rendered-direct", None)
+                    if quads:
+                        report.observe(content, "native" if scene.emit_sdf_quads(quads) else "hybrid")
+                    else:
+                        report.observe(content, "noop")
+                    continue
+            raise
         renderer.record_native_audit(card_ref, content, rendered.status, rendered.result)
         if not isinstance(rendered.result, tuple):
             report.observe(

@@ -58,7 +58,7 @@ from src.sekai.profile.custom_profile.general_prefab import (
     story_favorite_title as resolve_story_favorite_title,
 )
 from src.sekai.profile.custom_profile.honor_deck_prefab import build_honor_deck_plan
-from src.sekai.profile.custom_profile.limits import ensure_raster_size
+from src.sekai.profile.custom_profile.limits import RasterSizeLimitError, ensure_raster_size
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
@@ -2607,7 +2607,13 @@ class PNGRenderer:
                     if self.render_content_direct_on_card(img, content):
                         self.record_native_audit(card_ref, content, "rendered-direct", None)
                         continue
-                    rendered = self.render_and_prepare_content_for_card(content)
+                    try:
+                        rendered = self.render_and_prepare_content_for_card(content)
+                    except RasterSizeLimitError as exc:
+                        if self.render_oversized_tmp_text_direct(img, content, exc):
+                            self.record_native_audit(card_ref, content, "rendered-direct", None)
+                            continue
+                        raise
                     self.record_native_audit(card_ref, content, rendered.status, rendered.result)
                     if rendered.prepared is not None:
                         img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
@@ -2648,6 +2654,24 @@ class PNGRenderer:
         if not self.is_decorative_text_item(content.item):
             return False
         return self.render_tmp_decorative_text_direct(canvas, content.item, content.object_data)
+
+    def render_oversized_tmp_text_direct(
+        self,
+        canvas: Image.Image,
+        content: NativeContent,
+        exc: RasterSizeLimitError,
+    ) -> bool:
+        """Render a sparse TMP layer by glyph after its full local surface exceeds the budget."""
+
+        if exc.label != "custom profile TMP text layer":
+            return False
+        if not self.tmp_decorative_direct_raster:
+            return False
+        if content.kind != "text" or not content.object_data.get("visible", False):
+            return False
+        if self.text_layout != "tmp" or self.tmp_text_render_mode != "sdf":
+            return False
+        return self.render_tmp_text_direct(canvas, content.item, content.object_data)
 
     def render_content_for_card(self, content: NativeContent) -> RenderedLayer:
         if not content.object_data.get("visible", False):
@@ -9963,6 +9987,14 @@ class PNGRenderer:
         item: dict[str, Any],
         object_data: dict[str, Any],
     ) -> bool:
+        return self.render_tmp_text_direct(canvas, item, object_data)
+
+    def render_tmp_text_direct(
+        self,
+        canvas: Image.Image,
+        item: dict[str, Any],
+        object_data: dict[str, Any],
+    ) -> bool:
         import numpy as np
 
         quads = self.prepare_direct_sdf_quads(item, object_data)
@@ -9981,7 +10013,7 @@ class PNGRenderer:
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
     ) -> list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] | None:
-        """Layout + per-glyph warp half of the direct decorative path. Returns None when the
+        """Layout + per-glyph warp half of the sparse/direct TMP path. Returns None when the
         element is not eligible for the direct path (caller falls back to the raster path);
         degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
         Shading/compositing stays out: Pillow feeds each raster quad to _shade_field_with_scalars;
@@ -10161,7 +10193,7 @@ class PNGRenderer:
             )
             for field, *_ in direct_glyphs
         )
-        for field_img, glyph_asset, style, local_left, local_top, geometry_size in direct_glyphs:
+        for field_img, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners in direct_glyphs:
             if isinstance(field_img, TMPDynamicFontField):
                 plan = self.tmp_sdf_field_warp_plan(
                     field_img.field_size,
@@ -10170,6 +10202,7 @@ class PNGRenderer:
                     pivot,
                     object_data,
                     geometry_size=geometry_size,
+                    geometry_corners=geometry_corners,
                     max_output_bytes=self.max_scene_bytes - retained_field_bytes,
                 )
                 if plan is None:
@@ -10206,6 +10239,7 @@ class PNGRenderer:
                     pivot,
                     object_data,
                     geometry_size=geometry_size,
+                    geometry_corners=geometry_corners,
                     max_output_bytes=self.max_scene_bytes - retained_field_bytes,
                 )
                 if plan is None:
@@ -10237,6 +10271,7 @@ class PNGRenderer:
                 pivot,
                 object_data,
                 geometry_size=geometry_size,
+                geometry_corners=geometry_corners,
                 max_output_bytes=self.max_scene_bytes - retained_field_bytes,
             )
             if warped is None:
@@ -10275,6 +10310,7 @@ class PNGRenderer:
                 float,
                 float,
                 tuple[int, int],
+                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
             ]
         ]
         | None
@@ -10291,6 +10327,7 @@ class PNGRenderer:
                 float,
                 float,
                 tuple[int, int],
+                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
             ]
         ] = []
         retained_field_bytes = 0
@@ -10302,8 +10339,6 @@ class PNGRenderer:
                 if not char_info.visible:
                     continue
                 style = char_info.style
-                if abs(style.rotate) >= 1.0e-6:
-                    return None
                 run = TextRun(char_info.char, style)
                 if self.use_em_block(run):
                     return None
@@ -10344,7 +10379,17 @@ class PNGRenderer:
                     char_info.top_right_y,
                     char_info.bottom_right_y,
                 )
-                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top, geometry_size))
+                geometry_corners = None
+                if abs(style.rotate) >= 1.0e-6:
+                    geometry_corners = (
+                        (x_origin + char_info.top_left_x, baseline_y - char_info.top_left_y),
+                        (x_origin + char_info.top_right_x, baseline_y - char_info.top_right_y),
+                        (x_origin + char_info.bottom_right_x, baseline_y - char_info.bottom_right_y),
+                        (x_origin + char_info.bottom_left_x, baseline_y - char_info.bottom_left_y),
+                    )
+                direct_glyphs.append(
+                    (field_img, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners)
+                )
         return direct_glyphs
 
     def transformed_local_point(
@@ -10375,6 +10420,9 @@ class PNGRenderer:
         object_data: dict[str, Any],
         *,
         geometry_size: tuple[int, int] | None = None,
+        geometry_corners: (
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None
+        ) = None,
         max_output_bytes: int | None = None,
     ) -> TMPFieldWarpPlan | None:
         """Build the pixel-free geometry plan shared by Pillow and native atlas fields."""
@@ -10385,10 +10433,16 @@ class PNGRenderer:
         if geometry_w <= 0 or geometry_h <= 0:
             return None
 
-        p00 = self.transformed_local_point(object_data, pivot, local_left, local_top)
-        p10 = self.transformed_local_point(object_data, pivot, local_left + geometry_w, local_top)
-        p01 = self.transformed_local_point(object_data, pivot, local_left, local_top + geometry_h)
-        p11 = self.transformed_local_point(object_data, pivot, local_left + geometry_w, local_top + geometry_h)
+        if geometry_corners is None:
+            local_corners = (
+                (local_left, local_top),
+                (local_left + geometry_w, local_top),
+                (local_left + geometry_w, local_top + geometry_h),
+                (local_left, local_top + geometry_h),
+            )
+        else:
+            local_corners = geometry_corners
+        p00, p10, p11, p01 = (self.transformed_local_point(object_data, pivot, x, y) for x, y in local_corners)
         corners = (p00, p10, p11, p01)
         pad = 2
         left = max(0, math.floor(min(x for x, _ in corners)) - pad)
@@ -10439,6 +10493,9 @@ class PNGRenderer:
         object_data: dict[str, Any],
         *,
         geometry_size: tuple[int, int] | None = None,
+        geometry_corners: (
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None
+        ) = None,
         max_output_bytes: int | None = None,
     ) -> tuple[Image.Image, int, int] | None:
         """Warp an L field with Pillow's BICUBIC affine path using the shared geometry plan."""
@@ -10449,6 +10506,7 @@ class PNGRenderer:
             pivot,
             object_data,
             geometry_size=geometry_size,
+            geometry_corners=geometry_corners,
             max_output_bytes=max_output_bytes,
         )
         if plan is None:

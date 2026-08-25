@@ -41,6 +41,7 @@ from src.core.pillow_telemetry import (
 import src.core.pjsk.profile as route_mod
 from src.sekai.profile.custom_profile.card_prefab import CardCoverArtOp, CardDisplayList
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
+from src.sekai.profile.custom_profile.limits import RasterSizeLimitError
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
@@ -386,6 +387,66 @@ def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
     assert sum(len(entry[2]) for entry in mem_images.values()) == 2 * 4 * 4 * 4
     assert report.complete
     assert report.hybrid_elements == 2
+
+
+def test_scene_oversized_tmp_layer_retries_as_sparse_native_quads(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "<line-indent=98.4%><rotate=90>A"},
+        object_data={"visible": True},
+    )
+    error = RasterSizeLimitError(
+        label="custom profile TMP text layer",
+        width=44_033,
+        height=309,
+        max_pixels=8_388_608,
+    )
+
+    class _Renderer:
+        tmp_decorative_direct_raster = True
+        text_layout = "tmp"
+        tmp_text_render_mode = "sdf"
+
+        def __init__(self):
+            self.direct_calls = []
+            self.audit = []
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def is_decorative_text_item(self, item):
+            return False
+
+        def render_content_for_card(self, content):
+            raise error
+
+        def prepare_direct_sdf_quads(self, item, object_data, **kwargs):
+            self.direct_calls.append((item, object_data, kwargs))
+            return []
+
+        def record_native_audit(self, *args):
+            self.audit.append(args)
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+    renderer = _Renderer()
+
+    _, mem_images, report = _build_scene(renderer, {})
+
+    assert mem_images == {}
+    assert renderer.direct_calls == [
+        (
+            content.item,
+            content.object_data,
+            {"defer_static_atlas": True, "defer_dynamic_font": True},
+        )
+    ]
+    assert renderer.audit[-1][2:] == ("rendered-direct", None)
+    assert report.complete
+    assert report.noop_elements == 1
 
 
 def test_sdf_shape_lowers_to_asset_node_without_pillow_raster(tmp_path, monkeypatch):
