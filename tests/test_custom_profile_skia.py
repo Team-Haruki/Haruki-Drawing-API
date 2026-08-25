@@ -1627,6 +1627,220 @@ def test_synthetic_honor_full_card_native_parity_with_rotation_and_two_stage_sca
     assert local_p99 <= 25, (honor_type, local_mean, local_p99)
 
 
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "ASSET_INFO_CAPABILITY", 0) < 1,
+    reason="asset-backed bonds honor renderer is required",
+)
+@pytest.mark.parametrize("is_main_honor", [False, True], ids=["sub", "main"])
+def test_bonds_honor_category_only_fixture_is_native_pixel_pure(is_main_honor, tmp_path, monkeypatch):
+    from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets
+    from src.sekai.honor.model import HonorRequest
+    import src.sekai.skia_renderer.canvas as canvas_mod
+
+    badge_size = (380, 80) if is_main_honor else (180, 80)
+    paths = {
+        name: tmp_path / f"{name}.png" for name in ("left", "right", "one", "two", "mask", "frame", "word", "lv", "lv6")
+    }
+
+    left = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(left).rounded_rectangle(
+        (0, 0, badge_size[0] - 1, badge_size[1] - 1),
+        radius=12,
+        fill=(34, 91, 178, 239),
+    )
+    right = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(right).polygon(
+        ((0, 0), (badge_size[0] - 1, 0), (badge_size[0] - 20, badge_size[1] - 1), (18, badge_size[1] - 1)),
+        fill=(207, 69, 136, 219),
+    )
+    one = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(one).ellipse((4, 4, 95, 95), fill=(246, 197, 65, 232), outline=(255, 255, 255, 255), width=4)
+    two = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(two).rounded_rectangle(
+        (6, 6, 93, 93),
+        radius=18,
+        fill=(76, 211, 172, 221),
+        outline=(255, 255, 255, 255),
+        width=4,
+    )
+    mask = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (3, 3, badge_size[0] - 4, badge_size[1] - 4),
+        radius=13,
+        fill=(255, 255, 255, 224),
+    )
+    frame = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(frame).rounded_rectangle(
+        (1, 1, badge_size[0] - 2, badge_size[1] - 2),
+        radius=12,
+        outline=(250, 250, 255, 211),
+        width=3,
+    )
+    word = Image.new("RGBA", (92, 24), (0, 0, 0, 0))
+    ImageDraw.Draw(word).rounded_rectangle((0, 0, 91, 23), radius=5, fill=(255, 238, 145, 203))
+    lv = Image.new("RGBA", (22, 22), (255, 213, 66, 221))
+    lv6 = Image.new("RGBA", (22, 22), (238, 89, 142, 221))
+    images = {
+        "bonds_bg": left,
+        "bonds_bg2": right,
+        "chara_icon_1": one,
+        "chara_icon_2": two,
+        "mask_img": mask,
+        "frame_img": frame,
+        "word_img": word if is_main_honor else None,
+        "lv_img": lv,
+        "lv6_img": lv6,
+    }
+    for key, image in {
+        "left": left,
+        "right": right,
+        "one": one,
+        "two": two,
+        "mask": mask,
+        "frame": frame,
+        "word": word,
+        "lv": lv,
+        "lv6": lv6,
+    }.items():
+        image.save(paths[key])
+
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+    request_payload = {
+        "honor_type": "bonds",
+        "honor_level": 7,
+        "honor_rarity": "highest",
+        "is_main_honor": is_main_honor,
+        "bonds_bg_path": paths["left"].as_posix(),
+        "bonds_bg_path2": paths["right"].as_posix(),
+        "chara_icon_path": paths["one"].as_posix(),
+        "chara_icon_path2": paths["two"].as_posix(),
+        "mask_img_path": paths["mask"].as_posix(),
+        "frame_img_path": paths["frame"].as_posix(),
+        "lv_img_path": paths["lv"].as_posix(),
+        "lv6_img_path": paths["lv6"].as_posix(),
+    }
+    if is_main_honor:
+        request_payload["word_img_path"] = paths["word"].as_posix()
+    honor_request = HonorRequest.model_validate(request_payload)
+    angle = 9.0
+    object_data = {
+        "visible": True,
+        "position": {"x": 71.5, "y": -42.25},
+        "scale": {"x": 0.86, "y": 1.09},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(
+        layer=1,
+        kind="bonds_honor",
+        item={"id": 456, "fullSize": is_main_honor, "wordId": 0, "inverse": False},
+        object_data=object_data,
+    )
+    slot_key = f"456:7:{'main' if is_main_honor else 'sub'}:0:normal"
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = 1.113
+        position_scale_y = 1.087
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def __init__(self):
+            self.bonds_honor_requests = {slot_key: request_payload}
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def user_bonds_honor_level_for(self, honor_id):
+            return 7
+
+        def bonds_honor_slot_key(
+            self,
+            honor_id,
+            level,
+            full_size,
+            word_id,
+            inverse,
+            use_unit_virtual_singer=False,
+        ):
+            assert not use_unit_virtual_singer
+            return f"{honor_id}:{level}:{'main' if full_size else 'sub'}:{word_id}:{'reverse' if inverse else 'normal'}"
+
+        def resolve_request_asset_path(self, raw_path):
+            path = Path(raw_path)
+            return path.resolve() if path.is_file() else None
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible bonds honor must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {"bonds_honor": {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+    scene = json.loads(ir_json)
+    assert any(node.get("blend") == "paste_lerp" for node in _walk_ir_nodes(scene["root"]["children"]))
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+    pillow_badge = compose_full_honor_image_from_loaded_assets(honor_request, images)
+    assert pillow_badge is not None
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (pillow_badge, (pillow_badge.width / 2.0, pillow_badge.height / 2.0)),
+        object_data,
+        "bonds_honor",
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
+
+    assert mean <= 3.5, (is_main_honor, mean, p99)
+    assert p99 <= 35, (is_main_honor, mean, p99)
+
+
 # ------------------------------- the route contract -------------------------------
 
 

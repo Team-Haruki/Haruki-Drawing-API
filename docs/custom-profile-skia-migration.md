@@ -143,8 +143,10 @@ slot/request/素材时整元素 fallback，禁止“部分原生”。
 
 bonds 的共享几何 plan 明确表示“整图 resize → destination clip”，没有误写成 IR
 `source_rect`（后者是先 crop source 再 resize）；frame/word/star 等覆盖层通过
-`paste_lerp` 保留历史 alpha-mask paste。代码路径已经原生化，发布覆盖声明前仍需补
-bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
+`paste_lerp` 保留历史 alpha-mask paste。bonds main/sub 现均有不含整卡数据的类别级像素
+门禁，覆盖双背景、双头像、mask、frame、word、等级图标、非等比缩放与旋转；两者均为
+native-pure、无 `mem:`。HonorDeck 已验证原子 slot 预检和同一 bonds 子树嵌入；生产覆盖声明
+仍须在新版本聚合统计中观察到实际 `bonds_honor.native`，不能用完整请求替代。
 
 ### B. Card Member 与 General Prefab
 
