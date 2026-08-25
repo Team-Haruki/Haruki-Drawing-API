@@ -156,8 +156,9 @@ bonds main/sub 与 HonorDeck bonds slot 的真实 capture。
   （403,920 B）和 `HonorDeck`（700,000 B）已经全部清零；两张现有真实 fixture 均无
   hybrid raster。
 - 卡牌等级条的 `Rect blend="src"` 和精确 Pillow Lanczos 已完成。顶层 `card_member`
-  已有严格的 asset-backed synthetic 门禁，但仍缺真实 capture；发布 native 覆盖声明时
-  必须补 full/clip 各一张真实输入。
+  已有严格的类别级 asset-backed 像素门禁：full/clip 分别覆盖 cover-resize/crop、透明素材、
+  非等比缩放和旋转，均为 native-pure、无 `mem:`；生产覆盖声明仍须由新版本的
+  `classifications_by_kind.card_member.native` 证明真实流量确实走过该路径，不保留整卡 capture。
 - `StoryFavorite` 已完成共享布局与原生离散圆角 mask；synthetic banner 的 mask alpha 已
   逐字节对齐。现有两张 capture 的 favorites 都为空，发布类别覆盖声明前仍需补 banner、
   fallback、超过八项滚动三类最小脱敏 fixture。

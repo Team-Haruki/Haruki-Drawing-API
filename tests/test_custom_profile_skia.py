@@ -37,7 +37,11 @@ from src.core.pillow_telemetry import (
     take_pillow_touch_snapshot,
 )
 import src.core.pjsk.profile as route_mod
-from src.sekai.profile.custom_profile.card_prefab import CardCoverArtOp, CardDisplayList
+from src.sekai.profile.custom_profile.card_prefab import (
+    CardCoverArtOp,
+    CardDisplayList,
+    PillowCardAdapter,
+)
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
 from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
@@ -98,6 +102,32 @@ def _walk_ir_nodes(nodes):
     for node in nodes:
         yield node
         yield from _walk_ir_nodes(node.get("children", []))
+
+
+def _local_rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tuple[float, int]:
+    assert reference.size == rendered.size
+    white = Image.new("RGBA", reference.size, (255, 255, 255, 255))
+    reference_bbox = ImageChops.difference(reference, white).convert("RGB").getbbox()
+    rendered_bbox = ImageChops.difference(rendered, white).convert("RGB").getbbox()
+    assert reference_bbox is not None
+    assert rendered_bbox is not None
+    content_bbox = (
+        min(reference_bbox[0], rendered_bbox[0]),
+        min(reference_bbox[1], rendered_bbox[1]),
+        max(reference_bbox[2], rendered_bbox[2]),
+        max(reference_bbox[3], rendered_bbox[3]),
+    )
+    histogram = ImageChops.difference(reference, rendered).crop(content_bbox).convert("RGB").histogram()
+    channel_pixels = (content_bbox[2] - content_bbox[0]) * (content_bbox[3] - content_bbox[1]) * 3
+    mean = sum(value * histogram[channel * 256 + value] for channel in range(3) for value in range(256))
+    mean /= channel_pixels
+    threshold = channel_pixels * 0.99
+    seen = 0
+    for value in range(256):
+        seen += sum(histogram[channel * 256 + value] for channel in range(3))
+        if seen >= threshold:
+            return mean, value
+    return mean, 255
 
 
 # ------------------------- fail-open outcomes (no native needed) -------------------------
@@ -774,29 +804,7 @@ def test_static_category_only_fixture_is_native_pixel_pure_with_transform(kind, 
     )
     pillow_image.alpha_composite(prepared.image, prepared.xy)
 
-    white = Image.new("RGBA", pillow_image.size, (255, 255, 255, 255))
-    pillow_bbox = ImageChops.difference(pillow_image, white).convert("RGB").getbbox()
-    native_bbox = ImageChops.difference(native_image, white).convert("RGB").getbbox()
-    assert pillow_bbox is not None
-    assert native_bbox is not None
-    content_bbox = (
-        min(pillow_bbox[0], native_bbox[0]),
-        min(pillow_bbox[1], native_bbox[1]),
-        max(pillow_bbox[2], native_bbox[2]),
-        max(pillow_bbox[3], native_bbox[3]),
-    )
-    histogram = ImageChops.difference(pillow_image, native_image).crop(content_bbox).convert("RGB").histogram()
-    channel_pixels = (content_bbox[2] - content_bbox[0]) * (content_bbox[3] - content_bbox[1]) * 3
-    mean = sum(value * histogram[channel * 256 + value] for channel in range(3) for value in range(256))
-    mean /= channel_pixels
-    threshold = channel_pixels * 0.99
-    seen = 0
-    p99 = 0
-    for value in range(256):
-        seen += sum(histogram[channel * 256 + value] for channel in range(3))
-        if seen >= threshold:
-            p99 = value
-            break
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
 
     # Rotated Custom Profile layers intentionally use one native matrix pass instead of
     # Pillow's resize + rotate + supersample pipeline. This adversarial transparent fixture
@@ -804,6 +812,137 @@ def test_static_category_only_fixture_is_native_pixel_pure_with_transform(kind, 
     # tighter because unchanged white pixels are included there.
     assert mean <= 3.1, (kind, mean, p99)
     assert p99 <= 33, (kind, mean, p99)
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="current native renderer is required",
+)
+@pytest.mark.parametrize(
+    ("card_kind", "native_size", "cover_size", "crop_align", "blend"),
+    [
+        pytest.param("full", (220, 124), (220.0, 124.0), (0.5, 0.5), "src", id="full"),
+        pytest.param("deck", (96, 132), (96.0, 158.0), (0.5, 0.0), "src_over", id="clip"),
+    ],
+)
+def test_card_member_category_only_fixture_is_native_pixel_pure(
+    card_kind,
+    native_size,
+    cover_size,
+    crop_align,
+    blend,
+    tmp_path,
+    monkeypatch,
+):
+    """Top-level full and clip card members need no whole-profile fixture."""
+
+    asset_path = tmp_path / "category" / f"card_member_{card_kind}.png"
+    asset_path.parent.mkdir(parents=True)
+    source = Image.new("RGBA", (137, 181), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(source)
+    draw.rectangle((4, 6, 130, 175), fill=(36, 102, 191, 218))
+    draw.ellipse((18, 22, 119, 123), fill=(248, 194, 72, 181), outline=(253, 92, 104, 255), width=4)
+    draw.polygon(((9, 169), (68, 77), (128, 169)), fill=(72, 220, 173, 147))
+    source.save(asset_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    display_list = CardDisplayList(
+        card_kind,
+        native_size,
+        (CardCoverArtOp(asset_path, cover_size, crop_align=crop_align, blend=blend),),
+    )
+    angle = -13.0
+    object_data = {
+        "visible": True,
+        "position": {"x": -91.5, "y": 63.25},
+        "scale": {"x": 0.72, "y": 0.58},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(layer=1, kind="card_member", item={"id": 1}, object_data=object_data)
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = PROFILE_RENDER_VIEW_W / 1830.0
+        position_scale_y = PROFILE_RENDER_VIEW_H / 813.0
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def build_card_member_display_list(self, item):
+            return display_list
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible card member must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {"card_member": {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+    adapter = PillowCardAdapter(
+        lambda size, bold: None,
+        lambda *args, **kwargs: False,
+        lambda name: None,
+        lambda path: Image.open(path).convert("RGBA") if path == asset_path else None,
+    )
+    card_image = adapter.render(display_list)
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (card_image, (card_image.width / 2.0, card_image.height / 2.0)),
+        object_data,
+        "card_member",
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
+
+    assert mean <= 3.5, (card_kind, mean, p99)
+    assert p99 <= 40, (card_kind, mean, p99)
 
 
 @pytest.mark.parametrize("honor_type", ["normal", "birthday"])
