@@ -114,3 +114,17 @@ def test_custom_profile_native_stats_rejects_aggregate_http_5xx() -> None:
 
     assert summary["http_5xx"] == 1
     assert "http_5xx=1" in failures
+
+
+def test_custom_profile_native_stats_rejects_missing_http_5xx_total() -> None:
+    document = _stats()
+    del document["http_requests"]["server_errors"]["total"]
+
+    summary, failures = validate_custom_profile_stats(
+        document,
+        min_requests=3,
+        require_zero_http_5xx=True,
+    )
+
+    assert "http_5xx" not in summary
+    assert "aggregate HTTP server-error total is missing" in failures

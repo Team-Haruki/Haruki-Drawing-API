@@ -146,6 +146,8 @@ def validate_custom_profile_stats(
             server_errors = http_requests.get("server_errors")
             if not isinstance(server_errors, dict):
                 failures.append("aggregate HTTP server-error statistics are missing")
+            elif "total" not in server_errors:
+                failures.append("aggregate HTTP server-error total is missing")
             else:
                 http_5xx = _integer(server_errors, "total")
                 summary["http_5xx"] = http_5xx
