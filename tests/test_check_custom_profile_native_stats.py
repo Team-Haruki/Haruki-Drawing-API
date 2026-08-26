@@ -128,3 +128,29 @@ def test_custom_profile_native_stats_rejects_missing_http_5xx_total() -> None:
 
     assert "http_5xx" not in summary
     assert "aggregate HTTP server-error total is missing" in failures
+
+
+def test_custom_profile_native_stats_checks_http_5xx_before_first_render() -> None:
+    document = {
+        "http_requests": {"server_errors": {"total": 0}},
+        "renders": {"endpoints": {}},
+    }
+
+    summary, failures = validate_custom_profile_stats(
+        document,
+        min_requests=1,
+        require_zero_http_5xx=True,
+    )
+
+    assert summary == {
+        "total": 0,
+        "skia": 0,
+        "cache_hit": 0,
+        "native_pure": 0,
+        "scene_complete": 0,
+        "native_elements": 0,
+        "noop_elements": 0,
+        "native_categories": 0,
+        "http_5xx": 0,
+    }
+    assert failures == ["total requests 0 is below required 1"]

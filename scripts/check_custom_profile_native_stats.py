@@ -51,6 +51,11 @@ def _endpoint_stats(document: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(endpoints, dict):
         raise ValueError("render statistics do not contain endpoints")
     endpoint = endpoints.get(ENDPOINT)
+    if endpoint is None:
+        # Render counters are created lazily.  A freshly started process therefore has no
+        # Custom Profile entry yet; represent that legitimate state as zero traffic so the
+        # independent aggregate HTTP 5xx gate can still be evaluated.
+        return {"scene_completeness": {"classifications_by_kind": {}}}
     if not isinstance(endpoint, dict):
         raise ValueError(f"render statistics do not contain {ENDPOINT}")
     return endpoint
