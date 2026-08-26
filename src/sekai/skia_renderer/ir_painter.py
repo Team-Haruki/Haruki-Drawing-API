@@ -276,6 +276,32 @@ class IRPainter(Painter):
         )
         return self
 
+    def anchored_text(
+        self,
+        text,
+        pos,
+        font,
+        fill=(0, 0, 0, 255),
+        align="left",
+        baseline="ascender",
+        exclude_on_hash=False,
+    ):
+        del exclude_on_hash
+        if align not in {"left", "center", "right"} or baseline not in {"ascender", "alphabetic"}:
+            raise ValueError(f"unsupported anchored text alignment: {align}/{baseline}")
+        role, size, font_name = self._font(font)
+        self._b.text(
+            text,
+            self._abs(pos),
+            role,
+            size,
+            align=align,
+            baseline=baseline,
+            fill=_rgba(fill),
+            font_name=font_name,
+        )
+        return self
+
     def _gradient_text_fill(self, fill, text, role, size, font_name, apos):
         """Map a Painter gradient text fill to an absolute-coord IR gradient over the glyph
         overlay (text ink size + 10px padding, anchored at the draw position)."""

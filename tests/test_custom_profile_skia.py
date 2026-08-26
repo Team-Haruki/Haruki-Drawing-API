@@ -2,9 +2,9 @@
 
 The custom profile card is a hand-built IR scene (an argued exemption in
 test_route_render_contract.py): ``try_render_custom_profile_card_payload`` must follow the honor
-doctrine — fail-open, exactly one /render-stats outcome per attempt, never raise — and the route
-must fall back to the Pillow compose (preserving its canonical ValueError -> 400) whenever the
-Skia path declines.
+doctrine — fail-open, exactly one /render-stats outcome per committed attempt, never raise — and
+the route must fall back to the Pillow compose whenever the Skia path declines. A canonical
+ValueError -> 400 is rejected input rather than committed render traffic.
 
 The unit tests fake everything native. Only the final end-to-end test needs the built extension
 (at the production ``REQUIRED_NATIVE_IR_CAPABILITY`` — the payload may exercise Transform,
@@ -30,6 +30,7 @@ try:
 except ImportError:  # pragma: no cover - extension not built
     _native = None
 
+from src.core.debug import current_render_backend
 from src.core.image_payload import EncodedImagePayload
 from src.core.pillow_telemetry import (
     begin_pillow_touch_scope,
@@ -59,7 +60,13 @@ from src.sekai.profile.custom_profile.skia import (
 )
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
-from src.sekai.skia_renderer.render_stats import get_render_stats, reset_render_stats
+from src.sekai.skia_renderer.render_stats import (
+    OUTCOME_ERROR,
+    OUTCOME_FALLBACK,
+    OUTCOME_SKIA,
+    get_render_stats,
+    reset_render_stats,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card.json"
@@ -191,6 +198,7 @@ def test_pool_render_exception_is_contained_and_recorded(monkeypatch):
     stats = _endpoint_stats()
     assert stats["error"] == 1
     assert stats["total"] == 1
+    assert sum(stats["errors_by_stage"].values()) == 1
     assert not _Native.called
 
 
@@ -1855,13 +1863,13 @@ def test_route_serves_the_skia_payload_without_composing(monkeypatch):
         encode_elapsed=0.0,
     )
 
-    async def fake_try_render(request):
-        return payload
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(payload, OUTCOME_SKIA)
 
     async def _must_not_compose(request):  # pragma: no cover - must not run
         raise AssertionError("compose must not run when Skia produced a payload")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", _must_not_compose)
 
     response = asyncio.run(route_mod.custom_profile_card(_request()))
@@ -1870,38 +1878,75 @@ def test_route_serves_the_skia_payload_without_composing(monkeypatch):
 
 
 def test_route_falls_back_to_pillow_compose(monkeypatch):
-    async def fake_try_render(request):
-        return None  # Skia declined
+    seen_backend = None
+
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK)
 
     async def fake_compose(request):
         return Image.new("RGBA", (8, 8), (255, 0, 0, 128))
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    original_image_to_response = route_mod.image_to_response
+
+    async def observing_image_to_response(*args, **kwargs):
+        nonlocal seen_backend
+        seen_backend = current_render_backend()
+        return await original_image_to_response(*args, **kwargs)
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
+    monkeypatch.setattr(route_mod, "image_to_response", observing_image_to_response)
 
     response = asyncio.run(route_mod.custom_profile_card(_request()))
     # The route pins PNG regardless of the global EXPORT_IMAGE_FORMAT (the card has transparency).
     assert response.media_type == "image/png"
     assert Image.open(BytesIO(response.body)).format == "PNG"
+    assert _endpoint_stats()["fallback"] == 1
+    assert seen_backend == "skia_fallback"
+
+
+def test_route_records_skia_error_when_pillow_recovers(monkeypatch):
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="native_render",
+        )
+
+    async def fake_compose(request):
+        return Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
+    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
+
+    response = asyncio.run(route_mod.custom_profile_card(_request()))
+    assert response.status_code == 200
+    stats = _endpoint_stats()
+    assert stats["error"] == 1
+    assert stats["errors_by_stage"] == {"native_render": 1}
 
 
 def test_route_preserves_the_value_error_400(monkeypatch):
-    """try_render never raises, so an unrenderable card must still reach the Pillow compose and
-    surface its canonical ValueError as a 400."""
+    """A rejected request reaches the canonical 400 without poisoning the native gate."""
 
-    async def fake_try_render(request):
-        return None
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="native_render",
+        )
 
     async def fake_compose(request):
         raise ValueError("bad card")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
 
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(route_mod.custom_profile_card(_request()))
     assert excinfo.value.status_code == 400
     assert "bad card" in excinfo.value.detail
+    assert get_render_stats()["endpoints"] == {}
 
 
 def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
@@ -1927,7 +1972,7 @@ def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
     async def _must_not_render(request):  # pragma: no cover - must not run
         raise AssertionError("validation must run before either renderer")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", _must_not_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", _must_not_render)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", _must_not_render)
 
     with pytest.raises(HTTPException) as excinfo:

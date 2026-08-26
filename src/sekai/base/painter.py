@@ -1009,6 +1009,31 @@ class Painter:
         """
         return self.add_operation("_impl_text", exclude_on_hash, (text, pos, font, fill, align))
 
+    def anchored_text(
+        self,
+        text: str,
+        pos: Position,
+        font: FontDesc | Font,
+        fill: Color = BLACK,
+        align: str = "left",
+        baseline: str = "ascender",
+        exclude_on_hash: bool = False,
+    ) -> Self:
+        """Draw solid text from an explicit horizontal anchor and vertical baseline.
+
+        Unlike :meth:`text`, this operation does not translate through the historical
+        CJK-top convention or measure the string while the widget tree is built. It is for
+        layouts whose source coordinates already carry an ImageDraw-compatible anchor, such
+        as Unity UI labels centred inside a fixed slot. Both the Pillow and Render-IR
+        backends resolve the anchor in their own renderer, so lowering a native subtree does
+        not touch Pillow merely to compute an x/y offset.
+        """
+        return self.add_operation(
+            "_impl_anchored_text",
+            exclude_on_hash,
+            (text, pos, font, fill, align, baseline),
+        )
+
     def paste(
         self,
         sub_img: ImageSource,
@@ -1380,6 +1405,30 @@ class Painter:
             self.img.alpha_composite(overlay, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
 
         return self
+
+    def _impl_anchored_text(
+        self,
+        text: str,
+        pos: Position,
+        font: FontDesc | Font,
+        fill: Color,
+        align: str,
+        baseline: str,
+    ) -> Self:
+        if isinstance(font, FontDesc):
+            font = get_font(font.path, font.size)
+        if align not in {"left", "center", "right"} or baseline not in {"ascender", "alphabetic"}:
+            raise ValueError(f"unsupported anchored text alignment: {align}/{baseline}")
+        x = pos[0]
+        if align != "left":
+            text_width = get_text_size(font, text)[0]
+            x -= text_width // 2 if align == "center" else text_width
+        reference_height = get_text_size(font, "哇")[1]
+        if baseline == "ascender":
+            y = pos[1] + font.getmetrics()[0] - reference_height
+        else:
+            y = pos[1] - reference_height
+        return self._impl_text(text, (x, y), font, fill, "left")
 
     def _impl_paste(
         self,

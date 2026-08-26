@@ -45,6 +45,16 @@ NATIVE_PURITY_KEYS: tuple[str, ...] = (
 )
 _NATIVE_OUTCOMES = frozenset((OUTCOME_SKIA, OUTCOME_CACHE_HIT))
 
+ERROR_STAGES: tuple[str, ...] = (
+    "renderer_init",
+    "scene_build",
+    "native_render",
+    "payload_decode",
+    "pool_dispatch",
+    "unknown",
+)
+_ERROR_STAGE_SET = frozenset(ERROR_STAGES)
+
 # Backend labels for the ``image.response`` log line.
 BACKEND_SKIA = "skia"
 BACKEND_SKIA_CACHE = "skia_cache"
@@ -74,6 +84,7 @@ _native_purity_counters: dict[str, dict[str, int]] = {}
 _pillow_touch_render_counts: dict[str, dict[str, int]] = {}
 _pillow_touch_call_counts: dict[str, dict[str, int]] = {}
 _scene_completeness: dict[str, dict] = {}
+_error_stage_counters: dict[str, dict[str, int]] = {}
 _font_fallbacks: int = 0
 
 _SCENE_SUM_KEYS: tuple[str, ...] = (
@@ -206,6 +217,7 @@ def record_render(
     outcome: str,
     *,
     pillow_touches: PillowTouchSnapshot | None = None,
+    error_stage: str | None = None,
 ) -> None:
     """Record one render attempt and consume its request-scoped Pillow touches.
 
@@ -241,6 +253,13 @@ def record_render(
             for reason, count in snapshot.counts.items():
                 render_counts[reason] = render_counts.get(reason, 0) + 1
                 call_counts[reason] = call_counts.get(reason, 0) + count
+
+        if outcome == OUTCOME_ERROR and error_stage:
+            stage = str(error_stage).strip() or "unknown"
+            if stage not in _ERROR_STAGE_SET:
+                stage = "unknown"
+            stage_counts = _error_stage_counters.setdefault(name, {})
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
 
 
 def record_worker_payload_backend(
@@ -305,6 +324,9 @@ def get_render_stats() -> dict:
                 aggregate["renders"] += reason_entry["renders"]
                 aggregate["touches"] += reason_entry["touches"]
             entry["pillow_touch_reasons"] = reasons
+            error_stages = _error_stage_counters.get(name)
+            if error_stages:
+                entry["errors_by_stage"] = dict(sorted(error_stages.items()))
             scene_completeness = _scene_completeness.get(name)
             if scene_completeness is not None:
                 entry["scene_completeness"] = {
@@ -344,4 +366,5 @@ def reset_render_stats() -> None:
         _pillow_touch_render_counts.clear()
         _pillow_touch_call_counts.clear()
         _scene_completeness.clear()
+        _error_stage_counters.clear()
         _font_fallbacks = 0

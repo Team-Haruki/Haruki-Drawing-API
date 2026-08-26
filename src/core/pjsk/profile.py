@@ -7,7 +7,7 @@ from src.core.debug import set_request_stage
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
-from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_payload
+from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_attempt
 from src.sekai.profile.drawer import compose_profile_image, try_render_profile_payload
 from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileRequest
 from src.settings import (
@@ -65,6 +65,7 @@ async def profile(request: ProfileRequest):
 
 @router.post("/custom-profile-card", summary="Generate custom profile card image")
 async def custom_profile_card(request: CustomProfileCardRenderRequest):
+    attempt = None
     try:
         validate_custom_profile_card(
             dict(request.card),
@@ -75,17 +76,24 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
         )
         async with _custom_profile_render_slots:
             set_request_stage("custom_profile_card:compose_image")
-            # Skia-first: try_render never raises (fail-open records one outcome and returns None),
-            # so an unrenderable card still reaches the Pillow compose and raises the canonical
-            # ValueError -> 400 below.
-            payload = await try_render_custom_profile_card_payload(request)
+            # Defer the aggregate backend outcome until the final HTTP result is known. A
+            # canonical ValueError -> 400 is a rejected request, not production render traffic;
+            # a Skia failure recovered by Pillow still commits ``error`` below.
+            attempt = await try_render_custom_profile_card_attempt(request)
+            attempt.tag_backend()
+            payload = attempt.payload
             if payload is None:
                 image = await compose_custom_profile_card_image(request)
             set_request_stage("custom_profile_card:image_to_response")
             if payload is not None:
-                return encoded_image_payload_to_response(payload)
-            return await image_to_response(image, export_format="png")
+                response = encoded_image_payload_to_response(payload)
+            else:
+                response = await image_to_response(image, export_format="png")
+            attempt.record()
+            return response
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if attempt is not None:
+            attempt.record()
         raise HTTPException(status_code=500, detail=str(e))

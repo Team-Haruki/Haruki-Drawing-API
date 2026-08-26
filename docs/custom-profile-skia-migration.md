@@ -236,6 +236,11 @@ curl -fsS http://127.0.0.1:8000/render-stats | \
     --require-kind shape --require-kind text --require-zero-http-5xx
 ```
 
+渲染结果计数在路由确定最终 HTTP 结果后才提交：资源尺寸等安全边界最终返回的标准 400
+属于被拒绝输入，不计入 pure-Skia 流量；若 Skia 失败而 Pillow 成功返回 200，仍记为
+`error`，不会放松门禁。`error` 另带 `renderer_init` / `scene_build` / `native_render` /
+`payload_decode` / `pool_dispatch` 的脱敏阶段计数，不记录异常消息或请求内容。
+
 对 rare 类别可在观察窗内追加 `card_member`、`honor`、`bonds_honor`、`stamp`、
 `character_icon`、`material`、`user_interface_icon`；没有观察到就保持未证明，不能用整卡数据
 补写为“已覆盖”。
