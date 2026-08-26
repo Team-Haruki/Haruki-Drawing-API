@@ -2,11 +2,25 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw
 
+from src.core.pillow_telemetry import (
+    begin_pillow_touch_scope,
+    end_pillow_touch_scope,
+    take_pillow_touch_snapshot,
+)
+from src.sekai.base.painter import (
+    WHITE,
+    Painter,
+    ascender_top_to_painter_y,
+    get_font,
+    get_font_desc,
+    get_text_size,
+)
 from src.sekai.base.utils import AssetImageRef
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets
 from src.sekai.honor.model import HonorRequest
-from src.sekai.honor.widget import build_honor_badge_canvas
+from src.sekai.honor.widget import FCAP_TEXT_SIZE, FCAP_TEXT_TOP_Y, build_honor_badge_canvas
 from src.sekai.skia_renderer.canvas import build_canvas_ir
+from src.settings import DEFAULT_BOLD_FONT
 
 
 def test_event_honor_draws_scroll_level() -> None:
@@ -38,6 +52,54 @@ def test_event_honor_draws_scroll_level() -> None:
         for y in range(text_area.height)
         for x in range(text_area.width)
     )
+
+
+def test_event_honor_preserves_legacy_bbox_rounded_text_geometry(real_fonts) -> None:
+    base = Image.new("RGBA", (380, 80), (10, 20, 30, 255))
+    scroll = Image.new("RGBA", (90, 24), (255, 0, 0, 255))
+    request = HonorRequest(
+        honor_type="normal",
+        group_type="fc_ap",
+        honor_rarity="middle",
+        honor_level=10,
+        fc_or_ap_level="137",
+        is_main_honor=True,
+    )
+
+    actual = compose_full_honor_image_from_loaded_assets(
+        request,
+        {
+            "honor_img": base,
+            "scroll_img": scroll,
+        },
+    )
+    assert actual is not None
+
+    canvas = build_honor_badge_canvas(
+        request,
+        {
+            "honor_img": base,
+            "scroll_img": scroll,
+        },
+    )
+    assert canvas is not None
+    painter = Painter(size=(380, 80))
+    canvas.draw(painter)
+    font = get_font(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE)
+    text_width = get_text_size(font, "137")[0]
+    legacy_y = ascender_top_to_painter_y(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE, FCAP_TEXT_TOP_Y)
+    anchored = [operation for operation in painter.operations if operation.func == "_impl_anchored_text"]
+    assert len(anchored) == 1
+    anchored[0].func = "_impl_text"
+    anchored[0].args = (
+        "137",
+        (265 - text_width // 2, legacy_y),
+        get_font_desc(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE),
+        WHITE,
+        "left",
+    )
+    expected = Painter._execute(painter.operations, None, (380, 80))
+    assert actual.tobytes() == expected.tobytes()
 
 
 def _bonds_request(*, main: bool = False) -> HonorRequest:
@@ -146,6 +208,48 @@ def _asset_ref(path: Path) -> AssetImageRef:
             mtime_ns=stat.st_mtime_ns,
             file_size=stat.st_size,
         )
+
+
+def test_event_honor_ir_lowering_does_not_measure_text_with_pillow(tmp_path) -> None:
+    base_path = tmp_path / "base.png"
+    scroll_path = tmp_path / "scroll.png"
+    Image.new("RGBA", (180, 80), (0, 0, 0, 0)).save(base_path)
+    Image.new("RGBA", (90, 24), (255, 0, 0, 255)).save(scroll_path)
+    request = HonorRequest(
+        honor_type="normal",
+        group_type="event",
+        honor_rarity="middle",
+        honor_level=3,
+        fc_or_ap_level="3",
+        is_main_honor=False,
+    )
+    canvas = build_honor_badge_canvas(
+        request,
+        {
+            "honor_img": _asset_ref(base_path),
+            "scroll_img": _asset_ref(scroll_path),
+        },
+    )
+    assert canvas is not None
+
+    token = begin_pillow_touch_scope()
+    try:
+        builder, mem_images = build_canvas_ir(
+            canvas,
+            assets_base_dir=str(tmp_path),
+            export_format="png",
+        )
+        touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    text_nodes = [node for node in _walk_ir(builder.build()["root"]) if node.get("type") == "Text"]
+    assert mem_images == {}
+    assert touches.counts == {}
+    assert len(text_nodes) == 1
+    assert text_nodes[0]["pos"] == [87.0, 46.0]
+    assert text_nodes[0]["align"] == "center"
+    assert text_nodes[0]["baseline"] == "ascender"
 
 
 def _walk_ir(node):

@@ -28,6 +28,16 @@ _BAD_SCENE_COUNTS = (
     "mem_bytes",
 )
 _BAD_CLASSIFICATIONS = ("hybrid", "missing", "unresolved")
+_ERROR_STAGES = frozenset(
+    {
+        "renderer_init",
+        "scene_build",
+        "native_render",
+        "payload_decode",
+        "pool_dispatch",
+        "unknown",
+    }
+)
 
 
 def _integer(mapping: dict[str, Any], key: str) -> int:
@@ -78,10 +88,31 @@ def validate_custom_profile_stats(
     native_pure = _integer(endpoint, "native_pure")
     if total < min_requests:
         failures.append(f"total requests {total} is below required {min_requests}")
+    bad_outcomes: dict[str, int] = {}
     for key in _BAD_OUTCOMES:
         value = _integer(endpoint, key)
+        bad_outcomes[key] = value
         if value:
             failures.append(f"{key}={value}")
+    raw_error_stages = endpoint.get("errors_by_stage")
+    if raw_error_stages is not None:
+        if not isinstance(raw_error_stages, dict):
+            failures.append("error stage diagnostics are malformed")
+        else:
+            error_stage_total = 0
+            for raw_stage, raw_count in sorted(raw_error_stages.items()):
+                stage = str(raw_stage or "").strip()
+                if stage not in _ERROR_STAGES:
+                    failures.append("error stage diagnostics contain an unknown category")
+                    continue
+                count = _integer({stage: raw_count}, stage)
+                error_stage_total += count
+                if count:
+                    failures.append(f"error stage {stage}={count}")
+            if error_stage_total != bad_outcomes["error"]:
+                failures.append(f"error stage total={error_stage_total} does not equal error={bad_outcomes['error']}")
+    elif bad_outcomes["error"]:
+        failures.append("error stage diagnostics are missing")
     for key in _BAD_PURITY:
         value = _integer(endpoint, key)
         if value:

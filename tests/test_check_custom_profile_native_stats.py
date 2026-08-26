@@ -81,6 +81,26 @@ def test_custom_profile_native_stats_rejects_outcome_purity_and_scene_drift() ->
     assert "required native categories not observed: stamp" in failures
 
 
+def test_custom_profile_native_stats_reports_sanitized_error_stages() -> None:
+    document = _stats()
+    endpoint = document["renders"]["endpoints"]["custom_profile_card"]
+    endpoint.update(
+        {
+            "skia": 2,
+            "error": 1,
+            "native_pure": 2,
+            "errors_by_stage": {"native_render": 1},
+        }
+    )
+    endpoint["scene_completeness"].update({"checked": 2, "complete": 2})
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3)
+
+    assert "error=1" in failures
+    assert "error stage native_render=1" in failures
+    assert not any("diagnostics are missing" in failure for failure in failures)
+
+
 def test_custom_profile_native_stats_requires_category_classifications() -> None:
     document = _stats()["renders"]
     del document["endpoints"]["custom_profile_card"]["scene_completeness"]["classifications_by_kind"]

@@ -167,6 +167,18 @@ def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
     assert "scene_completeness" not in get_render_stats()["endpoints"]["card_list"]
 
 
+def test_error_stages_are_aggregate_only_and_reset() -> None:
+    record_render("custom_profile_card", "error", error_stage="native_render")
+    record_render("custom_profile_card", "error", error_stage="native_render")
+    record_render("custom_profile_card", "error", error_stage="scene_build")
+
+    endpoint = get_render_stats()["endpoints"]["custom_profile_card"]
+    assert endpoint["errors_by_stage"] == {"native_render": 2, "scene_build": 1}
+
+    reset_render_stats()
+    assert get_render_stats()["endpoints"] == {}
+
+
 def test_font_fallbacks_are_aggregated_from_the_payload():
     """The Rust font-fallback counter is process-local, so it is invisible for the two endpoints
     that render in a spawned heavy worker. The per-render count rides back on the payload; if it

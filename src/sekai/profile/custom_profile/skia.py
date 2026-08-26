@@ -36,6 +36,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import threading
 import time
 from typing import Any
 
@@ -250,20 +251,86 @@ class CustomProfileSceneReport:
         }
 
 
-def _record(outcome: str, payload: EncodedImagePayload | None = None) -> None:
+def _record(
+    outcome: str,
+    payload: EncodedImagePayload | None = None,
+    *,
+    error_stage: str | None = None,
+) -> None:
     """Record one render attempt for /render-stats and tag the request context.
 
     Mirrors ``skia_renderer.canvas._record`` / ``honor.skia._record``: this path cannot reuse the
     canvas helper, so it records through the same public primitives instead.
     """
+    record_render(CUSTOM_PROFILE_ENDPOINT, outcome, error_stage=error_stage)
+    _tag_backend(outcome, payload)
+    if payload is not None:
+        record_native_metrics(payload.native_metrics)
+
+
+def _tag_backend(outcome: str, payload: EncodedImagePayload | None = None) -> None:
+    """Set request/log backend metadata without committing aggregate counters."""
     from src.core.debug import set_render_backend
 
-    record_render(CUSTOM_PROFILE_ENDPOINT, outcome)
     backend = backend_for_outcome(outcome)
     set_render_backend(backend)
     if payload is not None:
         payload.backend = backend
-        record_native_metrics(payload.native_metrics)
+
+
+class CustomProfileSkiaAttempt:
+    """One deferred Custom Profile backend outcome.
+
+    The route commits this only after it knows the final HTTP result. A request rejected with
+    the canonical 400 is not production render traffic and must not poison the pure-Skia gate;
+    a Skia failure recovered by a successful Pillow response is still recorded as ``error``.
+    Direct render/parity callers use :func:`try_render_custom_profile_card_payload`, which
+    commits immediately and preserves the historical payload-or-None contract.
+    """
+
+    def __init__(
+        self,
+        payload: EncodedImagePayload | None,
+        outcome: str,
+        *,
+        report: CustomProfileSceneReport | None = None,
+        error_stage: str | None = None,
+    ) -> None:
+        self.payload = payload
+        self.outcome = outcome
+        self.report = report
+        self.error_stage = error_stage
+        self._record_lock = threading.Lock()
+        self._recorded = False
+
+    def tag_backend(self) -> None:
+        """Make response/performance logs reflect this attempt before encoding starts."""
+
+        _tag_backend(self.outcome, self.payload)
+
+    def record(self) -> None:
+        """Commit aggregate metrics exactly once."""
+
+        with self._record_lock:
+            if self._recorded:
+                return
+            self._recorded = True
+        if self.report is not None:
+            record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, self.report.metrics())
+        _record(
+            self.outcome,
+            self.payload,
+            error_stage=self.error_stage,
+        )
+
+
+class _CustomProfileSkiaStageError(Exception):
+    """Internal carrier for a sanitized failure stage and any completed scene report."""
+
+    def __init__(self, stage: str, *, report: CustomProfileSceneReport | None = None) -> None:
+        super().__init__(stage)
+        self.stage = stage
+        self.report = report
 
 
 def _new_builder(width: int, height: int, *, general_font_path: Path | None = None) -> IRBuilder:
@@ -1759,20 +1826,18 @@ def _build_scene(
     return ir_json, scene.mem_images, report
 
 
-async def try_render_custom_profile_card_payload(
+async def try_render_custom_profile_card_attempt(
     request: CustomProfileCardRenderRequest,
-) -> EncodedImagePayload | None:
-    """Skia path for /profile/custom-profile-card; ``None`` means "Pillow, please"."""
+) -> CustomProfileSkiaAttempt:
+    """Build a deferred Skia attempt for the Custom Profile route."""
     if not skia_plot_enabled():
-        _record(OUTCOME_DISABLED)
-        return None
+        return CustomProfileSkiaAttempt(None, OUTCOME_DISABLED)
     try:
         native = load_native_renderer()
     except ImportError as exc:
         # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
         logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
-        _record(OUTCOME_FALLBACK)
-        return None
+        return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK)
 
     card = dict(request.card)
     profile_context = dict(request.profile_context)
@@ -1793,48 +1858,63 @@ async def try_render_custom_profile_card_payload(
             CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR,
         )
 
-        renderer = PNGRenderer(
-            masterdata=None,
-            assets=_drawer._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
-            fonts=_drawer._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
-            resources=resources,
-            tmp_font_metadata=_drawer._optional_region_file(
-                "custom_profile_tmp_font_metadata", CUSTOM_PROFILE_TMP_FONT_METADATA, region
-            ),
-            shape_sprite_dir=_drawer._require_region_path(
-                "custom_profile_shape_sprite_dir", CUSTOM_PROFILE_SHAPE_SPRITE_DIR, region
-            ),
-            profile_context=profile_context,
-            parallel_workers=max(1, int(CUSTOM_PROFILE_PARALLEL_WORKERS or 1)),
-            parallel_stage="transform",
-            clip_canvas_transform=True,
-            canvas_w=int(PROFILE_RENDER_VIEW_W),
-            canvas_h=int(PROFILE_RENDER_VIEW_H),
-            origin_x=PROFILE_RENDER_VIEW_W / 2.0,
-            origin_y=PROFILE_RENDER_VIEW_H / 2.0,
-            unity_ui_sprite_dir=_drawer._require_region_path(
-                "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
-            ),
-            region=region,
-            max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-            max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
-        )
-        ir_json, mem_images, report = _build_scene(renderer, card)
+        try:
+            renderer = PNGRenderer(
+                masterdata=None,
+                assets=_drawer._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
+                fonts=_drawer._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
+                resources=resources,
+                tmp_font_metadata=_drawer._optional_region_file(
+                    "custom_profile_tmp_font_metadata", CUSTOM_PROFILE_TMP_FONT_METADATA, region
+                ),
+                shape_sprite_dir=_drawer._require_region_path(
+                    "custom_profile_shape_sprite_dir", CUSTOM_PROFILE_SHAPE_SPRITE_DIR, region
+                ),
+                profile_context=profile_context,
+                parallel_workers=max(1, int(CUSTOM_PROFILE_PARALLEL_WORKERS or 1)),
+                parallel_stage="transform",
+                clip_canvas_transform=True,
+                canvas_w=int(PROFILE_RENDER_VIEW_W),
+                canvas_h=int(PROFILE_RENDER_VIEW_H),
+                origin_x=PROFILE_RENDER_VIEW_W / 2.0,
+                origin_y=PROFILE_RENDER_VIEW_H / 2.0,
+                unity_ui_sprite_dir=_drawer._require_region_path(
+                    "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
+                ),
+                region=region,
+                max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+                max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
+            )
+        except Exception as exc:
+            raise _CustomProfileSkiaStageError("renderer_init") from exc
+        try:
+            ir_json, mem_images, report = _build_scene(renderer, card)
+        except Exception as exc:
+            raise _CustomProfileSkiaStageError("scene_build") from exc
         if not report.complete:
             return None, report
-        return native.render_scene(ir_json, mem_images), report
+        try:
+            return native.render_scene(ir_json, mem_images), report
+        except Exception as exc:
+            raise _CustomProfileSkiaStageError("native_render", report=report) from exc
 
     started = time.perf_counter()
     try:
         result, report = await run_in_pool(_render)
-    except Exception:
+    except _CustomProfileSkiaStageError as exc:
         # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
         # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
         logger.exception("custom_profile_card backend=skia failed; falling back to Pillow")
-        _record(OUTCOME_ERROR)
-        return None
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            report=exc.report,
+            error_stage=exc.stage,
+        )
+    except Exception:
+        logger.exception("custom_profile_card backend=skia pool dispatch failed; falling back to Pillow")
+        return CustomProfileSkiaAttempt(None, OUTCOME_ERROR, error_stage="pool_dispatch")
     scene_metrics = report.metrics()
-    record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, scene_metrics)
     if result is None:
         from src.core.debug import current_request_context
 
@@ -1852,16 +1932,18 @@ async def try_render_custom_profile_card_payload(
             report.mem_bytes,
             scene_metrics["issues_by_kind"],
         )
-        _record(OUTCOME_FALLBACK)
-        return None
+        return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK, report=report)
     try:
         payload = payload_from_native(result)
     except Exception:
         logger.exception("custom_profile_card backend=skia returned an invalid payload; falling back to Pillow")
-        _record(OUTCOME_ERROR)
-        return None
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            report=report,
+            error_stage="payload_decode",
+        )
     payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
-    _record(OUTCOME_SKIA, payload)
     logger.info(
         "custom_profile_card backend=skia total=%.3fs bytes=%d image=%sx%s",
         time.perf_counter() - started,
@@ -1869,4 +1951,14 @@ async def try_render_custom_profile_card_payload(
         payload.image_width,
         payload.image_height,
     )
-    return payload
+    return CustomProfileSkiaAttempt(payload, OUTCOME_SKIA, report=report)
+
+
+async def try_render_custom_profile_card_payload(
+    request: CustomProfileCardRenderRequest,
+) -> EncodedImagePayload | None:
+    """Skia path for direct/parity callers; ``None`` means "Pillow, please"."""
+
+    attempt = await try_render_custom_profile_card_attempt(request)
+    attempt.record()
+    return attempt.payload

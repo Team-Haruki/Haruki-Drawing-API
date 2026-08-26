@@ -45,10 +45,7 @@ import os
 from src.sekai.base.painter import (
     WHITE,
     Painter,
-    ascender_top_to_painter_y,
-    get_font,
     get_font_desc,
-    get_text_size,
 )
 from src.sekai.base.plot import Canvas, Widget
 from src.sekai.base.utils import ImageSource
@@ -171,11 +168,15 @@ class HonorBadgeBox(Widget):
 
     def _add_fcap_lv(self, p: Painter) -> None:
         text = str(self.rqd.fc_or_ap_level or "")
-        font = get_font(path=DEFAULT_BOLD_FONT, size=FCAP_TEXT_SIZE)
-        text_w, _ = get_text_size(font, text)
         offset = 215 if self.rqd.is_main_honor else 37
-        y = ascender_top_to_painter_y(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE, FCAP_TEXT_TOP_Y)
-        p.text(text, (offset + 50 - text_w // 2, y), get_font_desc(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE), fill=WHITE)
+        p.anchored_text(
+            text,
+            (offset + 50, FCAP_TEXT_TOP_Y),
+            get_font_desc(DEFAULT_BOLD_FONT, FCAP_TEXT_SIZE),
+            fill=WHITE,
+            align="center",
+            baseline="ascender",
+        )
 
     # ---- branches ----
 
