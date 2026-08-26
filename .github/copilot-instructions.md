@@ -210,8 +210,9 @@ number already exist (Rust, canvas.py, and the two CI assertions) — do not add
 
 **Observability.** `GET /render-stats` reports, per endpoint, how many requests were served
 `skia` / `cache_hit` / `fallback` / `disabled` / `error` (`src/sekai/skia_renderer/render_stats.py`), plus the
-Skia payload cache (`payload_cache.py`, **used by honor only**). The `image.response` log line carries a
-`backend=` field.
+Skia payload cache (`payload_cache.py`, **used by honor only**) and aggregate HTTP status families. HTTP 5xx are
+classified only by FastAPI route template, never by actual path, body, or user data. The `image.response` log line
+carries a `backend=` field.
 
 **No page-level cache on a page that renders the clock.** card/box and card/list used to have one and it was
 removed: `add_request_watermark` stamps a `DT: <timestamp>` footer, and card/list's 未上线 badge is decided by

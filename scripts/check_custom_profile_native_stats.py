@@ -5,7 +5,8 @@ aggregate counts.  It never accepts or inspects render requests.  Use it as the 
 gate after counters have accumulated enough traffic::
 
     curl -fsS http://127.0.0.1:8000/render-stats | \
-      uv run python scripts/check_custom_profile_native_stats.py --min-requests 100
+      uv run python scripts/check_custom_profile_native_stats.py --min-requests 100 \
+        --require-zero-http-5xx
 """
 
 from __future__ import annotations
@@ -60,6 +61,7 @@ def validate_custom_profile_stats(
     *,
     min_requests: int,
     required_kinds: set[str] | None = None,
+    require_zero_http_5xx: bool = False,
 ) -> tuple[dict[str, int], list[str]]:
     """Return a sanitized summary and strict-gate failures."""
 
@@ -126,19 +128,33 @@ def validate_custom_profile_stats(
     if missing_kinds:
         failures.append(f"required native categories not observed: {','.join(missing_kinds)}")
 
-    return (
-        {
-            "total": total,
-            "skia": skia,
-            "cache_hit": cache_hit,
-            "native_pure": native_pure,
-            "scene_complete": complete,
-            "native_elements": native,
-            "noop_elements": noop,
-            "native_categories": len(observed_native_kinds),
-        },
-        failures,
-    )
+    summary = {
+        "total": total,
+        "skia": skia,
+        "cache_hit": cache_hit,
+        "native_pure": native_pure,
+        "scene_complete": complete,
+        "native_elements": native,
+        "noop_elements": noop,
+        "native_categories": len(observed_native_kinds),
+    }
+    if require_zero_http_5xx:
+        http_requests = document.get("http_requests")
+        if not isinstance(http_requests, dict):
+            failures.append("aggregate HTTP request statistics are missing")
+        else:
+            server_errors = http_requests.get("server_errors")
+            if not isinstance(server_errors, dict):
+                failures.append("aggregate HTTP server-error statistics are missing")
+            elif "total" not in server_errors:
+                failures.append("aggregate HTTP server-error total is missing")
+            else:
+                http_5xx = _integer(server_errors, "total")
+                summary["http_5xx"] = http_5xx
+                if http_5xx:
+                    failures.append(f"http_5xx={http_5xx}")
+
+    return summary, failures
 
 
 def _load_document(path: str) -> dict[str, Any]:
@@ -156,6 +172,7 @@ def main() -> int:
     parser.add_argument("input", nargs="?", default="-", help="/render-stats JSON file, or - for stdin")
     parser.add_argument("--min-requests", type=int, default=1)
     parser.add_argument("--require-kind", action="append", default=[], dest="required_kinds")
+    parser.add_argument("--require-zero-http-5xx", action="store_true")
     args = parser.parse_args()
     if args.min_requests < 1:
         parser.error("--min-requests must be at least 1")
@@ -165,6 +182,7 @@ def main() -> int:
             _load_document(args.input),
             min_requests=args.min_requests,
             required_kinds=set(args.required_kinds),
+            require_zero_http_5xx=args.require_zero_http_5xx,
         )
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         print(f"status=invalid reason={exc}")  # noqa: T201

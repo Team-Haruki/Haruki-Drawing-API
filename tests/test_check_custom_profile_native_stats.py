@@ -5,6 +5,7 @@ from scripts.check_custom_profile_native_stats import validate_custom_profile_st
 
 def _stats() -> dict:
     return {
+        "http_requests": {"server_errors": {"total": 0}},
         "renders": {
             "endpoints": {
                 "custom_profile_card": {
@@ -36,7 +37,7 @@ def _stats() -> dict:
                     },
                 }
             }
-        }
+        },
     }
 
 
@@ -87,3 +88,43 @@ def test_custom_profile_native_stats_requires_category_classifications() -> None
     _, failures = validate_custom_profile_stats(document, min_requests=1)
 
     assert failures == ["category classifications are missing"]
+
+
+def test_custom_profile_native_stats_accepts_zero_aggregate_http_5xx() -> None:
+    summary, failures = validate_custom_profile_stats(
+        _stats(),
+        min_requests=3,
+        required_kinds={"general", "text"},
+        require_zero_http_5xx=True,
+    )
+
+    assert failures == []
+    assert summary["http_5xx"] == 0
+
+
+def test_custom_profile_native_stats_rejects_aggregate_http_5xx() -> None:
+    document = _stats()
+    document["http_requests"]["server_errors"]["total"] = 1
+
+    summary, failures = validate_custom_profile_stats(
+        document,
+        min_requests=3,
+        require_zero_http_5xx=True,
+    )
+
+    assert summary["http_5xx"] == 1
+    assert "http_5xx=1" in failures
+
+
+def test_custom_profile_native_stats_rejects_missing_http_5xx_total() -> None:
+    document = _stats()
+    del document["http_requests"]["server_errors"]["total"]
+
+    summary, failures = validate_custom_profile_stats(
+        document,
+        min_requests=3,
+        require_zero_http_5xx=True,
+    )
+
+    assert "http_5xx" not in summary
+    assert "aggregate HTTP server-error total is missing" in failures

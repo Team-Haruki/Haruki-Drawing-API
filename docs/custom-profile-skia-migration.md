@@ -226,13 +226,14 @@ uv run python -X gil=0 scripts/skia_parity_sweep.py \
 ```
 
 RC 累积足够请求后，把 `/render-stats` 的聚合响应直接交给严格门禁；脚本不读取请求体，
-`--require-kind` 只检查已观察到的类别计数：
+`--require-kind` 只检查已观察到的类别计数。`--require-zero-http-5xx` 同时读取进程内 HTTP
+聚合计数；5xx 只按状态码和 FastAPI 路由模板分类，不保存实际路径、请求体或用户字段：
 
 ```bash
 curl -fsS http://127.0.0.1:8000/render-stats | \
   uv run python scripts/check_custom_profile_native_stats.py --min-requests 100 \
     --require-kind general --require-kind story_background --require-kind collection \
-    --require-kind shape --require-kind text
+    --require-kind shape --require-kind text --require-zero-http-5xx
 ```
 
 对 rare 类别可在观察窗内追加 `card_member`、`honor`、`bonds_honor`、`stamp`、
