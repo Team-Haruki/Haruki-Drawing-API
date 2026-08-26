@@ -1,4 +1,5 @@
 import asyncio
+from collections import Counter
 import contextvars
 from dataclasses import dataclass
 import hashlib
@@ -52,6 +53,13 @@ _request_stage_var: contextvars.ContextVar[RequestStageRef | None] = contextvars
 _inflight_lock = threading.Lock()
 _inflight_requests = 0
 
+_http_request_stats_lock = threading.Lock()
+_http_request_total = 0
+_http_status_counts: Counter[int] = Counter()
+_http_status_family_counts: Counter[str] = Counter()
+_http_5xx_route_counts: Counter[str] = Counter()
+_http_uncaught_exceptions = 0
+
 _SLOW_REQUEST_SECONDS = 1.5
 _BODY_PREVIEW_LIMIT = 512
 _WATCHDOG_WARN_SECONDS = 10.0
@@ -67,6 +75,77 @@ _EXEMPT_RUNTIME_GUARD_PATHS = frozenset(
         "/openapi.json",
     }
 )
+
+
+def _request_route_label(request: Request) -> str:
+    """Return a bounded, de-identified route template for aggregate telemetry."""
+
+    route = request.scope.get("route")
+    template = getattr(route, "path", None)
+    if isinstance(template, str) and template.startswith("/"):
+        return template
+    return "__unmatched__"
+
+
+def record_http_request_outcome(
+    request: Request,
+    status_code: int,
+    *,
+    uncaught_exception: bool = False,
+    route_label: str | None = None,
+) -> None:
+    """Record an HTTP outcome without retaining request paths, bodies, or identities."""
+
+    global _http_request_total, _http_uncaught_exceptions
+
+    status = int(status_code)
+    family = f"{status // 100}xx" if 100 <= status <= 599 else "other"
+    label = route_label or _request_route_label(request)
+    with _http_request_stats_lock:
+        _http_request_total += 1
+        _http_status_counts[status] += 1
+        _http_status_family_counts[family] += 1
+        if family == "5xx":
+            _http_5xx_route_counts[label] += 1
+        if uncaught_exception:
+            _http_uncaught_exceptions += 1
+
+
+def get_http_request_stats() -> dict[str, Any]:
+    """Return process-lifetime aggregate HTTP outcomes for production gates."""
+
+    with _http_request_stats_lock:
+        status_counts = dict(sorted(_http_status_counts.items()))
+        family_counts = dict(_http_status_family_counts)
+        route_counts = dict(sorted(_http_5xx_route_counts.items()))
+        total = _http_request_total
+        uncaught = _http_uncaught_exceptions
+
+    return {
+        "total": total,
+        "status_families": {
+            family: family_counts.get(family, 0) for family in ("1xx", "2xx", "3xx", "4xx", "5xx", "other")
+        },
+        "status_codes": {str(status): count for status, count in status_counts.items()},
+        "server_errors": {
+            "total": family_counts.get("5xx", 0),
+            "uncaught_exceptions": uncaught,
+            "by_route": route_counts,
+        },
+    }
+
+
+def reset_http_request_stats() -> None:
+    """Clear aggregate HTTP telemetry (used by tests and controlled soak restarts)."""
+
+    global _http_request_total, _http_uncaught_exceptions
+
+    with _http_request_stats_lock:
+        _http_request_total = 0
+        _http_status_counts.clear()
+        _http_status_family_counts.clear()
+        _http_5xx_route_counts.clear()
+        _http_uncaught_exceptions = 0
 
 
 @dataclass(slots=True)
@@ -516,6 +595,7 @@ def install_debug_middleware(app: FastAPI) -> None:
                 headers = {}
                 if OVERLOAD_RETRY_AFTER_SECONDS > 0:
                     headers["Retry-After"] = str(OVERLOAD_RETRY_AFTER_SECONDS)
+                record_http_request_outcome(request, 503, route_label="__overload__")
                 return JSONResponse(
                     status_code=503,
                     headers=headers,
@@ -557,6 +637,7 @@ def install_debug_middleware(app: FastAPI) -> None:
         except Exception:
             elapsed = time.perf_counter() - start
             end_metrics = snapshot_process_metrics(include_asyncio=True)
+            record_http_request_outcome(request, 500, uncaught_exception=True)
             logger.exception(
                 "request.error id=%s method=%s path=%s stage=%s elapsed=%.3fs inflight=%s metrics=%s",
                 request_id,
@@ -571,6 +652,7 @@ def install_debug_middleware(app: FastAPI) -> None:
         else:
             elapsed = time.perf_counter() - start
             end_metrics = snapshot_process_metrics(include_asyncio=True)
+            record_http_request_outcome(request, getattr(response, "status_code", 500))
             level = logging.WARNING if elapsed >= _SLOW_REQUEST_SECONDS else logging.INFO
             cache_stats = None
             if elapsed >= _SLOW_REQUEST_SECONDS:
