@@ -295,11 +295,13 @@ class CustomProfileSkiaAttempt:
         *,
         report: CustomProfileSceneReport | None = None,
         error_stage: str | None = None,
+        error_type: str | None = None,
     ) -> None:
         self.payload = payload
         self.outcome = outcome
         self.report = report
         self.error_stage = error_stage
+        self.error_type = error_type
         self._record_lock = threading.Lock()
         self._recorded = False
 
@@ -315,6 +317,12 @@ class CustomProfileSkiaAttempt:
             if self._recorded:
                 return
             self._recorded = True
+        if self.outcome == OUTCOME_ERROR:
+            logger.error(
+                "custom_profile_card backend=skia committed_error stage=%s error_type=%s",
+                self.error_stage or "unknown",
+                self.error_type or "unknown",
+            )
         if self.report is not None:
             record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, self.report.metrics())
         _record(
@@ -322,6 +330,20 @@ class CustomProfileSkiaAttempt:
             self.payload,
             error_stage=self.error_stage,
         )
+
+    def reject(self) -> None:
+        """Finalize a rejected request without counting it as production render traffic."""
+
+        with self._record_lock:
+            if self._recorded:
+                return
+            self._recorded = True
+        if self.outcome == OUTCOME_ERROR:
+            logger.warning(
+                "custom_profile_card backend=skia rejected_request stage=%s error_type=%s",
+                self.error_stage or "unknown",
+                self.error_type or "unknown",
+            )
 
 
 class _CustomProfileSkiaStageError(Exception):
@@ -1904,16 +1926,21 @@ async def try_render_custom_profile_card_attempt(
     except _CustomProfileSkiaStageError as exc:
         # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
         # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
-        logger.exception("custom_profile_card backend=skia failed; falling back to Pillow")
+        cause = exc.__cause__ or exc
         return CustomProfileSkiaAttempt(
             None,
             OUTCOME_ERROR,
             report=exc.report,
             error_stage=exc.stage,
+            error_type=type(cause).__name__,
         )
-    except Exception:
-        logger.exception("custom_profile_card backend=skia pool dispatch failed; falling back to Pillow")
-        return CustomProfileSkiaAttempt(None, OUTCOME_ERROR, error_stage="pool_dispatch")
+    except Exception as exc:
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="pool_dispatch",
+            error_type=type(exc).__name__,
+        )
     scene_metrics = report.metrics()
     if result is None:
         from src.core.debug import current_request_context
@@ -1935,13 +1962,13 @@ async def try_render_custom_profile_card_attempt(
         return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK, report=report)
     try:
         payload = payload_from_native(result)
-    except Exception:
-        logger.exception("custom_profile_card backend=skia returned an invalid payload; falling back to Pillow")
+    except Exception as exc:
         return CustomProfileSkiaAttempt(
             None,
             OUTCOME_ERROR,
             report=report,
             error_stage="payload_decode",
+            error_type=type(exc).__name__,
         )
     payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
     logger.info(
