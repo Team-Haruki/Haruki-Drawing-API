@@ -92,6 +92,8 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
             attempt.record()
             return response
     except ValueError as e:
+        if attempt is not None:
+            attempt.reject()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if attempt is not None:

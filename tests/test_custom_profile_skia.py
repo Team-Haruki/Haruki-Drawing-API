@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import json
+import logging
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,7 +170,7 @@ def test_disabled_gate_records_disabled_without_loading_native(monkeypatch):
     assert stats["total"] == 1
 
 
-def test_pool_render_exception_is_contained_and_recorded(monkeypatch):
+def test_pool_render_exception_is_contained_and_recorded(monkeypatch, caplog):
     """FAIL-OPEN: nothing escaping the pool render may propagate — the route depends on None to
     reach the Pillow compose that raises the canonical user-visible error.
 
@@ -194,12 +195,17 @@ def test_pool_render_exception_is_contained_and_recorded(monkeypatch):
 
     monkeypatch.setattr(skia_mod, "_build_scene", _explode)
 
-    assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
     stats = _endpoint_stats()
     assert stats["error"] == 1
     assert stats["total"] == 1
     assert sum(stats["errors_by_stage"].values()) == 1
     assert not _Native.called
+    errors = [record for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert "committed_error stage=" in errors[0].message
 
 
 def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp_path):
@@ -1905,12 +1911,13 @@ def test_route_falls_back_to_pillow_compose(monkeypatch):
     assert seen_backend == "skia_fallback"
 
 
-def test_route_records_skia_error_when_pillow_recovers(monkeypatch):
+def test_route_records_skia_error_when_pillow_recovers(monkeypatch, caplog):
     async def fake_attempt(request):
         return skia_mod.CustomProfileSkiaAttempt(
             None,
             OUTCOME_ERROR,
             error_stage="native_render",
+            error_type="RuntimeError",
         )
 
     async def fake_compose(request):
@@ -1919,14 +1926,19 @@ def test_route_records_skia_error_when_pillow_recovers(monkeypatch):
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
 
-    response = asyncio.run(route_mod.custom_profile_card(_request()))
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        response = asyncio.run(route_mod.custom_profile_card(_request()))
     assert response.status_code == 200
     stats = _endpoint_stats()
     assert stats["error"] == 1
     assert stats["errors_by_stage"] == {"native_render": 1}
+    errors = [record for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert "committed_error stage=native_render error_type=RuntimeError" in errors[0].message
 
 
-def test_route_preserves_the_value_error_400(monkeypatch):
+def test_route_preserves_the_value_error_400(monkeypatch, caplog):
     """A rejected request reaches the canonical 400 without poisoning the native gate."""
 
     async def fake_attempt(request):
@@ -1934,6 +1946,7 @@ def test_route_preserves_the_value_error_400(monkeypatch):
             None,
             OUTCOME_ERROR,
             error_stage="native_render",
+            error_type="ValueError",
         )
 
     async def fake_compose(request):
@@ -1942,11 +1955,16 @@ def test_route_preserves_the_value_error_400(monkeypatch):
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
 
-    with pytest.raises(HTTPException) as excinfo:
-        asyncio.run(route_mod.custom_profile_card(_request()))
+    with caplog.at_level(logging.WARNING, logger="custom_profile.draw.perf"):
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(route_mod.custom_profile_card(_request()))
     assert excinfo.value.status_code == 400
     assert "bad card" in excinfo.value.detail
     assert get_render_stats()["endpoints"] == {}
+    records = [record for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert "rejected_request stage=native_render error_type=ValueError" in records[0].message
 
 
 def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
