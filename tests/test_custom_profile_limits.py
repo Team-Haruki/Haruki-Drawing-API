@@ -33,7 +33,10 @@ def _card(*, scale: object = 1.0) -> dict:
     }
 
 
-@pytest.mark.parametrize("scale", [math.nan, math.inf, -1.0, 0.0, 8.01, 1.0e308, "nan", "inf"])
+@pytest.mark.parametrize(
+    "scale",
+    [math.nan, math.inf, -1.0, 0.0, 8.01, 1.0e308, 10**400, "nan", "inf"],
+)
 def test_custom_profile_rejects_non_finite_or_unbounded_scale(scale: object) -> None:
     with pytest.raises(ValueError, match="scale"):
         validate_custom_profile_card(_card(scale=scale), **LIMITS)

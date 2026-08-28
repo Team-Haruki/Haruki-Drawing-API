@@ -61,7 +61,7 @@ class RasterSizeLimitError(ValueError):
 def _finite_number(value: Any, label: str) -> float:
     try:
         number = float(value)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"{label} must be a finite number") from exc
     if not math.isfinite(number):
         raise ValueError(f"{label} must be a finite number")
