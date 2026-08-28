@@ -1967,7 +1967,8 @@ def test_route_preserves_the_value_error_400(monkeypatch, caplog):
     assert "rejected_request stage=native_render error_type=ValueError" in records[0].message
 
 
-def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
+@pytest.mark.parametrize("scale", [1.0e9, 10**400])
+def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch, scale):
     request = CustomProfileCardRenderRequest(
         card={
             "customProfileCard": {
@@ -1978,7 +1979,7 @@ def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
                             "visible": True,
                             "layer": 1,
                             "position": {"x": 0, "y": 0},
-                            "scale": {"x": 1.0e9, "y": 1.0e9},
+                            "scale": {"x": scale, "y": scale},
                             "rotation": {"z": 0, "w": 1},
                         },
                     }
