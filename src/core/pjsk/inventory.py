@@ -1,10 +1,11 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.inventory.drawer import compose_inventory_list_image, try_render_inventory_list_payload
 from src.sekai.inventory.model import InventoryListRequest
 
-router = APIRouter(tags=["Inventory"])
+router = APIRouter(tags=["Inventory"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/list", summary="Generate inventory list image")

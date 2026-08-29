@@ -70,7 +70,7 @@ def deterministic_hash(obj: Any) -> str:
     """
     计算复杂对象的确定性哈希值
     """
-    ret = hashlib.md5()
+    ret = hashlib.sha256()
 
     def update(s: str | bytes) -> None:
         if isinstance(s, str):
@@ -826,7 +826,7 @@ class Painter:
         return self
 
     @staticmethod
-    def _execute(operations: list[PainterOperation], img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    def _execute(operations: list[PainterOperation], img: Image.Image | None, size: tuple[int, int]) -> Image.Image:
         t = datetime.now()
         if img is None:
             img = Image.new("RGBA", size, TRANSPARENT)

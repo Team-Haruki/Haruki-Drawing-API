@@ -39,6 +39,8 @@ CANVAS_SIZE_LIMIT = [4096, 4096]
 DEFAULT_PADDING = 0
 DEFAULT_MARGIN = 0
 DEFAULT_SEP = 8
+_INVALID_ALIGN_MESSAGE = "Invalid align"
+_GRID_DIMENSION_MESSAGE = "Either row_count or col_count should be None"
 
 
 def _open_image_copy(path: str) -> Image.Image:
@@ -54,7 +56,7 @@ def _open_image_copy(path: str) -> Image.Image:
 
 class WidgetBg:
     def __init__(self) -> None:
-        pass
+        """Initialize the stateless background protocol base."""
 
     def draw(self, p: Painter) -> None:
         raise NotImplementedError()
@@ -235,7 +237,7 @@ class Widget:
 
     def set_content_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.content_h_align, self.content_v_align = ALIGN_MAP[align]
         return self
 
@@ -339,16 +341,16 @@ class Widget:
 
     def _draw_self(self, p: Painter) -> None:
         if DEBUG:
-            import random
+            import hashlib
 
-            color = (random.randint(0, 200), random.randint(0, 200), random.randint(0, 200), 255)
+            digest = hashlib.sha256(f"{self.__class__.__name__}:{p.w}:{p.h}".encode()).digest()
+            color = (digest[0] % 201, digest[1] % 201, digest[2] % 201, 255)
             p.rect((0, 0), (p.w, p.h), TRANSPARENT, stroke=color, stroke_width=2)
             s = f"{self.__class__.__name__}({p.w},{p.h})"
             s += f"self={self._get_self_size()}"
             s += f"content={self._get_content_size()}"
             p.text(s, (3, 3), font=get_font_desc(DEFAULT_FONT, 16), fill=color)
             logging.debug(f"Draw {self.__class__.__name__} at {p.offset} size={p.size}")
-            pass
 
         if self.bg:
             self.bg.draw(p)
@@ -357,7 +359,7 @@ class Widget:
             draw_func(self, p)
 
     def _draw_content(self, p: Painter) -> None:
-        pass
+        """Draw no intrinsic content; subclasses opt in by overriding this hook."""
 
     def add_draw_func(self, draw_func: Callable[[Self, Painter], None]) -> Self:
         self.draw_funcs.append(draw_func)
@@ -465,7 +467,7 @@ class HSplit(Widget):
         assert item_size_mode in ("expand", "fixed")
         self.item_size_mode = item_size_mode
         if item_align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[item_align]
         self.item_bg = None
 
@@ -484,7 +486,7 @@ class HSplit(Widget):
 
     def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
         return self
 
@@ -576,7 +578,7 @@ class VSplit(Widget):
         assert item_size_mode in ("expand", "fixed")
         self.item_size_mode = item_size_mode
         if item_align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[item_align]
         self.item_bg = None
 
@@ -595,7 +597,7 @@ class VSplit(Widget):
 
     def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
         return self
 
@@ -687,13 +689,13 @@ class Grid(Widget):
             item.set_parent(self)
         self.row_count = row_count
         self.col_count = col_count
-        assert not (self.row_count and self.col_count), "Either row_count or col_count should be None"
+        assert not (self.row_count and self.col_count), _GRID_DIMENSION_MESSAGE
         assert item_size_mode in ("expand", "fixed")
         self.item_size_mode = item_size_mode
         self.h_sep = h_sep
         self.v_sep = v_sep
         if item_align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[item_align]
         self.item_bg = None
         self.vertical = vertical
@@ -717,7 +719,7 @@ class Grid(Widget):
 
     def set_item_align(self, align: ALIGN_TYPE) -> Self:
         if align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_h_align, self.item_valign = ALIGN_MAP[align]
         return self
 
@@ -749,7 +751,7 @@ class Grid(Widget):
 
     def _get_grid_rc_and_size(self) -> tuple[tuple[int, int], tuple[int, int]]:
         r, c = self.row_count, self.col_count
-        assert (r and not c) or (c and not r), "Either row_count or col_count should be None"
+        assert (r and not c) or (c and not r), _GRID_DIMENSION_MESSAGE
         if not r:
             r = (len(self.items) + c - 1) // c
         if not c:
@@ -844,7 +846,7 @@ class Flow(Widget):
 
     def set_item_align(self, align: ALIGN_TYPE):
         if align not in ALIGN_MAP:
-            raise ValueError("Invalid align")
+            raise ValueError(_INVALID_ALIGN_MESSAGE)
         self.item_halign, self.item_valign = ALIGN_MAP[align]
         return self
 
@@ -860,7 +862,7 @@ class Flow(Widget):
         return self
 
     def set_row_or_col_count(self, row_count: int | None = None, col_count: int | None = None):
-        assert not (row_count and col_count), "Either row_count or col_count should be None"
+        assert not (row_count and col_count), _GRID_DIMENSION_MESSAGE
         self.row_count = row_count
         self.col_count = col_count
         return self
@@ -1734,7 +1736,7 @@ class Spacer(Widget):
         return self.w - 2 * self.h_padding, self.h - 2 * self.v_padding
 
     def _draw_content(self, p: Painter) -> None:
-        pass
+        """Remain empty; a spacer contributes only size and optional background."""
 
 
 def _image_box_size_hint(widget) -> tuple[int, int] | None:

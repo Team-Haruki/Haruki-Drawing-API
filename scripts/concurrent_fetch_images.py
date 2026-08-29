@@ -28,6 +28,12 @@ from typing import Any
 
 import aiohttp
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.path_safety import resolve_cli_path
+
 
 @dataclass(slots=True)
 class RequestResult:
@@ -85,7 +91,7 @@ def parse_headers(header_items: list[str]) -> dict[str, str]:
 
 
 def load_payloads(payload_file: str) -> list[dict[str, Any]]:
-    path = Path(payload_file)
+    path = resolve_cli_path(payload_file, must_exist=True)
     raw = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(raw, dict):
         return [raw]
@@ -98,7 +104,7 @@ def load_payloads(payload_file: str) -> list[dict[str, Any]]:
 
 def get_output_dir(cli_value: str) -> Path:
     if cli_value:
-        out = Path(cli_value)
+        out = resolve_cli_path(cli_value)
     else:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         out = Path("out") / f"load_images_{ts}"

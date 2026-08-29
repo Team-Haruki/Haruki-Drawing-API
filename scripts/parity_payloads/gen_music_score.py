@@ -55,6 +55,14 @@ DIFFICULTY_ORDER = {"easy": 1, "normal": 2, "hard": 3, "expert": 4, "master": 5,
 # board_helpers.go:62-79
 BOARD_PRIORITY = {"master": 6, "append": 5, "expert": 4, "hard": 3, "normal": 2, "easy": 1}
 BASE_DIFF_ORDER = ["easy", "normal", "hard", "expert", "master"]
+_CAPTION_VIRTUAL_SINGER = "Virtual Singer"
+_CAPTION_ANOTHER_VOCAL = "Another Vocal"
+_CAPTION_ORIGINAL_SONG = "Original Song"
+_CAPTION_CONNECT_LIVE = "Connect Live"
+_CAPTION_APRIL_FOOL = "April Fool"
+_CAPTION_ENSEMBLE_STARS = "Ensemble Stars!! Collab"
+_CAPTION_INSTRUMENTAL = "Inst."
+_TARGET_PT_TIME = "pt/time"
 
 # board_request.go:13-21
 BOARD_PAGE_SIZE = 50
@@ -219,41 +227,41 @@ def _categories(music: dict) -> list[str]:
 _CAPTION_OVERRIDES = {
     "セカイver.": "Sekai",
     "セカイ ver.": "Sekai",
-    "バーチャル・シンガーver.": "Virtual Singer",
-    "バーチャルシンガーver.": "Virtual Singer",
-    "アナザーボーカルver.": "Another Vocal",
-    "原曲ver.": "Original Song",
-    "原曲 ver.": "Original Song",
-    "ストリーミングライブver.": "Connect Live",
-    "ストリーミングライブ ver.": "Connect Live",
-    "エイプリルフールver.": "April Fool",
-    "あんさんぶるスターズ！！コラボver.": "Ensemble Stars!! Collab",
+    "バーチャル・シンガーver.": _CAPTION_VIRTUAL_SINGER,
+    "バーチャルシンガーver.": _CAPTION_VIRTUAL_SINGER,
+    "アナザーボーカルver.": _CAPTION_ANOTHER_VOCAL,
+    "原曲ver.": _CAPTION_ORIGINAL_SONG,
+    "原曲 ver.": _CAPTION_ORIGINAL_SONG,
+    "ストリーミングライブver.": _CAPTION_CONNECT_LIVE,
+    "ストリーミングライブ ver.": _CAPTION_CONNECT_LIVE,
+    "エイプリルフールver.": _CAPTION_APRIL_FOOL,
+    "あんさんぶるスターズ！！コラボver.": _CAPTION_ENSEMBLE_STARS,
     "「劇場版プロジェクトセカイ」ver.": "Movie",
     "sekai ver.": "Sekai",
     "sekai": "Sekai",
-    "virtual singer ver.": "Virtual Singer",
-    "virtual singer": "Virtual Singer",
-    "another vocal ver.": "Another Vocal",
-    "another vocal": "Another Vocal",
-    "original song ver.": "Original Song",
-    "original song": "Original Song",
-    "streaming live ver.": "Connect Live",
-    "streaming live": "Connect Live",
-    "instrumental ver.": "Inst.",
-    "instrumental": "Inst.",
-    "april fool 2022 ver.": "April Fool",
-    "april_fool_2022 ver.": "April Fool",
-    "april_fool_2022": "April Fool",
-    "april fool": "April Fool",
+    "virtual singer ver.": _CAPTION_VIRTUAL_SINGER,
+    _CAPTION_VIRTUAL_SINGER.lower(): _CAPTION_VIRTUAL_SINGER,
+    "another vocal ver.": _CAPTION_ANOTHER_VOCAL,
+    "another vocal": _CAPTION_ANOTHER_VOCAL,
+    "original song ver.": _CAPTION_ORIGINAL_SONG,
+    "original song": _CAPTION_ORIGINAL_SONG,
+    "streaming live ver.": _CAPTION_CONNECT_LIVE,
+    "streaming live": _CAPTION_CONNECT_LIVE,
+    "instrumental ver.": _CAPTION_INSTRUMENTAL,
+    "instrumental": _CAPTION_INSTRUMENTAL,
+    "april fool 2022 ver.": _CAPTION_APRIL_FOOL,
+    "april_fool_2022 ver.": _CAPTION_APRIL_FOOL,
+    "april_fool_2022": _CAPTION_APRIL_FOOL,
+    "april fool": _CAPTION_APRIL_FOOL,
     "sekai version": "Sekai",
-    "virtual singer version": "Virtual Singer",
-    "another vocal version": "Another Vocal",
-    "original song version": "Original Song",
-    "streaming live version": "Connect Live",
-    "instrumental version": "Inst.",
-    "april fool 2022 version": "April Fool",
-    "ensemble stars!! collab": "Ensemble Stars!! Collab",
-    "ensemble stars!! collab ver.": "Ensemble Stars!! Collab",
+    "virtual singer version": _CAPTION_VIRTUAL_SINGER,
+    "another vocal version": _CAPTION_ANOTHER_VOCAL,
+    "original song version": _CAPTION_ORIGINAL_SONG,
+    "streaming live version": _CAPTION_CONNECT_LIVE,
+    "instrumental version": _CAPTION_INSTRUMENTAL,
+    "april fool 2022 version": _CAPTION_APRIL_FOOL,
+    "ensemble stars!! collab": _CAPTION_ENSEMBLE_STARS,
+    "ensemble stars!! collab ver.": _CAPTION_ENSEMBLE_STARS,
     "movie ver.": "Movie",
     "movie": "Movie",
 }
@@ -261,16 +269,16 @@ _CAPTION_OVERRIDES = {
 # builder_helpers.go:131-139
 _TYPE_FALLBACKS = {
     "sekai": "Sekai",
-    "virtual_singer": "Virtual Singer",
-    "original_song": "Original Song",
-    "another_vocal": "Another Vocal",
-    "streaming_live": "Connect Live",
-    "instrumental": "Inst.",
-    "april_fool_2022": "April Fool",
+    "virtual_singer": _CAPTION_VIRTUAL_SINGER,
+    "original_song": _CAPTION_ORIGINAL_SONG,
+    "another_vocal": _CAPTION_ANOTHER_VOCAL,
+    "streaming_live": _CAPTION_CONNECT_LIVE,
+    "instrumental": _CAPTION_INSTRUMENTAL,
+    "april_fool_2022": _CAPTION_APRIL_FOOL,
 }
 
 # builder_helpers.go:141-162 (JP entries are identity mappings)
-_JP_LOCALIZE = {"sekai": "Sekai", "virtual singer": "Virtual Singer"}
+_JP_LOCALIZE = {"sekai": "Sekai", "virtual singer": _CAPTION_VIRTUAL_SINGER}
 
 
 def _localize_caption(caption: str) -> str:
@@ -298,14 +306,14 @@ def _normalize_caption(raw: str, vocal_type: str, assetbundle_name: str) -> str:
     if name.startswith("se_"):
         return _localize_caption("Sekai")
     if name.startswith("vs_"):
-        return _localize_caption("Virtual Singer")
+        return _localize_caption(_CAPTION_VIRTUAL_SINGER)
     if name.startswith("an_"):
-        return _localize_caption("Another Vocal")
+        return _localize_caption(_CAPTION_ANOTHER_VOCAL)
     fallback = _TYPE_FALLBACKS.get(vocal_type.strip().lower())
     if fallback:
         return _localize_caption(fallback)
     if key == "virtual singer":
-        return _localize_caption("Virtual Singer")
+        return _localize_caption(_CAPTION_VIRTUAL_SINGER)
     return trimmed
 
 
@@ -655,7 +663,7 @@ def _build_board_rows(
 def _board_metric(row: dict, target: str, live_type: str) -> float:
     if target in ("score", "pt"):
         return row[f"{live_type}_{target}"]
-    if target == "pt/time":
+    if target == _TARGET_PT_TIME:
         return row[f"{live_type}_pt_per_hour"]
     if target == "tps":
         return row["tps"]
@@ -697,7 +705,7 @@ def _sort_board_rows(
 DETAIL_MUSIC_ID = 187  # ロウワー: event + append + outside-character vocals + 6 vocal versions
 
 _LEADERBOARD_LIVE_ORDER = ["solo", "multi", "auto"]
-_LEADERBOARD_TARGET_ORDER = ["score", "pt", "pt/time"]
+_LEADERBOARD_TARGET_ORDER = ["score", "pt", _TARGET_PT_TIME]
 
 
 def _leaderboard_value(row: dict, live_type: str, target: str) -> str:
@@ -706,7 +714,7 @@ def _leaderboard_value(row: dict, live_type: str, target: str) -> str:
         return f"{row[f'{live_type}_score'] * 100:.1f}%"
     if target == "pt":
         return str(round(row[f"{live_type}_pt"]))
-    if target == "pt/time":
+    if target == _TARGET_PT_TIME:
         return f"{row[f'{live_type}_pt_per_hour'] / 10000.0:.2f}w/h"
     return "-"
 
@@ -794,7 +802,7 @@ def gen_music_detail() -> str:
         body["leaderboard_matrix"] = matrix
         body["leaderboard_music_num"] = total
         body["leaderboard_live_types"] = {"solo": "单人", "multi": "多人", "auto": "AUTO"}
-        body["leaderboard_targets"] = {"score": "分数", "pt": "PT", "pt/time": "时速"}
+        body["leaderboard_targets"] = {"score": "分数", "pt": "PT", _TARGET_PT_TIME: "时速"}
     MusicDetailRequest.model_validate(body)
     common.write_payload("music_detail", body)
     return "music_detail"
@@ -1254,7 +1262,7 @@ def gen_score_music_meta() -> str:
 
 
 def gen_score_music_board() -> str:
-    live_type, target, ascend, page = "multi", "pt/time", False, 1
+    live_type, target, ascend, page = "multi", _TARGET_PT_TIME, False, 1
     strategy = "avg"  # board_request_query.go: default for non-solo
     skills = [BOARD_DEFAULT_MULTI_SKILL] * 5
     power, deck_bonus, interval = BOARD_DEFAULT_POWER, BOARD_DEFAULT_DECK_BONUS, BOARD_DEFAULT_MULTI_INTERVAL

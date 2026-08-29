@@ -42,6 +42,7 @@ MD = common.MD
 ASSETS = common.ASSETS
 JP_TZ = timezone(timedelta(hours=9))
 NOW_MS = common.now_ms()
+_MUSIC_RECORD_ICON = "mysekai/music_record.png"
 
 ISSUES: list[str] = []
 
@@ -603,7 +604,7 @@ def _site_resource_numbers(merged: dict) -> list[dict]:
                 "has_music_record": has_record,
             }
             if has_record:
-                entry["music_record_icon_path"] = ASSETS.static("mysekai/music_record.png")
+                entry["music_record_icon_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
             resources.append(entry)
         if not resources:
             continue
@@ -801,7 +802,7 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
         if existing is not None:
             existing["quantity"] += quantity
             if has_record and "attachment_image_path" not in existing:
-                existing["attachment_image_path"] = ASSETS.static("mysekai/music_record.png")
+                existing["attachment_image_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
             continue
         item: dict[str, Any] = {
             "id": resource_id,
@@ -815,7 +816,7 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
             "rarity": rarity,
         }
         if has_record:
-            item["attachment_image_path"] = ASSETS.static("mysekai/music_record.png")
+            item["attachment_image_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
         group[key] = item
 
     drops_out: list[dict] = []

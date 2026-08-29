@@ -133,14 +133,17 @@ def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
     """Return only the source fields that the selected widget branch can consume."""
 
     branch = honor_asset_branch(request)
+    specs: list[HonorAssetSpec] = []
     if branch == "empty":
-        return (_required("empty_honor"),)
-    if branch in {"normal", "birthday"}:
-        specs = [
-            _required("honor_img"),
-            _optional("rank_img", on_supplied_missing="ignore"),
-            _optional("frame_img"),
-        ]
+        specs.append(_required("empty_honor"))
+    elif branch in {"normal", "birthday"}:
+        specs.extend(
+            (
+                _required("honor_img"),
+                _optional("rank_img", on_supplied_missing="ignore"),
+                _optional("frame_img"),
+            )
+        )
         # HonorBadgeBox returns from _add_frame before consulting the birthday level icon.
         if branch == "birthday" and request.frame_img_path:
             specs.append(_optional("frame_degree_level_img"))
@@ -149,12 +152,8 @@ def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
             specs.append(_optional("scroll_img"))
         elif group_type in _STAR_LEVEL_GROUP_TYPES:
             specs.extend((_optional("lv_img"), _optional("lv6_img")))
-        return tuple(specs)
-    if branch == "bonds":
-        specs = [
-            _required("bonds_bg"),
-            _required("bonds_bg2"),
-        ]
+    elif branch == "bonds":
+        specs.extend((_required("bonds_bg"), _required("bonds_bg2")))
         # The shared tree intentionally returns a bare background when either character icon is
         # absent.  In that branch it never reads the lone icon, mask, frame, word, or level stars.
         if request.chara_icon_path and request.chara_icon_path2:
@@ -170,8 +169,7 @@ def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
             )
             if request.is_main_honor:
                 specs.append(_optional("word_img"))
-        return tuple(specs)
-    return ()
+    return tuple(specs)
 
 
 def _failure_result(

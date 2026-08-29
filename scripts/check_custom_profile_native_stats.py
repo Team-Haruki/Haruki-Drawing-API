@@ -17,6 +17,12 @@ from pathlib import Path
 import sys
 from typing import Any
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.path_safety import resolve_cli_path
+
 ENDPOINT = "custom_profile_card"
 _BAD_OUTCOMES = ("fallback", "disabled", "error")
 _BAD_PURITY = ("native_hybrid", "native_unclassified")
@@ -197,7 +203,7 @@ def _load_document(path: str) -> dict[str, Any]:
     if path == "-":
         value = json.load(sys.stdin)
     else:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = json.loads(resolve_cli_path(path, must_exist=True).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("render statistics document must be an object")
     return value

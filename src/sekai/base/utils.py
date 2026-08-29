@@ -43,6 +43,7 @@ from src.settings import (
 )
 
 logger = logging.getLogger(__name__)
+_EMPTY_IMAGE_PATH_MESSAGE = "图片路径不能为空(None)"
 
 MissingImageMode = Literal["raise", "placeholder"]
 _PRISTINE_ASSET_PATH_ATTR = "_haruki_pristine_asset_path"
@@ -185,7 +186,7 @@ async def get_img_from_path(
         if on_missing == "placeholder":
             _log_missing_image_once(path, "empty-path")
             return _get_missing_placeholder_image(path)
-        raise ValueError("图片路径不能为空(None)")
+        raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
 
     try:
         return await run_in_pool(_load_image_from_path_sync, base_path, path)
@@ -1192,7 +1193,7 @@ async def get_asset_image_ref(
         if on_missing == "placeholder":
             _log_missing_image_once(path, "empty-path")
             return _get_missing_placeholder_image(path)
-        raise ValueError("图片路径不能为空(None)")
+        raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
 
     try:
         return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
@@ -1280,7 +1281,7 @@ async def get_img_resized(
             _log_missing_image_once(path, "empty-path")
             img = _get_missing_placeholder_image(path)
             return img.resize((target_w, target_h), resample)
-        raise ValueError("图片路径不能为空(None)")
+        raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
 
     try:
         return await run_in_pool(_load_image_resized_sync, base_path, path, target_w, target_h, resample)
@@ -1416,13 +1417,13 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
     return text
 
 
-def truncate(s: str, limit: int) -> str:
+def truncate(s: str | None, limit: int) -> str:
     """
     截断字符串到指定长度，中文字符算两个字符
     """
-    s = str(s)
     if s is None:
         return "<None>"
+    s = str(s)
     length = 0
     for i, c in enumerate(s):
         if length >= limit:

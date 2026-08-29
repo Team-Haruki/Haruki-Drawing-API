@@ -61,6 +61,7 @@ from .model import (
 matplotlib.use("Agg")
 _matplotlib_workers = max(1, min(DEFAULT_THREAD_POOL_SIZE, os.cpu_count() or 1))
 _matplotlib_executor = ThreadPoolExecutor(max_workers=_matplotlib_workers, thread_name_prefix="sk-matplotlib")
+_EVENT_ENDED_TEXT = "活动已结束"
 
 
 async def run_matplotlib_plot(func: Callable[[], Image.Image]) -> Image.Image:
@@ -233,7 +234,7 @@ async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
@@ -430,7 +431,7 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
@@ -567,7 +568,7 @@ async def _build_cf_canvas(rqd: CFRequest) -> Canvas:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
@@ -699,7 +700,7 @@ async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
@@ -802,7 +803,7 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
@@ -1308,7 +1309,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
                     )
                     time_to_end = event_end - now
                     if time_to_end.total_seconds() <= 0:
-                        time_to_end = "活动已结束"
+                        time_to_end = _EVENT_ENDED_TEXT
                     else:
                         time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
                     TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))

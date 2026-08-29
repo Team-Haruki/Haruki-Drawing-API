@@ -37,6 +37,7 @@ from .model import (
 )
 
 logger = logging.getLogger(__name__)
+_POINTS_PER_TIME_TARGET = "pt/time"
 
 
 def _calc_custom_room_title_width(
@@ -132,8 +133,8 @@ async def _build_score_control_canvas(
                             TextBox("火", style1).set_bg(bg1).set_size((gw2, gh)).set_content_align("c")
                             TextBox("分数下限", style1).set_bg(bg1).set_size((gw3, gh)).set_content_align("c")
                             TextBox("分数上限", style1).set_bg(bg1).set_size((gw4, gh)).set_content_align("c")
-                        for i, item in enumerate(scores):
-                            bg = bg2 if i % 2 == 0 else bg1
+                        for row_index, item in enumerate(scores):
+                            bg = bg2 if row_index % 2 == 0 else bg1
                             score_min = get_score_str(item.score_min)
                             if score_min == "0":
                                 score_min = "0 (放置)"
@@ -475,18 +476,18 @@ async def _build_music_board_canvas(
             # 根据target添加动态列
             if rqd.target == "score":
                 columns.append(("分数", 2.0, "c"))
-            elif rqd.target in ("pt", "pt/time"):
+            elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
                 columns.append(("PT", 2.0, "c"))
                 columns.append(("LIVE分数", 2.0, "c"))
-            if rqd.target == "pt/time":
+            if rqd.target == _POINTS_PER_TIME_TARGET:
                 columns.append(("PT/h", 2.0, "c"))
 
             columns.append(("技能占比", 2.0, "c"))
 
-            if rqd.target in ("pt/time", "time"):
+            if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
                 columns.append(("周回/h", 2.0, "c"))
 
-            if rqd.target in ("pt", "pt/time", "time"):
+            if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
                 columns.append(("PT系数", 1.5, "c"))
 
             columns.append(("时长", 1.5, "c"))
@@ -577,19 +578,19 @@ async def _build_music_board_canvas(
 
                 if rqd.target == "score":
                     add_text_column("分数", lambda r: f"{(r.live_type_score or 0) * 100:.1f}%")
-                elif rqd.target in ("pt", "pt/time"):
+                elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
                     add_text_column("PT", lambda r: f"{r.live_type_pt or 0}")
                     add_text_column("LIVE分数", lambda r: f"{(r.live_type_real_score or 0):.0f}")
 
-                if rqd.target == "pt/time":
+                if rqd.target == _POINTS_PER_TIME_TARGET:
                     add_text_column("PT/h", lambda r: f"{(r.live_type_pt_per_hour or 0):.0f}")
 
                 add_text_column("技能占比", lambda r: f"{(r.live_type_skill_account or 0) * 100:.1f}%")
 
-                if rqd.target in ("pt/time", "time"):
+                if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
                     add_text_column("周回/h", lambda r: f"{(r.play_count_per_hour or 0):.1f}")
 
-                if rqd.target in ("pt", "pt/time", "time"):
+                if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
                     add_text_column("PT系数", lambda r: f"{r.event_rate:.0f}")
 
                 add_text_column("时长", lambda r: f"{r.music_time:.1f}")

@@ -108,24 +108,24 @@ def _clean_command_help_inline(text: str) -> str:
 
 
 def _command_help_heading(line: str) -> tuple[str, int] | None:
-    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+    match = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
     if not match:
         return None
-    return match.group(2), len(match.group(1))
+    return match.group(2).strip(), len(match.group(1))
 
 
 def _command_help_bullet(line: str) -> str | None:
-    match = re.match(r"^[-*+]\s+(.+?)\s*$", line)
+    match = re.match(r"^[-*+]\s+(.+)$", line.strip())
     if not match:
         return None
-    return match.group(1)
+    return match.group(1).strip()
 
 
 def _command_help_numbered(line: str) -> str | None:
-    match = re.match(r"^(\d+[.)])\s+(.+?)\s*$", line)
+    match = re.match(r"^(\d+[.)])\s+(.+)$", line.strip())
     if not match:
         return None
-    return f"{match.group(1)} {match.group(2)}"
+    return f"{match.group(1)} {match.group(2).strip()}"
 
 
 def _wrap_command_help_text(font_name: str, size: int, text: str, max_width: int) -> list[str]:

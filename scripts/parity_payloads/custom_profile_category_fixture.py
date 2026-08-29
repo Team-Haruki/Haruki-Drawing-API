@@ -17,8 +17,15 @@ import json
 import os
 from pathlib import Path
 import re
+import sys
 from typing import Any
 import unicodedata
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.path_safety import resolve_cli_path
 
 CATEGORY_FIXTURE_KIND = "pjsk_custom_profile_category_fixture"
 CATEGORY_FIXTURE_SCHEMA_VERSION = 1
@@ -219,15 +226,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    payload = json.loads(args.input.read_text(encoding="utf-8"))
-    dependencies = json.loads(args.dependencies.read_text(encoding="utf-8")) if args.dependencies else None
+    input_path = resolve_cli_path(args.input, must_exist=True)
+    output_path = resolve_cli_path(args.output)
+    dependencies_path = resolve_cli_path(args.dependencies, must_exist=True) if args.dependencies else None
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
+    dependencies = json.loads(dependencies_path.read_text(encoding="utf-8")) if dependencies_path else None
     fixture = extract_category_fixture(
         payload,
         category=args.category,
         indexes=args.indexes,
         dependencies=dependencies,
     )
-    write_owner_only_json(args.output, fixture)
+    write_owner_only_json(output_path, fixture)
     print(f"category={args.category} items={len(fixture['items'])}")  # noqa: T201
 
 

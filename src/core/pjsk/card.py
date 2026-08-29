@@ -3,6 +3,7 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.card.drawer import (
     compose_box_image,
@@ -18,7 +19,7 @@ from src.sekai.card.model import (
     CardListRequest,
 )
 
-router = APIRouter(tags=["Card"])
+router = APIRouter(tags=["Card"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 _perf_logger = logging.getLogger("card.endpoint.perf")
 
 

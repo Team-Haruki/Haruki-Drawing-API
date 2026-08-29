@@ -2,6 +2,7 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.event.drawer import (
     compose_event_detail_image,
@@ -20,7 +21,7 @@ from src.sekai.event.model import (
     EventRecordRequest,
 )
 
-router = APIRouter(tags=["Event"])
+router = APIRouter(tags=["Event"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/detail", summary="Generate event detail image")

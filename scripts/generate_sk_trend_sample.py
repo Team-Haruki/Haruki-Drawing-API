@@ -20,6 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.core.path_safety import resolve_cli_path
 
 RANK_PATTERN = [5, 4, 6, 3, 7, 4, 6, 5, 3, 7]
 
@@ -154,7 +155,7 @@ def build_honor_payload(output_dir: Path) -> Path:
 
 def main() -> int:
     args = parse_args()
-    output_dir = Path(args.output_dir)
+    output_dir = resolve_cli_path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     ensure_runtime_assets()

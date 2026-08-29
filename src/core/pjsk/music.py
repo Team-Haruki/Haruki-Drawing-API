@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.music.drawer import (
     compose_basic_music_rewards_image,
@@ -24,7 +25,7 @@ from src.sekai.music.model import (
     PlayProgressRequest,
 )
 
-router = APIRouter(tags=["Music"])
+router = APIRouter(tags=["Music"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/detail", summary="Generate music detail image")

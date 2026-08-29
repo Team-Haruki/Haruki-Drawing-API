@@ -3,6 +3,7 @@ import time
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.mysekai.drawer import (
     compose_mysekai_door_upgrade_image,
@@ -35,7 +36,7 @@ from src.sekai.mysekai.model import (
     MysekaiTalkListRequest,
 )
 
-router = APIRouter(tags=["MySekai"])
+router = APIRouter(tags=["MySekai"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 _perf_logger = logging.getLogger("mysekai.endpoint.perf")
 _logger = logging.getLogger(__name__)
 
