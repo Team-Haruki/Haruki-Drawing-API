@@ -14,10 +14,15 @@ import asyncio
 from dataclasses import dataclass
 import json
 import math
+from pathlib import Path
 import statistics
 import sys
 import time
 import warnings
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.core.path_safety import resolve_cli_path
 from src.sekai.sk.drawer import compose_player_trace_image, compose_sk_image
