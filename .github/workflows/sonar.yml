@@ -26,7 +26,7 @@ jobs:
           fetch-depth: 0
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v7
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
 
       - name: Install CPython free-threaded
         run: uv python install cpython-3.14.3+freethreaded
@@ -34,7 +34,7 @@ jobs:
       - name: Create 3.14t venv and sync dependencies
         run: |
           uv venv .venv314t --python cpython-3.14.3+freethreaded
-          UV_PROJECT_ENVIRONMENT=.venv314t uv sync --frozen --all-groups --python .venv314t/bin/python
+          UV_PROJECT_ENVIRONMENT=.venv314t uv sync --frozen --all-groups --python .venv314t/bin/python --no-build
 
       - name: Repair pjsekai_scores_rs FreeType linkage
         run: |
