@@ -37,7 +37,6 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.skia_parity_sweep import CASES, MYSEKAI_REAL, PAYLOAD_DIR, _load_payload
-from src.core.path_safety import validate_git_ref
 
 # The baseline renders in a worktree that has no copy of the untracked config/assets.
 _UNTRACKED_NEEDED = ("configs.yaml",)
@@ -59,6 +58,11 @@ _RENDER_ENV = {"HARUKI_BG_TEST_HOUR": "12.0"}
 # tree there differ by ~12% of pixels on their own. Seeding the global RNG keeps the baseline side
 # reproducible; on the current side it is a harmless no-op.
 _RNG_SEED = 12345
+
+# Baseline comparisons intentionally support only the stable branch and the current
+# checkout.  Mapping a CLI choice to literals prevents revision expressions or
+# option-like strings from ever crossing the git command boundary.
+_BASELINE_REFS = {"main": "main", "HEAD": "HEAD"}
 
 _BASELINE_DRIVER = textwrap.dedent(
     """
@@ -82,7 +86,7 @@ _BASELINE_DRIVER = textwrap.dedent(
 
 
 def _prepare_worktree(ref: str, workdir: Path) -> Path:
-    ref = validate_git_ref(ref)
+    ref = _BASELINE_REFS[ref]
     tree = workdir / "baseline"
     subprocess.run(
         ["git", "worktree", "add", "--detach", str(tree), ref],
@@ -209,7 +213,12 @@ def _diff(a: Image.Image, b: Image.Image) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", default="main", help="baseline git ref (default: main)")
+    ap.add_argument(
+        "--ref",
+        choices=tuple(_BASELINE_REFS),
+        default="main",
+        help="baseline git ref (default: main)",
+    )
     ap.add_argument("--only", default="", help="comma-separated case names")
     ap.add_argument("--tolerance", type=int, default=0, help="max per-channel delta tolerated")
     ap.add_argument("--out-dir", default="out/legacy-baseline")
