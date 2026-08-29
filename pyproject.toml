@@ -86,3 +86,7 @@ dev = [
 branch = true
 relative_files = true
 source = ["src"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true

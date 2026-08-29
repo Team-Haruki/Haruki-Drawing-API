@@ -51,9 +51,14 @@ jobs:
       - name: Generate Python coverage report
         run: |
           .venv314t/bin/python -X gil=0 -m coverage run -m pytest -q
-          .venv314t/bin/python -X gil=0 -m coverage xml -o coverage.xml
+          .venv314t/bin/python -X gil=0 -m coverage xml --fail-under=0 -o coverage.xml
 
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      # Keep this after the scan: until the legacy suite reaches 90%, Sonar must
+      # still receive every report so staged quality improvements stay visible.
+      - name: Enforce 90% overall Python coverage
+        run: .venv314t/bin/python -X gil=0 -m coverage report
