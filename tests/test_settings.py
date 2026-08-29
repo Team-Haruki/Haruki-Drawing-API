@@ -92,6 +92,7 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     monkeypatch.setenv("HARUKI_DRAWING__EXPORT_IMAGE_FORMAT", "jpg")
     monkeypatch.setenv("HARUKI_DRAWING__JPG_QUALITY", "91")
     monkeypatch.setenv("HARUKI_DRAWING__USE_SKIA_PLOT", "false")
+    monkeypatch.setenv("HARUKI_DRAWING__CUSTOM_PROFILE_DIAGNOSTIC_DIR", "./diagnostics")
 
     settings = Settings()
 
@@ -101,6 +102,7 @@ def test_settings_reads_nested_environment_overrides(monkeypatch):
     assert settings.drawing.export_image_format == "jpg"
     assert settings.drawing.jpg_quality == 91
     assert settings.drawing.use_skia_plot is False
+    assert settings.drawing.custom_profile_diagnostic_dir == (PROJECT_ROOT / "diagnostics").resolve()
 
 
 def test_environment_overrides_beat_yaml_written_keys(tmp_path, monkeypatch):

@@ -59,6 +59,10 @@ from src.sekai.profile.custom_profile.collection_prefab import (
     OmikujiTextOp,
     build_omikuji_display_list,
 )
+from src.sekai.profile.custom_profile.diagnostics import (
+    capture_safe_exception,
+    persist_custom_profile_diagnostic,
+)
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralFontRef,
@@ -296,12 +300,14 @@ class CustomProfileSkiaAttempt:
         report: CustomProfileSceneReport | None = None,
         error_stage: str | None = None,
         error_type: str | None = None,
+        exception_diagnostic: dict[str, Any] | None = None,
     ) -> None:
         self.payload = payload
         self.outcome = outcome
         self.report = report
         self.error_stage = error_stage
         self.error_type = error_type
+        self.exception_diagnostic = exception_diagnostic
         self._record_lock = threading.Lock()
         self._recorded = False
 
@@ -310,7 +316,7 @@ class CustomProfileSkiaAttempt:
 
         _tag_backend(self.outcome, self.payload)
 
-    def record(self) -> None:
+    def record(self, final_http_status: int | None = None) -> None:
         """Commit aggregate metrics exactly once."""
 
         with self._record_lock:
@@ -322,6 +328,18 @@ class CustomProfileSkiaAttempt:
                 "custom_profile_card backend=skia committed_error stage=%s error_type=%s",
                 self.error_stage or "unknown",
                 self.error_type or "unknown",
+            )
+        if self.outcome == OUTCOME_ERROR or (
+            self.outcome == OUTCOME_FALLBACK
+            and (self.exception_diagnostic is not None or (self.report is not None and not self.report.complete))
+        ):
+            persist_custom_profile_diagnostic(
+                outcome=self.outcome,
+                stage=self.error_stage or ("scene_coverage" if self.report is not None else "unknown"),
+                error_type=self.error_type,
+                exception=self.exception_diagnostic,
+                scene_metrics=self.report.metrics() if self.report is not None else None,
+                final_http_status=final_http_status,
             )
         if self.report is not None:
             record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, self.report.metrics())
@@ -1858,8 +1876,14 @@ async def try_render_custom_profile_card_attempt(
         native = load_native_renderer()
     except ImportError as exc:
         # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
-        return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK)
+        logger.error("haruki_skia_renderer not importable; falling back to Pillow error_type=ImportError")
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_FALLBACK,
+            error_stage="renderer_load",
+            error_type="ImportError",
+            exception_diagnostic=capture_safe_exception(exc),
+        )
 
     card = dict(request.card)
     profile_context = dict(request.profile_context)
@@ -1933,6 +1957,7 @@ async def try_render_custom_profile_card_attempt(
             report=exc.report,
             error_stage=exc.stage,
             error_type=type(cause).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
         )
     except Exception as exc:
         return CustomProfileSkiaAttempt(
@@ -1940,6 +1965,7 @@ async def try_render_custom_profile_card_attempt(
             OUTCOME_ERROR,
             error_stage="pool_dispatch",
             error_type=type(exc).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
         )
     scene_metrics = report.metrics()
     if result is None:
@@ -1969,6 +1995,7 @@ async def try_render_custom_profile_card_attempt(
             report=report,
             error_stage="payload_decode",
             error_type=type(exc).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
         )
     payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
     logger.info(

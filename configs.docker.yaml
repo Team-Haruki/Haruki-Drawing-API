@@ -60,6 +60,10 @@ drawing:
   custom_profile_glyph_cache_max_mb: 64
   custom_profile_sprite_cache_size: 512
   custom_profile_sprite_cache_max_mb: 128
+  # 仅保存失败阶段、源码栈帧、异常消息指纹及场景分类计数；不保存请求体或资源路径。
+  custom_profile_diagnostic_dir: /pjskdata/Data/custom_profile/diagnostics
+  custom_profile_diagnostic_retention_hours: 168
+  custom_profile_diagnostic_max_files: 256
 
 server:
   host: 0.0.0.0

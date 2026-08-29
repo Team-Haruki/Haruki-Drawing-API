@@ -199,6 +199,7 @@ async def lifespan(app: FastAPI):
         cleanup_expired_tmp_files,
         shutdown_utils,
     )
+    from src.sekai.profile.custom_profile.diagnostics import cleanup_custom_profile_diagnostics
     from src.sekai.sk.drawer import shutdown_sk_drawer
 
     _ensure_nogil_runtime()
@@ -209,11 +210,13 @@ async def lifespan(app: FastAPI):
     def _cleanup_disk_caches() -> None:
         composed_removed = cleanup_expired_composed_image_disk_cache()
         painter_removed = Painter.cleanup_old_disk_cache()
-        if composed_removed or painter_removed:
+        diagnostic_removed = cleanup_custom_profile_diagnostics()
+        if composed_removed or painter_removed or diagnostic_removed:
             logger.info(
-                "Cleaned drawing disk caches: composed=%d painter=%d",
+                "Cleaned drawing disk caches: composed=%d painter=%d custom_profile_diagnostics=%d",
                 composed_removed,
                 painter_removed,
+                diagnostic_removed,
             )
 
     # 后台定期清理临时文件

@@ -25,6 +25,34 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+
+      - name: Install CPython free-threaded
+        run: uv python install cpython-3.14.3+freethreaded
+
+      - name: Create 3.14t venv and sync dependencies
+        run: |
+          uv venv .venv314t --python cpython-3.14.3+freethreaded
+          UV_PROJECT_ENVIRONMENT=.venv314t uv sync --frozen --all-groups --python .venv314t/bin/python --no-build
+
+      - name: Repair pjsekai_scores_rs FreeType linkage
+        run: |
+          set -euo pipefail
+          system_freetype="$(ldconfig -p | awk '/libfreetype\.so\.6 / { print $NF; exit }')"
+          bundled_freetype="$(find .venv314t/lib -path '*/pjsekai_scores_rs_skia_image.libs/libfreetype-*.so.6' -print -quit)"
+          if [ -n "$bundled_freetype" ]; then
+            test -n "$system_freetype"
+            rm "$bundled_freetype"
+            ln -s "$system_freetype" "$bundled_freetype"
+          fi
+          .venv314t/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
+
+      - name: Generate Python coverage report
+        run: |
+          .venv314t/bin/python -X gil=0 -m coverage run -m pytest -q
+          .venv314t/bin/python -X gil=0 -m coverage xml -o coverage.xml
+
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0
         env:
