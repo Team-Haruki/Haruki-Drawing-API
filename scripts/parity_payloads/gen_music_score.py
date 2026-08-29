@@ -240,7 +240,7 @@ _CAPTION_OVERRIDES = {
     "sekai ver.": "Sekai",
     "sekai": "Sekai",
     "virtual singer ver.": _CAPTION_VIRTUAL_SINGER,
-    "virtual singer": _CAPTION_VIRTUAL_SINGER,
+    _CAPTION_VIRTUAL_SINGER.lower(): _CAPTION_VIRTUAL_SINGER,
     "another vocal ver.": _CAPTION_ANOTHER_VOCAL,
     "another vocal": _CAPTION_ANOTHER_VOCAL,
     "original song ver.": _CAPTION_ORIGINAL_SONG,

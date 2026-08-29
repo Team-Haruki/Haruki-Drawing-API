@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.path_safety import resolve_cli_path
+from src.core.path_safety import resolve_cli_path, write_cli_text
 
 STATIC_IMAGES_DIR = "static_images"
 REGION_ASSET_MODE = "startapp"
@@ -365,9 +365,7 @@ def main() -> None:
         sys.stdout.write(rendered)
         sys.stdout.write("\n")
         return
-    output = resolve_cli_path(args.output)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(rendered + "\n", encoding="utf-8")
+    write_cli_text(args.output, rendered + "\n")
 
 
 if __name__ == "__main__":

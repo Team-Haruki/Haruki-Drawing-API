@@ -25,6 +25,15 @@ def resolve_cli_path(path: str | Path, *, must_exist: bool = False) -> Path:
     return candidate
 
 
+def write_cli_text(path: str | Path, contents: str, *, encoding: str = "utf-8") -> Path:
+    """Validate a CLI-selected output path and write text below an allowed root."""
+
+    destination = resolve_cli_path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(contents, encoding=encoding)
+    return destination
+
+
 def validate_git_ref(ref: str) -> str:
     """Reject ref strings that can be parsed as options or revision expressions."""
 
