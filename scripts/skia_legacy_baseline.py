@@ -37,6 +37,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.skia_parity_sweep import CASES, MYSEKAI_REAL, PAYLOAD_DIR, _load_payload
+from src.core.path_safety import validate_git_ref
 
 # The baseline renders in a worktree that has no copy of the untracked config/assets.
 _UNTRACKED_NEEDED = ("configs.yaml",)
@@ -81,6 +82,7 @@ _BASELINE_DRIVER = textwrap.dedent(
 
 
 def _prepare_worktree(ref: str, workdir: Path) -> Path:
+    ref = validate_git_ref(ref)
     tree = workdir / "baseline"
     subprocess.run(
         ["git", "worktree", "add", "--detach", str(tree), ref],

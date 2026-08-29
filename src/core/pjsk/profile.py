@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
+from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
@@ -18,7 +19,7 @@ from src.settings import (
     CUSTOM_PROFILE_MAX_TEXT_SIZE,
 )
 
-router = APIRouter(tags=["Profile"])
+router = APIRouter(tags=["Profile"], responses=CUSTOM_PROFILE_ERROR_RESPONSES)
 logger = logging.getLogger(__name__)
 _custom_profile_render_slots = asyncio.Semaphore(CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS)
 

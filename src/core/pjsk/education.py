@@ -2,6 +2,7 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.education.drawer import (
     compose_area_item_upgrade_materials_image,
@@ -29,7 +30,7 @@ from src.sekai.education.model import (
     PowerBonusDetailRequest,
 )
 
-router = APIRouter(tags=["Education"])
+router = APIRouter(tags=["Education"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/challenge-live", summary="Generate challenge live detail image")

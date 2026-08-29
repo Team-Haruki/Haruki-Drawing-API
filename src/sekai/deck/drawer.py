@@ -43,6 +43,7 @@ from .model import (
 
 OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
+_DFS_GA_DISPLAY_NAME = "DFS 预热遗传"
 RECOMMEND_ALG_NAMES = {
     "dfs": "暴力搜索",
     "DFS": "暴力搜索",
@@ -50,10 +51,10 @@ RECOMMEND_ALG_NAMES = {
     "SA": "模拟退火",
     "ga": "遗传算法",
     "GA": "遗传算法",
-    "dfs_ga": "DFS 预热遗传",
-    "dfs-ga": "DFS 预热遗传",
-    "dga": "DFS 预热遗传",
-    "DGA": "DFS 预热遗传",
+    "dfs_ga": _DFS_GA_DISPLAY_NAME,
+    "dfs-ga": _DFS_GA_DISPLAY_NAME,
+    "dga": _DFS_GA_DISPLAY_NAME,
+    "DGA": _DFS_GA_DISPLAY_NAME,
     "rl": "强化学习",
     "RL": "强化学习",
     "all": "全部算法",

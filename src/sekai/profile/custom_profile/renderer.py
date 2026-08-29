@@ -16,6 +16,8 @@ from typing import Any
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
+from src.core.path_safety import resolve_cli_path
+
 Image.MAX_IMAGE_PIXELS = None
 
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets, honor_group_uses_scroll_level
@@ -414,13 +416,29 @@ GENERAL_DECK_CARD_RENDER_SIZE = (
     round(GENERAL_DECK_CARD_NATIVE_SIZE[0] * GENERAL_DECK_CARD_SCALE),
     round(GENERAL_DECK_CARD_NATIVE_SIZE[1] * GENERAL_DECK_CARD_SCALE),
 )
+_CARDS_FILENAME = "cards.json"
+_BUILD_IMAGE_CONTENT_METHOD = "CustomProfileUtility.BuildImageContentViewInternal"
+_INSTANTIATE_IMAGE_CONTENT_METHOD = "CustomProfileUtility.InstantiateImageContent"
+_IMAGE_CONTENT_REFRESH_METHOD = "ImageContentView.Refresh"
+_ALT_OTF_SUFFIX = "-alt.otf"
+_DEFAULT_FONT_FILENAME = "FOT-RodinNTLGPro-DB.otf"
+_DEFAULT_ALT_FONT_FILENAME = "FOT-RodinNTLGPro-DB" + _ALT_OTF_SUFFIX
+_OMIKUJI_FILENAME = "omikujis.json"
+_DECK_IMAGE_FILENAME = "deck.png"
+_OMIKUJI_FONT_FILENAME = "FOT-Omikuji_4956192661917990345.otf"
+_TMP_TEXT_LABEL = "custom profile TMP text"
+_NATIVE_IMAGE_CONTENT_METHODS = (
+    _BUILD_IMAGE_CONTENT_METHOD,
+    _INSTANTIATE_IMAGE_CONTENT_METHOD,
+    _IMAGE_CONTENT_REFRESH_METHOD,
+)
 GENERAL_VIEW_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "X": ("userProfile.twitterId",),
     "EditUserName": ("user.name",),
     "TotalPower": ("totalPower",),
-    "Deck": ("userDeck", "userCards", "cards.json", "card thumbnail assets"),
+    "Deck": ("userDeck", "userCards", _CARDS_FILENAME, "card thumbnail assets"),
     "Comment": ("userProfile.word",),
-    "LeaderCard": ("userDeck.leader", "userCards", "cards.json", "card thumbnail assets"),
+    "LeaderCard": ("userDeck.leader", "userCards", _CARDS_FILENAME, "card thumbnail assets"),
     "HonorDeck": ("userProfileHonors", "userHonors", "honor assets"),
     "MultiLive": ("userMultiLiveTopScoreCount",),
     "ChallengeLive": ("userChallengeLiveSoloResult",),
@@ -435,36 +453,12 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
         "CustomProfileUtility.InstantiateGeneralContent",
         "GeneralContentViewBase.Setup",
     ),
-    "general_background": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
-    "story_background": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
-    "character_icon": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
-    "material": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
-    "user_interface_icon": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
-    "stand_member": (
-        "CustomProfileUtility.BuildImageContentViewInternal",
-        "CustomProfileUtility.InstantiateImageContent",
-        "ImageContentView.Refresh",
-    ),
+    "general_background": _NATIVE_IMAGE_CONTENT_METHODS,
+    "story_background": _NATIVE_IMAGE_CONTENT_METHODS,
+    "character_icon": _NATIVE_IMAGE_CONTENT_METHODS,
+    "material": _NATIVE_IMAGE_CONTENT_METHODS,
+    "user_interface_icon": _NATIVE_IMAGE_CONTENT_METHODS,
+    "stand_member": _NATIVE_IMAGE_CONTENT_METHODS,
     "card_member": (
         "CustomProfileUtility.InstantiateCardMemberContent",
         "CardMemberContentViewBase.Refresh",
@@ -488,7 +482,7 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
     ),
     "stamp": (
         "CustomProfileUtility.InstantiateStampContent",
-        "ImageContentView.Refresh",
+        _IMAGE_CONTENT_REFRESH_METHOD,
     ),
     "shape": (
         "CustomProfileUtility.InstantiateShapeContent",
@@ -1369,7 +1363,7 @@ class TMPFontLibrary:
                 base_names.append(lower)
 
         for name in base_names:
-            for suffix in (".otf", ".ttf", "-alt.otf"):
+            for suffix in (".otf", ".ttf", _ALT_OTF_SUFFIX):
                 candidate = self.runtime_fonts_dir / f"{name}{suffix}"
                 if candidate.exists():
                     return candidate
@@ -1728,7 +1722,7 @@ def edt_1d_squared(values: Any) -> Any:
         while True:
             p = int(v[k])
             denom = 2.0 * (q - p)
-            s = np.inf if denom == 0.0 else ((float(values[q]) + q * q) - (float(values[p]) + p * p)) / denom
+            s = ((float(values[q]) + q * q) - (float(values[p]) + p * p)) / denom
             if s > z[k] or k == 0:
                 break
             k -= 1
@@ -1863,16 +1857,16 @@ def transform_rgba_premul(
 def font_file(fonts: Path, font_name: str, rodin_font: str = "ttf") -> Path:
     if font_name == "FOT-RodinNTLGPro-DB":
         if rodin_font == "otf":
-            suffixes = (".otf", ".ttf", "-alt.otf")
+            suffixes = (".otf", ".ttf", _ALT_OTF_SUFFIX)
         else:
-            suffixes = (".ttf", ".otf", "-alt.otf")
+            suffixes = (".ttf", ".otf", _ALT_OTF_SUFFIX)
     else:
-        suffixes = (".otf", ".ttf", "-alt.otf")
+        suffixes = (".otf", ".ttf", _ALT_OTF_SUFFIX)
     for suffix in suffixes:
         candidate = fonts / (font_name + suffix)
         if candidate.exists():
             return candidate
-    return fonts / "FOT-RodinNTLGPro-DB.otf"
+    return fonts / _DEFAULT_FONT_FILENAME
 
 
 def sharp_triangle_alpha(size: tuple[int, int]) -> Image.Image:
@@ -2171,7 +2165,7 @@ class PNGRenderer:
             "omikujis",
             "omikujiResources",
             "omikuji_resources",
-            filename="omikujis.json",
+            filename=_OMIKUJI_FILENAME,
         )
         self.others = self.load_resource_index(
             "customProfileEtcResources", "custom_profile_etc_resources", filename="customProfileEtcResources.json"
@@ -2192,7 +2186,7 @@ class PNGRenderer:
             filename="customProfileUserInterfaceIconResources.json",
         )
         self.stamps = self.load_resource_index("stamps", filename="stamps.json")
-        self.cards = self.load_resource_index("cards", filename="cards.json")
+        self.cards = self.load_resource_index("cards", filename=_CARDS_FILENAME)
         self.honors = self.load_resource_index("honors", filename="honors.json")
         self.honor_groups = self.load_resource_index("honorGroups", "honor_groups", filename="honorGroups.json")
         self.bonds_honors = self.load_resource_index("bondsHonors", "bonds_honors", filename="bondsHonors.json")
@@ -2994,8 +2988,8 @@ class PNGRenderer:
 
         if self.region in {"jp", "ja"}:
             return [
-                self.fonts / "FOT-RodinNTLGPro-DB.otf",
-                self.fonts / "FOT-RodinNTLGPro-DB-alt.otf",
+                self.fonts / _DEFAULT_FONT_FILENAME,
+                self.fonts / _DEFAULT_ALT_FONT_FILENAME,
                 self.fonts / "FOT-RodinNTLGPro-DB.ttf",
                 self.font_path_for("FOT-RodinNTLGPro-DB"),
                 Path("/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc"),
@@ -3003,7 +2997,7 @@ class PNGRenderer:
         return [
             self.font_path_for("FOT-RodinNTLGPro-DB"),
             self.fonts / "FOT-RodinNTLGPro-DB.ttf",
-            self.fonts / "FOT-RodinNTLGPro-DB.otf",
+            self.fonts / _DEFAULT_FONT_FILENAME,
             Path("/System/Library/Fonts/Supplemental/Arial Unicode.ttf"),
         ]
 
@@ -4032,8 +4026,8 @@ class PNGRenderer:
                     Path("character") / "member_cutout" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
-                    Path("character") / "member_cutout" / bundle / "deck.png",
-                    Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                    Path("character") / "member_cutout" / bundle / _DECK_IMAGE_FILENAME,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / _DECK_IMAGE_FILENAME,
                 ]
             )
         elif kind == "clip":
@@ -4463,7 +4457,7 @@ class PNGRenderer:
             "card member content route is known, but the required card sprite PNG is not available locally",
             expected_view=expected_view,
             expected_size=PREFAB_NATIVE_SIZES.get(expected_view),
-            required_inputs=("userCards", "cards.json", "character/member card assets"),
+            required_inputs=("userCards", _CARDS_FILENAME, "character/member card assets"),
             generated_data=generated,
         )
 
@@ -4993,17 +4987,12 @@ class PNGRenderer:
             return self.render_omikuji_collection_content(item, resource)
         if collection_type in {"none", "other", ""}:
             return self.render_image_content("collection", item)
-        expected_view = (
-            "CollectionCustomPrefabContentView"
-            if collection_type == "omikuji"
-            else "ImageContentView+collection material"
-        )
         return self.native_unresolved(
             "collection",
             item,
             f"collection resource type {collection_type!r} uses a dynamic child UI/material path",
             resource=resource,
-            expected_view=expected_view,
+            expected_view="ImageContentView+collection material",
             expected_size=PREFAB_NATIVE_SIZES["CollectionCustomPrefabContentView"],
             required_inputs=("MasterResource", "GenerateCollectionData", "collection child prefab/material assets"),
             generated_data=self.generate_collection_data(item),
@@ -5020,11 +5009,11 @@ class PNGRenderer:
             return self.native_unresolved(
                 "collection",
                 item,
-                "omikuji collection needs the target omikujis.json row",
+                f"omikuji collection needs the target {_OMIKUJI_FILENAME} row",
                 resource=resource,
                 expected_view="CollectionCustomPrefabContentView",
                 expected_size=OMIKUJI_RESULT_NATIVE_SIZE,
-                required_inputs=("MasterResource", "GenerateCollectionData", "omikujis.json"),
+                required_inputs=("MasterResource", "GenerateCollectionData", _OMIKUJI_FILENAME),
                 generated_data=self.generate_collection_data(item),
             )
 
@@ -5044,7 +5033,7 @@ class PNGRenderer:
                 required_inputs=(
                     "MasterResource",
                     "GenerateCollectionData",
-                    "omikujis.json",
+                    _OMIKUJI_FILENAME,
                     "lottery_game material assets",
                 ),
                 generated_data=self.generate_collection_data(item),
@@ -5111,24 +5100,9 @@ class PNGRenderer:
         for base in self.data_root_candidates():
             candidates.extend(
                 (
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / self.region
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "cn"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "kr"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
+                    base / "custom_profile" / "tmp-font-assets" / self.region / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                    base / "custom_profile" / "tmp-font-assets" / "cn" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                    base / "custom_profile" / "tmp-font-assets" / "kr" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
                 )
             )
         return candidates
@@ -5416,8 +5390,8 @@ class PNGRenderer:
                     Path("character") / "member_cutout" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_file,
                     Path("character") / "member_cutout" / f"{bundle}_rip" / cutout_trim_file,
-                    Path("character") / "member_cutout" / bundle / "deck.png",
-                    Path("character") / "member_cutout" / f"{bundle}_rip" / "deck.png",
+                    Path("character") / "member_cutout" / bundle / _DECK_IMAGE_FILENAME,
+                    Path("character") / "member_cutout" / f"{bundle}_rip" / _DECK_IMAGE_FILENAME,
                     Path("character") / "member_cutout_trm" / bundle / cutout_file,
                     Path("character") / "member_cutout_trm" / bundle / cutout_trim_file,
                     Path("character") / "member_cutout_trm" / f"{bundle}_rip" / cutout_file,
@@ -5773,7 +5747,7 @@ class PNGRenderer:
         inputs = self.layer_transform_inputs(local, object_data, content_kind)
         layer, pivot = inputs.layer, inputs.pivot
         sx, sy = inputs.object_scale
-        if sx != 1.0 or sy != 1.0:
+        if not math.isclose(sx, 1.0, abs_tol=1.0e-9) or not math.isclose(sy, 1.0, abs_tol=1.0e-9):
             new_w = max(1, round(layer.width * sx))
             new_h = max(1, round(layer.height * sy))
             layer = self.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
@@ -5918,7 +5892,7 @@ class PNGRenderer:
             self.origin_y - float(position.get("y", 0)) * self.position_scale_y,
         )
 
-    def render_shape(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float]] | None:
+    def render_shape(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float], bool] | None:
         resource = self.shapes.get(int(item.get("id", 0)), {})
         path = self.shape_resource_path(resource)
         if not path:
@@ -5958,9 +5932,7 @@ class PNGRenderer:
                 outline_size,
                 output_size,
             )
-            if scale_consumed:
-                return base, (base.width / 2, base.height / 2), True
-            return base, (base.width / 2, base.height / 2)
+            return base, (base.width / 2, base.height / 2), scale_consumed
         fill.putalpha(ImageChops.multiply(alpha_mask, Image.new("L", size, round(255 * fill_alpha_value))))
         if outline_alpha > 0 and outline_size > 0:
             if self.shape_outline_mode == "dilate":
@@ -5978,7 +5950,7 @@ class PNGRenderer:
                 base = Image.new("RGBA", size, (0, 0, 0, 0))
                 base.alpha_composite(outline, (0, 0))
                 base.alpha_composite(fill, (0, 0))
-                return base, (base.width / 2, base.height / 2)
+                return base, (base.width / 2, base.height / 2), False
             factor = 1.0 + outline_size * SHAPE_OUTLINE_SCALE_FACTOR
             out_size = (round(size[0] * factor), round(size[1] * factor))
             out_alpha = alpha_mask.resize(out_size, Image.Resampling.BICUBIC)
@@ -5996,8 +5968,8 @@ class PNGRenderer:
             base = Image.new("RGBA", out_size, (0, 0, 0, 0))
             base.alpha_composite(outline, (0, 0))
             base.alpha_composite(fill, fill_offset)
-            return base, (base.width / 2, base.height / 2)
-        return fill, (fill.width / 2, fill.height / 2)
+            return base, (base.width / 2, base.height / 2), False
+        return fill, (fill.width / 2, fill.height / 2), False
 
     def render_text(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float]] | None:
         data = self.generate_text_data(item)
@@ -7808,7 +7780,7 @@ class PNGRenderer:
         return max(64, round(max(base_size * self.tmp_font_scale, outline_width) * 2))
 
     def text_bbox(self, font: ImageFont.FreeTypeFont, text: str) -> tuple[int, int, int, int]:
-        if self.tmp_space_width_factor == 1.0 or " " not in text:
+        if math.isclose(self.tmp_space_width_factor, 1.0, abs_tol=1.0e-9) or " " not in text:
             return font.getbbox(text or " ")
 
         cursor = 0.0
@@ -8685,7 +8657,7 @@ class PNGRenderer:
             region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
 
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
             scaled_size = ensure_raster_size(
                 (max(1, round(field_img.width * style.scale_x)), field_img.height),
                 max_pixels=self.max_layer_pixels,
@@ -9349,7 +9321,7 @@ class PNGRenderer:
             py = round(max_pad + glyph_bbox[1] - glyph_pad - bbox[1])
             image.alpha_composite(glyph, (px, py))
 
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
             scaled_size = ensure_raster_size(
                 (max(1, round(image.width * style.scale_x)), image.height),
                 max_pixels=self.max_layer_pixels,
@@ -9419,7 +9391,7 @@ class PNGRenderer:
             self.draw_text_mask_run(
                 ImageDraw.Draw(mask), (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size
             )
-            if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+            if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
                 new_w = max(1, round(mask.width * style.scale_x))
                 scaled_size = ensure_raster_size(
                     (new_w, mask.height),
@@ -10044,7 +10016,7 @@ class PNGRenderer:
                 retained_field_bytes = self._reserve_retained_raster_bytes(
                     retained_field_bytes,
                     plan.size[0] * plan.size[1],
-                    label="custom profile TMP text",
+                    label=_TMP_TEXT_LABEL,
                 )
                 scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
                 quads.append(
@@ -10081,7 +10053,7 @@ class PNGRenderer:
                 retained_field_bytes = self._reserve_retained_raster_bytes(
                     retained_field_bytes,
                     plan.size[0] * plan.size[1],
-                    label="custom profile TMP text",
+                    label=_TMP_TEXT_LABEL,
                 )
                 scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
                 quads.append(
@@ -10114,7 +10086,7 @@ class PNGRenderer:
             retained_field_bytes = self._reserve_retained_raster_bytes(
                 retained_field_bytes,
                 warped_field.width * warped_field.height,
-                label="custom profile TMP text",
+                label=_TMP_TEXT_LABEL,
             )
             scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
             quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
@@ -10181,7 +10153,7 @@ class PNGRenderer:
                 retained_field_bytes = self._reserve_retained_raster_bytes(
                     retained_field_bytes,
                     field_size[0] * field_size[1],
-                    label="custom profile TMP text",
+                    label=_TMP_TEXT_LABEL,
                 )
                 character_field = self.render_tmp_sdf_character_field(
                     font_name,
@@ -10454,7 +10426,7 @@ class PNGRenderer:
             font_name,
             font_size,
         )
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
             glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
@@ -10540,7 +10512,7 @@ class PNGRenderer:
             font_name,
             font_size,
         )
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
             glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
@@ -11143,6 +11115,7 @@ def main() -> None:
         )
     warn_deprecated_probe_args(args)
 
+    args.out = resolve_cli_path(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
     resources: dict[str, Any] = {}
     if args.request is not None:

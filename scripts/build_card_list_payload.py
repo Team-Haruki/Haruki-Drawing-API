@@ -7,6 +7,8 @@ import re
 import sys
 from typing import Any
 
+from src.core.path_safety import resolve_cli_path
+
 STATIC_IMAGES_DIR = "static_images"
 REGION_ASSET_MODE = "startapp"
 SKILL_PLACEHOLDER = re.compile(r"\{\{([^{}]+)}}")
@@ -350,18 +352,19 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def main() -> None:
     args = parse_args()
-    payload = build_payload(args.master_dir, card_ids=args.card_id, region=args.region, title=args.title)
+    master_dir = resolve_cli_path(args.master_dir, must_exist=True)
+    payload = build_payload(master_dir, card_ids=args.card_id, region=args.region, title=args.title)
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output is None:
         sys.stdout.write(rendered)
         sys.stdout.write("\n")
-        return 0
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(rendered + "\n", encoding="utf-8")
-    return 0
+        return
+    output = resolve_cli_path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(rendered + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

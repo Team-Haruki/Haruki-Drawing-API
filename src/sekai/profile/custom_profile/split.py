@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from src.core.path_safety import resolve_cli_path
+
 CUSTOM_PROFILE_REQUEST_KIND = "pjsk_custom_profile_card"
 CUSTOM_PROFILE_REQUEST_SCHEMA_VERSION = 1
 
@@ -32,13 +34,15 @@ PROFILE_CONTEXT_KEYS = (
 
 
 def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
+    safe_path = resolve_cli_path(path, must_exist=True)
+    with safe_path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    safe_path = resolve_cli_path(path)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    with safe_path.open("w", encoding="utf-8") as f:
         json.dump(value, f, ensure_ascii=False, indent=2)
         f.write("\n")
 

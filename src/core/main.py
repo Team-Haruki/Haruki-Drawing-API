@@ -251,10 +251,9 @@ async def lifespan(app: FastAPI):
         try:
             import haruki_skia_renderer  # noqa: F401
         except ImportError:
-            logger.error(
+            logger.exception(
                 "Skia gates are enabled but haruki_skia_renderer is not importable; "
-                "every Skia path will fall back to Pillow (fail-open)",
-                exc_info=True,
+                "every Skia path will fall back to Pillow (fail-open)"
             )
     _self_check_fonts()
     await startup_heavy_render_worker_pool()

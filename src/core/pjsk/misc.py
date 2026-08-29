@@ -8,11 +8,12 @@ from src.core.heavy_render_pool import (
     HeavyRenderTaskTimeoutError,
     get_heavy_render_worker_pool,
 )
+from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.misc.drawer import compose_alias_list_image, try_render_alias_list_payload
 from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
 
-router = APIRouter(tags=["Misc"])
+router = APIRouter(tags=["Misc"], responses=HEAVY_RENDER_ERROR_RESPONSES)
 
 
 @router.post("/chara-birthday", summary="Generate character birthday image")

@@ -463,13 +463,13 @@ class IRBuilder:
             edges = (left, top, left + values[2], top + values[3])
             if fit != "stretch":
                 raise ValueError("paste_lerp Image requires fit='stretch'")
-            if float(alpha) != 1.0:
+            if not math.isclose(float(alpha), 1.0, abs_tol=1.0e-9):
                 raise ValueError("paste_lerp Image requires alpha=1")
             if (
                 source_rect is not None
                 or tint is not None
                 or shadow is not None
-                or any(value != 0.0 for value in sigma)
+                or any(not math.isclose(value, 0.0, abs_tol=1.0e-9) for value in sigma)
             ):
                 raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
             if (
@@ -1202,9 +1202,9 @@ class IRBuilder:
             "fill": _fill_value(fill),
             "shadow_alpha": shadow_alpha,
         }
-        if blur != 4.0:
+        if not math.isclose(blur, 4.0, abs_tol=1.0e-9):
             node["blur"] = float(blur)
-        if shadow_width != 6.0:
+        if not math.isclose(shadow_width, 6.0, abs_tol=1.0e-9):
             node["shadow_width"] = float(shadow_width)
         if tuple(corners) != (True, True, True, True):
             node["corners"] = [bool(c) for c in corners]

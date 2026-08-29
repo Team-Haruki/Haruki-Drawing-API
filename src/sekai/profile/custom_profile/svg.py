@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+from src.core.path_safety import resolve_cli_path
+
 
 DEFAULT_PROFILE = Path("/Users/deseer/PycharmProjects/metadata/profile.json")
 DEFAULT_MASTERDATA = Path("/Users/deseer/PycharmProjects/haruki-sekai-sc-master/master")
@@ -77,7 +79,8 @@ INVALID_TMP_TAG = object()
 
 
 def load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as f:
+    safe_path = resolve_cli_path(path, must_exist=True)
+    with safe_path.open("r", encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -785,7 +788,7 @@ class Renderer:
                         f" translate({x_cursor:.3f} {baseline - style.voffset:.3f})"
                         f" scale({style.scale_x:.6f} 1)"
                         f" translate({-x_cursor:.3f} {-baseline + style.voffset:.3f})"
-                        if style.scale_x != 1.0
+                        if not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9)
                         else ""
                     )
                 stroke = ""
@@ -911,7 +914,8 @@ def main() -> None:
     parser.add_argument("--tmp-scale-mode", choices=["x", "uniform"], default="x")
     args = parser.parse_args()
 
-    args.out.mkdir(parents=True, exist_ok=True)
+    output_dir = resolve_cli_path(args.out)
+    output_dir.mkdir(parents=True, exist_ok=True)
     profile = load_json(args.profile)
     cards = select_cards(profile, args.seq, args.card_id, args.all)
     if not cards:
@@ -928,7 +932,7 @@ def main() -> None:
         svg = renderer.render_layout(card)
         seq = int(card.get("seq", 0))
         cid = int(card.get("customProfileCardId", 0))
-        path = args.out / f"custom_profile_seq{seq:02d}_card{cid:02d}.svg"
+        path = output_dir / f"custom_profile_seq{seq:02d}_card{cid:02d}.svg"
         path.write_text(svg, encoding="utf-8")
         print(path)
 

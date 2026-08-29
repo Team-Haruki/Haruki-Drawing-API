@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.costume.drawer import (
     compose_costume_detail_image,
@@ -9,7 +10,7 @@ from src.sekai.costume.drawer import (
 )
 from src.sekai.costume.model import CostumeDetailRequest, CostumeListRequest
 
-router = APIRouter(tags=["Costume"])
+router = APIRouter(tags=["Costume"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/list", summary="Generate costume list image")

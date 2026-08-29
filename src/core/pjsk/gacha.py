@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.gacha.drawer import (
     compose_gacha_detail_image,
@@ -12,7 +13,7 @@ from src.sekai.gacha.model import (
     GachaListRequest,
 )
 
-router = APIRouter(tags=["Gacha"])
+router = APIRouter(tags=["Gacha"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/list", summary="Generate gacha list image")

@@ -8,11 +8,12 @@ only contributes event metadata, world-bloom chapter windows and asset paths.
 """
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 from itertools import pairwise
 import math
 from pathlib import Path
-import random
 import sys
+from typing import TypeVar
 
 _HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(_HERE))
@@ -42,6 +43,41 @@ EVENT_ID = 210  # marathon 褪せない今を、彩って (2026-07-09 ~ 2026-07-
 WL_EVENT_ID = 207  # world_bloom Into the New Light
 WL_CHAPTER_CID = 24  # chapter 1 gameCharacterId (Luka)
 CC_EVENT_ID = 132  # cheerful_carnival みんなで配信♡WEDDING LIVE！
+_FIXTURE_PLAYER_NAME = "翠のマグロ"
+
+_T = TypeVar("_T")
+
+
+class FixtureRng:
+    """Deterministic SHA-256 stream used only to synthesize repeatable fixtures."""
+
+    def __init__(self, seed: int) -> None:
+        self._seed = str(seed).encode()
+        self._counter = 0
+
+    def _unit(self) -> float:
+        block = hashlib.sha256(self._seed + self._counter.to_bytes(8, "big")).digest()
+        self._counter += 1
+        return int.from_bytes(block, "big") / (1 << 256)
+
+    def randint(self, start: int, end: int) -> int:
+        return start + int(self._unit() * (end - start + 1))
+
+    def uniform(self, start: float, end: float) -> float:
+        return start + self._unit() * (end - start)
+
+    def choice(self, values: list[_T] | tuple[_T, ...]) -> _T:
+        return values[self.randint(0, len(values) - 1)]
+
+    def sample(self, values: list[_T] | tuple[_T, ...], count: int) -> list[_T]:
+        pool = list(values)
+        if count < 0 or count > len(pool):
+            raise ValueError("sample larger than population")
+        for index in range(count):
+            selected = self.randint(index, len(pool) - 1)
+            pool[index], pool[selected] = pool[selected], pool[index]
+        return pool[:count]
+
 
 # handler/sk_parse.go:212-230
 DEFAULT_NORMAL_RANKS = [
@@ -106,7 +142,7 @@ PLAYER_NAMES = [
     "夜更かしカナデ",
     "こはねぇ〜〜!",
     "P茄子の逆襲",
-    "翠のマグロ",
+    _FIXTURE_PLAYER_NAME,
     "ツカサ様の下僕No.1",
     "えむ〜ワンダショ!!",
     "Karin_pjsk",
@@ -189,7 +225,7 @@ def _diurnal(ts_ms: int) -> float:
 
 
 def border_series(
-    rank: int, start_ms: int, end_ms: int, step_ms: int, rng: random.Random, scale: float = 1.0
+    rank: int, start_ms: int, end_ms: int, step_ms: int, rng: FixtureRng, scale: float = 1.0
 ) -> list[tuple[int, int]]:
     """Monotonic (time, score) border walk from 0 at event start to border_now at end."""
     times = list(range(start_ms, end_ms + 1, step_ms))
@@ -208,7 +244,7 @@ def synth_minute_trace(
     start_ms: int,
     end_ms: int,
     breaks: list[tuple[int, int]],
-    rng: random.Random,
+    rng: FixtureRng,
     *,
     step_ms: int = 60_000,
     start_score: int = 0,
@@ -267,7 +303,7 @@ def derive_metrics(points: list[dict], now_ms: int) -> dict:
 def tracked_rank_info(
     rank: int,
     name: str,
-    rng: random.Random,
+    rng: FixtureRng,
     *,
     now_ms: int = NOW_MS,
     scale: float = 1.0,
@@ -359,7 +395,7 @@ def jst(y: int, mo: int, d: int, h: int, mi: int = 0) -> int:
 
 
 def gen_sk_line() -> dict:
-    rng = random.Random(210_001)
+    rng = FixtureRng(210_001)
     meta = event_meta(EVENT_ID)
     ranks = []
     for rank in DEFAULT_NORMAL_RANKS:
@@ -387,7 +423,7 @@ def gen_sk_line() -> dict:
 
 
 def gen_sk_line_predict() -> dict:
-    rng = random.Random(210_002)
+    rng = FixtureRng(210_002)
     meta = event_meta(EVENT_ID)
     forecast_ranks = [
         100,
@@ -461,7 +497,7 @@ def gen_sk_line_predict() -> dict:
 
 def gen_sk_query() -> dict:
     """WL-chapter query (event 207 ch.1): names kept, metrics for tracked top-100."""
-    rng = random.Random(207_001)
+    rng = FixtureRng(207_001)
     meta = event_meta(WL_EVENT_ID)
     chapter = wl_chapter(WL_EVENT_ID, WL_CHAPTER_CID)
     wl_now = chapter["chapterStartAt"] + 20 * 3_600_000
@@ -498,7 +534,7 @@ def gen_sk_query() -> dict:
 
 def gen_sk_check_room() -> dict:
     """Classic /cf: single target room with tracker previous/next (rank±1)."""
-    rng = random.Random(210_003)
+    rng = FixtureRng(210_003)
     meta = event_meta(EVENT_ID)
     return {
         "eid": meta["id"],
@@ -506,7 +542,7 @@ def gen_sk_check_room() -> dict:
         "region": "jp",
         "ranks": [tracked_rank_info(26, "ミズキと添い遂げる会", rng)],
         "prev_rank": tracked_rank_info(25, "夜更かしカナデ", rng),
-        "next_rank": tracked_rank_info(27, "翠のマグロ", rng),
+        "next_rank": tracked_rank_info(27, _FIXTURE_PLAYER_NAME, rng),
         "aggregate_at": meta["aggregate_at"],
         "update_at": NOW_MS,  # query_requests.go:177
         "timezone": common.TIMEZONE,
@@ -516,7 +552,7 @@ def gen_sk_check_room() -> dict:
 
 def gen_sk_check_room_multi() -> dict:
     """/cfl: the default lite rank table, one room row per rank, no prev/next."""
-    rng = random.Random(210_004)
+    rng = FixtureRng(210_004)
     meta = event_meta(EVENT_ID)
     names = rng.sample(PLAYER_NAMES, len(CFL_RANKS))
     return {
@@ -532,7 +568,7 @@ def gen_sk_check_room_multi() -> dict:
 
 
 def _csb_body(name: str, breaks: list[tuple[int, int]], seed: int, *, round_pt: tuple[int, int], rank_end: int) -> dict:
-    rng = random.Random(seed)
+    rng = FixtureRng(seed)
     meta = event_meta(EVENT_ID)
     trace = synth_minute_trace(
         name, meta["start_at"], NOW_MS - 90_000, breaks, rng, round_pt=round_pt, rank_start=88, rank_end=rank_end
@@ -591,7 +627,7 @@ def gen_sk_csb_large() -> dict:
 
 
 def _speed_body(request_type: str, period_s: int, gain_ratio: float, seed: int) -> dict:
-    rng = random.Random(seed)
+    rng = FixtureRng(seed)
     meta = event_meta(EVENT_ID)
     ranks = []
     for rank in DEFAULT_NORMAL_RANKS:
@@ -631,7 +667,7 @@ def gen_sk_speed_daily() -> dict:
 
 
 def gen_sk_player_trace() -> dict:
-    rng = random.Random(210_009)
+    rng = FixtureRng(210_009)
     meta = event_meta(EVENT_ID)
     nights = [
         (jst(2026, 7, 10, 2, 0), jst(2026, 7, 10, 9, 0)),
@@ -662,7 +698,7 @@ def gen_sk_player_trace() -> dict:
         rank_end=41,
     )
     compare_trace = [
-        {"rank": 100, "name": "翠のマグロ", "score": score, "time": t}
+        {"rank": 100, "name": _FIXTURE_PLAYER_NAME, "score": score, "time": t}
         for t, score in border_series(100, meta["start_at"], NOW_MS, 900_000, rng)
     ]
     latest = compare_trace[-1]
@@ -681,10 +717,10 @@ def gen_sk_player_trace() -> dict:
 
 
 def gen_sk_rank_trace() -> dict:
-    rng = random.Random(210_010)
+    rng = FixtureRng(210_010)
     meta = event_meta(EVENT_ID)
     holders = [
-        "翠のマグロ",
+        _FIXTURE_PLAYER_NAME,
         "エナドリ絵名",
         "Karin_pjsk",
         "月夜のセレナーデ",

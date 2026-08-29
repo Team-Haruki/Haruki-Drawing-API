@@ -204,7 +204,7 @@ def _heavy_render_worker_main(
             set_request_stage(f"worker:{task.kind}:compose_image")
             payload = _render_heavy_task(task.kind, task.payload)
             result_queue.put(_WorkerResult(task_id=task.task_id, ok=True, payload=payload))
-        except BaseException as exc:
+        except Exception as exc:
             result_queue.put(
                 _WorkerResult(
                     task_id=task.task_id,

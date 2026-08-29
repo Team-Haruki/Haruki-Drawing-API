@@ -14,12 +14,12 @@ import asyncio
 from dataclasses import dataclass
 import json
 import math
-from pathlib import Path
 import statistics
 import sys
 import time
 import warnings
 
+from src.core.path_safety import resolve_cli_path
 from src.sekai.sk.drawer import compose_player_trace_image, compose_sk_image
 from src.sekai.sk.model import PlayerTraceRequest, SKRequest
 
@@ -170,11 +170,11 @@ async def run_benchmark(sk_payload: dict, trace_payload: dict) -> dict:
 
 if __name__ == "__main__":
     args = parse_args()
-    sk_payload = json.loads(Path(args.sk_payload).read_text(encoding="utf-8"))
-    trace_payload = json.loads(Path(args.trace_payload).read_text(encoding="utf-8"))
+    sk_payload = json.loads(resolve_cli_path(args.sk_payload, must_exist=True).read_text(encoding="utf-8"))
+    trace_payload = json.loads(resolve_cli_path(args.trace_payload, must_exist=True).read_text(encoding="utf-8"))
     result = asyncio.run(run_benchmark(sk_payload, trace_payload))
 
-    output_path = Path(args.output)
+    output_path = resolve_cli_path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")

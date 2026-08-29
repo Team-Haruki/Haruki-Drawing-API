@@ -300,7 +300,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
     # rarity images
     for rarity in GACHA_RATE_RARITIES:
         rate = getattr(rqd.weight_info, f"{rarity}_rate", 0.0)
-        if rate != 0.0:
+        if not math.isclose(rate, 0.0, abs_tol=1.0e-12):
             _gd_keys.append(f"rarity_{rarity}")
             _gd_coros.append(get_rarity_img(rarity))
 
@@ -469,7 +469,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                         # 显示各稀有度概率
                         for rarity in GACHA_RATE_RARITIES:
                             rate = getattr(rqd.weight_info, f"{rarity}_rate", 0.0)
-                            if rate == 0.0:
+                            if math.isclose(rate, 0.0, abs_tol=1.0e-12):
                                 continue
 
                             # 获取该稀有度的卡牌数量

@@ -10,10 +10,11 @@ from src.core.heavy_render_pool import (
     HeavyRenderTaskTimeoutError,
     get_heavy_render_worker_pool,
 )
+from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.deck.model import DeckRequest
 
-router = APIRouter(tags=["Deck"])
+router = APIRouter(tags=["Deck"], responses=HEAVY_RENDER_ERROR_RESPONSES)
 
 
 @router.post("/recommend", summary="Generate deck recommendation image")

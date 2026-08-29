@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sys
 from typing import Any
+
+from src.core.path_safety import resolve_cli_path
 
 ENDPOINT = "custom_profile_card"
 _BAD_OUTCOMES = ("fallback", "disabled", "error")
@@ -197,7 +198,7 @@ def _load_document(path: str) -> dict[str, Any]:
     if path == "-":
         value = json.load(sys.stdin)
     else:
-        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        value = json.loads(resolve_cli_path(path, must_exist=True).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise ValueError("render statistics document must be an object")
     return value

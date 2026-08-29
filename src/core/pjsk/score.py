@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.score.drawer import (
     compose_custom_room_score_control_image,
@@ -18,7 +19,7 @@ from src.sekai.score.model import (
     ScoreControlRequest,
 )
 
-router = APIRouter(tags=["Score"])
+router = APIRouter(tags=["Score"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
 @router.post("/control", summary="Generate score control image")

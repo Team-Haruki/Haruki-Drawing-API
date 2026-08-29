@@ -71,7 +71,7 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="bench_custom_profile_") as tmp:
         workdir = Path(tmp)
-        font_path = workdir / font_src.name
+        font_path = workdir / f"benchmark-font{font_src.suffix.lower()}"
         font_path.write_bytes(font_src.read_bytes())
         metadata_path = workdir / "metadata.json"
         metadata_path.write_text(json.dumps({"tmp_font_assets": []}), encoding="utf-8")

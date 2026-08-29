@@ -211,16 +211,14 @@ async def _build_challenge_live_detail_canvas(rqd: ChallengeLiveDetailsRequest) 
                                 ).set_offset((border, border))
 
                                 def draw_line(line_x: int):
-                                    p = line_x / max_score if max_score > 0 else 0
-                                    if p <= 0 or p >= 1:
-                                        return
+                                    p = line_x / max_score
                                     lx = int((total_w - border * 2) * p)
                                     line_color = (100, 100, 100, 255) if line_x < x else (150, 150, 150, 255)
                                     Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
                                         (border + lx - 1, total_h // 2)
                                     )
 
-                                for line_x in range(0, max_score, 500000):
+                                for line_x in range(500000, max_score, 500000):
                                     draw_line(line_x)
                             else:
                                 Spacer(w=total_w, h=total_h).set_bg(
@@ -654,16 +652,14 @@ async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
                                 ).set_offset((border, border))
 
                                 def draw_line(line_x: int):
-                                    p = line_x / max_level if max_level > 0 else 0
-                                    if p <= 0 or p >= 1:
-                                        return
+                                    p = line_x / max_level
                                     lx = int((total_w - border * 2) * p)
                                     line_color = (100, 100, 100, 255) if line_x < level else (150, 150, 150, 255)
                                     Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
                                         (border + lx - 1, total_h // 2)
                                     )
 
-                                for line_x in range(0, max_level, 10):
+                                for line_x in range(10, max_level, 10):
                                     draw_line(line_x)
                             else:
                                 Spacer(w=total_w, h=total_h).set_bg(
@@ -806,16 +802,14 @@ async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
                                 ).set_offset((border, border))
 
                                 def draw_line(line_x: int):
-                                    p = line_x / max_play_count if max_play_count > 0 else 0
-                                    if p <= 0 or p >= 1:
-                                        return
+                                    p = line_x / max_play_count
                                     lx = int((total_w - border * 2) * p)
                                     line_color = (100, 100, 100, 255) if line_x < pc else (150, 150, 150, 255)
                                     Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
                                         (border + lx - 1, total_h // 2)
                                     )
 
-                                for line_x in range(0, max_play_count, 10000):
+                                for line_x in range(10000, max_play_count, 10000):
                                     draw_line(line_x)
                             else:
                                 Spacer(w=total_w, h=total_h).set_bg(

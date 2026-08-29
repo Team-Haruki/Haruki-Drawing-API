@@ -235,9 +235,9 @@ async def _render_canvas_uncounted(
     fail-open catch-all live in :func:`render_canvas_payload`."""
     try:
         native = load_native_renderer()
-    except ImportError as exc:
+    except ImportError:
         # Fail-open: a missing/broken native extension must degrade to Pillow, not 500.
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        logger.exception("haruki_skia_renderer not importable; falling back to Pillow")
         return None
     bg = background_hour() if bg_hour is None else bg_hour
     eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None

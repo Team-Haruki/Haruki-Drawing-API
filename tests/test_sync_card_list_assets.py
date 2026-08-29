@@ -130,11 +130,13 @@ def test_build_rsync_command_uses_files_from_manifest():
     assert command == [
         "rsync",
         "-aR",
+        "--protect-args",
         "--files-from",
         "out/assets.txt",
         "-e",
         "ssh -o BatchMode=yes -o ConnectTimeout=15",
         "--dry-run",
+        "--",
         "root@100.111.213.59:/data/HarukiServices/data/drawing/",
         "data",
     ]
@@ -150,7 +152,7 @@ def test_build_rsync_command_can_use_custom_ssh_port():
         dry_run=False,
     )
 
-    assert command[5] == "ssh -o BatchMode=yes -o ConnectTimeout=15 -p 60022"
+    assert command[6] == "ssh -o BatchMode=yes -o ConnectTimeout=15 -p 60022"
     assert command[-2] == "root@yamamoto.j8.network:/data/HarukiServices/data/drawing/"
 
 
@@ -170,21 +172,41 @@ def test_build_rsync_commands_splits_roots():
         [
             "rsync",
             "-aR",
+            "--protect-args",
             "--files-from",
             "out/drawing.txt",
             "-e",
             "ssh -o BatchMode=yes -o ConnectTimeout=15",
+            "--",
             "root@100.111.213.59:/data/HarukiServices/data/drawing/",
             "data",
         ],
         [
             "rsync",
             "-aR",
+            "--protect-args",
             "--files-from",
             "out/game-assets.txt",
             "-e",
             "ssh -o BatchMode=yes -o ConnectTimeout=15",
+            "--",
             "root@100.111.213.59:/data/HarukiServices/data/assets/",
             "data/asset",
         ],
     ]
+
+
+@pytest.mark.parametrize(
+    ("ssh_host", "remote_root"),
+    [("--rsh=evil", "/data/ok"), ("root@example", "/data/ok;touch-pwned"), ("root@example", "/data/../etc")],
+)
+def test_build_rsync_command_rejects_argument_injection(ssh_host: str, remote_root: str):
+    with pytest.raises(ValueError, match="unsafe"):
+        build_rsync_command(
+            ssh_host=ssh_host,
+            ssh_port=None,
+            remote_root=remote_root,
+            local_root=Path("data"),
+            manifest_path=Path("out/assets.txt"),
+            dry_run=False,
+        )
