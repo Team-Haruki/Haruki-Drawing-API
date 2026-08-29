@@ -243,9 +243,10 @@ curl -fsS http://127.0.0.1:8000/render-stats | \
 
 生产 Docker 还会把已提交的 Skia error、renderer-load fallback 和不完整 scene fallback 写入
 `custom_profile_diagnostic_dir`，用于跨容器重启排障。记录只含最终 HTTP 类别、渲染阶段、异常
-类型、异常消息 SHA-256/长度、仓库模块/函数/行号以及类别级 scene 计数；持久化边界会再次执行
+类型、仓库模块/函数/行号以及类别级 scene 计数；异常消息及其指纹均不保存。持久化边界会再次执行
 字段白名单，完整请求、卡片/profile、用户标识、URL、资源/请求文件名、源码文件路径、locals
-均不会落盘。目录/文件权限为 0700/0600，Docker 默认保留 168 小时且最多 256 条；普通
+均不会落盘。目录/文件权限为 0700/0600，Docker 默认保留 168 小时且最多 256 条；服务每小时
+独立清理一次，因此即使没有后续错误也会到期删除；普通
 `configs.yaml` 默认关闭，设置目录后才启用。
 
 对 rare 类别可在观察窗内追加 `card_member`、`honor`、`bonds_honor`、`stamp`、

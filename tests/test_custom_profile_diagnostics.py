@@ -10,6 +10,7 @@ import pytest
 from src.core.debug import pop_request_context, push_request_context
 from src.sekai.profile.custom_profile.diagnostics import (
     capture_safe_exception,
+    cleanup_custom_profile_diagnostics,
     persist_custom_profile_diagnostic,
 )
 from src.sekai.profile.custom_profile.skia import CustomProfileSceneReport, CustomProfileSkiaAttempt
@@ -82,7 +83,8 @@ def test_persisted_exception_is_owner_only_and_request_free(diagnostic_dir: Path
     assert record["error_type"] == "RuntimeError"
     assert record["final_http_class"] == "unknown"
     assert record["exception"]["exception_chain"][0]["type"] == "RuntimeError"
-    assert len(record["exception"]["exception_chain"][0]["message_sha256"]) == 64
+    assert "message_sha256" not in record["exception"]["exception_chain"][0]
+    assert "message_length" not in record["exception"]["exception_chain"][0]
     assert record["exception"]["exception_chain"][0]["frames"]
     assert record["scene"]["classifications_by_kind"] == {"general": {"native": 3}}
 
@@ -193,6 +195,18 @@ def test_retention_prunes_expired_and_excess_records(diagnostic_dir: Path, monke
 
     assert not expired.exists()
     assert len(_records(diagnostic_dir)) == 2
+
+
+def test_periodic_cleanup_prunes_without_a_followup_failure(diagnostic_dir: Path, monkeypatch):
+    monkeypatch.setattr(settings.drawing, "custom_profile_diagnostic_retention_hours", 1)
+    diagnostic_dir.mkdir(mode=0o700)
+    expired = diagnostic_dir / "custom-profile-diagnostic-expired.json"
+    expired.write_text("{}")
+    old = time.time() - 7200
+    os.utime(expired, (old, old))
+
+    assert cleanup_custom_profile_diagnostics() == 1
+    assert not expired.exists()
 
 
 def test_persistence_is_noop_when_directory_is_disabled(monkeypatch):

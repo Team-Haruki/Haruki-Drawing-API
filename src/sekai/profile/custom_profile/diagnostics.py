@@ -1,7 +1,7 @@
 """Owner-only, request-free diagnostics for committed Custom Profile Skia failures.
 
 The production request is deliberately absent.  A record contains only a bounded source
-traceback, exception type/message fingerprint, render stage, and aggregate scene coverage.
+traceback, exception type, render stage, and aggregate scene coverage.
 That is enough to correlate and locate failures without retaining a card, profile, user ID,
 asset path, URL, exception message, or request filename.
 """
@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import UTC, datetime
-import hashlib
 import json
 import logging
 import os
@@ -43,7 +42,6 @@ _SAFE_EXCEPTION_TYPES = frozenset(
 _SAFE_STAGE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _SAFE_FUNCTION_RE = re.compile(r"^[A-Za-z0-9_<>.]{1,160}$")
 _SAFE_MODULE_RE = re.compile(r"^(?:src|tests)(?:\.[A-Za-z_][A-Za-z0-9_]*)+$")
-_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_RELATIONS = frozenset({"raised", "cause", "context"})
 _write_lock = threading.Lock()
 
@@ -74,14 +72,6 @@ def _safe_frame(frame) -> dict[str, Any]:
     }
 
 
-def _exception_message_fingerprint(exc: BaseException) -> tuple[str, int]:
-    try:
-        message = str(exc)
-    except Exception:
-        message = ""
-    return hashlib.sha256(message.encode("utf-8", errors="replace")).hexdigest(), len(message)
-
-
 def capture_safe_exception(exc: BaseException) -> dict[str, Any]:
     """Return a request-free exception chain. Never includes the exception message itself."""
 
@@ -91,7 +81,6 @@ def capture_safe_exception(exc: BaseException) -> dict[str, Any]:
     relation = "raised"
     while current is not None and len(chain) < _MAX_EXCEPTION_CHAIN and id(current) not in seen:
         seen.add(id(current))
-        message_sha256, message_length = _exception_message_fingerprint(current)
         frames: list[dict[str, Any]] = []
         traceback_cursor = current.__traceback__
         while traceback_cursor is not None and len(frames) < _MAX_FRAMES_PER_EXCEPTION:
@@ -101,8 +90,6 @@ def capture_safe_exception(exc: BaseException) -> dict[str, Any]:
             {
                 "relation": relation,
                 "type": _safe_exception_type(current),
-                "message_sha256": message_sha256,
-                "message_length": message_length,
                 "frames": frames,
             }
         )
@@ -117,6 +104,51 @@ def capture_safe_exception(exc: BaseException) -> dict[str, Any]:
     return {"exception_chain": chain}
 
 
+def _non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _sanitize_frame_mapping(value: Any) -> dict[str, Any] | None:
+    """Normalize one traceback frame without accepting filenames, paths, or locals."""
+
+    if not isinstance(value, Mapping):
+        return None
+    module = str(value.get("module", "unknown"))
+    if not _SAFE_MODULE_RE.fullmatch(module):
+        module = "unknown"
+    function = str(value.get("function", "unknown"))
+    if not _SAFE_FUNCTION_RE.fullmatch(function):
+        function = "unknown"
+    return {"module": module, "function": function, "line": _non_negative_int(value.get("line"))}
+
+
+def _sanitize_exception_item(value: Any) -> dict[str, Any] | None:
+    """Normalize one exception-chain item through the persistence whitelist."""
+
+    if not isinstance(value, Mapping):
+        return None
+    relation = str(value.get("relation", "raised"))
+    if relation not in _SAFE_RELATIONS:
+        relation = "raised"
+    error_type = str(value.get("type", "OtherError"))
+    if error_type not in _SAFE_EXCEPTION_TYPES and error_type != "OtherError":
+        error_type = "OtherError"
+    raw_frames = value.get("frames")
+    frames = (
+        []
+        if not isinstance(raw_frames, list)
+        else [_sanitize_frame_mapping(frame) for frame in raw_frames[:_MAX_FRAMES_PER_EXCEPTION]]
+    )
+    return {
+        "relation": relation,
+        "type": error_type,
+        "frames": [frame for frame in frames if frame is not None],
+    }
+
+
 def _sanitize_exception_diagnostic(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Re-apply a strict field whitelist at the persistence boundary."""
 
@@ -125,55 +157,9 @@ def _sanitize_exception_diagnostic(value: Mapping[str, Any] | None) -> dict[str,
     raw_chain = value.get("exception_chain")
     if not isinstance(raw_chain, list):
         return None
-    chain: list[dict[str, Any]] = []
-    for raw_item in raw_chain[:_MAX_EXCEPTION_CHAIN]:
-        if not isinstance(raw_item, Mapping):
-            continue
-        relation = str(raw_item.get("relation", "raised"))
-        if relation not in _SAFE_RELATIONS:
-            relation = "raised"
-        error_type = str(raw_item.get("type", "OtherError"))
-        if error_type not in _SAFE_EXCEPTION_TYPES and error_type != "OtherError":
-            error_type = "OtherError"
-        digest = str(raw_item.get("message_sha256", ""))
-        if not _SHA256_RE.fullmatch(digest):
-            digest = hashlib.sha256(b"").hexdigest()
-        frames: list[dict[str, Any]] = []
-        raw_frames = raw_item.get("frames")
-        if isinstance(raw_frames, list):
-            for raw_frame in raw_frames[:_MAX_FRAMES_PER_EXCEPTION]:
-                if not isinstance(raw_frame, Mapping):
-                    continue
-                module = str(raw_frame.get("module", "unknown"))
-                if not _SAFE_MODULE_RE.fullmatch(module):
-                    module = "unknown"
-                function = str(raw_frame.get("function", "unknown"))
-                if not _SAFE_FUNCTION_RE.fullmatch(function):
-                    function = "unknown"
-                frames.append(
-                    {
-                        "module": module,
-                        "function": function,
-                        "line": _non_negative_int(raw_frame.get("line")),
-                    }
-                )
-        chain.append(
-            {
-                "relation": relation,
-                "type": error_type,
-                "message_sha256": digest,
-                "message_length": _non_negative_int(raw_item.get("message_length")),
-                "frames": frames,
-            }
-        )
-    return {"exception_chain": chain} if chain else None
-
-
-def _non_negative_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError, OverflowError):
-        return 0
+    chain = [_sanitize_exception_item(item) for item in raw_chain[:_MAX_EXCEPTION_CHAIN]]
+    safe_chain = [item for item in chain if item is not None]
+    return {"exception_chain": safe_chain} if safe_chain else None
 
 
 def _http_class(status: int | None) -> str:
@@ -182,6 +168,32 @@ def _http_class(status: int | None) -> str:
     except (TypeError, ValueError, OverflowError):
         return "unknown"
     return f"{code // 100}xx" if 100 <= code <= 599 else "unknown"
+
+
+def _sanitize_count_mapping(value: Any) -> dict[str, int]:
+    """Keep positive counts keyed only by renderer-owned category tokens."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    counts = {
+        str(raw_status or "").strip().lower(): _non_negative_int(raw_count)
+        for raw_status, raw_count in value.items()
+        if _SAFE_STAGE_RE.fullmatch(str(raw_status or "").strip().lower())
+    }
+    return dict(sorted((status, count) for status, count in counts.items() if count))
+
+
+def _sanitize_aggregate_mapping(value: Any) -> dict[str, dict[str, int]]:
+    """Normalize a category-to-counts aggregate without retaining element details."""
+
+    if not isinstance(value, Mapping):
+        return {}
+    aggregate = {
+        str(raw_kind or "").strip().lower(): _sanitize_count_mapping(raw_counts)
+        for raw_kind, raw_counts in value.items()
+        if _SAFE_STAGE_RE.fullmatch(str(raw_kind or "").strip().lower())
+    }
+    return dict(sorted((kind, counts) for kind, counts in aggregate.items() if counts))
 
 
 def sanitize_scene_metrics(metrics: Mapping[str, Any] | None) -> dict[str, Any] | None:
@@ -207,24 +219,7 @@ def sanitize_scene_metrics(metrics: Mapping[str, Any] | None) -> dict[str, Any] 
         result[key] = _non_negative_int(metrics.get(key))
 
     for aggregate_key in ("issues_by_kind", "classifications_by_kind"):
-        raw_aggregate = metrics.get(aggregate_key)
-        aggregate: dict[str, dict[str, int]] = {}
-        if isinstance(raw_aggregate, Mapping):
-            for raw_kind, raw_counts in raw_aggregate.items():
-                kind = str(raw_kind or "").strip().lower()
-                if not _SAFE_STAGE_RE.fullmatch(kind) or not isinstance(raw_counts, Mapping):
-                    continue
-                counts: dict[str, int] = {}
-                for raw_status, raw_count in raw_counts.items():
-                    status = str(raw_status or "").strip().lower()
-                    if not _SAFE_STAGE_RE.fullmatch(status):
-                        continue
-                    count = _non_negative_int(raw_count)
-                    if count:
-                        counts[status] = count
-                if counts:
-                    aggregate[kind] = dict(sorted(counts.items()))
-        result[aggregate_key] = dict(sorted(aggregate.items()))
+        result[aggregate_key] = _sanitize_aggregate_mapping(metrics.get(aggregate_key))
     return result
 
 
@@ -239,14 +234,18 @@ def _diagnostic_files(directory: Path) -> list[Path]:
         return []
 
 
-def _prune(directory: Path, *, retention_hours: int, max_files: int, now: float) -> None:
+def _prune(directory: Path, *, retention_hours: int, max_files: int, now: float) -> int:
+    """Remove expired or excess records and return the aggregate removal count."""
+
     cutoff = now - retention_hours * 3600
     retained: list[tuple[float, Path]] = []
+    removed = 0
     for path in _diagnostic_files(directory):
         try:
             modified = path.stat().st_mtime
             if modified < cutoff:
                 path.unlink(missing_ok=True)
+                removed += 1
             else:
                 retained.append((modified, path))
         except OSError:
@@ -255,8 +254,31 @@ def _prune(directory: Path, *, retention_hours: int, max_files: int, now: float)
     for _, path in retained[: max(0, len(retained) - max_files)]:
         try:
             path.unlink(missing_ok=True)
+            removed += 1
         except OSError:
             continue
+    return removed
+
+
+def cleanup_custom_profile_diagnostics() -> int:
+    """Prune configured records independently of future rendering failures."""
+
+    try:
+        from src.settings import settings
+
+        directory = settings.drawing.custom_profile_diagnostic_dir
+        if directory is None or not directory.is_dir():
+            return 0
+        with _write_lock:
+            return _prune(
+                directory,
+                retention_hours=int(settings.drawing.custom_profile_diagnostic_retention_hours),
+                max_files=int(settings.drawing.custom_profile_diagnostic_max_files),
+                now=time.time(),
+            )
+    except Exception as exc:
+        logger.warning("custom profile diagnostic cleanup failed: error_type=%s", type(exc).__name__)
+        return 0
 
 
 def persist_custom_profile_diagnostic(
