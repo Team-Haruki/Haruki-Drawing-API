@@ -89,7 +89,7 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
                 response = encoded_image_payload_to_response(payload)
             else:
                 response = await image_to_response(image, export_format="png")
-            attempt.record()
+            attempt.record(response.status_code)
             return response
     except ValueError as e:
         if attempt is not None:
@@ -97,5 +97,5 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         if attempt is not None:
-            attempt.record()
+            attempt.record(500)
         raise HTTPException(status_code=500, detail=str(e))

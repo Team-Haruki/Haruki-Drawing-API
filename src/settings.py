@@ -131,6 +131,10 @@ class DrawingSettings(BaseModel):
     custom_profile_glyph_cache_max_mb: int = 64  # 字形缓存单池内存上限(MB),0 表示关闭
     custom_profile_sprite_cache_size: int = 512  # sprite/atlas 解码缓存条目数,0 表示关闭
     custom_profile_sprite_cache_max_mb: int = 128  # sprite/atlas 缓存内存上限(MB),0 表示关闭
+    # Custom Profile Skia 失败的脱敏诊断:只落源码栈、异常指纹和分类计数,绝不落请求/卡片/资源路径。
+    custom_profile_diagnostic_dir: Path | None = None
+    custom_profile_diagnostic_retention_hours: int = Field(default=7 * 24, ge=1)
+    custom_profile_diagnostic_max_files: int = Field(default=256, ge=1)
     # 请求体转储(采集对拍 payload/排障用):设为目录时把白名单路径前缀的原始请求 body 落盘。
     # 生产走 HARUKI_DRAWING__DEBUG_DUMP_REQUEST_DIR / _PATHS 短窗开启,采完即关。默认关闭。
     # (tmp 清扫器只删注册过的文件、不扫目录,dump 放哪都不会被清;独立目录只是整洁。)
@@ -143,6 +147,7 @@ class DrawingSettings(BaseModel):
         "custom_profile_tmp_font_metadata",
         "custom_profile_shape_sprite_dir",
         "custom_profile_unity_ui_sprite_dir",
+        "custom_profile_diagnostic_dir",
         "debug_dump_request_dir",
         mode="before",
     )

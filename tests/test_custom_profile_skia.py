@@ -31,7 +31,7 @@ try:
 except ImportError:  # pragma: no cover - extension not built
     _native = None
 
-from src.core.debug import current_render_backend
+from src.core.debug import current_render_backend, pop_request_context, push_request_context
 from src.core.image_payload import EncodedImagePayload
 from src.core.pillow_telemetry import (
     begin_pillow_touch_scope,
@@ -75,9 +75,13 @@ PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card.json
 
 @pytest.fixture(autouse=True)
 def _clean_stats():
+    tokens = push_request_context("test", "/api/pjsk/profile/custom-profile-card", "POST")
     reset_render_stats()
-    yield
-    reset_render_stats()
+    try:
+        yield
+    finally:
+        reset_render_stats()
+        pop_request_context(tokens)
 
 
 def _request() -> CustomProfileCardRenderRequest:
@@ -144,16 +148,25 @@ def _local_rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tu
 def test_missing_native_extension_records_fallback(monkeypatch):
     """ImportError (missing wheel or stale capability) -> None + exactly one fallback."""
     monkeypatch.setattr(skia_mod, "skia_plot_enabled", lambda: True)
+    persisted = []
 
     def _no_wheel():
         raise ImportError("haruki_skia_renderer not built")
 
     monkeypatch.setattr(skia_mod, "load_native_renderer", _no_wheel)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
 
     assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
     stats = _endpoint_stats()
     assert stats["fallback"] == 1
     assert stats["total"] == 1
+    assert len(persisted) == 1
+    assert persisted[0]["stage"] == "renderer_load"
+    assert persisted[0]["error_type"] == "ImportError"
 
 
 def test_disabled_gate_records_disabled_without_loading_native(monkeypatch):
@@ -1912,6 +1925,8 @@ def test_route_falls_back_to_pillow_compose(monkeypatch):
 
 
 def test_route_records_skia_error_when_pillow_recovers(monkeypatch, caplog):
+    persisted = []
+
     async def fake_attempt(request):
         return skia_mod.CustomProfileSkiaAttempt(
             None,
@@ -1925,6 +1940,11 @@ def test_route_records_skia_error_when_pillow_recovers(monkeypatch, caplog):
 
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
     monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
 
     with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
         response = asyncio.run(route_mod.custom_profile_card(_request()))
@@ -1936,6 +1956,37 @@ def test_route_records_skia_error_when_pillow_recovers(monkeypatch, caplog):
     assert len(errors) == 1
     assert errors[0].levelno == logging.ERROR
     assert "committed_error stage=native_render error_type=RuntimeError" in errors[0].message
+    assert len(persisted) == 1
+    assert persisted[0]["final_http_status"] == 200
+
+
+def test_route_records_final_5xx_class_for_committed_skia_error(monkeypatch):
+    persisted = []
+
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="native_render",
+            error_type="RuntimeError",
+        )
+
+    async def fake_compose(request):
+        raise RuntimeError("fallback failed")
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
+    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(route_mod.custom_profile_card(_request()))
+    assert excinfo.value.status_code == 500
+    assert len(persisted) == 1
+    assert persisted[0]["final_http_status"] == 500
 
 
 def test_route_preserves_the_value_error_400(monkeypatch, caplog):
