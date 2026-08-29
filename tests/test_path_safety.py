@@ -34,3 +34,10 @@ def test_write_cli_text_validates_and_creates_parent(tmp_path: Path) -> None:
 
     assert write_cli_text(destination, "safe") == destination
     assert destination.read_text(encoding="utf-8") == "safe"
+
+
+def test_write_cli_text_rejects_outside_write_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="outside the permitted CLI write roots"):
+        write_cli_text("/etc/haruki-unsafe.txt", "unsafe")

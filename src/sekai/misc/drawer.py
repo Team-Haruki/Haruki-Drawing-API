@@ -108,24 +108,35 @@ def _clean_command_help_inline(text: str) -> str:
 
 
 def _command_help_heading(line: str) -> tuple[str, int] | None:
-    match = re.match(r"^(#{1,6})\s+(.+)$", line.strip())
-    if not match:
+    stripped = line.strip()
+    level = len(stripped) - len(stripped.lstrip("#"))
+    if not 1 <= level <= 6 or len(stripped) <= level or not stripped[level].isspace():
         return None
-    return match.group(2).strip(), len(match.group(1))
+    heading = stripped[level:].strip()
+    return (heading, level) if heading else None
 
 
 def _command_help_bullet(line: str) -> str | None:
-    match = re.match(r"^[-*+]\s+(.+)$", line.strip())
-    if not match:
+    stripped = line.strip()
+    if len(stripped) < 3 or stripped[0] not in "-*+" or not stripped[1].isspace():
         return None
-    return match.group(1).strip()
+    bullet = stripped[2:].strip()
+    return bullet or None
 
 
 def _command_help_numbered(line: str) -> str | None:
-    match = re.match(r"^(\d+[.)])\s+(.+)$", line.strip())
-    if not match:
+    stripped = line.strip()
+    digit_count = len(stripped) - len(stripped.lstrip("0123456789"))
+    marker_end = digit_count + 1
+    if (
+        digit_count == 0
+        or len(stripped) <= marker_end
+        or stripped[digit_count] not in ".)"
+        or not stripped[marker_end].isspace()
+    ):
         return None
-    return f"{match.group(1)} {match.group(2).strip()}"
+    item = stripped[marker_end:].strip()
+    return f"{stripped[:marker_end]} {item}" if item else None
 
 
 def _wrap_command_help_text(font_name: str, size: int, text: str, max_width: int) -> list[str]:
