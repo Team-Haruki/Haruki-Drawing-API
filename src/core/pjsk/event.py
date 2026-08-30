@@ -24,7 +24,11 @@ from src.sekai.event.model import (
 router = APIRouter(tags=["Event"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/detail", summary="Generate event detail image")
+@router.post(
+    "/detail",
+    summary="Generate event detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def event_detail(request: EventDetailRequest):
     """
     Generate an event detail image.
@@ -42,7 +46,11 @@ async def event_detail(request: EventDetailRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/record", summary="Generate event record image")
+@router.post(
+    "/record",
+    summary="Generate event record image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def event_record(request: EventRecordRequest):
     """
     Generate an event participation record image.
@@ -60,7 +68,11 @@ async def event_record(request: EventRecordRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/list", summary="Generate event list image")
+@router.post(
+    "/list",
+    summary="Generate event list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def event_list(request: EventListRequest):
     """
     Generate an event list image.
@@ -78,7 +90,11 @@ async def event_list(request: EventListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/planner", summary="Generate event planner image")
+@router.post(
+    "/planner",
+    summary="Generate event planner image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def event_planner(request: EventPlannerRequest):
     """
     Generate an event planning image.
