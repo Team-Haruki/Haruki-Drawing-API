@@ -4,7 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
-from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES
+from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 _custom_profile_render_slots = asyncio.Semaphore(CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS)
 
 
-@router.post("", summary="Generate profile image")
+@router.post(
+    "",
+    summary="Generate profile image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def profile(request: ProfileRequest):
     """
     Generate a player profile image.
@@ -64,7 +68,11 @@ async def profile(request: ProfileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/custom-profile-card", summary="Generate custom profile card image")
+@router.post(
+    "/custom-profile-card",
+    summary="Generate custom profile card image",
+    responses=CUSTOM_PROFILE_ERROR_RESPONSES,
+)
 async def custom_profile_card(request: CustomProfileCardRenderRequest):
     attempt = None
     try:

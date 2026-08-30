@@ -23,7 +23,11 @@ router = APIRouter(tags=["Card"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 _perf_logger = logging.getLogger("card.endpoint.perf")
 
 
-@router.post("/detail", summary="Generate card detail image")
+@router.post(
+    "/detail",
+    summary="Generate card detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def card_detail(request: CardDetailRequest):
     """
     Generate a detailed card image.
@@ -40,7 +44,11 @@ async def card_detail(request: CardDetailRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/list", summary="Generate card list image")
+@router.post(
+    "/list",
+    summary="Generate card list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def card_list(request: CardListRequest):
     """
     Generate a card list image.
@@ -80,7 +88,11 @@ async def card_list(request: CardListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/box", summary="Generate card box image")
+@router.post(
+    "/box",
+    summary="Generate card box image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def card_box(request: CardBoxRequest):
     """
     Generate a card box image.
