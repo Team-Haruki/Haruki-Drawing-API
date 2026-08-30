@@ -1,11 +1,12 @@
 from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from PIL import Image
+from PIL import Image, ImageFont
 import pytest
 
-from src.sekai.profile.custom_profile import drawer as custom_profile_drawer
+from src.sekai.profile.custom_profile import drawer as custom_profile_drawer, renderer as renderer_mod
 from src.sekai.profile.custom_profile.card_prefab import CardAlphaMaskOp, CardCoverArtOp
 from src.sekai.profile.custom_profile.drawer import _optional_region_file, _region_path_candidates, _require_region_path
 from src.sekai.profile.custom_profile.general_prefab import (
@@ -25,6 +26,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PreparedLayer,
     RenderedLayer,
     TMPDynamicFontField,
+    TMPFontLibrary,
     TMPStaticAtlasField,
     build_arg_parser,
     harden_rgba_alpha,
@@ -133,6 +135,395 @@ def _make_renderer(
         region=region,
         **renderer_kwargs,
     )
+
+
+def test_custom_profile_renderer_value_helpers_preserve_legacy_fallbacks(tmp_path: Path) -> None:
+    configured: dict[str, object] = {"value": 1}
+
+    assert renderer_mod._mapping_or_empty(configured) is configured
+    assert renderer_mod._mapping_or_empty([]) == {}
+    assert renderer_mod._optional_dict(configured) is configured
+    assert renderer_mod._optional_dict(None) == {}
+    assert renderer_mod._default_if_none(None, 3) == 3
+    assert renderer_mod._default_if_none(0, 3) == 0
+    assert renderer_mod._choice_or_default("full", {"full"}, "serial") == "full"
+    assert renderer_mod._choice_or_default("bad", {"full"}, "serial") == "serial"
+    assert renderer_mod._positive_int(0) == 1
+    assert renderer_mod._positive_int(-2) == 1
+    assert renderer_mod._positive_float(0.0) == 1.0
+    assert renderer_mod._positive_float(2.5) == 2.5
+    assert renderer_mod._game_assets_root(tmp_path / "custom_profile") == tmp_path
+    assert renderer_mod._game_assets_root(tmp_path / "other") == tmp_path / "other"
+    assert renderer_mod._first_truthy(0, "", 4, default=9) == 4
+    assert renderer_mod._first_truthy(0, "", default=9) == 9
+    assert renderer_mod._float_first(0, "2.5") == 2.5
+    assert renderer_mod._int_first(None, "4") == 4
+    assert renderer_mod._nonempty_strings([None, "", "Font"]) == ["None", "Font"]
+    assert renderer_mod._record_or_noop(None)(tmp_path) is None
+
+
+def test_tmp_font_library_loads_metadata_with_material_and_glyph_fallbacks(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "fonts.json"
+    source_font = tmp_path / "font.ttf"
+    atlas = tmp_path / "atlases" / "font_77.png"
+    chars_path = tmp_path / "chars.json"
+    glyphs_path = tmp_path / "glyphs.json"
+    source_font.write_bytes(b"font")
+    _write_png(atlas)
+    chars_path.write_text(json.dumps([{"m_Unicode": 65, "m_GlyphIndex": 3, "m_Scale": 0}]), encoding="utf-8")
+    glyphs_path.write_text(
+        json.dumps(
+            [
+                {
+                    "m_Index": 3,
+                    "m_Scale": 2,
+                    "m_AtlasIndex": 1,
+                    "m_Metrics": {
+                        "m_Width": 8,
+                        "m_Height": 9,
+                        "m_HorizontalBearingX": 1,
+                        "m_HorizontalBearingY": 7,
+                        "m_HorizontalAdvance": 10,
+                    },
+                    "m_GlyphRect": {"m_X": 2, "m_Y": 3, "m_Width": 8, "m_Height": 9},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    common = {
+        "name": "Rodin",
+        "material": "material-1",
+        "source_font_data_path": "font.ttf",
+        "atlas_textures": [77],
+        "character_table_path": "chars.json",
+        "glyph_table_path": "glyphs.json",
+        "atlas_population_mode": "2",
+        "atlas_width": 0,
+        "atlas_padding": 0,
+        "face_info": {"m_PointSize": 0, "m_Scale": 0, "m_LineHeight": 12},
+        "creation_settings": {"pointSize": 24},
+        "fallback_font_asset_names": [None, "", "Fallback"],
+    }
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "materials": [
+                    {"path_id": "material-1", "floats": {"_TextureWidth": 64, "_GradientScale": 0}},
+                    {"floats": {}},
+                ],
+                "tmp_font_assets": [
+                    {**common, "bundle": "secondary.bundle"},
+                    {**common, "bundle": "custom_profile_font.bundle"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    recorded: list[Path] = []
+
+    assets = TMPFontLibrary._load_assets(metadata_path, recorded.append)
+
+    assert [asset.bundle for asset in assets["Rodin"]] == ["custom_profile_font.bundle", "secondary.bundle"]
+    asset = assets["Rodin"][0]
+    assert asset.source_font_path == source_font
+    assert asset.atlas_paths == [atlas]
+    assert asset.atlas_population_mode == 2
+    assert asset.atlas_width == 64.0
+    assert asset.atlas_padding == 5.0
+    assert asset.gradient_scale == 6.0
+    assert asset.point_size == 24.0
+    assert asset.face_scale == 1.0
+    assert asset.fallback_names == ["None", "Fallback"]
+    assert asset.glyphs[65].advance == 10.0
+    assert asset.glyphs[65].glyph_scale == 2.0
+    assert metadata_path in recorded
+    assert chars_path in recorded
+    assert glyphs_path in recorded
+    assert tmp_path / "atlases" in recorded
+
+
+def test_tmp_font_library_character_tables_fail_open_when_inputs_are_missing(tmp_path: Path) -> None:
+    assert TMPFontLibrary._load_character_table(tmp_path, {}) == {}
+    assert (
+        TMPFontLibrary._load_character_table(
+            tmp_path,
+            {"character_table_path": "missing-chars.json", "glyph_table_path": "missing-glyphs.json"},
+        )
+        == {}
+    )
+
+
+def test_custom_profile_resource_index_accepts_wrapped_mapping_and_list_shapes(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    keyed = {"7": {"name": "fallback-key"}, "ignored": "text", "bad": {"id": "not-int"}}
+    wrapped = {"items": [{"id": "8", "name": "wrapped"}, "ignored"]}
+    listed = [{"id": 9, "name": "listed"}, {"name": "missing-id"}, None]
+
+    assert renderer.coerce_resource_index(keyed) == {7: keyed["7"]}
+    assert renderer.coerce_resource_index(wrapped) == {8: wrapped["items"][0]}
+    assert renderer.coerce_resource_index(listed) == {9: listed[0]}
+    assert renderer.coerce_resource_index("invalid") == {}
+    assert renderer_mod._resource_entries({"items": "not-a-list", "10": {"id": 10}})[0][0] == "items"
+    assert renderer_mod._coerced_resource_entry(None, "invalid") is None
+
+
+def test_custom_profile_request_asset_candidates_cover_supported_prefixes(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.static_images = tmp_path / "static_images"
+    renderer.data_root_candidates = lambda: [tmp_path]  # type: ignore[method-assign]
+    absolute = tmp_path / "absolute.png"
+
+    assert renderer.request_asset_candidates(None) == []
+    assert renderer.request_asset_candidates(str(absolute)) == [absolute]
+    assert renderer.request_asset_candidates("asset/cn-assets/a.png") == [
+        tmp_path / "asset/cn-assets/a.png",
+        tmp_path / "cn-assets/a.png",
+    ]
+    assert renderer.request_asset_candidates("cn-assets/a.png") == [
+        tmp_path / "asset/cn-assets/a.png",
+        tmp_path / "cn-assets/a.png",
+    ]
+    assert renderer.request_asset_candidates("static_images/a.png") == [tmp_path / "static_images/a.png"]
+    ordinary = renderer.request_asset_candidates("folder/a.png")
+    assert ordinary[0] == Path("folder/a.png")
+    assert len(ordinary) == len(set(ordinary))
+    assert renderer_mod._dedupe_paths([absolute, absolute]) == [absolute]
+
+
+def test_custom_profile_resource_path_covers_masterdata_layout_variants(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    resource_files = {
+        "nested": renderer.assets / "bg" / "nested.png",
+        "root": renderer.assets / "root.png",
+        "fallback": renderer.assets / "shape" / "fallback.png",
+        "plain": renderer.assets / "misc" / "plain.png",
+    }
+    for path in resource_files.values():
+        _write_png(path)
+
+    assert (
+        renderer.resource_path({"resourceLoadVal": "custom_profile/bg", "fileName": "nested"})
+        == resource_files["nested"]
+    )
+    assert (
+        renderer.resource_path({"resourceLoadVal": "custom_profile", "fileName": "root.png"}) == resource_files["root"]
+    )
+    assert (
+        renderer.resource_path({"resourceLoadVal": "ignored", "fileName": "fallback"}, "shape")
+        == resource_files["fallback"]
+    )
+    assert renderer.resource_path({"resourceLoadVal": "misc", "fileName": "plain"}) == resource_files["plain"]
+    assert renderer.resource_path({"resourceLoadVal": "misc"}) is None
+    assert renderer_mod._png_resource_filename({"fileName": ""}) is None
+
+    renderer.masterdata = None
+    assert renderer.resource_path({"resourceLoadVal": "misc", "fileName": "plain"}) is None
+
+
+def test_custom_profile_renderer_normalizes_invalid_constructor_options(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        parallel_workers=0,
+        parallel_stage="invalid",
+        tmp_text_render_mode="invalid",
+        shape_sdf_source="invalid",
+        tmp_metrics_mode="invalid",
+        max_layer_pixels=-1,
+        max_scene_bytes=-1,
+        tmp_decorative_alpha_harden=0,
+        position_scale=2.0,
+        position_scale_x=3.0,
+    )
+
+    assert renderer.parallel_workers == 1
+    assert renderer.parallel_stage == "transform"
+    assert renderer.tmp_text_render_mode == renderer_mod.DEFAULT_TMP_TEXT_RENDER_MODE
+    assert renderer.shape_sdf_source == "rgb"
+    assert renderer.tmp_metrics_mode == "pil"
+    assert renderer.max_layer_pixels == 1
+    assert renderer.max_scene_bytes == 1
+    assert renderer.tmp_decorative_alpha_harden == 1.0
+    assert renderer.position_scale == 2.0
+    assert renderer.position_scale_x == 3.0
+    assert renderer.position_scale_y == 2.0
+
+
+def test_custom_profile_general_text_helpers_split_ascii_tokens_and_long_runs(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    font = ImageFont.load_default()
+
+    assert renderer_mod._general_text_tokens("alpha.test中!") == ["alpha.test", "中", "!"]
+    lines: list[str] = []
+    assert renderer_mod._append_general_token("cd", "ab", 3, len, lines) == "cd"
+    assert lines == ["ab"]
+    lines = []
+    assert renderer_mod._append_general_token("abcdef", "", 3, len, lines) == "def"
+    assert lines == ["abc"]
+    assert renderer.wrap_general_text("", font, 20) == [""]
+    assert renderer.wrap_general_text("alpha.test中", font, 1)
+
+
+def test_custom_profile_general_prefab_asset_helpers_cover_supported_views(tmp_path: Path) -> None:
+    challenge_icon = tmp_path / "challenge.png"
+    story_image = tmp_path / "story.png"
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userChallengeLiveSoloResult": {"characterId": 5},
+            "userStoryFavorites": [{"storyType": "unit", "storyId": 7}, "ignored"],
+        },
+    )
+    renderer.chara_icon_path = lambda character_id: challenge_icon if character_id == 5 else None  # type: ignore[method-assign]
+    renderer.story_favorite_image_path = lambda _story: story_image  # type: ignore[method-assign]
+
+    assert renderer._general_prefab_asset_paths("ChallengeLive") == {"challenge_character_icon": challenge_icon}
+    assert renderer._general_prefab_asset_paths("StoryFavorite") == {
+        renderer_mod.story_favorite_asset_key({"storyType": "unit", "storyId": 7}): story_image
+    }
+    rank_assets = renderer._general_prefab_asset_paths("CharacterRankAndChallengeStage")
+    assert len(rank_assets) == sum(character_id is not None for _name, character_id in renderer_mod.CHARA_LIST)
+    assert renderer._general_prefab_asset_paths("X") == {}
+    assert set(renderer._general_prefab_labels()) == {
+        "comment_title",
+        "total_power",
+        "multi_live_title",
+        "multi_live_count_suffix",
+        "challenge_live_title",
+        "challenge_live_solo",
+        "character_rank_tab",
+        "challenge_stage_tab",
+        "music_clear",
+        "music_full_combo",
+        "music_all_perfect",
+        "story_favorite_title",
+        "not_set",
+    }
+
+    renderer.profile_context = {"userChallengeLiveSoloResult": "invalid", "userStoryFavorites": "invalid"}
+    assert renderer._challenge_live_prefab_assets() == {"challenge_character_icon": None}
+    assert renderer._story_favorite_prefab_assets() == {}
+
+
+def test_custom_profile_honor_level_visual_chooses_exact_then_nearest_lower(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    level_one = {"level": 1, "assetbundleName": "one"}
+    level_three = {"level": 3, "honorRarity": "high"}
+    level_five = {"level": 5, "assetbundleName": "five"}
+    honor = {"levels": [None, {}, level_one, level_three, level_five]}
+
+    assert renderer.resolve_honor_level_visual(honor, 3) is level_three
+    assert renderer.resolve_honor_level_visual(honor, 4) is level_three
+    assert renderer.resolve_honor_level_visual(honor, 6) is level_five
+    assert renderer.resolve_honor_level_visual(honor, 0) is level_one
+    assert renderer.resolve_honor_level_visual({"levels": []}, 2) is None
+
+
+def test_custom_profile_honor_metadata_helpers_preserve_fallback_order(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    honor = {"assetbundleName": "primary", "honorRarity": ""}
+    visual = {"assetbundleName": "secondary", "honorRarity": "high", "level": 4}
+
+    assert renderer._honor_asset_details(honor, visual, 0) == ("primary", "high", 4)
+    assert renderer._honor_asset_details(honor, None, 2) == ("primary", "", 2)
+    assert renderer._honor_background_asset_name({"backgroundAssetBundleName": "bg"}, "asset") == "bg"
+    assert renderer._honor_background_asset_name({}, "asset") == "asset"
+    assert renderer._resolved_honor_group_type({"honorType": "world_link"}, "", "") == "wl_event"
+    assert renderer._honor_scroll_path("") is None
+    assert renderer._honor_level_icon_paths("normal", "event") == (None, None)
+
+
+def test_custom_profile_honor_frame_path_handles_birthday_and_rarity_rules(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.static_images = tmp_path / "static_images"
+    static_frame = renderer.static_images / "honor" / "frame_degree_s_2.png"
+    _write_png(static_frame)
+    region_frame = tmp_path / "region-frame.png"
+    requested_rels: list[Path] = []
+
+    def first_region_asset(rels):
+        requested_rels.extend(rels)
+        return region_frame
+
+    renderer.first_region_asset = first_region_asset  # type: ignore[method-assign]
+
+    assert renderer.honor_frame_path({"honorType": "birthday"}, "honor_bg_birthday_miku", "", "sub", 1) is None
+    assert renderer.honor_frame_path({"honorType": "birthday"}, "honor_bg_birthday_miku", "", "sub", 2) == region_frame
+    assert Path("honor_frame/honor_frame_birthday_miku/frame_degree_s_2.png") in requested_rels
+
+    requested_rels.clear()
+    assert renderer.honor_frame_path({"frameName": "event_frame"}, "", "", "sub", 2) == static_frame
+    assert requested_rels == []
+    assert renderer.honor_frame_path({"frameName": "normal_frame"}, "", "", "sub", 2) == region_frame
+
+
+def test_custom_profile_bonds_honor_helpers_resolve_slots_and_load_optional_images(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    keys = renderer._bonds_honor_request_keys(1, 2, False, 3, False, True)
+    assert len(keys) == 2
+    renderer.bonds_honor_requests = {keys[1]: {"imagePath": "second"}, "1": {"imagePath": "fallback"}}
+    renderer.honor_request_image = lambda payload: payload and payload["imagePath"]  # type: ignore[method-assign]
+    assert renderer._configured_bonds_honor_image(1, keys) == "second"
+    assert renderer._configured_bonds_honor_image(1, ["missing"]) == "fallback"
+
+    image_path = tmp_path / "loaded.png"
+    _write_png(image_path)
+    renderer.open_rgba = lambda path: Image.open(path).convert("RGBA")  # type: ignore[method-assign]
+    request = SimpleNamespace(bonds_bg_path=str(image_path), frame_img_path=None)
+    loaded = renderer._loaded_request_images(request, {"background": "bonds_bg_path", "frame": "frame_img_path"})
+    assert loaded["background"] is not None
+    assert loaded["frame"] is None
+
+
+def test_custom_profile_card_asset_path_uses_kind_and_training_lookup_table(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    renderer.card_assets = {
+        10: {
+            "deckNormalPath": "deck-normal",
+            "deckAfterTrainingPath": "deck-trained",
+            "clipNormalPath": "clip-normal",
+            "clipAfterTrainingPath": "clip-trained",
+            "smallNormalPath": "small-normal",
+            "smallAfterTrainingPath": "small-trained",
+            "normalPath": "full-normal",
+            "afterTrainingPath": "full-trained",
+        }
+    }
+    renderer.resolve_request_asset_path = lambda raw: Path(raw) if raw else None  # type: ignore[method-assign]
+
+    assert renderer.card_asset_path_for_state(10, False, "deck") == Path("deck-normal")
+    assert renderer.card_asset_path_for_state(10, True, "deck") == Path("deck-trained")
+    assert renderer.card_asset_path_for_state(10, False, "clip") == Path("deck-normal")
+    assert renderer.card_asset_path_for_state(10, True, "clip") == Path("deck-trained")
+    assert renderer.card_asset_path_for_state(10, False, "small") == Path("small-normal")
+    assert renderer.card_asset_path_for_state(10, True, "small") == Path("small-trained")
+    assert renderer.card_asset_path_for_state(10, False, "unknown") == Path("full-normal")
+    assert renderer.card_asset_path_for_state(10, True) == Path("full-trained")
+    assert renderer.card_asset_path_for_state(99, False) is None
+
+
+def test_custom_profile_profile_level_helpers_accept_list_dict_and_fallback_rows(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        profile_context={
+            "userHonors": ["invalid", [1], [2, 4], {"honorId": 3, "honorLevel": 5}],
+            "userProfileHonors": [{"honorId": 6, "honorLevel": 7}],
+            "userBondsHonors": [[8, 9], {"bondsHonorId": 10, "bondsHonorLevel": 11}],
+            "userHonorMissions": [{"honorId": 12, "missionProgress": 13}],
+        },
+    )
+
+    assert renderer.user_honor_level_for(1) == 0
+    assert renderer.user_honor_level_for(2) == 4
+    assert renderer.user_honor_level_for(3) == 5
+    assert renderer.user_honor_level_for(6) == 7
+    assert renderer.user_honor_level_for(99) == 0
+    assert renderer.user_bonds_honor_level_for(8) == 9
+    assert renderer.user_bonds_honor_level_for(10) == 11
+    assert renderer.user_bonds_honor_level_for(99) == 0
+    assert renderer.user_honor_mission_progress_for(12) == 13
+    assert renderer.user_honor_mission_progress_for(99) == 0
 
 
 def test_masterdata_honor_request_builder_does_not_decode_images(tmp_path: Path, monkeypatch) -> None:
@@ -765,6 +1156,83 @@ def test_custom_profile_direct_raster_preserves_mixed_layer_order(tmp_path: Path
     rendered = renderer.render_card({"customProfileCard": {}})
 
     assert rendered.getpixel((0, 0)) == (0, 0, 255, 255)
+
+
+def test_custom_profile_serial_card_pipeline_records_and_composites_layers(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        tmp_decorative_direct_raster=False,
+        parallel_stage="serial",
+        canvas_w=1,
+        canvas_h=1,
+    )
+    content = NativeContent(1, "shape", {"id": 1}, {"visible": True})
+    layer = Image.new("RGBA", (1, 1), (1, 2, 3, 255))
+    audits: list[tuple[str, object]] = []
+    renderer._current_card_ref = {"cardId": 99}
+    renderer.build_native_contents = lambda _card: [content]  # type: ignore[method-assign]
+    renderer.render_content_for_card = lambda value: RenderedLayer(  # type: ignore[method-assign]
+        value, "rendered", (layer, (0.0, 0.0))
+    )
+    renderer.prepare_layers_for_card = lambda _layers: [PreparedLayer(layer, (0, 0)), None]  # type: ignore[method-assign]
+    renderer.record_native_audit = (  # type: ignore[method-assign]
+        lambda _card_ref, _content, status, result: audits.append((status, result))
+    )
+
+    rendered = renderer.render_card({"customProfileCard": {}})
+
+    assert rendered.getpixel((0, 0)) == (1, 2, 3, 255)
+    assert audits == [("rendered", (layer, (0.0, 0.0)))]
+    assert renderer._current_card_ref == {"cardId": 99}
+
+
+def test_custom_profile_full_parallel_card_pipeline_records_prepared_layers(tmp_path: Path) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        tmp_decorative_direct_raster=False,
+        parallel_stage="full",
+        parallel_workers=2,
+        canvas_w=1,
+        canvas_h=1,
+    )
+    first = NativeContent(1, "shape", {"id": 1}, {"visible": True})
+    second = NativeContent(2, "shape", {"id": 2}, {"visible": True})
+    layer = Image.new("RGBA", (1, 1), (4, 5, 6, 255))
+    audits: list[str] = []
+    renderer.build_native_contents = lambda _card: [first, second]  # type: ignore[method-assign]
+    renderer.render_contents_for_card_parallel = lambda _contents: [  # type: ignore[method-assign]
+        RenderedLayer(first, "empty", None),
+        RenderedLayer(second, "rendered", (layer, (0.0, 0.0)), PreparedLayer(layer, (0, 0))),
+    ]
+    renderer.record_native_audit = (  # type: ignore[method-assign]
+        lambda _card_ref, _content, status, _result: audits.append(status)
+    )
+
+    rendered = renderer.render_card({"customProfileCard": {}})
+
+    assert rendered.getpixel((0, 0)) == (4, 5, 6, 255)
+    assert audits == ["empty", "rendered"]
+
+
+def test_custom_profile_oversized_direct_fallback_reraises_when_sparse_path_rejects(
+    tmp_path: Path,
+) -> None:
+    renderer = _make_renderer(tmp_path, canvas_w=1, canvas_h=1)
+    content = NativeContent(1, "text", {"id": 1}, {"visible": True})
+    error = RasterSizeLimitError(label="layer", width=2, height=2, max_pixels=1)
+    renderer._current_card_ref = {"cardId": 77}
+    renderer.build_native_contents = lambda _card: [content]  # type: ignore[method-assign]
+    renderer.render_content_direct_on_card = lambda *_args: False  # type: ignore[method-assign]
+    renderer.render_and_prepare_content_for_card = (  # type: ignore[method-assign]
+        lambda _content: (_ for _ in ()).throw(error)
+    )
+    renderer.render_oversized_tmp_text_direct = lambda *_args: False  # type: ignore[method-assign]
+
+    with pytest.raises(RasterSizeLimitError) as exc_info:
+        renderer.render_card({"customProfileCard": {}})
+
+    assert exc_info.value is error
+    assert renderer._current_card_ref == {"cardId": 77}
 
 
 def test_custom_profile_stamp_uses_cloud_region_asset_layout(tmp_path: Path) -> None:

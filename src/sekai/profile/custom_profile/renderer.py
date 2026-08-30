@@ -106,6 +106,21 @@ DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
 DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
 DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
 DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024
+_CARD_ASSET_STATE_KEYS = {
+    ("deck", False): ("deckNormalPath", "deck_normal_path"),
+    ("deck", True): ("deckAfterTrainingPath", "deck_after_training_path"),
+    ("clip", False): ("deckNormalPath", "deck_normal_path", "clipNormalPath", "clip_normal_path"),
+    ("clip", True): (
+        "deckAfterTrainingPath",
+        "deck_after_training_path",
+        "clipAfterTrainingPath",
+        "clip_after_training_path",
+    ),
+    ("small", False): ("smallNormalPath", "small_normal_path"),
+    ("small", True): ("smallAfterTrainingPath", "small_after_training_path"),
+    ("full", False): ("normalPath", "normal_path"),
+    ("full", True): ("afterTrainingPath", "after_training_path"),
+}
 TMP_DEFAULT_TEXT_BOX_W = 108.0
 TMP_TEXT_BOX_W_SIZE_FACTOR = 1.6
 TMP_LINE_HEIGHT_FACTOR = 1.0
@@ -1174,6 +1189,57 @@ def freetype_metrics() -> FreeTypeMetrics | None:
     return _FREETYPE_METRICS
 
 
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _optional_dict(value: dict[str, Any] | None) -> dict[str, Any]:
+    return value or {}
+
+
+def _default_if_none(value: Any, default: Any) -> Any:
+    return default if value is None else value
+
+
+def _choice_or_default(value: str, choices: set[str] | frozenset[str], default: str) -> str:
+    return value if value in choices else default
+
+
+def _positive_int(value: Any, default: int = 1) -> int:
+    return max(1, int(value or default))
+
+
+def _positive_float(value: Any, default: float = 1.0) -> float:
+    return max(1.0, float(value or default))
+
+
+def _game_assets_root(assets: Path) -> Path:
+    return assets.parent if assets.name == "custom_profile" else assets
+
+
+def _record_or_noop(record):
+    return (lambda path: None) if record is None else record
+
+
+def _first_truthy(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value:
+            return value
+    return default
+
+
+def _float_first(*values: Any, default: float = 0.0) -> float:
+    return float(_first_truthy(*values, default=default))
+
+
+def _int_first(*values: Any, default: int = 0) -> int:
+    return int(_first_truthy(*values, default=default))
+
+
+def _nonempty_strings(values: Any) -> list[str]:
+    return [text for value in values or [] if (text := str(value))]
+
+
 class TMPFontLibrary:
     def __init__(
         self,
@@ -1219,60 +1285,79 @@ class TMPFontLibrary:
 
     @classmethod
     def _load_assets(cls, metadata_path: Path, record=None) -> dict[str, list[TMPFontAsset]]:
-        if record is None:
-            record = lambda path: None
+        record = _record_or_noop(record)
         record(metadata_path)
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         base = metadata_path.parent
-        materials = {
-            str(row.get("path_id")): row for row in metadata.get("materials", []) if row.get("path_id") is not None
-        }
+        materials = cls._materials_by_path_id(metadata)
         assets: dict[str, list[TMPFontAsset]] = {}
         for row in metadata.get("tmp_font_assets", []):
-            name = str(row.get("name", ""))
-            chars = cls._load_character_table(base, row, record)
-            face = row.get("face_info", {}) or {}
-            material = materials.get(str(row.get("material"))) or {}
-            floats = material.get("floats", {}) or {}
-            asset = TMPFontAsset(
-                name=name,
-                bundle=str(row.get("bundle", "")),
-                source_font_path=cls._source_font_path(base, row, record),
-                atlas_paths=cls._atlas_paths(base, row, record),
-                atlas_population_mode=int(row.get("atlas_population_mode", 0) or 0),
-                atlas_width=float(row.get("atlas_width") or floats.get("_TextureWidth") or 0.0),
-                atlas_height=float(row.get("atlas_height") or floats.get("_TextureHeight") or 0.0),
-                atlas_padding=float(row.get("atlas_padding") or 5.0),
-                point_size=float(face.get("m_PointSize") or row.get("creation_settings", {}).get("pointSize") or 1.0),
-                face_scale=float(face.get("m_Scale") or 1.0),
-                line_height=float(face.get("m_LineHeight") or 0.0),
-                ascent_line=float(face.get("m_AscentLine") or 0.0),
-                descent_line=float(face.get("m_DescentLine") or 0.0),
-                tab_width=float(face.get("m_TabWidth") or 0.0),
-                gradient_scale=float(floats.get("_GradientScale") or (float(row.get("atlas_padding") or 5.0) + 1.0)),
-                weight_normal=float(floats.get("_WeightNormal") or 0.0),
-                weight_bold=float(floats.get("_WeightBold") or 0.75),
-                face_dilate=float(floats.get("_FaceDilate") or 0.0),
-                outline_width=float(floats.get("_OutlineWidth") or 0.0),
-                outline_softness=float(floats.get("_OutlineSoftness") or 0.0),
-                sharpness=float(floats.get("_Sharpness") or 0.0),
-                normal_spacing_offset=float(row.get("normal_spacing_offset") or 0.0),
-                bold_spacing=float(row.get("bold_spacing") or 0.0),
-                scale_ratio_a=float(floats.get("_ScaleRatioA") or 1.0),
-                scale_ratio_b=float(floats.get("_ScaleRatioB") or 1.0),
-                scale_ratio_c=float(floats.get("_ScaleRatioC") or 1.0),
-                glow_offset=float(floats.get("_GlowOffset") or 0.0),
-                glow_outer=float(floats.get("_GlowOuter") or 0.0),
-                underlay_softness=float(floats.get("_UnderlaySoftness") or 0.0),
-                underlay_offset_x=float(floats.get("_UnderlayOffsetX") or 0.0),
-                underlay_offset_y=float(floats.get("_UnderlayOffsetY") or 0.0),
-                fallback_names=[str(v) for v in row.get("fallback_font_asset_names", []) if str(v)],
-                glyphs=chars,
-            )
-            assets.setdefault(name, []).append(asset)
-        for rows in assets.values():
-            rows.sort(key=lambda asset: (0 if asset.bundle == "custom_profile_font.bundle" else 1, asset.name))
+            asset = cls._asset_from_metadata_row(base, row, materials, record)
+            assets.setdefault(asset.name, []).append(asset)
+        cls._sort_assets(assets)
         return assets
+
+    @staticmethod
+    def _materials_by_path_id(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            str(row.get("path_id")): row
+            for row in metadata.get("materials", [])
+            if isinstance(row, dict) and row.get("path_id") is not None
+        }
+
+    @classmethod
+    def _asset_from_metadata_row(
+        cls,
+        base: Path,
+        row: dict[str, Any],
+        materials: dict[str, dict[str, Any]],
+        record,
+    ) -> TMPFontAsset:
+        face = _mapping_or_empty(row.get("face_info"))
+        creation = _mapping_or_empty(row.get("creation_settings"))
+        material = _mapping_or_empty(materials.get(str(row.get("material"))))
+        floats = _mapping_or_empty(material.get("floats"))
+        atlas_padding = _float_first(row.get("atlas_padding"), default=5.0)
+        return TMPFontAsset(
+            name=str(row.get("name", "")),
+            bundle=str(row.get("bundle", "")),
+            source_font_path=cls._source_font_path(base, row, record),
+            atlas_paths=cls._atlas_paths(base, row, record),
+            atlas_population_mode=_int_first(row.get("atlas_population_mode")),
+            atlas_width=_float_first(row.get("atlas_width"), floats.get("_TextureWidth")),
+            atlas_height=_float_first(row.get("atlas_height"), floats.get("_TextureHeight")),
+            atlas_padding=atlas_padding,
+            point_size=_float_first(face.get("m_PointSize"), creation.get("pointSize"), default=1.0),
+            face_scale=_float_first(face.get("m_Scale"), default=1.0),
+            line_height=_float_first(face.get("m_LineHeight")),
+            ascent_line=_float_first(face.get("m_AscentLine")),
+            descent_line=_float_first(face.get("m_DescentLine")),
+            tab_width=_float_first(face.get("m_TabWidth")),
+            gradient_scale=_float_first(floats.get("_GradientScale"), default=atlas_padding + 1.0),
+            weight_normal=_float_first(floats.get("_WeightNormal")),
+            weight_bold=_float_first(floats.get("_WeightBold"), default=0.75),
+            face_dilate=_float_first(floats.get("_FaceDilate")),
+            outline_width=_float_first(floats.get("_OutlineWidth")),
+            outline_softness=_float_first(floats.get("_OutlineSoftness")),
+            sharpness=_float_first(floats.get("_Sharpness")),
+            normal_spacing_offset=_float_first(row.get("normal_spacing_offset")),
+            bold_spacing=_float_first(row.get("bold_spacing")),
+            scale_ratio_a=_float_first(floats.get("_ScaleRatioA"), default=1.0),
+            scale_ratio_b=_float_first(floats.get("_ScaleRatioB"), default=1.0),
+            scale_ratio_c=_float_first(floats.get("_ScaleRatioC"), default=1.0),
+            glow_offset=_float_first(floats.get("_GlowOffset")),
+            glow_outer=_float_first(floats.get("_GlowOuter")),
+            underlay_softness=_float_first(floats.get("_UnderlaySoftness")),
+            underlay_offset_x=_float_first(floats.get("_UnderlayOffsetX")),
+            underlay_offset_y=_float_first(floats.get("_UnderlayOffsetY")),
+            fallback_names=_nonempty_strings(row.get("fallback_font_asset_names")),
+            glyphs=cls._load_character_table(base, row, record),
+        )
+
+    @staticmethod
+    def _sort_assets(assets: dict[str, list[TMPFontAsset]]) -> None:
+        for rows in assets.values():
+            rows.sort(key=lambda asset: (asset.bundle != "custom_profile_font.bundle", asset.name))
 
     @staticmethod
     def _source_font_path(base: Path, row: dict[str, Any], record=None) -> Path | None:
@@ -1300,43 +1385,54 @@ class TMPFontLibrary:
                 paths.append(matches[0])
         return paths
 
+    @classmethod
+    def _load_character_table(cls, base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
+        tables = cls._character_table_rows(base, row, record)
+        if tables is None:
+            return {}
+        chars, glyphs = tables
+        glyph_by_index = {_int_first(glyph.get("m_Index")): glyph for glyph in glyphs}
+        out: dict[int, TMPGlyphMetrics] = {}
+        for char in chars:
+            glyph = glyph_by_index.get(_int_first(char.get("m_GlyphIndex")))
+            if glyph:
+                out[_int_first(char.get("m_Unicode"))] = cls._glyph_metrics_from_rows(char, glyph)
+        return out
+
     @staticmethod
-    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
+    def _character_table_rows(
+        base: Path, row: dict[str, Any], record=None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
         char_rel = row.get("character_table_path")
         glyph_rel = row.get("glyph_table_path")
         if not char_rel or not glyph_rel:
-            return {}
+            return None
         char_path = base / str(char_rel)
         glyph_path = base / str(glyph_rel)
         if record is not None:
             record(char_path)
             record(glyph_path)
         if not char_path.exists() or not glyph_path.exists():
-            return {}
-        chars = json.loads(char_path.read_text(encoding="utf-8"))
-        glyphs = json.loads(glyph_path.read_text(encoding="utf-8"))
-        glyph_by_index = {int(glyph.get("m_Index", 0)): glyph for glyph in glyphs}
-        out: dict[int, TMPGlyphMetrics] = {}
-        for char in chars:
-            glyph = glyph_by_index.get(int(char.get("m_GlyphIndex", 0)))
-            if not glyph:
-                continue
-            metrics = glyph.get("m_Metrics", {}) or {}
-            rect = glyph.get("m_GlyphRect", {}) or {}
-            out[int(char.get("m_Unicode", 0))] = TMPGlyphMetrics(
-                width=float(metrics.get("m_Width") or 0.0),
-                height=float(metrics.get("m_Height") or 0.0),
-                bearing_x=float(metrics.get("m_HorizontalBearingX") or 0.0),
-                bearing_y=float(metrics.get("m_HorizontalBearingY") or 0.0),
-                advance=float(metrics.get("m_HorizontalAdvance") or 0.0),
-                rect_x=int(rect.get("m_X") or 0),
-                rect_y=int(rect.get("m_Y") or 0),
-                rect_w=int(rect.get("m_Width") or 0),
-                rect_h=int(rect.get("m_Height") or 0),
-                glyph_scale=float(char.get("m_Scale") or glyph.get("m_Scale") or 1.0),
-                atlas_index=int(glyph.get("m_AtlasIndex") or 0),
-            )
-        return out
+            return None
+        return json.loads(char_path.read_text(encoding="utf-8")), json.loads(glyph_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _glyph_metrics_from_rows(char: dict[str, Any], glyph: dict[str, Any]) -> TMPGlyphMetrics:
+        metrics = _mapping_or_empty(glyph.get("m_Metrics"))
+        rect = _mapping_or_empty(glyph.get("m_GlyphRect"))
+        return TMPGlyphMetrics(
+            width=_float_first(metrics.get("m_Width")),
+            height=_float_first(metrics.get("m_Height")),
+            bearing_x=_float_first(metrics.get("m_HorizontalBearingX")),
+            bearing_y=_float_first(metrics.get("m_HorizontalBearingY")),
+            advance=_float_first(metrics.get("m_HorizontalAdvance")),
+            rect_x=_int_first(rect.get("m_X")),
+            rect_y=_int_first(rect.get("m_Y")),
+            rect_w=_int_first(rect.get("m_Width")),
+            rect_h=_int_first(rect.get("m_Height")),
+            glyph_scale=_float_first(char.get("m_Scale"), glyph.get("m_Scale"), default=1.0),
+            atlas_index=_int_first(glyph.get("m_AtlasIndex")),
+        )
 
     def active_asset(self, font_name: str) -> TMPFontAsset | None:
         rows = self.assets.get(font_name, [])
@@ -1640,6 +1736,79 @@ def int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _resource_entries(value: Any) -> list[tuple[Any, Any]]:
+    if isinstance(value, dict):
+        wrapped_items = value.get("items")
+        if isinstance(wrapped_items, list):
+            return [(None, item) for item in wrapped_items]
+        return list(value.items())
+    if isinstance(value, list):
+        return [(None, item) for item in value]
+    return []
+
+
+def _coerced_resource_entry(key: Any, item: Any) -> tuple[int, dict[str, Any]] | None:
+    if not isinstance(item, dict):
+        return None
+    item_id = int_or_none(item.get("id"))
+    if item_id is None:
+        item_id = int_or_none(key)
+    return None if item_id is None else (item_id, item)
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def _png_resource_filename(resource: dict[str, Any]) -> str | None:
+    file_name = str(resource.get("fileName", "")).strip("/")
+    if not file_name:
+        return None
+    return file_name if file_name.lower().endswith(".png") else f"{file_name}.png"
+
+
+def _general_text_tokens(raw_line: str) -> list[str]:
+    tokens: list[str] = []
+    ascii_token = ""
+    for char in raw_line:
+        if char.isascii() and (char.isalnum() or char in "._-@:/#"):
+            ascii_token += char
+        else:
+            if ascii_token:
+                tokens.append(ascii_token)
+                ascii_token = ""
+            tokens.append(char)
+    if ascii_token:
+        tokens.append(ascii_token)
+    return tokens
+
+
+def _append_oversized_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
+    for char in token:
+        trial = line + char
+        if line and text_width(trial) > max_width:
+            lines.append(line)
+            line = char
+        else:
+            line = trial
+    return line
+
+
+def _append_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
+    if line and text_width(line + token) > max_width:
+        lines.append(line)
+        line = ""
+    if text_width(token) > max_width:
+        return _append_oversized_general_token(token, line, max_width, text_width, lines)
+    return line + token
 
 
 def summarize_resource(resource: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2065,35 +2234,35 @@ class PNGRenderer:
         max_scene_bytes: int = DEFAULT_MAX_SCENE_BYTES,
     ) -> None:
         self.masterdata = masterdata
-        self.resources = resources or {}
+        self.resources = _optional_dict(resources)
         self.assets = assets
-        self.game_assets = assets.parent if assets.name == "custom_profile" else assets
+        self.game_assets = _game_assets_root(assets)
         self.region = self.normalize_region(region)
         self.fonts = fonts
-        self.profile_context = profile_context or {}
+        self.profile_context = _optional_dict(profile_context)
         self.canvas_w = canvas_w
         self.canvas_h = canvas_h
-        self.origin_x = float(canvas_w) / 2.0 if origin_x is None else origin_x
-        self.origin_y = float(canvas_h) / 2.0 if origin_y is None else origin_y
-        self.parallel_workers = max(1, int(parallel_workers or 1))
-        self.parallel_stage = parallel_stage if parallel_stage in {"serial", "transform", "full"} else "transform"
+        self.origin_x = _default_if_none(origin_x, float(canvas_w) / 2.0)
+        self.origin_y = _default_if_none(origin_y, float(canvas_h) / 2.0)
+        self.parallel_workers = _positive_int(parallel_workers)
+        self.parallel_stage = _choice_or_default(parallel_stage, {"serial", "transform", "full"}, "transform")
         self.clip_canvas_transform = clip_canvas_transform
         self.tmp_decorative_face_only = tmp_decorative_face_only
         self.premultiply_alpha_transforms = premultiply_alpha_transforms
         self.tmp_decorative_direct_raster = tmp_decorative_direct_raster
-        self.tmp_decorative_alpha_harden = max(1.0, float(tmp_decorative_alpha_harden or 1.0))
-        self.max_layer_pixels = max(1, int(max_layer_pixels))
-        self.max_scene_bytes = max(1, int(max_scene_bytes))
+        self.tmp_decorative_alpha_harden = _positive_float(tmp_decorative_alpha_harden)
+        self.max_layer_pixels = _positive_int(max_layer_pixels)
+        self.max_scene_bytes = _positive_int(max_scene_bytes)
         self.text_pivot = text_pivot
         self.tmp_scale_mode = tmp_scale_mode
         self.rotation_sign = rotation_sign
         self.tmp_font_scale = tmp_font_scale
         self.text_layout = text_layout
-        base_scale_x = DEFAULT_POSITION_SCALE_X if position_scale is None else position_scale
-        base_scale_y = DEFAULT_POSITION_SCALE_Y if position_scale is None else position_scale
-        self.position_scale = DEFAULT_POSITION_SCALE if position_scale is None else position_scale
-        self.position_scale_x = base_scale_x if position_scale_x is None else position_scale_x
-        self.position_scale_y = base_scale_y if position_scale_y is None else position_scale_y
+        base_scale_x = _default_if_none(position_scale, DEFAULT_POSITION_SCALE_X)
+        base_scale_y = _default_if_none(position_scale, DEFAULT_POSITION_SCALE_Y)
+        self.position_scale = _default_if_none(position_scale, DEFAULT_POSITION_SCALE)
+        self.position_scale_x = _default_if_none(position_scale_x, base_scale_x)
+        self.position_scale_y = _default_if_none(position_scale_y, base_scale_y)
         self.tmp_line_mode = tmp_line_mode
         self.tmp_box_mode = tmp_box_mode
         self.include_empty_lines = include_empty_lines
@@ -2110,8 +2279,8 @@ class PNGRenderer:
         self.triangle_mode = triangle_mode
         self.text_vertical_mode = text_vertical_mode
         self.tmp_space_width_factor = tmp_space_width_factor
-        self.tmp_text_render_mode = (
-            tmp_text_render_mode if tmp_text_render_mode in TMP_TEXT_RENDER_MODES else DEFAULT_TMP_TEXT_RENDER_MODE
+        self.tmp_text_render_mode = _choice_or_default(
+            tmp_text_render_mode, TMP_TEXT_RENDER_MODES, DEFAULT_TMP_TEXT_RENDER_MODE
         )
         self.tmp_dynamic_sdf = tmp_dynamic_sdf
         self.tmp_pillow_stroke_factor = tmp_pillow_stroke_factor
@@ -2119,9 +2288,9 @@ class PNGRenderer:
         self.shape_sdf_outer_factor = shape_sdf_outer_factor
         self.shape_sdf_face_factor = shape_sdf_face_factor
         self.shape_sdf_softness = shape_sdf_softness
-        self.shape_sdf_source = shape_sdf_source if shape_sdf_source in SHAPE_SDF_SOURCES else "rgb"
+        self.shape_sdf_source = _choice_or_default(shape_sdf_source, SHAPE_SDF_SOURCES, "rgb")
         self.shape_sdf_screen_fwidth = shape_sdf_screen_fwidth
-        self.tmp_metrics_mode = tmp_metrics_mode if tmp_metrics_mode in TMP_METRIC_MODES else "pil"
+        self.tmp_metrics_mode = _choice_or_default(tmp_metrics_mode, TMP_METRIC_MODES, "pil")
         self.tmp_font_library = TMPFontLibrary.load(tmp_font_metadata, runtime_fonts_dir=fonts)
         self.shape_sprite_dir = shape_sprite_dir
         self.tmp_native_line_gap = tmp_native_line_gap
@@ -2252,26 +2421,11 @@ class PNGRenderer:
         return {}
 
     def coerce_resource_index(self, value: Any) -> dict[int, dict[str, Any]]:
-        if isinstance(value, dict) and isinstance(value.get("items"), list):
-            value = value["items"]
         result: dict[int, dict[str, Any]] = {}
-        if isinstance(value, dict):
-            for key, item in value.items():
-                if not isinstance(item, dict):
-                    continue
-                item_id = int_or_none(item.get("id"))
-                if item_id is None:
-                    item_id = int_or_none(key)
-                if item_id is not None:
-                    result[item_id] = item
-            return result
-        if isinstance(value, list):
-            for item in value:
-                if not isinstance(item, dict):
-                    continue
-                item_id = int_or_none(item.get("id"))
-                if item_id is not None:
-                    result[item_id] = item
+        for key, item in _resource_entries(value):
+            if entry := _coerced_resource_entry(key, item):
+                item_id, resource = entry
+                result[item_id] = resource
         return result
 
     def coerce_string_resource_map(self, value: Any) -> dict[str, dict[str, Any]]:
@@ -2439,8 +2593,10 @@ class PNGRenderer:
         path = Path(raw)
         if path.is_absolute():
             return [path]
-
         clean = raw.strip("/")
+        return _dedupe_paths(self._relative_request_asset_candidates(clean))
+
+    def _relative_request_asset_candidates(self, clean: str) -> list[Path]:
         rel = Path(clean)
         candidates: list[Path] = []
         if clean.startswith("asset/"):
@@ -2462,15 +2618,7 @@ class PNGRenderer:
             candidates.append(Path(clean))
             for root in (self.assets, self.game_assets, self.static_images.parent, *self.data_root_candidates()):
                 candidates.append(root / rel)
-
-        seen: set[Path] = set()
-        result: list[Path] = []
-        for candidate in candidates:
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            result.append(candidate)
-        return result
+        return candidates
 
     def resolve_request_asset_path(self, raw_path: str | None) -> Path | None:
         raw = str(raw_path or "").strip()
@@ -2511,30 +2659,32 @@ class PNGRenderer:
         return path.as_posix()
 
     def resource_path(self, resource: dict[str, Any], fallback_dir: str | None = None) -> Path | None:
+        if path := self._explicit_resource_path(resource):
+            return path
+        if self.masterdata is None:
+            return None
+        file_name = _png_resource_filename(resource)
+        if file_name is None:
+            return None
+        rels = self._resource_relative_dirs(resource, fallback_dir)
+        return self._existing_resource_path(rels, file_name)
+
+    def _explicit_resource_path(self, resource: dict[str, Any]) -> Path | None:
         for key in ("imagePath", "image_path", "resourcePath", "resource_path", "filePath", "file_path"):
             if path := self.resolve_request_asset_path(str(resource.get(key, "") or "")):
                 return path
-        if self.masterdata is None:
-            return None
+        return None
 
+    @staticmethod
+    def _resource_relative_dirs(resource: dict[str, Any], fallback_dir: str | None) -> list[Path]:
         load_val = str(resource.get("resourceLoadVal", "")).strip("/")
-        file_name = str(resource.get("fileName", "")).strip("/")
-        if not file_name:
-            return None
-        if not file_name.lower().endswith(".png"):
-            file_name += ".png"
-        rels: list[Path] = []
         if load_val.startswith("custom_profile/"):
-            rels.append(Path(load_val.removeprefix("custom_profile/")))
-            rels.append(Path(load_val))
-        elif load_val == "custom_profile":
-            rels.append(Path("."))
-            rels.append(Path("custom_profile"))
-        elif fallback_dir:
-            rels.append(Path(fallback_dir))
-        else:
-            rels.append(Path(load_val))
+            return [Path(load_val.removeprefix("custom_profile/")), Path(load_val)]
+        if load_val == "custom_profile":
+            return [Path("."), Path("custom_profile")]
+        return [Path(fallback_dir)] if fallback_dir else [Path(load_val)]
 
+    def _existing_resource_path(self, rels: list[Path], file_name: str) -> Path | None:
         roots = [self.assets]
         if self.game_assets != self.assets:
             roots.append(self.game_assets)
@@ -2583,48 +2733,71 @@ class PNGRenderer:
         previous_card_ref = self._current_card_ref
         self._current_card_ref = card_ref
         try:
-            contents = self.build_native_contents(card)
-            if self.tmp_decorative_direct_raster:
-                for content in contents:
-                    if self.render_content_direct_on_card(img, content):
-                        self.record_native_audit(card_ref, content, "rendered-direct", None)
-                        continue
-                    try:
-                        rendered = self.render_and_prepare_content_for_card(content)
-                    except RasterSizeLimitError as exc:
-                        if self.render_oversized_tmp_text_direct(img, content, exc):
-                            self.record_native_audit(card_ref, content, "rendered-direct", None)
-                            continue
-                        raise
-                    self.record_native_audit(card_ref, content, rendered.status, rendered.result)
-                    if rendered.prepared is not None:
-                        img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
-                return img
-
-            if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
-                for rendered in self.render_contents_for_card_parallel(contents):
-                    self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
-                    if rendered.prepared is not None:
-                        img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
-                return img
-
-            rendered_layers: list[
-                tuple[
-                    NativeContent,
-                    tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
-                ]
-            ] = []
-            for content in contents:
-                rendered = self.render_content_for_card(content)
-                self.record_native_audit(card_ref, content, rendered.status, rendered.result)
-                if isinstance(rendered.result, tuple):
-                    rendered_layers.append((content, rendered.result))
-            for prepared in self.prepare_layers_for_card(rendered_layers):
-                if prepared is not None:
-                    img.alpha_composite(prepared.image, prepared.xy)
+            self._render_card_contents(img, card_ref, self.build_native_contents(card))
         finally:
             self._current_card_ref = previous_card_ref
         return img
+
+    def _render_card_contents(self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]) -> None:
+        if self.tmp_decorative_direct_raster:
+            self._render_decorative_card_contents(img, card_ref, contents)
+            return
+        if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
+            self._render_parallel_card_contents(img, card_ref, contents)
+            return
+        self._render_serial_card_contents(img, card_ref, contents)
+
+    def _render_decorative_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        for content in contents:
+            self._render_decorative_card_content(img, card_ref, content)
+
+    def _render_decorative_card_content(
+        self, img: Image.Image, card_ref: dict[str, int], content: NativeContent
+    ) -> None:
+        if self.render_content_direct_on_card(img, content):
+            self.record_native_audit(card_ref, content, "rendered-direct", None)
+            return
+        try:
+            rendered = self.render_and_prepare_content_for_card(content)
+        except RasterSizeLimitError as exc:
+            if self.render_oversized_tmp_text_direct(img, content, exc):
+                self.record_native_audit(card_ref, content, "rendered-direct", None)
+                return
+            raise
+        self._record_and_composite_prepared(img, card_ref, rendered)
+
+    def _render_parallel_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        for rendered in self.render_contents_for_card_parallel(contents):
+            self._record_and_composite_prepared(img, card_ref, rendered)
+
+    def _record_and_composite_prepared(
+        self, img: Image.Image, card_ref: dict[str, int], rendered: RenderedLayer
+    ) -> None:
+        self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
+        if rendered.prepared is not None:
+            img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
+
+    def _render_serial_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        rendered_layers: list[
+            tuple[
+                NativeContent,
+                tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
+            ]
+        ] = []
+        for content in contents:
+            rendered = self.render_content_for_card(content)
+            self.record_native_audit(card_ref, content, rendered.status, rendered.result)
+            if isinstance(rendered.result, tuple):
+                rendered_layers.append((content, rendered.result))
+        for prepared in self.prepare_layers_for_card(rendered_layers):
+            if prepared is not None:
+                img.alpha_composite(prepared.image, prepared.xy)
 
     def render_content_direct_on_card(self, canvas: Image.Image, content: NativeContent) -> bool:
         if not self.tmp_decorative_direct_raster:
@@ -3024,49 +3197,69 @@ class PNGRenderer:
     def render_shared_general_prefab(self, file_name: str) -> Image.Image | None:
         """Replay one migrated GeneralContentView from its renderer-neutral display list."""
 
-        asset_paths = {}
-        if file_name == "ChallengeLive":
-            data = self.profile_context.get("userChallengeLiveSoloResult") or {}
-            if isinstance(data, dict):
-                character_id = int(data.get("characterId", 0) or 0)
-                asset_paths["challenge_character_icon"] = self.chara_icon_path(character_id)
-        elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
-            for _nickname, character_id in CHARA_LIST:
-                if character_id is not None:
-                    asset_paths[f"character_rank_icon:{character_id}"] = self.chara_icon_path(character_id)
-        elif file_name == "StoryFavorite":
-            stories = self.profile_context.get("userStoryFavorites") or []
-            if isinstance(stories, list):
-                for story in stories:
-                    if isinstance(story, dict):
-                        asset_paths[story_favorite_asset_key(story)] = self.story_favorite_image_path(story)
         adapter = PillowGeneralPrefabAdapter(self.general_font, self.paste_unity_sprite, self.open_rgba)
         display_list = build_general_prefab_display_list(
             file_name,
             size=GENERAL_NATIVE_SIZES[file_name],
             profile_context=self.profile_context,
-            labels={
-                "comment_title": self.general_text("comment_title"),
-                "total_power": self.general_text("total_power"),
-                "multi_live_title": self.general_text("multi_live_title"),
-                "multi_live_count_suffix": self.general_text("multi_live_count_suffix"),
-                "challenge_live_title": self.general_text("challenge_live_title"),
-                "challenge_live_solo": self.general_text("challenge_live_solo"),
-                "character_rank_tab": self.general_text("character_rank_tab"),
-                "challenge_stage_tab": self.general_text("challenge_stage_tab"),
-                "music_clear": self.general_text("music_clear"),
-                "music_full_combo": self.general_text("music_full_combo"),
-                "music_all_perfect": self.general_text("music_all_perfect"),
-                "story_favorite_title": self.general_text("story_favorite_title"),
-                "not_set": self.general_text("not_set"),
-            },
+            labels=self._general_prefab_labels(),
             metrics=adapter,
             palette=GENERAL_PREFAB_PALETTE,
-            asset_paths=asset_paths,
+            asset_paths=self._general_prefab_asset_paths(file_name),
             music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
             story_favorite_resources=self.story_favorite_resources,
         )
         return adapter.render(display_list) if display_list is not None else None
+
+    def _general_prefab_asset_paths(self, file_name: str) -> dict[str, Path | None]:
+        builders = {
+            "ChallengeLive": self._challenge_live_prefab_assets,
+            "CharacterRankAndChallengeStage": self._character_rank_prefab_assets,
+            "CharacterRankAndChallengeStageScroll": self._character_rank_prefab_assets,
+            "StoryFavorite": self._story_favorite_prefab_assets,
+        }
+        builder = builders.get(file_name)
+        return builder() if builder is not None else {}
+
+    def _challenge_live_prefab_assets(self) -> dict[str, Path | None]:
+        data = _mapping_or_empty(self.profile_context.get("userChallengeLiveSoloResult") or {})
+        character_id = _int_first(data.get("characterId"))
+        return {"challenge_character_icon": self.chara_icon_path(character_id)}
+
+    def _character_rank_prefab_assets(self) -> dict[str, Path | None]:
+        return {
+            f"character_rank_icon:{character_id}": self.chara_icon_path(character_id)
+            for _nickname, character_id in CHARA_LIST
+            if character_id is not None
+        }
+
+    def _story_favorite_prefab_assets(self) -> dict[str, Path | None]:
+        stories = self.profile_context.get("userStoryFavorites")
+        if not isinstance(stories, list):
+            return {}
+        return {
+            story_favorite_asset_key(story): self.story_favorite_image_path(story)
+            for story in stories
+            if isinstance(story, dict)
+        }
+
+    def _general_prefab_labels(self) -> dict[str, str]:
+        keys = (
+            "comment_title",
+            "total_power",
+            "multi_live_title",
+            "multi_live_count_suffix",
+            "challenge_live_title",
+            "challenge_live_solo",
+            "character_rank_tab",
+            "challenge_stage_tab",
+            "music_clear",
+            "music_full_combo",
+            "music_all_perfect",
+            "story_favorite_title",
+            "not_set",
+        )
+        return {key: self.general_text(key) for key in keys}
 
     def rect_transform_box(
         self,
@@ -3487,39 +3680,11 @@ class PNGRenderer:
             bbox = draw.textbbox((0, 0), value, font=font)
             return bbox[2] - bbox[0]
 
-        def tokens_for(raw_line: str) -> list[str]:
-            tokens: list[str] = []
-            token = ""
-            for ch in raw_line:
-                if ch.isascii() and (ch.isalnum() or ch in "._-@:/#"):
-                    token += ch
-                    continue
-                if token:
-                    tokens.append(token)
-                    token = ""
-                tokens.append(ch)
-            if token:
-                tokens.append(token)
-            return tokens
-
         lines: list[str] = []
         for raw_line in text.splitlines() or [""]:
             line = ""
-            for token in tokens_for(raw_line):
-                trial = line + token
-                if line and text_width(trial) > max_width:
-                    lines.append(line)
-                    line = ""
-                if text_width(token) > max_width:
-                    for ch in token:
-                        trial = line + ch
-                        if line and text_width(trial) > max_width:
-                            lines.append(line)
-                            line = ch
-                        else:
-                            line = trial
-                else:
-                    line += token
+            for token in _general_text_tokens(raw_line):
+                line = _append_general_token(token, line, max_width, text_width, lines)
             lines.append(line)
         return lines
 
@@ -4551,19 +4716,9 @@ class PNGRenderer:
         if not group:
             return None
         visual = self.resolve_honor_level_visual(honor, level)
-        asset_name = str(honor.get("assetbundleName", "") or "")
-        rarity = str(honor.get("honorRarity", "") or "")
-        if visual:
-            asset_name = asset_name or str(visual.get("assetbundleName", "") or "")
-            rarity = rarity or str(visual.get("honorRarity", "") or "")
-            if level <= 0:
-                level = int(visual.get("level", 0) or 0)
-        bg_asset_name = (
-            str(group.get("backgroundAssetbundleName", group.get("backgroundAssetBundleName", "")) or "") or asset_name
-        )
-        group_type = str(group.get("honorType", "") or "")
-        if self.is_world_link_honor_group(group_type, bg_asset_name, asset_name):
-            group_type = "wl_event"
+        asset_name, rarity, level = self._honor_asset_details(honor, visual, level)
+        bg_asset_name = self._honor_background_asset_name(group, asset_name)
+        group_type = self._resolved_honor_group_type(group, bg_asset_name, asset_name)
         mode = "main" if full_size else "sub"
         honor_path = self.honor_background_path(group_type, bg_asset_name, asset_name, mode)
         if honor_path is None:
@@ -4575,12 +4730,8 @@ class PNGRenderer:
         frame_degree_level_path = self.honor_frame_degree_level_path(group, honor_type, rarity_rank)
         request_group_type = "fc_ap" if honor_id in FC_AP_HONOR_IDS else group_type
 
-        scroll_path = self.first_region_asset([Path("honor") / asset_name / "scroll.png"]) if asset_name else None
-        lv_path: Path | None = None
-        lv6_path: Path | None = None
-        if request_group_type == "fc_ap" or group_type in {"character", "achievement"}:
-            lv_path = self.static_image_path("honor", "icon_degreeLv.png")
-            lv6_path = self.static_image_path("honor", "icon_degreeLv6.png")
+        scroll_path = self._honor_scroll_path(asset_name)
+        lv_path, lv6_path = self._honor_level_icon_paths(request_group_type, group_type)
 
         request = HonorRequest(
             honor_type=honor_type,
@@ -4599,25 +4750,68 @@ class PNGRenderer:
         )
         return request
 
+    @staticmethod
+    def _honor_asset_details(
+        honor: dict[str, Any], visual: dict[str, Any] | None, requested_level: int
+    ) -> tuple[str, str, int]:
+        asset_name = str(honor.get("assetbundleName", "") or "")
+        rarity = str(honor.get("honorRarity", "") or "")
+        if visual is None:
+            return asset_name, rarity, requested_level
+        asset_name = str(_first_truthy(asset_name, visual.get("assetbundleName"), default=""))
+        rarity = str(_first_truthy(rarity, visual.get("honorRarity"), default=""))
+        level = _int_first(visual.get("level")) if requested_level <= 0 else requested_level
+        return asset_name, rarity, level
+
+    @staticmethod
+    def _honor_background_asset_name(group: dict[str, Any], asset_name: str) -> str:
+        configured = group.get("backgroundAssetbundleName", group.get("backgroundAssetBundleName", ""))
+        return str(_first_truthy(configured, asset_name, default=""))
+
+    def _resolved_honor_group_type(self, group: dict[str, Any], bg_asset_name: str, asset_name: str) -> str:
+        group_type = str(group.get("honorType", "") or "")
+        return "wl_event" if self.is_world_link_honor_group(group_type, bg_asset_name, asset_name) else group_type
+
+    def _honor_scroll_path(self, asset_name: str) -> Path | None:
+        if not asset_name:
+            return None
+        return self.first_region_asset([Path("honor") / asset_name / "scroll.png"])
+
+    def _honor_level_icon_paths(self, request_group_type: str, group_type: str) -> tuple[Path | None, Path | None]:
+        if request_group_type != "fc_ap" and group_type not in {"character", "achievement"}:
+            return None, None
+        return (
+            self.static_image_path("honor", "icon_degreeLv.png"),
+            self.static_image_path("honor", "icon_degreeLv6.png"),
+        )
+
     def honor_group_for(self, honor: dict[str, Any]) -> dict[str, Any] | None:
         return self.honor_groups.get(int(honor.get("groupId", 0) or 0))
 
     def resolve_honor_level_visual(self, honor: dict[str, Any], requested_level: int) -> dict[str, Any] | None:
-        best: dict[str, Any] | None = None
-        first: dict[str, Any] | None = None
-        for level in honor.get("levels", []) or []:
-            if not isinstance(level, dict):
-                continue
-            if not level.get("assetbundleName") and not level.get("honorRarity"):
-                continue
-            if first is None:
-                first = level
-            if int(level.get("level", 0) or 0) == requested_level:
-                return level
-            if requested_level > 0 and int(level.get("level", 0) or 0) <= requested_level:
-                if best is None or int(level.get("level", 0) or 0) > int(best.get("level", 0) or 0):
-                    best = level
-        return best or first
+        levels = self._usable_honor_level_visuals(honor)
+        if not levels:
+            return None
+        for visual in levels:
+            if self._honor_visual_level(visual) == requested_level:
+                return visual
+        if requested_level > 0:
+            eligible = [visual for visual in levels if self._honor_visual_level(visual) <= requested_level]
+            if eligible:
+                return max(eligible, key=self._honor_visual_level)
+        return levels[0]
+
+    @staticmethod
+    def _usable_honor_level_visuals(honor: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            level
+            for level in honor.get("levels", []) or []
+            if isinstance(level, dict) and (level.get("assetbundleName") or level.get("honorRarity"))
+        ]
+
+    @staticmethod
+    def _honor_visual_level(visual: dict[str, Any]) -> int:
+        return _int_first(visual.get("level"))
 
     def honor_background_path(self, group_type: str, bg_asset_name: str, asset_name: str, mode: str) -> Path | None:
         rels: list[Path] = []
@@ -4681,32 +4875,37 @@ class PNGRenderer:
         rarity_rank: int,
     ) -> Path | None:
         frame_name = str(group.get("frameName", "") or "")
-        honor_type = (
-            "birthday"
-            if (
-                str(group.get("honorType", "") or "") == "birthday"
-                or frame_name.startswith("honor_frame_birthday")
-                or bg_asset_name.startswith("honor_bg_birthday")
-                or asset_name.startswith("honor_bg_birthday")
-            )
-            else "normal"
-        )
+        honor_type = self.honor_type_for_group(group, bg_asset_name, asset_name)
         if honor_type == "birthday" and rarity_rank <= 1:
             return None
         mode_short = mode[0]
         static_path = self.static_images / "honor" / f"frame_degree_{mode_short}_{rarity_rank}.png"
-        if honor_type == "birthday" and not frame_name:
-            if bg_asset_name.startswith("honor_bg_birthday_"):
-                frame_name = "honor_frame_birthday_" + bg_asset_name.removeprefix("honor_bg_birthday_")
-            elif asset_name.startswith("honor_bg_birthday_"):
-                frame_name = "honor_frame_birthday_" + asset_name.removeprefix("honor_bg_birthday_")
-        if frame_name:
-            start_rare = 3 if frame_name.startswith("event") else 2
-            rel = Path("honor_frame") / frame_name / f"frame_degree_{mode_short}_{rarity_rank}.png"
-            region_path = self.first_region_asset([rel])
-            if region_path is not None and (honor_type == "birthday" or rarity_rank >= start_rare):
-                return region_path
+        frame_name = self._resolved_honor_frame_name(frame_name, honor_type, bg_asset_name, asset_name)
+        region_path = self._eligible_honor_frame_path(frame_name, honor_type, mode_short, rarity_rank)
+        if region_path is not None:
+            return region_path
         return static_path if static_path.exists() else None
+
+    @staticmethod
+    def _resolved_honor_frame_name(frame_name: str, honor_type: str, bg_asset_name: str, asset_name: str) -> str:
+        if honor_type != "birthday" or frame_name:
+            return frame_name
+        if bg_asset_name.startswith("honor_bg_birthday_"):
+            return "honor_frame_birthday_" + bg_asset_name.removeprefix("honor_bg_birthday_")
+        if asset_name.startswith("honor_bg_birthday_"):
+            return "honor_frame_birthday_" + asset_name.removeprefix("honor_bg_birthday_")
+        return ""
+
+    def _eligible_honor_frame_path(
+        self, frame_name: str, honor_type: str, mode_short: str, rarity_rank: int
+    ) -> Path | None:
+        if not frame_name:
+            return None
+        start_rare = 3 if frame_name.startswith("event") else 2
+        if honor_type != "birthday" and rarity_rank < start_rare:
+            return None
+        rel = Path("honor_frame") / frame_name / f"frame_degree_{mode_short}_{rarity_rank}.png"
+        return self.first_region_asset([rel])
 
     def honor_frame_degree_level_path(
         self,
@@ -4814,32 +5013,57 @@ class PNGRenderer:
         word_id = int(item.get("wordId", 0) or 0)
         inverse = bool_from_profile(item.get("inverse", False))
         use_unit_virtual_singer = bool_from_profile(item.get("useUnitVirtualSinger", False))
-        request_keys = [
-            self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer),
-        ]
-        if use_unit_virtual_singer:
-            request_keys.append(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
-        for key in request_keys:
-            if image := self.honor_request_image(self.bonds_honor_requests.get(key)):
-                return image
-        if image := self.honor_request_image(self.bonds_honor_requests.get(str(honor_id))):
+        request_keys = self._bonds_honor_request_keys(
+            honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer
+        )
+        if image := self._configured_bonds_honor_image(honor_id, request_keys):
             return image
 
         request = self.build_masterdata_bonds_honor_request(item, full_size)
         if request is None:
             return None
-        images = {
-            "bonds_bg": self.open_rgba(Path(request.bonds_bg_path)) if request.bonds_bg_path else None,
-            "bonds_bg2": self.open_rgba(Path(request.bonds_bg_path2)) if request.bonds_bg_path2 else None,
-            "chara_icon_1": self.open_rgba(Path(request.chara_icon_path)) if request.chara_icon_path else None,
-            "chara_icon_2": self.open_rgba(Path(request.chara_icon_path2)) if request.chara_icon_path2 else None,
-            "mask_img": self.open_rgba(Path(request.mask_img_path)) if request.mask_img_path else None,
-            "frame_img": self.open_rgba(Path(request.frame_img_path)) if request.frame_img_path else None,
-            "word_img": self.open_rgba(Path(request.word_img_path)) if request.word_img_path else None,
-            "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
-            "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
-        }
+        images = self._loaded_request_images(
+            request,
+            {
+                "bonds_bg": "bonds_bg_path",
+                "bonds_bg2": "bonds_bg_path2",
+                "chara_icon_1": "chara_icon_path",
+                "chara_icon_2": "chara_icon_path2",
+                "mask_img": "mask_img_path",
+                "frame_img": "frame_img_path",
+                "word_img": "word_img_path",
+                "lv_img": "lv_img_path",
+                "lv6_img": "lv6_img_path",
+            },
+        )
         return compose_full_honor_image_from_loaded_assets(request, images)
+
+    def _bonds_honor_request_keys(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+        word_id: int,
+        inverse: bool,
+        use_unit_virtual_singer: bool,
+    ) -> list[str]:
+        keys = [self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer)]
+        if use_unit_virtual_singer:
+            keys.append(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
+        return keys
+
+    def _configured_bonds_honor_image(self, honor_id: int, request_keys: list[str]) -> Image.Image | None:
+        for key in request_keys:
+            if image := self.honor_request_image(self.bonds_honor_requests.get(key)):
+                return image
+        return self.honor_request_image(self.bonds_honor_requests.get(str(honor_id)))
+
+    def _loaded_request_images(self, request: HonorRequest, fields: dict[str, str]) -> dict[str, Image.Image | None]:
+        images: dict[str, Image.Image | None] = {}
+        for image_key, path_field in fields.items():
+            raw_path = getattr(request, path_field)
+            images[image_key] = self.open_rgba(Path(raw_path)) if raw_path else None
+        return images
 
     def build_masterdata_bonds_honor_request(
         self,
@@ -5334,31 +5558,7 @@ class PNGRenderer:
         asset = self.card_assets.get(card_id, {})
         if not asset:
             return None
-        if kind == "deck":
-            keys = (
-                ("deckAfterTrainingPath", "deck_after_training_path")
-                if after_training
-                else ("deckNormalPath", "deck_normal_path")
-            )
-        elif kind == "clip":
-            keys = (
-                (
-                    "deckAfterTrainingPath",
-                    "deck_after_training_path",
-                    "clipAfterTrainingPath",
-                    "clip_after_training_path",
-                )
-                if after_training
-                else ("deckNormalPath", "deck_normal_path", "clipNormalPath", "clip_normal_path")
-            )
-        elif kind == "small":
-            keys = (
-                ("smallAfterTrainingPath", "small_after_training_path")
-                if after_training
-                else ("smallNormalPath", "small_normal_path")
-            )
-        else:
-            keys = ("afterTrainingPath", "after_training_path") if after_training else ("normalPath", "normal_path")
+        keys = _CARD_ASSET_STATE_KEYS.get((kind, after_training), _CARD_ASSET_STATE_KEYS[("full", after_training)])
         for key in keys:
             if path := self.resolve_request_asset_path(str(asset.get(key, "") or "")):
                 return path
@@ -5500,31 +5700,60 @@ class PNGRenderer:
 
     def user_honor_level_for(self, honor_id: int) -> int:
         for row in self.profile_context.get("userHonors", []) or []:
-            if isinstance(row, list) and row and int(row[0] or 0) == honor_id:
-                return int(row[1] or 0) if len(row) > 1 else 0
-            if isinstance(row, dict) and int(row.get("honorId", row.get("id", 0)) or 0) == honor_id:
-                return int(row.get("honorLevel", row.get("level", 0)) or 0)
+            if (level := self._user_honor_row_level(row, honor_id)) is not None:
+                return level
         for row in self.profile_context.get("userProfileHonors", []) or []:
-            if int(row.get("honorId", 0) or 0) == honor_id:
-                return int(row.get("honorLevel", 0) or 0)
+            if (level := self._profile_honor_row_level(row, honor_id)) is not None:
+                return level
         return 0
+
+    @staticmethod
+    def _list_profile_level(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, list) or not row or _int_first(row[0]) != honor_id:
+            return None
+        return _int_first(row[1]) if len(row) > 1 else 0
+
+    @classmethod
+    def _user_honor_row_level(cls, row: Any, honor_id: int) -> int | None:
+        if (level := cls._list_profile_level(row, honor_id)) is not None:
+            return level
+        if not isinstance(row, dict):
+            return None
+        row_id = _int_first(row.get("honorId", row.get("id", 0)))
+        return _int_first(row.get("honorLevel", row.get("level", 0))) if row_id == honor_id else None
+
+    @staticmethod
+    def _profile_honor_row_level(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, dict) or _int_first(row.get("honorId")) != honor_id:
+            return None
+        return _int_first(row.get("honorLevel"))
 
     def user_bonds_honor_level_for(self, bonds_honor_id: int) -> int:
         for row in self.profile_context.get("userBondsHonors", []) or []:
-            if isinstance(row, list) and row and int(row[0] or 0) == bonds_honor_id:
-                return int(row[1] or 0) if len(row) > 1 else 0
-            if (
-                isinstance(row, dict)
-                and int(row.get("bondsHonorId", row.get("honorId", row.get("id", 0))) or 0) == bonds_honor_id
-            ):
-                return int(row.get("bondsHonorLevel", row.get("level", 0)) or 0)
+            if (level := self._bonds_honor_row_level(row, bonds_honor_id)) is not None:
+                return level
         return 0
+
+    @classmethod
+    def _bonds_honor_row_level(cls, row: Any, bonds_honor_id: int) -> int | None:
+        if (level := cls._list_profile_level(row, bonds_honor_id)) is not None:
+            return level
+        if not isinstance(row, dict):
+            return None
+        row_id = _int_first(row.get("bondsHonorId", row.get("honorId", row.get("id", 0))))
+        return _int_first(row.get("bondsHonorLevel", row.get("level", 0))) if row_id == bonds_honor_id else None
 
     def user_honor_mission_progress_for(self, honor_id: int) -> int:
         for row in self.profile_context.get("userHonorMissions", []) or []:
-            if isinstance(row, dict) and int(row.get("honorId", row.get("id", 0)) or 0) == honor_id:
-                return int(row.get("missionProgress", row.get("progress", 0)) or 0)
+            if (progress := self._honor_mission_row_progress(row, honor_id)) is not None:
+                return progress
         return 0
+
+    @staticmethod
+    def _honor_mission_row_progress(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, dict) or _int_first(row.get("honorId", row.get("id", 0))) != honor_id:
+            return None
+        return _int_first(row.get("missionProgress", row.get("progress", 0)))
 
     def shape_alpha_mask(self, path: Path, resource_file: str) -> Image.Image:
         key = (path, self.triangle_mode if resource_file == "triangle" else "asset")
