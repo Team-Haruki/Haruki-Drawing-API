@@ -14,10 +14,14 @@ from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.deck.model import DeckRequest
 
-router = APIRouter(tags=["Deck"], responses=HEAVY_RENDER_ERROR_RESPONSES)
+router = APIRouter(tags=["Deck"])
 
 
-@router.post("/recommend", summary="Generate deck recommendation image")
+@router.post(
+    "/recommend",
+    summary="Generate deck recommendation image",
+    responses=HEAVY_RENDER_ERROR_RESPONSES,
+)
 async def deck_recommend(request: DeckRequest):
     """
     Generate a deck recommendation image.
