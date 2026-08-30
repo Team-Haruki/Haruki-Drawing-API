@@ -10,6 +10,7 @@ ReDoc: http://localhost:8000/redoc
 """
 
 import asyncio
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -189,64 +190,61 @@ def _self_check_fonts() -> None:
         logger.info("font self-check passed (Pillow and native renderer both resolve every configured font)")
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan handler for startup/shutdown events."""
-    from src.core.heavy_render_pool import shutdown_heavy_render_worker_pool, startup_heavy_render_worker_pool
-    from src.sekai.base.painter import Painter, shutdown_painter
-    from src.sekai.base.utils import (
-        cleanup_expired_composed_image_disk_cache,
-        cleanup_expired_tmp_files,
-        shutdown_utils,
-    )
+def _cleanup_disk_caches() -> None:
+    """Remove expired persistent cache entries and report a non-empty sweep."""
+
+    from src.sekai.base.painter import Painter
+    from src.sekai.base.utils import cleanup_expired_composed_image_disk_cache
     from src.sekai.profile.custom_profile.diagnostics import cleanup_custom_profile_diagnostics
-    from src.sekai.sk.drawer import shutdown_sk_drawer
 
-    _ensure_nogil_runtime()
-    # Configure coloredlogs
-    coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
-    configure_runtime_diagnostics()
+    composed_removed = cleanup_expired_composed_image_disk_cache()
+    painter_removed = Painter.cleanup_old_disk_cache()
+    diagnostic_removed = cleanup_custom_profile_diagnostics()
+    if composed_removed or painter_removed or diagnostic_removed:
+        logger.info(
+            "Cleaned drawing disk caches: composed=%d painter=%d custom_profile_diagnostics=%d",
+            composed_removed,
+            painter_removed,
+            diagnostic_removed,
+        )
 
-    def _cleanup_disk_caches() -> None:
-        composed_removed = cleanup_expired_composed_image_disk_cache()
-        painter_removed = Painter.cleanup_old_disk_cache()
-        diagnostic_removed = cleanup_custom_profile_diagnostics()
-        if composed_removed or painter_removed or diagnostic_removed:
-            logger.info(
-                "Cleaned drawing disk caches: composed=%d painter=%d custom_profile_diagnostics=%d",
-                composed_removed,
-                painter_removed,
-                diagnostic_removed,
+
+async def _periodic_cleanup(interval_seconds: float, cleanup: Callable[[], object], warning: str) -> None:
+    """Run one synchronous cleanup forever without letting a failed sweep kill the task."""
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            cleanup()
+        except Exception:
+            logger.warning(warning, exc_info=True)
+
+
+def _create_cleanup_tasks() -> list[asyncio.Task[None]]:
+    from src.sekai.base.utils import cleanup_expired_tmp_files
+
+    return [
+        asyncio.create_task(
+            _periodic_cleanup(TMP_CLEANUP_INTERVAL, cleanup_expired_tmp_files, "Failed to cleanup tmp files")
+        ),
+        asyncio.create_task(
+            _periodic_cleanup(
+                DISK_CACHE_CLEANUP_INTERVAL,
+                _cleanup_disk_caches,
+                "Failed to cleanup drawing disk caches",
             )
-
-    # 后台定期清理临时文件
-    async def _periodic_tmp_cleanup():
-        while True:
-            await asyncio.sleep(TMP_CLEANUP_INTERVAL)
-            try:
-                cleanup_expired_tmp_files()
-            except Exception:
-                logger.warning("Failed to cleanup tmp files", exc_info=True)
-
-    # 后台定期清理磁盘缓存。内存缓存本身有 LRU/TTL，这里只处理长期运行服务中的落盘缓存。
-    async def _periodic_disk_cache_cleanup():
-        while True:
-            await asyncio.sleep(DISK_CACHE_CLEANUP_INTERVAL)
-            try:
-                _cleanup_disk_caches()
-            except Exception:
-                logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
-
-    cleanup_tasks = [
-        asyncio.create_task(_periodic_tmp_cleanup()),
-        asyncio.create_task(_periodic_disk_cache_cleanup()),
+        ),
     ]
 
-    # Startup
+
+def _run_initial_disk_cleanup() -> None:
     try:
         _cleanup_disk_caches()
     except Exception:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
+
+
+def _report_missing_skia_extension() -> None:
     if settings.drawing.use_skia_plot:
         try:
             import haruki_skia_renderer  # noqa: F401
@@ -255,11 +253,29 @@ async def lifespan(app: FastAPI):
                 "Skia gates are enabled but haruki_skia_renderer is not importable; "
                 "every Skia path will fall back to Pillow (fail-open)"
             )
+
+
+async def _startup_runtime() -> list[asyncio.Task[None]]:
+    from src.core.heavy_render_pool import startup_heavy_render_worker_pool
+
+    _ensure_nogil_runtime()
+    coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+    configure_runtime_diagnostics()
+    cleanup_tasks = _create_cleanup_tasks()
+    _run_initial_disk_cleanup()
+    _report_missing_skia_extension()
     _self_check_fonts()
     await startup_heavy_render_worker_pool()
     logger.info("Haruki Drawing API is starting...")
-    yield
-    # Shutdown
+    return cleanup_tasks
+
+
+async def _shutdown_runtime(cleanup_tasks: list[asyncio.Task[None]]) -> None:
+    from src.core.heavy_render_pool import shutdown_heavy_render_worker_pool
+    from src.sekai.base.painter import shutdown_painter
+    from src.sekai.base.utils import shutdown_utils
+    from src.sekai.sk.drawer import shutdown_sk_drawer
+
     logger.info("Haruki Drawing API is shutting down...")
     dump_runtime_diagnostics("lifespan_shutdown")
     for cleanup_task in cleanup_tasks:
@@ -270,6 +286,15 @@ async def lifespan(app: FastAPI):
     shutdown_sk_drawer()
     shutdown_utils()
     logger.info("Resources cleaned up.")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan handler for startup/shutdown events."""
+
+    cleanup_tasks = await _startup_runtime()
+    yield
+    await _shutdown_runtime(cleanup_tasks)
 
 
 def _app_version() -> str:
