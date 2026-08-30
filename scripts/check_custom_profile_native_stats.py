@@ -12,6 +12,7 @@ gate after counters have accumulated enough traffic::
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import sys
@@ -46,6 +47,21 @@ _ERROR_STAGES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _CoreCounts:
+    total: int
+    skia: int
+    cache_hit: int
+    native_pure: int
+
+
+@dataclass(frozen=True)
+class _SceneCounts:
+    complete: int
+    native: int
+    noop: int
+
+
 def _integer(mapping: dict[str, Any], key: str) -> int:
     value = mapping.get(key, 0)
     if isinstance(value, bool):
@@ -77,6 +93,137 @@ def _endpoint_stats(document: dict[str, Any]) -> dict[str, Any]:
     return endpoint
 
 
+def _append_nonzero_failures(
+    mapping: dict[str, Any],
+    keys: tuple[str, ...],
+    failures: list[str],
+    *,
+    prefix: str = "",
+) -> dict[str, int]:
+    values: dict[str, int] = {}
+    for key in keys:
+        value = _integer(mapping, key)
+        values[key] = value
+        if value:
+            failures.append(f"{prefix}{key}={value}")
+    return values
+
+
+def _validate_error_stages(endpoint: dict[str, Any], error_count: int, failures: list[str]) -> None:
+    raw_error_stages = endpoint.get("errors_by_stage")
+    if raw_error_stages is None:
+        if error_count:
+            failures.append("error stage diagnostics are missing")
+        return
+    if not isinstance(raw_error_stages, dict):
+        failures.append("error stage diagnostics are malformed")
+        return
+
+    error_stage_total = 0
+    for raw_stage, raw_count in sorted(raw_error_stages.items()):
+        stage = str(raw_stage or "").strip()
+        if stage not in _ERROR_STAGES:
+            failures.append("error stage diagnostics contain an unknown category")
+            continue
+        count = _integer({stage: raw_count}, stage)
+        error_stage_total += count
+        if count:
+            failures.append(f"error stage {stage}={count}")
+    if error_stage_total != error_count:
+        failures.append(f"error stage total={error_stage_total} does not equal error={error_count}")
+
+
+def _validate_core_counts(endpoint: dict[str, Any], min_requests: int, failures: list[str]) -> _CoreCounts:
+    counts = _CoreCounts(
+        total=_integer(endpoint, "total"),
+        skia=_integer(endpoint, "skia"),
+        cache_hit=_integer(endpoint, "cache_hit"),
+        native_pure=_integer(endpoint, "native_pure"),
+    )
+    if counts.total < min_requests:
+        failures.append(f"total requests {counts.total} is below required {min_requests}")
+
+    outcomes = _append_nonzero_failures(endpoint, _BAD_OUTCOMES, failures)
+    _validate_error_stages(endpoint, outcomes["error"], failures)
+    _append_nonzero_failures(endpoint, _BAD_PURITY, failures)
+
+    rendered = counts.skia + counts.cache_hit
+    if counts.native_pure != rendered:
+        failures.append(f"native_pure={counts.native_pure} does not equal skia+cache_hit={rendered}")
+    if counts.total != rendered:
+        failures.append(f"total={counts.total} does not equal skia+cache_hit={rendered}")
+    return counts
+
+
+def _validate_scene_counts(
+    endpoint: dict[str, Any], total: int, failures: list[str]
+) -> tuple[dict[str, Any], _SceneCounts]:
+    scene = endpoint.get("scene_completeness")
+    if not isinstance(scene, dict):
+        failures.append("scene completeness is missing")
+        scene = {}
+
+    checked = _integer(scene, "checked")
+    counts = _SceneCounts(
+        complete=_integer(scene, "complete"),
+        native=_integer(scene, "native_elements"),
+        noop=_integer(scene, "noop_elements"),
+    )
+    incomplete = _integer(scene, "incomplete")
+    visible = _integer(scene, "visible_elements")
+    if checked != total:
+        failures.append(f"scene checked={checked} does not equal total={total}")
+    if counts.complete != checked or incomplete:
+        failures.append(f"scene complete={counts.complete}, checked={checked}, incomplete={incomplete}")
+    if visible != counts.native + counts.noop:
+        failures.append(f"visible_elements={visible} does not equal native+noop={counts.native + counts.noop}")
+    _append_nonzero_failures(scene, _BAD_SCENE_COUNTS, failures, prefix="scene ")
+    return scene, counts
+
+
+def _observed_native_kinds(scene: dict[str, Any], failures: list[str]) -> set[str]:
+    raw_classifications = scene.get("classifications_by_kind")
+    if not isinstance(raw_classifications, dict):
+        failures.append("category classifications are missing")
+        return set()
+
+    observed: set[str] = set()
+    for raw_kind, raw_counts in raw_classifications.items():
+        kind = str(raw_kind or "").strip()
+        if not kind or not isinstance(raw_counts, dict):
+            failures.append("category classifications are malformed")
+            continue
+        if _integer(raw_counts, "native") > 0:
+            observed.add(kind)
+        _append_nonzero_failures(raw_counts, _BAD_CLASSIFICATIONS, failures, prefix=f"category {kind} ")
+    return observed
+
+
+def _validate_required_kinds(observed: set[str], required: set[str] | None, failures: list[str]) -> None:
+    missing = sorted((required or set()) - observed)
+    if missing:
+        failures.append(f"required native categories not observed: {','.join(missing)}")
+
+
+def _append_http_5xx(document: dict[str, Any], summary: dict[str, int], failures: list[str]) -> None:
+    http_requests = document.get("http_requests")
+    if not isinstance(http_requests, dict):
+        failures.append("aggregate HTTP request statistics are missing")
+        return
+    server_errors = http_requests.get("server_errors")
+    if not isinstance(server_errors, dict):
+        failures.append("aggregate HTTP server-error statistics are missing")
+        return
+    if "total" not in server_errors:
+        failures.append("aggregate HTTP server-error total is missing")
+        return
+
+    http_5xx = _integer(server_errors, "total")
+    summary["http_5xx"] = http_5xx
+    if http_5xx:
+        failures.append(f"http_5xx={http_5xx}")
+
+
 def validate_custom_profile_stats(
     document: dict[str, Any],
     *,
@@ -88,113 +235,23 @@ def validate_custom_profile_stats(
 
     endpoint = _endpoint_stats(document)
     failures: list[str] = []
-    total = _integer(endpoint, "total")
-    skia = _integer(endpoint, "skia")
-    cache_hit = _integer(endpoint, "cache_hit")
-    native_pure = _integer(endpoint, "native_pure")
-    if total < min_requests:
-        failures.append(f"total requests {total} is below required {min_requests}")
-    bad_outcomes: dict[str, int] = {}
-    for key in _BAD_OUTCOMES:
-        value = _integer(endpoint, key)
-        bad_outcomes[key] = value
-        if value:
-            failures.append(f"{key}={value}")
-    raw_error_stages = endpoint.get("errors_by_stage")
-    if raw_error_stages is not None:
-        if not isinstance(raw_error_stages, dict):
-            failures.append("error stage diagnostics are malformed")
-        else:
-            error_stage_total = 0
-            for raw_stage, raw_count in sorted(raw_error_stages.items()):
-                stage = str(raw_stage or "").strip()
-                if stage not in _ERROR_STAGES:
-                    failures.append("error stage diagnostics contain an unknown category")
-                    continue
-                count = _integer({stage: raw_count}, stage)
-                error_stage_total += count
-                if count:
-                    failures.append(f"error stage {stage}={count}")
-            if error_stage_total != bad_outcomes["error"]:
-                failures.append(f"error stage total={error_stage_total} does not equal error={bad_outcomes['error']}")
-    elif bad_outcomes["error"]:
-        failures.append("error stage diagnostics are missing")
-    for key in _BAD_PURITY:
-        value = _integer(endpoint, key)
-        if value:
-            failures.append(f"{key}={value}")
-    if native_pure != skia + cache_hit:
-        failures.append(f"native_pure={native_pure} does not equal skia+cache_hit={skia + cache_hit}")
-    if total != skia + cache_hit:
-        failures.append(f"total={total} does not equal skia+cache_hit={skia + cache_hit}")
-
-    scene = endpoint.get("scene_completeness")
-    if not isinstance(scene, dict):
-        failures.append("scene completeness is missing")
-        scene = {}
-    checked = _integer(scene, "checked")
-    complete = _integer(scene, "complete")
-    incomplete = _integer(scene, "incomplete")
-    visible = _integer(scene, "visible_elements")
-    native = _integer(scene, "native_elements")
-    noop = _integer(scene, "noop_elements")
-    if checked != total:
-        failures.append(f"scene checked={checked} does not equal total={total}")
-    if complete != checked or incomplete:
-        failures.append(f"scene complete={complete}, checked={checked}, incomplete={incomplete}")
-    if visible != native + noop:
-        failures.append(f"visible_elements={visible} does not equal native+noop={native + noop}")
-    for key in _BAD_SCENE_COUNTS:
-        value = _integer(scene, key)
-        if value:
-            failures.append(f"scene {key}={value}")
-
-    raw_classifications = scene.get("classifications_by_kind")
-    if not isinstance(raw_classifications, dict):
-        failures.append("category classifications are missing")
-        raw_classifications = {}
-    observed_native_kinds: set[str] = set()
-    for raw_kind, raw_counts in raw_classifications.items():
-        kind = str(raw_kind or "").strip()
-        if not kind or not isinstance(raw_counts, dict):
-            failures.append("category classifications are malformed")
-            continue
-        if _integer(raw_counts, "native") > 0:
-            observed_native_kinds.add(kind)
-        for status in _BAD_CLASSIFICATIONS:
-            value = _integer(raw_counts, status)
-            if value:
-                failures.append(f"category {kind} {status}={value}")
-
-    missing_kinds = sorted((required_kinds or set()) - observed_native_kinds)
-    if missing_kinds:
-        failures.append(f"required native categories not observed: {','.join(missing_kinds)}")
+    core = _validate_core_counts(endpoint, min_requests, failures)
+    scene, scene_counts = _validate_scene_counts(endpoint, core.total, failures)
+    observed_native_kinds = _observed_native_kinds(scene, failures)
+    _validate_required_kinds(observed_native_kinds, required_kinds, failures)
 
     summary = {
-        "total": total,
-        "skia": skia,
-        "cache_hit": cache_hit,
-        "native_pure": native_pure,
-        "scene_complete": complete,
-        "native_elements": native,
-        "noop_elements": noop,
+        "total": core.total,
+        "skia": core.skia,
+        "cache_hit": core.cache_hit,
+        "native_pure": core.native_pure,
+        "scene_complete": scene_counts.complete,
+        "native_elements": scene_counts.native,
+        "noop_elements": scene_counts.noop,
         "native_categories": len(observed_native_kinds),
     }
     if require_zero_http_5xx:
-        http_requests = document.get("http_requests")
-        if not isinstance(http_requests, dict):
-            failures.append("aggregate HTTP request statistics are missing")
-        else:
-            server_errors = http_requests.get("server_errors")
-            if not isinstance(server_errors, dict):
-                failures.append("aggregate HTTP server-error statistics are missing")
-            elif "total" not in server_errors:
-                failures.append("aggregate HTTP server-error total is missing")
-            else:
-                http_5xx = _integer(server_errors, "total")
-                summary["http_5xx"] = http_5xx
-                if http_5xx:
-                    failures.append(f"http_5xx={http_5xx}")
+        _append_http_5xx(document, summary, failures)
 
     return summary, failures
 

@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from scripts.check_custom_profile_native_stats import validate_custom_profile_stats
+from io import StringIO
+import json
+
+import pytest
+
+from scripts.check_custom_profile_native_stats import _load_document, validate_custom_profile_stats
 
 
 def _stats() -> dict:
@@ -174,3 +179,127 @@ def test_custom_profile_native_stats_checks_http_5xx_before_first_render() -> No
         "http_5xx": 0,
     }
     assert failures == ["total requests 0 is below required 1"]
+
+
+@pytest.mark.parametrize(
+    ("value", "message"),
+    [
+        (True, "total must be an integer"),
+        ("invalid", "total must be an integer"),
+        (-1, "total must not be negative"),
+    ],
+)
+def test_custom_profile_native_stats_rejects_invalid_integer_counts(value: object, message: str) -> None:
+    document = _stats()
+    document["renders"]["endpoints"]["custom_profile_card"]["total"] = value
+
+    with pytest.raises(ValueError, match=message):
+        validate_custom_profile_stats(document, min_requests=1)
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        ({"renders": []}, "render statistics root must be an object"),
+        ({"renders": {}}, "render statistics do not contain endpoints"),
+        (
+            {"renders": {"endpoints": {"custom_profile_card": []}}},
+            "render statistics do not contain custom_profile_card",
+        ),
+    ],
+)
+def test_custom_profile_native_stats_rejects_malformed_endpoint_documents(document: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        validate_custom_profile_stats(document, min_requests=1)
+
+
+@pytest.mark.parametrize(
+    ("diagnostics", "expected"),
+    [
+        (None, "error stage diagnostics are missing"),
+        ([], "error stage diagnostics are malformed"),
+        ({"unexpected": 1}, "error stage diagnostics contain an unknown category"),
+        ({"native_render": 0}, "error stage total=0 does not equal error=1"),
+    ],
+)
+def test_custom_profile_native_stats_rejects_invalid_error_diagnostics(diagnostics: object, expected: str) -> None:
+    document = _stats()
+    endpoint = document["renders"]["endpoints"]["custom_profile_card"]
+    endpoint.update({"skia": 2, "error": 1, "native_pure": 2})
+    endpoint["scene_completeness"].update({"checked": 2, "complete": 2})
+    if diagnostics is not None:
+        endpoint["errors_by_stage"] = diagnostics
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3)
+
+    assert expected in failures
+
+
+def test_custom_profile_native_stats_rejects_missing_or_inconsistent_scene_counts() -> None:
+    document = _stats()
+    del document["renders"]["endpoints"]["custom_profile_card"]["scene_completeness"]
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3)
+
+    assert "scene completeness is missing" in failures
+    assert "scene checked=0 does not equal total=3" in failures
+    assert "category classifications are missing" in failures
+
+    document = _stats()
+    document["renders"]["endpoints"]["custom_profile_card"]["scene_completeness"]["visible_elements"] = 9
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3)
+
+    assert "visible_elements=9 does not equal native+noop=8" in failures
+
+
+def test_custom_profile_native_stats_rejects_malformed_and_unsafe_classifications() -> None:
+    document = _stats()
+    classifications = document["renders"]["endpoints"]["custom_profile_card"]["scene_completeness"][
+        "classifications_by_kind"
+    ]
+    classifications[""] = {"native": 1}
+    classifications["shape"] = []
+    classifications["general"].update({"missing": 1, "unresolved": 2})
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3)
+
+    assert failures.count("category classifications are malformed") == 2
+    assert "category general missing=1" in failures
+    assert "category general unresolved=2" in failures
+
+
+@pytest.mark.parametrize(
+    ("http_requests", "expected"),
+    [
+        (None, "aggregate HTTP request statistics are missing"),
+        ({}, "aggregate HTTP server-error statistics are missing"),
+    ],
+)
+def test_custom_profile_native_stats_rejects_missing_http_aggregates(http_requests: object, expected: str) -> None:
+    document = _stats()
+    if http_requests is None:
+        del document["http_requests"]
+    else:
+        document["http_requests"] = http_requests
+
+    _, failures = validate_custom_profile_stats(document, min_requests=3, require_zero_http_5xx=True)
+
+    assert expected in failures
+
+
+def test_load_document_supports_stdin_and_safe_files(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    document = _stats()
+    monkeypatch.setattr("sys.stdin", StringIO(json.dumps(document)))
+    assert _load_document("-") == document
+
+    source = tmp_path / "stats.json"
+    source.write_text(json.dumps(document), encoding="utf-8")
+    assert _load_document(str(source)) == document
+
+
+def test_load_document_rejects_non_object_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.stdin", StringIO("[]"))
+
+    with pytest.raises(ValueError, match="render statistics document must be an object"):
+        _load_document("-")
