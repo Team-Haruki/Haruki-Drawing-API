@@ -347,6 +347,96 @@ class HeavyRenderWorkerPool:
     def _busy_count_unlocked(self) -> int:
         return sum(1 for slot in self._slots if slot.busy)
 
+    def _claim_idle_slot(
+        self,
+        kind: HeavyTaskKind,
+        request_ctx: dict[str, str],
+        wait_started: float,
+        busy_count: int,
+    ) -> _WorkerSlot | None:
+        for slot in self._slots:
+            if slot.busy:
+                continue
+            if not self._is_worker_alive(slot):
+                self._spawn_worker(slot, reason="slot-revive-before-acquire")
+            slot.busy = True
+            wait_ms = (time.monotonic() - wait_started) * 1000
+            logger.info(
+                "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s "
+                "busy=%d pending=%d wait_ms=%.1f request_id=%s path=%s",
+                slot.name,
+                kind,
+                slot.recycle_count,
+                getattr(slot.process, "pid", None),
+                busy_count + 1,
+                self._pending_waiters,
+                wait_ms,
+                request_ctx.get("request_id", "-"),
+                request_ctx.get("path", "-"),
+            )
+            return slot
+        return None
+
+    def _enqueue_waiter(
+        self,
+        kind: HeavyTaskKind,
+        request_ctx: dict[str, str],
+        busy_count: int,
+    ) -> None:
+        if self._pending_waiters >= self._queue_limit:
+            logger.warning(
+                "heavy render queue full: kind=%s busy=%d pending=%d workers=%d queue_limit=%d request_id=%s path=%s",
+                kind,
+                busy_count,
+                self._pending_waiters,
+                self._worker_count,
+                self._queue_limit,
+                request_ctx.get("request_id", "-"),
+                request_ctx.get("path", "-"),
+            )
+            raise HeavyRenderQueueFullError(
+                f"heavy render queue is full: kind={kind} pending={self._pending_waiters} limit={self._queue_limit}"
+            )
+        self._pending_waiters += 1
+        logger.warning(
+            "heavy render queued: kind=%s busy=%d pending=%d workers=%d queue_limit=%d "
+            "queue_timeout=%.0fs request_id=%s path=%s",
+            kind,
+            busy_count,
+            self._pending_waiters,
+            self._worker_count,
+            self._queue_limit,
+            self._queue_timeout_seconds,
+            request_ctx.get("request_id", "-"),
+            request_ctx.get("path", "-"),
+        )
+
+    def _remaining_queue_wait(
+        self,
+        kind: HeavyTaskKind,
+        request_ctx: dict[str, str],
+        wait_started: float,
+    ) -> float:
+        elapsed = time.monotonic() - wait_started
+        remaining = self._queue_timeout_seconds - elapsed
+        if remaining > 0:
+            return remaining
+        logger.warning(
+            "heavy render queue timeout: kind=%s busy=%d pending=%d workers=%d "
+            "queue_limit=%d wait_ms=%.1f request_id=%s path=%s",
+            kind,
+            self._busy_count_unlocked(),
+            self._pending_waiters,
+            self._worker_count,
+            self._queue_limit,
+            elapsed * 1000,
+            request_ctx.get("request_id", "-"),
+            request_ctx.get("path", "-"),
+        )
+        raise HeavyRenderQueueTimeoutError(
+            f"heavy render queue timeout after {self._queue_timeout_seconds:.0f}s: kind={kind}"
+        )
+
     def _acquire_slot_sync(self, kind: HeavyTaskKind, request_ctx: dict[str, str]) -> _WorkerSlot:
         wait_started = time.monotonic()
         queued = False
@@ -354,77 +444,14 @@ class HeavyRenderWorkerPool:
             try:
                 while True:
                     busy_count = self._busy_count_unlocked()
-                    for slot in self._slots:
-                        if slot.busy:
-                            continue
-                        if not self._is_worker_alive(slot):
-                            self._spawn_worker(slot, reason="slot-revive-before-acquire")
-                        slot.busy = True
-                        wait_ms = (time.monotonic() - wait_started) * 1000
-                        logger.info(
-                            "heavy render slot acquired: worker=%s kind=%s recycle_count=%d pid=%s "
-                            "busy=%d pending=%d wait_ms=%.1f request_id=%s path=%s",
-                            slot.name,
-                            kind,
-                            slot.recycle_count,
-                            getattr(slot.process, "pid", None),
-                            busy_count + 1,
-                            self._pending_waiters,
-                            wait_ms,
-                            request_ctx.get("request_id", "-"),
-                            request_ctx.get("path", "-"),
-                        )
+                    slot = self._claim_idle_slot(kind, request_ctx, wait_started, busy_count)
+                    if slot is not None:
                         return slot
 
                     if not queued:
-                        if self._pending_waiters >= self._queue_limit:
-                            logger.warning(
-                                "heavy render queue full: kind=%s busy=%d pending=%d workers=%d "
-                                "queue_limit=%d request_id=%s path=%s",
-                                kind,
-                                busy_count,
-                                self._pending_waiters,
-                                self._worker_count,
-                                self._queue_limit,
-                                request_ctx.get("request_id", "-"),
-                                request_ctx.get("path", "-"),
-                            )
-                            raise HeavyRenderQueueFullError(
-                                f"heavy render queue is full: kind={kind} pending={self._pending_waiters} "
-                                f"limit={self._queue_limit}"
-                            )
-                        self._pending_waiters += 1
+                        self._enqueue_waiter(kind, request_ctx, busy_count)
                         queued = True
-                        logger.warning(
-                            "heavy render queued: kind=%s busy=%d pending=%d workers=%d queue_limit=%d "
-                            "queue_timeout=%.0fs request_id=%s path=%s",
-                            kind,
-                            busy_count,
-                            self._pending_waiters,
-                            self._worker_count,
-                            self._queue_limit,
-                            self._queue_timeout_seconds,
-                            request_ctx.get("request_id", "-"),
-                            request_ctx.get("path", "-"),
-                        )
-
-                    remaining = self._queue_timeout_seconds - (time.monotonic() - wait_started)
-                    if remaining <= 0:
-                        logger.warning(
-                            "heavy render queue timeout: kind=%s busy=%d pending=%d workers=%d "
-                            "queue_limit=%d wait_ms=%.1f request_id=%s path=%s",
-                            kind,
-                            self._busy_count_unlocked(),
-                            self._pending_waiters,
-                            self._worker_count,
-                            self._queue_limit,
-                            (time.monotonic() - wait_started) * 1000,
-                            request_ctx.get("request_id", "-"),
-                            request_ctx.get("path", "-"),
-                        )
-                        raise HeavyRenderQueueTimeoutError(
-                            f"heavy render queue timeout after {self._queue_timeout_seconds:.0f}s: kind={kind}"
-                        )
+                    remaining = self._remaining_queue_wait(kind, request_ctx, wait_started)
                     self._condition.wait(timeout=remaining)
             finally:
                 if queued:
@@ -438,76 +465,90 @@ class HeavyRenderWorkerPool:
             slot.current_task_started_at = None
             self._condition.notify()
 
+    def _check_result_wait_state(
+        self,
+        slot: _WorkerSlot,
+        task: _WorkerTask,
+        deadline: float,
+        now: float,
+    ) -> None:
+        if not self._is_worker_alive(slot):
+            self._spawn_worker(slot, reason=f"worker-died task_id={task.task_id} kind={task.kind}")
+            raise HeavyRenderTaskExecutionError(
+                f"heavy render worker exited unexpectedly: worker={slot.name} task={task.kind}"
+            )
+        if now >= deadline:
+            self._spawn_worker(
+                slot,
+                reason=(
+                    f"task-timeout task_id={task.task_id} kind={task.kind} "
+                    f"elapsed={self._task_timeout_seconds:.1f}s worker={slot.name}"
+                ),
+            )
+            raise HeavyRenderTaskTimeoutError(
+                f"heavy render task timeout: worker={slot.name} kind={task.kind} "
+                f"timeout={self._task_timeout_seconds:.0f}s"
+            )
+        heartbeat_age = self._heartbeat_age(slot, now)
+        if heartbeat_age is None or heartbeat_age < self._heartbeat_timeout_seconds:
+            return
+        self._spawn_worker(
+            slot,
+            reason=(
+                f"heartbeat-timeout task_id={task.task_id} kind={task.kind} "
+                f"heartbeat_age={heartbeat_age:.1f}s worker={slot.name}"
+            ),
+        )
+        raise HeavyRenderTaskTimeoutError(f"heavy render worker heartbeat timeout: worker={slot.name} kind={task.kind}")
+
+    def _accept_worker_result(
+        self,
+        slot: _WorkerSlot,
+        task: _WorkerTask,
+        result: _WorkerResult,
+        now: float,
+    ) -> EncodedImagePayload | None:
+        if result.task_id != task.task_id:
+            logger.warning(
+                "heavy render worker returned stale result: worker=%s expected=%s actual=%s",
+                slot.name,
+                task.task_id,
+                result.task_id,
+            )
+            return None
+        if not result.ok or result.payload is None:
+            logger.error(
+                "heavy render task failed: worker=%s kind=%s task_id=%s error=%s\n%s",
+                slot.name,
+                task.kind,
+                task.task_id,
+                result.error,
+                (result.traceback_text or "").rstrip(),
+            )
+            raise HeavyRenderTaskExecutionError(result.error or f"heavy render task failed: {task.kind}")
+        logger.info(
+            "heavy render task completed: worker=%s kind=%s task_id=%s elapsed=%.3fs pid=%s",
+            slot.name,
+            task.kind,
+            task.task_id,
+            time.monotonic() - (slot.current_task_started_at or now),
+            getattr(slot.process, "pid", None),
+        )
+        return result.payload
+
     async def _wait_for_result(self, slot: _WorkerSlot, task: _WorkerTask) -> EncodedImagePayload:
         deadline = time.monotonic() + self._task_timeout_seconds
         while True:
-            if not self._is_worker_alive(slot):
-                self._spawn_worker(slot, reason=f"worker-died task_id={task.task_id} kind={task.kind}")
-                raise HeavyRenderTaskExecutionError(
-                    f"heavy render worker exited unexpectedly: worker={slot.name} task={task.kind}"
-                )
-
             now = time.monotonic()
-            heartbeat_age = self._heartbeat_age(slot, now)
-            if now >= deadline:
-                self._spawn_worker(
-                    slot,
-                    reason=(
-                        f"task-timeout task_id={task.task_id} kind={task.kind} "
-                        f"elapsed={self._task_timeout_seconds:.1f}s worker={slot.name}"
-                    ),
-                )
-                raise HeavyRenderTaskTimeoutError(
-                    f"heavy render task timeout: worker={slot.name} kind={task.kind} "
-                    f"timeout={self._task_timeout_seconds:.0f}s"
-                )
-            if heartbeat_age is not None and heartbeat_age >= self._heartbeat_timeout_seconds:
-                self._spawn_worker(
-                    slot,
-                    reason=(
-                        f"heartbeat-timeout task_id={task.task_id} kind={task.kind} "
-                        f"heartbeat_age={heartbeat_age:.1f}s worker={slot.name}"
-                    ),
-                )
-                raise HeavyRenderTaskTimeoutError(
-                    f"heavy render worker heartbeat timeout: worker={slot.name} kind={task.kind}"
-                )
-
+            self._check_result_wait_state(slot, task, deadline, now)
             timeout_seconds = min(self._result_poll_interval_seconds, max(0.1, deadline - now))
             try:
                 result = await asyncio.to_thread(self._get_result, slot, timeout_seconds)
             except queue.Empty:
                 continue
-
-            if result.task_id != task.task_id:
-                logger.warning(
-                    "heavy render worker returned stale result: worker=%s expected=%s actual=%s",
-                    slot.name,
-                    task.task_id,
-                    result.task_id,
-                )
-                continue
-
-            if not result.ok or result.payload is None:
-                logger.error(
-                    "heavy render task failed: worker=%s kind=%s task_id=%s error=%s\n%s",
-                    slot.name,
-                    task.kind,
-                    task.task_id,
-                    result.error,
-                    (result.traceback_text or "").rstrip(),
-                )
-                raise HeavyRenderTaskExecutionError(result.error or f"heavy render task failed: {task.kind}")
-
-            logger.info(
-                "heavy render task completed: worker=%s kind=%s task_id=%s elapsed=%.3fs pid=%s",
-                slot.name,
-                task.kind,
-                task.task_id,
-                time.monotonic() - (slot.current_task_started_at or now),
-                getattr(slot.process, "pid", None),
-            )
-            return result.payload
+            payload = self._accept_worker_result(slot, task, result, now)
+            if payload is not None:
+                return payload
 
     def _put_task(self, slot: _WorkerSlot, task: _WorkerTask) -> None:
         if slot.task_queue is None:
