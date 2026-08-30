@@ -58,15 +58,24 @@ def test_deterministic_hash_tracks_image_and_array_contents() -> None:
 
 
 def test_deterministic_hash_supports_dataclasses_and_public_object_state() -> None:
-    assert deterministic_hash(_Record("a", (1, 2))) == deterministic_hash(_Record("a", (1, 2)))
+    first_record = _Record("a", (1, 2))
+    second_record = _Record("a", (1, 2))
+
+    assert deterministic_hash(first_record) == deterministic_hash(second_record)
     assert deterministic_hash(_Object(1, private=2)) == deterministic_hash(_Object(1, private=99))
     assert deterministic_hash(_Object(1, private=2)) != deterministic_hash(_Object(2, private=2))
 
 
 def test_deterministic_hash_supports_reflective_slotted_objects() -> None:
-    assert deterministic_hash(_Slotted(1)) == deterministic_hash(_Slotted(1))
+    first = _Slotted(1)
+    second = _Slotted(1)
+
+    assert deterministic_hash(first) == deterministic_hash(second)
     assert deterministic_hash(_Slotted(1)) != deterministic_hash(_Slotted(2))
 
 
 def test_deterministic_hash_tolerates_unreadable_reflective_attributes() -> None:
-    assert deterministic_hash(_UnreadableSlotted()) == deterministic_hash(_UnreadableSlotted())
+    first = _UnreadableSlotted()
+    second = _UnreadableSlotted()
+
+    assert deterministic_hash(first) == deterministic_hash(second)
