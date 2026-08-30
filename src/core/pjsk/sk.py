@@ -32,7 +32,11 @@ from src.sekai.sk.drawer import (
 router = APIRouter(tags=["SK"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/line", summary="Generate ranking line image")
+@router.post(
+    "/line",
+    summary="Generate ranking line image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_line(request: SklRequest):
     """Generate event ranking line list image."""
     try:
@@ -45,7 +49,11 @@ async def sk_line(request: SklRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/query", summary="Generate sk image")
+@router.post(
+    "/query",
+    summary="Generate sk image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_query(request: SKRequest):
     """Generate sk image."""
     try:
@@ -58,7 +66,11 @@ async def sk_query(request: SKRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/check-room", summary="Generate check room image")
+@router.post(
+    "/check-room",
+    summary="Generate check room image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_check_room(request: CFRequest):
     """Generate 'Check Room' participation record image."""
     try:
@@ -71,7 +83,11 @@ async def sk_check_room(request: CFRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/csb", summary="Generate csb image")
+@router.post(
+    "/csb",
+    summary="Generate csb image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_csb(request: CSBRequest):
     """Generate 'CSB' heatmap image."""
     try:
@@ -84,7 +100,11 @@ async def sk_csb(request: CSBRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/speed", summary="Generate ranking speed image")
+@router.post(
+    "/speed",
+    summary="Generate ranking speed image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_speed(request: SpeedRequest):
     """Generate event ranking speed list image."""
     try:
@@ -97,7 +117,11 @@ async def sk_speed(request: SpeedRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/player-trace", summary="Generate player trace image")
+@router.post(
+    "/player-trace",
+    summary="Generate player trace image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_player_trace(request: PlayerTraceRequest):
     """Generate player point trace chart image."""
     try:
@@ -110,7 +134,11 @@ async def sk_player_trace(request: PlayerTraceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rank-trace", summary="Generate rank trace image")
+@router.post(
+    "/rank-trace",
+    summary="Generate rank trace image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_rank_trace(request: RankTraceRequest):
     """Generate ranking line trace and prediction chart image."""
     try:
@@ -123,7 +151,11 @@ async def sk_rank_trace(request: RankTraceRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/winrate", summary="Generate winrate prediction image")
+@router.post(
+    "/winrate",
+    summary="Generate winrate prediction image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def sk_winrate(request: WinRateRequest):
     """Generate Cheerful Live team winrate prediction image."""
     try:
