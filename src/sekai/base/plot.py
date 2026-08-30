@@ -880,235 +880,194 @@ class Flow(Widget):
         self.items.append(item)
         return self
 
+    def _horizontal_group_size(self, row: list[int]) -> tuple[int, int]:
+        sizes = [self.items[index]._get_self_size() for index in row]
+        width = sum(item_width for item_width, _ in sizes) + self.h_sep * max(0, len(row) - 1)
+        height = max((item_height for _, item_height in sizes), default=0)
+        return width, height
+
+    def _vertical_group_size(self, col: list[int]) -> tuple[int, int]:
+        sizes = [self.items[index]._get_self_size() for index in col]
+        width = max((item_width for item_width, _ in sizes), default=0)
+        height = sum(item_height for _, item_height in sizes) + self.v_sep * max(0, len(col) - 1)
+        return width, height
+
+    def _horizontal_layout_size(self, layout: list[list[int]]) -> tuple[int, int]:
+        row_sizes = [self._horizontal_group_size(row) for row in layout]
+        return self._horizontal_layout_size_from_groups(row_sizes)
+
+    def _horizontal_layout_size_from_groups(self, row_sizes: list[tuple[int, int]]) -> tuple[int, int]:
+        width = max((row_width for row_width, _ in row_sizes), default=0)
+        height = sum(row_height for _, row_height in row_sizes) + self.v_sep * max(0, len(row_sizes) - 1)
+        return width, height
+
+    def _vertical_layout_size(self, layout: list[list[int]]) -> tuple[int, int]:
+        col_sizes = [self._vertical_group_size(col) for col in layout]
+        return self._vertical_layout_size_from_groups(col_sizes)
+
+    def _vertical_layout_size_from_groups(self, col_sizes: list[tuple[int, int]]) -> tuple[int, int]:
+        width = sum(col_width for col_width, _ in col_sizes) + self.h_sep * max(0, len(col_sizes) - 1)
+        height = max((col_height for _, col_height in col_sizes), default=0)
+        return width, height
+
     def _calc_total_size_by_layout_fast(self, layout: list[list[int]]) -> tuple[int, int]:
-        if len(layout) == 0:
+        if not layout:
             return (0, 0)
-        total_w, total_h = 0, 0
-        if not self.vertical:
-            for i, row in enumerate(layout):
-                cur_w, row_h = 0, 0
-                for j, index in enumerate(row):
-                    iw, ih = self.items[index]._get_self_size()
-                    cur_w += iw
-                    if j < len(row) - 1:
-                        cur_w += self.h_sep
-                    row_h = max(row_h, ih)
-                total_w = max(total_w, cur_w)
-                total_h += row_h
-                if i < len(layout) - 1:
-                    total_h += self.v_sep
-        else:
-            for j, col in enumerate(layout):
-                cur_h, col_w = 0, 0
-                for i, index in enumerate(col):
-                    iw, ih = self.items[index]._get_self_size()
-                    cur_h += ih
-                    if i < len(col) - 1:
-                        cur_h += self.v_sep
-                    col_w = max(col_w, iw)
-                total_h = max(total_h, cur_h)
-                total_w += col_w
-                if j < len(layout) - 1:
-                    total_w += self.h_sep
-        return (total_w, total_h)
+        if self.vertical:
+            return self._vertical_layout_size(layout)
+        return self._horizontal_layout_size(layout)
+
+    @staticmethod
+    def _alignment_offset(container_size: int, item_size: int, alignment: str) -> int:
+        if alignment in {"l", "t"}:
+            return 0
+        if alignment in {"r", "b"}:
+            return container_size - item_size
+        return (container_size - item_size) // 2
+
+    def _horizontal_item_positions(
+        self,
+        layout: list[list[int]],
+        row_sizes: list[tuple[int, int]],
+        total_width: int,
+    ) -> list[tuple[int, int]]:
+        item_positions = [(0, 0) for _ in self.items]
+        row_y = 0
+        for row, (row_width, row_height) in zip(layout, row_sizes, strict=True):
+            item_x = self._alignment_offset(total_width, row_width, self.item_halign)
+            for index in row:
+                item_width, item_height = self.items[index]._get_self_size()
+                item_y = row_y + self._alignment_offset(row_height, item_height, self.item_valign)
+                item_positions[index] = (item_x, item_y)
+                item_x += item_width + self.h_sep
+            row_y += row_height + self.v_sep
+        return item_positions
+
+    def _vertical_item_positions(
+        self,
+        layout: list[list[int]],
+        col_sizes: list[tuple[int, int]],
+        total_height: int,
+    ) -> list[tuple[int, int]]:
+        item_positions = [(0, 0) for _ in self.items]
+        col_x = 0
+        for col, (col_width, col_height) in zip(layout, col_sizes, strict=True):
+            item_y = self._alignment_offset(total_height, col_height, self.item_valign)
+            for index in col:
+                item_width, item_height = self.items[index]._get_self_size()
+                item_x = col_x + self._alignment_offset(col_width, item_width, self.item_halign)
+                item_positions[index] = (item_x, item_y)
+                item_y += item_height + self.v_sep
+            col_x += col_width + self.h_sep
+        return item_positions
+
+    def _horizontal_layout_geometry(self, layout: list[list[int]]) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+        row_sizes = [self._horizontal_group_size(row) for row in layout]
+        total_size = self._horizontal_layout_size_from_groups(row_sizes)
+        return total_size, self._horizontal_item_positions(layout, row_sizes, total_size[0])
+
+    def _vertical_layout_geometry(self, layout: list[list[int]]) -> tuple[tuple[int, int], list[tuple[int, int]]]:
+        col_sizes = [self._vertical_group_size(col) for col in layout]
+        total_size = self._vertical_layout_size_from_groups(col_sizes)
+        return total_size, self._vertical_item_positions(layout, col_sizes, total_size[1])
 
     def _calc_total_size_and_item_pos_by_layout(
         self, layout: list[list[int]]
     ) -> tuple[tuple[int, int], list[tuple[int, int]]]:
-        if len(layout) == 0:
+        if not layout:
             return (0, 0), []
-        total_w, total_h = 0, 0
-        item_pos = [(0, 0) for _ in range(len(self.items))]
-        if not self.vertical:
-            row_ws, row_hs = [], []
-            for i, row in enumerate(layout):
-                cur_w, row_h = 0, 0
-                for j, index in enumerate(row):
-                    iw, ih = self.items[index]._get_self_size()
-                    item_pos[index] = (cur_w, total_h)
-                    cur_w += iw
-                    if j < len(row) - 1:
-                        cur_w += self.h_sep
-                    row_h = max(row_h, ih)
-                row_ws.append(cur_w)
-                row_hs.append(row_h)
-                total_w = max(total_w, cur_w)
-                total_h += row_h
-                if i < len(layout) - 1:
-                    total_h += self.v_sep
-            # 根据对齐方式调整item位置
-            for i, row in enumerate(layout):
-                match self.item_halign:
-                    case "l":
-                        x_offset = 0
-                    case "r":
-                        x_offset = total_w - row_ws[i]
-                    case "c":
-                        x_offset = (total_w - row_ws[i]) // 2
-                for j, index in enumerate(row):
-                    x, y = item_pos[index]
-                    iw, ih = self.items[index]._get_self_size()
-                    match self.item_valign:
-                        case "t":
-                            y_offset = 0
-                        case "b":
-                            y_offset = row_hs[i] - ih
-                        case "c":
-                            y_offset = (row_hs[i] - ih) // 2
-                    item_pos[index] = (x + x_offset, y + y_offset)
-        else:
-            col_ws, col_hs = [], []
-            for j, col in enumerate(layout):
-                cur_h, col_w = 0, 0
-                for i, index in enumerate(col):
-                    iw, ih = self.items[index]._get_self_size()
-                    item_pos[index] = (total_w, cur_h)
-                    cur_h += ih
-                    if i < len(col) - 1:
-                        cur_h += self.v_sep
-                    col_w = max(col_w, iw)
-                col_ws.append(col_w)
-                col_hs.append(cur_h)
-                total_h = max(total_h, cur_h)
-                total_w += col_w
-                if j < len(layout) - 1:
-                    total_w += self.h_sep
-            # 根据对齐方式调整item位置
-            for j, col in enumerate(layout):
-                match self.item_valign:
-                    case "t":
-                        y_offset = 0
-                    case "b":
-                        y_offset = total_h - col_hs[j]
-                    case "c":
-                        y_offset = (total_h - col_hs[j]) // 2
-                for i, index in enumerate(col):
-                    x, y = item_pos[index]
-                    iw, ih = self.items[index]._get_self_size()
-                    match self.item_halign:
-                        case "l":
-                            x_offset = 0
-                        case "r":
-                            x_offset = col_ws[j] - iw
-                        case "c":
-                            x_offset = (col_ws[j] - iw) // 2
-                    item_pos[index] = (x + x_offset, y + y_offset)
-        return (total_w, total_h), item_pos
+        if self.vertical:
+            return self._vertical_layout_geometry(layout)
+        return self._horizontal_layout_geometry(layout)
+
+    @staticmethod
+    def _balanced_layout(item_sizes: list[int], group_count: int) -> list[list[int]]:
+        layout = [[] for _ in range(group_count)]
+        target_size = sum(item_sizes) // group_count
+        current_index = 0
+        for group in layout:
+            group_size = 0
+            while current_index < len(item_sizes):
+                group.append(current_index)
+                group_size += item_sizes[current_index]
+                current_index += 1
+                if group_size >= target_size:
+                    break
+        if layout:
+            layout[-1].extend(range(current_index, len(item_sizes)))
+        return layout
+
+    def _row_count_layout(self, row_count: int, col_count: int | None, aspect_ratio: float | None) -> list[list[int]]:
+        assert not self.vertical, "Row count only works in horizontal mode"
+        assert not col_count, "Cannot specify both row_count and col_count"
+        assert not aspect_ratio, "Cannot specify both row_count and aspect_ratio"
+        item_widths = [item._get_self_size()[0] for item in self.items]
+        return self._balanced_layout(item_widths, row_count)
+
+    def _col_count_layout(self, row_count: int | None, col_count: int, aspect_ratio: float | None) -> list[list[int]]:
+        assert self.vertical, "Column count only works in vertical mode"
+        assert not row_count, "Cannot specify both row_count and col_count"
+        assert not aspect_ratio, "Cannot specify both col_count and aspect_ratio"
+        item_heights = [item._get_self_size()[1] for item in self.items]
+        return self._balanced_layout(item_heights, col_count)
+
+    def _aspect_ratio_layout(self, aspect_ratio: float) -> list[list[int]]:
+        candidates = (
+            (self._calc_item_layout(col_count=count) if self.vertical else self._calc_item_layout(row_count=count))
+            for count in range(1, len(self.items) + 1)
+        )
+        return min(candidates, key=lambda layout: abs(self._layout_aspect_ratio(layout) - aspect_ratio))
+
+    def _layout_aspect_ratio(self, layout: list[list[int]]) -> float:
+        width, height = self._calc_total_size_by_layout_fast(layout)
+        return width / height if height > 0 else 1.0
+
+    def _wrapped_layout(self, *, vertical: bool) -> list[list[int]]:
+        limit = self.h if vertical else self.w
+        padding = self.v_padding if vertical else self.h_padding
+        separator = self.v_sep if vertical else self.h_sep
+        size_index = 1 if vertical else 0
+        assert limit is not None
+
+        layout: list[list[int]] = []
+        current_group: list[int] = []
+        current_size = 0
+        for index, item in enumerate(self.items):
+            item_size = item._get_self_size()[size_index]
+            projected_size = current_size + item_size + len(current_group) * separator + padding * 2
+            if current_group and projected_size > limit:
+                layout.append(current_group)
+                current_group = []
+                current_size = 0
+            current_group.append(index)
+            current_size += item_size
+        if current_group:
+            layout.append(current_group)
+        return layout
 
     def _calc_item_layout(
         self, row_count: int | None = None, col_count: int | None = None, aspect_ratio: float | None = None
     ) -> list[list[int]]:
-        if len(self.items) == 0:
+        if not self.items:
             if row_count or col_count:
                 layout = [[] for _ in range(row_count or col_count)]
             else:
                 layout = []
+        elif row_count:
+            layout = self._row_count_layout(row_count, col_count, aspect_ratio)
+        elif col_count:
+            layout = self._col_count_layout(row_count, col_count, aspect_ratio)
+        elif aspect_ratio:
+            layout = self._aspect_ratio_layout(aspect_ratio)
+        elif not self.vertical and self.w:
+            layout = self._wrapped_layout(vertical=False)
+        elif self.vertical and self.h:
+            layout = self._wrapped_layout(vertical=True)
         else:
-            # 计算item的布局
-            if row_count:
-                assert not self.vertical, "Row count only works in horizontal mode"
-                assert not col_count, "Cannot specify both row_count and col_count"
-                assert not aspect_ratio, "Cannot specify both row_count and aspect_ratio"
-                # 在保证行数为row_count的前提下，将items依照高度均匀分布到各列
-                item_ws = [item._get_self_size()[0] for item in self.items]
-                total_w = sum(item_ws)
-                cur_index = 0
-                layout: list[list[int]] = []
-                for _ in range(row_count):
-                    layout.append([])
-                    row_w = 0
-                    while cur_index < len(self.items):
-                        layout[-1].append(cur_index)
-                        row_w += item_ws[cur_index]
-                        cur_index += 1
-                        if row_w >= total_w // row_count:
-                            break
-                # 将剩余的item强制归入最后一行
-                if layout:
-                    while cur_index < len(self.items):
-                        layout[-1].append(cur_index)
-                        cur_index += 1
-            elif col_count:
-                assert self.vertical, "Column count only works in vertical mode"
-                assert not row_count, "Cannot specify both row_count and col_count"
-                assert not aspect_ratio, "Cannot specify both col_count and aspect_ratio"
-                # 在保证列数为col_count的前提下，将items依照宽度均匀分布到各行
-                item_hs = [item._get_self_size()[1] for item in self.items]
-                total_h = sum(item_hs)
-                cur_index = 0
-                layout: list[list[int]] = []
-                for _ in range(col_count):
-                    layout.append([])
-                    col_h = 0
-                    while cur_index < len(self.items):
-                        layout[-1].append(cur_index)
-                        col_h += item_hs[cur_index]
-                        cur_index += 1
-                        if col_h >= total_h // col_count:
-                            break
-                # 将剩余的item强制归入最后一列
-                if layout:
-                    while cur_index < len(self.items):
-                        layout[-1].append(cur_index)
-                        cur_index += 1
-            elif aspect_ratio:
-                assert not row_count, "Cannot specify both aspect_ratio and row_count"
-                assert not col_count, "Cannot specify both aspect_ratio and col_count"
-                # 计算最终大小最接近aspect_ratio的行列数，尝试不同的行列数，选择最优解
-                best_diff, best_layout = None, None
-                n = len(self.items)
-                if not self.vertical:
-                    for r in range(1, n + 1):
-                        layout = self._calc_item_layout(row_count=r)
-                        w, h = self._calc_total_size_by_layout_fast(layout)
-                        ratio = w / h if h > 0 else 1.0
-                        diff = abs(ratio - (aspect_ratio or 1.0))
-                        if best_diff is None or diff < best_diff:
-                            best_diff, best_layout = diff, layout
-                else:
-                    for c in range(1, n + 1):
-                        layout = self._calc_item_layout(col_count=c)
-                        w, h = self._calc_total_size_by_layout_fast(layout)
-                        ratio = w / h if h > 0 else 1.0
-                        diff = abs(ratio - (aspect_ratio or 1.0))
-                        if best_diff is None or diff < best_diff:
-                            best_diff, best_layout = diff, layout
-                layout = best_layout
-            elif not self.vertical and self.w:
-                # 每行不超过self.w
-                layout = []
-                cur_row, cur_w = [], 0
-                for idx, item in enumerate(self.items):
-                    iw, ih = item._get_self_size()
-                    if cur_w + iw + (len(cur_row) * self.h_sep) + self.h_padding * 2 <= self.w or not cur_row:
-                        cur_row.append(idx)
-                        cur_w += iw
-                    else:
-                        layout.append(cur_row)
-                        cur_row = [idx]
-                        cur_w = iw
-                if cur_row:
-                    layout.append(cur_row)
-            elif self.vertical and self.h:
-                # 每列不超过self.h
-                layout = []
-                cur_col, cur_h = [], 0
-                for idx, item in enumerate(self.items):
-                    iw, ih = item._get_self_size()
-                    if cur_h + ih + (len(cur_col) * self.v_sep) + self.vpadding * 2 <= self.h or not cur_col:
-                        cur_col.append(idx)
-                        cur_h += ih
-                    else:
-                        layout.append(cur_col)
-                        cur_col = [idx]
-                        cur_h = ih
-                if cur_col:
-                    layout.append(cur_col)
-            else:
-                raise ValueError(
-                    "Either row_count, col_count, aspect_ratio, width (for horizontal) or height (for vertical)"
-                    " must be specified to calculate flow layout"
-                )
+            raise ValueError(
+                "Either row_count, col_count, aspect_ratio, width (for horizontal) or height (for vertical)"
+                " must be specified to calculate flow layout"
+            )
         if not self.keep_empty_row_or_col:
             layout = [row for row in layout if row]
         return layout
@@ -1253,33 +1212,39 @@ class TextBox(Widget):
                 return mid_idx
         return right_idx
 
+    def _wrap_line_to_width(self, line: str, width: int, suffix: str, preceding_lines: int) -> list[str]:
+        wrapped_lines: list[str] = []
+        while True:
+            line_suffix = suffix if preceding_lines + len(wrapped_lines) == self.line_count - 1 else ""
+            clip_idx = self._get_clip_text_to_width_idx(line, width, line_suffix)
+            if clip_idx is None:
+                wrapped_lines.append(line)
+                break
+            split_at = 1 if clip_idx == 0 else clip_idx
+            wrapped_lines.append(line[:split_at] + line_suffix)
+            line = line[split_at:]
+            if preceding_lines + len(wrapped_lines) >= self.line_count:
+                break
+        return wrapped_lines
+
+    def _clip_line_to_width(self, line: str, width: int, suffix: str) -> str:
+        clip_idx = self._get_clip_text_to_width_idx(line, width, suffix)
+        if clip_idx is None:
+            return line
+        return line[:clip_idx] + suffix
+
     def _get_lines(self) -> list[str]:
-        lines = self.text.split("\n")
-        clipped_lines = []
-        for line in lines:
-            if self.w:
-                w = self.w - self.h_padding * 2
-                suffix = "..." if self.overflow == "shrink" else ""
-                if self.wrap:
-                    while True:
-                        line_suffix = suffix if len(clipped_lines) == self.line_count - 1 else ""
-                        clip_idx = self._get_clip_text_to_width_idx(line, w, line_suffix)
-                        if clip_idx is None:
-                            clipped_lines.append(line)
-                            break
-                        if clip_idx == 0:
-                            clip_idx = 1
-                        clipped_lines.append(line[:clip_idx] + line_suffix)
-                        line = line[clip_idx:]
-                        if len(clipped_lines) >= self.line_count:
-                            break
-                else:
-                    clip_idx = self._get_clip_text_to_width_idx(line, w, suffix)
-                    if clip_idx is not None:
-                        line = line[:clip_idx] + suffix
-                    clipped_lines.append(line)
+        if not self.w:
+            return self.text.split("\n")[: self.line_count]
+
+        width = self.w - self.h_padding * 2
+        suffix = "..." if self.overflow == "shrink" else ""
+        clipped_lines: list[str] = []
+        for line in self.text.split("\n"):
+            if self.wrap:
+                clipped_lines.extend(self._wrap_line_to_width(line, width, suffix, len(clipped_lines)))
             else:
-                clipped_lines.append(line)
+                clipped_lines.append(self._clip_line_to_width(line, width, suffix))
         return clipped_lines[: self.line_count]
 
     def _get_content_size(self) -> tuple[int, int]:
@@ -1434,6 +1399,35 @@ class ColoredTextBox(Widget):
         suffix_color = line[-1]["color"] if line else None
         self._append_colored_text(line, suffix, suffix_color)
 
+    def _iter_colored_characters(self):
+        for seg in parse_colored_text_segments(self.text):
+            for character in seg["text"]:
+                yield character, seg["color"]
+
+    def _append_colored_character(
+        self,
+        lines: list[list[Seg]],
+        character: str,
+        color: tuple[int, int, int] | None,
+        character_width: int,
+        current_width: int,
+        max_width: int | None,
+    ) -> tuple[int, bool]:
+        if character == "\n":
+            if len(lines) >= self.line_count:
+                return current_width, True
+            lines.append([])
+            return 0, False
+
+        if max_width is not None and current_width + character_width > max_width and lines[-1]:
+            if not self.wrap or len(lines) >= self.line_count:
+                return current_width, True
+            lines.append([])
+            current_width = 0
+
+        self._append_colored_text(lines[-1], character, color)
+        return current_width + character_width, False
+
     def _get_lines(self) -> list[list[Seg]]:
         font = self._get_pil_font()
         max_width = self.w - self.h_padding * 2 if self.w else None
@@ -1441,29 +1435,11 @@ class ColoredTextBox(Widget):
         current_width = 0
         truncated = False
 
-        # Wrap by visible characters so inline color changes survive line breaks.
-        for seg in parse_colored_text_segments(self.text):
-            color = seg["color"]
-            for ch in seg["text"]:
-                if ch == "\n":
-                    if len(lines) >= self.line_count:
-                        truncated = True
-                        break
-                    lines.append([])
-                    current_width = 0
-                    continue
-
-                ch_width, _ = get_text_size(font, ch)
-                if max_width is not None and current_width + ch_width > max_width and lines[-1]:
-                    if not self.wrap or len(lines) >= self.line_count:
-                        truncated = True
-                        break
-                    lines.append([])
-                    current_width = 0
-
-                self._append_colored_text(lines[-1], ch, color)
-                current_width += ch_width
-
+        for character, color in self._iter_colored_characters():
+            character_width, _ = get_text_size(font, character)
+            current_width, truncated = self._append_colored_character(
+                lines, character, color, character_width, current_width, max_width
+            )
             if truncated:
                 break
 
@@ -1598,29 +1574,41 @@ class ImageBox(Widget):
         self.image_size_mode = mode
         return self
 
-    def _get_content_size(self) -> tuple[int, int] | None:
+    def _source_size(self) -> tuple[float, float]:
         if self.source_rect is None:
-            w, h = self.image.size
-        else:
-            w = self.source_rect[2] - self.source_rect[0]
-            h = self.source_rect[3] - self.source_rect[1]
+            return self.image.size
+        return self.source_rect[2] - self.source_rect[0], self.source_rect[3] - self.source_rect[1]
+
+    def _target_bounds(self) -> tuple[float, float]:
+        target_width = self.w - self.h_padding * 2 if self.w else 1_000_000
+        target_height = self.h - self.v_padding * 2 if self.h else 1_000_000
+        return target_width, target_height
+
+    @staticmethod
+    def _scaled_size(
+        source_size: tuple[float, float], target_bounds: tuple[float, float], *, fit: bool
+    ) -> tuple[int, int]:
+        width, height = source_size
+        target_width, target_height = target_bounds
+        scale = (
+            min(target_width / width, target_height / height)
+            if fit
+            else max(target_width / width, target_height / height)
+        )
+        return int(width * scale), int(height * scale)
+
+    def _get_content_size(self) -> tuple[int, int] | None:
+        source_size = self._source_size()
         if self.image_size_mode == "original":
-            return int(w), int(h)
-        elif self.image_size_mode == "fit":
+            return int(source_size[0]), int(source_size[1])
+        if self.image_size_mode == "fit":
             assert self.w is not None or self.h is not None, "Fit mode requires width or height"
-            tw = self.w - self.h_padding * 2 if self.w else 1000000
-            th = self.h - self.v_padding * 2 if self.h else 1000000
-            scale = min(tw / w, th / h)
-            return int(w * scale), int(h * scale)
-        elif self.image_size_mode == "fill":
+            return self._scaled_size(source_size, self._target_bounds(), fit=True)
+        if self.image_size_mode == "fill":
             assert self.w is not None or self.h is not None, "Fill mode requires width or height"
             if self.w and self.h:
                 return int(self.w - self.h_padding * 2), int(self.h - self.v_padding * 2)
-            else:
-                tw = self.w - self.h_padding * 2 if self.w else 1000000
-                th = self.h - self.v_padding * 2 if self.h else 1000000
-                scale = max(tw / w, th / h)
-                return int(w * scale), int(h * scale)
+            return self._scaled_size(source_size, self._target_bounds(), fit=False)
         return None
 
     def _draw_content(self, p: Painter):
@@ -1763,6 +1751,39 @@ def _image_box_size_hint(widget) -> tuple[int, int] | None:
     return (int(w), int(h))
 
 
+def _register_asset_ref(
+    out: dict,
+    seen_ids: set[int],
+    image: AssetImageRef,
+    hint: tuple[int, int] | None = None,
+    resample: Image.Resampling | int = 0,
+) -> None:
+    out[(id(image), hint, int(resample))] = (image, hint, resample)
+    seen_ids.add(id(image))
+
+
+def _register_widget_image_ref(widget, out: dict, seen_ids: set[int]) -> None:
+    image = getattr(widget, "image", None)
+    if not isinstance(image, AssetImageRef):
+        return
+    hint = _image_box_size_hint(widget)
+    resample = pillow_resample_for_image_sampling(widget.sampling) if hint is not None else 0
+    _register_asset_ref(out, seen_ids, image, hint, resample)
+
+
+def _register_widget_background_refs(widget, out: dict, seen_ids: set[int]) -> None:
+    for holder in (getattr(widget, "bg", None), getattr(widget, "item_bg", None)):
+        image = getattr(holder, "img", None)
+        if isinstance(image, AssetImageRef):
+            _register_asset_ref(out, seen_ids, image)
+
+
+def _register_widget_prefetch_refs(widget, out: dict, seen_ids: set[int]) -> None:
+    for image in getattr(widget, "prefetch_image_sources", None) or ():
+        if isinstance(image, AssetImageRef) and id(image) not in seen_ids:
+            _register_asset_ref(out, seen_ids, image)
+
+
 def _collect_asset_refs(widget, out: dict, seen_ids: set[int] | None = None) -> None:
     """Gather lazy AssetImageRefs held by a widget tree (ImageBox images, bg images,
     and any widget-declared ``prefetch_image_sources`` extras) with target-size and
@@ -1771,25 +1792,12 @@ def _collect_asset_refs(widget, out: dict, seen_ids: set[int] | None = None) -> 
     goes quadratic on a several-hundred-card box tree)."""
     if seen_ids is None:
         seen_ids = {key[0] for key in out}
-    image = getattr(widget, "image", None)
-    if isinstance(image, AssetImageRef):
-        hint = _image_box_size_hint(widget)
-        resample = pillow_resample_for_image_sampling(widget.sampling) if hint is not None else 0
-        out[(id(image), hint, int(resample))] = (image, hint, resample)
-        seen_ids.add(id(image))
-    for holder in (getattr(widget, "bg", None), getattr(widget, "item_bg", None)):
-        bg_img = getattr(holder, "img", None)
-        if isinstance(bg_img, AssetImageRef):
-            out[(id(bg_img), None, 0)] = (bg_img, None, 0)
-            seen_ids.add(id(bg_img))
-    for extra in getattr(widget, "prefetch_image_sources", None) or ():
-        if isinstance(extra, AssetImageRef):
-            # A widget may list its own ``image`` among the extras (CardFullThumbnailBox does —
-            # ``layers.base`` is both). Do not add an unhinted full decode when that exact object
-            # already has a display-size hint, but retain genuinely distinct size/sampling uses.
-            if id(extra) not in seen_ids:
-                out[(id(extra), None, 0)] = (extra, None, 0)
-                seen_ids.add(id(extra))
+    _register_widget_image_ref(widget, out, seen_ids)
+    _register_widget_background_refs(widget, out, seen_ids)
+    # A widget may list its own ``image`` among the extras (CardFullThumbnailBox does —
+    # ``layers.base`` is both). Do not add an unhinted full decode when that exact object
+    # already has a display-size hint, but retain genuinely distinct size/sampling uses.
+    _register_widget_prefetch_refs(widget, out, seen_ids)
     for child in getattr(widget, "items", None) or ():
         _collect_asset_refs(child, out, seen_ids)
 
