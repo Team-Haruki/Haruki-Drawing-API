@@ -827,55 +827,68 @@ class Painter:
         debug_print(f"Painter._execute use time: {datetime.now() - t}")
         return p.img
 
-    async def get(self, cache_key: str | None = None) -> Image.Image:
-        # 使用缓存
-        if cache_key is not None:
-            t = datetime.now()
-            debug_print(f"Cache key: {cache_key}")
-            op_hash = await run_in_pool(deterministic_hash, {"key": cache_key, "op": self.operations})
-            debug_print(f"Cache key: {cache_key}, op_hash: {op_hash}, elapsed: {datetime.now() - t}")
+    async def _operation_hash(self, cache_key: str) -> str:
+        t = datetime.now()
+        debug_print(f"Cache key: {cache_key}")
+        op_hash = await run_in_pool(deterministic_hash, {"key": cache_key, "op": self.operations})
+        debug_print(f"Cache key: {cache_key}, op_hash: {op_hash}, elapsed: {datetime.now() - t}")
+        return op_hash
 
-            with _painter_disk_cache_lock:
-                paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
-                if paths:
-                    path = paths[0]
-                    if path.endswith(f"{cache_key}__{op_hash}.png"):
-                        # 如果hash相同则直接返回缓存的图片
-                        debug_print(f"Using cached image: {path}")
-                        with Image.open(path) as img:
-                            img.load()
-                            return img.copy()
-                    else:
-                        # 否则清空缓存并重新绘图
-                        for p in paths:
-                            try:
-                                os.remove(p)
-                            except Exception as e:
-                                logging.warning(f"Failed to remove cache file {p}: {e}")
-                        debug_print(f"Cache mismatch, removed {len(paths)} files")
+    @staticmethod
+    def _remove_stale_cache_files(paths: list[str]) -> None:
+        for path in paths:
+            try:
+                os.remove(path)
+            except Exception as exc:
+                logging.warning(f"Failed to remove cache file {path}: {exc}")
+        debug_print(f"Cache mismatch, removed {len(paths)} files")
 
+    @staticmethod
+    def _load_disk_cache(cache_key: str, op_hash: str) -> Image.Image | None:
+        with _painter_disk_cache_lock:
+            paths = glob.glob(os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__*.png"))
+            if not paths:
+                return None
+            path = paths[0]
+            if not path.endswith(f"{cache_key}__{op_hash}.png"):
+                Painter._remove_stale_cache_files(paths)
+                return None
+            debug_print(f"Using cached image: {path}")
+            with Image.open(path) as img:
+                img.load()
+                return img.copy()
+
+    async def _execute_operations(self) -> None:
         debug_print(f"Memory usage: {get_memo_usage()} MB")
-
         try:
             for op in self.operations:
                 debug_print(str(op))
-
-            # 执行绘图操作
             t = datetime.now()
             self.img = await run_in_pool(Painter._execute, self.operations, self.img, self.size)
             debug_print(f"Painter executed in thread pool in {datetime.now() - t}")
         finally:
             self.operations = []
 
-        # 保存缓存
+    def _save_disk_cache(self, cache_key: str, op_hash: str) -> None:
+        try:
+            with _painter_disk_cache_lock:
+                cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
+                os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
+                self.img.save(cache_path, format="PNG")
+        except Exception:
+            debug_print(f"Failed to save cache for {cache_key}")
+
+    async def get(self, cache_key: str | None = None) -> Image.Image:
+        op_hash = None
         if cache_key is not None:
-            try:
-                with _painter_disk_cache_lock:
-                    cache_path = os.path.join(PAINTER_CACHE_DIR, f"{cache_key}__{op_hash}.png")
-                    os.makedirs(PAINTER_CACHE_DIR, exist_ok=True)
-                    self.img.save(cache_path, format="PNG")
-            except Exception:
-                debug_print(f"Failed to save cache for {cache_key}")
+            op_hash = await self._operation_hash(cache_key)
+            cached = self._load_disk_cache(cache_key, op_hash)
+            if cached is not None:
+                return cached
+
+        await self._execute_operations()
+        if cache_key is not None and op_hash is not None:
+            self._save_disk_cache(cache_key, op_hash)
 
         return self.img
 
