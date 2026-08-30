@@ -73,6 +73,159 @@ def _character_mission_card_bg() -> RoundRectBg:
     return roundrect_bg(alpha=CHARACTER_MISSION_CARD_ALPHA)
 
 
+async def _load_asset_refs(paths: list[str], perf_name: str) -> list[ImageSource]:
+    started_at = time.perf_counter()
+    images = await asyncio.gather(*(get_asset_image_ref(ASSETS_BASE_DIR, path) for path in paths))
+    logger.debug("[perf] %s preload %d icons: %.3fs", perf_name, len(paths), time.perf_counter() - started_at)
+    return list(images)
+
+
+async def _load_optional_asset_refs(*paths: str | None) -> list[ImageSource | None]:
+    present_paths = [path for path in paths if path]
+    loaded = iter(await asyncio.gather(*(get_asset_image_ref(ASSETS_BASE_DIR, path) for path in present_paths)))
+    return [next(loaded) if path else None for path in paths]
+
+
+def _challenge_score_color(score: int) -> tuple[int, int, int, int]:
+    if score > 2_500_000:
+        return (100, 255, 100, 255)
+    if score > 2_000_000:
+        return (255, 255, 100, 255)
+    if score > 1_500_000:
+        return (255, 200, 100, 255)
+    if score > 1_000_000:
+        return (255, 150, 100, 255)
+    if score > 500_000:
+        return (255, 100, 100, 255)
+    return (255, 50, 50, 255)
+
+
+def _leader_count_color(play_count: int) -> tuple[int, int, int, int]:
+    if play_count > 50_000:
+        return (100, 255, 100, 255)
+    if play_count > 40_000:
+        return (255, 255, 100, 255)
+    if play_count > 30_000:
+        return (255, 200, 100, 255)
+    if play_count > 20_000:
+        return (255, 150, 100, 255)
+    if play_count > 10_000:
+        return (255, 100, 100, 255)
+    return (255, 50, 50, 255)
+
+
+def _build_progress_bar(
+    *,
+    width: int,
+    current: int,
+    maximum: int,
+    fill,
+    tick_step: int,
+    enabled: bool = True,
+) -> Frame:
+    frame = Frame().set_w(width).set_content_align("lt")
+    progress = max(min(current / maximum, 1), 0) if maximum > 0 else 0
+    total_height, border = 14, 2
+    if not enabled or progress <= 0:
+        frame.add_item(
+            Spacer(w=width, h=total_height).set_bg(RoundRectBg(fill=(100, 100, 100, 100), radius=total_height // 2))
+        )
+        return frame
+
+    progress_width = int((width - border * 2) * progress)
+    progress_height = total_height - border * 2
+    frame.add_item(
+        Spacer(w=width, h=total_height).set_bg(RoundRectBg(fill=(100, 100, 100, 255), radius=total_height // 2))
+    )
+    frame.add_item(
+        Spacer(w=progress_width, h=progress_height)
+        .set_bg(RoundRectBg(fill=fill, radius=(total_height - border) // 2))
+        .set_offset((border, border))
+    )
+    for tick in range(tick_step, maximum, tick_step):
+        tick_x = int((width - border * 2) * (tick / maximum))
+        line_color = (100, 100, 100, 255) if tick < current else (150, 150, 150, 255)
+        frame.add_item(
+            Spacer(w=1, h=total_height // 2 - 1)
+            .set_bg(FillBg(line_color))
+            .set_offset((border + tick_x - 1, total_height // 2))
+        )
+    return frame
+
+
+def _build_challenge_live_header(
+    max_score: int,
+    jewel_icon: ImageSource | None,
+    shard_icon: ImageSource | None,
+    header_style: TextStyle,
+    widths: tuple[int, int, int, int, int, int],
+) -> HSplit:
+    w1, w2, w3, w4, w5, w6 = widths
+    header = (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_h(56)
+        .set_padding(4)
+        .set_bg(roundrect_bg(alpha=80))
+    )
+    header.add_item(TextBox("角色", header_style).set_w(w1).set_content_align("c"))
+    header.add_item(TextBox("等级", header_style).set_w(w2).set_content_align("c"))
+    header.add_item(TextBox("分数", header_style).set_w(w3).set_content_align("c"))
+    header.add_item(TextBox(f"进度(上限{max_score // 10000}w)", header_style).set_w(w4).set_content_align("c"))
+    for width, icon in ((w5, jewel_icon), (w6, shard_icon)):
+        icon_frame = Frame().set_w(width).set_content_align("c")
+        if icon:
+            icon_frame.add_item(ImageBox(icon, size=(None, 40)))
+        header.add_item(icon_frame)
+    return header
+
+
+def _build_challenge_live_row(
+    challenge,
+    chara_icon: ImageSource | None,
+    index: int,
+    max_score: int,
+    text_style: TextStyle,
+    widths: tuple[int, int, int, int, int, int],
+) -> HSplit:
+    w1, w2, w3, w4, w5, w6 = widths
+    row = (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_h(48)
+        .set_padding(4)
+        .set_bg(roundrect_bg(fill=_info_panel_row_fill(index)))
+    )
+    icon_frame = Frame().set_w(w1).set_content_align("c")
+    if chara_icon:
+        icon_frame.add_item(ImageBox(chara_icon, size=(None, 40)))
+    row.add_item(icon_frame)
+
+    score = challenge.score or 0
+    row.add_item(TextBox(str(challenge.rank) if challenge.rank else "-", text_style).set_w(w2).set_content_align("c"))
+    row.add_item(
+        TextBox(str(challenge.score) if challenge.score else "-", text_style.replace(font=DEFAULT_BOLD_FONT))
+        .set_w(w3)
+        .set_content_align("c")
+    )
+    row.add_item(
+        _build_progress_bar(
+            width=w4,
+            current=score,
+            maximum=max_score,
+            fill=_challenge_score_color(score),
+            tick_step=500_000,
+        )
+    )
+    row.add_item(TextBox(str(challenge.jewel), text_style).set_w(w5).set_content_align("c"))
+    row.add_item(TextBox(str(challenge.shard), text_style).set_w(w6).set_content_align("c"))
+    return row
+
+
 # ========== 挑战Live详情 ==========
 
 
@@ -85,148 +238,26 @@ async def _build_challenge_live_detail_canvas(rqd: ChallengeLiveDetailsRequest) 
     Returns:
         生成的挑战Live详情图片
     """
-    profile = rqd.profile
-    character_challenges = rqd.character_challenges
-    max_score = rqd.max_score
-
-    header_h, row_h = 56, 48
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
-    w1, w2, w3, w4, w5, w6 = 80, 80, 150, 300, 80, 80
-
-    # 获取图标（并行）
-    _icon_tasks = []
-    if rqd.jewel_icon_path:
-        _icon_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.jewel_icon_path))
-    if rqd.shard_icon_path:
-        _icon_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.shard_icon_path))
-    _icon_results = await asyncio.gather(*_icon_tasks) if _icon_tasks else []
-    _idx = 0
-    if rqd.jewel_icon_path:
-        jewel_icon = _icon_results[_idx]
-        _idx += 1
-    else:
-        jewel_icon = None
-    if rqd.shard_icon_path:
-        shard_icon = _icon_results[_idx]
-    else:
-        shard_icon = None
-
-    # 预加载角色图标（并行）
-    _t0 = time.perf_counter()
-    chara_icons = await asyncio.gather(
-        *[get_asset_image_ref(ASSETS_BASE_DIR, ch.chara_icon_path) for ch in character_challenges]
-    )
-    logger.debug(
-        "[perf] compose_challenge_live_detail_image preload %d chara icons: %.3fs",
-        len(chara_icons),
-        time.perf_counter() - _t0,
+    widths = (80, 80, 150, 300, 80, 80)
+    jewel_icon, shard_icon = await _load_optional_asset_refs(rqd.jewel_icon_path, rqd.shard_icon_path)
+    chara_icons = await _load_asset_refs(
+        [challenge.chara_icon_path for challenge in rqd.character_challenges],
+        "compose_challenge_live_detail_image",
     )
 
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(profile.to_profile_card_request())
-
-            with (
-                VSplit()
-                .set_content_align("c")
-                .set_item_align("c")
-                .set_sep(8)
-                .set_padding(16)
-                .set_bg(roundrect_bg(alpha=80))
-            ):
-                # 标题行
-                with (
-                    HSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_sep(8)
-                    .set_h(header_h)
-                    .set_padding(4)
-                    .set_bg(roundrect_bg(alpha=80))
-                ):
-                    TextBox("角色", header_style).set_w(w1).set_content_align("c")
-                    TextBox("等级", header_style).set_w(w2).set_content_align("c")
-                    TextBox("分数", header_style).set_w(w3).set_content_align("c")
-                    TextBox(f"进度(上限{max_score // 10000}w)", header_style).set_w(w4).set_content_align("c")
-                    with Frame().set_w(w5).set_content_align("c"):
-                        if jewel_icon:
-                            ImageBox(jewel_icon, size=(None, 40))
-                    with Frame().set_w(w6).set_content_align("c"):
-                        if shard_icon:
-                            ImageBox(shard_icon, size=(None, 40))
-
-                # 角色数据行
-                for idx, challenge in enumerate(character_challenges):
-                    bg_color = _info_panel_row_fill(idx)
-
-                    rank_text = str(challenge.rank) if challenge.rank else "-"
-                    score_text = str(challenge.score) if challenge.score else "-"
-                    jewel_text = str(challenge.jewel)
-                    shard_text = str(challenge.shard)
-
-                    chara_icon = chara_icons[idx]
-
-                    with (
-                        HSplit()
-                        .set_content_align("c")
-                        .set_item_align("c")
-                        .set_sep(8)
-                        .set_h(row_h)
-                        .set_padding(4)
-                        .set_bg(roundrect_bg(fill=bg_color))
-                    ):
-                        with Frame().set_w(w1).set_content_align("c"):
-                            if chara_icon:
-                                ImageBox(chara_icon, size=(None, 40))
-
-                        TextBox(rank_text, text_style).set_w(w2).set_content_align("c")
-                        TextBox(score_text, text_style.replace(font=DEFAULT_BOLD_FONT)).set_w(w3).set_content_align("c")
-
-                        with Frame().set_w(w4).set_content_align("lt"):
-                            x = challenge.score or 0
-                            progress = max(min(x / max_score, 1), 0) if max_score > 0 else 0
-                            total_w, total_h, border = w4, 14, 2
-                            progress_w = int((total_w - border * 2) * progress)
-                            progress_h = total_h - border * 2
-
-                            color = (255, 50, 50, 255)
-                            if x > 2500000:
-                                color = (100, 255, 100, 255)
-                            elif x > 2000000:
-                                color = (255, 255, 100, 255)
-                            elif x > 1500000:
-                                color = (255, 200, 100, 255)
-                            elif x > 1000000:
-                                color = (255, 150, 100, 255)
-                            elif x > 500000:
-                                color = (255, 100, 100, 255)
-
-                            if progress > 0:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 255), radius=total_h // 2)
-                                )
-                                Spacer(w=progress_w, h=progress_h).set_bg(
-                                    RoundRectBg(fill=color, radius=(total_h - border) // 2)
-                                ).set_offset((border, border))
-
-                                def draw_line(line_x: int):
-                                    p = line_x / max_score
-                                    lx = int((total_w - border * 2) * p)
-                                    line_color = (100, 100, 100, 255) if line_x < x else (150, 150, 150, 255)
-                                    Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
-                                        (border + lx - 1, total_h // 2)
-                                    )
-
-                                for line_x in range(500000, max_score, 500000):
-                                    draw_line(line_x)
-                            else:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)
-                                )
-
-                        TextBox(jewel_text, text_style).set_w(w5).set_content_align("c")
-                        TextBox(shard_text, text_style).set_w(w6).set_content_align("c")
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    table = (
+        VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
+    )
+    table.add_item(_build_challenge_live_header(rqd.max_score, jewel_icon, shard_icon, header_style, widths))
+    for index, (challenge, chara_icon) in enumerate(zip(rqd.character_challenges, chara_icons, strict=True)):
+        table.add_item(_build_challenge_live_row(challenge, chara_icon, index, rqd.max_score, text_style, widths))
+    root.add_item(table)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -387,6 +418,136 @@ def _get_quant_text(q: int) -> str:
         return str(q)
 
 
+def _collect_area_item_icon_paths(area_items) -> list[str]:
+    paths: dict[str, None] = {}
+    for item in area_items:
+        if item.item_icon_path:
+            paths[item.item_icon_path] = None
+        if item.target_icon_path:
+            paths[item.target_icon_path] = None
+        for level_info in item.levels:
+            for material in level_info.materials:
+                paths[material.material_icon_path] = None
+    return list(paths)
+
+
+async def _load_asset_ref_cache(paths: list[str], perf_name: str) -> dict[str, ImageSource]:
+    if not paths:
+        return {}
+    return dict(zip(paths, await _load_asset_refs(paths, perf_name), strict=True))
+
+
+def _area_level_color(level: int, current_level: int, can_upgrade: bool, has_profile: bool):
+    gray_color, red_color, green_color = (50, 50, 50), (200, 0, 0), (0, 200, 0)
+    if level <= current_level or not has_profile:
+        return gray_color
+    return green_color if can_upgrade else red_color
+
+
+def _build_area_item_header(item, icon_cache: dict[str, ImageSource]) -> HSplit:
+    gray_color = (50, 50, 50)
+    header = HSplit().set_content_align("c").set_item_align("c").set_omit_parent_bg(True)
+    target_icon = icon_cache.get(item.target_icon_path) if item.target_icon_path else None
+    item_icon = icon_cache.get(item.item_icon_path) if item.item_icon_path else None
+    if target_icon:
+        header.add_item(ImageBox(target_icon, size=(None, 64)))
+    if item_icon:
+        header.add_item(ImageBox(item_icon, size=(128, 64), image_size_mode="fit").set_content_align("c"))
+    if item.current_level:
+        header.add_item(
+            TextBox(f"Lv.{item.current_level}", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=gray_color))
+        )
+    return header
+
+
+def _build_completed_area_material_placeholder() -> VSplit:
+    gray_color = (50, 50, 50)
+    placeholder = VSplit().set_content_align("c").set_item_align("c").set_sep(4)
+    placeholder.add_item(Spacer(w=64, h=64))
+    placeholder.add_item(TextBox(" ", TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=gray_color)))
+    return placeholder
+
+
+def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profile: bool) -> VSplit:
+    gray_color, red_color, green_color = (50, 50, 50), (200, 0, 0), (0, 200, 0)
+    material_widget = VSplit().set_content_align("c").set_item_align("c").set_sep(4)
+    icon_frame = Frame()
+    size = 64
+    material_icon = icon_cache.get(material.material_icon_path)
+    if material_icon:
+        icon_frame.add_item(ImageBox(material_icon, size=(size, size)))
+    icon_frame.add_item(
+        TextBox(
+            f"x{_get_quant_text(material.quantity)}",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color),
+        )
+        .set_offset((size, size))
+        .set_offset_anchor("rb")
+    )
+    material_widget.add_item(icon_frame)
+    color = green_color if material.is_enough else red_color
+    if not has_profile:
+        color = gray_color
+    have_text = _get_quant_text(material.have_quantity)
+    sum_text = _get_quant_text(material.sum_quantity)
+    text = f"{have_text}/{sum_text}" if has_profile else sum_text
+    material_widget.add_item(TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color)))
+    return material_widget
+
+
+def _build_area_level_row(
+    level_info,
+    current_level: int,
+    can_upgrade: bool,
+    icon_cache: dict[str, ImageSource],
+    has_profile: bool,
+) -> HSplit:
+    gray_color = (50, 50, 50)
+    row = HSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(8)
+    level_column = VSplit().set_content_align("c").set_item_align("c").set_sep(4)
+    level_column.add_item(
+        TextBox(
+            str(level_info.level),
+            TextStyle(
+                font=DEFAULT_BOLD_FONT,
+                size=24,
+                color=_area_level_color(level_info.level, current_level, can_upgrade, has_profile),
+            ),
+        )
+    )
+    level_column.add_item(
+        TextBox(
+            f"+{level_info.bonus:.1f}%",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color),
+        ).set_w(64)
+    )
+    row.add_item(level_column)
+    if level_info.level <= current_level:
+        row.add_item(_build_completed_area_material_placeholder())
+    else:
+        for material in level_info.materials:
+            row.add_item(_build_area_material(material, icon_cache, has_profile))
+    return row
+
+
+def _build_area_item_column(item, icon_cache: dict[str, ImageSource], has_profile: bool) -> VSplit:
+    column = (
+        VSplit()
+        .set_content_align("l")
+        .set_item_align("l")
+        .set_sep(8)
+        .set_item_bg(roundrect_bg(alpha=80))
+        .set_padding(8)
+    )
+    column.add_item(_build_area_item_header(item, icon_cache))
+    can_upgrade = True
+    for level_info in item.levels:
+        if level_info.level > item.current_level:
+            can_upgrade = can_upgrade and level_info.can_upgrade
+        column.add_item(_build_area_level_row(level_info, item.current_level, can_upgrade, icon_cache, has_profile))
+    return column
+
+
 async def _build_area_item_upgrade_materials_canvas(rqd: AreaItemUpgradeMaterialsRequest) -> Canvas:
     """合成区域道具升级材料图片
 
@@ -396,117 +557,19 @@ async def _build_area_item_upgrade_materials_canvas(rqd: AreaItemUpgradeMaterial
     Returns:
         生成的区域道具升级材料图片
     """
-    profile = rqd.profile
-    area_items = rqd.area_items
-    has_profile = rqd.has_profile
-
-    gray_color, red_color, green_color = (50, 50, 50), (200, 0, 0), (0, 200, 0)
-    ok_color = green_color if has_profile else gray_color
-    no_color = red_color if has_profile else gray_color
-
-    # 预加载所有图标（并行）
-    _all_icon_paths = {}
-    for item in area_items:
-        if item.item_icon_path:
-            _all_icon_paths[item.item_icon_path] = None
-        if item.target_icon_path:
-            _all_icon_paths[item.target_icon_path] = None
-        for level_info in item.levels:
-            for mat in level_info.materials:
-                _all_icon_paths[mat.material_icon_path] = None
-    _unique_paths = list(_all_icon_paths.keys())
-    if _unique_paths:
-        _t0 = time.perf_counter()
-        _loaded = await asyncio.gather(*[get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _unique_paths])
-        logger.debug(
-            "[perf] compose_area_item_upgrade_materials_image preload %d icons: %.3fs",
-            len(_unique_paths),
-            time.perf_counter() - _t0,
-        )
-        _icon_cache = dict(zip(_unique_paths, _loaded))
-    else:
-        _icon_cache = {}
-
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            if profile:
-                await get_profile_card(profile.to_profile_card_request())
-
-            with (
-                HSplit()
-                .set_content_align("lt")
-                .set_item_align("lt")
-                .set_sep(16)
-                .set_bg(roundrect_bg(alpha=80))
-                .set_padding(8)
-            ):
-                for item in area_items:
-                    current_lv = item.current_level
-
-                    # 每个道具的列
-                    with (
-                        VSplit()
-                        .set_content_align("l")
-                        .set_item_align("l")
-                        .set_sep(8)
-                        .set_item_bg(roundrect_bg(alpha=80))
-                        .set_padding(8)
-                    ):
-                        # 列头
-                        item_icon = _icon_cache.get(item.item_icon_path) if item.item_icon_path else None
-                        target_icon = _icon_cache.get(item.target_icon_path) if item.target_icon_path else None
-
-                        with HSplit().set_content_align("c").set_item_align("c").set_omit_parent_bg(True):
-                            if target_icon:
-                                ImageBox(target_icon, size=(None, 64))
-                            if item_icon:
-                                ImageBox(item_icon, size=(128, 64), image_size_mode="fit").set_content_align("c")
-                            if current_lv:
-                                TextBox(
-                                    f"Lv.{current_lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=gray_color)
-                                )
-
-                        lv_can_upgrade = True
-                        for level_info in item.levels:
-                            lv = level_info.level
-
-                            if lv > current_lv:
-                                lv_can_upgrade = lv_can_upgrade and level_info.can_upgrade
-
-                            # 列项
-                            with HSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(8):
-                                bonus_text = f"+{level_info.bonus:.1f}%"
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(4):
-                                    color = ok_color if lv_can_upgrade else no_color
-                                    if lv <= current_lv:
-                                        color = gray_color
-                                    TextBox(f"{lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=color))
-                                    TextBox(
-                                        bonus_text, TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color)
-                                    ).set_w(64)
-
-                                if lv <= current_lv:
-                                    with VSplit().set_content_align("c").set_item_align("c").set_sep(4):
-                                        Spacer(w=64, h=64)
-                                        TextBox(" ", TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=gray_color))
-                                else:
-                                    for mat in level_info.materials:
-                                        material_icon = _icon_cache.get(mat.material_icon_path)
-                                        with VSplit().set_content_align("c").set_item_align("c").set_sep(4):
-                                            quantity_text = _get_quant_text(mat.quantity)
-                                            have_text = _get_quant_text(mat.have_quantity)
-                                            sum_text = _get_quant_text(mat.sum_quantity)
-                                            with Frame():
-                                                sz = 64
-                                                if material_icon:
-                                                    ImageBox(material_icon, size=(sz, sz))
-                                                TextBox(
-                                                    f"x{quantity_text}",
-                                                    TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(50, 50, 50)),
-                                                ).set_offset((sz, sz)).set_offset_anchor("rb")
-                                            color = ok_color if mat.is_enough else no_color
-                                            text = f"{have_text}/{sum_text}" if has_profile else f"{sum_text}"
-                                            TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color))
+    icon_paths = _collect_area_item_icon_paths(rqd.area_items)
+    icon_cache = await _load_asset_ref_cache(icon_paths, "compose_area_item_upgrade_materials_image")
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    if rqd.profile:
+        root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    columns = (
+        HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg(alpha=80)).set_padding(8)
+    )
+    for item in rqd.area_items:
+        columns.add_item(_build_area_item_column(item, icon_cache, rqd.has_profile))
+    root.add_item(columns)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -530,6 +593,81 @@ async def try_render_area_item_upgrade_materials_payload(
 # ========== 羁绊等级 ==========
 
 
+def _build_education_table_header(labels: list[str], widths: tuple[int, ...], style: TextStyle) -> HSplit:
+    header = (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_h(56)
+        .set_padding(4)
+        .set_bg(roundrect_bg(alpha=80))
+    )
+    for label, width in zip(labels, widths, strict=True):
+        header.add_item(TextBox(label, style).set_w(width).set_content_align("c"))
+    return header
+
+
+def _bond_need_exp_text(bond, max_level: int) -> str:
+    if not bond.has_bond:
+        return "-"
+    if bond.bond_level == max_level:
+        return "MAX"
+    if bond.need_exp is not None:
+        return str(bond.need_exp)
+    return "-"
+
+
+def _bond_level_color(bond, max_level: int) -> tuple[int, int, int, int]:
+    if min(bond.chara_rank1, bond.chara_rank2) <= bond.bond_level < max_level:
+        return (150, 0, 0, 255)
+    return (50, 50, 50, 255)
+
+
+def _build_bond_row(
+    bond,
+    icons: tuple[ImageSource | None, ImageSource | None],
+    index: int,
+    max_level: int,
+    text_style: TextStyle,
+    widths: tuple[int, int, int, int, int],
+) -> HSplit:
+    w1, w2, w3, w4, w5 = widths
+    row = (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_h(48)
+        .set_padding(4)
+        .set_bg(roundrect_bg(fill=_info_panel_row_fill(index)))
+    )
+    icon_frame = Frame().set_w(w1).set_content_align("c")
+    for icon, offset in zip(icons, (-13, 13), strict=True):
+        if icon:
+            icon_frame.add_item(ImageBox(icon, size=(None, 40)).set_offset((offset, 0)))
+    row.add_item(icon_frame)
+
+    level_color = _bond_level_color(bond, max_level)
+    bold_level_style = text_style.replace(font=DEFAULT_BOLD_FONT, color=level_color)
+    row.add_item(TextBox(f"{bond.chara_rank1} & {bond.chara_rank2}", bold_level_style).set_w(w2).set_content_align("c"))
+    row.add_item(
+        TextBox(str(bond.bond_level) if bond.bond_level else "-", bold_level_style).set_w(w3).set_content_align("c")
+    )
+    row.add_item(
+        _build_progress_bar(
+            width=w4,
+            current=bond.bond_level,
+            maximum=max_level,
+            fill=LinearGradient(c1=bond.color1, c2=bond.color2, p1=(0, 0.5), p2=(1, 0.5)),
+            tick_step=10,
+            enabled=bond.has_bond,
+        )
+    )
+    row.add_item(TextBox(_bond_need_exp_text(bond, max_level), text_style).set_w(w5).set_content_align("c"))
+    return row
+
+
 async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
     """合成羁绊等级图片
 
@@ -539,134 +677,25 @@ async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
     Returns:
         生成的羁绊等级图片
     """
-    profile = rqd.profile
-    bonds = rqd.bonds
-    max_level = rqd.max_level
-
-    header_h, row_h = 56, 48
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
-    w1, w2, w3, w4, w5 = 100, 120, 100, 350, 150
+    widths = (100, 120, 100, 350, 150)
+    icon_paths = [path for bond in rqd.bonds for path in (bond.chara_icon_path1, bond.chara_icon_path2)]
+    bond_icons = await _load_asset_refs(icon_paths, "compose_bonds_image")
 
-    # 预加载所有角色图标（并行）
-    _bond_icon_tasks = []
-    for bond in bonds:
-        _bond_icon_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, bond.chara_icon_path1))
-        _bond_icon_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, bond.chara_icon_path2))
-    _t0 = time.perf_counter()
-    _bond_icons = await asyncio.gather(*_bond_icon_tasks) if _bond_icon_tasks else []
-    logger.debug(
-        "[perf] compose_bonds_image preload %d bond icons: %.3fs",
-        len(_bond_icon_tasks),
-        time.perf_counter() - _t0,
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    table = (
+        VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
-
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(profile.to_profile_card_request())
-
-            with (
-                VSplit()
-                .set_content_align("l")
-                .set_item_align("l")
-                .set_sep(8)
-                .set_padding(16)
-                .set_bg(roundrect_bg(alpha=80))
-            ):
-                # 标题
-                with (
-                    HSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_sep(8)
-                    .set_h(header_h)
-                    .set_padding(4)
-                    .set_bg(roundrect_bg(alpha=80))
-                ):
-                    TextBox("角色", header_style).set_w(w1).set_content_align("c")
-                    TextBox("角色等级", header_style).set_w(w2).set_content_align("c")
-                    TextBox("羁绊等级", header_style).set_w(w3).set_content_align("c")
-                    TextBox(f"进度(上限{max_level}级)", header_style).set_w(w4).set_content_align("c")
-                    TextBox("升级经验", header_style).set_w(w5).set_content_align("c")
-
-                # 项目
-                for idx, bond in enumerate(bonds):
-                    bg_color = _info_panel_row_fill(idx)
-
-                    level = bond.bond_level
-                    level_text = str(level) if level else "-"
-
-                    if not bond.has_bond:
-                        need_exp_text = "-"
-                    elif level == max_level:
-                        need_exp_text = "MAX"
-                    elif bond.need_exp is not None:
-                        need_exp_text = str(bond.need_exp)
-                    else:
-                        need_exp_text = "-"
-
-                    chara_rank_text = f"{bond.chara_rank1} & {bond.chara_rank2}"
-
-                    level_color = (50, 50, 50, 255)
-                    if min(bond.chara_rank1, bond.chara_rank2) <= level < max_level:
-                        level_color = (150, 0, 0, 255)
-
-                    chara_icon1 = _bond_icons[idx * 2]
-                    chara_icon2 = _bond_icons[idx * 2 + 1]
-
-                    with (
-                        HSplit()
-                        .set_content_align("c")
-                        .set_item_align("c")
-                        .set_sep(8)
-                        .set_h(row_h)
-                        .set_padding(4)
-                        .set_bg(roundrect_bg(fill=bg_color))
-                    ):
-                        with Frame().set_w(w1).set_content_align("c"):
-                            if chara_icon1:
-                                ImageBox(chara_icon1, size=(None, 40)).set_offset((-13, 0))
-                            if chara_icon2:
-                                ImageBox(chara_icon2, size=(None, 40)).set_offset((13, 0))
-
-                        TextBox(chara_rank_text, text_style.replace(font=DEFAULT_BOLD_FONT, color=level_color)).set_w(
-                            w2
-                        ).set_content_align("c")
-                        TextBox(level_text, text_style.replace(font=DEFAULT_BOLD_FONT, color=level_color)).set_w(
-                            w3
-                        ).set_content_align("c")
-
-                        with Frame().set_w(w4).set_content_align("lt"):
-                            progress = max(min(level / max_level, 1), 0) if max_level > 0 else 0
-                            total_w, total_h, border = w4, 14, 2
-                            progress_w = int((total_w - border * 2) * progress)
-                            progress_h = total_h - border * 2
-                            color = LinearGradient(c1=bond.color1, c2=bond.color2, p1=(0, 0.5), p2=(1, 0.5))
-
-                            if bond.has_bond and progress > 0:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 255), radius=total_h // 2)
-                                )
-                                Spacer(w=progress_w, h=progress_h).set_bg(
-                                    RoundRectBg(fill=color, radius=(total_h - border) // 2)
-                                ).set_offset((border, border))
-
-                                def draw_line(line_x: int):
-                                    p = line_x / max_level
-                                    lx = int((total_w - border * 2) * p)
-                                    line_color = (100, 100, 100, 255) if line_x < level else (150, 150, 150, 255)
-                                    Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
-                                        (border + lx - 1, total_h // 2)
-                                    )
-
-                                for line_x in range(10, max_level, 10):
-                                    draw_line(line_x)
-                            else:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)
-                                )
-
-                        TextBox(need_exp_text, text_style).set_w(w5).set_content_align("c")
+    labels = ["角色", "角色等级", "羁绊等级", f"进度(上限{rqd.max_level}级)", "升级经验"]
+    table.add_item(_build_education_table_header(labels, widths, header_style))
+    for index, bond in enumerate(rqd.bonds):
+        icon_pair = (bond_icons[index * 2], bond_icons[index * 2 + 1])
+        table.add_item(_build_bond_row(bond, icon_pair, index, rqd.max_level, text_style, widths))
+    root.add_item(table)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -688,6 +717,45 @@ async def try_render_bonds_payload(rqd: BondsRequest) -> EncodedImagePayload | N
 # ========== 队长次数 ==========
 
 
+def _build_leader_count_row(
+    info,
+    chara_icon: ImageSource | None,
+    index: int,
+    max_play_count: int,
+    text_style: TextStyle,
+    widths: tuple[int, int, int, int, int],
+) -> HSplit:
+    w1, w2, w3, w4, w5 = widths
+    row = (
+        HSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_h(48)
+        .set_padding(4)
+        .set_bg(roundrect_bg(fill=_info_panel_row_fill(index)))
+    )
+    icon_frame = Frame().set_w(w1).set_content_align("c")
+    if chara_icon:
+        icon_frame.add_item(ImageBox(chara_icon, size=(None, 40)))
+    row.add_item(icon_frame)
+
+    bold_style = text_style.replace(font=DEFAULT_BOLD_FONT)
+    row.add_item(TextBox(str(info.play_count) if info.play_count else "-", bold_style).set_w(w2).set_content_align("c"))
+    row.add_item(TextBox(f"x{info.ex_level}" if info.ex_level else "-", bold_style).set_w(w3).set_content_align("c"))
+    row.add_item(TextBox(str(info.ex_count) if info.ex_count else "-", bold_style).set_w(w4).set_content_align("c"))
+    row.add_item(
+        _build_progress_bar(
+            width=w5,
+            current=info.play_count,
+            maximum=max_play_count,
+            fill=_leader_count_color(info.play_count),
+            tick_step=10_000,
+        )
+    )
+    return row
+
+
 async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
     """合成队长次数图片
 
@@ -697,124 +765,26 @@ async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
     Returns:
         生成的队长次数图片
     """
-    profile = rqd.profile
-    leader_counts = rqd.leader_counts
-    max_play_count = rqd.max_play_count
-
-    header_h, row_h = 56, 48
     header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
     text_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50, 255))
-    w1, w2, w3, w4, w5 = 80, 100, 100, 100, 350
-
-    # 预加载所有角色图标（并行）
-    _t0 = time.perf_counter()
-    _leader_icons = await asyncio.gather(
-        *[get_asset_image_ref(ASSETS_BASE_DIR, info.chara_icon_path) for info in leader_counts]
-    )
-    logger.debug(
-        "[perf] compose_leader_count_image preload %d icons: %.3fs",
-        len(leader_counts),
-        time.perf_counter() - _t0,
+    widths = (80, 100, 100, 100, 350)
+    leader_icons = await _load_asset_refs(
+        [info.chara_icon_path for info in rqd.leader_counts],
+        "compose_leader_count_image",
     )
 
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(profile.to_profile_card_request())
-
-            with (
-                VSplit()
-                .set_content_align("l")
-                .set_item_align("l")
-                .set_sep(8)
-                .set_padding(16)
-                .set_bg(roundrect_bg(alpha=80))
-            ):
-                # 标题
-                with (
-                    HSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_sep(8)
-                    .set_h(header_h)
-                    .set_padding(4)
-                    .set_bg(roundrect_bg(alpha=80))
-                ):
-                    TextBox("角色", header_style).set_w(w1).set_content_align("c")
-                    TextBox("队长次数", header_style).set_w(w2).set_content_align("c")
-                    TextBox("EX等级", header_style).set_w(w3).set_content_align("c")
-                    TextBox("EX次数", header_style).set_w(w4).set_content_align("c")
-                    TextBox(f"进度(上限{max_play_count})", header_style).set_w(w5).set_content_align("c")
-
-                # 项目
-                for idx, info in enumerate(leader_counts):
-                    bg_color = _info_panel_row_fill(idx)
-
-                    pc = info.play_count
-                    pc_text = str(pc) if pc else "-"
-                    pc_ex_text = str(info.ex_count) if info.ex_count else "-"
-                    ex_level_text = f"x{info.ex_level}" if info.ex_level else "-"
-
-                    chara_icon = _leader_icons[idx]
-
-                    with (
-                        HSplit()
-                        .set_content_align("c")
-                        .set_item_align("c")
-                        .set_sep(8)
-                        .set_h(row_h)
-                        .set_padding(4)
-                        .set_bg(roundrect_bg(fill=bg_color))
-                    ):
-                        with Frame().set_w(w1).set_content_align("c"):
-                            if chara_icon:
-                                ImageBox(chara_icon, size=(None, 40))
-
-                        TextBox(pc_text, text_style.replace(font=DEFAULT_BOLD_FONT)).set_w(w2).set_content_align("c")
-                        TextBox(ex_level_text, text_style.replace(font=DEFAULT_BOLD_FONT)).set_w(w3).set_content_align(
-                            "c"
-                        )
-                        TextBox(pc_ex_text, text_style.replace(font=DEFAULT_BOLD_FONT)).set_w(w4).set_content_align("c")
-
-                        with Frame().set_w(w5).set_content_align("lt"):
-                            progress = max(min(pc / max_play_count, 1), 0) if max_play_count > 0 else 0
-                            total_w, total_h, border = w5, 14, 2
-                            progress_w = int((total_w - border * 2) * progress)
-                            progress_h = total_h - border * 2
-
-                            color = (255, 50, 50, 255)
-                            if pc > 50000:
-                                color = (100, 255, 100, 255)
-                            elif pc > 40000:
-                                color = (255, 255, 100, 255)
-                            elif pc > 30000:
-                                color = (255, 200, 100, 255)
-                            elif pc > 20000:
-                                color = (255, 150, 100, 255)
-                            elif pc > 10000:
-                                color = (255, 100, 100, 255)
-
-                            if progress > 0:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 255), radius=total_h // 2)
-                                )
-                                Spacer(w=progress_w, h=progress_h).set_bg(
-                                    RoundRectBg(fill=color, radius=(total_h - border) // 2)
-                                ).set_offset((border, border))
-
-                                def draw_line(line_x: int):
-                                    p = line_x / max_play_count
-                                    lx = int((total_w - border * 2) * p)
-                                    line_color = (100, 100, 100, 255) if line_x < pc else (150, 150, 150, 255)
-                                    Spacer(w=1, h=total_h // 2 - 1).set_bg(FillBg(line_color)).set_offset(
-                                        (border + lx - 1, total_h // 2)
-                                    )
-
-                                for line_x in range(10000, max_play_count, 10000):
-                                    draw_line(line_x)
-                            else:
-                                Spacer(w=total_w, h=total_h).set_bg(
-                                    RoundRectBg(fill=(100, 100, 100, 100), radius=total_h // 2)
-                                )
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    table = (
+        VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
+    )
+    labels = ["角色", "队长次数", "EX等级", "EX次数", f"进度(上限{rqd.max_play_count})"]
+    table.add_item(_build_education_table_header(labels, widths, header_style))
+    for index, (info, icon) in enumerate(zip(rqd.leader_counts, leader_icons, strict=True)):
+        table.add_item(_build_leader_count_row(info, icon, index, rqd.max_play_count, text_style, widths))
+    root.add_item(table)
+    canvas.add_item(root)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -974,18 +944,73 @@ def _build_character_mission_dual_card(
     return frame
 
 
-async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverviewRequest) -> Canvas:
-    chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.character_icon_path)
-    header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
-    sub_header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(35, 35, 35, 255))
-    note_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(0, 0, 0, 255))
-    card_w = 520
+def _build_character_mission_card_rows(rows, card_w: int) -> list[HSplit]:
+    card_rows = []
+    for index in range(0, len(rows), 2):
+        row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+        row.add_item(_build_character_mission_card(rows[index], card_w))
+        second_card = (
+            _build_character_mission_card(rows[index + 1], card_w) if index + 1 < len(rows) else Spacer(card_w, 1)
+        )
+        row.add_item(second_card)
+        card_rows.append(row)
+    return card_rows
 
-    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
-    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
 
-    note_panel = (
+def _build_character_mission_panel(title: str, title_style: TextStyle) -> VSplit:
+    panel = (
+        VSplit()
+        .set_bg(_character_mission_panel_bg())
+        .set_padding(16)
+        .set_sep(12)
+        .set_content_align("lt")
+        .set_item_align("lt")
+    )
+    panel.add_item(TextBox(title, title_style))
+    return panel
+
+
+def _build_character_mission_rows_panel(
+    title: str,
+    rows,
+    card_w: int,
+    empty_text: str,
+    title_style: TextStyle,
+) -> VSplit:
+    panel = _build_character_mission_panel(title, title_style)
+    if rows:
+        for card_row in _build_character_mission_card_rows(rows, card_w):
+            panel.add_item(card_row)
+    else:
+        panel.add_item(TextBox(empty_text, TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+    return panel
+
+
+_DUAL_ACHIEVEMENT_TYPES = ("play_live", "play_live_ex", "waiting_room", "waiting_room_ex")
+
+
+def _build_character_mission_achievement_panel(rows, card_w: int, title_style: TextStyle) -> VSplit:
+    panel = _build_character_mission_panel("成就", title_style)
+    by_type = {row.mission_type: row for row in rows}
+    dual_rows = [by_type.get(mission_type) for mission_type in _DUAL_ACHIEVEMENT_TYPES]
+    has_dual_rows = all(dual_rows)
+    if has_dual_rows:
+        play_live, play_live_ex, waiting_room, waiting_room_ex = dual_rows
+        dual_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+        dual_row.add_item(_build_character_mission_dual_card("队长次数", play_live, play_live_ex, card_w))
+        dual_row.add_item(_build_character_mission_dual_card("休息室次数", waiting_room, waiting_room_ex, card_w))
+        panel.add_item(dual_row)
+
+    remaining_rows = [row for row in rows if row.mission_type not in _DUAL_ACHIEVEMENT_TYPES]
+    for card_row in _build_character_mission_card_rows(remaining_rows, card_w):
+        panel.add_item(card_row)
+    if not remaining_rows and not has_dual_rows:
+        panel.add_item(TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255))))
+    return panel
+
+
+def _build_character_mission_note_panel(note_style: TextStyle) -> VSplit:
+    panel = (
         VSplit()
         .set_content_align("l")
         .set_item_align("l")
@@ -993,16 +1018,22 @@ async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverview
         .set_padding(12)
         .set_bg(_character_mission_panel_bg())
     )
-    note_panel.add_item(
+    panel.add_item(
         TextBox(
             "各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数",
             note_style,
             use_real_line_count=True,
         )
     )
-    root.add_item(note_panel)
+    return panel
 
-    summary_panel = (
+
+def _build_character_mission_summary_panel(
+    rqd: CharacterMissionOverviewRequest,
+    chara_icon: ImageSource,
+    header_style: TextStyle,
+) -> VSplit:
+    panel = (
         VSplit()
         .set_bg(_character_mission_panel_bg())
         .set_padding(16)
@@ -1020,73 +1051,32 @@ async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverview
             use_real_line_count=True,
         )
     )
-    summary_panel.add_item(header_row)
-    root.add_item(summary_panel)
+    panel.add_item(header_row)
+    return panel
 
-    basic_panel = (
-        VSplit()
-        .set_bg(_character_mission_panel_bg())
-        .set_padding(16)
-        .set_sep(12)
-        .set_content_align("lt")
-        .set_item_align("lt")
-    )
-    basic_panel.add_item(TextBox("基本任务", sub_header_style))
-    if rqd.basic_rows:
-        for i in range(0, len(rqd.basic_rows), 2):
-            row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-            row.add_item(_build_character_mission_card(rqd.basic_rows[i], card_w))
-            if i + 1 < len(rqd.basic_rows):
-                row.add_item(_build_character_mission_card(rqd.basic_rows[i + 1], card_w))
-            else:
-                row.add_item(Spacer(card_w, 1))
-            basic_panel.add_item(row)
-    else:
-        basic_panel.add_item(
-            TextBox("暂无可显示的基本任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255)))
+
+async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverviewRequest) -> Canvas:
+    chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.character_icon_path)
+    header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(25, 25, 25, 255))
+    sub_header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(35, 35, 35, 255))
+    note_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(0, 0, 0, 255))
+    card_w = 520
+
+    canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
+    root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
+    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(_build_character_mission_note_panel(note_style))
+    root.add_item(_build_character_mission_summary_panel(rqd, chara_icon, header_style))
+    root.add_item(
+        _build_character_mission_rows_panel(
+            "基本任务",
+            rqd.basic_rows,
+            card_w,
+            "暂无可显示的基本任务",
+            sub_header_style,
         )
-    root.add_item(basic_panel)
-
-    achievement_panel = (
-        VSplit()
-        .set_bg(_character_mission_panel_bg())
-        .set_padding(16)
-        .set_sep(12)
-        .set_content_align("lt")
-        .set_item_align("lt")
     )
-    achievement_panel.add_item(TextBox("成就", sub_header_style))
-    by_type = {row.mission_type: row for row in rqd.achievement_rows}
-
-    play_live = by_type.get("play_live")
-    play_live_ex = by_type.get("play_live_ex")
-    waiting_room = by_type.get("waiting_room")
-    waiting_room_ex = by_type.get("waiting_room_ex")
-    if play_live and play_live_ex and waiting_room and waiting_room_ex:
-        dual_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-        dual_row.add_item(_build_character_mission_dual_card("队长次数", play_live, play_live_ex, card_w))
-        dual_row.add_item(_build_character_mission_dual_card("休息室次数", waiting_room, waiting_room_ex, card_w))
-        achievement_panel.add_item(dual_row)
-
-    remaining_rows = [
-        row
-        for row in rqd.achievement_rows
-        if row.mission_type not in {"play_live", "play_live_ex", "waiting_room", "waiting_room_ex"}
-    ]
-    if remaining_rows:
-        for i in range(0, len(remaining_rows), 2):
-            row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-            row.add_item(_build_character_mission_card(remaining_rows[i], card_w))
-            if i + 1 < len(remaining_rows):
-                row.add_item(_build_character_mission_card(remaining_rows[i + 1], card_w))
-            else:
-                row.add_item(Spacer(card_w, 1))
-            achievement_panel.add_item(row)
-    elif not (play_live and play_live_ex and waiting_room and waiting_room_ex):
-        achievement_panel.add_item(
-            TextBox("暂无可显示的成就任务", TextStyle(font=DEFAULT_FONT, size=18, color=(80, 80, 80, 255)))
-        )
-    root.add_item(achievement_panel)
+    root.add_item(_build_character_mission_achievement_panel(rqd.achievement_rows, card_w, sub_header_style))
 
     canvas.add_item(root)
 
@@ -1109,87 +1099,149 @@ async def try_render_character_mission_overview_payload(
     )
 
 
+_MISSION_TABLE_DEFAULT_CHUNK_SIZE = 40
+_MISSION_TABLE_COLUMNS = (
+    ("档位", 84, "seq", "#"),
+    ("需求", 96, "requirement", ""),
+    ("累计需求", 128, "acc_requirement", ""),
+    ("EXP", 72, "exp", ""),
+    ("累计EXP", 116, "acc_exp", ""),
+)
+
+
+def _character_mission_table_chunks(section, target_col_count: int | None) -> list[list]:
+    chunk_size = _MISSION_TABLE_DEFAULT_CHUNK_SIZE
+    if target_col_count and target_col_count > 1:
+        chunk_size = max(1, math.ceil(len(section.display_rows) / target_col_count))
+    return [
+        section.display_rows[index : index + chunk_size] for index in range(0, len(section.display_rows), chunk_size)
+    ] or [[]]
+
+
+def _character_mission_table_cell_bg(row, index: int, reached_seq: int) -> RoundRectBg:
+    fill = (255, 244, 196, 210) if row.seq == reached_seq and reached_seq > 0 else _info_panel_row_fill(index)
+    return roundrect_bg(fill=fill)
+
+
+def _build_character_mission_table_column(
+    title: str,
+    width: int,
+    attribute: str,
+    prefix: str,
+    rows,
+    reached_seq: int,
+    header_style: TextStyle,
+    cell_style: TextStyle,
+) -> VSplit:
+    column = VSplit().set_content_align("c").set_item_align("c").set_sep(6)
+    column.add_item(TextBox(title, header_style).set_size((width, 40)).set_content_align("c"))
+    for index, row in enumerate(rows):
+        value = f"{prefix}{getattr(row, attribute)}"
+        column.add_item(
+            TextBox(value, cell_style)
+            .set_bg(_character_mission_table_cell_bg(row, index, reached_seq))
+            .set_size((width, 40))
+            .set_content_align("c")
+        )
+    return column
+
+
+def _build_character_mission_table_chunk(
+    rows,
+    reached_seq: int,
+    header_style: TextStyle,
+    cell_style: TextStyle,
+) -> HSplit:
+    chunk = HSplit().set_content_align("lt").set_item_align("lt").set_sep(6)
+    for title, width, attribute, prefix in _MISSION_TABLE_COLUMNS:
+        chunk.add_item(
+            _build_character_mission_table_column(
+                title,
+                width,
+                attribute,
+                prefix,
+                rows,
+                reached_seq,
+                header_style,
+                cell_style,
+            )
+        )
+    return chunk
+
+
+def _build_character_mission_section_header(
+    section,
+    header_style: TextStyle,
+    cell_style: TextStyle,
+    progress_style: TextStyle,
+) -> HSplit:
+    header = HSplit().set_content_align("lb").set_item_align("lb").set_sep(8)
+    header.add_item(TextBox("当前进度:", header_style))
+    header.add_item(TextBox(str(section.current_total), progress_style))
+    if section.is_ex and section.current_round_no is not None:
+        header.add_item(TextBox(f"当前回目 EX {section.current_round_no}", cell_style))
+    elif section.reached_seq > 0:
+        header.add_item(TextBox(f"已达档位 #{section.reached_seq}", cell_style))
+    return header
+
+
+def _build_character_mission_section_table(section, target_col_count: int | None = None) -> VSplit:
+    title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(35, 35, 35, 255))
+    header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
+    cell_style = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
+    progress_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 50, 50))
+    root = (
+        VSplit()
+        .set_content_align("lt")
+        .set_item_align("lt")
+        .set_sep(8)
+        .set_padding(8)
+        .set_bg(_character_mission_panel_bg())
+    )
+    root.add_item(TextBox("EX任务" if section.is_ex else "普通任务", title_style))
+    root.add_item(_build_character_mission_section_header(section, header_style, cell_style, progress_style))
+    root.add_item(
+        _draw_character_mission_progress(
+            "",
+            section.current_total,
+            section.upper,
+            section.ratio,
+            560,
+            next_need=section.next_need,
+            next_exp=section.next_exp,
+        )
+    )
+    column_wrap = HSplit().set_content_align("lt").set_item_align("lt").set_sep(12)
+    for rows in _character_mission_table_chunks(section, target_col_count):
+        column_wrap.add_item(_build_character_mission_table_chunk(rows, section.reached_seq, header_style, cell_style))
+    root.add_item(column_wrap)
+    return root
+
+
+def _character_mission_normal_column_count(sections) -> int | None:
+    normal_section = next((section for section in sections if not section.is_ex), None)
+    if normal_section is None:
+        return None
+    return max(1, math.ceil(len(normal_section.display_rows) / _MISSION_TABLE_DEFAULT_CHUNK_SIZE))
+
+
+def _build_character_mission_empty_table(cell_style: TextStyle) -> VSplit:
+    panel = (
+        VSplit()
+        .set_content_align("lt")
+        .set_item_align("lt")
+        .set_sep(8)
+        .set_padding(8)
+        .set_bg(_character_mission_panel_bg())
+    )
+    panel.add_item(TextBox("没有可显示的任务表数据", cell_style))
+    return panel
+
+
 async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -> Canvas:
     chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.character_icon_path)
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=BLACK)
-    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK)
     style2 = TextStyle(font=DEFAULT_FONT, size=20, color=(50, 50, 50))
-    style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 50, 50))
-    sub_header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(35, 35, 35, 255))
-    gh, vsep, hsep = 40, 6, 6
-    gw_seq, gw_req, gw_acc_req, gw_exp, gw_acc_exp = 84, 96, 128, 72, 116
-    default_chunk_size = 40
-
-    def draw_section_table(section, target_col_count: int | None = None) -> Widget:
-        root = (
-            VSplit()
-            .set_content_align("lt")
-            .set_item_align("lt")
-            .set_sep(8)
-            .set_padding(8)
-            .set_bg(_character_mission_panel_bg())
-        )
-        root.add_item(TextBox("EX任务" if section.is_ex else "普通任务", sub_header_style))
-
-        header_row = HSplit().set_content_align("lb").set_item_align("lb").set_sep(8)
-        header_row.add_item(TextBox("当前进度:", style1))
-        header_row.add_item(TextBox(str(section.current_total), style3))
-        if section.is_ex and section.current_round_no is not None:
-            header_row.add_item(TextBox(f"当前回目 EX {section.current_round_no}", style2))
-        elif section.reached_seq > 0:
-            header_row.add_item(TextBox(f"已达档位 #{section.reached_seq}", style2))
-        root.add_item(header_row)
-
-        root.add_item(
-            _draw_character_mission_progress(
-                "",
-                section.current_total,
-                section.upper,
-                section.ratio,
-                560,
-                next_need=section.next_need,
-                next_exp=section.next_exp,
-            )
-        )
-
-        if target_col_count and target_col_count > 1:
-            chunk_size = max(1, math.ceil(len(section.display_rows) / target_col_count))
-        else:
-            chunk_size = default_chunk_size
-        chunks = [
-            section.display_rows[i : i + chunk_size] for i in range(0, len(section.display_rows), chunk_size)
-        ] or [[]]
-        column_wrap = HSplit().set_content_align("lt").set_item_align("lt").set_sep(12)
-        for chunk in chunks:
-            grid_row = HSplit().set_content_align("lt").set_item_align("lt").set_sep(hsep)
-
-            def build_col(title: str, width: int, extractor):
-                col = VSplit().set_content_align("c").set_item_align("c").set_sep(vsep)
-                col.add_item(TextBox(title, style1).set_size((width, gh)).set_content_align("c"))
-                for idx, row in enumerate(chunk):
-                    bg_fill = roundrect_bg(
-                        fill=(
-                            (255, 244, 196, 210)
-                            if row.seq == section.reached_seq and section.reached_seq > 0
-                            else _info_panel_row_fill(idx)
-                        )
-                    )
-                    col.add_item(
-                        TextBox(str(extractor(row)), style2)
-                        .set_bg(bg_fill)
-                        .set_size((width, gh))
-                        .set_content_align("c")
-                    )
-                return col
-
-            grid_row.add_item(build_col("档位", gw_seq, lambda row: f"#{row.seq}"))
-            grid_row.add_item(build_col("需求", gw_req, lambda row: row.requirement))
-            grid_row.add_item(build_col("累计需求", gw_acc_req, lambda row: row.acc_requirement))
-            grid_row.add_item(build_col("EXP", gw_exp, lambda row: row.exp))
-            grid_row.add_item(build_col("累计EXP", gw_acc_exp, lambda row: row.acc_exp))
-            column_wrap.add_item(grid_row)
-        root.add_item(column_wrap)
-        return root
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(_character_mission_panel_bg())
@@ -1203,26 +1255,13 @@ async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -
     header.add_item(TextBox("普通任务高亮栏为已达成的最近档位，EX任务高亮栏为当前进行中的档位", style2))
     root.add_item(header)
 
-    normal_section = next((section for section in rqd.sections if not section.is_ex), None)
-    normal_col_count = None
-    if normal_section is not None:
-        normal_col_count = max(1, math.ceil(len(normal_section.display_rows) / default_chunk_size))
-
+    normal_col_count = _character_mission_normal_column_count(rqd.sections)
     if rqd.sections:
         for section in rqd.sections:
             target_col_count = normal_col_count if section.is_ex and normal_col_count else None
-            root.add_item(draw_section_table(section, target_col_count))
+            root.add_item(_build_character_mission_section_table(section, target_col_count))
     else:
-        empty_panel = (
-            VSplit()
-            .set_content_align("lt")
-            .set_item_align("lt")
-            .set_sep(8)
-            .set_padding(8)
-            .set_bg(_character_mission_panel_bg())
-        )
-        empty_panel.add_item(TextBox("没有可显示的任务表数据", style2))
-        root.add_item(empty_panel)
+        root.add_item(_build_character_mission_empty_table(style2))
 
     canvas.add_item(root)
 
