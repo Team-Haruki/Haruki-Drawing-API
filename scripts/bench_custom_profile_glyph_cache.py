@@ -7,8 +7,8 @@ request, TMP metadata re-parsed from JSON — was paid again on every render. Th
 FRESH renderer per iteration (simulating one request per iteration) and shows iteration 1 paying
 the cold cost while iterations 2-3 collapse to near-zero on cache hits.
 
-Runs entirely against a temp dir: one real font copied out of ``src.settings.FONT_DIR`` plus a
-minimal synthetic metadata.json. No production assets are touched.
+Runs entirely against a temp dir: a minimal synthetic TrueType font plus synthetic
+``metadata.json``. No production assets or configurable paths are touched.
 
 Run (repo root):
     uv run python scripts/bench_custom_profile_glyph_cache.py
@@ -22,13 +22,15 @@ import sys
 import tempfile
 import time
 
+from fontTools.fontBuilder import FontBuilder
+from fontTools.pens.ttGlyphPen import TTGlyphPen
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from src.sekai.profile.custom_profile.cache import clear_custom_profile_caches, get_custom_profile_cache_stats
 from src.sekai.profile.custom_profile.renderer import PNGRenderer, TMPFontLibrary, load_font
-from src.settings import FONT_DIR
 
 GLYPHS = "春日影一二三四五六七八九十AB"  # CJK + ASCII, one TTFont parse each when cold
 ITERATIONS = 3
@@ -36,12 +38,32 @@ FONT_CALLS = 300  # ~the 200-400 load_font calls a real request makes
 METADATA_LOADS = 20
 
 
-def pick_font() -> Path | None:
-    for pattern in ("*.otf", "*.ttf"):
-        candidates = sorted(Path(FONT_DIR).glob(pattern))
-        if candidates:
-            return candidates[0]
-    return None
+def build_benchmark_font(path: Path) -> None:
+    """Create a tiny deterministic TrueType font containing the benchmark glyphs."""
+
+    glyph_names = {char: f"uni{ord(char):04X}" for char in dict.fromkeys(GLYPHS)}
+    glyph_order = [".notdef", *glyph_names.values()]
+    glyphs = {}
+    for name in glyph_order:
+        pen = TTGlyphPen(None)
+        pen.moveTo((80, 0))
+        pen.lineTo((520, 0))
+        pen.lineTo((520, 700))
+        pen.lineTo((80, 700))
+        pen.closePath()
+        glyphs[name] = pen.glyph()
+
+    builder = FontBuilder(1000, isTTF=True)
+    builder.setupGlyphOrder(glyph_order)
+    builder.setupCharacterMap({ord(char): name for char, name in glyph_names.items()})
+    builder.setupGlyf(glyphs)
+    builder.setupHorizontalMetrics(dict.fromkeys(glyph_order, (600, 80)))
+    builder.setupHorizontalHeader(ascent=800, descent=-200)
+    builder.setupNameTable({"familyName": "Haruki Benchmark", "styleName": "Regular"})
+    builder.setupOS2(sTypoAscender=800, sTypoDescender=-200, usWinAscent=800, usWinDescent=200)
+    builder.setupPost()
+    builder.setupMaxp()
+    builder.save(path)
 
 
 def make_renderer(workdir: Path) -> PNGRenderer:
@@ -64,23 +86,16 @@ def make_renderer(workdir: Path) -> PNGRenderer:
 
 
 def main() -> int:
-    font_src = pick_font()
-    if font_src is None:
-        print(f"No .otf/.ttf found under FONT_DIR ({FONT_DIR}); cannot run this bench.")  # noqa: T201
-        return 1
-
     with tempfile.TemporaryDirectory(prefix="bench_custom_profile_") as tmp:
         workdir = Path(tmp)
-        # The parser detects the font format from its bytes.  A fixed filename keeps
-        # filesystem structure independent from the configured source filename.
-        font_path = workdir / "benchmark-font"
-        font_path.write_bytes(font_src.read_bytes())
+        font_path = workdir / "benchmark-font.ttf"
+        build_benchmark_font(font_path)
         metadata_path = workdir / "metadata.json"
         metadata_path.write_text(json.dumps({"tmp_font_assets": []}), encoding="utf-8")
 
         clear_custom_profile_caches()
 
-        print(f"font: {font_src.name}   glyphs: {len(GLYPHS)}   fresh PNGRenderer per iteration")  # noqa: T201
+        print(f"font: synthetic   glyphs: {len(GLYPHS)}   fresh PNGRenderer per iteration")  # noqa: T201
         header = (
             f"{'iter':>4}  {'contours_ms':>12}  {'load_font_ms':>13}  {'metadata_ms':>12}"
             f"   ({len(GLYPHS)} glyphs / {FONT_CALLS} calls / {METADATA_LOADS} loads)"

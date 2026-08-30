@@ -448,8 +448,7 @@ uv run python scripts/build_card_list_payload.py \
   --region jp \
   --card-id 1 \
   --card-id 2 \
-  --title smoke \
-  --output out/card-list-payload.json
+  --title smoke > out/card-list-payload.json
 ```
 
 该脚本参考 cloud 侧 `internal/pjsk/render/card` builder，只覆盖 Card List MVP 所需字段：

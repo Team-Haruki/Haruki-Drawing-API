@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.path_safety import resolve_cli_path, write_cli_text
+from src.core.path_safety import resolve_cli_path
 
 STATIC_IMAGES_DIR = "static_images"
 REGION_ASSET_MODE = "startapp"
@@ -352,7 +352,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--region", default="jp", help="Asset region, such as jp/cn/tw/en/kr.")
     parser.add_argument("--card-id", action="append", type=int, required=True, help="Card ID. Repeatable.")
     parser.add_argument("--title", help="Optional Card List notice/title.")
-    parser.add_argument("--output", type=Path, help="Write JSON payload to this file. Defaults to stdout.")
     return parser.parse_args()
 
 
@@ -361,11 +360,8 @@ def main() -> None:
     master_dir = resolve_cli_path(args.master_dir, must_exist=True)
     payload = build_payload(master_dir, card_ids=args.card_id, region=args.region, title=args.title)
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-    if args.output is None:
-        sys.stdout.write(rendered)
-        sys.stdout.write("\n")
-        return
-    write_cli_text(args.output, rendered + "\n")
+    sys.stdout.write(rendered)
+    sys.stdout.write("\n")
 
 
 if __name__ == "__main__":
