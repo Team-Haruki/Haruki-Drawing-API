@@ -28,7 +28,11 @@ from src.sekai.music.model import (
 router = APIRouter(tags=["Music"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/detail", summary="Generate music detail image")
+@router.post(
+    "/detail",
+    summary="Generate music detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_detail(request: MusicDetailRequest):
     """
     Generate a detailed music image.
@@ -45,7 +49,11 @@ async def music_detail(request: MusicDetailRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/brief-list", summary="Generate music brief list image")
+@router.post(
+    "/brief-list",
+    summary="Generate music brief list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_brief_list(request: MusicBriefListRequest):
     """
     Generate a brief music list image.
@@ -62,7 +70,11 @@ async def music_brief_list(request: MusicBriefListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/list", summary="Generate music list image")
+@router.post(
+    "/list",
+    summary="Generate music list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_list(request: MusicListRequest):
     """
     Generate a music list image with user play results.
@@ -79,7 +91,11 @@ async def music_list(request: MusicListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/progress", summary="Generate play progress image")
+@router.post(
+    "/progress",
+    summary="Generate play progress image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_progress(request: PlayProgressRequest):
     """
     Generate a play progress image.
@@ -96,7 +112,11 @@ async def music_progress(request: PlayProgressRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rewards/detail", summary="Generate detailed music rewards image")
+@router.post(
+    "/rewards/detail",
+    summary="Generate detailed music rewards image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_rewards_detail(request: DetailMusicRewardsRequest):
     """
     Generate a detailed music rewards image.
@@ -113,7 +133,11 @@ async def music_rewards_detail(request: DetailMusicRewardsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/rewards/basic", summary="Generate basic music rewards image")
+@router.post(
+    "/rewards/basic",
+    summary="Generate basic music rewards image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_rewards_basic(request: BasicMusicRewardsRequest):
     """
     Generate a basic music rewards image.
