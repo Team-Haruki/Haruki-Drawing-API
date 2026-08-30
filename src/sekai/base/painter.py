@@ -66,128 +66,114 @@ def get_memo_usage() -> float | int:
     return 0
 
 
+class _DeterministicHasher:
+    """Incrementally serialize supported values into one stable SHA-256 digest."""
+
+    def __init__(self) -> None:
+        self._digest = hashlib.sha256()
+
+    def update(self, value: str | bytes) -> None:
+        self._digest.update(value.encode("utf-8") if isinstance(value, str) else value)
+
+    def serialize(self, obj: Any) -> None:
+        if self._serialize_scalar(obj):
+            return
+        if self._serialize_container(obj):
+            return
+        if self._serialize_special(obj):
+            return
+        self._serialize_reflective(obj)
+
+    def _serialize_scalar(self, obj: Any) -> bool:
+        if obj is None:
+            self.update(b"None")
+            return True
+        if isinstance(obj, bool | int | float | str | PurePath):
+            self.update(str(obj))
+            return True
+        if isinstance(obj, bytes):
+            self.update(obj)
+            return True
+        return False
+
+    def _serialize_container(self, obj: Any) -> bool:
+        if isinstance(obj, list | tuple):
+            self._serialize_items(obj)
+            return True
+        if isinstance(obj, dict):
+            for key, value in sorted(obj.items()):
+                self.serialize(key)
+                self.serialize(value)
+            return True
+        if isinstance(obj, set | frozenset):
+            self._serialize_items(sorted(obj))
+            return True
+        return False
+
+    def _serialize_special(self, obj: Any) -> bool:
+        if isinstance(obj, Image.Image):
+            self._serialize_pil_image(obj)
+            return True
+        if isinstance(obj, np.ndarray):
+            self._serialize_numpy_array(obj)
+            return True
+        if is_dataclass(obj) and not isinstance(obj, type):
+            self._serialize_dataclass(obj)
+            return True
+        if hasattr(obj, "__dict__"):
+            self._serialize_object_dict(obj)
+            return True
+        if hasattr(obj, "__iter__"):
+            self.update(f"iterable:{type(obj).__name__}:")
+            self._serialize_items(obj)
+            return True
+        return False
+
+    def _serialize_items(self, items) -> None:
+        for item in items:
+            self.serialize(item)
+
+    def _serialize_pil_image(self, image: Image.Image) -> None:
+        self.update(f"{image.size[0]}x{image.size[1]}:{image.mode}:")
+        self.update(image.tobytes())
+
+    def _serialize_numpy_array(self, array: np.ndarray) -> None:
+        self.update(f"{array.shape}:{array.dtype.str}:")
+        self.update(array.tobytes())
+
+    def _serialize_dataclass(self, obj: Any) -> None:
+        class_name = f"{obj.__class__.__module__}.{obj.__class__.__name__}"
+        self.update(f"{class_name}:")
+        for field in fields(obj):
+            self.update(f"{field.name}:")
+            self.serialize(getattr(obj, field.name))
+
+    def _serialize_object_dict(self, obj: Any) -> None:
+        class_name = f"{obj.__class__.__module__}.{obj.__class__.__name__}"
+        public_data = {key: value for key, value in obj.__dict__.items() if not key.startswith("_")}
+        self.update(f"object:{class_name}:")
+        self.serialize(public_data)
+
+    def _serialize_reflective(self, obj: Any) -> None:
+        try:
+            class_name = f"{obj.__class__.__module__}.{obj.__class__.__name__}"
+            self.update(f"{class_name}:")
+            for attr in dir(obj):
+                if not attr.startswith("_"):
+                    self.serialize(getattr(obj, attr))
+        except Exception:
+            return
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+
 def deterministic_hash(obj: Any) -> str:
-    """
-    计算复杂对象的确定性哈希值
-    """
-    ret = hashlib.sha256()
+    """Calculate a deterministic hash for nested renderer state."""
 
-    def update(s: str | bytes) -> None:
-        if isinstance(s, str):
-            s = s.encode("utf-8")
-        ret.update(s)
-
-    def _serialize(_obj: Any):
-        # 基本类型
-        if _obj is None:
-            update(b"None")
-            return None
-        elif isinstance(_obj, bool):
-            update(str(_obj))
-            return None
-        elif isinstance(_obj, int):
-            update(str(_obj))
-            return None
-        elif isinstance(_obj, float):
-            update(str(_obj))
-            return None
-        elif isinstance(_obj, str):
-            update(str(_obj))
-            return None
-        elif isinstance(_obj, bytes):
-            update(_obj)
-            return None
-        elif isinstance(_obj, PurePath):
-            update(str(_obj))
-            return None
-
-        # 容器类型
-        elif isinstance(_obj, list | tuple):
-            for item in _obj:
-                _serialize(item)
-
-        elif isinstance(_obj, dict):
-            # 字典按键排序确保一致性
-            for key, value in sorted(_obj.items()):
-                _serialize(key)
-                _serialize(value)
-
-        elif isinstance(_obj, set):
-            # 集合元素排序确保一致性
-            for item in sorted(_obj):
-                _serialize(item)
-
-        elif isinstance(_obj, frozenset):
-            for item in sorted(_obj):
-                _serialize(item)
-
-        # PIL Image
-        elif isinstance(_obj, Image.Image):
-            _serialize_pil_image(_obj)
-            return None
-
-        # NumPy数组
-        elif isinstance(_obj, np.ndarray):
-            _serialize_numpy_array(_obj)
-            return None
-
-        # Dataclass
-        elif is_dataclass(_obj) and not isinstance(_obj, type):
-            _serialize_dataclass(_obj)
-            return None
-
-        # 有__dict__属性的自定义对象
-        elif hasattr(_obj, "__dict__"):
-            class_name = f"{_obj.__class__.__module__}.{_obj.__class__.__name__}"
-            dict_data = {k: v for k, v in _obj.__dict__.items() if not k.startswith("_")}
-            update(f"object:{class_name}:")
-            _serialize(dict_data)
-            return None
-
-        # 其他可迭代对象
-        elif hasattr(_obj, "__iter__") and not isinstance(_obj, str | bytes):
-            update(f"iterable:{type(_obj).__name__}:")
-            for item in _obj:
-                _serialize(item)
-
-        else:
-            # 其他类型的对象
-            try:
-                class_name = f"{_obj.__class__.__module__}.{_obj.__class__.__name__}"
-                update(f"{class_name}:")
-                attrs = dir(_obj)
-                for attr in attrs:
-                    if not attr.startswith("_"):
-                        value = getattr(_obj, attr)
-                        _serialize(value)
-            except Exception:
-                return f"fallback:{type(_obj).__name__}:{id(_obj)}"
-
-    def _serialize_pil_image(img: Image.Image):
-        """序列化PIL Image"""
-        update(f"{img.size[0]}x{img.size[1]}:{img.mode}:")
-        update(img.tobytes())
-
-    def _serialize_numpy_array(arr):
-        """序列化NumPy数组"""
-        arr_bytes = arr.tobytes()
-        arr_shape = arr.shape
-        arr_dtype = arr.dtype.str
-        update(f"{arr_shape}:{arr_dtype}:")
-        update(arr_bytes)
-
-    def _serialize_dataclass(_obj):
-        """序列化dataclass对象"""
-        class_name = f"{_obj.__class__.__module__}.{_obj.__class__.__name__}"
-        update(f"{class_name}:")
-        # 获取所有字段
-        for _field in fields(_obj):
-            field_value = getattr(_obj, _field.name)
-            update(f"{_field.name}:")
-            _serialize(field_value)
-
-    _serialize(obj)
-    return ret.hexdigest()
+    hasher = _DeterministicHasher()
+    hasher.serialize(obj)
+    return hasher.hexdigest()
 
 
 # =========================== 基础定义 =========================== #
