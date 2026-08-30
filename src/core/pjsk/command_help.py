@@ -9,7 +9,11 @@ from src.sekai.misc.model import CommandHelpRenderRequest
 router = APIRouter(tags=["Help"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/render", summary="Generate command help image")
+@router.post(
+    "/render",
+    summary="Generate command help image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def command_help(request: CommandHelpRenderRequest):
     try:
         set_request_stage("help:try_render_payload")

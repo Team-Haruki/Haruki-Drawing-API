@@ -8,7 +8,11 @@ from src.sekai.stamp.model import StampListRequest
 router = APIRouter(tags=["Stamp"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/list", summary="Generate stamp list image")
+@router.post(
+    "/list",
+    summary="Generate stamp list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def stamp_list(request: StampListRequest):
     """
     Generate a stamp list image.

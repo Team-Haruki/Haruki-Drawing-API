@@ -8,7 +8,11 @@ from src.sekai.inventory.model import InventoryListRequest
 router = APIRouter(tags=["Inventory"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/list", summary="Generate inventory list image")
+@router.post(
+    "/list",
+    summary="Generate inventory list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def inventory_list(request: InventoryListRequest):
     try:
         payload = await try_render_inventory_list_payload(request)

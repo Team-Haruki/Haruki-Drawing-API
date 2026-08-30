@@ -16,7 +16,11 @@ from src.sekai.gacha.model import (
 router = APIRouter(tags=["Gacha"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/list", summary="Generate gacha list image")
+@router.post(
+    "/list",
+    summary="Generate gacha list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def gacha_list(request: GachaListRequest):
     """
     Generate a gacha list image.
@@ -33,7 +37,11 @@ async def gacha_list(request: GachaListRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/detail", summary="Generate gacha detail image")
+@router.post(
+    "/detail",
+    summary="Generate gacha detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def gacha_detail(request: GachaDetailRequest):
     """
     Generate a gacha detail image.

@@ -10,7 +10,11 @@ from src.sekai.vlive.model import VLiveListRequest
 router = APIRouter(tags=["VLive"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/list", summary="Generate virtual live list image")
+@router.post(
+    "/list",
+    summary="Generate virtual live list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def vlive_list(request: VLiveListRequest):
     """
     Generate a virtual live list image.
