@@ -895,6 +895,20 @@ def _load_image_cached(
         return image.copy()
 
 
+def _record_image_cache_write(is_thumb: bool, current_bytes: int, evictions: int) -> None:
+    global _image_cache_total_bytes, _thumb_cache_total_bytes
+    global _image_cache_sets, _thumb_cache_sets, _image_cache_evictions, _thumb_cache_evictions
+
+    if is_thumb:
+        _thumb_cache_total_bytes = current_bytes
+        _thumb_cache_sets += 1
+        _thumb_cache_evictions += evictions
+    else:
+        _image_cache_total_bytes = current_bytes
+        _image_cache_sets += 1
+        _image_cache_evictions += evictions
+
+
 def _put_image_cache(
     path: str,
     mtime_ns: int,
@@ -904,9 +918,6 @@ def _put_image_cache(
     target_h: int = 0,
     resample: int = 0,
 ) -> None:
-    global _image_cache_total_bytes, _thumb_cache_total_bytes
-    global _image_cache_sets, _thumb_cache_sets, _image_cache_evictions, _thumb_cache_evictions
-
     is_thumb = _is_thumbnail_path(path)
     if is_thumb:
         lock, cache = _thumb_cache_lock, _thumb_cache
@@ -930,24 +941,15 @@ def _put_image_cache(
 
         cache[cache_key] = (image, cache_bytes)
         current_bytes += cache_bytes
-        if is_thumb:
-            _thumb_cache_sets += 1
-        else:
-            _image_cache_sets += 1
 
         # 双阈值驱逐：条目数和总字节数都受控
+        evictions = 0
         while cache and (len(cache) > max_size or current_bytes > max_bytes):
             _, (evict_image, evict_bytes) = cache.popitem(last=False)
             current_bytes -= evict_bytes
-            if is_thumb:
-                _thumb_cache_evictions += 1
-            else:
-                _image_cache_evictions += 1
+            evictions += 1
             evict_image.close()
-        if is_thumb:
-            _thumb_cache_total_bytes = current_bytes
-        else:
-            _image_cache_total_bytes = current_bytes
+        _record_image_cache_write(is_thumb, current_bytes, evictions)
 
 
 def _birthday_fallback_request(full_path: Path, resolved_base: Path) -> tuple[str, int, tuple[str, ...]] | None:

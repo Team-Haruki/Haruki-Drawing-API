@@ -64,6 +64,58 @@ def _calc_custom_room_title_width(
     return max(24, usable_width // music_count)
 
 
+async def _load_custom_room_covers(music_list_map: dict) -> dict[str, ImageSource]:
+    cover_paths = {music["music_cover"] for music_list in music_list_map.values() for music in music_list}
+    if not cover_paths:
+        return {}
+    cover_list = list(cover_paths)
+    started_at = time.perf_counter()
+    cover_images = await asyncio.gather(*[get_asset_image_ref(ASSETS_BASE_DIR, path) for path in cover_list])
+    logger.debug(
+        "[perf] compose_custom_room_score_control_image preload %d covers: %.3fs",
+        len(cover_list),
+        time.perf_counter() - started_at,
+    )
+    return dict(zip(cover_list, cover_images))
+
+
+def _custom_room_music_list(music_list_map: dict, event_rate: int) -> list[dict]:
+    return music_list_map.get(str(event_rate), []) or music_list_map.get(int(event_rate), [])
+
+
+def _draw_custom_room_music_row(
+    music_list_map: dict,
+    cover_cache: dict[str, ImageSource],
+    event_rate: int,
+    column_width: int,
+    row_padding: int,
+    item_sep: int,
+    cover_size: int,
+    style: TextStyle,
+) -> None:
+    music_list = _custom_room_music_list(music_list_map, event_rate)
+    if not music_list:
+        TextBox("-", style)
+        return
+
+    title_width = _calc_custom_room_title_width(
+        column_width,
+        len(music_list),
+        row_padding,
+        item_sep,
+        cover_size,
+        style,
+    )
+    for index, music_info in enumerate(music_list):
+        if index > 0:
+            # Keep separator width consistent with _calc_custom_room_title_width
+            # (TextBox has default horizontal padding=2, which may cause overflow).
+            TextBox(" / ", style).set_padding(0)
+        music_cover = cover_cache[music_info["music_cover"]]
+        ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
+        TextBox(str(music_info["music_title"]), style, line_count=1).set_w(title_width)
+
+
 # 合成控分图片
 async def _build_score_control_canvas(
     rqd: ScoreControlRequest,
@@ -171,23 +223,7 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
     style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 50, 50))
 
     # 预加载所有歌曲封面（并行）
-    _cover_paths: set[str] = set()
-    for music_list in rqd.music_list_map.values():
-        for m in music_list:
-            _cover_paths.add(m["music_cover"])
-    _cover_list = list(_cover_paths)
-    _cover_cache: dict[str, ImageSource]
-    if _cover_list:
-        _t0 = time.perf_counter()
-        _cover_imgs = await asyncio.gather(*[get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _cover_list])
-        logger.debug(
-            "[perf] compose_custom_room_score_control_image preload %d covers: %.3fs",
-            len(_cover_list),
-            time.perf_counter() - _t0,
-        )
-        _cover_cache = dict(zip(_cover_list, _cover_imgs))
-    else:
-        _cover_cache = {}
+    cover_cache = await _load_custom_room_covers(rqd.music_list_map)
 
     # 合成图片
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -258,29 +294,16 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
                             .set_size((w2, gh))
                             .set_bg(bg)
                         ):
-                            music_list = rqd.music_list_map.get(str(event_rate), [])
-                            if not music_list:
-                                music_list = rqd.music_list_map.get(int(event_rate), [])
-
-                            if not music_list:
-                                TextBox("-", style2)
-                            else:
-                                title_width = _calc_custom_room_title_width(
-                                    w2,
-                                    len(music_list),
-                                    music_row_padding,
-                                    music_item_sep,
-                                    cover_size,
-                                    style2,
-                                )
-                                for j, music_info in enumerate(music_list):
-                                    if j > 0:
-                                        # Keep separator width consistent with _calc_custom_room_title_width
-                                        # (TextBox has default horizontal padding=2, which may cause overflow).
-                                        TextBox(" / ", style2).set_padding(0)
-                                    music_cover = _cover_cache[music_info["music_cover"]]
-                                    ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
-                                    TextBox(str(music_info["music_title"]), style2, line_count=1).set_w(title_width)
+                            _draw_custom_room_music_row(
+                                rqd.music_list_map,
+                                cover_cache,
+                                event_rate,
+                                w2,
+                                music_row_padding,
+                                music_item_sep,
+                                cover_size,
+                                style2,
+                            )
                 # PT系数
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
                     TextBox("PT系数", style1).set_size((w3, gh)).set_content_align("c").set_bg(bg_fn(0))

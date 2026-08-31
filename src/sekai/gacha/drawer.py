@@ -35,6 +35,7 @@ from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
 # 从 model.py 导入数据模型
 from .model import (
     GachaBehavior,
+    GachaBrief,
     GachaDetailRequest,
     GachaListRequest,
 )
@@ -156,50 +157,54 @@ GACHA_RARE_NAMES = {
 # ======================= Drawing Functions ======================= #
 
 
-async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
-    """合成卡池一览图片"""
+def _paginate_gacha_list(rqd: GachaListRequest) -> tuple[list[GachaBrief], int, int]:
     gachas = list(rqd.gachas)
     pre_paginated = rqd.pre_paginated or (rqd.current_page is not None and rqd.total_page is not None)
-
     if pre_paginated:
         total_pages = max(1, rqd.total_page or 1)
         page = rqd.current_page if rqd.current_page is not None else total_pages
         page = max(1, min(page, total_pages))
-    else:
-        gachas.sort(key=lambda g: g.start_at)
+        return gachas, page, total_pages
 
-        total_pages = 1
-        page_size = rqd.page_size if rqd.page_size else 20
-        if len(gachas) > 0:
-            total_pages = (len(gachas) + page_size - 1) // page_size
+    gachas.sort(key=lambda g: g.start_at)
+    page_size = rqd.page_size if rqd.page_size else 20
+    total_pages = max(1, math.ceil(len(gachas) / page_size))
+    page = max(1, min(rqd.filter.page, total_pages)) if rqd.filter.page else total_pages
+    start_index = (page - 1) * page_size
+    return gachas[start_index : start_index + page_size], page, total_pages
 
-        page = max(1, min(rqd.filter.page, total_pages)) if rqd.filter.page else total_pages
-        start_index = (page - 1) * page_size
-        gachas = gachas[start_index : start_index + page_size]
+
+async def _preload_gacha_list_images(
+    rqd: GachaListRequest,
+    gachas: list[GachaBrief],
+) -> dict[int, tuple[ImageSource, str]]:
+    image_inputs = [(rqd.gacha_logos.get(g.id), rqd.gacha_banners.get(g.id)) for g in gachas]
+    started_at = time.perf_counter()
+    results = (
+        await asyncio.gather(
+            *[get_gacha_list_image_with_fallback(logo_path, banner_path) for logo_path, banner_path in image_inputs]
+        )
+        if image_inputs
+        else []
+    )
+    logger.debug(
+        "[perf] compose_gacha_list_image preload %d list images: %.3fs",
+        len(image_inputs),
+        time.perf_counter() - started_at,
+    )
+    return {g.id: result for g, result in zip(gachas, results)}
+
+
+async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
+    """合成卡池一览图片"""
+    gachas, page, total_pages = _paginate_gacha_list(rqd)
 
     row_count = max(1, math.ceil(math.sqrt(len(gachas))))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
 
     # 预加载所有列表缩略图，优先 logo，缺失时回退 banner。
-    _list_image_inputs = [(rqd.gacha_logos.get(g.id), rqd.gacha_banners.get(g.id)) for g in gachas]
-    _t0 = time.perf_counter()
-    _list_image_results = (
-        await asyncio.gather(
-            *[
-                get_gacha_list_image_with_fallback(logo_path, banner_path)
-                for logo_path, banner_path in _list_image_inputs
-            ]
-        )
-        if _list_image_inputs
-        else []
-    )
-    _list_image_cache = {g.id: result for g, result in zip(gachas, _list_image_results)}
-    logger.debug(
-        "[perf] compose_gacha_list_image preload %d list images: %.3fs",
-        len(_list_image_inputs),
-        time.perf_counter() - _t0,
-    )
+    list_image_cache = await _preload_gacha_list_images(rqd, gachas)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(4).set_content_align("lt").set_item_align("lt"):
@@ -219,7 +224,7 @@ async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
                     bg = roundrect_bg(bg_color, 5)
                     with HSplit().set_padding(4).set_sep(4).set_item_align("lt").set_content_align("lt").set_bg(bg):
                         with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
-                            list_image_data = _list_image_cache.get(g.id)
+                            list_image_data = list_image_cache.get(g.id)
                             if list_image_data is None:
                                 fallback_path = rqd.gacha_banners.get(g.id) or rqd.gacha_logos.get(g.id)
                                 list_image_data = (await get_unknown_fallback_image(fallback_path), "unknown")

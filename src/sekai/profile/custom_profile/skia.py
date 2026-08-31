@@ -1473,6 +1473,18 @@ def _native_profile_honor_badge(
         honor_level=level,
         full_size=full_size,
     )
+    for payload in _native_profile_honor_payloads(renderer, candidates):
+        request = HonorRequest.model_validate(payload)
+        status, badge = _lower_native_honor_request(renderer, request)
+        if status in {"unrenderable", "missing"}:
+            continue
+        if status != "ready" or badge is None:
+            return "hybrid", None
+        return "ready", badge
+    return "missing", None
+
+
+def _native_profile_honor_payloads(renderer: PNGRenderer, candidates: Any) -> Iterator[dict[str, Any]]:
     seen_payloads: set[int] = set()
     request_maps = (
         (renderer.profile_honor_requests, candidates.profile_keys),
@@ -1484,14 +1496,7 @@ def _native_profile_honor_badge(
             if not isinstance(payload, dict) or id(payload) in seen_payloads:
                 continue
             seen_payloads.add(id(payload))
-            request = HonorRequest.model_validate(payload)
-            status, badge = _lower_native_honor_request(renderer, request)
-            if status in {"unrenderable", "missing"}:
-                continue
-            if status != "ready" or badge is None:
-                return "hybrid", None
-            return "ready", badge
-    return "missing", None
+            yield payload
 
 
 def _prepare_native_honor_deck_slots(

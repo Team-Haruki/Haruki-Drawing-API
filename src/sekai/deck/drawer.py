@@ -286,6 +286,33 @@ def draw_event_planner_block(planner, planner_music_imgs: dict[str, ImageSource]
                 ).set_w(920)
 
 
+_RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX = {"mysekai", "challenge", "challenge_all", "bonus", "wl_bonus"}
+
+
+def _recommend_type_title(recommend_type: str, event_id: int | None, wl_chara_name: str | None) -> str:
+    if recommend_type == "mysekai":
+        return f"烤森活动#{event_id}组卡" if event_id else "烤森模拟活动组卡"
+    if recommend_type in {"challenge", "challenge_all"}:
+        return "每日挑战组卡"
+    if recommend_type == "bonus":
+        return f"活动#{event_id}加成组卡"
+    if recommend_type == "wl_bonus":
+        return f"WL活动#{event_id}加成组卡"
+    if recommend_type == "event":
+        return f"活动#{event_id}组卡"
+    if recommend_type == "wl":
+        if event_id:
+            return f"WL活动#{event_id}组卡"
+        return "WL模拟组卡" if wl_chara_name else "WL终章活动组卡"
+    return {"unit_attr": "团队+颜色模拟活动组卡", "no_event": "无活动组卡"}.get(recommend_type, "")
+
+
+def _recommend_live_suffix(live_type: str | None, live_name: str | None) -> str:
+    if live_type == "multi":
+        return f"({live_name})"
+    return {"solo": "(单人)", "auto": "(AUTO)"}.get(live_type, "")
+
+
 def build_recommend_title(
     recommend_type: str,
     event_id: int | None,
@@ -293,43 +320,10 @@ def build_recommend_title(
     live_type: str | None,
     live_name: str | None,
 ) -> str:
-    title = ""
-
-    if recommend_type == "mysekai":
-        if event_id:
-            title += f"烤森活动#{event_id}组卡"
-        else:
-            title += "烤森模拟活动组卡"
-    elif recommend_type in ["challenge", "challenge_all"]:
-        title += "每日挑战组卡"
-    elif recommend_type in ["bonus", "wl_bonus"]:
-        if recommend_type == "bonus":
-            title += f"活动#{event_id}加成组卡"
-        elif recommend_type == "wl_bonus":
-            title += f"WL活动#{event_id}加成组卡"
-    else:
-        if recommend_type == "event":
-            title += f"活动#{event_id}组卡"
-        elif recommend_type == "wl":
-            if event_id:
-                title += f"WL活动#{event_id}组卡"
-            elif wl_chara_name:
-                title += "WL模拟组卡"
-            else:
-                title += "WL终章活动组卡"
-        elif recommend_type == "unit_attr":
-            title += "团队+颜色模拟活动组卡"
-        elif recommend_type == "no_event":
-            title += "无活动组卡"
-
-        if live_type == "multi":
-            title += f"({live_name})"
-        elif live_type == "solo":
-            title += "(单人)"
-        elif live_type == "auto":
-            title += "(AUTO)"
-
-    return title
+    title = _recommend_type_title(recommend_type, event_id, wl_chara_name)
+    if recommend_type in _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX:
+        return title
+    return title + _recommend_live_suffix(live_type, live_name)
 
 
 async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
