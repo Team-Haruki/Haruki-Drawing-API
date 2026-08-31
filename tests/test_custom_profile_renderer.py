@@ -2843,6 +2843,144 @@ def test_custom_profile_static_atlas_run_reuses_placement_and_field_helpers(tmp_
     assert renderer.tmp_static_atlas_placements("font", TextRun("B", style), 20.0, asset) is None
 
 
+def test_custom_profile_render_text_uses_measured_pillow_layout(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, text_layout="pil", text_pivot="left", tmp_font_scale=1.0)
+    text_data = renderer_mod.TMPGeneratedTextData("AB", 1, 0x0101, 24.0, 0.0, 0, 0, 0.0)
+    mesh_state = renderer_mod.TMPUpdateMeshState("font", None, "AB", 24.0, "#112233", 0x0101, 0.0, "#445566", 0.0)
+    draws: list[tuple[float, float, float]] = []
+    monkeypatch.setattr(renderer, "generate_text_data", lambda _item: text_data)
+    monkeypatch.setattr(renderer, "update_text_mesh_state", lambda *_: mesh_state)
+    monkeypatch.setattr(renderer, "font_path_for", lambda *_: tmp_path / "font.ttf")
+    monkeypatch.setattr(renderer_mod, "load_font", lambda *_: object())
+    monkeypatch.setattr(
+        renderer,
+        "measure_tmp_run",
+        lambda *_: renderer_mod.TMPRunMeasure(10.0, -1.0, 9.0, -2.0, 8.0),
+    )
+    monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_: 1.0)
+    monkeypatch.setattr(
+        renderer,
+        "draw_run",
+        lambda _img, _font_name, _font_path, _run, x, y, line_h, *_rest: draws.append((x, y, line_h)),
+    )
+
+    rendered = renderer.render_text({})
+
+    assert rendered is not None
+    image, pivot = rendered
+    assert image.width > 10
+    assert pivot == (renderer.text_pad(24.0, 0), image.height / 2)
+    assert draws == [(renderer.text_pad(24.0, 0), renderer.text_pad(24.0, 0), 24.0)]
+
+    monkeypatch.setattr(renderer, "generate_text_data", lambda _item: replace(text_data, text=" "))
+    assert renderer.render_text({}) is None
+
+
+def test_custom_profile_tmp_text_box_delegates_layout_and_drawing(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    line = renderer_mod.StyledLine([TextRun("A", style)], style)
+    text_data = renderer_mod.TMPGeneratedTextData("A", 1, 0x0101, 24.0, 0.0, 0, 0, 0.0)
+    mesh_state = renderer_mod.TMPUpdateMeshState("font", None, "A", 24.0, "#112233", 0x0101, 0.0, "#445566", 0.0)
+    native_line_layout = SimpleNamespace(baselines=[0.0], max_ascender=8.0, max_descender=-2.0, content_height=10.0)
+    native_layout = SimpleNamespace(
+        dominant_size=24.0,
+        preferred_width=20.0,
+        preferred_height=10.0,
+        content_height=10.0,
+    )
+    mesh_line = SimpleNamespace(
+        styled_line=line,
+        run_metrics=[(line.runs[0], 0.0, 5.0)],
+        y_down=0.0,
+        line_height=10.0,
+        width=5.0,
+    )
+    mesh_layout = SimpleNamespace(
+        lines=[mesh_line],
+        line_layout=native_line_layout,
+        accumulated_line_height=10.0,
+    )
+    draw_calls: list[tuple[float, float]] = []
+    audits: list[tuple] = []
+    monkeypatch.setattr(renderer, "generate_text_data", lambda _item: text_data)
+    monkeypatch.setattr(renderer, "update_text_mesh_state", lambda *_: mesh_state)
+    monkeypatch.setattr(renderer, "resolve_tmp_text_box_layouts", lambda *_: (native_layout, mesh_layout))
+    monkeypatch.setattr(renderer, "tmp_text_box_size", lambda *_: (20.0, 10.0))
+    monkeypatch.setattr(renderer, "tmp_native_baseline_downs", lambda *_: [5.0])
+    monkeypatch.setattr(renderer, "tmp_native_mesh_pixel_bounds", lambda *_: (0.0, 0.0, 20.0, 10.0))
+    monkeypatch.setattr(renderer, "record_tmp_layout_audit", lambda *args: audits.append(args))
+    monkeypatch.setattr(
+        renderer,
+        "draw_tmp_text_box_content",
+        lambda _image, _font_name, _font_path, _layout, _baselines, _align, _box_w, x, y, *_rest: draw_calls.append(
+            (x, y)
+        ),
+    )
+
+    rendered = renderer.render_tmp_text_box({}, "font", tmp_path / "font.ttf", style, [line])
+
+    assert rendered is not None
+    image, pivot = rendered
+    pad = renderer.text_pad(24.0, 0)
+    assert image.size == (20 + pad * 2, 10 + pad * 2)
+    assert pivot == (pad + 10.0, pad + 5.0)
+    assert draw_calls == [(pad, pad)]
+    assert len(audits) == 1
+
+
+def test_custom_profile_tmp_text_box_layout_resolution_reflows_percent_indent(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = replace(_base_tmp_style(), indent_percent=0.5)
+    line = renderer_mod.StyledLine([], style)
+    preferred = SimpleNamespace(marker="preferred")
+    reflowed = SimpleNamespace(marker="reflowed")
+    mesh = SimpleNamespace(marker="mesh")
+    calls: list[tuple[str, float | None]] = []
+
+    def fake_layout(*args, **_kwargs):
+        calls.append((args[6], args[8]))
+        if args[6] == "mesh":
+            return mesh
+        return preferred if args[8] is None else reflowed
+
+    monkeypatch.setattr(renderer, "tmp_native_text_layout", fake_layout)
+    monkeypatch.setattr(renderer, "tmp_resolve_percent_indent_margin_width", lambda *_: 40.0)
+
+    resolved = renderer.resolve_tmp_text_box_layouts([line], "font", tmp_path / "font.ttf", 24.0, 0.0, 24.0, 0.0)
+
+    assert resolved == (reflowed, mesh)
+    assert calls == [("preferred", None), ("preferred", 40.0), ("mesh", 40.0)]
+
+
+def test_custom_profile_dynamic_sdf_run_composes_scaled_glyphs(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, tmp_scale_mode="x")
+    style = replace(_base_tmp_style(), scale_x=2.0, mspace=6.0)
+    gate_asset = SimpleNamespace(atlas_population_mode=1)
+    cached = renderer_mod.TMPDynamicGlyphSDF(Image.new("L", (2, 2), 255), (0, 0, 2, 2), 1, 10.0)
+    monkeypatch.setattr(renderer, "tmp_sdf_asset", lambda *_: gate_asset)
+    monkeypatch.setattr(renderer_mod, "load_font", lambda *_: object())
+    monkeypatch.setattr(renderer, "glyph_advance", lambda *_: 4.0)
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda _font, char, _size: char)
+    monkeypatch.setattr(renderer, "tmp_dynamic_glyph_sdf", lambda *_: (cached, None))
+    monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_: 1.0)
+    monkeypatch.setattr(
+        renderer,
+        "shade_tmp_sdf_field",
+        lambda field, *_: Image.new("RGBA", (field.shape[1], field.shape[0]), (255, 255, 255, 255)),
+    )
+
+    rendered = renderer.render_tmp_dynamic_sdf_run_from_glyphs(
+        "font", tmp_path / "font.ttf", TextRun("AB", style), 20.0, "#000000", 0.0
+    )
+
+    assert rendered is not None
+    image, bbox, pad = rendered
+    assert image.size == (34, 8)
+    assert bbox == (0, 0, 26, 4)
+    assert pad == 2
+
+
 def test_custom_profile_region_path_expands_region_placeholder(tmp_path: Path) -> None:
     target = tmp_path / "asset" / "jp-assets" / "startapp" / "custom_profile"
     target.mkdir(parents=True)
