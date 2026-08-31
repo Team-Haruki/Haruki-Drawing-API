@@ -423,6 +423,36 @@ def test_scene_declines_unsupported_content_without_rendering_pillow_layers():
     assert report.metrics()["classifications_by_kind"] == {"general": {"unresolved": 2}}
 
 
+def test_native_content_result_classifies_hidden_content_without_emitters():
+    content = NativeContent(layer=1, kind="general", item={}, object_data={"visible": False})
+
+    assert skia_mod._native_content_result(object(), content, object()) == ("hidden", "hidden")
+
+
+def test_native_content_result_declines_quads_rejected_by_scene(monkeypatch):
+    content = NativeContent(layer=1, kind="text", item={}, object_data={"visible": True})
+    for name in (
+        "_emit_native_asset_image",
+        "_emit_native_omikuji_collection",
+        "_emit_native_shape",
+        "_emit_native_card_member",
+        "_emit_native_honor",
+        "_emit_native_simple_tmp_text",
+    ):
+        monkeypatch.setattr(skia_mod, name, lambda *_args: False)
+    monkeypatch.setattr(skia_mod, "_emit_native_card_general", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_emit_native_honor_deck", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_emit_native_general", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_is_empty_text_noop", lambda *_args: False)
+    monkeypatch.setattr(skia_mod, "_direct_text_quads", lambda *_args: [object()])
+
+    class _Scene:
+        def emit_sdf_quads(self, _quads):
+            return False
+
+    assert skia_mod._native_content_result(object(), content, _Scene()) is None
+
+
 def test_scene_routes_non_decorative_tmp_through_sparse_native_quads(monkeypatch):
     content = NativeContent(
         layer=1,

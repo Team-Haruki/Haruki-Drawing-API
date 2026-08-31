@@ -442,92 +442,118 @@ async def try_render_event_detail_payload(rqd: EventDetailRequest) -> EncodedIma
     return await render_canvas_payload(await _build_event_detail_canvas(rqd), endpoint="event_detail")
 
 
-# 合成活动记录图片
-async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
-    user_events = rqd.event_info
-    user_wl_events = rqd.wl_event_info
+def _event_record_sort_rank(item: EventHistoryInfo) -> int | float:
+    if item.rank is not None:
+        return item.rank
+    if item.rank_tier is not None:
+        return item.rank_tier
+    rank_display = (item.rank_display or "").strip().upper()
+    if rank_display.startswith("T") and rank_display[1:].isdigit():
+        return int(rank_display[1:])
+    return float("inf")
 
-    style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
-    style2 = TextStyle(font=DEFAULT_FONT, size=16, color=(70, 70, 70))
-    style3 = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
-    style4 = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))
 
-    def event_record_sort_rank(item: EventHistoryInfo) -> int | float:
-        if item.rank is not None:
-            return item.rank
-        if item.rank_tier is not None:
-            return item.rank_tier
-        if item.rank_display:
-            rank_display = item.rank_display.strip().upper()
-            if rank_display.startswith("T") and rank_display[1:].isdigit():
-                return int(rank_display[1:])
-        return float("inf")
+def _event_record_point(item: EventHistoryInfo) -> int:
+    return item.event_point if item.event_point is not None else 0
 
-    def event_record_point(item: EventHistoryInfo) -> int:
-        return item.event_point if item.event_point is not None else 0
 
-    async def draw_events(name, user_events: list[EventHistoryInfo]):
-        topk = 30
-        if any(item.rank is not None or item.rank_display or item.rank_tier is not None for item in user_events):
-            has_rank = True
-            title = f"排名前{topk}的{name}记录"
-            user_events.sort(key=lambda x: (event_record_sort_rank(x), -event_record_point(x)))
-        else:
-            has_rank = False
-            title = f"活动点数前{topk}的{name}记录"
-            user_events.sort(key=lambda x: -event_record_point(x))
+def _event_record_rows(name: str, events: list[EventHistoryInfo]) -> tuple[str, bool, list[EventHistoryInfo]]:
+    topk = 30
+    has_rank = any(item.rank is not None or item.rank_display or item.rank_tier is not None for item in events)
+    if has_rank:
+        events.sort(key=lambda item: (_event_record_sort_rank(item), -_event_record_point(item)))
+        return f"排名前{topk}的{name}记录", True, events[:topk]
+    events.sort(key=lambda item: -_event_record_point(item))
+    return f"活动点数前{topk}的{name}记录", False, events[:topk]
 
-        user_events = user_events[:topk]
 
+async def _draw_event_record_events_column(
+    events: list[EventHistoryInfo],
+    header_style: TextStyle,
+    detail_style: TextStyle,
+    header_height: int,
+    row_sep: int,
+    row_height: int,
+) -> None:
+    with VSplit().set_padding(0).set_sep(row_sep).set_item_align("c").set_content_align("c"):
+        TextBox("活动", header_style).set_h(header_height).set_content_align("c")
+        for item in events:
+            with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(row_height):
+                if item.wl_chara_icon_path:
+                    ImageBox(
+                        await get_asset_image_ref(ASSETS_BASE_DIR, item.wl_chara_icon_path),
+                        size=(None, row_height),
+                    )
+                ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, item.banner_path), size=(None, row_height))
+                with VSplit().set_padding(0).set_sep(2).set_item_align("l").set_content_align("l"):
+                    TextBox(f"【{item.id}】{item.event_name}", detail_style).set_w(150)
+                    TextBox(f"S {item.start_at.strftime('%Y-%m-%d %H:%M')}", detail_style)
+                    TextBox(f"T {item.end_at.strftime('%Y-%m-%d %H:%M')}", detail_style)
+
+
+def _draw_event_record_rank_column(
+    events: list[EventHistoryInfo],
+    style: TextStyle,
+    header_style: TextStyle,
+    header_height: int,
+    row_sep: int,
+    row_height: int,
+) -> None:
+    with VSplit().set_padding(0).set_sep(row_sep).set_item_align("c").set_content_align("c"):
+        TextBox("排名", header_style).set_h(header_height).set_content_align("c")
+        for item in events:
+            rank_text = f"#{item.rank}" if item.rank is not None else (item.rank_display or "-")
+            TextBox(rank_text, style, overflow="clip").set_h(row_height).set_content_align("c")
+
+
+def _draw_event_record_point_column(
+    events: list[EventHistoryInfo],
+    style: TextStyle,
+    header_style: TextStyle,
+    header_height: int,
+    row_sep: int,
+    row_height: int,
+) -> None:
+    with VSplit().set_padding(0).set_sep(row_sep).set_item_align("c").set_content_align("c"):
+        TextBox("PT", header_style).set_h(header_height).set_content_align("c")
+        for item in events:
+            point_text = str(item.event_point) if item.event_point is not None else "-"
+            TextBox(point_text, style, overflow="clip").set_h(row_height).set_content_align("c")
+
+
+async def _draw_event_record_group(
+    name: str,
+    events: list[EventHistoryInfo],
+    header_style: TextStyle,
+    detail_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    title, has_rank, rows = _event_record_rows(name, events)
+    with (
+        VSplit().set_padding(16).set_sep(16).set_item_align("lt").set_content_align("lt").set_bg(roundrect_bg(alpha=80))
+    ):
+        TextBox(title, header_style)
+        header_height, row_sep, row_height = 28, 40, 80
         with (
-            VSplit()
+            HSplit()
             .set_padding(16)
             .set_sep(16)
             .set_item_align("lt")
             .set_content_align("lt")
             .set_bg(roundrect_bg(alpha=80))
         ):
-            TextBox(title, style1)
+            await _draw_event_record_events_column(rows, header_style, detail_style, header_height, row_sep, row_height)
+            if has_rank:
+                _draw_event_record_rank_column(rows, value_style, header_style, header_height, row_sep, row_height)
+            _draw_event_record_point_column(rows, value_style, header_style, header_height, row_sep, row_height)
 
-            th, sh, gh = 28, 40, 80
-            with (
-                HSplit()
-                .set_padding(16)
-                .set_sep(16)
-                .set_item_align("lt")
-                .set_content_align("lt")
-                .set_bg(roundrect_bg(alpha=80))
-            ):
-                # 活动信息
-                with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
-                    TextBox("活动", style1).set_h(th).set_content_align("c")
-                    for item in user_events:
-                        event_start_at = item.start_at
-                        event_end_at = item.end_at
-                        with HSplit().set_padding(0).set_sep(4).set_item_align("l").set_content_align("l").set_h(gh):
-                            if item.wl_chara_icon_path:
-                                ImageBox(
-                                    await get_asset_image_ref(ASSETS_BASE_DIR, item.wl_chara_icon_path),
-                                    size=(None, gh),
-                                )
-                            ImageBox(await get_asset_image_ref(ASSETS_BASE_DIR, item.banner_path), size=(None, gh))
-                            with VSplit().set_padding(0).set_sep(2).set_item_align("l").set_content_align("l"):
-                                TextBox(f"【{item.id}】{item.event_name}", style2).set_w(150)
-                                TextBox(f"S {event_start_at.strftime('%Y-%m-%d %H:%M')}", style2)
-                                TextBox(f"T {event_end_at.strftime('%Y-%m-%d %H:%M')}", style2)
-                # 排名
-                if has_rank:
-                    with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
-                        TextBox("排名", style1).set_h(th).set_content_align("c")
-                        for item in user_events:
-                            rank_text = f"#{item.rank}" if item.rank is not None else (item.rank_display or "-")
-                            TextBox(rank_text, style3, overflow="clip").set_h(gh).set_content_align("c")
-                # 活动点数
-                with VSplit().set_padding(0).set_sep(sh).set_item_align("c").set_content_align("c"):
-                    TextBox("PT", style1).set_h(th).set_content_align("c")
-                    for item in user_events:
-                        point_text = str(item.event_point) if item.event_point is not None else "-"
-                        TextBox(point_text, style3, overflow="clip").set_h(gh).set_content_align("c")
+
+# 合成活动记录图片
+async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
+    header_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
+    detail_style = TextStyle(font=DEFAULT_FONT, size=16, color=(70, 70, 70))
+    value_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
+    note_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(50, 50, 50))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -535,12 +561,12 @@ async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
             note = "每次上传时进行增量更新，未上传过的记录将会丢失"
             if rqd.rank_note:
                 note = f"{note}\n{rqd.rank_note}"
-            TextBox(note, style4).set_bg(roundrect_bg(alpha=80)).set_padding(12)
+            TextBox(note, note_style).set_bg(roundrect_bg(alpha=80)).set_padding(12)
             with HSplit().set_sep(16).set_item_align("lt").set_content_align("lt"):
-                if user_events:
-                    await draw_events("活动", user_events)
-                if user_wl_events:
-                    await draw_events("WL单榜", user_wl_events)
+                if rqd.event_info:
+                    await _draw_event_record_group("活动", rqd.event_info, header_style, detail_style, value_style)
+                if rqd.wl_event_info:
+                    await _draw_event_record_group("WL单榜", rqd.wl_event_info, header_style, detail_style, value_style)
 
     add_request_watermark(canvas, rqd)
     return canvas

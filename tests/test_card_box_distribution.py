@@ -16,6 +16,7 @@ from src.sekai.card.model import (
     CardDistributionCharacterStat,
     UserCard,
 )
+from src.sekai.profile.model import DetailedProfileCardRequest
 
 
 def test_card_box_request_accepts_distribution_contract():
@@ -96,6 +97,62 @@ def test_card_box_distribution_fallback_counts_owned_cards():
     assert cute.count == 2
     assert cute.owned_count == 2
     assert cute.bar_count == 2
+
+
+def test_card_box_distribution_fallback_uses_owned_counts_and_unknown_attributes():
+    request = CardBoxRequest(
+        cards=[
+            UserCard(
+                card=CardBasic(card_id=1001, character_id=5, rare="rarity_4", attr="cute"),
+                has_card=True,
+            ),
+            UserCard(
+                card=CardBasic(card_id=1002, character_id=5, rare="rarity_4", attr="special"),
+                has_card=False,
+            ),
+            UserCard(
+                card=CardBasic(card_id=1003, character_id=None, rare="rarity_4", attr=None),
+                has_card=True,
+            ),
+        ],
+        region="jp",
+        user_info=DetailedProfileCardRequest(
+            id="1",
+            region="jp",
+            nickname="tester",
+            source="test",
+            update_time=0,
+            leader_image_path="leader.png",
+        ),
+        character_icon_paths={5: "mnr.png"},
+        character_color_codes={5: "#33AAEE"},
+    )
+
+    distribution = _fallback_card_box_distribution(request)
+
+    assert distribution.owned_data is True
+    assert distribution.total_count == 3
+    assert distribution.owned_count == 2
+    assert distribution.max_character_bar_count == 1
+    assert distribution.character_stats[0].share == 0.5
+    assert distribution.character_stats[0].bar_ratio == 1.0
+    assert [stat.attr for stat in distribution.attribute_stats][-1] == "unknown"
+    unknown = next(stat for stat in distribution.attribute_stats if stat.attr == "unknown")
+    assert unknown.count == 2
+    assert unknown.bar_count == 1
+    assert unknown.character_stats[0].bar_ratio == 0.0
+    assert unknown.character_stats[0].share == 0.0
+
+
+def test_card_box_distribution_fallback_handles_empty_cards():
+    distribution = _fallback_card_box_distribution(CardBoxRequest(cards=[], region="jp", character_icon_paths={}))
+
+    assert distribution.total_count == 0
+    assert distribution.owned_count == 0
+    assert distribution.max_character_bar_count == 0
+    assert distribution.max_attribute_bar_count == 0
+    assert distribution.character_stats == []
+    assert all(stat.share == 0.0 and stat.bar_ratio == 0.0 for stat in distribution.attribute_stats)
 
 
 def test_single_character_progress_splits_rarity_and_total():

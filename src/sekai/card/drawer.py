@@ -413,86 +413,114 @@ def _attribute_stat_map(distribution: CardBoxDistribution | None) -> dict[str, C
     return {stat.attr: stat for stat in distribution.attribute_stats}
 
 
-def _fallback_card_box_distribution(rqd: CardBoxRequest) -> CardBoxDistribution:
-    owned_data = rqd.user_info is not None
+def _increment_card_box_bucket(bucket: dict[str, int], has_card: bool) -> None:
+    bucket["count"] += 1
+    bucket["owned_count"] += int(has_card)
+
+
+def _card_box_buckets(
+    rqd: CardBoxRequest,
+) -> tuple[
+    dict[int, dict[str, int]],
+    dict[str, dict[str, int]],
+    dict[str, dict[int, dict[str, int]]],
+    int,
+]:
     character_buckets: dict[int, dict[str, int]] = {}
-    attribute_buckets: dict[str, dict[str, int]] = {
-        attr: {"count": 0, "owned_count": 0} for attr in CARD_BOX_ATTR_ORDER
-    }
+    attribute_buckets = {attr: {"count": 0, "owned_count": 0} for attr in CARD_BOX_ATTR_ORDER}
     attribute_character_buckets: dict[str, dict[int, dict[str, int]]] = {}
-    total_count = 0
     owned_count = 0
 
     for user_card in rqd.cards:
-        total_count += 1
         has_card = bool(user_card.has_card)
-        if has_card:
-            owned_count += 1
+        owned_count += int(has_card)
         character_id = user_card.card.character_id
         if character_id is not None:
-            bucket = character_buckets.setdefault(character_id, {"count": 0, "owned_count": 0})
-            bucket["count"] += 1
-            bucket["owned_count"] += int(has_card)
+            _increment_card_box_bucket(
+                character_buckets.setdefault(character_id, {"count": 0, "owned_count": 0}),
+                has_card,
+            )
 
         attr = _normalize_card_box_attr(user_card.card.attr)
-        bucket = attribute_buckets.setdefault(attr, {"count": 0, "owned_count": 0})
-        bucket["count"] += 1
-        bucket["owned_count"] += int(has_card)
-        if character_id is not None:
-            char_bucket = attribute_character_buckets.setdefault(attr, {}).setdefault(
-                character_id, {"count": 0, "owned_count": 0}
-            )
-            char_bucket["count"] += 1
-            char_bucket["owned_count"] += int(has_card)
-
-    denominator = owned_count if owned_data else total_count
-
-    character_stats: list[CardDistributionCharacterStat] = []
-    max_character_bar_count = 0
-    for character_id in sorted(character_buckets):
-        bucket = character_buckets[character_id]
-        bar_count = bucket["owned_count"] if owned_data else bucket["count"]
-        max_character_bar_count = max(max_character_bar_count, bar_count)
-        character_stats.append(
-            CardDistributionCharacterStat(
-                character_id=character_id,
-                count=bucket["count"],
-                owned_count=bucket["owned_count"],
-                bar_count=bar_count,
-                color_code=rqd.character_color_codes.get(character_id),
-                icon_path=rqd.character_icon_paths.get(character_id),
-            )
+        _increment_card_box_bucket(
+            attribute_buckets.setdefault(attr, {"count": 0, "owned_count": 0}),
+            has_card,
         )
-    for stat in character_stats:
-        stat.bar_ratio = stat.bar_count / max_character_bar_count if max_character_bar_count > 0 else 0.0
-        stat.share = stat.bar_count / denominator if denominator > 0 else 0.0
-
-    attribute_stats: list[CardDistributionAttributeStat] = []
-    max_attribute_bar_count = 0
-    for attr in [*CARD_BOX_ATTR_ORDER, *sorted(k for k in attribute_buckets if k not in CARD_BOX_ATTR_ORDER)]:
-        bucket = attribute_buckets[attr]
-        bar_count = bucket["owned_count"] if owned_data else bucket["count"]
-        max_attribute_bar_count = max(max_attribute_bar_count, bar_count)
-        group_character_stats: list[CardDistributionCharacterStat] = []
-        group_max = 0
-        for character_id in sorted(attribute_character_buckets.get(attr, {})):
-            char_bucket = attribute_character_buckets[attr][character_id]
-            char_bar_count = char_bucket["owned_count"] if owned_data else char_bucket["count"]
-            group_max = max(group_max, char_bar_count)
-            group_character_stats.append(
-                CardDistributionCharacterStat(
-                    character_id=character_id,
-                    count=char_bucket["count"],
-                    owned_count=char_bucket["owned_count"],
-                    bar_count=char_bar_count,
-                    color_code=rqd.character_color_codes.get(character_id),
-                    icon_path=rqd.character_icon_paths.get(character_id),
-                )
+        if character_id is not None:
+            _increment_card_box_bucket(
+                attribute_character_buckets.setdefault(attr, {}).setdefault(
+                    character_id, {"count": 0, "owned_count": 0}
+                ),
+                has_card,
             )
-        for stat in group_character_stats:
-            stat.bar_ratio = stat.bar_count / group_max if group_max > 0 else 0.0
-            stat.share = stat.bar_count / bar_count if bar_count > 0 else 0.0
-        attribute_stats.append(
+    return character_buckets, attribute_buckets, attribute_character_buckets, owned_count
+
+
+def _card_box_bar_count(bucket: dict[str, int], owned_data: bool) -> int:
+    return bucket["owned_count"] if owned_data else bucket["count"]
+
+
+def _card_box_character_stats(
+    rqd: CardBoxRequest,
+    buckets: dict[int, dict[str, int]],
+    owned_data: bool,
+    denominator: int,
+) -> tuple[list[CardDistributionCharacterStat], int]:
+    stats = [
+        CardDistributionCharacterStat(
+            character_id=character_id,
+            count=buckets[character_id]["count"],
+            owned_count=buckets[character_id]["owned_count"],
+            bar_count=_card_box_bar_count(buckets[character_id], owned_data),
+            color_code=rqd.character_color_codes.get(character_id),
+            icon_path=rqd.character_icon_paths.get(character_id),
+        )
+        for character_id in sorted(buckets)
+    ]
+    maximum = max((stat.bar_count for stat in stats), default=0)
+    for stat in stats:
+        stat.bar_ratio = stat.bar_count / maximum if maximum else 0.0
+        stat.share = stat.bar_count / denominator if denominator else 0.0
+    return stats, maximum
+
+
+def _card_box_attribute_character_stats(
+    rqd: CardBoxRequest,
+    buckets: dict[int, dict[str, int]],
+    owned_data: bool,
+    denominator: int,
+) -> list[CardDistributionCharacterStat]:
+    stats = [
+        CardDistributionCharacterStat(
+            character_id=character_id,
+            count=buckets[character_id]["count"],
+            owned_count=buckets[character_id]["owned_count"],
+            bar_count=_card_box_bar_count(buckets[character_id], owned_data),
+            color_code=rqd.character_color_codes.get(character_id),
+            icon_path=rqd.character_icon_paths.get(character_id),
+        )
+        for character_id in sorted(buckets)
+    ]
+    maximum = max((stat.bar_count for stat in stats), default=0)
+    for stat in stats:
+        stat.bar_ratio = stat.bar_count / maximum if maximum else 0.0
+        stat.share = stat.bar_count / denominator if denominator else 0.0
+    return stats
+
+
+def _card_box_attribute_stats(
+    rqd: CardBoxRequest,
+    buckets: dict[str, dict[str, int]],
+    character_buckets: dict[str, dict[int, dict[str, int]]],
+    owned_data: bool,
+    denominator: int,
+) -> tuple[list[CardDistributionAttributeStat], int]:
+    attrs = [*CARD_BOX_ATTR_ORDER, *sorted(attr for attr in buckets if attr not in CARD_BOX_ATTR_ORDER)]
+    stats: list[CardDistributionAttributeStat] = []
+    for attr in attrs:
+        bucket = buckets[attr]
+        bar_count = _card_box_bar_count(bucket, owned_data)
+        stats.append(
             CardDistributionAttributeStat(
                 attr=attr,
                 label=_card_box_attr_label(attr),
@@ -500,13 +528,36 @@ def _fallback_card_box_distribution(rqd: CardBoxRequest) -> CardBoxDistribution:
                 owned_count=bucket["owned_count"],
                 bar_count=bar_count,
                 color_code=_card_box_attr_color(attr),
-                character_stats=group_character_stats,
+                character_stats=_card_box_attribute_character_stats(
+                    rqd,
+                    character_buckets.get(attr, {}),
+                    owned_data,
+                    bar_count,
+                ),
             )
         )
-    for stat in attribute_stats:
-        stat.bar_ratio = stat.bar_count / max_attribute_bar_count if max_attribute_bar_count > 0 else 0.0
-        stat.share = stat.bar_count / denominator if denominator > 0 else 0.0
+    maximum = max((stat.bar_count for stat in stats), default=0)
+    for stat in stats:
+        stat.bar_ratio = stat.bar_count / maximum if maximum else 0.0
+        stat.share = stat.bar_count / denominator if denominator else 0.0
+    return stats, maximum
 
+
+def _fallback_card_box_distribution(rqd: CardBoxRequest) -> CardBoxDistribution:
+    owned_data = rqd.user_info is not None
+    character_buckets, attribute_buckets, attribute_character_buckets, owned_count = _card_box_buckets(rqd)
+    total_count = len(rqd.cards)
+    denominator = owned_count if owned_data else total_count
+    character_stats, max_character_bar_count = _card_box_character_stats(
+        rqd, character_buckets, owned_data, denominator
+    )
+    attribute_stats, max_attribute_bar_count = _card_box_attribute_stats(
+        rqd,
+        attribute_buckets,
+        attribute_character_buckets,
+        owned_data,
+        denominator,
+    )
     return CardBoxDistribution(
         total_count=total_count,
         owned_count=owned_count,

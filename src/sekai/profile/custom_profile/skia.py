@@ -1844,6 +1844,62 @@ def _emit_native_shape(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
     return True
 
 
+def _native_content_result(
+    renderer: PNGRenderer,
+    content: Any,
+    scene: _SceneAssembler,
+) -> tuple[str, str] | None:
+    if not content.object_data.get("visible", False):
+        return "hidden", "hidden"
+
+    native_emitters = (
+        _emit_native_asset_image,
+        _emit_native_omikuji_collection,
+        _emit_native_shape,
+        _emit_native_card_member,
+    )
+    if any(emitter(renderer, content, scene) for emitter in native_emitters):
+        return "rendered-native", "native"
+
+    if _emit_native_card_general(renderer, content, scene) == "native":
+        return "rendered-native", "native"
+
+    for result in (
+        _emit_native_honor_deck(renderer, content, scene),
+        _emit_native_general(renderer, content, scene),
+    ):
+        if result in {"native", "noop"}:
+            return "rendered-native", result
+
+    if _emit_native_honor(renderer, content, scene):
+        return "rendered-native", "native"
+    if _is_empty_text_noop(renderer, content):
+        return "rendered-native", "noop"
+    if _emit_native_simple_tmp_text(renderer, content, scene):
+        return "rendered-native", "native"
+
+    quads = _direct_text_quads(renderer, content)
+    if quads is None:
+        return None
+    if not quads:
+        return "rendered-direct", "noop"
+    if scene.emit_sdf_quads(quads):
+        return "rendered-direct", "native"
+    return None
+
+
+def _record_native_content_result(
+    renderer: PNGRenderer,
+    card_ref: dict[str, Any],
+    content: Any,
+    report: CustomProfileSceneReport,
+    result: tuple[str, str] | None,
+) -> None:
+    audit_result, classification = result or ("unresolved", "unresolved")
+    renderer.record_native_audit(card_ref, content, audit_result, None)
+    report.observe(content, classification)
+
+
 def _build_scene(
     renderer: PNGRenderer,
     card: dict[str, Any],
@@ -1864,74 +1920,13 @@ def _build_scene(
     # asset/font-backed IR. Unsupported content is classified before a Pillow layer is created;
     # the strict coverage gate then declines the whole scene to the route-level Pillow fallback.
     for content in contents:
-        if not content.object_data.get("visible", False):
-            renderer.record_native_audit(card_ref, content, "hidden", None)
-            report.observe(content, "hidden")
-            continue
-        if _emit_native_asset_image(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if _emit_native_omikuji_collection(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if _emit_native_shape(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if _emit_native_card_member(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        card_general_result = _emit_native_card_general(renderer, content, scene)
-        if card_general_result == "native":
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        honor_deck_result = _emit_native_honor_deck(renderer, content, scene)
-        if honor_deck_result == "native":
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if honor_deck_result == "noop":
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "noop")
-            continue
-        general_result = _emit_native_general(renderer, content, scene)
-        if general_result == "native":
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if general_result == "noop":
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "noop")
-            continue
-        if _emit_native_honor(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        if _is_empty_text_noop(renderer, content):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "noop")
-            continue
-        if _emit_native_simple_tmp_text(renderer, content, scene):
-            renderer.record_native_audit(card_ref, content, "rendered-native", None)
-            report.observe(content, "native")
-            continue
-        quads = _direct_text_quads(renderer, content)
-        if quads is not None:
-            if not quads:
-                renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-                report.observe(content, "noop")
-                continue
-            if scene.emit_sdf_quads(quads):
-                renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-                report.observe(content, "native")
-                continue
-
-        renderer.record_native_audit(card_ref, content, "unresolved", None)
-        report.observe(content, "unresolved")
+        _record_native_content_result(
+            renderer,
+            card_ref,
+            content,
+            report,
+            _native_content_result(renderer, content, scene),
+        )
     report.mem_images = len(scene.mem_images)
     report.mem_bytes = scene.mem_bytes
 
