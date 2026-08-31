@@ -49,6 +49,7 @@ from .model import (
     BasicMusicRewardsRequest,
     CustomChartInfo,
     DetailMusicRewardsRequest,
+    MusicBriefList,
     MusicBriefListRequest,
     MusicDetailRequest,
     MusicListRequest,
@@ -712,6 +713,85 @@ async def try_render_music_detail_payload(rqd: MusicDetailRequest) -> EncodedIma
     return await render_canvas_payload(await _build_music_detail_canvas(rqd), endpoint="music_detail")
 
 
+def _music_brief_release_date(music: MusicBriefList, timezone) -> str:
+    if music.music_info is None:
+        return ""
+    return datetime_from_millis(music.music_info.release_at, timezone).strftime("%Y-%m-%d")
+
+
+def _music_brief_difficulty_levels(
+    music: MusicBriefList,
+    required_difficulty: str,
+) -> list[tuple[str, int]]:
+    if music.difficulty is None:
+        return [(required_difficulty, music.level)] if required_difficulty and music.level else []
+
+    difficulty = music.difficulty
+    order = difficulty.order or ["easy", "normal", "hard", "expert", "master"]
+    if difficulty.has_append:
+        order = [*order, "append"]
+    return [
+        (name, difficulty.level[index])
+        for index, name in enumerate(order)
+        if index < len(difficulty.level) and difficulty.level[index]
+    ]
+
+
+async def _draw_music_brief_jacket(music: MusicBriefList, jacket: ImageSource | None) -> None:
+    with Frame():
+        ImageBox(jacket, size=(96, 96), image_size_mode="fill")
+        if music.play_result:
+            result_path = RESULT_ASSET_PATH + f"/icon_{music.play_result}.png"
+            result_image = await get_asset_image_ref(ASSETS_BASE_DIR, result_path)
+            if result_image:
+                ImageBox(result_image, size=(20, 20), image_size_mode="fill").set_offset((96 - 14, 96 - 14))
+
+
+def _draw_music_brief_details(
+    music: MusicBriefList,
+    release_date: str,
+    difficulty_levels: list[tuple[str, int]],
+) -> None:
+    with VSplit().set_sep(8).set_content_align("lt").set_item_align("lt"):
+        TextBox(
+            f"【{music.id}】{music.music_info.title if music.music_info else ''}",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
+            use_real_line_count=True,
+        ).set_w(820)
+        if release_date:
+            TextBox(
+                release_date,
+                TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
+            )
+        with HSplit().set_sep(8).set_content_align("c").set_item_align("c"):
+            for difficulty_name, level in difficulty_levels:
+                TextBox(
+                    str(level),
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=WHITE),
+                ).set_padding((10, 4)).set_bg(roundrect_bg(fill=DIFF_COLORS.get(difficulty_name, BLACK), radius=12))
+
+
+async def _draw_music_brief_row(
+    music: MusicBriefList,
+    jacket: ImageSource | None,
+    timezone,
+    required_difficulty: str,
+) -> None:
+    release_date = _music_brief_release_date(music, timezone)
+    difficulty_levels = _music_brief_difficulty_levels(music, required_difficulty)
+    with (
+        HSplit()
+        .set_bg(roundrect_bg(alpha=80))
+        .set_padding(12)
+        .set_sep(12)
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_w(964)
+    ):
+        await _draw_music_brief_jacket(music, jacket)
+        _draw_music_brief_details(music, release_date, difficulty_levels)
+
+
 async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
     profile = rqd.profile
 
@@ -736,59 +816,7 @@ async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 for m in rqd.music_list:
-                    release_at = ""
-                    if m.music_info:
-                        release_at = datetime_from_millis(m.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d")
-                    diff_levels = []
-                    if m.difficulty:
-                        diff_order = m.difficulty.order or ["easy", "normal", "hard", "expert", "master"]
-                        if m.difficulty.has_append:
-                            diff_order = [*diff_order, "append"]
-                        for idx, diff_name in enumerate(diff_order):
-                            level = m.difficulty.level[idx] if idx < len(m.difficulty.level) else 0
-                            if level:
-                                diff_levels.append((diff_name, level))
-                    elif rqd.required_difficulty and m.level:
-                        diff_levels.append((rqd.required_difficulty, m.level))
-
-                    with (
-                        HSplit()
-                        .set_bg(roundrect_bg(alpha=80))
-                        .set_padding(12)
-                        .set_sep(12)
-                        .set_content_align("c")
-                        .set_item_align("c")
-                        .set_w(964)
-                    ):
-                        with Frame():
-                            ImageBox(jackets.get(m.id), size=(96, 96), image_size_mode="fill")
-                            if m.play_result:
-                                result_img_path = RESULT_ASSET_PATH + f"/icon_{m.play_result}.png"
-                                result_img = await get_asset_image_ref(ASSETS_BASE_DIR, result_img_path)
-                                if result_img:
-                                    ImageBox(result_img, size=(20, 20), image_size_mode="fill").set_offset(
-                                        (96 - 14, 96 - 14)
-                                    )
-
-                        with VSplit().set_sep(8).set_content_align("lt").set_item_align("lt"):
-                            TextBox(
-                                f"【{m.id}】{m.music_info.title if m.music_info else ''}",
-                                TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
-                                use_real_line_count=True,
-                            ).set_w(820)
-                            if release_at:
-                                TextBox(
-                                    release_at,
-                                    TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
-                                )
-                            with HSplit().set_sep(8).set_content_align("c").set_item_align("c"):
-                                for diff_name, level in diff_levels:
-                                    TextBox(
-                                        str(level),
-                                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=WHITE),
-                                    ).set_padding((10, 4)).set_bg(
-                                        roundrect_bg(fill=DIFF_COLORS.get(diff_name, BLACK), radius=12)
-                                    )
+                    await _draw_music_brief_row(m, jackets.get(m.id), rqd.timezone, rqd.required_difficulty)
 
     add_request_watermark(canvas, rqd)
     return canvas

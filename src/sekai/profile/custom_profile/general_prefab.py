@@ -272,6 +272,52 @@ def _fit_text_op(
     return GeneralTextOp(text, (x, (top + bottom) // 2), min_size, fill, anchor, font)
 
 
+def _wrap_tokens(raw_line: str) -> list[str]:
+    tokens: list[str] = []
+    token = ""
+    for char in raw_line:
+        if char.isascii() and (char.isalnum() or char in "._-@:/#"):
+            token += char
+            continue
+        if token:
+            tokens.append(token)
+            token = ""
+        tokens.append(char)
+    if token:
+        tokens.append(token)
+    return tokens
+
+
+def _wrapped_text_width(
+    metrics: GeneralTextMetrics,
+    value: str,
+    font: GeneralFontRef,
+    size: int,
+) -> float:
+    return _text_size(metrics, value, font, size)[0]
+
+
+def _append_wrapped_token(
+    lines: list[str],
+    line: str,
+    token: str,
+    metrics: GeneralTextMetrics,
+    font: GeneralFontRef,
+    size: int,
+    max_width: int,
+) -> str:
+    if _wrapped_text_width(metrics, token, font, size) <= max_width:
+        return line + token
+    for char in token:
+        trial = line + char
+        if line and _wrapped_text_width(metrics, trial, font, size) > max_width:
+            lines.append(line)
+            line = char
+        else:
+            line = trial
+    return line
+
+
 def _wrap_text(
     metrics: GeneralTextMetrics,
     text: str,
@@ -280,43 +326,15 @@ def _wrap_text(
     max_width: int,
 ) -> list[str]:
     """The existing GeneralContentView greedy CJK/Latin wrapping, kept byte-for-byte in intent."""
-
-    def text_width(value: str) -> float:
-        return _text_size(metrics, value, font, size)[0]
-
-    def tokens_for(raw_line: str) -> list[str]:
-        tokens: list[str] = []
-        token = ""
-        for char in raw_line:
-            if char.isascii() and (char.isalnum() or char in "._-@:/#"):
-                token += char
-                continue
-            if token:
-                tokens.append(token)
-                token = ""
-            tokens.append(char)
-        if token:
-            tokens.append(token)
-        return tokens
-
     lines: list[str] = []
     for raw_line in text.splitlines() or [""]:
         line = ""
-        for token in tokens_for(raw_line):
+        for token in _wrap_tokens(raw_line):
             trial = line + token
-            if line and text_width(trial) > max_width:
+            if line and _wrapped_text_width(metrics, trial, font, size) > max_width:
                 lines.append(line)
                 line = ""
-            if text_width(token) > max_width:
-                for char in token:
-                    trial = line + char
-                    if line and text_width(trial) > max_width:
-                        lines.append(line)
-                        line = char
-                    else:
-                        line = trial
-            else:
-                line += token
+            line = _append_wrapped_token(lines, line, token, metrics, font, size, max_width)
         lines.append(line)
     return lines
 

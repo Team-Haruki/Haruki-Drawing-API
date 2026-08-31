@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 # 从 model.py 导入数据模型
 from .model import (
+    DeckPlannerBoostRow,
+    DeckPlannerInfo,
+    DeckPlannerSong,
     DeckRequest,
 )
 
@@ -173,117 +176,163 @@ def planner_cover_key(song) -> str:
     return str(song.music_id or song.music_cover_path or song.title)
 
 
-def draw_event_planner_block(planner, planner_music_imgs: dict[str, ImageSource]) -> None:
+def _planner_rows(planner: DeckPlannerInfo) -> list[tuple[DeckPlannerSong, DeckPlannerBoostRow | None]]:
+    rows: list[tuple[DeckPlannerSong, DeckPlannerBoostRow | None]] = []
+    for song in planner.songs:
+        rows.extend((song, row) for row in song.rows or [None])
+    return rows
+
+
+def _draw_planner_summary(planner: DeckPlannerInfo) -> None:
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
+        TextBox("活动规划", TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(50, 50, 50)))
+        TextBox(
+            f"目标 {format_planner_int(planner.target_point)}pt",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
+        )
+        TextBox(
+            f"当前 {format_planner_int(planner.current_point)}pt",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
+        )
+        TextBox(
+            f"还需 {format_planner_int(planner.remaining_point)}pt",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 180, 220)),
+        )
+        if planner.target_source:
+            TextBox(
+                f"来源 {planner.target_source}",
+                TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
+                overflow="shrink",
+            ).set_w(240)
+
+
+def _draw_planner_header(style: TextStyle) -> None:
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
+        TextBox("歌曲 / 火数", style).set_w(330).set_h(48).set_content_align("c")
+        TextBox("每把PT", style).set_w(140).set_h(48).set_content_align("c")
+        TextBox("需要把数", style).set_w(140).set_h(48).set_content_align("c")
+        TextBox("体力", style).set_w(120).set_h(48).set_content_align("c")
+        TextBox("日速", style).set_w(140).set_h(48).set_content_align("c")
+
+
+def _draw_planner_song_cell(
+    song: DeckPlannerSong,
+    row: DeckPlannerBoostRow | None,
+    planner_music_imgs: dict[str, ImageSource],
+) -> None:
+    with HSplit().set_w(330).set_h(76).set_content_align("c").set_item_align("c").set_sep(10):
+        with Frame().set_size((56, 56)).set_content_align("c"):
+            diff = (song.difficulty or "").lower()
+            if diff in DIFF_COLORS:
+                Spacer(w=52, h=52).set_bg(FillBg(fill=DIFF_COLORS[diff])).set_offset((3, 3))
+            cover = planner_music_imgs.get(song.music_cover_path or planner_cover_key(song))
+            if cover is not None:
+                ImageBox(cover, size=(52, 52)).set_offset((-2, -2))
+            else:
+                Spacer(w=52, h=52).set_bg(RoundRectBg((235, 242, 248, 255), 6)).set_offset((-2, -2))
+
+        with VSplit().set_w(230).set_content_align("l").set_item_align("l").set_sep(2).set_padding(0):
+            TextBox(
+                song.title,
+                TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(70, 70, 70)),
+                overflow="shrink",
+            ).set_w(230)
+            with HSplit().set_content_align("l").set_item_align("l").set_sep(6).set_padding(0):
+                TextBox(
+                    (song.difficulty or "DIFF").upper(),
+                    TextStyle(
+                        font=DEFAULT_BOLD_FONT,
+                        size=12,
+                        color=DIFF_COLORS.get(diff, (70, 70, 70)),
+                    ),
+                ).set_bg(RoundRectBg((255, 255, 255, 180), 4))
+                TextBox(
+                    f"{row.boost}火" if row else "-",
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(130, 80, 180)),
+                ).set_bg(RoundRectBg((246, 237, 255, 220), 4))
+
+
+def _draw_planner_number_cell(
+    text: str,
+    sub_text: str,
+    width: int,
+    style: TextStyle,
+    color: tuple[int, int, int] = (70, 70, 70),
+) -> None:
+    with VSplit().set_w(width).set_h(76).set_content_align("c").set_item_align("c").set_sep(2):
+        TextBox(text, style.replace(color=color), overflow="shrink").set_w(width).set_content_align("c")
+        TextBox(
+            sub_text,
+            TextStyle(font=DEFAULT_FONT, size=13, color=(75, 75, 75)),
+        ).set_w(width).set_content_align("c")
+
+
+def _draw_planner_row(
+    planner: DeckPlannerInfo,
+    song: DeckPlannerSong,
+    row: DeckPlannerBoostRow | None,
+    planner_music_imgs: dict[str, ImageSource],
+    style: TextStyle,
+) -> None:
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
+        _draw_planner_song_cell(song, row, planner_music_imgs)
+        _draw_planner_number_cell(format_planner_int(row.point_per_play if row else 0), "pt/把", 140, style)
+        _draw_planner_number_cell(
+            format_planner_int(row.plays if row else 0),
+            "把",
+            140,
+            style,
+            (0, 180, 220),
+        )
+        _draw_planner_number_cell(
+            format_planner_int(row.energy if row else 0),
+            "火",
+            120,
+            style,
+            (142, 94, 190),
+        )
+        _draw_planner_number_cell(format_planner_optional_int(planner.daily_point), "pt/日", 140, style)
+
+
+def _draw_planner_tips(planner: DeckPlannerInfo) -> None:
+    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+        tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
+        TextBox(
+            "活动规划按当前数据估算，实际结算以游戏内和榜线更新为准。",
+            tip_style,
+            use_real_line_count=True,
+        ).set_w(920)
+        TextBox(
+            "未指定当前 pt 时按 0 计算；不写歌曲时默认虾 EXPERT / 龙 HARD。",
+            tip_style,
+            use_real_line_count=True,
+        ).set_w(920)
+        for warning in planner.warnings or []:
+            TextBox(
+                f"提示: {warning}",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(200, 75, 75)),
+                use_real_line_count=True,
+            ).set_w(920)
+
+
+def draw_event_planner_block(planner: DeckPlannerInfo, planner_music_imgs: dict[str, ImageSource]) -> None:
     th_style = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(75, 75, 75))
     tb_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(70, 70, 70))
-    rows = []
-    for song in planner.songs:
-        if not song.rows:
-            rows.append((song, None))
-            continue
-        for row in song.rows:
-            rows.append((song, row))
+    rows = _planner_rows(planner)
 
     with (
         VSplit().set_content_align("lt").set_item_align("lt").set_sep(14).set_padding(16).set_bg(roundrect_bg(alpha=80))
     ):
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
-            TextBox("活动规划", TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(50, 50, 50)))
-            TextBox(
-                f"目标 {format_planner_int(planner.target_point)}pt",
-                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
-            )
-            TextBox(
-                f"当前 {format_planner_int(planner.current_point)}pt",
-                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
-            )
-            TextBox(
-                f"还需 {format_planner_int(planner.remaining_point)}pt",
-                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 180, 220)),
-            )
-            if planner.target_source:
-                TextBox(
-                    f"来源 {planner.target_source}",
-                    TextStyle(font=DEFAULT_FONT, size=18, color=(90, 90, 90)),
-                    overflow="shrink",
-                ).set_w(240)
-
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
-            TextBox("歌曲 / 火数", th_style).set_w(330).set_h(48).set_content_align("c")
-            TextBox("每把PT", th_style).set_w(140).set_h(48).set_content_align("c")
-            TextBox("需要把数", th_style).set_w(140).set_h(48).set_content_align("c")
-            TextBox("体力", th_style).set_w(120).set_h(48).set_content_align("c")
-            TextBox("日速", th_style).set_w(140).set_h(48).set_content_align("c")
+        _draw_planner_summary(planner)
+        _draw_planner_header(th_style)
 
         if rows:
             for song, row in rows:
-                with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
-                    with HSplit().set_w(330).set_h(76).set_content_align("c").set_item_align("c").set_sep(10):
-                        with Frame().set_size((56, 56)).set_content_align("c"):
-                            diff = (song.difficulty or "").lower()
-                            if diff in DIFF_COLORS:
-                                Spacer(w=52, h=52).set_bg(FillBg(fill=DIFF_COLORS[diff])).set_offset((3, 3))
-                            cover = planner_music_imgs.get(song.music_cover_path or planner_cover_key(song))
-                            if cover is not None:
-                                ImageBox(cover, size=(52, 52)).set_offset((-2, -2))
-                            else:
-                                Spacer(w=52, h=52).set_bg(RoundRectBg((235, 242, 248, 255), 6)).set_offset((-2, -2))
-
-                        with VSplit().set_w(230).set_content_align("l").set_item_align("l").set_sep(2).set_padding(0):
-                            TextBox(
-                                song.title,
-                                TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(70, 70, 70)),
-                                overflow="shrink",
-                            ).set_w(230)
-                            with HSplit().set_content_align("l").set_item_align("l").set_sep(6).set_padding(0):
-                                TextBox(
-                                    (song.difficulty or "DIFF").upper(),
-                                    TextStyle(
-                                        font=DEFAULT_BOLD_FONT,
-                                        size=12,
-                                        color=DIFF_COLORS.get(diff, (70, 70, 70)),
-                                    ),
-                                ).set_bg(RoundRectBg((255, 255, 255, 180), 4))
-                                TextBox(
-                                    f"{row.boost}火" if row else "-",
-                                    TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(130, 80, 180)),
-                                ).set_bg(RoundRectBg((246, 237, 255, 220), 4))
-
-                    def planner_number_cell(text: str, sub_text: str, width: int, color=(70, 70, 70)) -> None:
-                        with VSplit().set_w(width).set_h(76).set_content_align("c").set_item_align("c").set_sep(2):
-                            TextBox(text, tb_style.replace(color=color), overflow="shrink").set_w(
-                                width
-                            ).set_content_align("c")
-                            TextBox(
-                                sub_text,
-                                TextStyle(font=DEFAULT_FONT, size=13, color=(75, 75, 75)),
-                            ).set_w(width).set_content_align("c")
-
-                    planner_number_cell(format_planner_int(row.point_per_play if row else 0), "pt/把", 140)
-                    planner_number_cell(format_planner_int(row.plays if row else 0), "把", 140, (0, 180, 220))
-                    planner_number_cell(format_planner_int(row.energy if row else 0), "火", 120, (142, 94, 190))
-                    planner_number_cell(format_planner_optional_int(planner.daily_point), "pt/日", 140)
+                _draw_planner_row(planner, song, row, planner_music_imgs, tb_style)
         else:
             TextBox("没有可展示的规划歌曲", TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(255, 50, 50)))
 
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-            tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
-            TextBox(
-                "活动规划按当前数据估算，实际结算以游戏内和榜线更新为准。",
-                tip_style,
-                use_real_line_count=True,
-            ).set_w(920)
-            TextBox(
-                "未指定当前 pt 时按 0 计算；不写歌曲时默认虾 EXPERT / 龙 HARD。",
-                tip_style,
-                use_real_line_count=True,
-            ).set_w(920)
-            for warning in planner.warnings or []:
-                TextBox(
-                    f"提示: {warning}",
-                    TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(200, 75, 75)),
-                    use_real_line_count=True,
-                ).set_w(920)
+        _draw_planner_tips(planner)
 
 
 _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX = {"mysekai", "challenge", "challenge_all", "bonus", "wl_bonus"}
