@@ -12,7 +12,7 @@ import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
@@ -703,6 +703,33 @@ class TMPRunMeasure:
     @property
     def visual_height(self) -> float:
         return max(0.0, self.visual_bottom - self.visual_top)
+
+
+@dataclass
+class TMPVisualBounds:
+    left: float | None = None
+    right: float | None = None
+    top: float | None = None
+    bottom: float | None = None
+
+    def include(self, left: float, right: float, top: float, bottom: float) -> None:
+        self.left = left if self.left is None else min(self.left, left)
+        self.right = right if self.right is None else max(self.right, right)
+        self.top = top if self.top is None else min(self.top, top)
+        self.bottom = bottom if self.bottom is None else max(self.bottom, bottom)
+
+    def include_horizontal(self, left: float, right: float) -> None:
+        self.left = left if self.left is None else min(self.left, left)
+        self.right = right if self.right is None else max(self.right, right)
+
+    def resolved(self, fallback: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        fallback_left, fallback_right, fallback_top, fallback_bottom = fallback
+        return (
+            fallback_left if self.left is None else self.left,
+            fallback_right if self.right is None else self.right,
+            fallback_top if self.top is None else self.top,
+            fallback_bottom if self.bottom is None else self.bottom,
+        )
 
 
 @dataclass(frozen=True)
@@ -8013,29 +8040,55 @@ class PNGRenderer:
             return font.getbbox(text or " ")
 
         cursor = 0.0
-        advance_total = 0.0
-        left = 0.0
-        right = 0.0
-        top: float | None = None
-        bottom: float | None = None
+        bounds = TMPVisualBounds(left=0.0, right=0.0)
         for ch in text:
             metric_char = " " if ch in TMP_SPACE_EQUIVALENT_CHARS else ch
             if not ch.isspace():
                 bbox = font.getbbox(metric_char)
-                left = min(left, cursor + bbox[0])
-                right = max(right, cursor + bbox[2])
-                top = float(bbox[1]) if top is None else min(top, float(bbox[1]))
-                bottom = float(bbox[3]) if bottom is None else max(bottom, float(bbox[3]))
-            advance = float(font.getlength(metric_char))
-            if metric_char == " ":
-                advance *= self.tmp_space_width_factor
-            cursor += advance
-        right = max(right, cursor)
-        if top is None or bottom is None:
-            bbox = font.getbbox(text or " ")
-            top = float(bbox[1])
-            bottom = float(bbox[3])
+                bounds.include(cursor + bbox[0], cursor + bbox[2], float(bbox[1]), float(bbox[3]))
+            cursor += self.tmp_adjusted_space_advance(font, metric_char)
+        bounds.include_horizontal(0.0, cursor)
+        fallback_bbox = font.getbbox(text or " ")
+        left, right, top, bottom = bounds.resolved((0.0, cursor, float(fallback_bbox[1]), float(fallback_bbox[3])))
         return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
+
+    def tmp_adjusted_space_advance(self, font: ImageFont.FreeTypeFont, metric_char: str) -> float:
+        advance = float(font.getlength(metric_char))
+        return advance * self.tmp_space_width_factor if metric_char == " " else advance
+
+    def tmp_asset_layout_metrics(
+        self,
+        font_name: str,
+        metric_char: str,
+        font_size: float,
+    ) -> tuple[TMPGlyphMetrics, str] | None:
+        if self.tmp_metrics_mode == "pil" or not font_name or font_size <= 0:
+            return None
+        include_fallback = self.tmp_metrics_mode == "asset-fallback"
+        active = self.tmp_font_library.active_asset(font_name)
+        if active is not None and active.atlas_population_mode == 1 and self.tmp_dynamic_sdf:
+            source_metrics = self.tmp_font_library.source_glyph_metrics(
+                font_name,
+                metric_char,
+                font_size,
+                include_fallback=include_fallback,
+            )
+            return (source_metrics, "source-font-dynamic") if source_metrics is not None else None
+        metrics = self.tmp_font_library.glyph_metrics(
+            font_name,
+            metric_char,
+            font_size,
+            include_fallback=include_fallback,
+        )
+        if metrics is not None:
+            return metrics, "tmp-character-table"
+        source_metrics = self.tmp_font_library.source_glyph_metrics(
+            font_name,
+            metric_char,
+            font_size,
+            include_fallback=include_fallback,
+        )
+        return (source_metrics, "source-font-fallback") if source_metrics is not None else None
 
     def glyph_advance(
         self,
@@ -8049,39 +8102,10 @@ class PNGRenderer:
             if tab_advance is not None:
                 return tab_advance
         metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
-        use_asset_metrics = self.tmp_metrics_mode != "pil" and font_name and font_size > 0
-        active = self.tmp_font_library.active_asset(font_name) if use_asset_metrics else None
-        if active is not None and active.atlas_population_mode == 1 and self.tmp_dynamic_sdf:
-            source_metrics = self.tmp_font_library.source_glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if source_metrics is not None:
-                return max(0.0, source_metrics.advance)
-            use_asset_metrics = False
-        if use_asset_metrics:
-            metrics = self.tmp_font_library.glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if metrics is not None:
-                return max(0.0, metrics.advance)
-            source_metrics = self.tmp_font_library.source_glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if source_metrics is not None:
-                return max(0.0, source_metrics.advance)
-        advance = float(font.getlength(metric_char))
-        if metric_char == " ":
-            advance *= self.tmp_space_width_factor
-        return advance
+        asset_metrics = self.tmp_asset_layout_metrics(font_name, metric_char, font_size)
+        if asset_metrics is not None:
+            return max(0.0, asset_metrics[0].advance)
+        return self.tmp_adjusted_space_advance(font, metric_char)
 
     def tmp_has_renderable_glyph(self, font_name: str, ch: str, font_size: float, include_fallback: bool) -> bool:
         if not font_name or font_size <= 0:
@@ -8146,35 +8170,9 @@ class PNGRenderer:
                 "face-tab-width",
             )
         metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
-        use_asset_metrics = self.tmp_metrics_mode != "pil" and font_name and font_size > 0
-        active = self.tmp_font_library.active_asset(font_name) if use_asset_metrics else None
-        if active is not None and active.atlas_population_mode == 1 and self.tmp_dynamic_sdf:
-            source_metrics = self.tmp_font_library.source_glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if source_metrics is not None:
-                return source_metrics, "source-font-dynamic"
-            use_asset_metrics = False
-        if use_asset_metrics:
-            metrics = self.tmp_font_library.glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if metrics is not None:
-                return metrics, "tmp-character-table"
-            source_metrics = self.tmp_font_library.source_glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=self.tmp_metrics_mode == "asset-fallback",
-            )
-            if source_metrics is not None:
-                return source_metrics, "source-font-fallback"
+        asset_metrics = self.tmp_asset_layout_metrics(font_name, metric_char, font_size)
+        if asset_metrics is not None:
+            return asset_metrics
         bbox = font.getbbox(metric_char or " ")
         advance = self.glyph_advance(font, metric_char or " ", font_name, font_size)
         return (
@@ -8211,52 +8209,18 @@ class PNGRenderer:
         current_em_scale: float | None = None,
     ) -> TMPRunMeasure:
         """Measure a strict dynamic-font run without constructing a Pillow font object."""
-
-        metric_text = run.text or " "
-        cursor = 0.0
-        visual_left: float | None = None
-        visual_right: float | None = None
-        visual_top: float | None = None
-        visual_bottom: float | None = None
-        last_index = len(metric_text) - 1
-        for idx, ch in enumerate(metric_text):
-            metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
-            # The per-run bounds must follow the same fallback chain as the character quads;
-            # otherwise a renderable fallback glyph incorrectly rejects the entire native scene.
-            metrics = self.tmp_font_library.source_glyph_metrics(
+        return self.measure_tmp_run_from_metrics(
+            run,
+            font_name,
+            font_size,
+            current_em_scale,
+            lambda ch: self.tmp_font_library.source_glyph_metrics(
                 font_name,
-                metric_char,
+                self.tmp_render_glyph_char(font_name, ch, font_size),
                 font_size,
                 include_fallback=True,
-            )
-            if metrics is None:
-                raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
-            advance = metrics.advance
-            glyph_origin_x = cursor
-            if run.style.mspace is not None:
-                mono_advance = self.tmp_mspace_advance(run.style.mspace)
-                glyph_origin_x += (mono_advance - advance) * 0.5
-                advance = mono_advance
-            if run.text and self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
-                raw_left = glyph_origin_x + metrics.bearing_x
-                raw_right = raw_left + metrics.width
-                top = -metrics.bearing_y
-                bottom = top + metrics.height
-                visual_left = raw_left if visual_left is None else min(visual_left, raw_left)
-                visual_right = raw_right if visual_right is None else max(visual_right, raw_right)
-                visual_top = top if visual_top is None else min(visual_top, top)
-                visual_bottom = bottom if visual_bottom is None else max(visual_bottom, bottom)
-            cursor += advance
-            if idx != last_index:
-                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
-
-        if not run.text:
-            return TMPRunMeasure(cursor, 0.0, cursor, 0.0, 0.0)
-        if visual_top is None or visual_bottom is None:
-            visual_top = visual_bottom = 0.0
-        if visual_left is None or visual_right is None:
-            visual_left = visual_right = 0.0
-        return TMPRunMeasure(cursor, visual_left, visual_right, visual_top, visual_bottom)
+            ),
+        )
 
     def measure_tmp_run(
         self,
@@ -8266,43 +8230,47 @@ class PNGRenderer:
         font_size: float,
         current_em_scale: float | None = None,
     ) -> TMPRunMeasure:
-        if not run.text:
-            advance = self.glyph_advance(font, " ", font_name, font_size)
-            return TMPRunMeasure(advance, 0.0, advance, 0.0, 0.0)
+        return self.measure_tmp_run_from_metrics(
+            run,
+            font_name,
+            font_size,
+            current_em_scale,
+            lambda ch: self.glyph_layout_metrics(font, ch, font_name, font_size),
+        )
 
+    def measure_tmp_run_from_metrics(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_size: float,
+        current_em_scale: float | None,
+        metrics_for_char: Callable[[str], TMPGlyphMetrics | None],
+    ) -> TMPRunMeasure:
+        metric_text = run.text or " "
         cursor = 0.0
-        visual_left: float | None = None
-        visual_right: float | None = None
-        visual_top: float | None = None
-        visual_bottom: float | None = None
-        last_index = len(run.text) - 1
-        for idx, ch in enumerate(run.text):
-            metrics = self.glyph_layout_metrics(font, ch, font_name, font_size)
-            advance = metrics.advance
-            glyph_origin_x = cursor
+        bounds = TMPVisualBounds()
+        last_index = len(metric_text) - 1
+        for idx, ch in enumerate(metric_text):
+            metrics = metrics_for_char(ch)
+            if metrics is None:
+                raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
+            glyph_origin_x, advance = cursor, metrics.advance
             if run.style.mspace is not None:
                 mono_advance = self.tmp_mspace_advance(run.style.mspace)
                 glyph_origin_x += (mono_advance - advance) * 0.5
                 advance = mono_advance
-            if self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
+            if run.text and self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
                 raw_left = glyph_origin_x + metrics.bearing_x
                 raw_right = raw_left + metrics.width
-                left = raw_left
-                right = raw_right
                 top = -metrics.bearing_y
                 bottom = top + metrics.height
-                visual_left = left if visual_left is None else min(visual_left, left)
-                visual_right = right if visual_right is None else max(visual_right, right)
-                visual_top = top if visual_top is None else min(visual_top, top)
-                visual_bottom = bottom if visual_bottom is None else max(visual_bottom, bottom)
+                bounds.include(raw_left, raw_right, top, bottom)
             cursor += advance
             if idx != last_index:
                 cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
-
-        if visual_top is None or visual_bottom is None:
-            visual_top = visual_bottom = 0.0
-        if visual_left is None or visual_right is None:
-            visual_left = visual_right = 0.0
+        if not run.text:
+            return TMPRunMeasure(cursor, 0.0, cursor, 0.0, 0.0)
+        visual_left, visual_right, visual_top, visual_bottom = bounds.resolved((0.0, 0.0, 0.0, 0.0))
         return TMPRunMeasure(cursor, visual_left, visual_right, visual_top, visual_bottom)
 
     def tmp_run_glyph_audit(
@@ -8377,35 +8345,7 @@ class PNGRenderer:
         font_name: str = "",
         font_size: float = 0.0,
     ) -> tuple[int, int, int, int]:
-        if not run.text:
-            return self.text_bbox(font, " ")
-        cursor = 0.0
-        left = 0.0
-        right = 0.0
-        top: float | None = None
-        bottom: float | None = None
-        last_index = len(run.text) - 1
-        for idx, ch in enumerate(run.text):
-            metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
-            bbox = font.getbbox(metric_char)
-            if self.tmp_native_visible_character(ch):
-                left = min(left, cursor + bbox[0])
-                right = max(right, cursor + bbox[2])
-                top = float(bbox[1]) if top is None else min(top, float(bbox[1]))
-                bottom = float(bbox[3]) if bottom is None else max(bottom, float(bbox[3]))
-            if run.style.mspace is not None:
-                advance = self.tmp_mspace_advance(run.style.mspace)
-            else:
-                advance = self.glyph_advance(font, ch, font_name, font_size)
-            cursor += advance
-            if idx != last_index:
-                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size)
-        right = max(right, cursor)
-        if top is None or bottom is None:
-            bbox = self.text_bbox(font, " ")
-            top = float(bbox[1])
-            bottom = float(bbox[3])
-        return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
+        return self.tmp_run_bbox(font, run, font_name, font_size, fx_scale=False)
 
     def run_fx_bbox(
         self,
@@ -8414,41 +8354,69 @@ class PNGRenderer:
         font_name: str = "",
         font_size: float = 0.0,
     ) -> tuple[int, int, int, int]:
+        return self.tmp_run_bbox(font, run, font_name, font_size, fx_scale=True)
+
+    def tmp_run_bbox(
+        self,
+        font: ImageFont.FreeTypeFont,
+        run: TextRun,
+        font_name: str,
+        font_size: float,
+        *,
+        fx_scale: bool,
+    ) -> tuple[int, int, int, int]:
         if not run.text:
             return self.text_bbox(font, " ")
-        scale_x = self.tmp_fx_scale_x(run.style)
         cursor = 0.0
-        left = 0.0
-        right = 0.0
-        top: float | None = None
-        bottom: float | None = None
+        bounds = TMPVisualBounds(left=0.0, right=0.0)
         last_index = len(run.text) - 1
         for idx, ch in enumerate(run.text):
             metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
             bbox = font.getbbox(metric_char)
             if self.tmp_native_visible_character(ch):
-                raw_left = cursor + bbox[0]
-                raw_right = cursor + bbox[2]
-                center_x = (raw_left + raw_right) * 0.5
-                scaled_left = center_x + (raw_left - center_x) * scale_x
-                scaled_right = center_x + (raw_right - center_x) * scale_x
-                left = min(left, scaled_left)
-                right = max(right, scaled_right)
-                top = float(bbox[1]) if top is None else min(top, float(bbox[1]))
-                bottom = float(bbox[3]) if bottom is None else max(bottom, float(bbox[3]))
-            if run.style.mspace is not None:
-                advance = self.tmp_mspace_advance(run.style.mspace)
-            else:
-                advance = self.glyph_advance(font, ch, font_name, font_size)
-            cursor += advance * self.tmp_fx_advance_scale_x(run.style)
+                left, right = self.tmp_run_glyph_horizontal_bounds(cursor, bbox, run.style, fx_scale)
+                bounds.include(left, right, float(bbox[1]), float(bbox[3]))
+            cursor += self.tmp_run_character_advance(font, run, ch, font_name, font_size, fx_scale)
             if idx != last_index:
                 cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size)
-        right = max(right, cursor)
-        if top is None or bottom is None:
-            bbox = self.text_bbox(font, " ")
-            top = float(bbox[1])
-            bottom = float(bbox[3])
+        bounds.include_horizontal(0.0, cursor)
+        fallback_bbox = self.text_bbox(font, " ")
+        left, right, top, bottom = bounds.resolved((0.0, cursor, float(fallback_bbox[1]), float(fallback_bbox[3])))
         return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
+
+    def tmp_run_glyph_horizontal_bounds(
+        self,
+        cursor: float,
+        bbox: tuple[int, int, int, int],
+        style: TextStyle,
+        fx_scale: bool,
+    ) -> tuple[float, float]:
+        raw_left = cursor + bbox[0]
+        raw_right = cursor + bbox[2]
+        if not fx_scale:
+            return raw_left, raw_right
+        center_x = (raw_left + raw_right) * 0.5
+        scale_x = self.tmp_fx_scale_x(style)
+        return (
+            center_x + (raw_left - center_x) * scale_x,
+            center_x + (raw_right - center_x) * scale_x,
+        )
+
+    def tmp_run_character_advance(
+        self,
+        font: ImageFont.FreeTypeFont,
+        run: TextRun,
+        ch: str,
+        font_name: str,
+        font_size: float,
+        fx_scale: bool,
+    ) -> float:
+        advance = (
+            self.tmp_mspace_advance(run.style.mspace)
+            if run.style.mspace is not None
+            else self.glyph_advance(font, ch, font_name, font_size)
+        )
+        return advance * self.tmp_fx_advance_scale_x(run.style) if fx_scale else advance
 
     def draw_text_run(
         self,
@@ -10996,82 +10964,57 @@ def dict_int_set(obj: dict[str, Any], keys: set[int]) -> set[int]:
     return present
 
 
+def deprecated_probe_args(args: argparse.Namespace) -> list[str]:
+    checks = (
+        (args.text_pivot != DEFAULT_TEXT_PIVOT, f"--text-pivot={args.text_pivot}"),
+        (args.tmp_scale_mode != DEFAULT_TMP_SCALE_MODE, f"--tmp-scale-mode={args.tmp_scale_mode}"),
+        (args.rotation_sign != DEFAULT_ROTATION_SIGN, f"--rotation-sign={args.rotation_sign}"),
+        (args.text_layout != "tmp", f"--text-layout={args.text_layout}"),
+        (args.position_scale is not None, "--position-scale"),
+        (args.position_scale_x is not None, "--position-scale-x"),
+        (args.position_scale_y is not None, "--position-scale-y"),
+        (args.tmp_font_scale != DEFAULT_TMP_FONT_SCALE, "--tmp-font-scale"),
+        (args.tmp_line_mode != DEFAULT_TMP_LINE_MODE, f"--tmp-line-mode={args.tmp_line_mode}"),
+        (args.tmp_box_mode != "preferred", f"--tmp-box-mode={args.tmp_box_mode}"),
+        (args.tmp_box_width != TMP_DEFAULT_TEXT_BOX_W, "--tmp-box-width"),
+        (args.tmp_box_width_factor != TMP_TEXT_BOX_W_SIZE_FACTOR, "--tmp-box-width-factor"),
+        (args.tmp_line_height_factor != TMP_LINE_HEIGHT_FACTOR, "--tmp-line-height-factor"),
+        (args.tmp_line_spacing_factor != TMP_LINE_SPACING_FACTOR, "--tmp-line-spacing-factor"),
+        (args.tmp_preferred_padding_x != TMP_PREFERRED_PADDING_X, "--tmp-preferred-padding-x"),
+        (args.tmp_preferred_padding_y != TMP_PREFERRED_PADDING_Y, "--tmp-preferred-padding-y"),
+        (args.rodin_font != "auto", f"--rodin-font={args.rodin_font}"),
+        (args.tmp_block_mode != DEFAULT_TMP_BLOCK_MODE, f"--tmp-block-mode={args.tmp_block_mode}"),
+        (args.draw_order != "global", f"--draw-order={args.draw_order}"),
+        (args.shape_outline_mode != "sdf", f"--shape-outline-mode={args.shape_outline_mode}"),
+        (args.triangle_mode != DEFAULT_TRIANGLE_MODE, f"--triangle-mode={args.triangle_mode}"),
+        (args.text_vertical_mode != DEFAULT_TEXT_VERTICAL_MODE, f"--text-vertical-mode={args.text_vertical_mode}"),
+        (args.tmp_space_width_factor != DEFAULT_TMP_SPACE_WIDTH_FACTOR, "--tmp-space-width-factor"),
+        (
+            args.tmp_text_render_mode != DEFAULT_TMP_TEXT_RENDER_MODE,
+            f"--tmp-text-render-mode={args.tmp_text_render_mode}",
+        ),
+        (args.tmp_dynamic_sdf != DEFAULT_TMP_DYNAMIC_SDF, "--tmp-dynamic-sdf"),
+        (args.premultiply_alpha_transforms, "--premultiply-alpha-transforms"),
+        (args.tmp_pillow_stroke_factor != DEFAULT_TMP_PILLOW_STROKE_FACTOR, "--tmp-pillow-stroke-factor"),
+        (args.shape_sdf_ratio_scale != SHAPE_SDF_RATIO_SCALE, "--shape-sdf-ratio-scale"),
+        (args.shape_sdf_outer_factor != SHAPE_SDF_OUTER_FACTOR, "--shape-sdf-outer-factor"),
+        (args.shape_sdf_face_factor != SHAPE_SDF_FACE_FACTOR, "--shape-sdf-face-factor"),
+        (args.shape_sdf_softness != SHAPE_SDF_SOFTNESS, "--shape-sdf-softness"),
+        (args.shape_sdf_source != "rgb", f"--shape-sdf-source={args.shape_sdf_source}"),
+        (args.shape_sdf_screen_fwidth != SHAPE_SDF_SCREEN_FWIDTH, "--no-shape-sdf-screen-fwidth"),
+        (args.tmp_metrics_mode != DEFAULT_TMP_METRICS_MODE, f"--tmp-metrics-mode={args.tmp_metrics_mode}"),
+        (
+            args.tmp_native_line_gap != DEFAULT_TMP_NATIVE_LINE_GAP,
+            "--tmp-native-line-gap" if args.tmp_native_line_gap else "--no-tmp-native-line-gap",
+        ),
+        (args.no_shape_sprites, "--no-shape-sprites"),
+        (args.skip_empty_lines, "--skip-empty-lines"),
+    )
+    return [probe for enabled, probe in checks if enabled]
+
+
 def warn_deprecated_probe_args(args: argparse.Namespace) -> None:
-    probes: list[str] = []
-    if args.text_pivot != DEFAULT_TEXT_PIVOT:
-        probes.append(f"--text-pivot={args.text_pivot}")
-    if args.tmp_scale_mode != DEFAULT_TMP_SCALE_MODE:
-        probes.append(f"--tmp-scale-mode={args.tmp_scale_mode}")
-    if args.rotation_sign != DEFAULT_ROTATION_SIGN:
-        probes.append(f"--rotation-sign={args.rotation_sign}")
-    if args.text_layout != "tmp":
-        probes.append(f"--text-layout={args.text_layout}")
-    if args.position_scale is not None:
-        probes.append("--position-scale")
-    if args.position_scale_x is not None:
-        probes.append("--position-scale-x")
-    if args.position_scale_y is not None:
-        probes.append("--position-scale-y")
-    if args.tmp_font_scale != DEFAULT_TMP_FONT_SCALE:
-        probes.append("--tmp-font-scale")
-    if args.tmp_line_mode != DEFAULT_TMP_LINE_MODE:
-        probes.append(f"--tmp-line-mode={args.tmp_line_mode}")
-    if args.tmp_box_mode != "preferred":
-        probes.append(f"--tmp-box-mode={args.tmp_box_mode}")
-    if args.tmp_box_width != TMP_DEFAULT_TEXT_BOX_W:
-        probes.append("--tmp-box-width")
-    if args.tmp_box_width_factor != TMP_TEXT_BOX_W_SIZE_FACTOR:
-        probes.append("--tmp-box-width-factor")
-    if args.tmp_line_height_factor != TMP_LINE_HEIGHT_FACTOR:
-        probes.append("--tmp-line-height-factor")
-    if args.tmp_line_spacing_factor != TMP_LINE_SPACING_FACTOR:
-        probes.append("--tmp-line-spacing-factor")
-    if args.tmp_preferred_padding_x != TMP_PREFERRED_PADDING_X:
-        probes.append("--tmp-preferred-padding-x")
-    if args.tmp_preferred_padding_y != TMP_PREFERRED_PADDING_Y:
-        probes.append("--tmp-preferred-padding-y")
-    if args.rodin_font != "auto":
-        probes.append(f"--rodin-font={args.rodin_font}")
-    if args.tmp_block_mode != DEFAULT_TMP_BLOCK_MODE:
-        probes.append(f"--tmp-block-mode={args.tmp_block_mode}")
-    if args.draw_order != "global":
-        probes.append(f"--draw-order={args.draw_order}")
-    if args.shape_outline_mode != "sdf":
-        probes.append(f"--shape-outline-mode={args.shape_outline_mode}")
-    if args.triangle_mode != DEFAULT_TRIANGLE_MODE:
-        probes.append(f"--triangle-mode={args.triangle_mode}")
-    if args.text_vertical_mode != DEFAULT_TEXT_VERTICAL_MODE:
-        probes.append(f"--text-vertical-mode={args.text_vertical_mode}")
-    if args.tmp_space_width_factor != DEFAULT_TMP_SPACE_WIDTH_FACTOR:
-        probes.append("--tmp-space-width-factor")
-    if args.tmp_text_render_mode != DEFAULT_TMP_TEXT_RENDER_MODE:
-        probes.append(f"--tmp-text-render-mode={args.tmp_text_render_mode}")
-    if args.tmp_dynamic_sdf != DEFAULT_TMP_DYNAMIC_SDF:
-        probes.append("--tmp-dynamic-sdf")
-    if args.premultiply_alpha_transforms:
-        probes.append("--premultiply-alpha-transforms")
-    if args.tmp_pillow_stroke_factor != DEFAULT_TMP_PILLOW_STROKE_FACTOR:
-        probes.append("--tmp-pillow-stroke-factor")
-    if args.shape_sdf_ratio_scale != SHAPE_SDF_RATIO_SCALE:
-        probes.append("--shape-sdf-ratio-scale")
-    if args.shape_sdf_outer_factor != SHAPE_SDF_OUTER_FACTOR:
-        probes.append("--shape-sdf-outer-factor")
-    if args.shape_sdf_face_factor != SHAPE_SDF_FACE_FACTOR:
-        probes.append("--shape-sdf-face-factor")
-    if args.shape_sdf_softness != SHAPE_SDF_SOFTNESS:
-        probes.append("--shape-sdf-softness")
-    if args.shape_sdf_source != "rgb":
-        probes.append(f"--shape-sdf-source={args.shape_sdf_source}")
-    if args.shape_sdf_screen_fwidth != SHAPE_SDF_SCREEN_FWIDTH:
-        probes.append("--no-shape-sdf-screen-fwidth")
-    if args.tmp_metrics_mode != DEFAULT_TMP_METRICS_MODE:
-        probes.append(f"--tmp-metrics-mode={args.tmp_metrics_mode}")
-    if args.tmp_native_line_gap != DEFAULT_TMP_NATIVE_LINE_GAP:
-        probes.append("--tmp-native-line-gap" if args.tmp_native_line_gap else "--no-tmp-native-line-gap")
-    if args.no_shape_sprites:
-        probes.append("--no-shape-sprites")
-    if args.skip_empty_lines:
-        probes.append("--skip-empty-lines")
+    probes = deprecated_probe_args(args)
     if probes:
         print(
             "warning: deprecated probe/visual-fit options are enabled; "
@@ -11326,9 +11269,7 @@ def build_renderer(
     )
 
 
-def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
+def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.full_canvas and args.viewer_viewport:
         parser.error("--full-canvas and --viewer-viewport are mutually exclusive")
     if args.request is not None and args.export_request is not None:
@@ -11342,49 +11283,66 @@ def main() -> None:
             "warning: --parallel-stage full is experimental and may be non-deterministic with TMP/SDF caches; use transform for production",
             file=sys.stderr,
         )
+
+
+def load_cli_render_job(
+    parser: argparse.ArgumentParser,
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | None:
+    if args.request is not None:
+        card, profile_context, resources = decode_custom_profile_render_request(load_json(args.request))
+        return profile_context, [card], resources
+    profile = normalize_profile_payload(load_json(args.profile))
+    cards = select_custom_profile_cards(
+        profile,
+        seq=args.seq,
+        custom_profile_id=args.custom_profile_id,
+        custom_profile_card_id=args.card_id,
+        all_cards=args.all,
+    )
+    if args.export_request is not None:
+        if len(cards) != 1:
+            parser.error("--export-request requires a selector that resolves exactly one card")
+        write_json(args.export_request, build_custom_profile_render_request(profile, cards[0]))
+        print(args.export_request, flush=True)
+        return None
+    return build_profile_context(profile), cards, {}
+
+
+def render_cli_cards(renderer: PNGRenderer, cards: list[dict[str, Any]], out_dir: Path) -> None:
+    for card in cards:
+        img = renderer.render_card(card)
+        path = out_dir / custom_profile_output_name(card)
+        img.save(path)
+        print(path, flush=True)
+
+
+def write_cli_audit(path: Path, entries: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+    print(path, flush=True)
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    validate_cli_args(parser, args)
     warn_deprecated_probe_args(args)
 
     args.out = resolve_cli_path(args.out)
     args.out.mkdir(parents=True, exist_ok=True)
-    resources: dict[str, Any] = {}
-    if args.request is not None:
-        card, profile_context, resources = decode_custom_profile_render_request(load_json(args.request))
-        cards = [card]
-    else:
-        profile = normalize_profile_payload(load_json(args.profile))
-        cards = select_custom_profile_cards(
-            profile,
-            seq=args.seq,
-            custom_profile_id=args.custom_profile_id,
-            custom_profile_card_id=args.card_id,
-            all_cards=args.all,
-        )
-        profile_context = build_profile_context(profile)
-        if args.export_request is not None:
-            if len(cards) != 1:
-                parser.error("--export-request requires a selector that resolves exactly one card")
-            write_json(args.export_request, build_custom_profile_render_request(profile, cards[0]))
-            print(args.export_request, flush=True)
-            return
-
+    render_job = load_cli_render_job(parser, args)
+    if render_job is None:
+        return
+    profile_context, cards, resources = render_job
     renderer = build_renderer(args, profile_context, resolve_render_target(args), resources)
-    for card in cards:
-        img = renderer.render_card(card)
-        path = args.out / custom_profile_output_name(card)
-        img.save(path)
-        print(path, flush=True)
+    render_cli_cards(renderer, cards, args.out)
     if args.dump_tmp_layout is not None:
-        args.dump_tmp_layout.parent.mkdir(parents=True, exist_ok=True)
-        with args.dump_tmp_layout.open("w", encoding="utf-8") as f:
-            for entry in renderer.tmp_layout_audit:
-                f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-        print(args.dump_tmp_layout, flush=True)
+        write_cli_audit(args.dump_tmp_layout, renderer.tmp_layout_audit)
     if args.dump_native_audit is not None:
-        args.dump_native_audit.parent.mkdir(parents=True, exist_ok=True)
-        with args.dump_native_audit.open("w", encoding="utf-8") as f:
-            for entry in renderer.native_audit:
-                f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-        print(args.dump_native_audit, flush=True)
+        write_cli_audit(args.dump_native_audit, renderer.native_audit)
 
 
 if __name__ == "__main__":

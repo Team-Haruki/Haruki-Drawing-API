@@ -137,6 +137,141 @@ def _make_renderer(
     )
 
 
+class _MetricsFont:
+    def __init__(self) -> None:
+        self.bboxes = {
+            " ": (0, 3, 3, 8),
+            "  ": (0, 3, 6, 8),
+            "A": (-1, 2, 5, 9),
+            "B": (0, 1, 4, 10),
+            "AB": (-1, 1, 9, 10),
+            "A B": (-1, 1, 12, 10),
+        }
+        self.lengths = {" ": 3.0, "A": 5.0, "B": 4.0}
+
+    def getbbox(self, text: str) -> tuple[int, int, int, int]:
+        return self.bboxes[text]
+
+    def getlength(self, text: str) -> float:
+        return self.lengths[text]
+
+
+def _glyph_metrics(
+    *,
+    width: float = 4.0,
+    height: float = 6.0,
+    bearing_x: float = -1.0,
+    bearing_y: float = 5.0,
+    advance: float = 5.0,
+) -> renderer_mod.TMPGlyphMetrics:
+    return renderer_mod.TMPGlyphMetrics(
+        width=width,
+        height=height,
+        bearing_x=bearing_x,
+        bearing_y=bearing_y,
+        advance=advance,
+        rect_x=0,
+        rect_y=0,
+        rect_w=0,
+        rect_h=0,
+        glyph_scale=1.0,
+        atlas_index=0,
+    )
+
+
+def test_custom_profile_text_bbox_scales_spaces_and_keeps_visual_bounds(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_space_width_factor=2.0)
+    font = _MetricsFont()
+
+    assert renderer.text_bbox(font, "AB") == (-1, 1, 9, 10)
+    assert renderer.text_bbox(font, "A B") == (-1, 1, 15, 10)
+    assert renderer.text_bbox(font, "  ") == (0, 3, 12, 8)
+
+
+def test_custom_profile_glyph_advance_uses_tab_dynamic_static_and_pillow_metrics(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_metrics_mode="asset-fallback", tmp_space_width_factor=2.0)
+    font = _MetricsFont()
+    dynamic = SimpleNamespace(atlas_population_mode=1)
+    static = SimpleNamespace(atlas_population_mode=0)
+    calls: list[tuple[str, bool]] = []
+    renderer.tmp_render_glyph_char = lambda _font, ch, _size: ch  # type: ignore[method-assign]
+    renderer.tmp_font_library = SimpleNamespace(
+        tab_advance=lambda *_args: 13.0,
+        active_asset=lambda _name: dynamic,
+        glyph_metrics=lambda *_args, **_kwargs: pytest.fail("dynamic glyph table must not be used"),
+        source_glyph_metrics=lambda _name, ch, _size, *, include_fallback: (
+            calls.append((ch, include_fallback)) or _glyph_metrics(advance=7.0)
+        ),
+    )
+
+    assert renderer.glyph_advance(font, "\t", "Rodin", 24.0) == 13.0
+    assert renderer.glyph_advance(font, "A", "Rodin", 24.0) == 7.0
+    assert calls == [("A", True)]
+
+    renderer.tmp_font_library.active_asset = lambda _name: static
+    renderer.tmp_font_library.glyph_metrics = lambda *_args, **_kwargs: _glyph_metrics(advance=8.0)
+    assert renderer.glyph_layout_metrics_with_source(font, "A", "Rodin", 24.0)[1] == "tmp-character-table"
+    assert renderer.glyph_advance(font, "A", "Rodin", 24.0) == 8.0
+
+    renderer.tmp_font_library.glyph_metrics = lambda *_args, **_kwargs: None
+    renderer.tmp_font_library.source_glyph_metrics = lambda *_args, **_kwargs: _glyph_metrics(advance=9.0)
+    metrics, source = renderer.glyph_layout_metrics_with_source(font, "A", "Rodin", 24.0)
+    assert (metrics.advance, source) == (9.0, "source-font-fallback")
+
+    renderer.tmp_metrics_mode = "pil"
+    assert renderer.glyph_advance(font, " ", "Rodin", 24.0) == 6.0
+
+
+def test_custom_profile_run_measurement_preserves_spacing_bounds_and_empty_runs(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    run = TextRun("AB", style)
+    metrics = {
+        "A": _glyph_metrics(),
+        "B": _glyph_metrics(width=3.0, height=4.0, bearing_x=1.0, bearing_y=3.0, advance=4.0),
+        " ": _glyph_metrics(width=0.0, height=0.0, bearing_x=0.0, bearing_y=0.0, advance=3.0),
+    }
+    renderer.tmp_native_visible_character = lambda ch: not ch.isspace()  # type: ignore[method-assign]
+    renderer.tmp_character_spacing_advance = lambda *_args: 1.5  # type: ignore[method-assign]
+    renderer.glyph_layout_metrics = lambda _font, ch, _name, _size: metrics[ch]  # type: ignore[method-assign]
+    renderer.tmp_render_glyph_char = lambda _font, ch, _size: ch  # type: ignore[method-assign]
+    renderer.tmp_font_library.source_glyph_metrics = lambda _name, ch, _size, **_kwargs: metrics.get(ch)
+
+    expected = renderer_mod.TMPRunMeasure(10.5, -1.0, 10.5, -5.0, 1.0)
+    assert renderer.measure_tmp_run(_MetricsFont(), run, "Rodin", 24.0) == expected
+    assert renderer.measure_tmp_source_run(run, "Rodin", 24.0) == expected
+
+    mono_run = TextRun("AB", replace(style, mspace=8.0))
+    renderer.tmp_mspace_advance = lambda _value: 8.0  # type: ignore[method-assign]
+    assert renderer.measure_tmp_run(_MetricsFont(), mono_run, "Rodin", 24.0) == renderer_mod.TMPRunMeasure(
+        17.5, 0.5, 15.5, -5.0, 1.0
+    )
+
+    empty = TextRun("", style)
+    assert renderer.measure_tmp_run(_MetricsFont(), empty, "Rodin", 24.0) == renderer_mod.TMPRunMeasure(
+        3.0, 0.0, 3.0, 0.0, 0.0
+    )
+    renderer.tmp_font_library.source_glyph_metrics = lambda *_args, **_kwargs: None
+    with pytest.raises(ValueError, match="U\\+0041"):
+        renderer.measure_tmp_source_run(TextRun("A", style), "Rodin", 24.0)
+
+
+def test_custom_profile_run_bboxes_preserve_plain_fx_and_empty_geometry(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    font = _MetricsFont()
+    run = TextRun("AB", replace(_base_tmp_style(), scale_x=2.0))
+    renderer.tmp_render_glyph_char = lambda _font, ch, _size: ch  # type: ignore[method-assign]
+    renderer.tmp_native_visible_character = lambda _ch: True  # type: ignore[method-assign]
+    renderer.glyph_advance = lambda _font, ch, *_args: font.getlength(ch)  # type: ignore[method-assign]
+    renderer.tmp_character_spacing_advance = lambda *_args: 1.0  # type: ignore[method-assign]
+    renderer.tmp_fx_scale_x = lambda _style: 2.0  # type: ignore[method-assign]
+    renderer.tmp_fx_advance_scale_x = lambda _style: 1.5  # type: ignore[method-assign]
+
+    assert renderer.run_bbox(font, run, "Rodin", 24.0) == (-1, 1, 10, 10)
+    assert renderer.run_fx_bbox(font, run, "Rodin", 24.0) == (-4, 1, 15, 10)
+    assert renderer.run_bbox(font, TextRun("", run.style), "Rodin", 24.0) == (0, 3, 3, 8)
+
+
 def test_custom_profile_renderer_value_helpers_preserve_legacy_fallbacks(tmp_path: Path) -> None:
     configured: dict[str, object] = {"value": 1}
 
@@ -1092,6 +1227,167 @@ def test_custom_profile_cli_uses_decorative_tmp_main_logic_by_default() -> None:
     disabled = parser.parse_args(["--no-tmp-decorative-face-only", "--no-tmp-decorative-direct-raster"])
     assert not disabled.tmp_decorative_face_only
     assert not disabled.tmp_decorative_direct_raster
+
+
+def test_custom_profile_cli_reports_only_enabled_deprecated_probes(capsys: pytest.CaptureFixture[str]) -> None:
+    args = build_arg_parser().parse_args([])
+    assert renderer_mod.deprecated_probe_args(args) == []
+
+    args.position_scale = 1.25
+    args.premultiply_alpha_transforms = True
+    args.shape_sdf_source = "alpha"
+    args.tmp_native_line_gap = not renderer_mod.DEFAULT_TMP_NATIVE_LINE_GAP
+    args.skip_empty_lines = True
+    expected = [
+        "--position-scale",
+        "--premultiply-alpha-transforms",
+        "--shape-sdf-source=alpha",
+        "--no-tmp-native-line-gap" if not args.tmp_native_line_gap else "--tmp-native-line-gap",
+        "--skip-empty-lines",
+    ]
+
+    assert renderer_mod.deprecated_probe_args(args) == expected
+    renderer_mod.warn_deprecated_probe_args(args)
+    assert ", ".join(expected) in capsys.readouterr().err
+
+
+def test_custom_profile_cli_validation_rejects_conflicts_and_warns_for_full_parallel_stage(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    args.full_canvas = True
+    args.viewer_viewport = True
+    with pytest.raises(SystemExit):
+        renderer_mod.validate_cli_args(parser, args)
+
+    args = parser.parse_args([])
+    args.request = Path("request.json")
+    args.export_request = Path("export.json")
+    with pytest.raises(SystemExit):
+        renderer_mod.validate_cli_args(parser, args)
+
+    args = parser.parse_args([])
+    args.request = Path("request.json")
+    args.seq = 1
+    with pytest.raises(SystemExit):
+        renderer_mod.validate_cli_args(parser, args)
+
+    args = parser.parse_args([])
+    args.parallel_stage = "full"
+    renderer_mod.validate_cli_args(parser, args)
+    assert "--parallel-stage full is experimental" in capsys.readouterr().err
+
+
+def test_custom_profile_cli_loads_request_profile_and_export_jobs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args([])
+    args.request = tmp_path / "request.json"
+    request_document = {"request": True}
+    monkeypatch.setattr(renderer_mod, "load_json", lambda path: request_document if path == args.request else {})
+    monkeypatch.setattr(
+        renderer_mod,
+        "decode_custom_profile_render_request",
+        lambda document: ({"card": 1}, {"context": 2}, {"resources": 3}) if document is request_document else None,
+    )
+    assert renderer_mod.load_cli_render_job(parser, args) == (
+        {"context": 2},
+        [{"card": 1}],
+        {"resources": 3},
+    )
+
+    args = parser.parse_args([])
+    profile = {"profile": True}
+    cards = [{"card": 1}]
+    monkeypatch.setattr(renderer_mod, "load_json", lambda _path: profile)
+    monkeypatch.setattr(renderer_mod, "normalize_profile_payload", lambda value: value)
+    monkeypatch.setattr(renderer_mod, "select_custom_profile_cards", lambda *_args, **_kwargs: cards)
+    monkeypatch.setattr(renderer_mod, "build_profile_context", lambda value: {"context": value})
+    assert renderer_mod.load_cli_render_job(parser, args) == ({"context": profile}, cards, {})
+
+    writes: list[tuple[Path, dict]] = []
+    args.export_request = tmp_path / "export.json"
+    monkeypatch.setattr(
+        renderer_mod, "build_custom_profile_render_request", lambda value, card: {"p": value, "c": card}
+    )
+    monkeypatch.setattr(renderer_mod, "write_json", lambda path, value: writes.append((path, value)))
+    assert renderer_mod.load_cli_render_job(parser, args) is None
+    assert writes == [(args.export_request, {"p": profile, "c": cards[0]})]
+
+    monkeypatch.setattr(renderer_mod, "select_custom_profile_cards", lambda *_args, **_kwargs: cards * 2)
+    with pytest.raises(SystemExit):
+        renderer_mod.load_cli_render_job(parser, args)
+
+
+def test_custom_profile_cli_renders_cards_and_writes_jsonl_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    cards = [{"id": 1}, {"id": 2}]
+    rendered: list[dict] = []
+    fake_renderer = SimpleNamespace(
+        render_card=lambda card: rendered.append(card) or Image.new("RGBA", (1, 1), (card["id"], 0, 0, 255))
+    )
+    monkeypatch.setattr(renderer_mod, "custom_profile_output_name", lambda card: f"card-{card['id']}.png")
+
+    renderer_mod.render_cli_cards(fake_renderer, cards, out_dir)
+    assert rendered == cards
+    assert [Image.open(out_dir / f"card-{index}.png").getpixel((0, 0))[0] for index in (1, 2)] == [1, 2]
+
+    audit_path = tmp_path / "audit" / "rows.jsonl"
+    renderer_mod.write_cli_audit(audit_path, [{"kind": "text"}, {"kind": "shape"}])
+    assert audit_path.read_text(encoding="utf-8").splitlines() == [
+        '{"kind":"text"}',
+        '{"kind":"shape"}',
+    ]
+    assert str(audit_path) in capsys.readouterr().out
+
+
+def test_custom_profile_cli_main_dispatches_render_and_audit_helpers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    args = build_arg_parser().parse_args([])
+    args.out = tmp_path / "out"
+    args.dump_tmp_layout = tmp_path / "tmp.jsonl"
+    args.dump_native_audit = tmp_path / "native.jsonl"
+    parser = SimpleNamespace(parse_args=lambda: args, error=lambda message: pytest.fail(message))
+    cards = [{"id": 1}]
+    fake_renderer = SimpleNamespace(tmp_layout_audit=[{"tmp": 1}], native_audit=[{"native": 1}])
+    calls: list[tuple[str, object]] = []
+    monkeypatch.setattr(renderer_mod, "build_arg_parser", lambda: parser)
+    monkeypatch.setattr(renderer_mod, "resolve_cli_path", lambda path: path)
+    monkeypatch.setattr(renderer_mod, "load_cli_render_job", lambda *_args: ({"profile": 1}, cards, {"asset": 2}))
+    monkeypatch.setattr(renderer_mod, "resolve_render_target", lambda _args: "target")
+    monkeypatch.setattr(
+        renderer_mod,
+        "build_renderer",
+        lambda _args, profile, target, resources: (
+            calls.append(("build", (profile, target, resources))) or fake_renderer
+        ),
+    )
+    monkeypatch.setattr(
+        renderer_mod,
+        "render_cli_cards",
+        lambda renderer, selected, out: calls.append(("render", (renderer, selected, out))),
+    )
+    monkeypatch.setattr(
+        renderer_mod,
+        "write_cli_audit",
+        lambda path, rows: calls.append(("audit", (path, rows))),
+    )
+
+    renderer_mod.main()
+
+    assert args.out.is_dir()
+    assert calls == [
+        ("build", ({"profile": 1}, "target", {"asset": 2})),
+        ("render", (fake_renderer, cards, args.out)),
+        ("audit", (args.dump_tmp_layout, fake_renderer.tmp_layout_audit)),
+        ("audit", (args.dump_native_audit, fake_renderer.native_audit)),
+    ]
 
 
 def test_custom_profile_premul_resize_does_not_bleed_transparent_rgb() -> None:
