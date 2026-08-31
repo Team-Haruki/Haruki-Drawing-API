@@ -393,55 +393,126 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
     return title, sections
 
 
+def _command_help_section_layout(
+    sections: list[_CommandHelpSection],
+    content_width: int,
+    section_padding_y: int,
+    section_gap: int,
+    title_height: int,
+) -> tuple[list[tuple[int, int]], int]:
+    height = _HELP_CARD_MARGIN + title_height + section_gap
+    section_sizes: list[tuple[int, int]] = []
+    for section in sections:
+        section_h = section_padding_y * 2 + 42
+        for line in section.lines:
+            section_h += line.gap_before + _command_help_line_height(line.size)
+        section_h = max(92, section_h)
+        section_sizes.append((content_width, section_h))
+        height += section_h + section_gap
+    return section_sizes, max(360, height + _HELP_CARD_MARGIN - section_gap)
+
+
+def _draw_command_help_glass_box(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    radius: int,
+    fill_alpha: int = 112,
+) -> None:
+    shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+    shadow_draw.rounded_rectangle(
+        (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
+        radius=radius,
+        fill=(72, 96, 128, 30),
+    )
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=(255, 255, 255, fill_alpha),
+        outline=(255, 255, 255, 150),
+        width=2,
+    )
+
+
+def _draw_command_help_section(
+    draw: ImageDraw.ImageDraw,
+    section: _CommandHelpSection,
+    section_box: tuple[int, int, int, int],
+    section_padding_x: int,
+    section_padding_y: int,
+) -> None:
+    header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
+    draw.text(
+        (header_box[0], header_box[1]),
+        section.title,
+        font=get_font(DEFAULT_BOLD_FONT, 24),
+        fill=(24, 38, 58, 255),
+    )
+    draw.line(
+        (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
+        fill=(255, 255, 255, 86),
+        width=2,
+    )
+
+    text_y = section_box[1] + section_padding_y + 48
+    text_x = section_box[0] + section_padding_x
+    text_right = section_box[2] - section_padding_x
+    for line in section.lines:
+        text_y += line.gap_before
+        line_height = _command_help_line_height(line.size)
+        if line.bg is not None:
+            bg_box = (
+                text_x + line.indent - 14,
+                text_y - 4,
+                text_right + 8,
+                text_y + line_height - 1,
+            )
+            draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
+        if line.text:
+            font = get_font(line.font_name, line.size)
+            if line.label:
+                draw.text(
+                    (text_x + line.indent, text_y),
+                    line.label,
+                    font=get_font(DEFAULT_BOLD_FONT, line.size),
+                    fill=(30, 45, 66, 255),
+                )
+            text_offset = line.label_width if line.label_width > 0 else 0
+            draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
+        text_y += line_height
+
+
 def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
     title, sections = _layout_command_help_markdown(rqd.markdown)
     title = (rqd.title or title or "指令帮助").strip()
     if not sections:
         sections = [_CommandHelpSection("说明", [])]
 
-    content_w = _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN * 2
+    content_width = _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN * 2
     section_gap = 22
-    section_pad_x = 26
-    section_pad_y = 20
-    title_h = 88
-    height = _HELP_CARD_MARGIN + title_h + section_gap
-    section_sizes: list[tuple[int, int]] = []
-    for section in sections:
-        section_h = section_pad_y * 2 + 42
-        for line in section.lines:
-            section_h += line.gap_before + _command_help_line_height(line.size)
-        section_h = max(92, section_h)
-        section_sizes.append((content_w, section_h))
-        height += section_h + section_gap
-    height = max(360, height + _HELP_CARD_MARGIN - section_gap)
+    section_padding_x = 26
+    section_padding_y = 20
+    title_height = 88
+    section_sizes, height = _command_help_section_layout(
+        sections,
+        content_width,
+        section_padding_y,
+        section_gap,
+        title_height,
+    )
 
     img = Image.new("RGBA", (_HELP_IMAGE_WIDTH, height), (255, 255, 255, 0))
     draw = ImageDraw.Draw(img, "RGBA")
-
-    def draw_glass_box(box: tuple[int, int, int, int], radius: int, fill_alpha: int = 112) -> None:
-        shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
-        shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-        shadow_draw.rounded_rectangle(
-            (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
-            radius=radius,
-            fill=(72, 96, 128, 30),
-        )
-        img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
-        draw.rounded_rectangle(
-            box,
-            radius=radius,
-            fill=(255, 255, 255, fill_alpha),
-            outline=(255, 255, 255, 150),
-            width=2,
-        )
 
     title_box = (
         _HELP_CARD_MARGIN,
         _HELP_CARD_MARGIN,
         _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN,
-        _HELP_CARD_MARGIN + title_h,
+        _HELP_CARD_MARGIN + title_height,
     )
-    draw_glass_box(title_box, 22, 118)
+    _draw_command_help_glass_box(img, draw, title_box, 22, 118)
     draw.text(
         (_HELP_CARD_MARGIN + 30, _HELP_CARD_MARGIN + 24),
         title,
@@ -452,46 +523,8 @@ def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Ima
     y = title_box[3] + section_gap
     for section, (_, section_h) in zip(sections, section_sizes, strict=True):
         section_box = (_HELP_CARD_MARGIN, y, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, y + section_h)
-        draw_glass_box(section_box, 18, 102)
-        header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
-        draw.text(
-            (header_box[0], header_box[1]),
-            section.title,
-            font=get_font(DEFAULT_BOLD_FONT, 24),
-            fill=(24, 38, 58, 255),
-        )
-        draw.line(
-            (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
-            fill=(255, 255, 255, 86),
-            width=2,
-        )
-
-        text_y = section_box[1] + section_pad_y + 48
-        text_x = section_box[0] + section_pad_x
-        text_right = section_box[2] - section_pad_x
-        for line in section.lines:
-            text_y += line.gap_before
-            line_height = _command_help_line_height(line.size)
-            if line.bg is not None:
-                bg_box = (
-                    text_x + line.indent - 14,
-                    text_y - 4,
-                    text_right + 8,
-                    text_y + line_height - 1,
-                )
-                draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
-            if line.text:
-                font = get_font(line.font_name, line.size)
-                if line.label:
-                    draw.text(
-                        (text_x + line.indent, text_y),
-                        line.label,
-                        font=get_font(DEFAULT_BOLD_FONT, line.size),
-                        fill=(30, 45, 66, 255),
-                    )
-                text_offset = line.label_width if line.label_width > 0 else 0
-                draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
-            text_y += line_height
+        _draw_command_help_glass_box(img, draw, section_box, 18, 102)
+        _draw_command_help_section(draw, section, section_box, section_padding_x, section_padding_y)
         y += section_h + section_gap
 
     return img

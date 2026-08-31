@@ -804,82 +804,95 @@ async def try_render_music_brief_list_payload(rqd: MusicBriefListRequest) -> Enc
     return await render_canvas_payload(await _build_music_brief_list_canvas(rqd), endpoint="music_brief_list")
 
 
+async def _load_music_list_jackets(rqd: MusicListRequest, image_loader) -> dict[int, ImageSource]:
+    music_ids = list(rqd.jackets_path_list)
+    jacket_tasks = [image_loader(ASSETS_BASE_DIR, rqd.jackets_path_list[music_id]) for music_id in music_ids]
+    started_at = time.perf_counter()
+    loaded_jackets = await asyncio.gather(*jacket_tasks)
+    logger.debug(
+        "[perf] compose_music_list_image jackets %d: %.3fs",
+        len(jacket_tasks),
+        time.perf_counter() - started_at,
+    )
+    return dict(zip(music_ids, loaded_jackets))
+
+
+def _group_music_list(rqd: MusicListRequest) -> list[tuple[tuple[str, int], list[dict]]]:
+    grouped_musics: dict[tuple[str, int], list[dict]] = {}
+    for music in rqd.music_list:
+        level = music["difficulty"]
+        difficulty = str(music.get("difficulty_type") or rqd.required_difficulties or "").lower()
+        grouped_musics.setdefault((difficulty, level), []).append(music)
+    return sorted(grouped_musics.items(), key=lambda item: _music_list_group_order(item[0][0], item[0][1]))
+
+
+def _prepare_music_list_group(rqd: MusicListRequest, musics: list[dict]) -> None:
+    musics.sort(key=lambda music: (music["release_at"], music["id"]))
+    for music in musics:
+        music["play_result"] = rqd.user_results.get(music["id"])
+
+
+def _music_list_result_icon_path(rqd: MusicListRequest, play_result: str) -> str:
+    if rqd.play_result_icon_path_map and play_result in rqd.play_result_icon_path_map:
+        return rqd.play_result_icon_path_map[play_result]
+    return RESULT_ASSET_PATH + f"/icon_{play_result}.png"
+
+
+async def _draw_music_list_entry(
+    rqd: MusicListRequest,
+    music: dict,
+    jackets: dict[int, ImageSource],
+    image_loader,
+) -> None:
+    with VSplit().set_sep(2):
+        with Frame():
+            ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
+            if play_result := music["play_result"]:
+                result_img_path = _music_list_result_icon_path(rqd, play_result)
+                result_img = await image_loader(ASSETS_BASE_DIR, result_img_path)
+                ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset((64 - 10, 64 - 10))
+        # 默认始终显示 ID，因为它是列表查询
+        TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(64)
+
+
+async def _draw_music_list_group(
+    rqd: MusicListRequest,
+    difficulty: str,
+    level: int,
+    musics: list[dict],
+    jackets: dict[int, ImageSource],
+    image_loader,
+) -> None:
+    _prepare_music_list_group(rqd, musics)
+    difficulty = difficulty or str(rqd.required_difficulties or "").lower()
+    difficulty_color = DIFF_COLORS.get(difficulty, DIFF_COLORS["master"])
+    with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
+        level_text = TextBox(f"{difficulty.upper()} {level}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE))
+        level_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=difficulty_color, radius=5))
+
+        with Grid(col_count=10).set_sep(5):
+            for music in musics:
+                await _draw_music_list_entry(rqd, music, jackets, image_loader)
+
+
 async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
     # Header-only refs: the Skia path emits asset paths into the IR, the Pillow
     # fallback decodes on demand (Canvas.get_img prefetches concurrently).
-    jackets = {}
     image_loader = get_asset_image_ref
-    jacket_tasks = [image_loader(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
-    _t0 = time.perf_counter()
-    loaded_jackets = await asyncio.gather(*jacket_tasks)
-    logger.debug("[perf] compose_music_list_image jackets %d: %.3fs", len(jacket_tasks), time.perf_counter() - _t0)
-    for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
-        jackets[music_id] = img
-
-    profile = rqd.profile
-    lv_musics_map = {}
-    for music in rqd.music_list:
-        lv = music["difficulty"]
-        diff = str(music.get("difficulty_type") or rqd.required_difficulties or "").lower()
-        key = (diff, lv)
-        if key not in lv_musics_map:
-            lv_musics_map[key] = []
-        lv_musics_map[key].append(music)
-    lv_musics = sorted(lv_musics_map.items(), key=lambda x: _music_list_group_order(x[0][0], x[0][1]))
+    jackets = await _load_music_list_jackets(rqd, image_loader)
+    grouped_musics = _group_music_list(rqd)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             # 附加标题
             _draw_rqd_title(rqd)
 
-            if profile:
-                await get_profile_card(profile.to_profile_card_request())
+            if rqd.profile:
+                await get_profile_card(rqd.profile.to_profile_card_request())
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
-                for (diff, lv), musics in lv_musics:
-                    musics.sort(key=lambda x: (x["release_at"], x["id"]), reverse=False)
-
-                    # 这里的 filtered_musics 实际上就是传入的所有 musics，因为不需要过滤了
-                    filtered_musics = []
-                    for music in musics:
-                        # 获取游玩结果
-                        music["play_result"] = rqd.user_results.get(music["id"])
-                        filtered_musics.append(music)
-
-                    if not filtered_musics:
-                        continue
-
-                    diff = diff or str(rqd.required_difficulties or "").lower()
-                    diff_color = DIFF_COLORS.get(diff, DIFF_COLORS["master"])
-                    with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(8).set_item_align("lt").set_sep(8):
-                        lv_text = TextBox(
-                            f"{diff.upper()} {lv}", TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=WHITE)
-                        )
-                        lv_text.set_padding((10, 5)).set_bg(roundrect_bg(fill=diff_color, radius=5))
-
-                        with Grid(col_count=10).set_sep(5):
-                            for music in filtered_musics:
-                                with VSplit().set_sep(2):
-                                    with Frame():
-                                        ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
-                                        if music["play_result"]:
-                                            if (
-                                                rqd.play_result_icon_path_map
-                                                and music["play_result"] in rqd.play_result_icon_path_map
-                                            ):
-                                                result_img_path = rqd.play_result_icon_path_map[music["play_result"]]
-                                            else:
-                                                result_img_path = (
-                                                    RESULT_ASSET_PATH + f"/icon_{music['play_result']}.png"
-                                                )
-                                            result_img = await image_loader(ASSETS_BASE_DIR, result_img_path)
-                                            ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
-                                                (64 - 10, 64 - 10)
-                                            )
-                                    # 默认始终显示 ID，因为它是列表查询
-                                    TextBox(f"{music['id']}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)).set_w(
-                                        64
-                                    )
+                for (difficulty, level), musics in grouped_musics:
+                    await _draw_music_list_group(rqd, difficulty, level, musics, jackets, image_loader)
 
     add_request_watermark(canvas, rqd)
     return canvas

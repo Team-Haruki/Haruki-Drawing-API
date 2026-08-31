@@ -1,6 +1,12 @@
 import pytest
 
-from src.sekai.misc.drawer import _command_help_bullet, _command_help_heading, _command_help_numbered
+from src.sekai.misc.drawer import (
+    _command_help_bullet,
+    _command_help_heading,
+    _command_help_numbered,
+    _compose_command_help_image_sync,
+)
+from src.sekai.misc.model import CommandHelpRenderRequest
 
 
 @pytest.mark.parametrize(
@@ -44,3 +50,29 @@ def test_command_help_bullet(line: str, expected: str | None) -> None:
 )
 def test_command_help_numbered(line: str, expected: str | None) -> None:
     assert _command_help_numbered(line) == expected
+
+
+def test_compose_command_help_image_covers_rich_sections() -> None:
+    request = CommandHelpRenderRequest(
+        title="自定义标题",
+        markdown="""# 文档标题
+## 常用指令
+- **查询**：查看资料
+1. 第一步
+> 提示文本
+| 参数 | 说明 |
+普通说明
+""",
+    )
+
+    image = _compose_command_help_image_sync(request)
+
+    assert image.mode == "RGBA"
+    assert image.width == 1080
+    assert image.height > 360
+
+
+def test_compose_command_help_image_supplies_an_empty_fallback_section() -> None:
+    image = _compose_command_help_image_sync(CommandHelpRenderRequest(markdown=""))
+
+    assert image.size == (1080, 360)
