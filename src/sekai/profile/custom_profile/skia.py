@@ -1362,6 +1362,61 @@ def _native_honor_candidates(
     return bonds_candidates()
 
 
+def _lower_native_honor_request(
+    renderer: PNGRenderer,
+    request: HonorRequest,
+) -> tuple[str, NativeSubtree | None]:
+    source_status, images = _native_honor_sources(renderer, request)
+    if source_status == "unrenderable":
+        return "unrenderable", None
+    if source_status != "ready" or images is None:
+        return "hybrid", None
+    canvas = build_honor_badge_canvas(request, images)
+    if canvas is None:
+        return "missing", None
+    try:
+        badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
+    except NativeSubtreeError:
+        return "hybrid", None
+    return "ready", badge
+
+
+def _honor_request_from_candidate(candidate: Any) -> HonorRequest | None:
+    if isinstance(candidate, HonorRequest):
+        return candidate
+    if isinstance(candidate, dict):
+        return HonorRequest.model_validate(candidate)
+    return None
+
+
+def _emit_native_honor_badge(
+    renderer: PNGRenderer,
+    content: Any,
+    scene: _SceneAssembler,
+    badge: NativeSubtree,
+) -> bool:
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x", 1.0))
+    sy = float(scale.get("y", sx))
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    with scene.builder.unity_subscene(
+        size=badge.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        badge.splice_into(
+            scene.builder,
+            scene.mem_images,
+            namespace="custom.honor.content",
+            require_asset_backed=True,
+        )
+    return True
+
+
 def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
     """Lower normal, birthday, bonds, and empty badges through ``HonorBadgeBox``.
 
@@ -1382,47 +1437,15 @@ def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
         if candidate is None or id(candidate) in seen_candidates:
             continue
         seen_candidates.add(id(candidate))
-        if isinstance(candidate, HonorRequest):
-            request = candidate
-        elif isinstance(candidate, dict):
-            request = HonorRequest.model_validate(candidate)
-        else:
+        request = _honor_request_from_candidate(candidate)
+        if request is None:
             return False
-
-        source_status, images = _native_honor_sources(renderer, request)
-        if source_status == "unrenderable":
+        status, badge = _lower_native_honor_request(renderer, request)
+        if status == "unrenderable":
             continue
-        if source_status != "ready" or images is None:
+        if status != "ready" or badge is None:
             return False
-
-        canvas = build_honor_badge_canvas(request, images)
-        if canvas is None:
-            return False
-        try:
-            badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
-        except NativeSubtreeError:
-            return False
-
-        scale = content.object_data.get("scale") or {}
-        sx = float(scale.get("x", 1.0))
-        sy = float(scale.get("y", sx))
-        if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
-            return False
-        angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-        with scene.builder.unity_subscene(
-            size=badge.size,
-            anchor=renderer.unity_point(content.object_data.get("position", {})),
-            object_scale=(sx, sy),
-            post_scale=(renderer.position_scale_x, renderer.position_scale_y),
-            rotation=angle,
-        ):
-            badge.splice_into(
-                scene.builder,
-                scene.mem_images,
-                namespace="custom.honor.content",
-                require_asset_backed=True,
-            )
-        return True
+        return _emit_native_honor_badge(renderer, content, scene, badge)
     return False
 
 
@@ -1462,20 +1485,87 @@ def _native_profile_honor_badge(
                 continue
             seen_payloads.add(id(payload))
             request = HonorRequest.model_validate(payload)
-            source_status, images = _native_honor_sources(renderer, request)
-            if source_status == "unrenderable":
+            status, badge = _lower_native_honor_request(renderer, request)
+            if status in {"unrenderable", "missing"}:
                 continue
-            if source_status != "ready" or images is None:
-                return "hybrid", None
-            canvas = build_honor_badge_canvas(request, images)
-            if canvas is None:
-                continue
-            try:
-                badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
-            except NativeSubtreeError:
+            if status != "ready" or badge is None:
                 return "hybrid", None
             return "ready", badge
     return "missing", None
+
+
+def _prepare_native_honor_deck_slots(
+    renderer: PNGRenderer,
+    plan: Any,
+) -> list[tuple[NativeSubtree, tuple[int, int, int, int], int]] | None:
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
+    for slot in plan.slots:
+        status, badge = _native_profile_honor_badge(
+            renderer,
+            dict(slot.profile_row),
+            full_size=slot.full_size,
+        )
+        if status != "ready" or badge is None:
+            return None
+        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
+        # size. Native custom-profile does not claim that filter yet; decline rather than
+        # silently substituting Catmull-Rom through a nested subscene.
+        if badge.size != slot.target_size:
+            return None
+        slots.append((badge, (*slot.target_xy, *slot.target_size), slot.index))
+    return slots
+
+
+def _native_honor_deck_background(renderer: PNGRenderer, plan: Any) -> tuple[bool, str | None]:
+    assert plan.panel is not None
+    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
+    if background_path is None:
+        return True, None
+    background_asset = _relative_asset_path(background_path)
+    return background_asset is not None, background_asset
+
+
+def _native_honor_deck_transform(renderer: PNGRenderer, content: Any) -> tuple[float, float, float] | None:
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return None
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    return sx, sy, angle
+
+
+def _emit_native_honor_deck_contents(
+    scene: _SceneAssembler,
+    plan: Any,
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]],
+    background_asset: str | None,
+) -> None:
+    if background_asset is not None:
+        scene.builder.sliced_image(
+            path=background_asset,
+            pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
+            size=(
+                round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
+                round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
+            ),
+            border=plan.panel.sliced_border,
+            tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
+        )
+    for badge, (left, top, width, height), slot_index in slots:
+        with scene.builder.unity_subscene(
+            size=badge.size,
+            anchor=(left + width / 2.0, top + height / 2.0),
+            object_scale=(1.0, 1.0),
+            post_scale=(1.0, 1.0),
+            rotation=0.0,
+        ):
+            badge.splice_into(
+                scene.builder,
+                scene.mem_images,
+                namespace=f"custom.honor.deck.{slot_index}",
+                require_asset_backed=True,
+            )
 
 
 def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
@@ -1498,43 +1588,16 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     if plan is None:
         return None
 
-    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
-    for slot in plan.slots:
-        status, badge = _native_profile_honor_badge(
-            renderer,
-            dict(slot.profile_row),
-            full_size=slot.full_size,
-        )
-        if status != "ready":
-            return None
-        assert badge is not None
-        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
-        # size. Native custom-profile does not claim that filter yet; decline rather than
-        # silently substituting Catmull-Rom through a nested subscene.
-        if badge.size != slot.target_size:
-            return None
-        slots.append(
-            (
-                badge,
-                (
-                    *slot.target_xy,
-                    *slot.target_size,
-                ),
-                slot.index,
-            )
-        )
-
-    assert plan.panel is not None
-    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
-    background_asset = _relative_asset_path(background_path) if background_path is not None else None
-    if background_path is not None and background_asset is None:
+    slots = _prepare_native_honor_deck_slots(renderer, plan)
+    if slots is None:
         return None
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x") or 1.0)
-    sy = float(scale.get("y") or sx or 1.0)
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+    background_ready, background_asset = _native_honor_deck_background(renderer, plan)
+    if not background_ready:
         return None
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    transform = _native_honor_deck_transform(renderer, content)
+    if transform is None:
+        return None
+    sx, sy, angle = transform
     size = plan.natural_size
     with scene.builder.unity_subscene(
         size=size,
@@ -1543,31 +1606,7 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
         post_scale=(renderer.position_scale_x, renderer.position_scale_y),
         rotation=angle,
     ):
-        if background_asset is not None:
-            scene.builder.sliced_image(
-                path=background_asset,
-                pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
-                size=(
-                    round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
-                    round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
-                ),
-                border=plan.panel.sliced_border,
-                tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
-            )
-        for badge, (left, top, width, height), slot_index in slots:
-            with scene.builder.unity_subscene(
-                size=badge.size,
-                anchor=(left + width / 2.0, top + height / 2.0),
-                object_scale=(1.0, 1.0),
-                post_scale=(1.0, 1.0),
-                rotation=0.0,
-            ):
-                badge.splice_into(
-                    scene.builder,
-                    scene.mem_images,
-                    namespace=f"custom.honor.deck.{slot_index}",
-                    require_asset_backed=True,
-                )
+        _emit_native_honor_deck_contents(scene, plan, slots, background_asset)
     return "native"
 
 

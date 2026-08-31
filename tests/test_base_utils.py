@@ -58,6 +58,31 @@ def _save_image(path: Path, size: tuple[int, int] = (12, 8)) -> None:
     Image.new("RGBA", size, (20, 80, 140, 255)).save(path)
 
 
+@pytest.mark.parametrize(
+    ("precision", "expected"),
+    [
+        ("d", "1天"),
+        ("h", "1天2小时"),
+        ("m", "1天2小时3分钟"),
+        ("s", "1天2小时3分钟4秒"),
+    ],
+)
+def test_get_readable_timedelta_respects_precision(precision: str, expected: str) -> None:
+    delta = timedelta(days=1, hours=2, minutes=3, seconds=4)
+
+    assert utils.get_readable_timedelta(delta, precision) == expected
+    assert utils.get_readable_timedelta(delta, precision, use_en_unit=True).endswith(
+        {"d": "1d", "h": "2h", "m": "3m", "s": "4s"}[precision]
+    )
+
+
+def test_get_readable_timedelta_keeps_first_nonzero_unit_and_clamps_negative() -> None:
+    assert utils.get_readable_timedelta(timedelta(hours=2, minutes=3), "d") == "2小时"
+    assert utils.get_readable_timedelta(timedelta(0)) == ""
+    assert utils.get_readable_timedelta(timedelta(seconds=-1)) == "0秒"
+    assert utils.get_readable_timedelta(timedelta(seconds=-1), use_en_unit=True) == "0s"
+
+
 def test_get_img_from_path_blocks_path_traversal(tmp_path):
     with pytest.raises(ValueError, match="越界"):
         asyncio.run(utils.get_img_from_path(tmp_path, "../outside.png", on_missing="raise"))
@@ -96,6 +121,39 @@ def test_image_and_thumbnail_caches_record_hits(monkeypatch):
     assert stats["thumbnail_cache"]["entries"] == 1
     assert stats["thumbnail_cache"]["hits"] == 1
     assert stats["thumbnail_cache"]["misses"] == 1
+
+
+@pytest.mark.parametrize("path", ["regular.png", "thumbnail/icon.png"])
+def test_image_cache_replacement_and_entry_limit_eviction(monkeypatch, path: str) -> None:
+    monkeypatch.setattr(utils, "IMAGE_CACHE_SIZE", 1)
+    monkeypatch.setattr(utils, "IMAGE_CACHE_MAX_BYTES", 1024 * 1024)
+    monkeypatch.setattr(utils, "THUMB_CACHE_SIZE", 1)
+    monkeypatch.setattr(utils, "THUMB_CACHE_MAX_BYTES", 1024 * 1024)
+    first = Image.new("RGBA", (2, 2), (1, 2, 3, 255))
+    replacement = Image.new("RGBA", (3, 3), (4, 5, 6, 255))
+    newest = Image.new("RGBA", (4, 4), (7, 8, 9, 255))
+
+    utils._put_image_cache(path, 1, 1, first)
+    utils._put_image_cache(path, 1, 1, replacement)
+    utils._put_image_cache(path, 2, 2, newest)
+
+    cache = utils._thumb_cache if "thumbnail" in path else utils._image_cache
+    stats = utils.get_runtime_cache_stats()["thumbnail_cache" if "thumbnail" in path else "image_cache"]
+    assert len(cache) == 1
+    assert next(iter(cache.values()))[0] is newest
+    assert stats["sets"] == 3
+    assert stats["evictions"] == 1
+
+
+def test_put_image_cache_is_disabled_when_a_limit_is_zero(monkeypatch) -> None:
+    monkeypatch.setattr(utils, "IMAGE_CACHE_SIZE", 0)
+    image = Image.new("RGBA", (2, 2), (1, 2, 3, 255))
+
+    utils._put_image_cache("regular.png", 1, 1, image)
+
+    assert not utils._image_cache
+    assert utils._image_cache_sets == 0
+    image.close()
 
 
 def test_asset_path_provenance_only_survives_while_pixels_are_pristine(tmp_path):
@@ -200,6 +258,37 @@ def test_resolve_existing_asset_path_reports_a_vanished_file(tmp_path):
 
     _save_image(path)
     assert utils.resolve_existing_asset_path(path) == path.resolve()
+
+
+def test_birthday_fallback_prefers_latest_same_or_older_year(tmp_path) -> None:
+    requested = tmp_path / "static_images" / "mysekai" / "birthday" / "miku_2026" / "icon" / "item.png"
+    older = tmp_path / "static_images" / "mysekai" / "birthday" / "miku_2024" / "icon" / "item.png"
+    newer = tmp_path / "static_images" / "mysekai" / "birthday" / "miku_2027" / "icon" / "item.png"
+    _save_image(older)
+    _save_image(newer)
+
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path) == older
+    earliest_request = requested.parents[2] / "miku_2023" / "icon" / "item.png"
+    assert utils._resolve_birthday_year_fallback(earliest_request, tmp_path) == older
+
+
+def test_birthday_fallback_uses_generic_and_rejects_unrelated_paths(tmp_path) -> None:
+    generic = (
+        tmp_path
+        / "static_images"
+        / "mysekai"
+        / "harvest_fixture_icon"
+        / "rarity_1"
+        / "mdl_site_wood_common_fieldtree01.png"
+    )
+    _save_image(generic)
+    requested = tmp_path / "static_images" / "mysekai" / "birthday" / "rin_2026" / "icon" / "item.png"
+
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path) == generic
+    (tmp_path / "static_images" / "mysekai" / "birthday").mkdir()
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path) == generic
+    assert utils._resolve_birthday_year_fallback(tmp_path / "unrelated.png", tmp_path) is None
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path / "other-root") is None
 
 
 def test_rendered_image_cache_key_is_stable_for_dict_ordering():

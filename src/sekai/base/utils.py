@@ -138,40 +138,40 @@ def get_pristine_image_asset_path(image: Image.Image | AssetImageRef) -> Path | 
     return Path(path)
 
 
-def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: bool = False) -> str:
-    """
-    将时间段转换为可读字符串
-    """
+def _timedelta_precision_level(precision: str) -> int | str:
     match precision:
         case "s":
-            precision = 3
+            return 3
         case "m":
-            precision = 2
+            return 2
         case "h":
-            precision = 1
+            return 1
         case "d":
-            precision = 0
+            return 0
+    return precision
 
-    s = int(delta.total_seconds())
-    if s < 0:
+
+def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: bool = False) -> str:
+    """将时间段转换为可读字符串。"""
+
+    total_seconds = int(delta.total_seconds())
+    if total_seconds < 0:
         return "0秒" if not use_en_unit else "0s"
-    d = s // (24 * 3600)
-    s %= 24 * 3600
-    h = s // 3600
-    s %= 3600
-    m = s // 60
-    s %= 60
-
-    ret = ""
-    if d > 0:
-        ret += f"{d}天" if not use_en_unit else f"{d}d"
-    if h > 0 and (precision >= 1 or not ret):
-        ret += f"{h}小时" if not use_en_unit else f"{h}h"
-    if m > 0 and (precision >= 2 or not ret):
-        ret += f"{m}分钟" if not use_en_unit else f"{m}m"
-    if s > 0 and (precision >= 3 or not ret):
-        ret += f"{s}秒" if not use_en_unit else f"{s}s"
-    return ret
+    days, seconds = divmod(total_seconds, 24 * 3600)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    units = (
+        (days, 0, "天", "d"),
+        (hours, 1, "小时", "h"),
+        (minutes, 2, "分钟", "m"),
+        (seconds, 3, "秒", "s"),
+    )
+    precision_level = _timedelta_precision_level(precision)
+    parts: list[str] = []
+    for value, level, zh_unit, en_unit in units:
+        if value > 0 and (level == 0 or level <= precision_level or not parts):
+            parts.append(f"{value}{en_unit if use_en_unit else zh_unit}")
+    return "".join(parts)
 
 
 async def get_img_from_path(
@@ -921,25 +921,21 @@ def _put_image_cache(
     cache_key = (path, mtime_ns, size, target_w, target_h, resample)
     cache_bytes = _estimate_image_bytes(image)
     with lock:
+        current_bytes = _thumb_cache_total_bytes if is_thumb else _image_cache_total_bytes
         old_entry = cache.pop(cache_key, None)
         if old_entry is not None:
             old_image, old_bytes = old_entry
-            if is_thumb:
-                _thumb_cache_total_bytes -= old_bytes
-            else:
-                _image_cache_total_bytes -= old_bytes
+            current_bytes -= old_bytes
             old_image.close()
 
         cache[cache_key] = (image, cache_bytes)
+        current_bytes += cache_bytes
         if is_thumb:
-            _thumb_cache_total_bytes += cache_bytes
             _thumb_cache_sets += 1
         else:
-            _image_cache_total_bytes += cache_bytes
             _image_cache_sets += 1
 
         # 双阈值驱逐：条目数和总字节数都受控
-        current_bytes = _thumb_cache_total_bytes if is_thumb else _image_cache_total_bytes
         while cache and (len(cache) > max_size or current_bytes > max_bytes):
             _, (evict_image, evict_bytes) = cache.popitem(last=False)
             current_bytes -= evict_bytes
@@ -954,26 +950,25 @@ def _put_image_cache(
             _image_cache_total_bytes = current_bytes
 
 
-def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Path | None:
+def _birthday_fallback_request(full_path: Path, resolved_base: Path) -> tuple[str, int, tuple[str, ...]] | None:
     try:
         rel_path = full_path.relative_to(resolved_base)
     except ValueError:
         return None
-
     parts = rel_path.parts
     if len(parts) < 5 or parts[:3] != ("static_images", "mysekai", "birthday"):
         return None
-
     directory_name = parts[3]
     if "_" not in directory_name:
         return None
-
     chara_name, year_text = directory_name.rsplit("_", 1)
     if not chara_name or not year_text.isdigit():
         return None
+    return chara_name, int(year_text), parts[4:]
 
-    birthday_root = resolved_base / "static_images" / "mysekai" / "birthday"
-    generic_fallback = (
+
+def _generic_birthday_fallback(resolved_base: Path) -> Path | None:
+    path = (
         resolved_base
         / "static_images"
         / "mysekai"
@@ -981,36 +976,44 @@ def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Pat
         / "rarity_1"
         / "mdl_site_wood_common_fieldtree01.png"
     )
-    if not birthday_root.is_dir():
-        return generic_fallback if generic_fallback.is_file() else None
+    return path if path.is_file() else None
 
-    target_year = int(year_text)
-    tail_parts = parts[4:]
-    fallback_candidates: list[tuple[int, Path]] = []
+
+def _birthday_fallback_candidates(
+    birthday_root: Path,
+    chara_name: str,
+    tail_parts: tuple[str, ...],
+) -> list[tuple[int, Path]]:
+    candidates: list[tuple[int, Path]] = []
+    prefix = chara_name + "_"
     for entry in birthday_root.iterdir():
-        if not entry.is_dir():
+        if not entry.is_dir() or not entry.name.startswith(prefix):
             continue
-        if not entry.name.startswith(chara_name + "_"):
-            continue
-
-        candidate_year = entry.name[len(chara_name) + 1 :]
+        candidate_year = entry.name[len(prefix) :]
         if not candidate_year.isdigit():
             continue
-
         candidate_path = entry.joinpath(*tail_parts)
         if candidate_path.is_file():
-            fallback_candidates.append((int(candidate_year), candidate_path))
+            candidates.append((int(candidate_year), candidate_path))
+    return candidates
 
+
+def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Path | None:
+    request = _birthday_fallback_request(full_path, resolved_base)
+    if request is None:
+        return None
+    chara_name, target_year, tail_parts = request
+    birthday_root = resolved_base / "static_images" / "mysekai" / "birthday"
+    if not birthday_root.is_dir():
+        return _generic_birthday_fallback(resolved_base)
+    fallback_candidates = _birthday_fallback_candidates(birthday_root, chara_name, tail_parts)
     if not fallback_candidates:
-        return generic_fallback if generic_fallback.is_file() else None
+        return _generic_birthday_fallback(resolved_base)
 
     same_or_older = [item for item in fallback_candidates if item[0] <= target_year]
     if same_or_older:
-        same_or_older.sort(key=lambda item: item[0], reverse=True)
-        return same_or_older[0][1]
-
-    fallback_candidates.sort(key=lambda item: item[0])
-    return fallback_candidates[0][1]
+        return max(same_or_older, key=lambda item: item[0])[1]
+    return min(fallback_candidates, key=lambda item: item[0])[1]
 
 
 def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
