@@ -458,10 +458,148 @@ async def _build_music_meta_canvas(requests: list[MusicMetaRequest]) -> Canvas:
     return canvas
 
 
-# 合成歌曲排行图片
-async def _build_music_board_canvas(
+def _music_board_columns(target: str) -> list[tuple[str, float, str]]:
+    columns = [("排名", 1.2, "c"), ("歌曲", 6.0, "l"), ("难度", 1.5, "c")]
+    if target == "score":
+        columns.append(("分数", 2.0, "c"))
+    elif target in ("pt", _POINTS_PER_TIME_TARGET):
+        columns.extend((("PT", 2.0, "c"), ("LIVE分数", 2.0, "c")))
+    if target == _POINTS_PER_TIME_TARGET:
+        columns.append(("PT/h", 2.0, "c"))
+    columns.append(("技能占比", 2.0, "c"))
+    if target in (_POINTS_PER_TIME_TARGET, "time"):
+        columns.append(("周回/h", 2.0, "c"))
+    if target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
+        columns.append(("PT系数", 1.5, "c"))
+    columns.extend((("时长", 1.5, "c"), ("每秒点击", 1.5, "c")))
+    return columns
+
+
+def _music_board_row_bg(index: int) -> FillBg:
+    return FillBg((255, 255, 255, 160)) if index % 2 == 0 else FillBg((255, 255, 255, 60))
+
+
+def _draw_music_board_rank_column(
     rqd: MusicBoardRequest,
-) -> Canvas:
+    width: int,
+    row_height: int,
+    row_sep: int,
+    title_style: TextStyle,
+    item_style: TextStyle,
+) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(row_sep):
+        TextBox("排名", title_style).set_size((width, row_height)).set_content_align("c").set_bg(_music_board_row_bg(0))
+        for index, row in enumerate(rqd.items):
+            style = item_style
+            if (row.music_id, row.difficulty) in rqd.spec_mid_diffs:
+                style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(255, 50, 50))
+            TextBox(f"#{row.rank}", style).set_size((width, row_height)).set_content_align("c").set_bg(
+                _music_board_row_bg(index + 1)
+            )
+
+
+async def _draw_music_board_song_column(
+    rqd: MusicBoardRequest,
+    width: int,
+    row_height: int,
+    row_sep: int,
+    title_style: TextStyle,
+    item_style: TextStyle,
+) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(row_sep):
+        TextBox("歌曲", title_style).set_size((width, row_height)).set_content_align("c").set_bg(_music_board_row_bg(0))
+        song_row_padding = 8
+        song_row_sep = 4
+        song_cover_size = row_height - 8
+        song_title_width = max(24, width - song_row_padding * 2 - song_cover_size - song_row_sep)
+        for index, row in enumerate(rqd.items):
+            with (
+                HSplit()
+                .set_content_align("l")
+                .set_item_align("l")
+                .set_sep(song_row_sep)
+                .set_padding((song_row_padding, 0))
+                .set_size((width, row_height))
+                .set_bg(_music_board_row_bg(index + 1))
+            ):
+                music_cover = await get_asset_image_ref(ASSETS_BASE_DIR, row.music_cover_path)
+                ImageBox(music_cover, size=(song_cover_size, song_cover_size), use_alpha_blend=False)
+                TextBox(row.music_title, item_style, wrap=False, overflow="shrink").set_w(song_title_width)
+
+
+def _draw_music_board_difficulty_column(
+    rqd: MusicBoardRequest,
+    width: int,
+    row_height: int,
+    row_sep: int,
+    title_style: TextStyle,
+) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(row_sep):
+        TextBox("难度", title_style).set_size((width, row_height)).set_content_align("c").set_bg(_music_board_row_bg(0))
+        for row in rqd.items:
+            difficulty_bg = FillBg(DIFF_COLORS.get(row.difficulty, (200, 200, 200)))
+            TextBox(f"{row.level}", TextStyle(DEFAULT_BOLD_FONT, 20, WHITE)).set_size(
+                (width, row_height)
+            ).set_content_align("c").set_bg(difficulty_bg)
+
+
+def _draw_music_board_text_column(
+    rqd: MusicBoardRequest,
+    header_text: str,
+    value_getter,
+    width: int,
+    row_height: int,
+    row_sep: int,
+    title_style: TextStyle,
+    item_style: TextStyle,
+) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(row_sep):
+        TextBox(header_text, title_style).set_size((width, row_height)).set_content_align("c").set_bg(
+            _music_board_row_bg(0)
+        )
+        for index, row in enumerate(rqd.items):
+            TextBox(value_getter(row), item_style).set_size((width, row_height)).set_content_align("c").set_bg(
+                _music_board_row_bg(index + 1)
+            )
+
+
+def _draw_music_board_dynamic_columns(
+    rqd: MusicBoardRequest,
+    ratios: list[float],
+    unit_width: int,
+    row_height: int,
+    row_sep: int,
+    title_style: TextStyle,
+    item_style: TextStyle,
+) -> None:
+    column_index = 3
+
+    def add_column(header_text, value_getter) -> None:
+        nonlocal column_index
+        width = int(ratios[column_index] * unit_width)
+        column_index += 1
+        _draw_music_board_text_column(
+            rqd, header_text, value_getter, width, row_height, row_sep, title_style, item_style
+        )
+
+    if rqd.target == "score":
+        add_column("分数", lambda row: f"{(row.live_type_score or 0) * 100:.1f}%")
+    elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
+        add_column("PT", lambda row: f"{row.live_type_pt or 0}")
+        add_column("LIVE分数", lambda row: f"{(row.live_type_real_score or 0):.0f}")
+    if rqd.target == _POINTS_PER_TIME_TARGET:
+        add_column("PT/h", lambda row: f"{(row.live_type_pt_per_hour or 0):.0f}")
+    add_column("技能占比", lambda row: f"{(row.live_type_skill_account or 0) * 100:.1f}%")
+    if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
+        add_column("周回/h", lambda row: f"{(row.play_count_per_hour or 0):.1f}")
+    if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
+        add_column("PT系数", lambda row: f"{row.event_rate:.0f}")
+    add_column("时长", lambda row: f"{row.music_time:.1f}")
+    add_column("每秒点击", lambda row: f"{row.tps:.1f}")
+
+
+# 合成歌曲排行图片
+async def _build_music_board_canvas(rqd: MusicBoardRequest) -> Canvas:
     r"""compose_music_board_image
 
     合成歌曲排行图片
@@ -488,36 +626,7 @@ async def _build_music_board_canvas(
             if rqd.description:
                 TextBox(rqd.description, title_style, use_real_line_count=True)
 
-            # 表格配置
-            # 定义列: (标题, 宽度权重, 对齐方式)
-            columns = [
-                ("排名", 1.2, "c"),
-                ("歌曲", 6.0, "l"),
-                ("难度", 1.5, "c"),
-            ]
-
-            # 根据target添加动态列
-            if rqd.target == "score":
-                columns.append(("分数", 2.0, "c"))
-            elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
-                columns.append(("PT", 2.0, "c"))
-                columns.append(("LIVE分数", 2.0, "c"))
-            if rqd.target == _POINTS_PER_TIME_TARGET:
-                columns.append(("PT/h", 2.0, "c"))
-
-            columns.append(("技能占比", 2.0, "c"))
-
-            if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
-                columns.append(("周回/h", 2.0, "c"))
-
-            if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
-                columns.append(("PT系数", 1.5, "c"))
-
-            columns.append(("时长", 1.5, "c"))
-            columns.append(("每秒点击", 1.5, "c"))
-
-            # 计算每列宽度
-            # 使用固定单位宽度计算总宽
+            columns = _music_board_columns(rqd.target)
             unit_w = 60
             ratios = [c[1] for c in columns]
 
@@ -526,98 +635,12 @@ async def _build_music_board_canvas(
             hsep = 5
             vsep = 5
 
-            def row_bg_fn(i: int):
-                return FillBg((255, 255, 255, 160)) if i % 2 == 0 else FillBg((255, 255, 255, 60))
-
             # 主容器：水平排列各列
             with HSplit().set_content_align("c").set_item_align("c").set_sep(hsep):
-                # Helper to create standard column logic
-                # But headers are specific, and content is specific.
-                # We will unroll the known columns and loop the dynamic ones if possible, or just unroll all.
-
-                # 1. 排名 Column
-                w = int(ratios[0] * unit_w)
-                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
-                    # Header
-                    TextBox("排名", title_style).set_size((w, gh)).set_content_align("c").set_bg(row_bg_fn(0))
-                    # Data
-                    for i, row in enumerate(rqd.items):
-                        bg = row_bg_fn(i + 1)
-                        style = item_style
-                        if (row.music_id, row.difficulty) in rqd.spec_mid_diffs:
-                            style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(255, 50, 50))
-                        TextBox(f"#{row.rank}", style).set_size((w, gh)).set_content_align("c").set_bg(bg)
-
-                # 2. 歌曲 Column
-                w = int(ratios[1] * unit_w)
-                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
-                    TextBox("歌曲", title_style).set_size((w, gh)).set_content_align("c").set_bg(row_bg_fn(0))
-                    song_row_padding = 8
-                    song_row_sep = 4
-                    song_cover_size = gh - 8
-                    song_title_w = max(24, w - song_row_padding * 2 - song_cover_size - song_row_sep)
-                    for i, row in enumerate(rqd.items):
-                        bg = row_bg_fn(i + 1)
-                        with (
-                            HSplit()
-                            .set_content_align("l")
-                            .set_item_align("l")
-                            .set_sep(song_row_sep)
-                            .set_padding((song_row_padding, 0))
-                            .set_size((w, gh))
-                            .set_bg(bg)
-                        ):
-                            music_cover = await get_asset_image_ref(ASSETS_BASE_DIR, row.music_cover_path)
-                            ImageBox(music_cover, size=(song_cover_size, song_cover_size), use_alpha_blend=False)
-                            TextBox(row.music_title, item_style, wrap=False, overflow="shrink").set_w(song_title_w)
-
-                # 3. 难度 Column
-                w = int(ratios[2] * unit_w)
-                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
-                    TextBox("难度", title_style).set_size((w, gh)).set_content_align("c").set_bg(row_bg_fn(0))
-                    for i, row in enumerate(rqd.items):
-                        diff_bg = FillBg(DIFF_COLORS.get(row.difficulty, (200, 200, 200)))
-                        TextBox(f"{row.level}", TextStyle(DEFAULT_BOLD_FONT, 20, WHITE)).set_size(
-                            (w, gh)
-                        ).set_content_align("c").set_bg(diff_bg)
-
-                # 动态列
-                current_col_idx = 3
-
-                # Helper for adding a simple text column
-                def add_text_column(header_text, value_getter):
-                    nonlocal current_col_idx
-                    w_col = int(ratios[current_col_idx] * unit_w)
-                    current_col_idx += 1
-                    with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
-                        TextBox(header_text, title_style).set_size((w_col, gh)).set_content_align("c").set_bg(
-                            row_bg_fn(0)
-                        )
-                        for i, row in enumerate(rqd.items):
-                            bg = row_bg_fn(i + 1)
-                            TextBox(value_getter(row), item_style).set_size((w_col, gh)).set_content_align("c").set_bg(
-                                bg
-                            )
-
-                if rqd.target == "score":
-                    add_text_column("分数", lambda r: f"{(r.live_type_score or 0) * 100:.1f}%")
-                elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
-                    add_text_column("PT", lambda r: f"{r.live_type_pt or 0}")
-                    add_text_column("LIVE分数", lambda r: f"{(r.live_type_real_score or 0):.0f}")
-
-                if rqd.target == _POINTS_PER_TIME_TARGET:
-                    add_text_column("PT/h", lambda r: f"{(r.live_type_pt_per_hour or 0):.0f}")
-
-                add_text_column("技能占比", lambda r: f"{(r.live_type_skill_account or 0) * 100:.1f}%")
-
-                if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
-                    add_text_column("周回/h", lambda r: f"{(r.play_count_per_hour or 0):.1f}")
-
-                if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
-                    add_text_column("PT系数", lambda r: f"{r.event_rate:.0f}")
-
-                add_text_column("时长", lambda r: f"{r.music_time:.1f}")
-                add_text_column("每秒点击", lambda r: f"{r.tps:.1f}")
+                _draw_music_board_rank_column(rqd, int(ratios[0] * unit_w), gh, vsep, title_style, item_style)
+                await _draw_music_board_song_column(rqd, int(ratios[1] * unit_w), gh, vsep, title_style, item_style)
+                _draw_music_board_difficulty_column(rqd, int(ratios[2] * unit_w), gh, vsep, title_style)
+                _draw_music_board_dynamic_columns(rqd, ratios, unit_w, gh, vsep, title_style, item_style)
 
     add_request_watermark(canvas, rqd)
     return canvas

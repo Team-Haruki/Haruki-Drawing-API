@@ -95,7 +95,10 @@ def test_image_paste_lerp_serializes_only_for_integral_plain_stretch():
         {"pos": (2, 3), "size": (20, 10), "alpha": 0.5},
         {"pos": (2, 3), "size": (20, 10), "source_rect": (0, 0, 1, 1)},
         {"pos": (2, 3), "size": (20, 10), "tint": image_tint((255, 0, 0, 255))},
+        {"pos": (2, 3), "size": (20, 10), "shadow": image_shadow()},
         {"pos": (2, 3), "size": (20, 10), "blur_sigma": 1.0},
+        {"pos": (2, 3), "size": (20, 10), "blur_sigma": (0.0, 1.0)},
+        {"pos": (float("inf"), 3), "size": (20, 10)},
     )
     for kwargs in invalid_calls:
         with pytest.raises(ValueError, match="paste_lerp Image"):
@@ -332,6 +335,7 @@ def test_image_tint_shadow_and_text_extras():
         (10, 10),
         fit="crop",
         sampling="cubic",
+        anchor=(0.5, 1.0),
         tint=image_tint((255, 0, 0, 255), "multiply"),
         shadow=image_shadow(0.5, (3, 3), 2.0),
         blur_sigma=(3.0, 1.5),
@@ -339,6 +343,7 @@ def test_image_tint_shadow_and_text_extras():
     img = b._root_children[-1]
     assert img["fit"] == "crop"
     assert img["sampling"] == "cubic"
+    assert img["anchor"] == [0.5, 1.0]
     assert img["tint"]["mode"] == "multiply"
     assert img["shadow"]["sigma"] == 2.0
     assert img["blur_sigma"] == [3.0, 1.5]

@@ -917,6 +917,86 @@ def _resolve_alias_panel_widths(
     return best_overflow[1], best_overflow[2], best_overflow[3]
 
 
+def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
+    timezone_label = timezone or ""
+    if not timezone_label and start_at and start_at.tzinfo:
+        timezone_label = start_at.tzname() or ""
+    if not timezone_label and end_at and end_at.tzinfo:
+        timezone_label = end_at.tzname() or ""
+    return f" ({timezone_label})" if timezone_label else ""
+
+
+def _draw_birthday_time_range(
+    rqd: CharaBirthdayRequest,
+    label: str,
+    time_range: BirthdayEventTime,
+    label_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    start_at = datetime_from_millis(time_range.start_at, rqd.timezone)
+    end_at = datetime_from_millis(time_range.end_at, rqd.timezone)
+    timezone_label = _birthday_timezone_label(start_at, end_at, rqd.timezone)
+    with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
+        TextBox(f"{label} ", label_style)
+        TextBox(
+            f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}",
+            value_style,
+        )
+
+
+def _draw_birthday_optional_times(
+    rqd: CharaBirthdayRequest,
+    label_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    if not rqd.is_fifth_anniv:
+        return
+    with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+        if rqd.drop_time:
+            _draw_birthday_time_range(rqd, "💧露滴掉落时间", rqd.drop_time, label_style, value_style)
+        if rqd.flower_time:
+            _draw_birthday_time_range(rqd, "🌱浇水开放时间", rqd.flower_time, label_style, value_style)
+        if rqd.party_time:
+            _draw_birthday_time_range(rqd, "🎂派对开放时间", rqd.party_time, label_style, value_style)
+
+
+def _draw_birthday_cards(cards, card_thumbs: list[ImageSource], label_style: TextStyle) -> None:
+    with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+        TextBox("卡牌", label_style)
+        Spacer(w=8)
+        with Grid(col_count=6).set_sep(4, 4):
+            for index, thumb in enumerate(card_thumbs):
+                with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
+                    ImageBox(
+                        thumb,
+                        image_size_mode="fill",
+                        size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
+                        shadow=True,
+                        sampling="linear",
+                    )
+                    TextBox(f"{cards[index].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
+
+
+def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
+    for index, item in enumerate(all_characters):
+        if item.cid == start_cid:
+            return index
+    return 0
+
+
+def _draw_birthday_calendar(all_characters, calendar_icons: dict[int, ImageSource], selected_cid: int) -> None:
+    with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
+        index = _birthday_calendar_start_index(all_characters)
+        for _ in range(len(all_characters)):
+            character = all_characters[index % len(all_characters)]
+            index += 1
+            with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
+                icon_box = ImageBox(calendar_icons[character.cid], size=(40, 40)).set_padding(4)
+                if character.cid == selected_cid:
+                    icon_box.set_bg(roundrect_bg(radius=8, alpha=80))
+                TextBox(f"{character.month}/{character.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
+
+
 async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     r"""_build_chara_birthday_canvas
 
@@ -931,39 +1011,10 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     -------
     Canvas
     """
-    cid = rqd.cid
-    month = rqd.month
-    day = rqd.day
-    region_name = rqd.region_name
-    days_until_birthday = rqd.days_until_birthday
-    color_code = rqd.color_code
-    cards = rqd.cards
-    all_characters = rqd.all_characters
-
-    is_fifth_anniv = rqd.is_fifth_anniv
-
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
     card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
-
-    # 绘制时间范围的辅助函数
-    def draw_time_range(label: str, tr: BirthdayEventTime):
-        start_at = datetime_from_millis(tr.start_at, rqd.timezone)
-        end_at = datetime_from_millis(tr.end_at, rqd.timezone)
-        timezone_label = rqd.timezone or ""
-        if timezone_label == "" and (start_at and start_at.tzinfo):
-            timezone_label = start_at.tzname() or ""
-        if timezone_label == "" and (end_at and end_at.tzinfo):
-            timezone_label = end_at.tzname() or ""
-        if timezone_label:
-            timezone_label = f" ({timezone_label})"
-        with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
-            TextBox(f"{label} ", style1)
-            TextBox(
-                (f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}"),
-                style2,
-            )
 
     with Canvas(bg=ImageBg(card_image)).set_padding(BG_PADDING) as canvas:
         with (
@@ -980,79 +1031,39 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
                 ImageBox(sd_image, size=(None, 80), shadow=True)
                 ImageBox(title_image, size=(None, 60))
                 TextBox(
-                    f"{month}月{day}日",
+                    f"{rqd.month}月{rqd.day}日",
                     TextStyle(
                         DEFAULT_HEAVY_FONT,
                         32,
                         (100, 100, 100),
                         use_shadow=True,
                         shadow_offset=2,
-                        shadow_color=tuple(color_code_to_rgb(color_code)),
+                        shadow_color=tuple(color_code_to_rgb(rqd.color_code)),
                     ),
                 )
 
             # 基本信息
             with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
                 with HSplit().set_sep(8).set_padding(0).set_content_align("l").set_item_align("l"):
-                    TextBox(f"({region_name}) 距离下次生日还有{days_until_birthday}天", style1)
+                    TextBox(f"({rqd.region_name}) 距离下次生日还有{rqd.days_until_birthday}天", style1)
                     Spacer(w=16)
                     TextBox("应援色", style1)
-                    TextBox(color_code, TextStyle(DEFAULT_FONT, 20, ADAPTIVE_WB)).set_bg(
-                        RoundRectBg(tuple(color_code_to_rgb(color_code)), radius=4)
+                    TextBox(rqd.color_code, TextStyle(DEFAULT_FONT, 20, ADAPTIVE_WB)).set_bg(
+                        RoundRectBg(tuple(color_code_to_rgb(rqd.color_code)), radius=4)
                     ).set_padding(8)
 
                 # 时间范围 - 固定绘制
-                draw_time_range("🎰卡池开放时间", rqd.gacha_time)
-                draw_time_range("🎤虚拟LIVE时间", rqd.live_time)
+                _draw_birthday_time_range(rqd, "🎰卡池开放时间", rqd.gacha_time, style1, style2)
+                _draw_birthday_time_range(rqd, "🎤虚拟LIVE时间", rqd.live_time, style1, style2)
 
             # 五周年特殊时间范围
-            if is_fifth_anniv:
-                with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-                    if rqd.drop_time:
-                        draw_time_range("💧露滴掉落时间", rqd.drop_time)
-                    if rqd.flower_time:
-                        draw_time_range("🌱浇水开放时间", rqd.flower_time)
-                    if rqd.party_time:
-                        draw_time_range("🎂派对开放时间", rqd.party_time)
+            _draw_birthday_optional_times(rqd, style1, style2)
 
             # 卡牌列表
-            with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-                TextBox("卡牌", style1)
-                Spacer(w=8)
-                with Grid(col_count=6).set_sep(4, 4):
-                    for i, thumb in enumerate(card_thumbs):
-                        with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
-                            ImageBox(
-                                thumb,
-                                image_size_mode="fill",
-                                size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
-                                shadow=True,
-                                sampling="linear",
-                            )
-                            TextBox(f"{cards[i].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
+            _draw_birthday_cards(rqd.cards, card_thumbs, style1)
 
             # 底部角色生日日历
-            with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
-                # 找到起始角色（从小豆沙开始，ID=6）
-                idx = 0
-                start_cid = 6
-                for i, item in enumerate(all_characters):
-                    if item.cid == start_cid:
-                        idx = i
-                        break
-
-                for _ in range(len(all_characters)):
-                    chara = all_characters[idx % len(all_characters)]
-                    idx += 1
-
-                    with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
-                        # 使用model中传入的icon_path
-                        chara_icon = calendar_icons[chara.cid]
-
-                        b = ImageBox(chara_icon, size=(40, 40)).set_padding(4)
-                        if chara.cid == cid:
-                            b.set_bg(roundrect_bg(radius=8, alpha=80))
-                        TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
+            _draw_birthday_calendar(rqd.all_characters, calendar_icons, rqd.cid)
 
     add_request_watermark(canvas, rqd)
     return canvas
