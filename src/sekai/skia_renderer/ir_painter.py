@@ -31,12 +31,12 @@ from src.core.pillow_telemetry import (
     record_pillow_touch,
 )
 from src.sekai.base.painter import (
-    ALIGN_MAP,
     AdaptiveTextColor,
     FontDesc,
     LinearGradient,
     Painter,
     RadialGradient,
+    _iter_image_bg_placements,
 )
 from src.sekai.base.triangle_bg import build_triangle_bg
 from src.sekai.base.utils import (
@@ -65,6 +65,17 @@ def _rgba(color: Any) -> tuple[int, int, int, int]:
     if len(c) == 3:
         return (c[0], c[1], c[2], 255)
     return (c[0], c[1], c[2], c[3])
+
+
+def _image_bg_tint(fade: float):
+    if fade <= 0:
+        return None
+    multiplier = int(max(0.0, min(1.0, 1.0 - float(fade))) * 255)
+    return image_tint((multiplier, multiplier, multiplier, 255), "multiply")
+
+
+def _image_bg_blur_sigma(blur: bool, source_scale: tuple[float, float]):
+    return (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
 
 
 class IRPainter(Painter):
@@ -504,46 +515,22 @@ class IRPainter(Painter):
         target raster reuse, and the shared-tree rule.
         """
         path = self._image_ref(image)
-        image_w, image_h = image.size
-        ha, va = ALIGN_MAP[align]
-        tint = None
-        if fade > 0:
-            multiplier = int(max(0.0, min(1.0, 1.0 - float(fade))) * 255)
-            tint = image_tint((multiplier, multiplier, multiplier, 255), "multiply")
-
-        def emit(pos, size, source_scale=(1.0, 1.0)):
-            sigma = (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
-            self._b.image(
-                path,
-                self._abs(pos),
-                size,
-                fit="stretch",
-                sampling="catmull_rom",
-                tint=tint,
-                blur_sigma=sigma,
-            )
-
-        if mode == "fit":
-            scale = max(self.w / image_w, self.h / image_h)
-            width, height = int(image_w * scale), int(image_h * scale)
-            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
-            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
-            emit((x, y), (width, height), (width / image_w, height / image_h))
-            return self
-        if mode == "fill":
-            emit((0, 0), self.size, (self.w / image_w, self.h / image_h))
-            return self
-        if mode == "fixed":
-            x = (self.w - image_w) // 2 if ha == "c" else (0 if ha == "l" else self.w - image_w)
-            y = (self.h - image_h) // 2 if va == "c" else (0 if va == "t" else self.h - image_h)
-            emit((x, y), (image_w, image_h))
-            return self
-        if mode == "repeat":
-            for y in range(0, self.h, image_h):
-                for x in range(0, self.w, image_w):
-                    emit((x, y), (image_w, image_h))
-            return self
-        raise SkiaUnsupported(f"unsupported image background mode: {mode}")
+        tint = _image_bg_tint(fade)
+        try:
+            placements = _iter_image_bg_placements(self.size, image.size, align, mode)
+            for pos, size, source_scale, _ in placements:
+                self._b.image(
+                    path,
+                    self._abs(pos),
+                    size,
+                    fit="stretch",
+                    sampling="catmull_rom",
+                    tint=tint,
+                    blur_sigma=_image_bg_blur_sigma(blur, source_scale),
+                )
+        except ValueError as exc:
+            raise SkiaUnsupported(str(exc)) from exc
+        return self
 
     def paste_with_alpha_blend(
         self,

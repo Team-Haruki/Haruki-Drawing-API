@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
@@ -252,6 +252,51 @@ ALIGN_TYPE = Literal[
     "rt",
     "rb",
 ]
+
+_ImageBgPlacement = tuple[Position, Size, tuple[float, float], bool]
+
+
+def _image_bg_axis_offset(container: int, content: int, align: str, start_align: str) -> int:
+    if align == "c":
+        return (container - content) // 2
+    return 0 if align == start_align else container - content
+
+
+def _iter_image_bg_placements(
+    canvas_size: Size,
+    image_size: Size,
+    align: ALIGN_TYPE,
+    mode: str,
+) -> Iterator[_ImageBgPlacement]:
+    canvas_w, canvas_h = canvas_size
+    image_w, image_h = image_size
+    ha, va = ALIGN_MAP[align]
+    if mode == "fit":
+        scale = max(canvas_w / image_w, canvas_h / image_h)
+        width, height = int(image_w * scale), int(image_h * scale)
+        pos = (
+            _image_bg_axis_offset(canvas_w, width, ha, "l"),
+            _image_bg_axis_offset(canvas_h, height, va, "t"),
+        )
+        yield pos, (width, height), (width / image_w, height / image_h), True
+        return
+    if mode == "fill":
+        yield (0, 0), canvas_size, (canvas_w / image_w, canvas_h / image_h), True
+        return
+    if mode == "fixed":
+        pos = (
+            _image_bg_axis_offset(canvas_w, image_w, ha, "l"),
+            _image_bg_axis_offset(canvas_h, image_h, va, "t"),
+        )
+        yield pos, image_size, (1.0, 1.0), False
+        return
+    if mode == "repeat":
+        for y in range(0, canvas_h, image_h):
+            for x in range(0, canvas_w, image_w):
+                yield (x, y), image_size, (1.0, 1.0), False
+        return
+    raise ValueError(f"unsupported image background mode: {mode}")
+
 
 ITEM_SIZE_MODE_TYPE = Literal["expand", "fixed"]
 
@@ -1551,25 +1596,9 @@ class Painter:
         if fade > 0:
             image = ImageEnhance.Brightness(image).enhance(1 - fade)
 
-        ha, va = ALIGN_MAP[align]
-        if mode == "fit":
-            scale = max(self.w / image.width, self.h / image.height)
-            width, height = int(image.width * scale), int(image.height * scale)
-            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
-            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
-            return self._impl_paste(image, (x, y), (width, height))
-        if mode == "fill":
-            return self._impl_paste(image, (0, 0), self.size)
-        if mode == "fixed":
-            x = (self.w - image.width) // 2 if ha == "c" else (0 if ha == "l" else self.w - image.width)
-            y = (self.h - image.height) // 2 if va == "c" else (0 if va == "t" else self.h - image.height)
-            return self._impl_paste(image, (x, y))
-        if mode == "repeat":
-            for y in range(0, self.h, image.height):
-                for x in range(0, self.w, image.width):
-                    self._impl_paste(image, (x, y))
-            return self
-        raise ValueError(f"unsupported image background mode: {mode}")
+        for pos, size, _, resize in _iter_image_bg_placements(self.size, image.size, align, mode):
+            self._impl_paste(image, pos, size if resize else None)
+        return self
 
     def _resolve_sub_img(
         self,

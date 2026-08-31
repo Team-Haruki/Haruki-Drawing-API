@@ -193,6 +193,141 @@ def _mix(c1: RGB, c2: RGB, ratio: float) -> RGB:
     return tuple(int(c1[i] * (1 - ratio) + c2[i] * ratio) for i in range(3))
 
 
+_ResolvedTrianglePalette = tuple[RGBA, RGBA, RGBA, RGBA, int, list[RGB], float, float]
+
+
+def _time_triangle_palette(hour: float) -> _ResolvedTrianglePalette:
+    palette = _pink_palette(hour)
+    _, sat_mul, light_mul = _time_color(hour)
+    grad1: RGBA = (*palette["grad1"], 255)
+    grad2: RGBA = (*palette["grad2"], 255)
+    mid = _mix(palette["grad1"], palette["grad2"], 0.5)
+    preset_colors = [
+        _brighten(_mix(palette["grad1"], (255, 206, 232), 0.72), 0.20),
+        _brighten(_mix(mid, (238, 214, 255), 0.68), 0.18),
+        _brighten(_mix(palette["grad2"], (208, 232, 255), 0.66), 0.20),
+        _brighten(_mix(mid, (255, 228, 176), 0.56), 0.18),
+    ]
+    return (
+        grad1,
+        grad2,
+        tuple(palette["overlay1"]),
+        tuple(palette["overlay2"]),
+        palette["white_alpha"],
+        preset_colors,
+        sat_mul,
+        light_mul,
+    )
+
+
+def _hue_rgba(hue: float, sat: float, light: float, sat_mul: float, light_mul: float, alpha: int = 255) -> RGBA:
+    hue = (hue + 1.0) % 1.0
+    r, g, b = colorsys.hls_to_rgb(hue, light * light_mul, sat * sat_mul)
+    return (int(255 * r), int(255 * g), int(255 * b), alpha)
+
+
+def _custom_hue_triangle_palette(main_hue: float) -> _ResolvedTrianglePalette:
+    sat_mul = light_mul = 1.0
+    offset = 0.025
+    grad1 = _hue_rgba(main_hue, 0.5, 1.0, sat_mul, light_mul)
+    grad2 = _hue_rgba(main_hue + offset, 0.9, 0.5, sat_mul, light_mul)
+    overlay1 = _hue_rgba(main_hue, 0.9, 0.7, sat_mul, light_mul, 100)
+    overlay2 = _hue_rgba(main_hue - offset, 0.5, 0.5, sat_mul, light_mul, 100)
+    preset_colors = [_brighten(c) for c in ((255, 189, 246), (183, 246, 255), (255, 247, 146))]
+    return grad1, grad2, overlay1, overlay2, 100, preset_colors, sat_mul, light_mul
+
+
+def _scatter_position(
+    rng: random.Random,
+    width: int,
+    height: int,
+    wide_shift: float,
+) -> tuple[float, float]:
+    if rng.random() >= 0.78:
+        return rng.uniform(0.12 * width, 0.88 * width), rng.uniform(0.12 * height, 0.88 * height)
+
+    edge = rng.choices(
+        ("left", "right", "top", "bottom"),
+        weights=(0.9, 0.95 - wide_shift * 1.8, 1.18 + wide_shift * 1.6, 0.72 - wide_shift * 1.2),
+        k=1,
+    )[0]
+    if edge == "left":
+        return rng.uniform(-0.04 * width, 0.18 * width), rng.uniform(0, height)
+    if edge == "right":
+        return rng.uniform((0.82 - wide_shift) * width, 1.03 * width), rng.uniform(0, height)
+    if edge == "top":
+        return rng.uniform(0, width), rng.uniform(-0.04 * height, (0.20 + wide_shift * 0.5) * height)
+    return rng.uniform(0, width), rng.uniform((0.80 - wide_shift * 0.8) * height, 1.03 * height)
+
+
+def _scatter_triangle(
+    rng: random.Random,
+    width: int,
+    height: int,
+    wide_shift: float,
+    size_mean_deviation: tuple[float, float],
+    size_factor: float,
+    light_mul: float,
+    preset_colors: list[RGB],
+) -> Triangle | None:
+    x, y = _scatter_position(rng, width, height, wide_shift)
+    if x < 0 or x >= width or y < 0 or y >= height:
+        return None
+
+    rot = rng.uniform(0, 360)
+    size = max(1, min(1000, int(rng.normalvariate(size_mean_deviation[0], size_mean_deviation[1]))))
+    distance = ((x - width // 2) / width * 2) ** 2 + ((y - height // 2) / height * 2) ** 2
+    size = int(size * max(0.28, distance))
+    lower_size, upper_size = 64 * size_factor, 128 * size_factor
+    size_alpha_factor = 1.0
+    if size < lower_size:
+        size_alpha_factor = size / lower_size
+    if size > upper_size:
+        size_alpha_factor = 1.0 - (size - upper_size * 1.5) / (upper_size * 1.5)
+    alpha = int(rng.normalvariate(122, 138) * max(0, min(1.5, size_alpha_factor) * (light_mul**0.5)))
+    if rng.random() < 0.05 and size > lower_size:
+        alpha = 255
+    if alpha <= 34:
+        return None
+    color = rng.choice(preset_colors)
+    triangle_type = rng.choice([0, 1, 1, 1, 2, 2])
+    return Triangle(
+        x=x,
+        y=y,
+        rot=rot,
+        size=size,
+        color=(*color, max(0, min(255, alpha))),
+        type=triangle_type,
+    )
+
+
+def _scatter_triangles(
+    triangles: list[Triangle],
+    rng: random.Random,
+    count: int,
+    size_mean_deviation: tuple[float, float],
+    width: int,
+    height: int,
+    wide_shift: float,
+    size_factor: float,
+    light_mul: float,
+    preset_colors: list[RGB],
+) -> None:
+    for _ in range(count):
+        triangle = _scatter_triangle(
+            rng,
+            width,
+            height,
+            wide_shift,
+            size_mean_deviation,
+            size_factor,
+            light_mul,
+            preset_colors,
+        )
+        if triangle is not None:
+            triangles.append(triangle)
+
+
 def gradient_points(width: int, height: int):
     """Endpoints of the two linear gradients, in normalized canvas coordinates."""
     aspect = width / max(height, 1)
@@ -236,36 +371,8 @@ def build_triangle_bg(
     main_hue = 0.0 if main_hue is None else float(main_hue)
     size_fixed_rate = float(size_fixed_rate or 0.0)
 
-    if time_color:
-        palette = _pink_palette(hour)
-        _, sat_mul, light_mul = _time_color(hour)
-        grad1: RGBA = (*palette["grad1"], 255)
-        grad2: RGBA = (*palette["grad2"], 255)
-        overlay1: RGBA = tuple(palette["overlay1"])
-        overlay2: RGBA = tuple(palette["overlay2"])
-        white_alpha = palette["white_alpha"]
-        mid = _mix(palette["grad1"], palette["grad2"], 0.5)
-        preset_colors = [
-            _brighten(_mix(palette["grad1"], (255, 206, 232), 0.72), 0.20),
-            _brighten(_mix(mid, (238, 214, 255), 0.68), 0.18),
-            _brighten(_mix(palette["grad2"], (208, 232, 255), 0.66), 0.20),
-            _brighten(_mix(mid, (255, 228, 176), 0.56), 0.18),
-        ]
-    else:
-        sat_mul = light_mul = 1.0
-
-        def h2c(hue: float, sat: float, light: float, alpha: int = 255) -> RGBA:
-            hue = (hue + 1.0) % 1.0
-            r, g, b = colorsys.hls_to_rgb(hue, light * light_mul, sat * sat_mul)
-            return (int(255 * r), int(255 * g), int(255 * b), alpha)
-
-        ofs = 0.025
-        grad1 = h2c(main_hue, 0.5, 1.0)
-        grad2 = h2c(main_hue + ofs, 0.9, 0.5)
-        overlay1 = h2c(main_hue, 0.9, 0.7, 100)
-        overlay2 = h2c(main_hue - ofs, 0.5, 0.5, 100)
-        white_alpha = 100
-        preset_colors = [_brighten(c) for c in ((255, 189, 246), (183, 246, 255), (255, 247, 146))]
+    palette = _time_triangle_palette(hour) if time_color else _custom_hue_triangle_palette(main_hue)
+    grad1, grad2, overlay1, overlay2, white_alpha, preset_colors, _, light_mul = palette
 
     rng = random.Random(triangle_bg_seed(width, height, hour, time_color, main_hue, size_fixed_rate))
 
@@ -278,54 +385,21 @@ def build_triangle_bg(
     wide_shift = min(0.12, max(0.0, (aspect - 1.0) * 0.08))
 
     triangles: list[Triangle] = []
-
-    def scatter(num: int, sz: tuple[float, float]) -> None:
-        for _ in range(num):
-            if rng.random() < 0.78:
-                edge = rng.choices(
-                    ("left", "right", "top", "bottom"),
-                    weights=(0.9, 0.95 - wide_shift * 1.8, 1.18 + wide_shift * 1.6, 0.72 - wide_shift * 1.2),
-                    k=1,
-                )[0]
-                if edge == "left":
-                    x = rng.uniform(-0.04 * w, 0.18 * w)
-                    y = rng.uniform(0, h)
-                elif edge == "right":
-                    x = rng.uniform((0.82 - wide_shift) * w, 1.03 * w)
-                    y = rng.uniform(0, h)
-                elif edge == "top":
-                    x = rng.uniform(0, w)
-                    y = rng.uniform(-0.04 * h, (0.20 + wide_shift * 0.5) * h)
-                else:
-                    x = rng.uniform(0, w)
-                    y = rng.uniform((0.80 - wide_shift * 0.8) * h, 1.03 * h)
-            else:
-                x = rng.uniform(0.12 * w, 0.88 * w)
-                y = rng.uniform(0.12 * h, 0.88 * h)
-            if x < 0 or x >= w or y < 0 or y >= h:
-                continue
-            rot = rng.uniform(0, 360)
-            size = max(1, min(1000, int(rng.normalvariate(sz[0], sz[1]))))
-            dist = ((x - w // 2) / w * 2) ** 2 + ((y - h // 2) / h * 2) ** 2
-            size = int(size * max(0.28, dist))
-
-            size_alpha_factor, std_size_lower, std_size_upper = 1.0, 64 * size_factor, 128 * size_factor
-            if size < std_size_lower:
-                size_alpha_factor = size / std_size_lower
-            if size > std_size_upper:
-                size_alpha_factor = 1.0 - (size - std_size_upper * 1.5) / (std_size_upper * 1.5)
-            alpha = int(rng.normalvariate(122, 138) * max(0, min(1.5, size_alpha_factor) * (light_mul**0.5)))
-            if rng.random() < 0.05 and size > std_size_lower:
-                alpha = 255
-            if alpha <= 34:
-                continue
-            alpha = max(0, min(255, alpha))
-            color = rng.choice(preset_colors)
-            tri_type = rng.choice([0, 1, 1, 1, 2, 2])
-            triangles.append(Triangle(x=x, y=y, rot=rot, size=size, color=(*color, alpha), type=tri_type))
-
-    scatter(int(28 * dense_factor * aspect_density_boost), (128 * size_factor, 16 * size_factor))
-    scatter(int(280 * dense_factor * aspect_density_boost), (64 * size_factor, 16 * size_factor))
+    scatter_args = (w, h, wide_shift, size_factor, light_mul, preset_colors)
+    _scatter_triangles(
+        triangles,
+        rng,
+        int(28 * dense_factor * aspect_density_boost),
+        (128 * size_factor, 16 * size_factor),
+        *scatter_args,
+    )
+    _scatter_triangles(
+        triangles,
+        rng,
+        int(280 * dense_factor * aspect_density_boost),
+        (64 * size_factor, 16 * size_factor),
+        *scatter_args,
+    )
 
     return TriangleBgSpec(
         grad1=grad1,
