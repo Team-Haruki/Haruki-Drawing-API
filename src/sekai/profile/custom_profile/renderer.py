@@ -11322,11 +11322,12 @@ def render_cli_cards(renderer: PNGRenderer, cards: list[dict[str, Any]], out_dir
 
 
 def write_cli_audit(path: Path, entries: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
+    safe_path = resolve_cli_path(path)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    with safe_path.open("w", encoding="utf-8") as f:
         for entry in entries:
             f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-    print(path, flush=True)
+    print(safe_path, flush=True)
 
 
 def main() -> None:
