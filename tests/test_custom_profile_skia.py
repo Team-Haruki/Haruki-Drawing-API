@@ -453,6 +453,59 @@ def test_native_content_result_declines_quads_rejected_by_scene(monkeypatch):
     assert skia_mod._native_content_result(object(), content, _Scene()) is None
 
 
+def test_native_card_general_helpers_decline_invalid_decks_and_preparation(monkeypatch):
+    class _Renderer:
+        def __init__(self):
+            self.profile_context = {"userDeck": ["invalid"]}
+
+    renderer = _Renderer()
+    assert skia_mod._prepare_native_leader_card(renderer, None) is None
+    assert skia_mod._profile_deck_display_lists(renderer) is None
+
+    monkeypatch.setattr(skia_mod, "_profile_deck_display_lists", lambda _renderer: None)
+    assert skia_mod._prepare_native_deck_cards(renderer, None) is None
+
+    display_list = SimpleNamespace(size=(10, 10), render_size=None)
+    monkeypatch.setattr(skia_mod, "_profile_deck_display_lists", lambda _renderer: [display_list] * 5)
+    monkeypatch.setattr(skia_mod, "_prepare_native_card_display_list", lambda *_args: None)
+    assert skia_mod._prepare_native_deck_cards(renderer, None) is None
+
+
+def test_native_card_general_declines_failed_cards_and_transform(monkeypatch):
+    content = NativeContent(layer=1, kind="general", item={}, object_data={"visible": True})
+
+    class _Renderer:
+        def general_font_path(self):
+            return None
+
+    renderer = _Renderer()
+    monkeypatch.setattr(skia_mod, "_native_card_general_name", lambda *_args: "LeaderCard")
+    monkeypatch.setattr(skia_mod._NativeGeneralTextMetrics, "create", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_prepare_native_leader_card", lambda *_args: None)
+    assert skia_mod._emit_native_card_general(renderer, content, object()) is None
+
+    monkeypatch.setattr(skia_mod, "_prepare_native_leader_card", lambda *_args: [(object(), (0, 0))])
+    monkeypatch.setattr(skia_mod, "_native_content_transform", lambda *_args: None)
+    assert skia_mod._emit_native_card_general(renderer, content, object()) is None
+
+
+def test_prepare_native_omikuji_ops_rejects_unavailable_assets_and_decorative_text(monkeypatch):
+    asset_op = skia_mod.OmikujiAssetOp("background", Path("outside.png"), (0, 0, 10, 10))
+    monkeypatch.setattr(skia_mod, "_relative_asset_path", lambda _path: None)
+    assert skia_mod._prepare_native_omikuji_ops([asset_op], object()) is None
+
+    decorative = skia_mod.OmikujiTextOp("text", (0, 0), 12, (0, 0, 0, 255), decorative=True)
+    assert skia_mod._prepare_native_omikuji_ops([decorative], object()) is None
+
+
+def test_native_omikuji_declines_invalid_transform_after_preparation(monkeypatch):
+    prepared = SimpleNamespace(font_path=Path("font.ttf"))
+    monkeypatch.setattr(skia_mod, "_prepare_native_omikuji", lambda *_args: prepared)
+    monkeypatch.setattr(skia_mod, "_native_content_transform", lambda *_args: None)
+
+    assert skia_mod._emit_native_omikuji_collection(object(), object(), object()) is False
+
+
 def test_scene_routes_non_decorative_tmp_through_sparse_native_quads(monkeypatch):
     content = NativeContent(
         layer=1,

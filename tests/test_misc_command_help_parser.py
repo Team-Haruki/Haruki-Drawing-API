@@ -5,6 +5,7 @@ from src.sekai.misc.drawer import (
     _command_help_heading,
     _command_help_numbered,
     _compose_command_help_image_sync,
+    _layout_command_help_markdown,
 )
 from src.sekai.misc.model import CommandHelpRenderRequest
 
@@ -76,3 +77,44 @@ def test_compose_command_help_image_supplies_an_empty_fallback_section() -> None
     image = _compose_command_help_image_sync(CommandHelpRenderRequest(markdown=""))
 
     assert image.size == (1080, 360)
+
+
+def test_layout_command_help_markdown_covers_filtered_and_styled_lines() -> None:
+    title, sections = _layout_command_help_markdown(
+        """---
+title: ignored
+---
+# 完整帮助
+import hidden
+const hidden = true
+<Component />
+## 基础
+
+### 小节
+- 普通项目
+- 参数: 参数说明
+```text
+  raw code
+```
+
+## 输出
+不应出现
+## 进阶
+> 引用
+| 列 | 值 |
+1) 步骤
+普通文本
+"""
+    )
+
+    assert title == "完整帮助"
+    assert [section.title for section in sections] == ["基础", "进阶"]
+    basic = sections[0].lines
+    assert any(line.text == "小节" and line.font_name for line in basic)
+    assert any(line.text == "普通项目" and line.indent == 34 for line in basic)
+    assert any(line.label == "参数" and line.text == "参数说明" for line in basic)
+    assert any(line.text == "raw code" and line.bg is not None for line in basic)
+    advanced = sections[1].lines
+    assert any(line.text == "引用" and line.bg is not None for line in advanced)
+    assert any(line.text == "| 列 | 值 |" and line.size == 18 for line in advanced)
+    assert any(line.text == "1) 步骤" and line.indent == 36 for line in advanced)

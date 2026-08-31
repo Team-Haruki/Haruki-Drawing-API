@@ -261,6 +261,108 @@ def _strip_command_help_output_section(markdown: str) -> str:
     return "\n".join(kept)
 
 
+def _flush_command_help_section(
+    sections: list[_CommandHelpSection],
+    section_title: str,
+    lines: list[_CommandHelpLine],
+) -> None:
+    while lines and not lines[0].text:
+        lines.pop(0)
+    while lines and not lines[-1].text:
+        lines.pop()
+    if lines:
+        sections.append(_CommandHelpSection(section_title, list(lines)))
+    lines.clear()
+
+
+def _append_command_help_body_line(
+    lines: list[_CommandHelpLine],
+    trimmed_right: str,
+    trimmed: str,
+    *,
+    in_code: bool,
+) -> None:
+    if in_code:
+        _append_command_help_wrapped_line(
+            lines,
+            trimmed_right,
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=26,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 116),
+            gap_before=2,
+        )
+        return
+    if not trimmed:
+        lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
+        return
+    if trimmed.startswith(("import ", "const ", "<")):
+        return
+
+    bullet = _command_help_bullet(trimmed)
+    if bullet is not None:
+        cleaned = _clean_command_help_inline(bullet)
+        if "：" in cleaned or ":" in cleaned:
+            _append_command_help_definition_line(lines, cleaned)
+        else:
+            _append_command_help_wrapped_line(
+                lines,
+                cleaned,
+                font_name=DEFAULT_FONT,
+                size=21,
+                indent=34,
+                fill=(50, 61, 78, 255),
+                gap_before=7,
+            )
+        return
+
+    numbered = _command_help_numbered(trimmed)
+    if numbered is not None:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(numbered),
+            font_name=DEFAULT_FONT,
+            size=21,
+            indent=36,
+            fill=(50, 61, 78, 255),
+            gap_before=7,
+        )
+        return
+    if trimmed.startswith(">"):
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed.lstrip(">").strip()),
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=28,
+            fill=(87, 103, 126, 255),
+            bg=(255, 255, 255, 104),
+            gap_before=10,
+        )
+        return
+    if trimmed.startswith("|") and "|" in trimmed[1:]:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed),
+            font_name=DEFAULT_FONT,
+            size=18,
+            indent=24,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 112),
+            gap_before=6,
+        )
+        return
+    _append_command_help_wrapped_line(
+        lines,
+        _clean_command_help_inline(trimmed),
+        font_name=DEFAULT_FONT,
+        size=21,
+        fill=(50, 61, 78, 255),
+        gap_before=7,
+    )
+
+
 def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelpSection]]:
     markdown = _strip_command_help_output_section(_strip_command_help_frontmatter(markdown or ""))
     title = "指令帮助"
@@ -269,49 +371,21 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
     section_title = "说明"
     in_code = False
 
-    def flush_section() -> None:
-        nonlocal lines
-        while lines and not lines[0].text:
-            lines.pop(0)
-        while lines and not lines[-1].text:
-            lines.pop()
-        if lines:
-            sections.append(_CommandHelpSection(section_title, lines))
-        lines = []
-
     for raw in markdown.splitlines():
         trimmed_right = raw.rstrip("\r\t ")
         trimmed = trimmed_right.strip()
         if trimmed.startswith("```"):
             in_code = not in_code
             continue
-        if in_code:
-            _append_command_help_wrapped_line(
-                lines,
-                trimmed_right,
-                font_name=DEFAULT_FONT,
-                size=20,
-                indent=26,
-                fill=(42, 52, 68, 255),
-                bg=(255, 255, 255, 116),
-                gap_before=2,
-            )
-            continue
-        if not trimmed:
-            lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
-            continue
-        if trimmed.startswith(("import ", "const ", "<")):
-            continue
-
         heading = _command_help_heading(trimmed)
-        if heading is not None:
+        if heading is not None and not in_code:
             text, level = heading
             text = _clean_command_help_inline(text)
             if level == 1:
                 title = text or title
                 continue
             if level == 2:
-                flush_section()
+                _flush_command_help_section(sections, section_title, lines)
                 section_title = text or "说明"
                 continue
             _append_command_help_wrapped_line(
@@ -323,73 +397,9 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
                 gap_before=16,
             )
             continue
+        _append_command_help_body_line(lines, trimmed_right, trimmed, in_code=in_code)
 
-        bullet = _command_help_bullet(trimmed)
-        if bullet is not None:
-            cleaned = _clean_command_help_inline(bullet)
-            if "：" in cleaned or ":" in cleaned:
-                _append_command_help_definition_line(lines, cleaned)
-                continue
-            _append_command_help_wrapped_line(
-                lines,
-                cleaned,
-                font_name=DEFAULT_FONT,
-                size=21,
-                indent=34,
-                fill=(50, 61, 78, 255),
-                gap_before=7,
-            )
-            continue
-
-        numbered = _command_help_numbered(trimmed)
-        if numbered is not None:
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(numbered),
-                font_name=DEFAULT_FONT,
-                size=21,
-                indent=36,
-                fill=(50, 61, 78, 255),
-                gap_before=7,
-            )
-            continue
-
-        if trimmed.startswith(">"):
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(trimmed.lstrip(">").strip()),
-                font_name=DEFAULT_FONT,
-                size=20,
-                indent=28,
-                fill=(87, 103, 126, 255),
-                bg=(255, 255, 255, 104),
-                gap_before=10,
-            )
-            continue
-
-        if trimmed.startswith("|") and "|" in trimmed[1:]:
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(trimmed),
-                font_name=DEFAULT_FONT,
-                size=18,
-                indent=24,
-                fill=(42, 52, 68, 255),
-                bg=(255, 255, 255, 112),
-                gap_before=6,
-            )
-            continue
-
-        _append_command_help_wrapped_line(
-            lines,
-            _clean_command_help_inline(trimmed),
-            font_name=DEFAULT_FONT,
-            size=21,
-            fill=(50, 61, 78, 255),
-            gap_before=7,
-        )
-
-    flush_section()
+    _flush_command_help_section(sections, section_title, lines)
     return title, sections
 
 

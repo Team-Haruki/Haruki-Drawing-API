@@ -893,62 +893,111 @@ def _emit_prepared_card_ops(scene: _SceneAssembler, prepared: _PreparedCardDispl
         _emit_prepared_card_sprite(scene, prepared, op)
 
 
-def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
-    """Compose LeaderCard/Deck from their shared CardDisplayList without Pillow pixels."""
-
+def _native_card_general_name(renderer: PNGRenderer, content: Any) -> str | None:
     if content.kind != "general" or not content.object_data.get("visible", False):
         return None
     resource_for = getattr(renderer, "image_resource_for", None)
-    font_path_for = getattr(renderer, "general_font_path", None)
-    if not callable(resource_for) or not callable(font_path_for):
+    if not callable(resource_for) or not callable(getattr(renderer, "general_font_path", None)):
         return None
-    resource = resource_for("general", content.item)
-    file_name = str(resource.get("fileName", "") or "")
-    if file_name not in _NATIVE_CARD_GENERAL_PREFABS:
-        return None
+    file_name = str(resource_for("general", content.item).get("fileName", "") or "")
+    return file_name if file_name in _NATIVE_CARD_GENERAL_PREFABS else None
 
-    metrics = _NativeGeneralTextMetrics.create(font_path_for())
+
+def _prepare_native_leader_card(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics | None,
+) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
+    deck = renderer.profile_context.get("userDeck") or {}
+    card_id = int(deck.get("leader", 0) or 0) if isinstance(deck, dict) else 0
+    if card_id <= 0:
+        return None
+    display_list = renderer.build_profile_leader_card_display_list(card_id)
+    prepared = _prepare_native_card_display_list(display_list, metrics) if display_list is not None else None
+    return [(prepared, (0, 0))] if prepared is not None else None
+
+
+def _profile_deck_display_lists(renderer: PNGRenderer) -> list[CardDisplayList] | None:
+    deck = renderer.profile_context.get("userDeck") or {}
+    if not isinstance(deck, dict):
+        return None
+    display_lists: list[CardDisplayList] = []
+    for index in range(5):
+        card_id = int(deck.get(f"member{index + 1}", 0) or 0)
+        display_list = renderer.build_profile_deck_card_display_list(card_id, leader=index == 0)
+        display_lists.append(
+            display_list or renderer.build_empty_profile_deck_card_display_list(GENERAL_DECK_CARD_RENDER_SIZE)
+        )
+    return display_lists
+
+
+def _prepare_native_deck_cards(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics | None,
+) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
+    display_lists = _profile_deck_display_lists(renderer)
+    if display_lists is None:
+        return None
+    card_w, card_h = display_lists[0].render_size or display_lists[0].size
+    gap = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - card_w * 5) / 4.0)
+    start_x = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - (card_w * 5 + gap * 4)) / 2.0)
+    top = GENERAL_NATIVE_SIZES["Deck"][1] - card_h
     prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]] = []
-    if file_name == "LeaderCard":
-        deck = renderer.profile_context.get("userDeck") or {}
-        card_id = int(deck.get("leader", 0) or 0) if isinstance(deck, dict) else 0
-        if card_id <= 0:
-            return None
-        display_list = renderer.build_profile_leader_card_display_list(card_id)
-        if display_list is None:
-            return None
+    for index, display_list in enumerate(display_lists):
         prepared = _prepare_native_card_display_list(display_list, metrics)
         if prepared is None:
             return None
-        prepared_cards.append((prepared, (0, 0)))
-    else:
-        deck = renderer.profile_context.get("userDeck") or {}
-        if not isinstance(deck, dict):
-            return None
-        card_ids = [int(deck.get(f"member{i}", 0) or 0) for i in range(1, 6)]
-        card_lists: list[CardDisplayList] = []
-        for index, card_id in enumerate(card_ids):
-            display_list = renderer.build_profile_deck_card_display_list(card_id, leader=index == 0)
-            if display_list is None:
-                display_list = renderer.build_empty_profile_deck_card_display_list(GENERAL_DECK_CARD_RENDER_SIZE)
-            card_lists.append(display_list)
-        card_w, card_h = card_lists[0].render_size or card_lists[0].size
-        gap = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - card_w * 5) / 4.0)
-        total_w = card_w * 5 + gap * 4
-        start_x = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - total_w) / 2.0)
-        y = GENERAL_NATIVE_SIZES["Deck"][1] - card_h
-        for index, display_list in enumerate(card_lists):
-            prepared = _prepare_native_card_display_list(display_list, metrics)
-            if prepared is None:
-                return None
-            prepared_cards.append((prepared, (round(start_x + index * (card_w + gap)), round(y))))
+        prepared_cards.append((prepared, (round(start_x + index * (card_w + gap)), round(top))))
+    return prepared_cards
 
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x") or 1.0)
-    sy = float(scale.get("y") or sx or 1.0)
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+
+def _emit_native_card_general_contents(
+    scene: _SceneAssembler,
+    outer_size: tuple[int, int],
+    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]],
+) -> None:
+    for prepared, (left, top) in prepared_cards:
+        display_list = prepared.display_list
+        render_size = display_list.render_size or display_list.size
+        if display_list.size == outer_size and (left, top) == (0, 0):
+            _emit_prepared_card_ops(scene, prepared)
+            continue
+        with scene.builder.unity_subscene(
+            size=display_list.size,
+            anchor=(left + render_size[0] / 2.0, top + render_size[1] / 2.0),
+            object_scale=(
+                render_size[0] / display_list.size[0],
+                render_size[1] / display_list.size[1],
+            ),
+            post_scale=(1.0, 1.0),
+            rotation=0.0,
+            sampling={
+                "nearest": "nearest",
+                "bilinear": "linear",
+                "bicubic": "catmull_rom",
+                "lanczos": "pillow_lanczos",
+            }[display_list.final_sampling],
+        ):
+            _emit_prepared_card_ops(scene, prepared)
+
+
+def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
+    """Compose LeaderCard/Deck from their shared CardDisplayList without Pillow pixels."""
+
+    file_name = _native_card_general_name(renderer, content)
+    if file_name is None:
         return None
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    metrics = _NativeGeneralTextMetrics.create(renderer.general_font_path())
+    prepared_cards = (
+        _prepare_native_leader_card(renderer, metrics)
+        if file_name == "LeaderCard"
+        else _prepare_native_deck_cards(renderer, metrics)
+    )
+    if prepared_cards is None:
+        return None
+    transform = _native_content_transform(renderer, content)
+    if transform is None:
+        return None
+    sx, sy, angle = transform
     outer_size = GENERAL_NATIVE_SIZES[file_name]
     with scene.builder.unity_subscene(
         size=outer_size,
@@ -957,29 +1006,7 @@ def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _Scene
         post_scale=(renderer.position_scale_x, renderer.position_scale_y),
         rotation=angle,
     ):
-        for prepared, (left, top) in prepared_cards:
-            display_list = prepared.display_list
-            render_size = display_list.render_size or display_list.size
-            if display_list.size == outer_size and (left, top) == (0, 0):
-                _emit_prepared_card_ops(scene, prepared)
-                continue
-            with scene.builder.unity_subscene(
-                size=display_list.size,
-                anchor=(left + render_size[0] / 2.0, top + render_size[1] / 2.0),
-                object_scale=(
-                    render_size[0] / display_list.size[0],
-                    render_size[1] / display_list.size[1],
-                ),
-                post_scale=(1.0, 1.0),
-                rotation=0.0,
-                sampling={
-                    "nearest": "nearest",
-                    "bilinear": "linear",
-                    "bicubic": "catmull_rom",
-                    "lanczos": "pillow_lanczos",
-                }[display_list.final_sampling],
-            ):
-                _emit_prepared_card_ops(scene, prepared)
+        _emit_native_card_general_contents(scene, outer_size, prepared_cards)
     return "native"
 
 
@@ -1530,7 +1557,7 @@ def _native_honor_deck_background(renderer: PNGRenderer, plan: Any) -> tuple[boo
     return background_asset is not None, background_asset
 
 
-def _native_honor_deck_transform(renderer: PNGRenderer, content: Any) -> tuple[float, float, float] | None:
+def _native_content_transform(renderer: PNGRenderer, content: Any) -> tuple[float, float, float] | None:
     scale = content.object_data.get("scale") or {}
     sx = float(scale.get("x") or 1.0)
     sy = float(scale.get("y") or sx or 1.0)
@@ -1599,7 +1626,7 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     background_ready, background_asset = _native_honor_deck_background(renderer, plan)
     if not background_ready:
         return None
-    transform = _native_honor_deck_transform(renderer, content)
+    transform = _native_content_transform(renderer, content)
     if transform is None:
         return None
     sx, sy, angle = transform
@@ -1615,34 +1642,40 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     return "native"
 
 
-def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
-    """Replay the shared omikuji result-card display list without a Pillow surface."""
+@dataclass(frozen=True)
+class _PreparedNativeOmikuji:
+    display_list: Any
+    font_path: Path
+    asset_paths: dict[int, str]
+    text_placements: dict[int, tuple[str, float]]
 
+
+def _prepare_native_omikuji(renderer: PNGRenderer, content: Any) -> _PreparedNativeOmikuji | None:
     if content.kind != "collection" or not content.object_data.get("visible", False):
-        return False
+        return None
     resource = renderer.image_resource_for("collection", content.item)
     if str(resource.get("customProfileResourceCollectionType", "none") or "none") != "omikuji":
-        return False
+        return None
     target_id = int(content.item.get("targetId", 0) or 0)
     omikuji = renderer.omikujis.get(target_id)
     if not isinstance(omikuji, dict):
-        return False
+        return None
     background_path = renderer.omikuji_background_asset_path(omikuji)
     fortune_path = renderer.omikuji_asset_path(omikuji, "fortune")
     if background_path is None or fortune_path is None:
-        return False
+        return None
     background_asset = _relative_asset_path(background_path)
     fortune_asset = _relative_asset_path(fortune_path)
     if background_asset is None or fortune_asset is None:
-        return False
+        return None
     background_info = _native_asset_info(background_asset)
     fortune_info = _native_asset_info(fortune_asset)
     if background_info is None or fortune_info is None:
-        return False
+        return None
     font_path = renderer.omikuji_font_path(decorative=False)
     metrics = _NativeGeneralTextMetrics.create(font_path, expected_font_name="omikuji")
     if metrics is None or font_path is None:
-        return False
+        return None
 
     display_list = build_omikuji_display_list(
         omikuji,
@@ -1651,18 +1684,29 @@ def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: 
         fortune_path=fortune_path,
         fortune_size=(int(fortune_info["width"]), int(fortune_info["height"])),
     )
+    prepared_ops = _prepare_native_omikuji_ops(display_list.ops, metrics)
+    if prepared_ops is None:
+        return None
+    asset_paths, text_placements = prepared_ops
+    return _PreparedNativeOmikuji(display_list, font_path, asset_paths, text_placements)
+
+
+def _prepare_native_omikuji_ops(
+    ops: list[Any],
+    metrics: _NativeGeneralTextMetrics,
+) -> tuple[dict[int, str], dict[int, tuple[str, float]]] | None:
     asset_paths: dict[int, str] = {}
     text_placements: dict[int, tuple[str, float]] = {}
     font_ref = GeneralFontRef(name="omikuji")
-    for op in display_list.ops:
+    for op in ops:
         if isinstance(op, OmikujiAssetOp):
             asset_path = _relative_asset_path(Path(op.path))
             if asset_path is None:
-                return False
+                return None
             asset_paths[id(op)] = asset_path
         elif isinstance(op, OmikujiTextOp):
             if op.decorative:
-                return False
+                return None
             text_placements[id(op)] = metrics.anchor_placement(
                 text=op.text,
                 pos=op.pos if abs(op.rotation) < 1.0e-6 else (0.0, 0.0),
@@ -1670,77 +1714,86 @@ def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: 
                 anchor=op.anchor,
                 font=font_ref,
             )
+    return asset_paths, text_placements
 
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x") or 1.0)
-    sy = float(scale.get("y") or sx or 1.0)
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+
+def _emit_native_omikuji_text(
+    scene: _SceneAssembler,
+    op: OmikujiTextOp,
+    placement: tuple[str, float],
+) -> None:
+    align, baseline = placement
+    text_args = (
+        op.text,
+        "default",
+        op.size,
+    )
+    text_kwargs = {
+        "align": align,
+        "baseline": "alphabetic",
+        "fill": op.fill,
+        "font_name": _OMIKUJI_FONT_IR_NAME,
+    }
+    if abs(op.rotation) < 1.0e-6:
+        scene.builder.text(text_args[0], (op.pos[0], baseline), *text_args[1:], **text_kwargs)
+        return
+    theta = math.radians(op.rotation)
+    with scene.builder.transform(
+        (
+            math.cos(theta),
+            -math.sin(theta),
+            op.pos[0],
+            math.sin(theta),
+            math.cos(theta),
+            op.pos[1],
+        )
+    ):
+        scene.builder.text(text_args[0], (0.0, baseline), *text_args[1:], **text_kwargs)
+
+
+def _emit_native_omikuji_ops(scene: _SceneAssembler, prepared: _PreparedNativeOmikuji) -> None:
+    for op in prepared.display_list.ops:
+        if isinstance(op, OmikujiAssetOp):
+            left, top, right, bottom = op.rect
+            scene.builder.image(
+                prepared.asset_paths[id(op)],
+                (round(left), round(top)),
+                (max(1, round(right - left)), max(1, round(bottom - top))),
+                sampling={
+                    "nearest": "nearest",
+                    "bilinear": "linear",
+                    "bicubic": "catmull_rom",
+                    "lanczos": "pillow_lanczos",
+                }[op.sampling],
+                blend=op.blend,
+            )
+        elif isinstance(op, OmikujiRectOp):
+            left, top, right, bottom = op.rect
+            scene.builder.rect((left, top), (right - left, bottom - top), fill=op.fill)
+        else:
+            _emit_native_omikuji_text(scene, op, prepared.text_placements[id(op)])
+
+
+def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Replay the shared omikuji result-card display list without a Pillow surface."""
+
+    prepared = _prepare_native_omikuji(renderer, content)
+    if prepared is None:
         return False
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    transform = _native_content_transform(renderer, content)
+    if transform is None:
+        return False
+    sx, sy, angle = transform
 
-    scene.builder.register_extra_font(_OMIKUJI_FONT_IR_NAME, font_path)
+    scene.builder.register_extra_font(_OMIKUJI_FONT_IR_NAME, prepared.font_path)
     with scene.builder.unity_subscene(
-        size=display_list.size,
+        size=prepared.display_list.size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
         object_scale=(sx, sy),
         post_scale=(renderer.position_scale_x, renderer.position_scale_y),
         rotation=angle,
     ):
-        for op in display_list.ops:
-            if isinstance(op, OmikujiAssetOp):
-                left, top, right, bottom = op.rect
-                scene.builder.image(
-                    asset_paths[id(op)],
-                    (round(left), round(top)),
-                    (max(1, round(right - left)), max(1, round(bottom - top))),
-                    sampling={
-                        "nearest": "nearest",
-                        "bilinear": "linear",
-                        "bicubic": "catmull_rom",
-                        "lanczos": "pillow_lanczos",
-                    }[op.sampling],
-                    blend=op.blend,
-                )
-                continue
-            if isinstance(op, OmikujiRectOp):
-                left, top, right, bottom = op.rect
-                scene.builder.rect((left, top), (right - left, bottom - top), fill=op.fill)
-                continue
-
-            align, baseline = text_placements[id(op)]
-            if abs(op.rotation) < 1.0e-6:
-                scene.builder.text(
-                    op.text,
-                    (op.pos[0], baseline),
-                    "default",
-                    op.size,
-                    align=align,
-                    baseline="alphabetic",
-                    fill=op.fill,
-                    font_name=_OMIKUJI_FONT_IR_NAME,
-                )
-                continue
-            theta = math.radians(op.rotation)
-            with scene.builder.transform(
-                (
-                    math.cos(theta),
-                    -math.sin(theta),
-                    op.pos[0],
-                    math.sin(theta),
-                    math.cos(theta),
-                    op.pos[1],
-                )
-            ):
-                scene.builder.text(
-                    op.text,
-                    (0.0, baseline),
-                    "default",
-                    op.size,
-                    align=align,
-                    baseline="alphabetic",
-                    fill=op.fill,
-                    font_name=_OMIKUJI_FONT_IR_NAME,
-                )
+        _emit_native_omikuji_ops(scene, prepared)
     return True
 
 
