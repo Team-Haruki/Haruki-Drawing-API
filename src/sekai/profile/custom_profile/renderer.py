@@ -11314,7 +11314,7 @@ def render_cli_cards(renderer: PNGRenderer, cards: list[dict[str, Any]], out_dir
     for card in cards:
         img = renderer.render_card(card)
         filename = custom_profile_output_name(card)
-        path = (output_root / filename).resolve()
+        path = resolve_cli_path(output_root / filename)
         if path.parent != output_root or Path(filename).name != filename:
             raise ValueError(f"unsafe custom profile output filename: {filename!r}")
         img.save(path)
