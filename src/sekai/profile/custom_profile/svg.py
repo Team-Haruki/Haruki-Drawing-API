@@ -281,36 +281,9 @@ def apply_tmp_color(value: str, style: TextStyle) -> TextStyle:
     )
 
 
-def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
-    raw = tag.strip()
-    tag_l = raw.lower()
-    if tag_l.startswith("/"):
-        return None
-    if tag_l.startswith("#") and is_tmp_hash_color(raw):
-        return apply_tmp_color(raw, style)
-    if tag_l.startswith("color="):
-        return apply_tmp_color(parse_tmp_tag_value(raw), style)
-    if tag_l.startswith("alpha="):
-        return replace(style, alpha=parse_hex_alpha(parse_tmp_tag_value(raw)))
-    if tag_l.startswith("size="):
-        return replace(style, size=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size))
-    if tag_l.startswith("scale="):
-        return replace(style, scale_x=parse_tmp_scale(parse_tmp_tag_value(raw), style.scale_x), rotate=0.0)
-    if tag_l.startswith("cspace="):
-        return replace(style, cspace=parse_tmp_numeric(parse_tmp_tag_value(raw), style.cspace, style.size, style.size))
-    if tag_l.startswith("mspace="):
-        return replace(style, mspace=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size))
-    if tag_l.startswith("indent="):
-        value = parse_tmp_tag_value(raw)
-        percent = parse_tmp_percent(value)
-        if percent is not None:
-            return replace(style, indent=0.0, indent_percent=percent)
-        return replace(
-            style, indent=parse_tmp_numeric(value, style.indent, style.size, style.size), indent_percent=None
-        )
-    if tag_l.startswith("line-indent="):
-        value = parse_tmp_tag_value(raw)
-        percent = parse_tmp_percent(value)
+def apply_tmp_indent(value: str, style: TextStyle, *, line: bool) -> TextStyle:
+    percent = parse_tmp_percent(value)
+    if line:
         if percent is not None:
             return replace(style, line_indent=0.0, line_indent_percent=percent)
         return replace(
@@ -318,21 +291,43 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
             line_indent=parse_tmp_numeric(value, style.line_indent, style.size, style.size),
             line_indent_percent=None,
         )
-    if tag_l.startswith("line-height="):
-        return replace(
-            style, line_height=parse_tmp_numeric(parse_tmp_tag_value(raw), style.size, style.size, style.size)
-        )
-    if tag_l.startswith("rotate="):
-        return replace(style, rotate=parse_float(parse_tmp_tag_value(raw), style.rotate), scale_x=1.0)
-    if tag_l.startswith("voffset="):
-        return replace(
-            style, voffset=parse_tmp_numeric(parse_tmp_tag_value(raw), style.voffset, style.size, style.size)
-        )
-    if tag_l.startswith("pos="):
-        pos, percent = parse_tmp_position(parse_tmp_tag_value(raw), style.pos or 0.0)
+    if percent is not None:
+        return replace(style, indent=0.0, indent_percent=percent)
+    return replace(style, indent=parse_tmp_numeric(value, style.indent, style.size, style.size), indent_percent=None)
+
+
+def apply_tmp_value_tag(name: str, value: str, style: TextStyle) -> TextStyle | object:
+    if name == "color":
+        return apply_tmp_color(value, style)
+    if name == "alpha":
+        return replace(style, alpha=parse_hex_alpha(value))
+    if name == "size":
+        return replace(style, size=parse_tmp_numeric(value, style.size, style.size, style.size))
+    if name == "scale":
+        return replace(style, scale_x=parse_tmp_scale(value, style.scale_x), rotate=0.0)
+    if name == "cspace":
+        return replace(style, cspace=parse_tmp_numeric(value, style.cspace, style.size, style.size))
+    if name == "mspace":
+        return replace(style, mspace=parse_tmp_numeric(value, style.size, style.size, style.size))
+    if name == "indent":
+        return apply_tmp_indent(value, style, line=False)
+    if name == "line-indent":
+        return apply_tmp_indent(value, style, line=True)
+    if name == "line-height":
+        return replace(style, line_height=parse_tmp_numeric(value, style.size, style.size, style.size))
+    if name == "rotate":
+        return replace(style, rotate=parse_float(value, style.rotate), scale_x=1.0)
+    if name == "voffset":
+        return replace(style, voffset=parse_tmp_numeric(value, style.voffset, style.size, style.size))
+    if name == "pos":
+        pos, percent = parse_tmp_position(value, style.pos or 0.0)
         return replace(style, pos=pos, pos_percent=percent)
-    if tag_l.startswith("mark="):
-        return replace(style, mark_color=color_or(style.color, parse_tmp_tag_value(raw)))
+    if name == "mark":
+        return replace(style, mark_color=color_or(style.color, value))
+    return INVALID_TMP_TAG
+
+
+def apply_tmp_simple_tag(tag_l: str, style: TextStyle) -> TextStyle | object:
     if tag_l == "sup":
         return replace(
             style,
@@ -353,15 +348,35 @@ def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
         return replace(style, underline=True)
     if tag_l == "s":
         return replace(style, strike=True)
-    if tag_l in {"nobr", "noparse"}:
-        return style
-    if tag_l.startswith(("align=", "width=", "margin=", "margin-left=", "margin-right=", "link=", "style=", "font=")):
-        return style
-    if tag_l.startswith(("font-weight=", "space=")):
-        return style
-    if tag_l in {"uppercase", "allcaps", "lowercase", "smallcaps"}:
+    if tag_l in {"nobr", "noparse", "uppercase", "allcaps", "lowercase", "smallcaps"}:
         return style
     return INVALID_TMP_TAG
+
+
+def apply_tmp_tag(tag: str, style: TextStyle) -> TextStyle | None | object:
+    raw = tag.strip()
+    tag_l = raw.lower()
+    if tag_l.startswith("/"):
+        return None
+    if tag_l.startswith("#") and is_tmp_hash_color(raw):
+        return apply_tmp_color(raw, style)
+    name, separator, _ = tag_l.partition("=")
+    if separator and name in {
+        "align",
+        "width",
+        "margin",
+        "margin-left",
+        "margin-right",
+        "link",
+        "style",
+        "font",
+        "font-weight",
+        "space",
+    }:
+        return style
+    if separator:
+        return apply_tmp_value_tag(name, parse_tmp_tag_value(raw), style)
+    return apply_tmp_simple_tag(tag_l, style)
 
 
 def tmp_tag_kind(tag: str) -> str | None:
@@ -416,40 +431,28 @@ def tmp_tag_kind(tag: str) -> str | None:
 def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> TextStyle:
     if kind == "color":
         return replace(style, color=previous.color, alpha=previous.alpha)
-    if kind == "alpha":
-        return replace(style, alpha=previous.alpha)
-    if kind == "size":
-        return replace(style, size=previous.size)
-    if kind == "scale":
-        return replace(style, scale_x=1.0, rotate=0.0)
-    if kind == "cspace":
-        return replace(style, cspace=0.0)
-    if kind == "mspace":
-        return replace(style, mspace=None)
-    if kind == "indent":
-        return replace(style, indent=previous.indent, indent_percent=previous.indent_percent)
-    if kind == "line-indent":
-        return replace(style, line_indent=0.0, line_indent_percent=None)
-    if kind == "line-height":
-        return replace(style, line_height=None)
-    if kind == "rotate":
-        return replace(style, scale_x=1.0, rotate=0.0)
-    if kind == "voffset":
-        return replace(style, voffset=0.0)
-    if kind == "mark":
-        return replace(style, mark_color=previous.mark_color)
-    if kind == "b":
-        return replace(style, bold=previous.bold)
-    if kind == "i":
-        return replace(style, italic=previous.italic)
-    if kind == "u":
-        return replace(style, underline=previous.underline)
-    if kind == "s":
-        return replace(style, strike=previous.strike)
+    updates = {
+        "alpha": {"alpha": previous.alpha},
+        "size": {"size": previous.size},
+        "scale": {"scale_x": 1.0, "rotate": 0.0},
+        "cspace": {"cspace": 0.0},
+        "mspace": {"mspace": None},
+        "indent": {"indent": previous.indent, "indent_percent": previous.indent_percent},
+        "line-indent": {"line_indent": 0.0, "line_indent_percent": None},
+        "line-height": {"line_height": None},
+        "rotate": {"scale_x": 1.0, "rotate": 0.0},
+        "voffset": {"voffset": 0.0},
+        "mark": {"mark_color": previous.mark_color},
+        "b": {"bold": previous.bold},
+        "i": {"italic": previous.italic},
+        "u": {"underline": previous.underline},
+        "s": {"strike": previous.strike},
+        "pos": {"pos": previous.pos, "pos_percent": previous.pos_percent},
+    }.get(kind)
+    if updates is not None:
+        return replace(style, **updates)
     if kind in {"sup", "sub"}:
         return replace(style, size=previous.size, voffset=previous.voffset)
-    if kind == "pos":
-        return replace(style, pos=previous.pos, pos_percent=previous.pos_percent)
     if kind in {
         "nobr",
         "noparse",
@@ -472,6 +475,70 @@ def restore_tmp_tag_kind(style: TextStyle, previous: TextStyle, kind: str) -> Te
     return previous
 
 
+def flush_tmp_text_buffer(runs: list[TextToken], buf: list[str], style: TextStyle) -> None:
+    if not buf:
+        return
+    runs.append(TextRun("".join(buf), style))
+    buf.clear()
+
+
+def close_tmp_text_tag(
+    tag_l: str,
+    style: TextStyle,
+    base_style: TextStyle,
+    stacks: dict[str, list[TextStyle]],
+    runs: list[TextToken],
+    buf: list[str],
+) -> TextStyle | object:
+    kind = tmp_tag_kind(tag_l)
+    if kind is None:
+        return INVALID_TMP_TAG
+    flush_tmp_text_buffer(runs, buf, style)
+    stack = stacks.get(kind)
+    previous = stack.pop() if stack else base_style
+    restored = restore_tmp_tag_kind(style, previous, kind)
+    runs.append(TextStyleMarker(restored))
+    return restored
+
+
+def open_tmp_text_tag(
+    tag: str,
+    style: TextStyle,
+    stacks: dict[str, list[TextStyle]],
+    runs: list[TextToken],
+    buf: list[str],
+) -> TextStyle | object:
+    next_style = apply_tmp_tag(tag, style)
+    if next_style is INVALID_TMP_TAG:
+        return INVALID_TMP_TAG
+    if next_style is None or next_style == style:
+        return style
+    flush_tmp_text_buffer(runs, buf, style)
+    kind = tmp_tag_kind(tag)
+    if kind is not None:
+        stacks.setdefault(kind, []).append(style)
+    runs.append(TextStyleMarker(next_style))
+    return next_style
+
+
+def consume_tmp_text_tag(
+    tag: str,
+    style: TextStyle,
+    base_style: TextStyle,
+    stacks: dict[str, list[TextStyle]],
+    runs: list[TextToken],
+    buf: list[str],
+) -> TextStyle | object:
+    tag_l = tag.lower().rstrip("/")
+    if tag_l == "br":
+        flush_tmp_text_buffer(runs, buf, style)
+        runs.append(TextBreak())
+        return style
+    if tag_l.startswith("/"):
+        return close_tmp_text_tag(tag_l, style, base_style, stacks, runs, buf)
+    return open_tmp_text_tag(tag, style, stacks, runs, buf)
+
+
 def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
     value = value.replace("\r\n", "\n").replace("\r", "\n")
     runs: list[TextToken] = []
@@ -480,53 +547,24 @@ def parse_tmp_text(value: str, base_style: TextStyle) -> list[TextToken]:
     buf: list[str] = []
     i = 0
     while i < len(value):
-        if value[i] == "<":
-            end = value.find(">", i + 1)
-            if end != -1:
-                tag = value[i + 1 : end].strip()
-                tag_l = tag.lower().rstrip("/")
-                if tag_l == "br":
-                    if buf:
-                        runs.append(TextRun("".join(buf), style))
-                        buf.clear()
-                    runs.append(TextBreak())
-                    i = end + 1
-                    continue
-                if tag_l.startswith("/"):
-                    kind = tmp_tag_kind(tag_l)
-                    if kind is None:
-                        buf.append(value[i])
-                        i += 1
-                        continue
-                    if buf:
-                        runs.append(TextRun("".join(buf), style))
-                        buf.clear()
-                    stack = stacks.get(kind)
-                    previous = stack.pop() if stack else base_style
-                    style = restore_tmp_tag_kind(style, previous, kind)
-                    runs.append(TextStyleMarker(style))
-                    i = end + 1
-                    continue
-                next_style = apply_tmp_tag(tag, style)
-                if next_style is INVALID_TMP_TAG:
-                    buf.append(value[i])
-                    i += 1
-                    continue
-                kind = tmp_tag_kind(tag)
-                if next_style is not None and next_style != style:
-                    if buf:
-                        runs.append(TextRun("".join(buf), style))
-                        buf.clear()
-                    if kind is not None:
-                        stacks.setdefault(kind, []).append(style)
-                    style = next_style
-                    runs.append(TextStyleMarker(style))
-                i = end + 1
-                continue
-        buf.append(value[i])
-        i += 1
-    if buf:
-        runs.append(TextRun("".join(buf), style))
+        if value[i] != "<":
+            buf.append(value[i])
+            i += 1
+            continue
+        end = value.find(">", i + 1)
+        if end == -1:
+            buf.append(value[i])
+            i += 1
+            continue
+        tag = value[i + 1 : end].strip()
+        next_style = consume_tmp_text_tag(tag, style, base_style, stacks, runs, buf)
+        if next_style is INVALID_TMP_TAG:
+            buf.append(value[i])
+            i += 1
+            continue
+        style = next_style
+        i = end + 1
+    flush_tmp_text_buffer(runs, buf, style)
     return [run for run in runs if isinstance(run, (TextBreak, TextStyleMarker)) or run.text]
 
 
@@ -720,6 +758,108 @@ class Renderer:
         parts.append("</g>")
         return "".join(parts)
 
+    def svg_base_text_style(self, color: str, size: float) -> TextStyle:
+        return TextStyle(
+            color=color,
+            alpha=1.0,
+            size=size,
+            scale_x=1.0,
+            cspace=0.0,
+            mspace=None,
+            indent=0.0,
+            line_indent=0.0,
+            line_height=None,
+            rotate=0.0,
+            voffset=0.0,
+            mark_color=None,
+            bold=False,
+            italic=False,
+            underline=False,
+            strike=False,
+        )
+
+    def svg_text_line_size(self, line: list[TextRun], base_size: float) -> float:
+        return max(
+            ((run.style.line_height if run.style.line_height is not None else run.style.size) for run in line),
+            default=base_size,
+        )
+
+    def svg_text_run_transform(self, style: TextStyle, x: float, y: float) -> tuple[float, str]:
+        if self.tmp_scale_mode == "uniform":
+            return style.size * style.scale_x, ""
+        if math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
+            return style.size, ""
+        return (
+            style.size,
+            f" translate({x:.3f} {y:.3f}) scale({style.scale_x:.6f} 1) translate({-x:.3f} {-y:.3f})",
+        )
+
+    def render_svg_text_run(
+        self,
+        run: TextRun,
+        font_name: str,
+        outline_color: str,
+        outline_size: float,
+        anchor: str,
+        x_cursor: float,
+        baseline: float,
+    ) -> tuple[str, float]:
+        style = run.style
+        y = baseline - style.voffset
+        effective_size, scale_transform = self.svg_text_run_transform(style, x_cursor, y)
+        stroke = (
+            f' stroke="{outline_color}" stroke-width="{outline_size:.3f}" '
+            'paint-order="stroke fill" stroke-linejoin="round"'
+            if outline_size > 0
+            else ""
+        )
+        rotate_attr = f" rotate({-style.rotate:.5f} {x_cursor:.3f} {y:.3f})" if style.rotate else ""
+        transform_bits = (scale_transform + rotate_attr).strip()
+        transform_attr_text = f' transform="{transform_bits}"' if transform_bits else ""
+        decorations = [
+            name for enabled, name in ((style.underline, "underline"), (style.strike, "line-through")) if enabled
+        ]
+        decoration_attr = f' text-decoration="{" ".join(decorations)}"' if decorations else ""
+        font_weight = ' font-weight="700"' if style.bold else ""
+        font_style = ' font-style="italic"' if style.italic else ""
+        anchor_attr = "middle" if self.text_anchor_mode == "center" else anchor
+        svg = (
+            f'<text x="{x_cursor:.3f}" y="{y:.3f}" text-anchor="{anchor_attr}" '
+            f'dominant-baseline="central" font-family="{svg_escape(font_name)}, sans-serif" '
+            f'font-size="{effective_size:.3f}" fill="{style.color}" fill-opacity="{style.alpha:.4f}"'
+            f"{font_weight}{font_style}{decoration_attr}{stroke}{transform_attr_text}>{svg_escape(run.text)}</text>"
+        )
+        advance = style.mspace if style.mspace is not None else effective_size * 0.55 * style.scale_x
+        return svg, x_cursor + len(run.text) * (advance + style.cspace)
+
+    def render_svg_text_line(
+        self,
+        line: list[TextRun],
+        y: float,
+        base_size: float,
+        line_spacing: float,
+        font_name: str,
+        outline_color: str,
+        outline_size: float,
+        anchor: str,
+    ) -> tuple[list[str], float]:
+        line_size = self.svg_text_line_size(line, base_size)
+        baseline = y + line_size / 2
+        x_cursor = 0.0
+        parts: list[str] = []
+        for run in line:
+            svg, x_cursor = self.render_svg_text_run(
+                run,
+                font_name,
+                outline_color,
+                outline_size,
+                anchor,
+                x_cursor,
+                baseline,
+            )
+            parts.append(svg)
+        return parts, y + line_size * (1.0 + line_spacing)
+
     def render_text(self, item: dict[str, Any]) -> str:
         if not item.get("objectData", {}).get("visible", False):
             return ""
@@ -734,92 +874,24 @@ class Renderer:
         outline_size = max(0.0, float(item.get("outlineSize", 0.0))) * base_size * TMP_OUTLINE_FACTOR
         line_spacing = float(item.get("lineSpacing", 0.0))
         anchor = tmp_anchor(int(item.get("type", 513)))
-        runs = parse_tmp_text(
-            raw_text,
-            TextStyle(
-                color=base_color,
-                alpha=1.0,
-                size=base_size,
-                scale_x=1.0,
-                cspace=0.0,
-                mspace=None,
-                indent=0.0,
-                line_indent=0.0,
-                line_height=None,
-                rotate=0.0,
-                voffset=0.0,
-                mark_color=None,
-                bold=False,
-                italic=False,
-                underline=False,
-                strike=False,
-            ),
-        )
+        runs = parse_tmp_text(raw_text, self.svg_base_text_style(base_color, base_size))
         lines = split_runs_by_line(runs)
         transform = transform_attr(item["objectData"])
         parts = [f'<g transform="{transform}">']
-        total_height = sum(
-            (
-                max(
-                    ((r.style.line_height if r.style.line_height is not None else r.style.size) for r in line),
-                    default=base_size,
-                )
-                * (1.0 + line_spacing)
-            )
-            for line in lines
-        )
+        total_height = sum(self.svg_text_line_size(line, base_size) * (1.0 + line_spacing) for line in lines)
         y = -total_height / 2
         for line in lines:
-            line_size = max(
-                ((r.style.line_height if r.style.line_height is not None else r.style.size) for r in line),
-                default=base_size,
+            line_parts, y = self.render_svg_text_line(
+                line,
+                y,
+                base_size,
+                line_spacing,
+                font_name,
+                outline_color,
+                outline_size,
+                anchor,
             )
-            baseline = y + line_size / 2
-            x_cursor = 0.0
-            for run in line:
-                text = svg_escape(run.text)
-                style = run.style
-                if self.tmp_scale_mode == "uniform":
-                    effective_size = style.size * style.scale_x
-                    scale_transform = ""
-                else:
-                    effective_size = style.size
-                    scale_transform = (
-                        f" translate({x_cursor:.3f} {baseline - style.voffset:.3f})"
-                        f" scale({style.scale_x:.6f} 1)"
-                        f" translate({-x_cursor:.3f} {-baseline + style.voffset:.3f})"
-                        if not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9)
-                        else ""
-                    )
-                stroke = ""
-                if outline_size > 0:
-                    stroke = (
-                        f' stroke="{outline_color}" stroke-width="{outline_size:.3f}" '
-                        'paint-order="stroke fill" stroke-linejoin="round"'
-                    )
-                rotate_attr = ""
-                if style.rotate:
-                    rotate_attr = f" rotate({-style.rotate:.5f} {x_cursor:.3f} {baseline - style.voffset:.3f})"
-                transform_bits = (scale_transform + rotate_attr).strip()
-                transform_attr_text = f' transform="{transform_bits}"' if transform_bits else ""
-                decoration = []
-                if style.underline:
-                    decoration.append("underline")
-                if style.strike:
-                    decoration.append("line-through")
-                decoration_attr = f' text-decoration="{" ".join(decoration)}"' if decoration else ""
-                font_weight = ' font-weight="700"' if style.bold else ""
-                font_style = ' font-style="italic"' if style.italic else ""
-                anchor_attr = "middle" if self.text_anchor_mode == "center" else anchor
-                parts.append(
-                    f'<text x="{x_cursor:.3f}" y="{baseline - style.voffset:.3f}" text-anchor="{anchor_attr}" '
-                    f'dominant-baseline="central" font-family="{svg_escape(font_name)}, sans-serif" '
-                    f'font-size="{effective_size:.3f}" fill="{style.color}" fill-opacity="{style.alpha:.4f}"'
-                    f"{font_weight}{font_style}{decoration_attr}{stroke}{transform_attr_text}>{text}</text>"
-                )
-                advance = style.mspace if style.mspace is not None else effective_size * 0.55 * style.scale_x
-                x_cursor += len(run.text) * (advance + style.cspace)
-            y += line_size * (1.0 + line_spacing)
+            parts.extend(line_parts)
         parts.append("</g>")
         return "".join(parts)
 
