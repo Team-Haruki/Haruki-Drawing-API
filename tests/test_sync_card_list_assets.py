@@ -104,6 +104,26 @@ def test_extract_card_list_asset_paths_can_skip_fonts():
     assert not any(path in DEFAULT_FONT_FILES for path in paths)
 
 
+@pytest.mark.parametrize(
+    ("payload_update", "message"),
+    [
+        ({"cards": {}}, "cards must be a list"),
+        ({"cards": [{"skill": []}]}, r"cards\[0\]\.skill must be an object"),
+        ({"cards": [{"thumbnail_info": {}}]}, r"cards\[0\]\.thumbnail_info must be a list"),
+        ({"cards": [{"thumbnail_info": [[]]}]}, r"cards\[0\]\.thumbnail_info\[0\] must be an object"),
+    ],
+)
+def test_extract_card_list_asset_paths_rejects_invalid_shapes(payload_update, message):
+    with pytest.raises(TypeError, match=message):
+        extract_card_list_asset_paths(payload_update, include_fonts=False)
+
+
+def test_extract_card_list_asset_paths_accepts_null_optional_sections():
+    payload = {"cards": [{"skill": None, "special_skill_info": None, "thumbnail_info": None}]}
+
+    assert extract_card_list_asset_paths(payload, include_fonts=False) == []
+
+
 def test_split_remote_asset_paths_routes_game_assets_without_asset_prefix():
     drawing_paths, game_asset_paths = split_remote_asset_paths(
         [

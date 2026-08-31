@@ -1,4 +1,11 @@
-from src.sekai.costume.drawer import _costume_lookup_text, _published_time_text
+import pytest
+
+from src.sekai.costume.drawer import (
+    _costume_detail_id_info,
+    _costume_lookup_text,
+    _costume_role_ids,
+    _published_time_text,
+)
 from src.sekai.costume.model import CostumeBasic
 
 
@@ -44,3 +51,28 @@ def test_costume_lookup_text_uses_role_local_hair_id():
     costume = _costume(part_type="hair", hair_id=2, character_3d_id=23)
 
     assert _costume_lookup_text(costume) == "发2 角23"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "expected"),
+    [
+        ({"outfit_id": 11}, ("服装ID", "11")),
+        ({"accessory_id": 12}, ("饰品ID", "12")),
+        ({"hair_id": 13}, ("发型ID", "13")),
+        ({}, ("ID", "6")),
+    ],
+)
+def test_costume_detail_id_info_selects_specific_id(kwargs, expected):
+    assert _costume_detail_id_info(_costume(**kwargs)) == expected
+
+
+def test_costume_role_ids_prefers_selected_role():
+    costume = _costume(character_3d_id=23, character_3d_ids=[21, 22, 23])
+
+    assert _costume_role_ids(costume) == [23]
+
+
+def test_costume_role_ids_keeps_supported_roles_without_selection():
+    costume = _costume(character_3d_ids=[21, 22, 23])
+
+    assert _costume_role_ids(costume) == [21, 22, 23]

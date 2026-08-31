@@ -328,6 +328,15 @@ def tracked_rank_info(
     return {"rank": rank, "name": name, "score": last["score"], "time": last["time"], **derive_metrics(trace, now_ms)}
 
 
+def _append_csb_segment(segments: list[tuple[dict, dict]], left: dict | None, right: dict | None) -> None:
+    if left is not None and right is not None and left is not right:
+        segments.append((left, right))
+
+
+def _starts_new_csb_segment(point: dict, right: dict) -> bool:
+    return point["rank"] > 100 or point["time"] - right["time"] > 70_000
+
+
 def count_csb_stop_texts(points: list[dict]) -> int:
     """Mirror of the CSB drawer's stop-segment scan (src/sekai/sk/drawer.py:635-681)."""
     ranks = sorted(points, key=lambda p: p["time"])
@@ -338,18 +347,15 @@ def count_csb_stop_texts(points: list[dict]) -> int:
             left = p
         if right is None:
             right = p
-        if p["rank"] > 100 or p["time"] - right["time"] > 70_000:
-            if left is not right:
-                segments.append((left, right))
+        if _starts_new_csb_segment(p, right):
+            _append_csb_segment(segments, left, right)
             left, right = p, None
         elif p["score"] != right["score"]:
-            if left is not right:
-                segments.append((left, right))
+            _append_csb_segment(segments, left, right)
             left, right = p, None
         else:
             right = p
-    if left is not None and right is not None and left is not right:
-        segments.append((left, right))
+    _append_csb_segment(segments, left, right)
     return 1 + sum(1 for lo, hi in segments if hi["time"] - lo["time"] >= 300_000)
 
 

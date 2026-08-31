@@ -183,11 +183,24 @@ def _character_3d_ids_text(ids: list[int]) -> str:
     return ",".join(str(item) for item in ids)
 
 
-def _costume_lookup_text(costume) -> str:
-    role_ids = costume.character_3d_ids
+def _costume_role_ids(costume) -> list[int]:
     if costume.character_3d_id:
-        role_ids = [costume.character_3d_id]
-    role_text = _character_3d_ids_text(role_ids)
+        return [costume.character_3d_id]
+    return costume.character_3d_ids
+
+
+def _costume_detail_id_info(costume) -> tuple[str, str]:
+    if costume.outfit_id:
+        return "服装ID", str(costume.outfit_id)
+    if costume.accessory_id:
+        return "饰品ID", str(costume.accessory_id)
+    if costume.hair_id:
+        return "发型ID", str(costume.hair_id)
+    return "ID", str(costume.costume_id)
+
+
+def _costume_lookup_text(costume) -> str:
+    role_text = _character_3d_ids_text(_costume_role_ids(costume))
     if costume.outfit_id:
         return f"服{costume.outfit_id} 角{role_text}"
     if costume.accessory_id:
@@ -331,18 +344,9 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
             with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
                 with VSplit().set_padding(16).set_sep(8).set_bg(roundrect_bg(alpha=80)).set_item_align("lt"):
                     TextBox(costume.name, title_style, use_real_line_count=True).set_w(660)
-                    if costume.outfit_id:
-                        _draw_info_row("服装ID", str(costume.outfit_id))
-                    elif costume.accessory_id:
-                        _draw_info_row("饰品ID", str(costume.accessory_id))
-                    elif costume.hair_id:
-                        _draw_info_row("发型ID", str(costume.hair_id))
-                    else:
-                        _draw_info_row("ID", str(costume.costume_id))
-                    role_ids = costume.character_3d_ids
-                    if costume.character_3d_id:
-                        role_ids = [costume.character_3d_id]
-                    _draw_info_row("角色ID", _character_3d_ids_text(role_ids))
+                    id_label, id_value = _costume_detail_id_info(costume)
+                    _draw_info_row(id_label, id_value)
+                    _draw_info_row("角色ID", _character_3d_ids_text(_costume_role_ids(costume)))
                     _draw_info_row("类别", costume.part_name or costume.part_type)
                     _draw_info_row("角色", costume.character_name)
                     _draw_info_row("颜色", costume.color_name or "-")

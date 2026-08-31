@@ -83,6 +83,35 @@ def _append_path(paths: list[str], value: Any, *, field: str) -> None:
         paths.append(path)
 
 
+def _append_card_skill_paths(paths: list[str], card: dict[str, Any], card_index: int) -> None:
+    for skill_field in ("skill", "special_skill_info"):
+        skill = card.get(skill_field)
+        if skill is None:
+            continue
+        skill_map = _as_mapping(skill, field=f"cards[{card_index}].{skill_field}")
+        _append_path(
+            paths,
+            skill_map.get("skill_type_icon_path"),
+            field=f"cards[{card_index}].{skill_field}.skill_type_icon_path",
+        )
+
+
+def _append_card_thumbnail_paths(paths: list[str], card: dict[str, Any], card_index: int) -> None:
+    thumbnails = card.get("thumbnail_info", [])
+    if thumbnails is None:
+        return
+    if not isinstance(thumbnails, list):
+        raise TypeError(f"cards[{card_index}].thumbnail_info must be a list")
+    for thumb_index, raw_thumb in enumerate(thumbnails):
+        thumb = _as_mapping(raw_thumb, field=f"cards[{card_index}].thumbnail_info[{thumb_index}]")
+        for field in THUMBNAIL_ASSET_FIELDS:
+            _append_path(
+                paths,
+                thumb.get(field),
+                field=f"cards[{card_index}].thumbnail_info[{thumb_index}].{field}",
+            )
+
+
 def extract_card_list_asset_paths(payload: dict[str, Any], *, include_fonts: bool = True) -> list[str]:
     paths: list[str] = []
 
@@ -95,30 +124,8 @@ def extract_card_list_asset_paths(payload: dict[str, Any], *, include_fonts: boo
 
     for card_index, raw_card in enumerate(cards):
         card = _as_mapping(raw_card, field=f"cards[{card_index}]")
-        for skill_field in ("skill", "special_skill_info"):
-            skill = card.get(skill_field)
-            if skill is None:
-                continue
-            skill_map = _as_mapping(skill, field=f"cards[{card_index}].{skill_field}")
-            _append_path(
-                paths,
-                skill_map.get("skill_type_icon_path"),
-                field=f"cards[{card_index}].{skill_field}.skill_type_icon_path",
-            )
-
-        thumbnails = card.get("thumbnail_info", [])
-        if thumbnails is None:
-            continue
-        if not isinstance(thumbnails, list):
-            raise TypeError(f"cards[{card_index}].thumbnail_info must be a list")
-        for thumb_index, raw_thumb in enumerate(thumbnails):
-            thumb = _as_mapping(raw_thumb, field=f"cards[{card_index}].thumbnail_info[{thumb_index}]")
-            for field in THUMBNAIL_ASSET_FIELDS:
-                _append_path(
-                    paths,
-                    thumb.get(field),
-                    field=f"cards[{card_index}].thumbnail_info[{thumb_index}].{field}",
-                )
+        _append_card_skill_paths(paths, card, card_index)
+        _append_card_thumbnail_paths(paths, card, card_index)
 
     if include_fonts:
         paths.extend(DEFAULT_FONT_FILES)
