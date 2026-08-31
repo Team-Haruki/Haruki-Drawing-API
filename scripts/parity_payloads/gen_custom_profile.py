@@ -138,20 +138,20 @@ def _inline_indexes(probe: Any) -> dict[str, Any]:
         if not path.exists():
             continue
         rows = json.loads(path.read_text(encoding="utf-8"))
-        resources[key] = _inline_resource_image_paths(probe, rows)
+        _inline_resource_image_paths(probe, rows)
+        resources[key] = rows
     return resources
 
 
-def _inline_resource_image_paths(probe: Any, rows: Any) -> Any:
+def _inline_resource_image_paths(probe: Any, rows: Any) -> None:
     if not isinstance(rows, list):
-        return rows
+        return
     for row in rows:
         if not isinstance(row, dict):
             continue
         # Only resource rows with a fileName can carry a derivable image path.
         if "fileName" in row and (resolved := probe.resource_path(row)):
             row["imagePath"] = _request_path(resolved)
-    return rows
 
 
 def _card_assets_for(probe: Any, profile: dict[str, Any]) -> dict[str, dict[str, str]]:

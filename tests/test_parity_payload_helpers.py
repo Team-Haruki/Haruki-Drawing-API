@@ -267,10 +267,12 @@ def test_inline_resource_image_paths_only_enriches_resolvable_file_rows(monkeypa
         "not-a-row",
     ]
 
-    assert gen_custom_profile._inline_resource_image_paths(Probe(), rows) is rows
+    gen_custom_profile._inline_resource_image_paths(Probe(), rows)
     assert rows[0]["imagePath"] == "request:shape.png"
     assert "imagePath" not in rows[1]
-    assert gen_custom_profile._inline_resource_image_paths(Probe(), {"value": 1}) == {"value": 1}
+    mapping = {"value": 1}
+    gen_custom_profile._inline_resource_image_paths(Probe(), mapping)
+    assert mapping == {"value": 1}
 
 
 def test_validated_honor_capture_assets_requires_exact_request_paths() -> None:
