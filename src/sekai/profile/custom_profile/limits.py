@@ -44,6 +44,18 @@ UNSUPPORTED_DYNAMIC_BUCKETS = frozenset({"miniCharas", "screenFilters"})
 # turn one glyph into a multi-gigabyte raster. Renderer-side pixel guards remain authoritative.
 _TMP_RICH_TEXT_SIZE_HEADROOM = 4.0
 _TMP_RICH_TEXT_SCALE_HEADROOM = 8.0
+_TMP_LAYOUT_FIELDS = (
+    "cspace",
+    "mspace",
+    "indent",
+    "indent_percent",
+    "line_indent",
+    "line_indent_percent",
+    "line_height",
+    "voffset",
+    "pos",
+    "pos_percent",
+)
 
 
 class RasterSizeLimitError(ValueError):
@@ -66,6 +78,42 @@ def _finite_number(value: Any, label: str) -> float:
     if not math.isfinite(number):
         raise ValueError(f"{label} must be a finite number")
     return number
+
+
+def _validate_tmp_layout_fields(style: TextStyle, *, label: str, max_magnitude: float) -> None:
+    for key in _TMP_LAYOUT_FIELDS:
+        value = getattr(style, key)
+        if value is None:
+            continue
+        number = _finite_number(value, f"{label}.richText.{key}")
+        if abs(number) > max_magnitude:
+            raise ValueError(f"{label}.richText.{key} must be within [-{max_magnitude:g}, {max_magnitude:g}]")
+
+
+def _validate_tmp_style(
+    style: TextStyle,
+    *,
+    label: str,
+    max_scale: float,
+    max_text_size: float,
+) -> None:
+    max_rich_text_size = max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM
+    size = _finite_number(style.size, f"{label}.richText.size")
+    if size <= 0 or size > max_rich_text_size:
+        raise ValueError(f"{label}.richText.size must be within (0, {max_rich_text_size:g}]")
+
+    max_rich_text_scale = max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
+    scale_x = _finite_number(style.scale_x, f"{label}.richText.scale")
+    if abs(scale_x) > max_rich_text_scale:
+        raise ValueError(f"{label}.richText.scale must be within [-{max_rich_text_scale:g}, {max_rich_text_scale:g}]")
+
+    _finite_number(style.alpha, f"{label}.richText.alpha")
+    _finite_number(style.rotate, f"{label}.richText.rotate")
+    _validate_tmp_layout_fields(
+        style,
+        label=label,
+        max_magnitude=max_rich_text_size * max_rich_text_scale,
+    )
 
 
 def _validate_tmp_text_styles(
@@ -105,41 +153,7 @@ def _validate_tmp_text_styles(
         style = getattr(token, "style", None)
         if style is None:
             continue
-
-        max_rich_text_size = max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM
-        size = _finite_number(style.size, f"{label}.richText.size")
-        if size <= 0 or size > max_rich_text_size:
-            raise ValueError(f"{label}.richText.size must be within (0, {max_rich_text_size:g}]")
-
-        max_rich_text_scale = max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
-        scale_x = _finite_number(style.scale_x, f"{label}.richText.scale")
-        if abs(scale_x) > max_rich_text_scale:
-            raise ValueError(
-                f"{label}.richText.scale must be within [-{max_rich_text_scale:g}, {max_rich_text_scale:g}]"
-            )
-
-        _finite_number(style.alpha, f"{label}.richText.alpha")
-        _finite_number(style.rotate, f"{label}.richText.rotate")
-        max_layout_magnitude = max_rich_text_size * max_rich_text_scale
-        for key in (
-            "cspace",
-            "mspace",
-            "indent",
-            "indent_percent",
-            "line_indent",
-            "line_indent_percent",
-            "line_height",
-            "voffset",
-            "pos",
-            "pos_percent",
-        ):
-            value = getattr(style, key)
-            if value is not None:
-                number = _finite_number(value, f"{label}.richText.{key}")
-                if abs(number) > max_layout_magnitude:
-                    raise ValueError(
-                        f"{label}.richText.{key} must be within [-{max_layout_magnitude:g}, {max_layout_magnitude:g}]"
-                    )
+        _validate_tmp_style(style, label=label, max_scale=max_scale, max_text_size=max_text_size)
 
 
 def validate_custom_profile_card(

@@ -194,31 +194,41 @@ class IRPainter(Painter):
         self._mem_by_id[id(img)] = (img, key)
         return f"mem:{key}"
 
+    def _encoded_image_ref(self, img: EncodedImageRef) -> str:
+        entry = self._mem_by_id.get(id(img))
+        if entry is not None and entry[0] is img:
+            return f"mem:{entry[1]}"
+        key = f"m{len(self._mem_images)}"
+        # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
+        self._mem_images[key] = img.data
+        self._mem_by_id[id(img)] = (img, key)
+        return f"mem:{key}"
+
+    def _asset_image_ref(self, img: Any) -> str | None:
+        source = get_pristine_image_asset_path(img)
+        if source is None:
+            return None
+        resolved = resolve_existing_asset_path(source)
+        if resolved is None:
+            return None
+        try:
+            relative = resolved.relative_to(self._assets_base_dir)
+        except ValueError:
+            return None
+        if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            return None
+        return relative.as_posix()
+
     def _image_ref(self, img: Any) -> str:
         if isinstance(img, Image.Image):
             # Count the boundary even when a pristine cached PIL image can be replaced with
             # its asset path. That request still depends on Pillow producing the source object.
             record_pillow_touch(PILLOW_TOUCH_IRPAINTER_PIL_IMAGE)
         if isinstance(img, EncodedImageRef):
-            entry = self._mem_by_id.get(id(img))
-            if entry is not None and entry[0] is img:
-                return f"mem:{entry[1]}"
-            key = f"m{len(self._mem_images)}"
-            # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
-            self._mem_images[key] = img.data
-            self._mem_by_id[id(img)] = (img, key)
-            return f"mem:{key}"
-        source = get_pristine_image_asset_path(img)
-        if source is not None:
-            resolved = resolve_existing_asset_path(source)
-            if resolved is not None:
-                try:
-                    relative = resolved.relative_to(self._assets_base_dir)
-                except ValueError:
-                    pass
-                else:
-                    if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
-                        return relative.as_posix()
+            return self._encoded_image_ref(img)
+        asset_ref = self._asset_image_ref(img)
+        if asset_ref is not None:
+            return asset_ref
         if not isinstance(img, Image.Image):
             # AssetImageRef outside the assets root or vanished on disk: decode
             # (placeholder on missing) so mem transport still renders something.

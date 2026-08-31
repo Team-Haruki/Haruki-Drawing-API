@@ -109,6 +109,41 @@ _SCENE_CLASSIFICATIONS: tuple[str, ...] = (
 )
 
 
+def _counter_bucket(counters: dict[str, dict[str, int]], name: str, keys: tuple[str, ...]) -> dict[str, int]:
+    bucket = counters.get(name)
+    if bucket is None:
+        bucket = dict.fromkeys(keys, 0)
+        counters[name] = bucket
+    return bucket
+
+
+def _record_native_purity(name: str, outcome: str, snapshot: PillowTouchSnapshot) -> None:
+    if outcome not in _NATIVE_OUTCOMES:
+        return
+    bucket = _counter_bucket(_native_purity_counters, name, NATIVE_PURITY_KEYS)
+    bucket[f"native_{snapshot.native_purity}"] += 1
+
+
+def _record_pillow_touches(name: str, outcome: str, snapshot: PillowTouchSnapshot) -> None:
+    if outcome not in _NATIVE_OUTCOMES or not snapshot.scoped or not snapshot.counts:
+        return
+    render_counts = _pillow_touch_render_counts.setdefault(name, {})
+    call_counts = _pillow_touch_call_counts.setdefault(name, {})
+    for reason, count in snapshot.counts.items():
+        render_counts[reason] = render_counts.get(reason, 0) + 1
+        call_counts[reason] = call_counts.get(reason, 0) + count
+
+
+def _record_error_stage(name: str, outcome: str, error_stage: str | None) -> None:
+    if outcome != OUTCOME_ERROR or not error_stage:
+        return
+    stage = str(error_stage).strip() or "unknown"
+    if stage not in _ERROR_STAGE_SET:
+        stage = "unknown"
+    stage_counts = _error_stage_counters.setdefault(name, {})
+    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+
 def backend_for_outcome(outcome: str) -> str:
     """Map a render outcome to the ``backend=`` label used on the image.response log line."""
     return _BACKEND_BY_OUTCOME.get(outcome, BACKEND_PILLOW)
@@ -234,32 +269,11 @@ def record_render(
         outcome = OUTCOME_ERROR
     snapshot = pillow_touches if pillow_touches is not None else take_pillow_touch_snapshot()
     with _lock:
-        bucket = _counters.get(name)
-        if bucket is None:
-            bucket = dict.fromkeys(OUTCOMES, 0)
-            _counters[name] = bucket
+        bucket = _counter_bucket(_counters, name, OUTCOMES)
         bucket[outcome] += 1
-
-        if outcome in _NATIVE_OUTCOMES:
-            purity_bucket = _native_purity_counters.get(name)
-            if purity_bucket is None:
-                purity_bucket = dict.fromkeys(NATIVE_PURITY_KEYS, 0)
-                _native_purity_counters[name] = purity_bucket
-            purity_bucket[f"native_{snapshot.native_purity}"] += 1
-
-        if outcome in _NATIVE_OUTCOMES and snapshot.scoped and snapshot.counts:
-            render_counts = _pillow_touch_render_counts.setdefault(name, {})
-            call_counts = _pillow_touch_call_counts.setdefault(name, {})
-            for reason, count in snapshot.counts.items():
-                render_counts[reason] = render_counts.get(reason, 0) + 1
-                call_counts[reason] = call_counts.get(reason, 0) + count
-
-        if outcome == OUTCOME_ERROR and error_stage:
-            stage = str(error_stage).strip() or "unknown"
-            if stage not in _ERROR_STAGE_SET:
-                stage = "unknown"
-            stage_counts = _error_stage_counters.setdefault(name, {})
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        _record_native_purity(name, outcome, snapshot)
+        _record_pillow_touches(name, outcome, snapshot)
+        _record_error_stage(name, outcome, error_stage)
 
 
 def record_worker_payload_backend(

@@ -64,6 +64,18 @@ def custom_profile_cards(profile: dict[str, Any]) -> list[dict[str, Any]]:
     return [card for card in cards if isinstance(card, dict)]
 
 
+def _matches_custom_profile_ids(
+    card: dict[str, Any],
+    *,
+    custom_profile_id: int | None,
+    custom_profile_card_id: int | None,
+) -> bool:
+    if custom_profile_id is not None and int(card.get("customProfileId", 0) or 0) != custom_profile_id:
+        return False
+    card_id = int(card.get("customProfileCardId", 0) or 0)
+    return custom_profile_card_id is None or card_id == custom_profile_card_id
+
+
 def select_custom_profile_cards(
     profile: dict[str, Any],
     *,
@@ -77,15 +89,15 @@ def select_custom_profile_cards(
         return sorted(cards, key=lambda c: int(c.get("seq", 0) or 0))
 
     if custom_profile_id is not None or custom_profile_card_id is not None:
-        result: list[dict[str, Any]] = []
-        for card in cards:
-            if custom_profile_id is not None and int(card.get("customProfileId", 0) or 0) != custom_profile_id:
-                continue
-            card_id = int(card.get("customProfileCardId", 0) or 0)
-            if custom_profile_card_id is not None and card_id != custom_profile_card_id:
-                continue
-            result.append(card)
-        return result
+        return [
+            card
+            for card in cards
+            if _matches_custom_profile_ids(
+                card,
+                custom_profile_id=custom_profile_id,
+                custom_profile_card_id=custom_profile_card_id,
+            )
+        ]
 
     target_seq = seq or 1
     return [card for card in cards if int(card.get("seq", 0) or 0) == target_seq]
