@@ -775,6 +775,25 @@ class TMPGlyphMetrics:
 
 
 @dataclass(frozen=True)
+class TMPShaderMaterial:
+    gradient_scale: float
+    face_dilate: float
+    outline_width: float
+    outline_softness: float
+    weight_normal: float
+    weight_bold: float
+    underlay_offset_x: float
+    underlay_offset_y: float
+    underlay_softness: float
+    glow_offset: float
+    glow_outer: float
+    sharpness: float
+    scale_ratio_a: float
+    scale_ratio_b: float
+    scale_ratio_c: float
+
+
+@dataclass(frozen=True)
 class TMPDynamicGlyphSDF:
     field: Image.Image
     bbox: tuple[int, int, int, int]
@@ -7191,19 +7210,46 @@ class PNGRenderer:
         if not self.tmp_lines_have_percent_indent(lines) or zero_margin_layout is None:
             return None
         if self.tmp_box_mode == "preferred":
-            padding_x = max(0.0, self.tmp_preferred_padding_x)
-            margin_width = zero_margin_layout.preferred_width + padding_x
-            for line in zero_margin_layout.lines:
-                percent = self.tmp_line_indent_percent(line.styled_line)
-                if abs(percent) < 1.0e-8:
-                    margin_width = max(margin_width, line.width + padding_x)
-                    continue
-                if percent >= 1.0:
-                    margin_width = TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
-                    continue
-                margin_width = max(margin_width, (line.width + padding_x) / max(1.0e-6, 1.0 - percent))
-            return min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, margin_width))
+            return self.tmp_preferred_percent_indent_margin_width(zero_margin_layout)
+        return self.tmp_iterative_percent_indent_margin_width(
+            lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            outline_dilate,
+            zero_margin_layout,
+            source_metrics_only=source_metrics_only,
+        )
 
+    def tmp_preferred_percent_indent_margin_width(self, layout: TMPNativeTextLayout) -> float:
+        padding_x = max(0.0, self.tmp_preferred_padding_x)
+        margin_width = layout.preferred_width + padding_x
+        for line in layout.lines:
+            percent = self.tmp_line_indent_percent(line.styled_line)
+            if abs(percent) < 1.0e-8:
+                margin_width = max(margin_width, line.width + padding_x)
+                continue
+            if percent >= 1.0:
+                margin_width = TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
+                continue
+            margin_width = max(margin_width, (line.width + padding_x) / max(1.0e-6, 1.0 - percent))
+        return min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, margin_width))
+
+    def tmp_iterative_percent_indent_margin_width(
+        self,
+        lines: list[StyledLine],
+        font_name: str,
+        font_path: Path,
+        base_size: float,
+        line_spacing: float,
+        dominant_size: float,
+        outline_dilate: float,
+        zero_margin_layout: TMPNativeTextLayout,
+        *,
+        source_metrics_only: bool = False,
+    ) -> float:
         margin_width = self.tmp_text_box_size(
             zero_margin_layout.dominant_size,
             zero_margin_layout.preferred_width,
@@ -7466,44 +7512,17 @@ class PNGRenderer:
         local_image_size: tuple[int, int] | None = None,
     ) -> None:
         object_data = item.get("objectData", {}) or {}
-        line_entries: list[dict[str, Any]] = []
-        for line_index, (line, line_metrics, line_y, line_h, line_w) in enumerate(metrics):
-            run_entries: list[dict[str, Any]] = []
-            for run, x, run_w in line_metrics:
-                scaled_size = run.style.size * self.tmp_font_scale
-                font = load_font(font_path, scaled_size)
-                current_em_scale = native_text_layout.current_em_scale if native_text_layout is not None else None
-                measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
-                spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size, current_em_scale)
-                run_entries.append(
-                    {
-                        "text": run.text,
-                        "style": self.tmp_style_audit_dict(run.style),
-                        "x": x,
-                        "meshWidth": run_w,
-                        "advance": measure.advance,
-                        "visualBounds": {
-                            "left": measure.visual_left,
-                            "right": measure.visual_right,
-                            "top": measure.visual_top,
-                            "bottom": measure.visual_bottom,
-                        },
-                        "characterSpacingAdvance": spacing,
-                        "fontSizeAfterFaceScale": scaled_size,
-                        "glyphs": self.tmp_run_glyph_audit(font, run, font_name, scaled_size, current_em_scale),
-                    }
-                )
-            line_entries.append(
-                {
-                    "index": line_index,
-                    "style": self.tmp_style_audit_dict(line.style),
-                    "lineY": line_y,
-                    "lineHeight": line_h,
-                    "lineWidth": line_w,
-                    "nativeBaselineDown": native_baselines[line_index] if native_baselines is not None else None,
-                    "runs": run_entries,
-                }
+        line_entries = [
+            self.tmp_line_layout_audit_entry(
+                line_index,
+                line_metric,
+                font_name,
+                font_path,
+                native_text_layout,
+                native_baselines,
             )
+            for line_index, line_metric in enumerate(metrics)
+        ]
         self.tmp_layout_audit.append(
             {
                 **self._current_card_ref,
@@ -7518,64 +7537,140 @@ class PNGRenderer:
                     "horizontal": tmp_horizontal_alignment(mesh_state.align),
                     "vertical": tmp_vertical_alignment(mesh_state.align),
                 },
-                "layout": {
-                    "preferredWidth": preferred_width,
-                    "preferredHeight": preferred_height,
-                    "contentHeight": content_height,
-                    "accumulatedLineHeight": total_height,
-                    "lateUpdateSizeDelta": {
-                        "x": box_w,
-                        "y": box_h,
-                    },
-                    "meshPixelBounds": (
-                        {
-                            "left": mesh_bounds[0],
-                            "top": mesh_bounds[1],
-                            "right": mesh_bounds[2],
-                            "bottom": mesh_bounds[3],
-                        }
-                        if mesh_bounds is not None
-                        else None
-                    ),
-                    "localImage": (
-                        {
-                            "width": local_image_size[0],
-                            "height": local_image_size[1],
-                            "rectOriginX": rect_origin[0],
-                            "rectOriginY": rect_origin[1],
-                        }
-                        if rect_origin is not None and local_image_size is not None
-                        else None
-                    ),
-                    "nativeLineLayout": (
-                        {
-                            "baselines": native_layout.baselines,
-                            "maxAscender": native_layout.max_ascender,
-                            "maxDescender": native_layout.max_descender,
-                            "contentHeight": native_layout.content_height,
-                        }
-                        if native_layout is not None
-                        else None
-                    ),
-                    "nativeTextInfo": (
-                        self.tmp_native_text_layout_audit_dict(native_text_layout)
-                        if native_text_layout is not None
-                        else None
-                    ),
-                    "meshNativeTextInfo": (
-                        self.tmp_native_text_layout_audit_dict(
-                            mesh_text_layout,
-                            rect_box_w=box_w,
-                            rect_box_h=box_h,
-                            native_baselines=native_baselines,
-                        )
-                        if mesh_text_layout is not None
-                        else None
-                    ),
-                },
+                "layout": self.tmp_layout_audit_metadata(
+                    preferred_width,
+                    preferred_height,
+                    content_height,
+                    total_height,
+                    box_w,
+                    box_h,
+                    native_layout,
+                    native_baselines,
+                    native_text_layout,
+                    mesh_text_layout,
+                    mesh_bounds,
+                    rect_origin,
+                    local_image_size,
+                ),
                 "lines": line_entries,
             }
         )
+
+    def tmp_run_layout_audit_entry(
+        self,
+        run: TextRun,
+        x: float,
+        run_w: float,
+        font_name: str,
+        font_path: Path,
+        native_text_layout: TMPNativeTextLayout | None,
+    ) -> dict[str, Any]:
+        scaled_size = run.style.size * self.tmp_font_scale
+        font = load_font(font_path, scaled_size)
+        current_em_scale = native_text_layout.current_em_scale if native_text_layout is not None else None
+        measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
+        spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size, current_em_scale)
+        return {
+            "text": run.text,
+            "style": self.tmp_style_audit_dict(run.style),
+            "x": x,
+            "meshWidth": run_w,
+            "advance": measure.advance,
+            "visualBounds": {
+                "left": measure.visual_left,
+                "right": measure.visual_right,
+                "top": measure.visual_top,
+                "bottom": measure.visual_bottom,
+            },
+            "characterSpacingAdvance": spacing,
+            "fontSizeAfterFaceScale": scaled_size,
+            "glyphs": self.tmp_run_glyph_audit(font, run, font_name, scaled_size, current_em_scale),
+        }
+
+    def tmp_line_layout_audit_entry(
+        self,
+        line_index: int,
+        line_metric: tuple[StyledLine, list[tuple[TextRun, float, float]], float, float, float],
+        font_name: str,
+        font_path: Path,
+        native_text_layout: TMPNativeTextLayout | None,
+        native_baselines: list[float] | None,
+    ) -> dict[str, Any]:
+        line, line_metrics, line_y, line_h, line_w = line_metric
+        runs = [
+            self.tmp_run_layout_audit_entry(run, x, run_w, font_name, font_path, native_text_layout)
+            for run, x, run_w in line_metrics
+        ]
+        native_baseline = native_baselines[line_index] if native_baselines is not None else None
+        return {
+            "index": line_index,
+            "style": self.tmp_style_audit_dict(line.style),
+            "lineY": line_y,
+            "lineHeight": line_h,
+            "lineWidth": line_w,
+            "nativeBaselineDown": native_baseline,
+            "runs": runs,
+        }
+
+    def tmp_layout_audit_metadata(
+        self,
+        preferred_width: float,
+        preferred_height: float,
+        content_height: float,
+        total_height: float,
+        box_w: float,
+        box_h: float,
+        native_layout: TMPNativeLineLayout | None,
+        native_baselines: list[float] | None,
+        native_text_layout: TMPNativeTextLayout | None,
+        mesh_text_layout: TMPNativeTextLayout | None,
+        mesh_bounds: tuple[float, float, float, float] | None,
+        rect_origin: tuple[float, float] | None,
+        local_image_size: tuple[int, int] | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "preferredWidth": preferred_width,
+            "preferredHeight": preferred_height,
+            "contentHeight": content_height,
+            "accumulatedLineHeight": total_height,
+            "lateUpdateSizeDelta": {"x": box_w, "y": box_h},
+            "meshPixelBounds": None,
+            "localImage": None,
+            "nativeLineLayout": None,
+            "nativeTextInfo": None,
+            "meshNativeTextInfo": None,
+        }
+        if mesh_bounds is not None:
+            metadata["meshPixelBounds"] = {
+                "left": mesh_bounds[0],
+                "top": mesh_bounds[1],
+                "right": mesh_bounds[2],
+                "bottom": mesh_bounds[3],
+            }
+        if rect_origin is not None and local_image_size is not None:
+            metadata["localImage"] = {
+                "width": local_image_size[0],
+                "height": local_image_size[1],
+                "rectOriginX": rect_origin[0],
+                "rectOriginY": rect_origin[1],
+            }
+        if native_layout is not None:
+            metadata["nativeLineLayout"] = {
+                "baselines": native_layout.baselines,
+                "maxAscender": native_layout.max_ascender,
+                "maxDescender": native_layout.max_descender,
+                "contentHeight": native_layout.content_height,
+            }
+        if native_text_layout is not None:
+            metadata["nativeTextInfo"] = self.tmp_native_text_layout_audit_dict(native_text_layout)
+        if mesh_text_layout is not None:
+            metadata["meshNativeTextInfo"] = self.tmp_native_text_layout_audit_dict(
+                mesh_text_layout,
+                rect_box_w=box_w,
+                rect_box_h=box_h,
+                native_baselines=native_baselines,
+            )
+        return metadata
 
     def tmp_native_text_layout_audit_dict(
         self,
@@ -8551,6 +8646,43 @@ class PNGRenderer:
         value = DEFAULT_TMP_TEXCOORD1_Y * max(1.0, rich_scale)
         return -value if style.bold else value
 
+    def tmp_shader_material(self, asset: TMPFontAsset | None) -> TMPShaderMaterial:
+        if asset is None:
+            return TMPShaderMaterial(
+                gradient_scale=6.0,
+                face_dilate=0.0,
+                outline_width=0.0,
+                outline_softness=0.0,
+                weight_normal=0.0,
+                weight_bold=0.75,
+                underlay_offset_x=0.0,
+                underlay_offset_y=0.0,
+                underlay_softness=0.0,
+                glow_offset=0.0,
+                glow_outer=0.0,
+                sharpness=0.0,
+                scale_ratio_a=1.0,
+                scale_ratio_b=1.0,
+                scale_ratio_c=1.0,
+            )
+        return TMPShaderMaterial(
+            gradient_scale=asset.gradient_scale,
+            face_dilate=asset.face_dilate,
+            outline_width=asset.outline_width,
+            outline_softness=asset.outline_softness,
+            weight_normal=asset.weight_normal,
+            weight_bold=asset.weight_bold,
+            underlay_offset_x=asset.underlay_offset_x,
+            underlay_offset_y=asset.underlay_offset_y,
+            underlay_softness=asset.underlay_softness,
+            glow_offset=asset.glow_offset,
+            glow_outer=asset.glow_outer,
+            sharpness=asset.sharpness,
+            scale_ratio_a=asset.scale_ratio_a,
+            scale_ratio_b=asset.scale_ratio_b,
+            scale_ratio_c=asset.scale_ratio_c,
+        )
+
     def tmp_shader_ratios(
         self,
         asset: TMPFontAsset | None,
@@ -8559,40 +8691,28 @@ class PNGRenderer:
         has_glow: bool = False,
         has_ratios_keyword: bool = False,
     ) -> tuple[float, float, float]:
-        gradient_scale = asset.gradient_scale if asset is not None else 6.0
-        gradient_scale = max(1.0e-6, gradient_scale)
-        face_dilate = asset.face_dilate if asset is not None else 0.0
-        outline_width = asset.outline_width if asset is not None else 0.0
-        outline_softness = asset.outline_softness if asset is not None else 0.0
-        weight_normal = asset.weight_normal if asset is not None else 0.0
-        weight_bold = asset.weight_bold if asset is not None else 0.75
-        underlay_offset_x = asset.underlay_offset_x if asset is not None else 0.0
-        underlay_offset_y = asset.underlay_offset_y if asset is not None else 0.0
-        underlay_softness = asset.underlay_softness if asset is not None else 0.0
-        glow_offset = asset.glow_offset if asset is not None else 0.0
-        glow_outer = asset.glow_outer if asset is not None else 0.0
+        material = self.tmp_shader_material(asset)
+        gradient_scale = max(1.0e-6, material.gradient_scale)
 
         if has_ratios_keyword:
-            return (
-                asset.scale_ratio_a if asset is not None else 1.0,
-                asset.scale_ratio_b if asset is not None else 1.0,
-                asset.scale_ratio_c if asset is not None else 1.0,
-            )
+            return material.scale_ratio_a, material.scale_ratio_b, material.scale_ratio_c
 
         available = max(0.0, gradient_scale - TMP_SHADER_RATIO_CLAMP)
-        weight_extent = max(weight_normal, weight_bold) * 0.25
-        face_extent = face_dilate + weight_extent
-        base_extent = max(1.0, face_extent + outline_width + outline_softness)
+        weight_extent = max(material.weight_normal, material.weight_bold) * 0.25
+        face_extent = material.face_dilate + weight_extent
+        base_extent = max(1.0, face_extent + material.outline_width + material.outline_softness)
         ratio_a = available / (gradient_scale * base_extent)
 
-        glow_extent = max(1.0, glow_offset + glow_outer)
+        glow_extent = max(1.0, material.glow_offset + material.glow_outer)
         ratio_b = max(0.0, available - face_extent * available) / (gradient_scale * glow_extent)
 
-        ratio_c = asset.scale_ratio_c if asset is not None else 1.0
+        ratio_c = material.scale_ratio_c
         if has_underlay:
             underlay_extent = max(
                 1.0,
-                max(abs(underlay_offset_x), abs(underlay_offset_y)) + outline_dilate + underlay_softness,
+                max(abs(material.underlay_offset_x), abs(material.underlay_offset_y))
+                + outline_dilate
+                + material.underlay_softness,
             )
             ratio_c = max(0.0, available - face_extent * available) / (gradient_scale * underlay_extent)
 
@@ -8694,45 +8814,24 @@ class PNGRenderer:
         (Phase 2): the fragile TMP material semantics live here once; both backends are dumb
         ``clip(field*scale - w)`` evaluators of these numbers.
         """
-        gradient_scale = asset.gradient_scale if asset is not None else 6.0
-        weight_normal = asset.weight_normal if asset is not None else 0.0
-        weight_bold = asset.weight_bold if asset is not None else 0.75
-        face_dilate = asset.face_dilate if asset is not None else 0.0
-        outline_softness = asset.outline_softness if asset is not None else 0.0
-        sharpness = asset.sharpness if asset is not None else 0.0
+        material = self.tmp_shader_material(asset)
         scale_ratio_a, _, scale_ratio_c = self.tmp_shader_ratios(asset, outline_dilate)
-        underlay_softness = asset.underlay_softness if asset is not None else 0.0
-        underlay_offset_x = asset.underlay_offset_x if asset is not None else 0.0
-        underlay_offset_y = asset.underlay_offset_y if asset is not None else 0.0
 
         texcoord_scale = abs(sdf_scale) if sdf_scale is not None else abs(self.tmp_mesh_texcoord1_y(style))
-        raw_scale = texcoord_scale * gradient_scale * (sharpness + 1.0)
-        face_scale = raw_scale / (outline_softness * scale_ratio_a * raw_scale + 1.0)
-        weight = weight_bold if style.bold else weight_normal
-        bias = 0.5 - 0.5 * (weight * 0.25 + face_dilate) * scale_ratio_a
+        raw_scale = texcoord_scale * material.gradient_scale * (material.sharpness + 1.0)
+        face_scale = raw_scale / (material.outline_softness * scale_ratio_a * raw_scale + 1.0)
+        weight = material.weight_bold if style.bold else material.weight_normal
+        bias = 0.5 - 0.5 * (weight * 0.25 + material.face_dilate) * scale_ratio_a
         face_w = bias * face_scale - 0.5
 
-        underlay: TMPSdfUnderlayScalars | None = None
-        if abs(outline_dilate) > 1.0e-6:
-            underlay_scale = raw_scale / (underlay_softness * scale_ratio_c * raw_scale + 1.0)
-            underlay_width = outline_dilate * scale_ratio_c * underlay_scale
-            underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
-            offset_x = -underlay_offset_x * scale_ratio_c * gradient_scale
-            offset_y = -underlay_offset_y * scale_ratio_c * gradient_scale
-            # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
-            # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
-            if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
-                shift_x = shift_y = 0
-            else:
-                shift_x = int(round(offset_x))
-                shift_y = int(round(offset_y))
-            underlay = TMPSdfUnderlayScalars(
-                scale=underlay_scale,
-                w=underlay_w,
-                shift_x=shift_x,
-                shift_y=shift_y,
-                color=hex_to_rgba(outline_color, 1.0)[:3],
-            )
+        underlay = self.tmp_sdf_underlay_scalars(
+            material,
+            outline_color,
+            outline_dilate,
+            scale_ratio_c,
+            raw_scale,
+            bias,
+        )
         return TMPSdfShadingScalars(
             face_scale=face_scale,
             face_w=face_w,
@@ -8740,6 +8839,38 @@ class PNGRenderer:
             face_color=hex_to_rgba(style.color, 1.0)[:3],
             underlay=underlay,
         )
+
+    def tmp_sdf_underlay_scalars(
+        self,
+        material: TMPShaderMaterial,
+        outline_color: str,
+        outline_dilate: float,
+        scale_ratio_c: float,
+        raw_scale: float,
+        bias: float,
+    ) -> TMPSdfUnderlayScalars | None:
+        if abs(outline_dilate) <= 1.0e-6:
+            return None
+        underlay_scale = raw_scale / (material.underlay_softness * scale_ratio_c * raw_scale + 1.0)
+        underlay_width = outline_dilate * scale_ratio_c * underlay_scale
+        underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
+        offset_x = -material.underlay_offset_x * scale_ratio_c * material.gradient_scale
+        offset_y = -material.underlay_offset_y * scale_ratio_c * material.gradient_scale
+        shift_x, shift_y = self.tmp_sdf_field_shift(offset_x, offset_y)
+        return TMPSdfUnderlayScalars(
+            scale=underlay_scale,
+            w=underlay_w,
+            shift_x=shift_x,
+            shift_y=shift_y,
+            color=hex_to_rgba(outline_color, 1.0)[:3],
+        )
+
+    def tmp_sdf_field_shift(self, offset_x: float, offset_y: float) -> tuple[int, int]:
+        # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
+        # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
+        if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
+            return 0, 0
+        return int(round(offset_x)), int(round(offset_y))
 
     def shade_tmp_sdf_field(
         self,
@@ -8795,6 +8926,34 @@ class PNGRenderer:
         if asset is None:
             return None
         style = run.style
+        prepared = self.tmp_static_atlas_placements(font_name, run, font_size, asset)
+        if prepared is None:
+            return None
+        placements, bbox = prepared
+        pad = self.tmp_display_padding(asset, outline_dilate, font_size)
+        field_img = self.tmp_static_atlas_field(asset, placements, bbox, pad)
+
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
+            scaled_size = ensure_raster_size(
+                (max(1, round(field_img.width * style.scale_x)), field_img.height),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile scaled TMP static SDF field",
+            )
+            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
+
+        import numpy as np
+
+        field = np.asarray(field_img, dtype=np.float32) / 255.0
+        return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
+
+    def tmp_static_atlas_placements(
+        self,
+        font_name: str,
+        run: TextRun,
+        font_size: float,
+        asset: TMPFontAsset,
+    ) -> tuple[list[tuple[TMPGlyphMetrics, float, float, float, float]], tuple[int, int, int, int]] | None:
+        style = run.style
         placements: list[tuple[TMPGlyphMetrics, float, float, float, float]] = []
         font_scale = font_size / max(1.0, asset.point_size)
         cursor = 0.0
@@ -8833,9 +8992,16 @@ class PNGRenderer:
         max_x = max(max_x, cursor)
         if not placements:
             return None
-
         bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
-        pad = self.tmp_display_padding(asset, outline_dilate, font_size)
+        return placements, bbox
+
+    def tmp_static_atlas_field(
+        self,
+        asset: TMPFontAsset,
+        placements: list[tuple[TMPGlyphMetrics, float, float, float, float]],
+        bbox: tuple[int, int, int, int],
+        pad: int,
+    ) -> Image.Image:
         field_size = ensure_raster_size(
             (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
             max_pixels=self.max_layer_pixels,
@@ -8853,19 +9019,7 @@ class PNGRenderer:
             py = round(pad + y - bbox[1])
             region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
-
-        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
-            scaled_size = ensure_raster_size(
-                (max(1, round(field_img.width * style.scale_x)), field_img.height),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile scaled TMP static SDF field",
-            )
-            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
-
-        import numpy as np
-
-        field = np.asarray(field_img, dtype=np.float32) / 255.0
-        return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
+        return field_img
 
     def render_tmp_dynamic_sdf_run(
         self,

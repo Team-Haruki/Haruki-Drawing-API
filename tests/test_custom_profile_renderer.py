@@ -2631,6 +2631,218 @@ def test_custom_profile_unity_sprite_loads_customprofile_static_assets(tmp_path:
     assert renderer.unity_ui_sprite("label_mark_leader_L_pk").size == (11, 5)
 
 
+def test_custom_profile_preferred_percent_indent_resolves_finite_and_saturated_widths(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path, tmp_box_mode="preferred", tmp_preferred_padding_x=64.0)
+    half_indent = renderer_mod.StyledLine([], replace(_base_tmp_style(), indent_percent=0.5))
+    half_layout = SimpleNamespace(
+        preferred_width=10.0,
+        lines=[SimpleNamespace(styled_line=half_indent, width=30.0)],
+        dominant_size=24.0,
+        content_height=12.0,
+    )
+
+    assert renderer.tmp_resolve_percent_indent_margin_width(
+        [half_indent], "font", tmp_path / "font.ttf", 24.0, 0.0, 24.0, 0.0, half_layout
+    ) == pytest.approx(188.0)
+
+    saturated_indent = renderer_mod.StyledLine([], replace(_base_tmp_style(), line_indent_percent=1.0))
+    saturated_layout = SimpleNamespace(
+        preferred_width=10.0,
+        lines=[SimpleNamespace(styled_line=saturated_indent, width=30.0)],
+        dominant_size=24.0,
+        content_height=12.0,
+    )
+    assert renderer.tmp_preferred_percent_indent_margin_width(saturated_layout) == (
+        renderer_mod.TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
+    )
+    assert (
+        renderer.tmp_resolve_percent_indent_margin_width(
+            [renderer_mod.StyledLine([], _base_tmp_style())],
+            "font",
+            tmp_path / "font.ttf",
+            24.0,
+            0.0,
+            24.0,
+            0.0,
+            half_layout,
+        )
+        is None
+    )
+
+
+def test_custom_profile_percent_indent_fixed_point_converges(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, tmp_box_mode="size")
+    line = renderer_mod.StyledLine([], replace(_base_tmp_style(), indent_percent=0.5))
+    zero_layout = SimpleNamespace(preferred_width=100.0, dominant_size=24.0, content_height=12.0)
+    margin_widths: list[float] = []
+
+    monkeypatch.setattr(renderer, "tmp_text_box_size", lambda _size, width, _height: (width, 10.0))
+
+    def fake_layout(*args, **kwargs):
+        margin_widths.append(args[8])
+        preferred_width = 120.0
+        return SimpleNamespace(preferred_width=preferred_width, dominant_size=24.0, content_height=12.0)
+
+    monkeypatch.setattr(renderer, "tmp_native_text_layout", fake_layout)
+
+    resolved = renderer.tmp_resolve_percent_indent_margin_width(
+        [line], "font", tmp_path / "font.ttf", 24.0, 0.0, 24.0, 0.0, zero_layout
+    )
+
+    assert resolved == pytest.approx(120.0)
+    assert margin_widths == [100.0, 120.0]
+
+
+def test_custom_profile_layout_audit_helpers_preserve_optional_details(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    run = TextRun("A", style)
+    line = renderer_mod.StyledLine([run], style)
+    text_data = renderer_mod.TMPGeneratedTextData("A", 1, 0x0101, 24.0, 0.2, 2, 3, 1.0)
+    mesh_state = renderer_mod.TMPUpdateMeshState("font", None, "A", 24.0, "#010203", 0x0101, 1.0, "#040506", 0.2)
+    native_line_layout = SimpleNamespace(baselines=[4.0], max_ascender=8.0, max_descender=-2.0, content_height=10.0)
+    native_text_layout = SimpleNamespace(current_em_scale=0.24, marker="native")
+    mesh_text_layout = SimpleNamespace(marker="mesh")
+    measure = renderer_mod.TMPRunMeasure(5.0, -1.0, 4.0, -2.0, 7.0)
+    monkeypatch.setattr(renderer_mod, "load_font", lambda *_: object())
+    monkeypatch.setattr(renderer, "measure_tmp_run", lambda *_: measure)
+    monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_: 0.5)
+    monkeypatch.setattr(renderer, "tmp_run_glyph_audit", lambda *_: [{"char": "A"}])
+    monkeypatch.setattr(
+        renderer,
+        "tmp_native_text_layout_audit_dict",
+        lambda layout, **_kwargs: {"marker": layout.marker},
+    )
+
+    renderer.record_tmp_layout_audit(
+        {"id": 9, "objectData": {"layer": 7}},
+        text_data,
+        mesh_state,
+        [(line, [(run, 2.0, 5.0)], 3.0, 10.0, 5.0)],
+        "font",
+        tmp_path / "font.ttf",
+        5.0,
+        10.0,
+        10.0,
+        10.0,
+        20.0,
+        30.0,
+        native_line_layout,
+        [4.0],
+        native_text_layout,
+        mesh_text_layout,
+        (-1.0, -2.0, 6.0, 8.0),
+        (11.0, 12.0),
+        (20, 30),
+    )
+
+    audit = renderer.tmp_layout_audit[-1]
+    assert audit["layer"] == 7
+    assert audit["lines"][0]["nativeBaselineDown"] == 4.0
+    assert audit["lines"][0]["runs"][0]["visualBounds"] == {
+        "left": -1.0,
+        "right": 4.0,
+        "top": -2.0,
+        "bottom": 7.0,
+    }
+    assert audit["layout"]["meshPixelBounds"] == {"left": -1.0, "top": -2.0, "right": 6.0, "bottom": 8.0}
+    assert audit["layout"]["localImage"] == {
+        "width": 20,
+        "height": 30,
+        "rectOriginX": 11.0,
+        "rectOriginY": 12.0,
+    }
+    assert audit["layout"]["nativeTextInfo"] == {"marker": "native"}
+    assert audit["layout"]["meshNativeTextInfo"] == {"marker": "mesh"}
+
+    empty_metadata = renderer.tmp_layout_audit_metadata(
+        1.0, 2.0, 3.0, 4.0, 5.0, 6.0, None, None, None, None, None, None, None
+    )
+    assert all(
+        empty_metadata[key] is None
+        for key in ("meshPixelBounds", "localImage", "nativeLineLayout", "nativeTextInfo", "meshNativeTextInfo")
+    )
+
+
+def test_custom_profile_tmp_shader_helpers_preserve_material_semantics(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    asset = SimpleNamespace(
+        gradient_scale=6.0,
+        face_dilate=0.1,
+        outline_width=0.2,
+        outline_softness=0.3,
+        weight_normal=0.4,
+        weight_bold=0.8,
+        underlay_offset_x=2.0,
+        underlay_offset_y=-1.0,
+        underlay_softness=0.5,
+        glow_offset=0.25,
+        glow_outer=0.75,
+        sharpness=0.25,
+        scale_ratio_a=0.9,
+        scale_ratio_b=0.8,
+        scale_ratio_c=0.7,
+    )
+
+    assert renderer.tmp_shader_ratios(asset, 0.4, has_ratios_keyword=True) == (0.9, 0.8, 0.7)
+    ratio_a, ratio_b, ratio_c = renderer.tmp_shader_ratios(asset, 0.4, has_underlay=True, has_glow=True)
+    assert ratio_a == pytest.approx(5.0 / 6.0)
+    assert ratio_b == pytest.approx(3.5 / 6.0)
+    assert ratio_c == pytest.approx(3.5 / (6.0 * 2.9))
+    assert renderer.tmp_shader_material(None).scale_ratio_c == 1.0
+    assert renderer.tmp_sdf_field_shift(0.49, -0.49) == (0, 0)
+    assert renderer.tmp_sdf_field_shift(2.5, -1.5) == (2, -2)
+
+    plain = renderer.tmp_sdf_shading_scalars(None, _base_tmp_style(), "#112233", 0.0, sdf_scale=2.0)
+    assert plain.underlay is None
+    shaded = renderer.tmp_sdf_shading_scalars(asset, _base_tmp_style(), "#112233", 0.4, sdf_scale=2.0)
+    assert shaded.face_color == (0, 0, 0)
+    assert shaded.underlay is not None
+    assert shaded.underlay.color == (17, 34, 51)
+    expected_offset_x = -asset.underlay_offset_x * ratio_c * asset.gradient_scale
+    expected_offset_y = -asset.underlay_offset_y * ratio_c * asset.gradient_scale
+    assert (shaded.underlay.shift_x, shaded.underlay.shift_y) == renderer.tmp_sdf_field_shift(
+        expected_offset_x, expected_offset_y
+    )
+
+
+def test_custom_profile_static_atlas_run_reuses_placement_and_field_helpers(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, tmp_scale_mode="x")
+    style = replace(_base_tmp_style(), scale_x=2.0)
+    metrics = replace(
+        _glyph_metrics(width=2.0, height=2.0, bearing_x=0.0, bearing_y=2.0, advance=3.0),
+        rect_w=2,
+        rect_h=2,
+    )
+    atlas_path = tmp_path / "atlas.png"
+    asset = SimpleNamespace(
+        point_size=10.0,
+        ascent_line=3.0,
+        descent_line=-1.0,
+        glyphs={ord("A"): metrics, ord(" "): metrics},
+        atlas_paths=[atlas_path],
+    )
+    monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: asset)
+    monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_: 0.0)
+    monkeypatch.setattr(renderer, "tmp_display_padding", lambda *_: 1)
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: Image.new("L", (8, 8), 255))
+    monkeypatch.setattr(
+        renderer,
+        "shade_tmp_sdf_field",
+        lambda field, *_: Image.new("RGBA", (field.shape[1], field.shape[0]), (255, 255, 255, 255)),
+    )
+
+    rendered = renderer.render_tmp_static_atlas_run("font", TextRun("AA", style), 20.0, "#000000", 0.0)
+
+    assert rendered is not None
+    image, bbox, pad = rendered
+    assert image.size == (28, 10)
+    assert bbox == (0, 0, 12, 8)
+    assert pad == 1
+    assert renderer.tmp_static_atlas_placements("font", TextRun(" ", style), 20.0, asset) is None
+    assert renderer.tmp_static_atlas_placements("font", TextRun("B", style), 20.0, asset) is None
+
+
 def test_custom_profile_region_path_expands_region_placeholder(tmp_path: Path) -> None:
     target = tmp_path / "asset" / "jp-assets" / "startapp" / "custom_profile"
     target.mkdir(parents=True)
