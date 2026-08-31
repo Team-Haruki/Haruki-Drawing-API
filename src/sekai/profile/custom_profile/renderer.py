@@ -809,6 +809,15 @@ class PILTextLayoutMetrics:
 
 
 @dataclass(frozen=True)
+class TMPRunVisualMetrics:
+    advance: float
+    left: float
+    right: float
+    top: float
+    bottom: float
+
+
+@dataclass(frozen=True)
 class TMPDynamicRunGlyph:
     image: Image.Image
     bbox: tuple[int, int, int, int]
@@ -6577,6 +6586,8 @@ class PNGRenderer:
         line_spacing: float,
         dominant_size: float,
         outline_dilate: float,
+        *,
+        source_metrics_only: bool = False,
     ) -> tuple[TMPNativeTextLayout, TMPNativeTextLayout] | None:
         native_text_layout = self.tmp_native_text_layout(
             layout_lines,
@@ -6588,6 +6599,7 @@ class PNGRenderer:
             "preferred",
             outline_dilate,
             None,
+            source_metrics_only=source_metrics_only,
         )
         percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
             layout_lines,
@@ -6598,6 +6610,7 @@ class PNGRenderer:
             dominant_size,
             outline_dilate,
             native_text_layout,
+            source_metrics_only=source_metrics_only,
         )
         if percent_margin_width is not None:
             native_text_layout = self.tmp_native_text_layout(
@@ -6610,6 +6623,7 @@ class PNGRenderer:
                 "preferred",
                 outline_dilate,
                 percent_margin_width,
+                source_metrics_only=source_metrics_only,
             )
         if native_text_layout is None:
             return None
@@ -6623,6 +6637,7 @@ class PNGRenderer:
             "mesh",
             outline_dilate,
             percent_margin_width,
+            source_metrics_only=source_metrics_only,
         )
         if mesh_text_layout is None:
             return None
@@ -7000,28 +7015,14 @@ class PNGRenderer:
             vertex_padding = self.tmp_native_vertex_padding(font_name, run.style, outline_dilate)
             dominant_size = max(dominant_size, run.style.size)
             scaled_size = run.style.size * self.tmp_font_scale
-            if self.use_em_block(run):
-                source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
-                raw_advance = source_metrics.advance if source_metrics is not None else scaled_size
-                raw_bbox_left = source_metrics.bearing_x if source_metrics is not None else 0.0
-                raw_bbox_right = raw_bbox_left + (source_metrics.width if source_metrics is not None else raw_advance)
-                raw_bbox_top = -self.tmp_native_style_extents(font_name, run.style)[0]
-                raw_bbox_bottom = -self.tmp_native_style_extents(font_name, run.style)[1]
-            elif source_metrics_only:
-                measure = self.measure_tmp_source_run(run, font_name, scaled_size, current_em_scale)
-                raw_advance = measure.advance
-                raw_bbox_left = measure.visual_left
-                raw_bbox_right = measure.visual_right
-                raw_bbox_top = measure.visual_top
-                raw_bbox_bottom = measure.visual_bottom
-            else:
-                font = load_font(font_path, scaled_size)
-                measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
-                raw_advance = measure.advance
-                raw_bbox_left = measure.visual_left
-                raw_bbox_right = measure.visual_right
-                raw_bbox_top = measure.visual_top
-                raw_bbox_bottom = measure.visual_bottom
+            visual = self.tmp_native_run_visual_metrics(
+                run,
+                font_name,
+                font_path,
+                scaled_size,
+                current_em_scale,
+                source_metrics_only=source_metrics_only,
+            )
             advance_scale_x = self.tmp_native_layout_advance_scale_x(run.style, layout_mode)
             vertex_scale_x = self.tmp_native_vertex_scale_x(run.style)
             run_w = self.tmp_native_run_advance(
@@ -7032,23 +7033,12 @@ class PNGRenderer:
                 advance_scale_x,
                 source_metrics_only=source_metrics_only,
             )
-            if self.tmp_scale_mode in {"fx-native"}:
-                quad = self.tmp_native_fx_quad(
-                    raw_bbox_left - vertex_padding,
-                    raw_bbox_right + vertex_padding,
-                    -raw_bbox_top + vertex_padding,
-                    -raw_bbox_bottom - vertex_padding,
-                    run.style,
-                    vertex_scale_x,
-                )
-                xs = (quad[0], quad[2], quad[4], quad[6])
-                raw_bbox_left, raw_bbox_right = min(xs), max(xs)
-            else:
-                raw_bbox_left, raw_bbox_right = self.tmp_scale_x_bounds(
-                    raw_bbox_left - vertex_padding,
-                    raw_bbox_right + vertex_padding,
-                    vertex_scale_x,
-                )
+            raw_bbox_left, raw_bbox_right = self.tmp_native_padded_horizontal_bounds(
+                visual,
+                run.style,
+                vertex_padding,
+                vertex_scale_x,
+            )
             run_metrics.append((run, x, run_w))
             line_min_x = x + raw_bbox_left if line_min_x is None else min(line_min_x, x + raw_bbox_left)
             line_max_x = x + raw_bbox_right if line_max_x is None else max(line_max_x, x + raw_bbox_right)
@@ -7073,6 +7063,60 @@ class PNGRenderer:
             line_min_x = min(0.0, x)
             line_max_x = max(0.0, x)
         return run_metrics, line_width, line_min_x, line_max_x, dominant_size
+
+    def tmp_native_run_visual_metrics(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_path: Path,
+        scaled_size: float,
+        current_em_scale: float,
+        *,
+        source_metrics_only: bool = False,
+    ) -> TMPRunVisualMetrics:
+        if self.use_em_block(run):
+            source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
+            raw_advance = source_metrics.advance if source_metrics is not None else scaled_size
+            raw_left = source_metrics.bearing_x if source_metrics is not None else 0.0
+            raw_right = raw_left + (source_metrics.width if source_metrics is not None else raw_advance)
+            raw_top, raw_bottom = self.tmp_native_style_extents(font_name, run.style)
+            return TMPRunVisualMetrics(raw_advance, raw_left, raw_right, -raw_top, -raw_bottom)
+        if source_metrics_only:
+            measure = self.measure_tmp_source_run(run, font_name, scaled_size, current_em_scale)
+        else:
+            font = load_font(font_path, scaled_size)
+            measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
+        return TMPRunVisualMetrics(
+            measure.advance,
+            measure.visual_left,
+            measure.visual_right,
+            measure.visual_top,
+            measure.visual_bottom,
+        )
+
+    def tmp_native_padded_horizontal_bounds(
+        self,
+        visual: TMPRunVisualMetrics,
+        style: TextStyle,
+        vertex_padding: float,
+        vertex_scale_x: float,
+    ) -> tuple[float, float]:
+        if self.tmp_scale_mode == "fx-native":
+            quad = self.tmp_native_fx_quad(
+                visual.left - vertex_padding,
+                visual.right + vertex_padding,
+                -visual.top + vertex_padding,
+                -visual.bottom - vertex_padding,
+                style,
+                vertex_scale_x,
+            )
+            xs = (quad[0], quad[2], quad[4], quad[6])
+            return min(xs), max(xs)
+        return self.tmp_scale_x_bounds(
+            visual.left - vertex_padding,
+            visual.right + vertex_padding,
+            vertex_scale_x,
+        )
 
     def tmp_native_layout_character(
         self,
@@ -9592,6 +9636,24 @@ class PNGRenderer:
     ) -> tuple[TMPDynamicGlyphSDF, TMPFontAsset] | None:
         if style is not None and self.use_em_block(TextRun(ch, style)):
             return None
+        source = self.tmp_dynamic_glyph_source(font_name, ch)
+        if source is None:
+            return None
+        asset, source_path, sample_size, glyph_char = source
+        key, l2_key = self.tmp_dynamic_glyph_cache_keys(source_path, asset, glyph_char, sample_size)
+        cache_hit, cached = self.tmp_cached_dynamic_glyph(key, l2_key)
+        if cache_hit:
+            return (cached, asset) if cached is not None else None
+
+        cached = self.build_tmp_dynamic_glyph_sdf(source_path, glyph_char, sample_size, asset)
+        self._store_dynamic_glyph(key, l2_key, cached)
+        return (cached, asset) if cached is not None else None
+
+    def tmp_dynamic_glyph_source(
+        self,
+        font_name: str,
+        ch: str,
+    ) -> tuple[TMPFontAsset, Path, float, str] | None:
         active = self.tmp_sdf_asset(font_name)
         if active is None or not ch or ch == " ":
             return None
@@ -9607,13 +9669,16 @@ class PNGRenderer:
         source_path = self.tmp_font_library.runtime_source_font_path(asset)
         if source_path is None:
             return None
-        key = (str(source_path), asset.name, ch[0], round(sample_size, 4))
-        if key in self._tmp_dynamic_glyph_cache:
-            cached = self._tmp_dynamic_glyph_cache[key]
-            return (cached, asset) if cached is not None else None
-        # L2 adds what the instance key pins implicitly: the font file's signature plus the
-        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
-        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
+        return asset, source_path, sample_size, ch[0]
+
+    def tmp_dynamic_glyph_cache_keys(
+        self,
+        source_path: Path,
+        asset: TMPFontAsset,
+        glyph_char: str,
+        sample_size: float,
+    ) -> tuple[tuple[str, str, str, float], tuple[Any, ...]]:
+        key = (str(source_path), asset.name, glyph_char, round(sample_size, 4))
         l2_key = (
             key[0],
             *self._font_signature(source_path),
@@ -9623,82 +9688,84 @@ class PNGRenderer:
             round(asset.gradient_scale, 4),
             round(asset.atlas_padding, 4),
         )
+        return key, l2_key
+
+    def tmp_cached_dynamic_glyph(
+        self,
+        key: tuple[str, str, str, float],
+        l2_key: tuple[Any, ...],
+    ) -> tuple[bool, TMPDynamicGlyphSDF | None]:
+        if key in self._tmp_dynamic_glyph_cache:
+            return True, self._tmp_dynamic_glyph_cache[key]
+        # L2 adds what the instance key pins implicitly: the font file's signature plus the
+        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
+        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
         l2_cached = GLYPH_SDF_CACHE.get(l2_key)
-        if l2_cached is not MISSING:
-            self._tmp_dynamic_glyph_cache[key] = l2_cached
-            return (l2_cached, asset) if l2_cached is not None else None
+        if l2_cached is MISSING:
+            return False, None
+        self._tmp_dynamic_glyph_cache[key] = l2_cached
+        return True, l2_cached
 
+    def tmp_dynamic_glyph_bounds(
+        self,
+        ft: Any,
+        source_path: Path,
+        glyph_char: str,
+        size: float,
+    ) -> tuple[tuple[int, int, int, int], Image.Image | None, int, int] | None:
+        rendered = ft.glyph_bitmap(source_path, glyph_char, size) if ft is not None else None
+        if rendered is not None:
+            glyph_mask, bitmap_left, bitmap_top, metrics = rendered
+            bbox_left = math.floor(min(metrics.bearing_x, float(bitmap_left)))
+            bbox_top = math.floor(min(-metrics.bearing_y, float(-bitmap_top)))
+            bbox_right = math.ceil(max(metrics.bearing_x + metrics.width, float(bitmap_left + glyph_mask.width)))
+            bbox_bottom = math.ceil(max(-metrics.bearing_y + metrics.height, float(-bitmap_top + glyph_mask.height)))
+            return (bbox_left, bbox_top, bbox_right, bbox_bottom), glyph_mask, bitmap_left, bitmap_top
+
+        sample_font = load_font(source_path, size)
+        bbox = sample_font.getbbox(glyph_char)
+        if bbox is None:
+            return None
+        return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])), None, 0, 0
+
+    def build_tmp_dynamic_glyph_sdf(
+        self,
+        source_path: Path,
+        glyph_char: str,
+        sample_size: float,
+        asset: TMPFontAsset,
+    ) -> TMPDynamicGlyphSDF | None:
         ft = freetype_metrics()
-
-        def glyph_bounds_at_size(size: float) -> tuple[tuple[int, int, int, int], Image.Image | None, int, int] | None:
-            rendered = ft.glyph_bitmap(source_path, ch[0], size) if ft is not None else None
-            if rendered is not None:
-                glyph_mask, bitmap_left, bitmap_top, metrics = rendered
-                bbox_left = math.floor(min(metrics.bearing_x, float(bitmap_left)))
-                bbox_top = math.floor(min(-metrics.bearing_y, float(-bitmap_top)))
-                bbox_right = math.ceil(max(metrics.bearing_x + metrics.width, float(bitmap_left + glyph_mask.width)))
-                bbox_bottom = math.ceil(
-                    max(-metrics.bearing_y + metrics.height, float(-bitmap_top + glyph_mask.height))
-                )
-                return (bbox_left, bbox_top, bbox_right, bbox_bottom), glyph_mask, bitmap_left, bitmap_top
-
-            sample_font = load_font(source_path, size)
-            bbox = sample_font.getbbox(ch[0])
-            if bbox is None:
-                return None
-            return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])), None, 0, 0
-
-        native_bounds = glyph_bounds_at_size(sample_size)
+        native_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, sample_size)
         if native_bounds is None:
-            self._store_dynamic_glyph(key, l2_key, None)
             return None
         native_bbox, _, _, _ = native_bounds
         # Runtime TMP atlas rects behave like atlas_padding + 1 around the
         # cropped glyph field.
         native_pad = max(1, math.ceil(asset.atlas_padding + 1.0))
-        vector_field = self.tmp_vector_glyph_sdf_field(source_path, ch[0], sample_size, native_bbox, native_pad, asset)
+        vector_field = self.tmp_vector_glyph_sdf_field(
+            source_path,
+            glyph_char,
+            sample_size,
+            native_bbox,
+            native_pad,
+            asset,
+        )
         if vector_field is not None:
-            cached = TMPDynamicGlyphSDF(
+            return TMPDynamicGlyphSDF(
                 field=vector_field,
                 bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
                 pad=native_pad,
                 sample_size=sample_size,
             )
-            self._store_dynamic_glyph(key, l2_key, cached)
-            return cached, asset
 
         supersample = max(1.0, TMP_DYNAMIC_SDF_SUPERSAMPLE)
         raster_size = sample_size * supersample
         raster_pad = max(1, math.ceil(asset.atlas_padding * supersample))
-        raster_bounds = glyph_bounds_at_size(raster_size)
+        raster_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, raster_size)
         if raster_bounds is None:
-            self._store_dynamic_glyph(key, l2_key, None)
             return None
-        raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
-        if raster_glyph_mask is not None:
-            bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
-            w = max(1, bbox_right - bbox_left + raster_pad * 2)
-            h = max(1, bbox_bottom - bbox_top + raster_pad * 2)
-            w, h = ensure_raster_size(
-                (w, h),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile TMP dynamic glyph mask",
-            )
-            mask = Image.new("L", (w, h), 0)
-            mask.paste(raster_glyph_mask, (raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top))
-        else:
-            sample_font = load_font(source_path, raster_size)
-            bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
-            w = max(1, bbox_right - bbox_left + raster_pad * 2)
-            h = max(1, bbox_bottom - bbox_top + raster_pad * 2)
-            w, h = ensure_raster_size(
-                (w, h),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile TMP dynamic glyph mask",
-            )
-            mask = Image.new("L", (w, h), 0)
-            draw = ImageDraw.Draw(mask)
-            draw.text((raster_pad - bbox_left, raster_pad - bbox_top), ch[0], font=sample_font, fill=255)
+        mask = self.tmp_dynamic_glyph_mask(source_path, glyph_char, raster_size, raster_pad, raster_bounds)
         try:
             field = alpha_mask_to_sdf_field(
                 mask,
@@ -9706,31 +9773,54 @@ class PNGRenderer:
                 tmp_dynamic_sdf_alpha_threshold(asset),
             )
         except ImportError:
-            self._store_dynamic_glyph(key, l2_key, None)
             return None
 
         import numpy as np
 
         field_img = Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
-        native_field_size = (
-            max(1, native_bbox[2] - native_bbox[0] + native_pad * 2),
-            max(1, native_bbox[3] - native_bbox[1] + native_pad * 2),
-        )
         native_field_size = ensure_raster_size(
-            native_field_size,
+            (
+                max(1, native_bbox[2] - native_bbox[0] + native_pad * 2),
+                max(1, native_bbox[3] - native_bbox[1] + native_pad * 2),
+            ),
             max_pixels=self.max_layer_pixels,
             label="custom profile TMP native glyph field",
         )
         if field_img.size != native_field_size:
             field_img = field_img.resize(native_field_size, Image.Resampling.BICUBIC)
-        cached = TMPDynamicGlyphSDF(
+        return TMPDynamicGlyphSDF(
             field=field_img,
             bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
             pad=native_pad,
             sample_size=sample_size,
         )
-        self._store_dynamic_glyph(key, l2_key, cached)
-        return cached, asset
+
+    def tmp_dynamic_glyph_mask(
+        self,
+        source_path: Path,
+        glyph_char: str,
+        raster_size: float,
+        raster_pad: int,
+        raster_bounds: tuple[tuple[int, int, int, int], Image.Image | None, int, int],
+    ) -> Image.Image:
+        raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
+        bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
+        size = ensure_raster_size(
+            (
+                max(1, bbox_right - bbox_left + raster_pad * 2),
+                max(1, bbox_bottom - bbox_top + raster_pad * 2),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP dynamic glyph mask",
+        )
+        mask = Image.new("L", size, 0)
+        if raster_glyph_mask is not None:
+            mask.paste(raster_glyph_mask, (raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top))
+            return mask
+        sample_font = load_font(source_path, raster_size)
+        draw = ImageDraw.Draw(mask)
+        draw.text((raster_pad - bbox_left, raster_pad - bbox_top), glyph_char, font=sample_font, fill=255)
+        return mask
 
     def render_tmp_dynamic_sdf_run_from_glyphs(
         self,
@@ -10402,24 +10492,7 @@ class PNGRenderer:
         font_path = self.font_path_for(font_name)
         mesh_state = self.update_text_mesh_state(text_data, font_name)
         base_size = mesh_state.font_size
-        base_style = TextStyle(
-            color=mesh_state.font_color,
-            alpha=1.0,
-            size=base_size,
-            scale_x=1.0,
-            cspace=0.0,
-            mspace=None,
-            indent=0.0,
-            line_indent=0.0,
-            line_height=None,
-            rotate=0.0,
-            voffset=0.0,
-            mark_color=None,
-            bold=False,
-            italic=False,
-            underline=False,
-            strike=False,
-        )
+        base_style = self.base_text_style(mesh_state)
         tokens = parse_tmp_text(text_data.text, base_style)
         lines = split_runs_by_line_with_style(tokens, base_style)
         if not lines:
@@ -10434,20 +10507,7 @@ class PNGRenderer:
         horizontal_align = tmp_horizontal_alignment(align_type)
         vertical_align = tmp_vertical_alignment(align_type)
         layout_lines = [line for line in lines if self.include_empty_lines or line.runs]
-
-        native_text_layout = self.tmp_native_text_layout(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            "preferred",
-            outline_dilate,
-            None,
-            source_metrics_only=source_metrics_only,
-        )
-        percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
+        layouts = self.resolve_tmp_text_box_layouts(
             layout_lines,
             font_name,
             font_path,
@@ -10455,38 +10515,11 @@ class PNGRenderer:
             line_spacing,
             dominant_size,
             outline_dilate,
-            native_text_layout,
             source_metrics_only=source_metrics_only,
         )
-        if percent_margin_width is not None:
-            native_text_layout = self.tmp_native_text_layout(
-                layout_lines,
-                font_name,
-                font_path,
-                base_size,
-                line_spacing,
-                dominant_size,
-                "preferred",
-                outline_dilate,
-                percent_margin_width,
-                source_metrics_only=source_metrics_only,
-            )
-        if native_text_layout is None:
+        if layouts is None:
             return None
-        mesh_text_layout = self.tmp_native_text_layout(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            "mesh",
-            outline_dilate,
-            percent_margin_width,
-            source_metrics_only=source_metrics_only,
-        )
-        if mesh_text_layout is None:
-            return None
+        native_text_layout, mesh_text_layout = layouts
 
         native_layout = (
             mesh_text_layout.line_layout if self.text_vertical_mode in {"tmp-native", "tmp-native-top"} else None
@@ -10574,98 +10607,141 @@ class PNGRenderer:
             )
             for field, *_ in direct_glyphs
         )
-        for field_img, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners in direct_glyphs:
-            if isinstance(field_img, TMPDynamicFontField):
-                plan = self.tmp_sdf_field_warp_plan(
-                    field_img.field_size,
-                    local_left,
-                    local_top,
-                    pivot,
-                    object_data,
-                    geometry_size=geometry_size,
-                    geometry_corners=geometry_corners,
-                    max_output_bytes=self.max_scene_bytes - retained_field_bytes,
-                )
-                if plan is None:
-                    continue
-                retained_field_bytes = self._reserve_retained_raster_bytes(
-                    retained_field_bytes,
-                    plan.size[0] * plan.size[1],
-                    label=_TMP_TEXT_LABEL,
-                )
-                scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
-                quads.append(
-                    DirectSdfFontQuad(
-                        font_path=field_img.font_path,
-                        codepoint=field_img.codepoint,
-                        sample_size=field_img.sample_size,
-                        bbox=field_img.bbox,
-                        padding=field_img.padding,
-                        crop_padding=field_img.crop_padding,
-                        field_size=field_img.field_size,
-                        spread=field_img.spread,
-                        size=plan.size,
-                        affine=plan.affine,
-                        left=plan.left,
-                        top=plan.top,
-                        scalars=scalars,
-                    )
-                )
-                continue
-            if isinstance(field_img, TMPStaticAtlasField):
-                plan = self.tmp_sdf_field_warp_plan(
-                    field_img.field_size,
-                    local_left,
-                    local_top,
-                    pivot,
-                    object_data,
-                    geometry_size=geometry_size,
-                    geometry_corners=geometry_corners,
-                    max_output_bytes=self.max_scene_bytes - retained_field_bytes,
-                )
-                if plan is None:
-                    continue
-                retained_field_bytes = self._reserve_retained_raster_bytes(
-                    retained_field_bytes,
-                    plan.size[0] * plan.size[1],
-                    label=_TMP_TEXT_LABEL,
-                )
-                scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
-                quads.append(
-                    DirectSdfAtlasQuad(
-                        atlas_path=field_img.atlas_path,
-                        atlas_size=field_img.atlas_size,
-                        crop=field_img.crop,
-                        field_size=field_img.field_size,
-                        size=plan.size,
-                        affine=plan.affine,
-                        left=plan.left,
-                        top=plan.top,
-                        scalars=scalars,
-                    )
-                )
-                continue
-            warped = self.warp_tmp_sdf_field_direct(
-                field_img,
-                local_left,
-                local_top,
+        for direct_glyph in direct_glyphs:
+            quad, retained_field_bytes = self.prepare_direct_sdf_quad(
+                direct_glyph,
                 pivot,
                 object_data,
-                geometry_size=geometry_size,
-                geometry_corners=geometry_corners,
-                max_output_bytes=self.max_scene_bytes - retained_field_bytes,
-            )
-            if warped is None:
-                continue
-            warped_field, left, top = warped
-            retained_field_bytes = self._reserve_retained_raster_bytes(
+                outline_color,
+                outline_dilate,
                 retained_field_bytes,
-                warped_field.width * warped_field.height,
-                label=_TMP_TEXT_LABEL,
             )
-            scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
-            quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
+            if quad is not None:
+                quads.append(quad)
         return quads
+
+    def prepare_direct_sdf_quad(
+        self,
+        direct_glyph: tuple[
+            Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+            TMPFontAsset | None,
+            TextStyle,
+            float,
+            float,
+            tuple[int, int],
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
+        ],
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+        outline_color: str,
+        outline_dilate: float,
+        retained_field_bytes: int,
+    ) -> tuple[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
+        field, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners = direct_glyph
+        if isinstance(field, (TMPStaticAtlasField, TMPDynamicFontField)):
+            return self.prepare_deferred_direct_sdf_quad(
+                field,
+                glyph_asset,
+                style,
+                local_left,
+                local_top,
+                geometry_size,
+                geometry_corners,
+                pivot,
+                object_data,
+                outline_color,
+                outline_dilate,
+                retained_field_bytes,
+            )
+        warped = self.warp_tmp_sdf_field_direct(
+            field,
+            local_left,
+            local_top,
+            pivot,
+            object_data,
+            geometry_size=geometry_size,
+            geometry_corners=geometry_corners,
+            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+        )
+        if warped is None:
+            return None, retained_field_bytes
+        warped_field, left, top = warped
+        retained_field_bytes = self._reserve_retained_raster_bytes(
+            retained_field_bytes,
+            warped_field.width * warped_field.height,
+            label=_TMP_TEXT_LABEL,
+        )
+        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+        return DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars), retained_field_bytes
+
+    def prepare_deferred_direct_sdf_quad(
+        self,
+        field: TMPStaticAtlasField | TMPDynamicFontField,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
+        local_left: float,
+        local_top: float,
+        geometry_size: tuple[int, int],
+        geometry_corners: (
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None
+        ),
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+        outline_color: str,
+        outline_dilate: float,
+        retained_field_bytes: int,
+    ) -> tuple[DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
+        plan = self.tmp_sdf_field_warp_plan(
+            field.field_size,
+            local_left,
+            local_top,
+            pivot,
+            object_data,
+            geometry_size=geometry_size,
+            geometry_corners=geometry_corners,
+            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+        )
+        if plan is None:
+            return None, retained_field_bytes
+        retained_field_bytes = self._reserve_retained_raster_bytes(
+            retained_field_bytes,
+            plan.size[0] * plan.size[1],
+            label=_TMP_TEXT_LABEL,
+        )
+        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+        if isinstance(field, TMPDynamicFontField):
+            return (
+                DirectSdfFontQuad(
+                    font_path=field.font_path,
+                    codepoint=field.codepoint,
+                    sample_size=field.sample_size,
+                    bbox=field.bbox,
+                    padding=field.padding,
+                    crop_padding=field.crop_padding,
+                    field_size=field.field_size,
+                    spread=field.spread,
+                    size=plan.size,
+                    affine=plan.affine,
+                    left=plan.left,
+                    top=plan.top,
+                    scalars=scalars,
+                ),
+                retained_field_bytes,
+            )
+        return (
+            DirectSdfAtlasQuad(
+                atlas_path=field.atlas_path,
+                atlas_size=field.atlas_size,
+                crop=field.crop,
+                field_size=field.field_size,
+                size=plan.size,
+                affine=plan.affine,
+                left=plan.left,
+                top=plan.top,
+                scalars=scalars,
+            ),
+            retained_field_bytes,
+        )
 
     def prepare_tmp_direct_sdf_glyphs(
         self,

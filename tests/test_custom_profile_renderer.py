@@ -2937,20 +2937,175 @@ def test_custom_profile_tmp_text_box_layout_resolution_reflows_percent_indent(tm
     reflowed = SimpleNamespace(marker="reflowed")
     mesh = SimpleNamespace(marker="mesh")
     calls: list[tuple[str, float | None]] = []
+    source_metric_flags: list[bool] = []
 
-    def fake_layout(*args, **_kwargs):
+    def fake_layout(*args, **kwargs):
         calls.append((args[6], args[8]))
+        source_metric_flags.append(kwargs["source_metrics_only"])
         if args[6] == "mesh":
             return mesh
         return preferred if args[8] is None else reflowed
 
-    monkeypatch.setattr(renderer, "tmp_native_text_layout", fake_layout)
-    monkeypatch.setattr(renderer, "tmp_resolve_percent_indent_margin_width", lambda *_: 40.0)
+    def fake_margin(*_args, **kwargs):
+        source_metric_flags.append(kwargs["source_metrics_only"])
+        return 40.0
 
-    resolved = renderer.resolve_tmp_text_box_layouts([line], "font", tmp_path / "font.ttf", 24.0, 0.0, 24.0, 0.0)
+    monkeypatch.setattr(renderer, "tmp_native_text_layout", fake_layout)
+    monkeypatch.setattr(renderer, "tmp_resolve_percent_indent_margin_width", fake_margin)
+
+    resolved = renderer.resolve_tmp_text_box_layouts(
+        [line],
+        "font",
+        tmp_path / "font.ttf",
+        24.0,
+        0.0,
+        24.0,
+        0.0,
+        source_metrics_only=True,
+    )
 
     assert resolved == (reflowed, mesh)
     assert calls == [("preferred", None), ("preferred", 40.0), ("mesh", 40.0)]
+    assert source_metric_flags == [True, True, True, True]
+
+
+def test_custom_profile_tmp_native_visual_metrics_preserve_measurement_paths(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    run = TextRun("A", style)
+    source_block = SimpleNamespace(advance=11.0, bearing_x=-2.0, width=7.0)
+    monkeypatch.setattr(renderer, "use_em_block", lambda *_: True)
+    monkeypatch.setattr(renderer, "tmp_source_block_metrics", lambda *_: source_block)
+    monkeypatch.setattr(renderer, "tmp_native_style_extents", lambda *_: (8.0, -3.0))
+
+    assert renderer.tmp_native_run_visual_metrics(run, "font", tmp_path / "font.ttf", 24.0, 1.0) == (
+        renderer_mod.TMPRunVisualMetrics(11.0, -2.0, 5.0, -8.0, 3.0)
+    )
+
+    measured = SimpleNamespace(
+        advance=9.0,
+        visual_left=-1.0,
+        visual_right=8.0,
+        visual_top=-6.0,
+        visual_bottom=2.0,
+    )
+    monkeypatch.setattr(renderer, "use_em_block", lambda *_: False)
+    monkeypatch.setattr(renderer, "measure_tmp_source_run", lambda *_: measured)
+    monkeypatch.setattr(renderer_mod, "load_font", lambda *_: pytest.fail("source metrics must not load a font"))
+
+    assert renderer.tmp_native_run_visual_metrics(
+        run,
+        "font",
+        tmp_path / "font.ttf",
+        24.0,
+        1.0,
+        source_metrics_only=True,
+    ) == renderer_mod.TMPRunVisualMetrics(9.0, -1.0, 8.0, -6.0, 2.0)
+
+
+def test_custom_profile_tmp_native_padded_bounds_preserve_fx_and_scale_modes(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path, tmp_scale_mode="fx-native")
+    style = _base_tmp_style()
+    visual = renderer_mod.TMPRunVisualMetrics(10.0, -2.0, 8.0, -7.0, 3.0)
+    monkeypatch.setattr(renderer, "tmp_native_fx_quad", lambda *_: (4.0, 0.0, -3.0, 0.0, 9.0, 0.0, 1.0, 0.0))
+
+    assert renderer.tmp_native_padded_horizontal_bounds(visual, style, 1.0, 2.0) == (-3.0, 9.0)
+
+    renderer.tmp_scale_mode = "x"
+    monkeypatch.setattr(renderer, "tmp_scale_x_bounds", lambda left, right, scale: (left * scale, right * scale))
+    assert renderer.tmp_native_padded_horizontal_bounds(visual, style, 1.0, 2.0) == (-6.0, 18.0)
+
+
+def test_custom_profile_dynamic_glyph_bounds_support_freetype_and_pillow(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    mask = Image.new("L", (2, 3), 255)
+    metrics = SimpleNamespace(bearing_x=-2.2, bearing_y=5.1, width=5.6, height=7.2)
+    ft = SimpleNamespace(glyph_bitmap=lambda *_: (mask, -1, 4, metrics))
+
+    assert renderer.tmp_dynamic_glyph_bounds(ft, tmp_path / "font.ttf", "A", 24.0) == (
+        (-3, -6, 4, 3),
+        mask,
+        -1,
+        4,
+    )
+
+    monkeypatch.setattr(renderer_mod, "load_font", lambda *_: SimpleNamespace(getbbox=lambda _char: (1, 2, 3, 4)))
+    assert renderer.tmp_dynamic_glyph_bounds(None, tmp_path / "font.ttf", "A", 24.0) == (
+        (1, 2, 3, 4),
+        None,
+        0,
+        0,
+    )
+
+
+def test_custom_profile_dynamic_glyph_sdf_stores_built_result(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    source_path = tmp_path / "font.ttf"
+    asset = SimpleNamespace(name="asset", point_size=24.0, gradient_scale=5.0, atlas_padding=2.0)
+    cached = renderer_mod.TMPDynamicGlyphSDF(Image.new("L", (2, 2), 255), (0, 0, 2, 2), 1, 24.0)
+    key = (str(source_path), "asset", "A", 24.0)
+    l2_key = ("l2",)
+    stores: list[tuple] = []
+    monkeypatch.setattr(renderer, "tmp_dynamic_glyph_source", lambda *_: (asset, source_path, 24.0, "A"))
+    monkeypatch.setattr(renderer, "tmp_dynamic_glyph_cache_keys", lambda *_: (key, l2_key))
+    monkeypatch.setattr(renderer, "tmp_cached_dynamic_glyph", lambda *_: (False, None))
+    monkeypatch.setattr(renderer, "build_tmp_dynamic_glyph_sdf", lambda *_: cached)
+    monkeypatch.setattr(renderer, "_store_dynamic_glyph", lambda *args: stores.append(args))
+
+    assert renderer.tmp_dynamic_glyph_sdf("font", source_path, "A") == (cached, asset)
+    assert stores == [(key, l2_key, cached)]
+
+
+def test_custom_profile_direct_sdf_quad_prepares_all_field_kinds(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    plan = renderer_mod.TMPFieldWarpPlan((1.0, 0.0, 0.0, 0.0, 1.0, 0.0), (3, 4), 5, 6)
+    scalars = renderer_mod.TMPSdfShadingScalars(1.0, 0.0, 1.0, (255, 255, 255), None)
+    object_data: dict = {}
+    geometry = (2, 2)
+    common = (None, style, 1.0, 2.0, geometry, None)
+    monkeypatch.setattr(renderer, "tmp_sdf_field_warp_plan", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(renderer, "tmp_sdf_shading_scalars", lambda *_: scalars)
+
+    dynamic = TMPDynamicFontField(tmp_path / "font.ttf", ord("A"), 24.0, (0, 0, 2, 2), 1, 1, (2, 2), 4.9)
+    dynamic_quad, dynamic_bytes = renderer.prepare_direct_sdf_quad(
+        (dynamic, *common),
+        (0.0, 0.0),
+        object_data,
+        "#000000",
+        0.0,
+        4,
+    )
+    assert isinstance(dynamic_quad, renderer_mod.DirectSdfFontQuad)
+    assert dynamic_quad.size == (3, 4)
+    assert dynamic_bytes == 16
+
+    atlas = TMPStaticAtlasField(tmp_path / "atlas.png", (8, 8), (0, 0, 2, 2), (2, 2))
+    atlas_quad, atlas_bytes = renderer.prepare_direct_sdf_quad(
+        (atlas, *common),
+        (0.0, 0.0),
+        object_data,
+        "#000000",
+        0.0,
+        4,
+    )
+    assert isinstance(atlas_quad, renderer_mod.DirectSdfAtlasQuad)
+    assert atlas_quad.crop == (0, 0, 2, 2)
+    assert atlas_bytes == 16
+
+    warped = Image.new("L", (3, 4), 255)
+    monkeypatch.setattr(renderer, "warp_tmp_sdf_field_direct", lambda *_args, **_kwargs: (warped, 7, 8))
+    raster_quad, raster_bytes = renderer.prepare_direct_sdf_quad(
+        (Image.new("L", (2, 2), 255), *common),
+        (0.0, 0.0),
+        object_data,
+        "#000000",
+        0.0,
+        4,
+    )
+    assert isinstance(raster_quad, renderer_mod.DirectSdfQuad)
+    assert (raster_quad.left, raster_quad.top) == (7, 8)
+    assert raster_bytes == 16
 
 
 def test_custom_profile_dynamic_sdf_run_composes_scaled_glyphs(tmp_path: Path, monkeypatch) -> None:
