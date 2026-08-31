@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from scripts.parity_payloads import gen_music_score, gen_profile
+from scripts.parity_payloads import gen_card, gen_music_score, gen_profile
 from scripts.parity_payloads.common import normalize_extended_json
 from scripts.parity_payloads.gen_sk_misc_stamp import count_csb_stop_texts
 
@@ -162,3 +162,90 @@ def test_resolve_level_visual_selects_expected_usable_level(requested: int, expe
 
 def test_resolve_level_visual_returns_none_without_usable_levels() -> None:
     assert gen_profile._resolve_level_visual([{"level": 1}], 1) is None
+
+
+def test_render_skill_detail_handles_effect_character_and_invalid_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMasterData:
+        @staticmethod
+        def character_by_id() -> dict[int, dict]:
+            return {39: {"firstName": "初音", "givenName": "未来"}}
+
+    monkeypatch.setattr(gen_card, "MD", FakeMasterData())
+    skill = {
+        "description": "{{1;v}}/{{1,2;v}}/{{1;c}}/{{9;v}}/{{bad;v}}/{{1;v;extra}}",
+        "skillEffects": [
+            {"id": 1, "skillEffectDetails": [{"activateEffectValue": 10}]},
+            {"id": 2, "skillEffectDetails": [{"activateEffectValue": 5}]},
+        ],
+    }
+
+    assert gen_card.render_skill_detail(skill, 39) == "10/15/初音未来/?/{{bad;v}}/{{1;v;extra}}"
+
+
+def test_card_detail_event_keeps_last_attr_and_unique_unit(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMasterData:
+        @staticmethod
+        def event_id_by_card() -> dict[int, int]:
+            return {7: 10}
+
+        @staticmethod
+        def event_by_id() -> dict[int, dict]:
+            return {
+                10: {
+                    "id": 10,
+                    "name": "Event",
+                    "startAt": 100,
+                    "aggregateAt": 200,
+                    "assetbundleName": "event_bundle",
+                }
+            }
+
+        @staticmethod
+        def get(table: str) -> list[dict]:
+            return {
+                "eventDeckBonuses": [
+                    {"eventId": 10, "cardAttr": "cute", "gameCharacterUnitId": 5},
+                    {"eventId": 10, "cardAttr": "cool", "gameCharacterUnitId": 5},
+                ],
+                "gameCharacterUnits": [{"id": 5, "unit": "light_sound"}],
+            }[table]
+
+    monkeypatch.setattr(gen_card, "MD", FakeMasterData())
+    monkeypatch.setattr(gen_card, "event_banner_character_id", lambda event_id: 39)
+
+    event_info, asset_paths = gen_card._card_detail_event(7)
+
+    assert event_info["bonus_attr"] == "cool"
+    assert event_info["unit"] == "light_sound"
+    assert event_info["banner_cid"] == 39
+    assert asset_paths.keys() == {
+        "event_attr_icon_path",
+        "event_unit_icon_path",
+        "event_chara_icon_path",
+    }
+    assert gen_card._card_detail_event(99) == (None, {})
+
+
+def test_build_distribution_preserves_owned_character_and_attribute_ratios() -> None:
+    items = [
+        {"has_card": True, "card": {"character_id": 1, "attr": "cute"}},
+        {"has_card": False, "card": {"character_id": 1, "attr": "cool"}},
+        {"has_card": True, "card": {"character_id": 2, "attr": "unexpected"}},
+    ]
+
+    distribution = gen_card.build_distribution(
+        items,
+        icon_paths={1: "one.png", 2: "two.png"},
+        color_codes={1: "#111111", 2: "#222222"},
+        owned_data=True,
+    )
+
+    assert distribution["total_count"] == 3
+    assert distribution["owned_count"] == 2
+    assert distribution["max_character_bar_count"] == 1
+    assert [stat["share"] for stat in distribution["character_stats"]] == [0.5, 0.5]
+    stats_by_attr = {stat["attr"]: stat for stat in distribution["attribute_stats"]}
+    assert stats_by_attr["cute"]["bar_count"] == 1
+    assert stats_by_attr["cool"]["bar_count"] == 0
+    assert stats_by_attr["unknown"]["bar_count"] == 1
+    assert stats_by_attr["unknown"]["character_stats"][0]["icon_path"] == "two.png"
