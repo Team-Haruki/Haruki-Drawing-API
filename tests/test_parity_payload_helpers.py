@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from scripts.parity_payloads import gen_card, gen_music_score, gen_profile
+from scripts.parity_payloads import gen_card, gen_custom_profile, gen_music_score, gen_profile
 from scripts.parity_payloads.common import normalize_extended_json
 from scripts.parity_payloads.gen_sk_misc_stamp import count_csb_stop_texts
 
@@ -249,3 +251,59 @@ def test_build_distribution_preserves_owned_character_and_attribute_ratios() -> 
     assert stats_by_attr["cool"]["bar_count"] == 0
     assert stats_by_attr["unknown"]["bar_count"] == 1
     assert stats_by_attr["unknown"]["character_stats"][0]["icon_path"] == "two.png"
+
+
+def test_inline_resource_image_paths_only_enriches_resolvable_file_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    class Probe:
+        @staticmethod
+        def resource_path(row: dict):
+            return Path("/resolved") / row["fileName"] if row["fileName"] != "missing" else None
+
+    monkeypatch.setattr(gen_custom_profile, "_request_path", lambda path: f"request:{path.name}")
+    rows = [
+        {"fileName": "shape.png"},
+        {"fileName": "missing"},
+        {"name": "no-file"},
+        "not-a-row",
+    ]
+
+    assert gen_custom_profile._inline_resource_image_paths(Probe(), rows) is rows
+    assert rows[0]["imagePath"] == "request:shape.png"
+    assert "imagePath" not in rows[1]
+    assert gen_custom_profile._inline_resource_image_paths(Probe(), {"value": 1}) == {"value": 1}
+
+
+def test_validated_honor_capture_assets_requires_exact_request_paths() -> None:
+    requests = {
+        "profile:2": {"background_path": "asset/a.png", "ignored": "value"},
+        "profile:3": {"frame_path2": "asset/b.png", "empty_path": ""},
+    }
+    capture = {"required_assets": ["asset/a.png", "asset/b.png"]}
+
+    assert gen_custom_profile._validated_honor_capture_assets(capture, requests) == capture["required_assets"]
+    with pytest.raises(ValueError, match="exactly match"):
+        gen_custom_profile._validated_honor_capture_assets({"required_assets": ["asset/a.png"]}, requests)
+    with pytest.raises(ValueError, match="string list"):
+        gen_custom_profile._validated_honor_capture_assets({"required_assets": [1]}, requests)
+
+
+def test_stage_honor_capture_assets_copies_missing_public_assets(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    raw_path = "asset/cn-assets/startapp/honor/honor_bg_test/file.png"
+    source = tmp_path / "source.png"
+    target = tmp_path / "nested" / "target.png"
+    source.write_bytes(b"asset")
+    monkeypatch.setattr(gen_custom_profile, "_captured_asset_pair", lambda overlay, raw: (source, target))
+
+    gen_custom_profile._stage_honor_capture_assets([raw_path], tmp_path, "cn")
+
+    assert target.read_bytes() == b"asset"
+    with pytest.raises(ValueError, match="region does not match"):
+        gen_custom_profile._stage_honor_capture_assets([raw_path], tmp_path, "jp")
+
+
+@pytest.mark.parametrize("region", ["", "cn-1", "../cn"])
+def test_capture_region_rejects_invalid_values(region: str) -> None:
+    with pytest.raises(ValueError, match="region is invalid"):
+        gen_custom_profile._capture_region({"region": region})

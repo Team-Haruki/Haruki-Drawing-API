@@ -138,15 +138,20 @@ def _inline_indexes(probe: Any) -> dict[str, Any]:
         if not path.exists():
             continue
         rows = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(rows, list):
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                # Only resource rows with a fileName can carry a derivable image path.
-                if "fileName" in row and (resolved := probe.resource_path(row)):
-                    row["imagePath"] = _request_path(resolved)
-        resources[key] = rows
+        resources[key] = _inline_resource_image_paths(probe, rows)
     return resources
+
+
+def _inline_resource_image_paths(probe: Any, rows: Any) -> Any:
+    if not isinstance(rows, list):
+        return rows
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        # Only resource rows with a fileName can carry a derivable image path.
+        if "fileName" in row and (resolved := probe.resource_path(row)):
+            row["imagePath"] = _request_path(resolved)
+    return rows
 
 
 def _card_assets_for(probe: Any, profile: dict[str, Any]) -> dict[str, dict[str, str]]:
@@ -242,10 +247,21 @@ def _load_honor_capture(
         raise ValueError(f"unsupported HonorDeck capture schema: {capture_path}")
     if capture.get("slots") != _honor_slots(profile):
         raise ValueError("HonorDeck capture slots do not match response.json")
-    capture_region = str(capture.get("region", "") or "").strip().lower()
-    if not capture_region or not capture_region.replace("_", "").isalnum():
-        raise ValueError("HonorDeck capture region is invalid")
+    capture_region = _capture_region(capture)
+    requests = _validated_honor_capture_requests(capture, profile)
+    required_assets = _validated_honor_capture_assets(capture, requests)
+    _stage_honor_capture_assets(required_assets, overlay_root, capture_region)
+    return {str(key): dict(value) for key, value in requests.items()}
 
+
+def _capture_region(capture: dict[str, Any]) -> str:
+    region = str(capture.get("region", "") or "").strip().lower()
+    if not region or not region.replace("_", "").isalnum():
+        raise ValueError("HonorDeck capture region is invalid")
+    return region
+
+
+def _validated_honor_capture_requests(capture: dict[str, Any], profile: dict[str, Any]) -> dict[str, dict]:
     requests = capture.get("profileHonorRequests")
     if not isinstance(requests, dict) or set(requests) != {"profile:2", "profile:3"}:
         raise ValueError("HonorDeck capture must contain exact profile:2/profile:3 requests")
@@ -261,7 +277,10 @@ def _load_honor_capture(
             or request.honor_type != "birthday"
         ):
             raise ValueError(f"HonorDeck capture request {seq} does not match its sub slot")
+    return requests
 
+
+def _validated_honor_capture_assets(capture: dict[str, Any], requests: dict[str, dict]) -> list[str]:
     required_assets = capture.get("required_assets")
     if not isinstance(required_assets, list) or not all(isinstance(path, str) for path in required_assets):
         raise ValueError("HonorDeck capture required_assets must be a string list")
@@ -273,7 +292,10 @@ def _load_honor_capture(
     }
     if set(required_assets) != request_assets:
         raise ValueError("HonorDeck capture required_assets do not exactly match its requests")
+    return required_assets
 
+
+def _stage_honor_capture_assets(required_assets: list[str], overlay_root: Path, capture_region: str) -> None:
     asset_pairs: list[tuple[Path, Path]] = []
     for raw_path in required_assets:
         source, target = _captured_asset_pair(overlay_root, raw_path)
@@ -290,7 +312,6 @@ def _load_honor_capture(
     for source, target in asset_pairs:
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, target)
-    return {str(key): dict(value) for key, value in requests.items()}
 
 
 def generate(
