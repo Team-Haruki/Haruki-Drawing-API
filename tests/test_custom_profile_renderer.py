@@ -1345,6 +1345,11 @@ def test_custom_profile_cli_renders_cards_and_writes_jsonl_audits(
     ]
     assert str(audit_path) in capsys.readouterr().out
 
+    monkeypatch.setattr(renderer_mod, "custom_profile_output_name", lambda _card: "../escape.png")
+    with pytest.raises(ValueError, match="unsafe custom profile output filename"):
+        renderer_mod.render_cli_cards(fake_renderer, cards[:1], out_dir)
+    assert not (tmp_path / "escape.png").exists()
+
 
 def test_custom_profile_cli_main_dispatches_render_and_audit_helpers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
