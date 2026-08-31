@@ -129,47 +129,57 @@ def _optional(image_key: str, *, on_supplied_missing: HonorAssetMissingPolicy = 
     )
 
 
+def _normal_honor_asset_specs(
+    request: HonorRequest, branch: Literal["normal", "birthday"]
+) -> tuple[HonorAssetSpec, ...]:
+    specs = [
+        _required("honor_img"),
+        _optional("rank_img", on_supplied_missing="ignore"),
+        _optional("frame_img"),
+    ]
+    # HonorBadgeBox returns from _add_frame before consulting the birthday level icon.
+    if branch == "birthday" and request.frame_img_path:
+        specs.append(_optional("frame_degree_level_img"))
+    group_type = str(request.group_type or "").strip().lower()
+    if group_type in _SCROLL_LEVEL_GROUP_TYPES:
+        specs.append(_optional("scroll_img"))
+    elif group_type in _STAR_LEVEL_GROUP_TYPES:
+        specs.extend((_optional("lv_img"), _optional("lv6_img")))
+    return tuple(specs)
+
+
+def _bonds_honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
+    specs = [_required("bonds_bg"), _required("bonds_bg2")]
+    # The shared tree intentionally returns a bare background when either character icon is
+    # absent. In that branch it never reads the lone icon, mask, frame, word, or level stars.
+    if not request.chara_icon_path or not request.chara_icon_path2:
+        return tuple(specs)
+    specs.extend(
+        (
+            _optional("chara_icon_1"),
+            _optional("chara_icon_2"),
+            _optional("mask_img"),
+            _optional("frame_img"),
+            _optional("lv_img"),
+            _optional("lv6_img"),
+        )
+    )
+    if request.is_main_honor:
+        specs.append(_optional("word_img"))
+    return tuple(specs)
+
+
 def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
     """Return only the source fields that the selected widget branch can consume."""
 
     branch = honor_asset_branch(request)
-    specs: list[HonorAssetSpec] = []
     if branch == "empty":
-        specs.append(_required("empty_honor"))
+        return (_required("empty_honor"),)
     elif branch in {"normal", "birthday"}:
-        specs.extend(
-            (
-                _required("honor_img"),
-                _optional("rank_img", on_supplied_missing="ignore"),
-                _optional("frame_img"),
-            )
-        )
-        # HonorBadgeBox returns from _add_frame before consulting the birthday level icon.
-        if branch == "birthday" and request.frame_img_path:
-            specs.append(_optional("frame_degree_level_img"))
-        group_type = str(request.group_type or "").strip().lower()
-        if group_type in _SCROLL_LEVEL_GROUP_TYPES:
-            specs.append(_optional("scroll_img"))
-        elif group_type in _STAR_LEVEL_GROUP_TYPES:
-            specs.extend((_optional("lv_img"), _optional("lv6_img")))
+        return _normal_honor_asset_specs(request, branch)
     elif branch == "bonds":
-        specs.extend((_required("bonds_bg"), _required("bonds_bg2")))
-        # The shared tree intentionally returns a bare background when either character icon is
-        # absent.  In that branch it never reads the lone icon, mask, frame, word, or level stars.
-        if request.chara_icon_path and request.chara_icon_path2:
-            specs.extend(
-                (
-                    _optional("chara_icon_1"),
-                    _optional("chara_icon_2"),
-                    _optional("mask_img"),
-                    _optional("frame_img"),
-                    _optional("lv_img"),
-                    _optional("lv6_img"),
-                )
-            )
-            if request.is_main_honor:
-                specs.append(_optional("word_img"))
-    return tuple(specs)
+        return _bonds_honor_asset_specs(request)
+    return ()
 
 
 def _failure_result(

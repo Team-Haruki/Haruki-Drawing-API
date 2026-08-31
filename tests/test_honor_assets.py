@@ -111,6 +111,10 @@ def test_branch_specs_only_include_assets_used_by_that_branch() -> None:
     bare_bonds = HonorRequest(honor_type="bonds", chara_icon_path="ignored-without-pair.png")
     assert tuple(_spec_map(bare_bonds)) == ("bonds_bg", "bonds_bg2")
 
+    unsupported = HonorRequest(honor_type="future")
+    assert honor_asset_branch(unsupported) == "unsupported"
+    assert honor_asset_specs(unsupported) == ()
+
 
 def test_empty_branch_resolves_without_touching_irrelevant_paths() -> None:
     request = HonorRequest(

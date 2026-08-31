@@ -110,24 +110,25 @@ def _iter_vocal_entries(vocal_info):
     return entries
 
 
+def _build_vocal_group(characters, vocal_logos):
+    vocal_group = {"chara_imgs": [], "vocal_names": []}
+    for chara_data in characters:
+        if not isinstance(chara_data, dict):
+            continue
+        chara_name = chara_data.get("characterName")
+        if not chara_name:
+            continue
+        target = "chara_imgs" if chara_name in vocal_logos else "vocal_names"
+        vocal_group[target].append(vocal_logos.get(chara_name, chara_name))
+    return vocal_group
+
+
 def _build_caption_vocals(vocal_info, vocal_logos):
     """Group vocal entries by caption, matching lunabot's compose logic."""
     caption_vocals = {}
     for item in _iter_vocal_entries(vocal_info):
         caption = str(item.get("caption", "Vocal")).replace("ver.", "").strip() or "Vocal"
-        vocal_group = {"chara_imgs": [], "vocal_names": []}
-
-        for chara_data in item.get("characters", []):
-            if not isinstance(chara_data, dict):
-                continue
-            chara_name = chara_data.get("characterName")
-            if not chara_name:
-                continue
-            if chara_name in vocal_logos:
-                vocal_group["chara_imgs"].append(vocal_logos[chara_name])
-            else:
-                vocal_group["vocal_names"].append(chara_name)
-
+        vocal_group = _build_vocal_group(item.get("characters", []), vocal_logos)
         if vocal_group["chara_imgs"] or vocal_group["vocal_names"]:
             caption_vocals.setdefault(caption, []).append(vocal_group)
 

@@ -163,6 +163,68 @@ def _image_op(
     )
 
 
+def _build_post_mask_ops(
+    *,
+    badge_size: BondsSize,
+    is_main_honor: bool,
+    honor_rarity: str,
+    honor_level: int,
+    frame_size: BondsSize | None,
+    word_size: BondsSize | None,
+    level_icon_size: BondsSize | None,
+    level6_icon_size: BondsSize | None,
+) -> tuple[FullResizeClipOp, ...]:
+    ops: list[FullResizeClipOp] = []
+    if frame_size is not None:
+        ops.append(
+            _image_op(
+                name="frame",
+                source_key="frame_img",
+                source_size=frame_size,
+                destination_offset=(8, 0) if honor_rarity == "low" else (0, 0),
+                badge_size=badge_size,
+            )
+        )
+    if is_main_honor and word_size is not None:
+        word_width, word_height = _checked_size("word_img", word_size)
+        ops.append(
+            _image_op(
+                name="word",
+                source_key="word_img",
+                source_size=(word_width, word_height),
+                destination_offset=(int(190 - word_width / 2), int(40 - word_height / 2)),
+                badge_size=badge_size,
+            )
+        )
+
+    visible_level = int(honor_level)
+    if visible_level > 10:
+        visible_level -= 10
+    if level_icon_size is not None:
+        for index in range(min(max(0, visible_level), 5)):
+            ops.append(
+                _image_op(
+                    name=f"level.base.{index}",
+                    source_key="lv_img",
+                    source_size=level_icon_size,
+                    destination_offset=(50 + 16 * index, 61),
+                    badge_size=badge_size,
+                )
+            )
+    if level6_icon_size is not None:
+        for index in range(5, max(0, visible_level)):
+            ops.append(
+                _image_op(
+                    name=f"level.upgraded.{index - 5}",
+                    source_key="lv6_img",
+                    source_size=level6_icon_size,
+                    destination_offset=(50 + 16 * (index - 5), 61),
+                    badge_size=badge_size,
+                )
+            )
+    return tuple(ops)
+
+
 def build_bonds_honor_plan(
     *,
     left_background_size: BondsSize,
@@ -269,54 +331,16 @@ def build_bonds_honor_plan(
         ),
     )
 
-    post_mask_ops: list[FullResizeClipOp] = []
-    if frame_size is not None:
-        post_mask_ops.append(
-            _image_op(
-                name="frame",
-                source_key="frame_img",
-                source_size=frame_size,
-                destination_offset=(8, 0) if honor_rarity == "low" else (0, 0),
-                badge_size=badge_size,
-            )
-        )
-    if is_main_honor and word_size is not None:
-        word_width, word_height = _checked_size("word_img", word_size)
-        post_mask_ops.append(
-            _image_op(
-                name="word",
-                source_key="word_img",
-                source_size=(word_width, word_height),
-                destination_offset=(int(190 - word_width / 2), int(40 - word_height / 2)),
-                badge_size=badge_size,
-            )
-        )
-
-    visible_level = int(honor_level)
-    if visible_level > 10:
-        visible_level -= 10
-    if level_icon_size is not None:
-        for index in range(min(max(0, visible_level), 5)):
-            post_mask_ops.append(
-                _image_op(
-                    name=f"level.base.{index}",
-                    source_key="lv_img",
-                    source_size=level_icon_size,
-                    destination_offset=(50 + 16 * index, 61),
-                    badge_size=badge_size,
-                )
-            )
-    if level6_icon_size is not None:
-        for index in range(5, max(0, visible_level)):
-            post_mask_ops.append(
-                _image_op(
-                    name=f"level.upgraded.{index - 5}",
-                    source_key="lv6_img",
-                    source_size=level6_icon_size,
-                    destination_offset=(50 + 16 * (index - 5), 61),
-                    badge_size=badge_size,
-                )
-            )
+    post_mask_ops = _build_post_mask_ops(
+        badge_size=badge_size,
+        is_main_honor=is_main_honor,
+        honor_rarity=honor_rarity,
+        honor_level=honor_level,
+        frame_size=frame_size,
+        word_size=word_size,
+        level_icon_size=level_icon_size,
+        level6_icon_size=level6_icon_size,
+    )
 
     mask = None
     if mask_size is not None:
@@ -330,7 +354,7 @@ def build_bonds_honor_plan(
         badge_size=badge_size,
         mask=mask,
         masked_ops=(*background_ops, *character_ops),
-        post_mask_ops=tuple(post_mask_ops),
+        post_mask_ops=post_mask_ops,
         bare_background_fallback=False,
     )
 
