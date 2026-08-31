@@ -138,19 +138,15 @@ def _honor_group(group_id: int) -> dict | None:
 
 def _resolve_level_visual(levels: list[dict], requested: int) -> dict | None:
     """honor/builder_normal.go:187-216 resolveHonorLevelVisual."""
-    best_at_or_below: dict | None = None
-    first_usable: dict | None = None
-    for level in levels:
-        if not level.get("assetbundleName") and not level.get("honorRarity"):
-            continue
-        if first_usable is None:
-            first_usable = level
-        if level.get("level") == requested:
-            return level
-        if requested > 0 and level.get("level", 0) <= requested:
-            if best_at_or_below is None or level.get("level", 0) > best_at_or_below.get("level", 0):
-                best_at_or_below = level
-    return best_at_or_below or first_usable
+    usable = [level for level in levels if level.get("assetbundleName") or level.get("honorRarity")]
+    exact = next((level for level in usable if level.get("level") == requested), None)
+    if exact is not None:
+        return exact
+
+    candidates = [level for level in usable if requested > 0 and level.get("level", 0) <= requested]
+    if candidates:
+        return max(candidates, key=lambda level: level.get("level", 0))
+    return usable[0] if usable else None
 
 
 def _derive_honor_bg_asset_name(asset_name: str) -> str:

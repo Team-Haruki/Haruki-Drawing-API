@@ -386,12 +386,7 @@ def _inject_omakase(metas: list[dict]) -> list[dict]:
         if item.get("difficulty") not in ("master", "expert", "hard"):
             continue
         count += 1
-        for k in scalar_keys:
-            agg[k] += float(item.get(k, 0.0))
-        for k in slice_keys:
-            base = agg[k]
-            for i, v in enumerate(item.get(k, [])[:6]):
-                base[i] += float(v)
+        _accumulate_omakase_meta(agg, item, scalar_keys, slice_keys)
     if count == 0:
         return metas
     for k in scalar_keys:
@@ -403,6 +398,15 @@ def _inject_omakase(metas: list[dict]) -> list[dict]:
     for difficulty in ("master", "expert", "hard"):
         metas.append({"music_id": 10000, "difficulty": difficulty, **{k: agg[k] for k in scalar_keys + slice_keys}})
     return metas
+
+
+def _accumulate_omakase_meta(agg: dict[str, object], item: dict, scalar_keys: list[str], slice_keys: list[str]) -> None:
+    for key in scalar_keys:
+        agg[key] += float(item.get(key, 0.0))
+    for key in slice_keys:
+        values = agg[key]
+        for index, value in enumerate(item.get(key, [])[:6]):
+            values[index] += float(value)
 
 
 @cache
@@ -489,15 +493,20 @@ def _suite_music_results() -> dict[str, dict[int, str]]:
     _collect_flat_results(store, suite.get("userMusicResults") or [])
     for music in suite.get("userMusics") or []:
         for status in music.get("userMusicDifficultyStatuses") or []:
-            results = []
-            for item in status.get("userMusicResults") or []:
-                merged = dict(item)
-                merged.setdefault("musicId", music.get("musicId"))
-                if not str(merged.get("musicDifficultyType", "") or "").strip():
-                    merged["musicDifficultyType"] = status.get("musicDifficultyType") or status.get("musicDifficulty")
-                results.append(merged)
-            _collect_flat_results(store, results)
+            _collect_flat_results(store, _nested_music_results(music, status))
     return store
+
+
+def _nested_music_results(music: dict, status: dict) -> list[dict]:
+    results = []
+    difficulty = status.get("musicDifficultyType") or status.get("musicDifficulty")
+    for item in status.get("userMusicResults") or []:
+        merged = dict(item)
+        merged.setdefault("musicId", music.get("musicId"))
+        if not str(merged.get("musicDifficultyType", "") or "").strip():
+            merged["musicDifficultyType"] = difficulty
+        results.append(merged)
+    return results
 
 
 def _music_results(diff: str) -> dict[int, str]:
