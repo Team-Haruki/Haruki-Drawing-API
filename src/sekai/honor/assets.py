@@ -105,6 +105,14 @@ class HonorAssetResolution(Generic[SourceT]):
         return self.status == "ready"
 
 
+@dataclass(frozen=True, slots=True)
+class _HonorAssetLoadFailure:
+    status: Literal["unrenderable", "hybrid"]
+    reason: HonorAssetFailureReason
+    raw_path: str | None = None
+    detail: str | None = None
+
+
 def honor_asset_branch(request: HonorRequest) -> HonorAssetBranch:
     """Return the layout branch selected by ``HonorBadgeBox``."""
 
@@ -174,12 +182,14 @@ def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
 
     branch = honor_asset_branch(request)
     if branch == "empty":
-        return (_required("empty_honor"),)
+        specs = (_required("empty_honor"),)
     elif branch in {"normal", "birthday"}:
-        return _normal_honor_asset_specs(request, branch)
+        specs = _normal_honor_asset_specs(request, branch)
     elif branch == "bonds":
-        return _bonds_honor_asset_specs(request)
-    return ()
+        specs = _bonds_honor_asset_specs(request)
+    else:
+        specs = ()
+    return specs
 
 
 def _failure_result(
@@ -222,6 +232,68 @@ def _unavailable_source_status(spec: HonorAssetSpec) -> Literal["ready", "hybrid
     return "ready" if spec.on_supplied_missing == "ignore" else "hybrid"
 
 
+def _load_failure_or_none(
+    spec: HonorAssetSpec,
+    *,
+    reason: Literal["path_unresolved", "source_unavailable"],
+    raw_path: str,
+    detail: str | None = None,
+    unresolved_path: bool = False,
+) -> _HonorAssetLoadFailure | None:
+    status = _unresolved_path_status(spec) if unresolved_path else _unavailable_source_status(spec)
+    if status == "ready":
+        return None
+    return _HonorAssetLoadFailure(status, reason, raw_path, detail)
+
+
+def _load_honor_asset_source(
+    request: HonorRequest,
+    spec: HonorAssetSpec,
+    *,
+    path_resolver: Callable[[str], ResolvedPathT | None],
+    source_factory: Callable[[ResolvedPathT], SourceT | None],
+) -> tuple[SourceT | None, _HonorAssetLoadFailure | None]:
+    raw_value = getattr(request, spec.path_field)
+    raw_path = str(raw_value) if raw_value else None
+    if raw_path is None:
+        failure = _HonorAssetLoadFailure("unrenderable", "path_absent") if spec.required else None
+        return None, failure
+
+    try:
+        resolved_path = path_resolver(raw_path)
+    except Exception as exc:
+        failure = _load_failure_or_none(
+            spec,
+            reason="path_unresolved",
+            raw_path=raw_path,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        return None, failure
+    if resolved_path is None:
+        failure = _load_failure_or_none(
+            spec,
+            reason="path_unresolved",
+            raw_path=raw_path,
+            unresolved_path=True,
+        )
+        return None, failure
+
+    try:
+        source = source_factory(resolved_path)
+    except Exception as exc:
+        failure = _load_failure_or_none(
+            spec,
+            reason="source_unavailable",
+            raw_path=raw_path,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        return None, failure
+    if source is None:
+        failure = _load_failure_or_none(spec, reason="source_unavailable", raw_path=raw_path)
+        return None, failure
+    return source, None
+
+
 def resolve_honor_assets(
     request: HonorRequest,
     *,
@@ -258,78 +330,21 @@ def resolve_honor_assets(
 
     sources: dict[str, SourceT | None] = {}
     for spec in specs:
-        raw_value = getattr(request, spec.path_field)
-        raw_path = str(raw_value) if raw_value else None
-        if raw_path is None:
-            if spec.required:
-                return _failure_result(
-                    status="unrenderable",
-                    branch=branch,
-                    specs=specs,
-                    reason="path_absent",
-                    spec=spec,
-                )
-            sources[spec.image_key] = None
-            continue
-
-        try:
-            resolved_path = path_resolver(raw_path)
-        except Exception as exc:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
+        source, failure = _load_honor_asset_source(
+            request,
+            spec,
+            path_resolver=path_resolver,
+            source_factory=source_factory,
+        )
+        if failure is not None:
             return _failure_result(
-                status=status,
+                status=failure.status,
                 branch=branch,
                 specs=specs,
-                reason="path_unresolved",
+                reason=failure.reason,
                 spec=spec,
-                raw_path=raw_path,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
-        if resolved_path is None:
-            status = _unresolved_path_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="path_unresolved",
-                spec=spec,
-                raw_path=raw_path,
-            )
-
-        try:
-            source = source_factory(resolved_path)
-        except Exception as exc:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="source_unavailable",
-                spec=spec,
-                raw_path=raw_path,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
-        if source is None:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="source_unavailable",
-                spec=spec,
-                raw_path=raw_path,
+                raw_path=failure.raw_path,
+                detail=failure.detail,
             )
         sources[spec.image_key] = source
 

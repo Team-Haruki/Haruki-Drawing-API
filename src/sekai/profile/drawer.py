@@ -162,6 +162,7 @@ from .model import (
     MusicClearCount,
     ProfileBgSettings,
     ProfileCardRequest,
+    ProfileDataSource,
     ProfileRequest,
     SoloLiveRank,
 )
@@ -1000,6 +1001,40 @@ def _profile_card_data_source_label(name: str | None) -> str:
     return name
 
 
+def _profile_card_level_label(items: list[Widget], mysekai_level: int | None) -> str | None:
+    if not mysekai_level:
+        return None
+    name_length = sum(get_str_display_length(item.text) for item in items if isinstance(item, TextBox))
+    return f"MySekai Lv.{mysekai_level}" if name_length <= 12 else f"MSLv.{mysekai_level}"
+
+
+def _profile_card_summary_line(profile: BasicProfile, data_sources: list[ProfileDataSource]) -> str:
+    user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
+    summary_line = f"{profile.region.upper()}: {user_id}"
+    primary_source = data_sources[0] if data_sources else None
+    if len(data_sources) <= 1 and primary_source and primary_source.name:
+        summary_line += f" {primary_source.name}"
+    return summary_line
+
+
+def _profile_card_update_lines(data_sources: list[ProfileDataSource], timezone_name: str | None) -> list[str]:
+    if len(data_sources) <= 1:
+        primary_source = data_sources[0] if data_sources else None
+        if primary_source is None or not primary_source.update_time:
+            return []
+        update_time = datetime_from_millis(primary_source.update_time, timezone_name)
+        return [f"更新时间: {format_info_panel_update_time(update_time, timezone_name)}"]
+
+    update_lines = []
+    for data_source in data_sources[:2]:
+        if not data_source.update_time:
+            continue
+        update_time = datetime_from_millis(data_source.update_time, timezone_name)
+        update_time_text = format_info_panel_update_time(update_time, timezone_name)
+        update_lines.append(f"{_profile_card_data_source_label(data_source.name)}更新时间: {update_time_text}")
+    return update_lines
+
+
 async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget | None:
     if not rqd.profile:
         return None
@@ -1014,14 +1049,14 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
 
 
 def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: list) -> Widget | None:
-    if not rqd.profile:
+    profile = rqd.profile
+    if not profile:
         return None
 
-    primary_source = data_sources[0] if data_sources else None
     with VSplit().set_content_align("c").set_item_align("l").set_sep(5) as identity:
         with HSplit().set_content_align("lb").set_item_align("lb").set_sep(5):
             hs = colored_text_box(
-                truncate(rqd.profile.nickname, 64),
+                truncate(profile.nickname, 64),
                 TextStyle(
                     font=DEFAULT_BOLD_FONT,
                     size=24,
@@ -1031,35 +1066,13 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
                     shadow_color=ADAPTIVE_SHADOW,
                 ),
             )
-            if rqd.mysekai_level:
-                name_length = 0
-                for item in hs.items:
-                    if isinstance(item, TextBox):
-                        name_length += get_str_display_length(item.text)
-                ms_lv_text = f"MySekai Lv.{rqd.mysekai_level}" if name_length <= 12 else f"MSLv.{rqd.mysekai_level}"
+            ms_lv_text = _profile_card_level_label(hs.items, rqd.mysekai_level)
+            if ms_lv_text:
                 TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
 
-        user_id = process_hide_uid(rqd.profile.is_hide_uid, rqd.profile.id, keep=6)
-        summary_line = f"{rqd.profile.region.upper()}: {user_id}"
-        if len(data_sources) <= 1 and primary_source and primary_source.name:
-            summary_line += f" {primary_source.name}"
-        TextBox(summary_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-
-        if len(data_sources) <= 1:
-            if primary_source and primary_source.update_time:
-                update_time = datetime_from_millis(primary_source.update_time, rqd.timezone)
-                update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-                TextBox(f"更新时间: {update_time_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-        else:
-            for data_source in data_sources[:2]:
-                if not data_source.update_time:
-                    continue
-                update_time = datetime_from_millis(data_source.update_time, rqd.timezone)
-                update_time_text = format_info_panel_update_time(update_time, rqd.timezone)
-                TextBox(
-                    f"{_profile_card_data_source_label(data_source.name)}更新时间: {update_time_text}",
-                    TextStyle(font=DEFAULT_FONT, size=16, color=BLACK),
-                )
+        TextBox(_profile_card_summary_line(profile, data_sources), TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+        for update_line in _profile_card_update_lines(data_sources, rqd.timezone):
+            TextBox(update_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
 
     return identity
 

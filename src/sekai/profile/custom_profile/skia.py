@@ -727,6 +727,14 @@ class _PreparedCardDisplayList:
     text_placements: dict[int, tuple[str, float]]
 
 
+_CARD_SAMPLING_MAP = {
+    "nearest": "nearest",
+    "bilinear": "linear",
+    "bicubic": "catmull_rom",
+    "lanczos": "pillow_lanczos",
+}
+
+
 def _prepare_native_card_display_list(
     display_list: CardDisplayList,
     metrics: _NativeGeneralTextMetrics | None,
@@ -787,81 +795,102 @@ def _prepare_native_card_display_list(
     return _PreparedCardDisplayList(display_list, asset_paths, text_placements)
 
 
+def _emit_prepared_card_cover_art(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardCoverArtOp,
+) -> None:
+    display_list = prepared.display_list
+    cover_w = max(1, round(op.cover_size[0]))
+    cover_h = max(1, round(op.cover_size[1]))
+    crop_left = max(0, round((cover_w - display_list.size[0]) * op.crop_align[0]))
+    crop_top = max(0, round((cover_h - display_list.size[1]) * op.crop_align[1]))
+    scene.builder.image(
+        prepared.asset_paths[id(op)],
+        (-crop_left, -crop_top),
+        (cover_w, cover_h),
+        fit="cover",
+        sampling=_CARD_SAMPLING_MAP[op.sampling],
+        blend=op.blend,
+    )
+
+
+def _emit_prepared_card_rect(scene: _SceneAssembler, op: CardRectOp) -> None:
+    left, top, right, bottom = op.rect
+    if op.round_coordinates:
+        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+    size = (max(0.0, right - left), max(0.0, bottom - top))
+    if op.radius > 0.0:
+        scene.builder.roundrect(
+            (left, top),
+            size,
+            op.radius,
+            fill=op.fill,
+            stroke=op.outline,
+            stroke_width=op.width,
+        )
+        return
+    scene.builder.rect(
+        (left, top),
+        size,
+        fill=op.fill,
+        stroke=op.outline,
+        stroke_width=op.width,
+        blend=op.blend,
+    )
+
+
+def _emit_prepared_card_text(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardTextOp,
+) -> None:
+    align, baseline = prepared.text_placements[id(op)]
+    scene.builder.text(
+        op.text,
+        (float(op.pos[0]), baseline),
+        "bold",
+        float(op.size),
+        align=align,
+        baseline="alphabetic",
+        fill=op.fill,
+        font_name=_GENERAL_FONT_IR_NAME,
+    )
+
+
+def _emit_prepared_card_sprite(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardSpriteOp,
+) -> None:
+    asset_path = prepared.asset_paths.get(id(op))
+    if asset_path is None:
+        return
+    left, top, right, bottom = op.rect
+    scene.builder.image(
+        asset_path,
+        (round(left), round(top)),
+        (max(1, round(right - left)), max(1, round(bottom - top))),
+        sampling=_CARD_SAMPLING_MAP[op.sampling],
+    )
+
+
 def _emit_prepared_card_ops(scene: _SceneAssembler, prepared: _PreparedCardDisplayList) -> None:
     """Replay one natural-size card display list into the current isolated surface."""
 
-    display_list = prepared.display_list
-    sampling_map = {
-        "nearest": "nearest",
-        "bilinear": "linear",
-        "bicubic": "catmull_rom",
-        "lanczos": "pillow_lanczos",
-    }
-    for op in display_list.ops:
-        op_key = id(op)
+    for op in prepared.display_list.ops:
         if isinstance(op, CardCoverArtOp):
-            cover_w = max(1, round(op.cover_size[0]))
-            cover_h = max(1, round(op.cover_size[1]))
-            crop_left = max(0, round((cover_w - display_list.size[0]) * op.crop_align[0]))
-            crop_top = max(0, round((cover_h - display_list.size[1]) * op.crop_align[1]))
-            scene.builder.image(
-                prepared.asset_paths[op_key],
-                (-crop_left, -crop_top),
-                (cover_w, cover_h),
-                fit="cover",
-                sampling=sampling_map[op.sampling],
-                blend=op.blend,
-            )
+            _emit_prepared_card_cover_art(scene, prepared, op)
             continue
         if isinstance(op, CardRectOp):
-            left, top, right, bottom = op.rect
-            if op.round_coordinates:
-                left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
-            size = (max(0.0, right - left), max(0.0, bottom - top))
-            if op.radius > 0.0:
-                scene.builder.roundrect(
-                    (left, top),
-                    size,
-                    op.radius,
-                    fill=op.fill,
-                    stroke=op.outline,
-                    stroke_width=op.width,
-                )
-            else:
-                scene.builder.rect(
-                    (left, top),
-                    size,
-                    fill=op.fill,
-                    stroke=op.outline,
-                    stroke_width=op.width,
-                    blend=op.blend,
-                )
+            _emit_prepared_card_rect(scene, op)
             continue
         if isinstance(op, CardTextOp):
-            align, baseline = prepared.text_placements[op_key]
-            scene.builder.text(
-                op.text,
-                (float(op.pos[0]), baseline),
-                "bold",
-                float(op.size),
-                align=align,
-                baseline="alphabetic",
-                fill=op.fill,
-                font_name=_GENERAL_FONT_IR_NAME,
-            )
+            _emit_prepared_card_text(scene, prepared, op)
             continue
         if not isinstance(op, CardSpriteOp):
             raise TypeError(f"unsupported native card display-list op: {type(op).__name__}")
-        asset_path = prepared.asset_paths.get(op_key)
-        if asset_path is None:
-            continue
-        left, top, right, bottom = op.rect
-        scene.builder.image(
-            asset_path,
-            (round(left), round(top)),
-            (max(1, round(right - left)), max(1, round(bottom - top))),
-            sampling=sampling_map[op.sampling],
-        )
+        _emit_prepared_card_sprite(scene, prepared, op)
 
 
 def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
@@ -1866,6 +1895,67 @@ def _build_scene(
     return ir_json, scene.mem_images, report
 
 
+def _render_custom_profile_native_scene(
+    native: Any,
+    card: dict[str, Any],
+    profile_context: dict[str, Any],
+    resources: dict[str, Any],
+    region: str,
+):
+    """Construct and rasterize one native scene inside the render-pool task."""
+
+    from src.sekai.profile.custom_profile import drawer as _drawer
+    from src.settings import (
+        CUSTOM_PROFILE_ASSETS_DIR,
+        CUSTOM_PROFILE_FONTS_DIR,
+        CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+        CUSTOM_PROFILE_PARALLEL_WORKERS,
+        CUSTOM_PROFILE_SHAPE_SPRITE_DIR,
+        CUSTOM_PROFILE_TMP_FONT_METADATA,
+        CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR,
+    )
+
+    try:
+        renderer = PNGRenderer(
+            masterdata=None,
+            assets=_drawer._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
+            fonts=_drawer._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
+            resources=resources,
+            tmp_font_metadata=_drawer._optional_region_file(
+                "custom_profile_tmp_font_metadata", CUSTOM_PROFILE_TMP_FONT_METADATA, region
+            ),
+            shape_sprite_dir=_drawer._require_region_path(
+                "custom_profile_shape_sprite_dir", CUSTOM_PROFILE_SHAPE_SPRITE_DIR, region
+            ),
+            profile_context=profile_context,
+            parallel_workers=max(1, int(CUSTOM_PROFILE_PARALLEL_WORKERS or 1)),
+            parallel_stage="transform",
+            clip_canvas_transform=True,
+            canvas_w=int(PROFILE_RENDER_VIEW_W),
+            canvas_h=int(PROFILE_RENDER_VIEW_H),
+            origin_x=PROFILE_RENDER_VIEW_W / 2.0,
+            origin_y=PROFILE_RENDER_VIEW_H / 2.0,
+            unity_ui_sprite_dir=_drawer._require_region_path(
+                "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
+            ),
+            region=region,
+            max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+            max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
+        )
+    except Exception as exc:
+        raise _CustomProfileSkiaStageError("renderer_init") from exc
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, card)
+    except Exception as exc:
+        raise _CustomProfileSkiaStageError("scene_build") from exc
+    if not report.complete:
+        return None, report
+    try:
+        return native.render_scene(ir_json, mem_images), report
+    except Exception as exc:
+        raise _CustomProfileSkiaStageError("native_render", report=report) from exc
+
+
 async def try_render_custom_profile_card_attempt(
     request: CustomProfileCardRenderRequest,
 ) -> CustomProfileSkiaAttempt:
@@ -1885,68 +1975,16 @@ async def try_render_custom_profile_card_attempt(
             exception_diagnostic=capture_safe_exception(exc),
         )
 
-    card = dict(request.card)
-    profile_context = dict(request.profile_context)
-    resources = dict(request.resources)
-    region = request.region
-
-    def _render():
-        # Same construction as drawer._render_custom_profile_card_sync (the Pillow service path);
-        # kept in one pool task so the event loop never sees the rasterization.
-        from src.sekai.profile.custom_profile import drawer as _drawer
-        from src.settings import (
-            CUSTOM_PROFILE_ASSETS_DIR,
-            CUSTOM_PROFILE_FONTS_DIR,
-            CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-            CUSTOM_PROFILE_PARALLEL_WORKERS,
-            CUSTOM_PROFILE_SHAPE_SPRITE_DIR,
-            CUSTOM_PROFILE_TMP_FONT_METADATA,
-            CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR,
-        )
-
-        try:
-            renderer = PNGRenderer(
-                masterdata=None,
-                assets=_drawer._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
-                fonts=_drawer._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
-                resources=resources,
-                tmp_font_metadata=_drawer._optional_region_file(
-                    "custom_profile_tmp_font_metadata", CUSTOM_PROFILE_TMP_FONT_METADATA, region
-                ),
-                shape_sprite_dir=_drawer._require_region_path(
-                    "custom_profile_shape_sprite_dir", CUSTOM_PROFILE_SHAPE_SPRITE_DIR, region
-                ),
-                profile_context=profile_context,
-                parallel_workers=max(1, int(CUSTOM_PROFILE_PARALLEL_WORKERS or 1)),
-                parallel_stage="transform",
-                clip_canvas_transform=True,
-                canvas_w=int(PROFILE_RENDER_VIEW_W),
-                canvas_h=int(PROFILE_RENDER_VIEW_H),
-                origin_x=PROFILE_RENDER_VIEW_W / 2.0,
-                origin_y=PROFILE_RENDER_VIEW_H / 2.0,
-                unity_ui_sprite_dir=_drawer._require_region_path(
-                    "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
-                ),
-                region=region,
-                max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-                max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
-            )
-        except Exception as exc:
-            raise _CustomProfileSkiaStageError("renderer_init") from exc
-        try:
-            ir_json, mem_images, report = _build_scene(renderer, card)
-        except Exception as exc:
-            raise _CustomProfileSkiaStageError("scene_build") from exc
-        if not report.complete:
-            return None, report
-        try:
-            return native.render_scene(ir_json, mem_images), report
-        except Exception as exc:
-            raise _CustomProfileSkiaStageError("native_render", report=report) from exc
-
     started = time.perf_counter()
     try:
-        result, report = await run_in_pool(_render)
+        result, report = await run_in_pool(
+            _render_custom_profile_native_scene,
+            native,
+            dict(request.card),
+            dict(request.profile_context),
+            dict(request.resources),
+            request.region,
+        )
     except _CustomProfileSkiaStageError as exc:
         # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
         # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).

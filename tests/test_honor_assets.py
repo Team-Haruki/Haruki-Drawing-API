@@ -184,6 +184,24 @@ def test_rank_is_optional_even_when_a_supplied_path_is_missing() -> None:
     }
 
 
+def test_rank_resolver_exception_is_ignored_by_its_optional_policy() -> None:
+    request = HonorRequest(
+        honor_type="normal",
+        honor_img_path="base.png",
+        rank_img_path="outside.png",
+    )
+
+    def resolve(path: str) -> str:
+        if path == "outside.png":
+            raise ValueError("outside asset root")
+        return path
+
+    result = resolve_honor_assets(request, path_resolver=resolve, source_factory=_source_factory)
+
+    assert result.ready
+    assert result.sources == {"honor_img": "source:base.png", "rank_img": None, "frame_img": None}
+
+
 @pytest.mark.parametrize("field", ["frame_img_path", "scroll_img_path", "frame_degree_level_img_path"])
 def test_supplied_overlay_missing_makes_request_hybrid(field: str) -> None:
     kwargs = {
@@ -265,6 +283,21 @@ def test_source_factory_failure_uses_the_same_missing_policy() -> None:
     assert result.failure is not None
     assert result.failure.reason == "source_unavailable"
     assert result.failure.detail == "ValueError: corrupt"
+
+
+def test_none_from_source_factory_is_classified_as_hybrid() -> None:
+    request = HonorRequest(honor_type="normal", honor_img_path="base.png")
+    result = resolve_honor_assets(
+        request,
+        path_resolver=lambda path: path,
+        source_factory=lambda _path: None,
+    )
+
+    assert result.status == "hybrid"
+    assert result.sources is None
+    assert result.failure is not None
+    assert result.failure.reason == "source_unavailable"
+    assert result.failure.raw_path == "base.png"
 
 
 def test_supplied_required_base_rejected_by_backend_is_hybrid_not_fallthrough() -> None:
