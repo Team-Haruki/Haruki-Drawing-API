@@ -167,6 +167,8 @@ def test_music_detail_helpers_cover_default_and_edge_values():
     assert drawer._music_list_group_order("easy", 5) == (1, 5)
     assert drawer._music_list_group_order("unknown", 1) == (99, 1)
     assert drawer._ordered_music_detail_leaderboard_keys(None, ("solo",)) == []
+    assert drawer._item_at(["first"], 0) == "first"
+    assert drawer._item_at(["first"], 5, "missing") == "missing"
     assert drawer._custom_chart_stat_text(None) == "-"
     assert drawer._custom_chart_stat_text(1.25) == "1.25"
     assert drawer._custom_chart_stat_text("  ") == "-"

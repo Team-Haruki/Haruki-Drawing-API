@@ -228,6 +228,10 @@ def _ordered_music_detail_leaderboard_keys(
     return ordered
 
 
+def _item_at(items, index: int, default=None):
+    return next((item for position, item in enumerate(items) if position == index), default)
+
+
 def _custom_chart_stat_text(value) -> str:
     if value is None:
         return "-"
@@ -494,8 +498,8 @@ class _MusicDetailRenderer:
 
     def _leaderboard_cell(self, row: int, column: int):
         matrix = self.rqd.leaderboard_matrix or []
-        row_data = matrix[row] if row < len(matrix) else []
-        info = row_data[column] if column < len(row_data) else None
+        row_data = _item_at(matrix, row, ())
+        info = _item_at(row_data, column)
         if info:
             music_num = self.rqd.leaderboard_music_num or 1
             return (
