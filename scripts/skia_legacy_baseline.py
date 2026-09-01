@@ -211,7 +211,7 @@ def _diff(a: Image.Image, b: Image.Image) -> dict:
     }
 
 
-def main() -> int:
+def _parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--ref",
@@ -222,7 +222,93 @@ def main() -> int:
     ap.add_argument("--only", default="", help="comma-separated case names")
     ap.add_argument("--tolerance", type=int, default=0, help="max per-channel delta tolerated")
     ap.add_argument("--out-dir", default="out/legacy-baseline")
-    args = ap.parse_args()
+    return ap.parse_args()
+
+
+def _preflight_case(tree: Path, case, payload_file: Path) -> dict | None:
+    if not payload_file.exists():
+        return {"case": case.name, "status": "no-payload"}
+    if case.drawer == MYSEKAI_REAL:
+        # drawer.real.py is gitignored, so the baseline worktree only has the stub.
+        return {"case": case.name, "status": "no-baseline", "detail": "mysekai drawer.real.py"}
+    if not _exists_on_baseline(tree, case):
+        # The endpoint did not exist on the baseline ref — nothing to drift from.
+        return {"case": case.name, "status": "no-baseline", "detail": "endpoint is new"}
+    return None
+
+
+def _comparison_status(stats: dict, tolerance: int) -> str:
+    if not stats.get("size_match"):
+        return "size-mismatch"
+    return "drift" if stats["max_delta"] > tolerance else "ok"
+
+
+def _print_case_result(case, row: dict, stats: dict) -> None:
+    detail = (
+        f"max_delta={stats.get('max_delta')} differing={stats.get('differing_pct')}%"
+        if stats.get("size_match")
+        else f"{stats.get('size_a')} vs {stats.get('size_b')}"
+    )
+    print(f"{row['status']:<15} {case.name:<28} {detail}")  # noqa: T201
+
+
+def _run_case(tree: Path, case, out_dir: Path, env_extra: dict, tolerance: int) -> dict:
+    payload_file = PAYLOAD_DIR / f"{case.name}.json"
+    preflight = _preflight_case(tree, case, payload_file)
+    if preflight is not None:
+        return preflight
+
+    row: dict = {"case": case.name}
+    base_png = out_dir / f"{case.name}_baseline.png"
+    error = _render_baseline(tree, case, payload_file, base_png, env_extra)
+    if error:
+        row.update(status="baseline-error", detail=error)
+        return row
+    try:
+        current = asyncio.run(_render_current(case, _load_payload(case.name)))
+    except Exception as exc:
+        row.update(status="current-error", detail=f"{type(exc).__name__}: {exc}")
+        return row
+
+    current.save(out_dir / f"{case.name}_current.png")
+    stats = _diff(Image.open(base_png), current)
+    row.update(stats)
+    row["status"] = _comparison_status(stats, tolerance)
+    _print_case_result(case, row, stats)
+    return row
+
+
+def _cleanup_worktree(tree: Path) -> None:
+    subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=REPO_ROOT, check=False)
+    subprocess.run(["git", "worktree", "prune"], cwd=REPO_ROOT, check=False)
+
+
+def _run_cases(ref: str, cases: list, out_dir: Path, env_extra: dict, tolerance: int) -> list[dict]:
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = _prepare_worktree(ref, Path(tmp))
+        try:
+            return [_run_case(tree, case, out_dir, env_extra, tolerance) for case in cases]
+        finally:
+            _cleanup_worktree(tree)
+
+
+def _report_results(ref: str, out_dir: Path, rows: list[dict]) -> bool:
+    (out_dir / "results.json").write_text(json.dumps({"ref": ref, "cases": rows}, indent=2, ensure_ascii=False))
+    counts: dict[str, int] = {}
+    for row in rows:
+        counts[row["status"]] = counts.get(row["status"], 0) + 1
+    print(f"\n=== status counts === {counts}")  # noqa: T201
+    print(f"results: {out_dir / 'results.json'}")  # noqa: T201
+    drift = [row for row in rows if row["status"] in ("drift", "size-mismatch")]
+    if drift:
+        print("\nDRIFT vs baseline (both backends would render this wrong — the parity sweep cannot see it):")  # noqa: T201
+        for row in drift:
+            print(f"  {row['case']}: {row}")  # noqa: T201
+    return bool(drift)
+
+
+def main() -> int:
+    args = _parse_args()
 
     wanted = {n.strip() for n in args.only.split(",") if n.strip()}
     cases = [c for c in CASES if not wanted or c.name in wanted]
@@ -233,73 +319,8 @@ def main() -> int:
     import os
 
     os.environ.update(env_extra)
-
-    rows: list[dict] = []
-    with tempfile.TemporaryDirectory() as tmp:
-        tree = _prepare_worktree(args.ref, Path(tmp))
-        try:
-            for case in cases:
-                payload_file = PAYLOAD_DIR / f"{case.name}.json"
-                if not payload_file.exists():
-                    rows.append({"case": case.name, "status": "no-payload"})
-                    continue
-                row: dict = {"case": case.name}
-                if case.drawer == MYSEKAI_REAL:
-                    # drawer.real.py is gitignored, so the baseline worktree only has the stub.
-                    rows.append({"case": case.name, "status": "no-baseline", "detail": "mysekai drawer.real.py"})
-                    continue
-                if not _exists_on_baseline(tree, case):
-                    # The endpoint did not exist on the baseline ref — nothing to drift from.
-                    rows.append({"case": case.name, "status": "no-baseline", "detail": "endpoint is new"})
-                    continue
-                base_png = out_dir / f"{case.name}_baseline.png"
-                err = _render_baseline(tree, case, payload_file, base_png, env_extra)
-                if err:
-                    row.update(status="baseline-error", detail=err)
-                    rows.append(row)
-                    continue
-                try:
-                    cur = asyncio.run(_render_current(case, _load_payload(case.name)))
-                except Exception as exc:
-                    row.update(status="current-error", detail=f"{type(exc).__name__}: {exc}")
-                    rows.append(row)
-                    continue
-                cur_png = out_dir / f"{case.name}_current.png"
-                cur.save(cur_png)
-
-                stats = _diff(Image.open(base_png), cur)
-                row.update(stats)
-                if not stats.get("size_match"):
-                    row["status"] = "size-mismatch"
-                elif stats["max_delta"] > args.tolerance:
-                    row["status"] = "drift"
-                else:
-                    row["status"] = "ok"
-                rows.append(row)
-                print(  # noqa: T201
-                    f"{row['status']:<15} {case.name:<28} "
-                    + (
-                        f"max_delta={stats.get('max_delta')} differing={stats.get('differing_pct')}%"
-                        if stats.get("size_match")
-                        else f"{stats.get('size_a')} vs {stats.get('size_b')}"
-                    )
-                )
-        finally:
-            subprocess.run(["git", "worktree", "remove", "--force", str(tree)], cwd=REPO_ROOT, check=False)
-            subprocess.run(["git", "worktree", "prune"], cwd=REPO_ROOT, check=False)
-
-    (out_dir / "results.json").write_text(json.dumps({"ref": args.ref, "cases": rows}, indent=2, ensure_ascii=False))
-    counts: dict[str, int] = {}
-    for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    print(f"\n=== status counts === {counts}")  # noqa: T201
-    print(f"results: {out_dir / 'results.json'}")  # noqa: T201
-    drift = [r for r in rows if r["status"] in ("drift", "size-mismatch")]
-    if drift:
-        print("\nDRIFT vs baseline (both backends would render this wrong — the parity sweep cannot see it):")  # noqa: T201
-        for r in drift:
-            print(f"  {r['case']}: {r}")  # noqa: T201
-    return 1 if drift else 0
+    rows = _run_cases(args.ref, cases, out_dir, env_extra, args.tolerance)
+    return 1 if _report_results(args.ref, out_dir, rows) else 0
 
 
 if __name__ == "__main__":
