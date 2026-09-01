@@ -1031,6 +1031,27 @@ class TMPDynamicFontField:
 
 
 @dataclass(frozen=True)
+class _TMPPreparedCharacterField:
+    field: Image.Image | TMPStaticAtlasField | TMPDynamicFontField
+    glyph_asset: TMPFontAsset | None
+    bbox: tuple[int, int, int, int]
+    pad_x: int
+    pad_y: int
+    native_quad_sized: bool
+
+    def result(
+        self,
+    ) -> tuple[
+        Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+        TMPFontAsset | None,
+        tuple[int, int, int, int],
+        int,
+        int,
+    ]:
+        return self.field, self.glyph_asset, self.bbox, self.pad_x, self.pad_y
+
+
+@dataclass(frozen=True)
 class TMPFieldWarpPlan:
     """Pillow AFFINE inverse matrix plus its clipped destination rectangle."""
 
@@ -10092,6 +10113,251 @@ class PNGRenderer:
 
         return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
 
+    def _tmp_native_static_character_field(
+        self,
+        glyph_asset: TMPFontAsset,
+        metrics: TMPGlyphMetrics,
+        atlas_path: Path,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo,
+        defer_static_atlas: bool,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField | None:
+        quad_w, quad_h = ensure_raster_size(
+            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native glyph quad",
+        )
+        atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+        atlas_left = metrics.rect_x - atlas_pad
+        atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
+        atlas_bottom_unity = metrics.rect_y - atlas_pad
+        atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
+        if defer_static_atlas:
+            atlas_width = round(glyph_asset.atlas_width)
+            atlas_height = round(glyph_asset.atlas_height)
+            if atlas_width <= 0 or atlas_height <= 0:
+                return None
+            atlas = None
+        else:
+            atlas = self.tmp_atlas_alpha(atlas_path)
+            atlas_width = atlas.width
+            atlas_height = atlas.height
+        crop_box = (
+            atlas_left,
+            atlas_height - atlas_top_unity,
+            atlas_right,
+            atlas_height - atlas_bottom_unity,
+        )
+        ensure_raster_size(
+            (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph crop",
+        )
+        if defer_static_atlas:
+            field_image: Image.Image | TMPStaticAtlasField = TMPStaticAtlasField(
+                atlas_path,
+                (atlas_width, atlas_height),
+                crop_box,
+                (quad_w, quad_h),
+            )
+        else:
+            assert atlas is not None
+            field_image = atlas.crop(crop_box)
+            if field_image.size != (quad_w, quad_h):
+                field_image = field_image.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+        return _TMPPreparedCharacterField(field_image, glyph_asset, (0, 0, quad_w, quad_h), 0, 0, True)
+
+    def _tmp_raster_static_character_field(
+        self,
+        glyph_asset: TMPFontAsset,
+        metrics: TMPGlyphMetrics,
+        atlas_path: Path,
+        font_size: float,
+        outline_dilate: float,
+    ) -> _TMPPreparedCharacterField:
+        atlas = self.tmp_atlas_alpha(atlas_path)
+        atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
+        atlas_left = max(0, metrics.rect_x)
+        crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
+        font_scale = font_size / max(1.0, glyph_asset.point_size)
+        glyph_scale = font_scale * metrics.glyph_scale
+        left = metrics.bearing_x * font_scale
+        top = -metrics.bearing_y * font_scale
+        width = max(1, round(metrics.rect_w * glyph_scale))
+        height = max(1, round(metrics.rect_h * glyph_scale))
+        bbox = (
+            math.floor(left),
+            math.floor(top),
+            math.ceil(left + width),
+            math.ceil(top + height),
+        )
+        pad = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
+        field_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph field",
+        )
+        field_image = Image.new("L", field_size, 0)
+        glyph_size = ensure_raster_size(
+            (width, height),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph",
+        )
+        glyph = crop.resize(glyph_size, Image.Resampling.BICUBIC)
+        field_image.paste(glyph, (pad + math.floor(left) - bbox[0], pad + math.floor(top) - bbox[1]))
+        return _TMPPreparedCharacterField(field_image, glyph_asset, bbox, pad, pad, False)
+
+    def _tmp_raster_dynamic_character_field(
+        self,
+        font_name: str,
+        style: TextStyle,
+        outline_dilate: float,
+        cached: TMPDynamicGlyphSDF,
+        glyph_asset: TMPFontAsset,
+        char_info: TMPNativeCharacterInfo | None,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField:
+        active = self.tmp_sdf_asset(font_name)
+        asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
+        native_element_scale = self.tmp_native_element_scale(font_name, style.size)
+        display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
+        display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
+        sample_crop_pad = cached.pad
+        if char_info is not None:
+            atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+            sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
+        sample_crop_pad = min(sample_crop_pad, cached.pad)
+        crop_box = (
+            max(0, cached.pad - sample_crop_pad),
+            max(0, cached.pad - sample_crop_pad),
+            min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
+            min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
+        )
+        field_source = cached.field.crop(crop_box)
+        if char_info is not None:
+            quad_w, quad_h = ensure_raster_size(
+                native_field_size or self.tmp_native_unrotated_quad_size(char_info),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile TMP native glyph quad",
+            )
+            field_image = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+            return _TMPPreparedCharacterField(
+                field_image,
+                glyph_asset,
+                (0, 0, field_image.width, field_image.height),
+                0,
+                0,
+                True,
+            )
+        bbox = (
+            math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
+            math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
+            math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
+            math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
+        )
+        pad = max(0, round(sample_crop_pad * display_scale))
+        field_size = ensure_raster_size(
+            (
+                max(1, round(field_source.width * display_scale)),
+                max(1, round(field_source.height * display_scale)),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile displayed TMP glyph field",
+        )
+        return _TMPPreparedCharacterField(
+            field_source.resize(field_size, Image.Resampling.BICUBIC),
+            glyph_asset,
+            bbox,
+            pad,
+            pad,
+            False,
+        )
+
+    def _tmp_dynamic_character_field(
+        self,
+        font_name: str,
+        font_path: Path,
+        glyph_char: str,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo | None,
+        defer_dynamic_font: bool,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField | None:
+        if defer_dynamic_font and char_info is not None:
+            native_field = self.tmp_dynamic_font_field(
+                font_name,
+                glyph_char,
+                style,
+                outline_dilate,
+                char_info,
+                native_field_size,
+            )
+            if native_field is None:
+                return None
+            field_image, glyph_asset = native_field
+            return _TMPPreparedCharacterField(
+                field_image,
+                glyph_asset,
+                (0, 0, field_image.field_size[0], field_image.field_size[1]),
+                0,
+                0,
+                True,
+            )
+        dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
+        if dynamic is None:
+            return None
+        cached, glyph_asset = dynamic
+        return self._tmp_raster_dynamic_character_field(
+            font_name,
+            style,
+            outline_dilate,
+            cached,
+            glyph_asset,
+            char_info,
+            native_field_size,
+        )
+
+    def _tmp_scaled_character_field(
+        self,
+        prepared: _TMPPreparedCharacterField,
+        style: TextStyle,
+    ) -> _TMPPreparedCharacterField:
+        scale_x = self.tmp_native_vertex_scale_x(style)
+        if prepared.native_quad_sized or abs(scale_x - 1.0) < 1.0e-6:
+            return prepared
+        assert isinstance(prepared.field, Image.Image)
+        scaled_left, scaled_right = self.tmp_scale_x_bounds(
+            float(prepared.bbox[0]),
+            float(prepared.bbox[2]),
+            scale_x,
+        )
+        bbox = (
+            math.floor(scaled_left),
+            prepared.bbox[1],
+            math.ceil(scaled_right),
+            prepared.bbox[3],
+        )
+        pad_x = max(1, round(prepared.pad_x * abs(scale_x)))
+        scaled_size = ensure_raster_size(
+            (
+                max(1, round(prepared.field.width * abs(scale_x))),
+                prepared.field.height,
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile scaled TMP glyph field",
+        )
+        return _TMPPreparedCharacterField(
+            prepared.field.resize(scaled_size, Image.Resampling.BICUBIC),
+            prepared.glyph_asset,
+            bbox,
+            pad_x,
+            prepared.pad_y,
+            False,
+        )
+
     def render_tmp_sdf_character_field(
         self,
         font_name: str,
@@ -10117,184 +10383,50 @@ class PNGRenderer:
         | None
     ):
         run = TextRun(char, style)
-        native_quad_sized = False
         glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
         glyph_asset = self.tmp_static_sdf_asset(font_name, run)
-        if glyph_asset is not None and glyph_asset.atlas_paths and glyph_char and glyph_char != " ":
+        has_static_glyph = bool(
+            glyph_asset is not None and glyph_asset.atlas_paths and glyph_char and glyph_char != " "
+        )
+        if has_static_glyph:
+            assert glyph_asset is not None
             metrics = glyph_asset.glyphs.get(ord(glyph_char[0]))
-            if metrics is not None and metrics.rect_w > 0 and metrics.rect_h > 0:
-                atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
-                if char_info is not None:
-                    quad_w, quad_h = ensure_raster_size(
-                        native_field_size or self.tmp_native_unrotated_quad_size(char_info),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile TMP native glyph quad",
-                    )
-                    atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
-                    atlas_left = metrics.rect_x - atlas_pad
-                    atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
-                    atlas_bottom_unity = metrics.rect_y - atlas_pad
-                    atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
-                    if defer_static_atlas:
-                        atlas_width = round(glyph_asset.atlas_width)
-                        atlas_height = round(glyph_asset.atlas_height)
-                        if atlas_width <= 0 or atlas_height <= 0:
-                            return None
-                        atlas = None
-                    else:
-                        atlas = self.tmp_atlas_alpha(atlas_path)
-                        atlas_height = atlas.height
-                    crop_box = (
-                        atlas_left,
-                        atlas_height - atlas_top_unity,
-                        atlas_right,
-                        atlas_height - atlas_bottom_unity,
-                    )
-                    ensure_raster_size(
-                        (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile TMP atlas glyph crop",
-                    )
-                    if defer_static_atlas:
-                        field_img = TMPStaticAtlasField(
-                            atlas_path,
-                            (atlas_width, atlas_height),
-                            crop_box,
-                            (quad_w, quad_h),
-                        )
-                    else:
-                        assert atlas is not None
-                        field_img = atlas.crop(crop_box)
-                        if field_img.size != (quad_w, quad_h):
-                            field_img = field_img.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-                    bbox = (0, 0, quad_w, quad_h)
-                    pad_x = pad_y = 0
-                    native_quad_sized = True
-                else:
-                    atlas = self.tmp_atlas_alpha(atlas_path)
-                    atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
-                    atlas_left = max(0, metrics.rect_x)
-                    crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
-                    font_scale = font_size / max(1.0, glyph_asset.point_size)
-                    glyph_scale = font_scale * metrics.glyph_scale
-                    left = metrics.bearing_x * font_scale
-                    top = -metrics.bearing_y * font_scale
-                    width = max(1, round(metrics.rect_w * glyph_scale))
-                    height = max(1, round(metrics.rect_h * glyph_scale))
-                    bbox = (
-                        math.floor(left),
-                        math.floor(top),
-                        math.ceil(left + width),
-                        math.ceil(top + height),
-                    )
-                    pad_x = pad_y = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
-                    field_size = ensure_raster_size(
-                        (max(1, bbox[2] - bbox[0] + pad_x * 2), max(1, bbox[3] - bbox[1] + pad_y * 2)),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile TMP atlas glyph field",
-                    )
-                    field_img = Image.new(
-                        "L",
-                        field_size,
-                        0,
-                    )
-                    glyph_size = ensure_raster_size(
-                        (width, height),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile TMP atlas glyph",
-                    )
-                    glyph = crop.resize(glyph_size, Image.Resampling.BICUBIC)
-                    field_img.paste(glyph, (pad_x + math.floor(left) - bbox[0], pad_y + math.floor(top) - bbox[1]))
-            else:
+            if metrics is None or metrics.rect_w <= 0 or metrics.rect_h <= 0:
                 return None
-        else:
-            if defer_dynamic_font and char_info is not None:
-                native_field = self.tmp_dynamic_font_field(
-                    font_name,
-                    glyph_char,
+            atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
+            if char_info is not None:
+                prepared = self._tmp_native_static_character_field(
+                    glyph_asset,
+                    metrics,
+                    atlas_path,
                     style,
                     outline_dilate,
                     char_info,
+                    defer_static_atlas,
                     native_field_size,
                 )
-                if native_field is None:
-                    return None
-                field_img, glyph_asset = native_field
-                bbox = (0, 0, field_img.field_size[0], field_img.field_size[1])
-                pad_x = pad_y = 0
-                native_quad_sized = True
             else:
-                dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
-                if dynamic is None:
-                    return None
-                cached, glyph_asset = dynamic
-                active = self.tmp_sdf_asset(font_name)
-                asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
-                native_element_scale = self.tmp_native_element_scale(font_name, style.size)
-                display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
-                display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
-                sample_crop_pad = cached.pad
-                if char_info is not None:
-                    atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
-                    sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
-                sample_crop_pad = min(sample_crop_pad, cached.pad)
-                crop_box = (
-                    max(0, cached.pad - sample_crop_pad),
-                    max(0, cached.pad - sample_crop_pad),
-                    min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
-                    min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
+                prepared = self._tmp_raster_static_character_field(
+                    glyph_asset,
+                    metrics,
+                    atlas_path,
+                    font_size,
+                    outline_dilate,
                 )
-                field_source = cached.field.crop(crop_box)
-                if char_info is not None:
-                    quad_w, quad_h = ensure_raster_size(
-                        native_field_size or self.tmp_native_unrotated_quad_size(char_info),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile TMP native glyph quad",
-                    )
-                    field_img = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-                    bbox = (0, 0, field_img.width, field_img.height)
-                    pad_x = pad_y = 0
-                    native_quad_sized = True
-                else:
-                    bbox = (
-                        math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
-                        math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
-                        math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
-                        math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
-                    )
-                    pad_x = pad_y = max(0, round(sample_crop_pad * display_scale))
-                    field_size = ensure_raster_size(
-                        (
-                            max(1, round(field_source.width * display_scale)),
-                            max(1, round(field_source.height * display_scale)),
-                        ),
-                        max_pixels=self.max_layer_pixels,
-                        label="custom profile displayed TMP glyph field",
-                    )
-                    field_img = field_source.resize(field_size, Image.Resampling.BICUBIC)
-
-        scale_x = self.tmp_native_vertex_scale_x(style)
-        if not native_quad_sized and abs(scale_x - 1.0) >= 1.0e-6:
-            assert isinstance(field_img, Image.Image)
-            scaled_left, scaled_right = self.tmp_scale_x_bounds(float(bbox[0]), float(bbox[2]), scale_x)
-            bbox = (
-                math.floor(scaled_left),
-                bbox[1],
-                math.ceil(scaled_right),
-                bbox[3],
+        else:
+            prepared = self._tmp_dynamic_character_field(
+                font_name,
+                font_path,
+                glyph_char,
+                style,
+                outline_dilate,
+                char_info,
+                defer_dynamic_font,
+                native_field_size,
             )
-            pad_x = max(1, round(pad_x * abs(scale_x)))
-            scaled_size = ensure_raster_size(
-                (
-                    max(1, round(field_img.width * abs(scale_x))),
-                    field_img.height,
-                ),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile scaled TMP glyph field",
-            )
-            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
-
-        return field_img, glyph_asset, bbox, pad_x, pad_y
+        if prepared is None:
+            return None
+        return self._tmp_scaled_character_field(prepared, style).result()
 
     def render_tmp_sdf_character_image(
         self,

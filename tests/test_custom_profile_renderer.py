@@ -26,6 +26,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PreparedLayer,
     RenderedLayer,
     TMPDynamicFontField,
+    TMPDynamicGlyphSDF,
     TMPFontLibrary,
     TMPStaticAtlasField,
     _TMPGlyphContourBuilder,
@@ -1174,6 +1175,78 @@ def test_custom_profile_dynamic_tmp_field_can_defer_all_glyph_pixels(tmp_path: P
     assert prepared_asset is asset
     assert bbox == (0, 0, 12, 16)
     assert (pad_x, pad_y) == (0, 0)
+
+
+def test_custom_profile_static_tmp_field_builds_the_pillow_raster(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = _base_tmp_style()
+    atlas_path = tmp_path / "atlas.png"
+    metrics = SimpleNamespace(
+        rect_x=1,
+        rect_y=2,
+        rect_w=4,
+        rect_h=6,
+        atlas_index=0,
+        bearing_x=1.0,
+        bearing_y=5.0,
+        glyph_scale=1.0,
+    )
+    asset = SimpleNamespace(atlas_paths=[atlas_path], point_size=24.0, glyphs={ord("A"): metrics})
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
+    monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: asset)
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: Image.new("L", (32, 32), 255))
+    monkeypatch.setattr(renderer, "tmp_display_padding", lambda *_: 2)
+    monkeypatch.setattr(renderer, "tmp_native_vertex_scale_x", lambda *_: 1.0)
+
+    prepared = renderer.render_tmp_sdf_character_field(
+        "font",
+        tmp_path / "font.ttf",
+        "A",
+        style,
+        24.0,
+        "#000000",
+        0.0,
+    )
+
+    assert prepared is not None
+    field, prepared_asset, bbox, pad_x, pad_y = prepared
+    assert isinstance(field, Image.Image)
+    assert field.size == (8, 10)
+    assert prepared_asset is asset
+    assert bbox == (1, -5, 5, 1)
+    assert (pad_x, pad_y) == (2, 2)
+
+
+def test_custom_profile_dynamic_tmp_field_scales_the_pillow_raster(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    style = replace(_base_tmp_style(), scale_x=2.0)
+    asset = SimpleNamespace(point_size=24.0)
+    cached = TMPDynamicGlyphSDF(Image.new("L", (10, 8), 255), (0, 0, 6, 4), 2, 24.0)
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
+    monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: None)
+    monkeypatch.setattr(renderer, "tmp_dynamic_glyph_sdf", lambda *_: (cached, asset))
+    monkeypatch.setattr(renderer, "tmp_sdf_asset", lambda *_: asset)
+    monkeypatch.setattr(renderer, "tmp_native_element_scale", lambda *_: 1.0)
+    monkeypatch.setattr(renderer, "tmp_native_vertex_scale_x", lambda *_: 2.0)
+    monkeypatch.setattr(renderer, "tmp_scale_x_bounds", lambda left, right, scale: (left * scale, right * scale))
+
+    prepared = renderer.render_tmp_sdf_character_field(
+        "font",
+        tmp_path / "font.ttf",
+        "A",
+        style,
+        24.0,
+        "#000000",
+        0.0,
+    )
+
+    assert prepared is not None
+    field, prepared_asset, bbox, pad_x, pad_y = prepared
+    assert isinstance(field, Image.Image)
+    assert field.size == (20, 8)
+    assert prepared_asset is asset
+    assert bbox == (-4, -2, 16, 6)
+    assert (pad_x, pad_y) == (4, 2)
 
 
 def test_custom_profile_decorative_face_only_only_matches_symbol_rich_text(tmp_path: Path) -> None:
