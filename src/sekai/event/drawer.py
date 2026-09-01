@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import timedelta
 import logging
 import math
@@ -68,6 +69,16 @@ _EVENT_LIST_CARD_ROW_HEIGHT = _EVENT_LIST_CARD_SIZE + _EVENT_LIST_CARD_ID_HEIGHT
 _EVENT_LIST_CARD_GRID_HEIGHT = _EVENT_LIST_CARD_ROW_HEIGHT * 2 + 1
 _DEFAULT_WL_CHAPTER_COLOR = (75, 75, 75, 255)
 _WL_PROGRESS_BORDER_COLOR = (75, 75, 75, 255)
+
+
+@dataclass(frozen=True)
+class _EventDetailStyles:
+    label: TextStyle
+    text: TextStyle
+    chapter_label: TextStyle
+    chapter_time: TextStyle
+    current_chapter_badge: TextStyle
+
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -187,247 +198,307 @@ def _wl_chapter_progress_segments(
     return segments
 
 
-async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
-    detail = rqd.event_info
-    now = request_now(rqd.timezone)
-    _t0 = time.perf_counter()
-    card_layers = await asyncio.gather(*[get_card_full_thumbnail_layers(card) for card in rqd.event_cards])
+async def _load_event_detail_card_layers(rqd: EventDetailRequest) -> list[CardFullThumbnailLayers]:
+    started_at = time.perf_counter()
+    card_layers = list(await asyncio.gather(*(get_card_full_thumbnail_layers(card) for card in rqd.event_cards)))
     logger.debug(
         "[perf] compose_event_detail_image card thumbs %d: %.3fs",
         len(rqd.event_cards),
-        time.perf_counter() - _t0,
+        time.perf_counter() - started_at,
     )
+    return card_layers
 
-    if detail:
-        banner_index = rqd.event_info.banner_index
-    start_time = rqd.event_info.start_at
-    end_time = rqd.event_info.end_at
 
-    label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
-    text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
-    chapter_label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=(50, 50, 50))
-    chapter_time_style = TextStyle(font=DEFAULT_FONT, size=13, color=(70, 70, 70))
-    current_chapter_badge_style = TextStyle(font=DEFAULT_BOLD_FONT, size=11, color=(70, 70, 70))
-
-    wl_chapters = _normalize_wl_chapters(rqd.event_info.wl_time_list, rqd.timezone)
-    use_story_bg = detail.event_type != "world_bloom"
-
-    # 并行加载所有活动图片
-    _event_img_tasks = {}
+def _event_detail_image_tasks(rqd: EventDetailRequest, wl_chapters: list[dict], use_story_bg: bool) -> dict:
+    tasks = {}
     bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
     # ImageBg 的 fade/blur 已由共享 Painter 原语表达；保持 ref，Skia 直接解码路径。
-    _event_img_tasks["bg"] = get_asset_image_ref(ASSETS_BASE_DIR, bg_path)
+    tasks["bg"] = get_asset_image_ref(ASSETS_BASE_DIR, bg_path)
     event_chara_path = (rqd.event_assets.event_ban_chara_img or "").strip()
     if use_story_bg and event_chara_path:
-        _event_img_tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, event_chara_path)
-    _event_img_tasks["logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
+        tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, event_chara_path)
+    tasks["logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     if rqd.event_assets.ban_chara_icon_path:
-        _event_img_tasks["ban_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
+        tasks["ban_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
     if rqd.event_assets.event_attr_image_path:
-        _event_img_tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
+        tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
     if rqd.event_assets.bonus_chara_path:
-        for i, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
-            _event_img_tasks[f"bonus_chara_{i}"] = get_asset_image_ref(ASSETS_BASE_DIR, chara_path)
-    for i, chapter in enumerate(wl_chapters):
+        for index, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
+            tasks[f"bonus_chara_{index}"] = get_asset_image_ref(ASSETS_BASE_DIR, chara_path)
+    for index, chapter in enumerate(wl_chapters):
         if chapter.get("character_icon_path"):
-            key = f"wl_chapter_icon_{i}"
+            key = f"wl_chapter_icon_{index}"
             chapter["character_icon_key"] = key
-            _event_img_tasks[key] = get_asset_image_ref(ASSETS_BASE_DIR, chapter["character_icon_path"])
-    _ek = list(_event_img_tasks.keys())
-    _t0 = time.perf_counter()
-    _ev = dict(zip(_ek, await asyncio.gather(*_event_img_tasks.values())))
-    logger.debug("[perf] compose_event_detail_image event images %d: %.3fs", len(_ek), time.perf_counter() - _t0)
-    event_bg = _ev["bg"]
-    event_chara_img = _ev.get("chara")
-    event_logo = _ev["logo"]
-    ban_chara_icon = _ev.get("ban_icon")
+            tasks[key] = get_asset_image_ref(ASSETS_BASE_DIR, chapter["character_icon_path"])
+    return tasks
+
+
+async def _load_event_detail_images(
+    rqd: EventDetailRequest,
+    wl_chapters: list[dict],
+    use_story_bg: bool,
+) -> dict:
+    tasks = _event_detail_image_tasks(rqd, wl_chapters, use_story_bg)
+    keys = list(tasks)
+    started_at = time.perf_counter()
+    images = dict(zip(keys, await asyncio.gather(*tasks.values())))
+    logger.debug(
+        "[perf] compose_event_detail_image event images %d: %.3fs",
+        len(keys),
+        time.perf_counter() - started_at,
+    )
+    return images
+
+
+def _event_status_text(start_time, end_time, now) -> str:
+    if start_time <= now <= end_time:
+        return f"距结束还有{get_readable_timedelta(end_time - now)}"
+    if now > end_time:
+        return "活动已结束"
+    return f"距开始还有{get_readable_timedelta(start_time - now)}"
+
+
+def _current_wl_chapter(wl_chapters: list[dict], now) -> dict | None:
+    return next((chapter for chapter in wl_chapters if _is_wl_chapter_current(chapter, now)), None)
+
+
+def _draw_event_identity(
+    rqd: EventDetailRequest,
+    images: dict,
+    styles: _EventDetailStyles,
+) -> None:
+    detail = rqd.event_info
+    with VSplit().set_padding(16).set_sep(12).set_item_align("l").set_content_align("l"):
+        with HSplit().set_padding(0).set_sep(8).set_item_align("l").set_content_align("l"):
+            TextBox(rqd.region.upper(), styles.label)
+            TextBox(f"{detail.id}", styles.text)
+            Spacer(w=8)
+            TextBox("类型", styles.label)
+            TextBox(f"{detail.event_type_name}", styles.text)
+            if detail.banner_cid:
+                Spacer(w=8)
+                if (ban_chara_icon := images.get("ban_icon")) is not None:
+                    ImageBox(ban_chara_icon, size=(30, 30))
+                TextBox(f"{detail.banner_index}箱", styles.label)
+
+
+def _draw_wl_chapter_row(
+    chapter: dict,
+    current_chapter: dict | None,
+    images: dict,
+    styles: _EventDetailStyles,
+) -> None:
+    with HSplit().set_padding(0).set_sep(6).set_item_align("c").set_content_align("l"):
+        icon = images.get(chapter.get("character_icon_key"))
+        if icon is not None:
+            ImageBox(icon, size=(22, 22), image_size_mode="fill")
+        else:
+            Spacer(w=22, h=22).set_bg(RoundRectBg(chapter["color"], 11))
+        is_current = chapter is current_chapter
+        with VSplit().set_padding(0).set_sep(0).set_item_align("l").set_content_align("l"):
+            with HSplit().set_padding(0).set_sep(4).set_item_align("c").set_content_align("l"):
+                label_box = TextBox(
+                    chapter["chapter_label"],
+                    styles.chapter_label,
+                    overflow="shrink",
+                    wrap=False,
+                )
+                if not is_current:
+                    label_box.set_w(260)
+                if is_current:
+                    TextBox(
+                        "当前",
+                        styles.current_chapter_badge,
+                        overflow="shrink",
+                        wrap=False,
+                    ).set_padding((5, 1)).set_bg(RoundRectBg((255, 231, 105, 255), 4))
+            TextBox(
+                f"{chapter['start_time'].strftime('%m-%d %H:%M')} ~ {chapter['end_time'].strftime('%m-%d %H:%M')}",
+                styles.chapter_time,
+                overflow="shrink",
+                wrap=False,
+            ).set_w(260)
+
+
+def _draw_wl_chapters(
+    wl_chapters: list[dict],
+    current_chapter: dict | None,
+    images: dict,
+    styles: _EventDetailStyles,
+) -> None:
+    if not wl_chapters:
+        return
+    with VSplit().set_padding(0).set_sep(5).set_item_align("l").set_content_align("l"):
+        for chapter in wl_chapters:
+            _draw_wl_chapter_row(
+                chapter,
+                current_chapter,
+                images,
+                styles,
+            )
+
+
+def _draw_event_progress(detail, wl_chapters: list[dict], now) -> None:
+    start_time = detail.start_at
+    end_time = detail.end_at
+    event_duration = end_time - start_time
+    progress = _clamp((now - start_time) / event_duration) if event_duration.total_seconds() > 0 else 0
+    progress_w, progress_h, border = 360, 8, 1
+    with Frame().set_padding(8).set_content_align("lt"):
+        Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(RoundRectBg(_WL_PROGRESS_BORDER_COLOR, 4))
+        if detail.event_type == "world_bloom" and wl_chapters and event_duration.total_seconds() > 0:
+            for segment_start, segment_end, color in _wl_chapter_progress_segments(
+                wl_chapters,
+                start_time,
+                end_time,
+                now,
+            ):
+                segment_x = round(progress_w * segment_start)
+                segment_end_x = round(progress_w * segment_end)
+                segment_width = max(1, segment_end_x - segment_x)
+                Spacer(w=segment_width, h=progress_h).set_bg(RoundRectBg(color, 0)).set_offset(
+                    (border + segment_x, border)
+                )
+        else:
+            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(RoundRectBg((255, 255, 255, 255), 4)).set_offset(
+                (border, border)
+            )
+
+
+def _draw_event_timing(
+    detail,
+    now,
+    wl_chapters: list[dict],
+    images: dict,
+    styles: _EventDetailStyles,
+) -> None:
+    with VSplit().set_padding(16).set_sep(12).set_item_align("c").set_content_align("c"):
+        with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
+            TextBox("开始时间", styles.label)
+            TextBox(detail.start_at.strftime("%Y-%m-%d %H:%M:%S"), styles.text)
+        with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
+            TextBox("结束时间", styles.label)
+            TextBox(detail.end_at.strftime("%Y-%m-%d %H:%M:%S"), styles.text)
+        with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
+            TextBox(_event_status_text(detail.start_at, detail.end_at, now), styles.text)
+
+        if detail.event_type == "world_bloom":
+            current_chapter = _current_wl_chapter(wl_chapters, now)
+            if current_chapter:
+                TextBox(
+                    f"距章节结束还有{get_readable_timedelta(current_chapter['end_time'] - now)}",
+                    styles.text,
+                )
+            _draw_wl_chapters(
+                wl_chapters,
+                current_chapter,
+                images,
+                styles,
+            )
+        _draw_event_progress(detail, wl_chapters, now)
+
+
+def _event_card_column_count(card_count: int) -> int:
+    if card_count <= 4:
+        return card_count
+    return 3 if card_count <= 6 else 4
+
+
+def _draw_event_cards(
+    event_cards: list,
+    card_layers: list[CardFullThumbnailLayers],
+    styles: _EventDetailStyles,
+) -> None:
+    if not event_cards:
+        return
+    with HSplit().set_padding(16).set_sep(16).set_item_align("c").set_content_align("c"):
+        TextBox("活动卡片", styles.label)
+        visible_cards = event_cards[:8]
+        with Grid(col_count=_event_card_column_count(len(visible_cards))).set_sep(4, 4):
+            for card, layers in zip(visible_cards, card_layers):
+                with VSplit().set_padding(0).set_sep(2).set_item_align("c").set_content_align("c"):
+                    CardFullThumbnailBox(layers, size=(80, 80))
+                    TextBox(
+                        f"ID:{card.card_id}",
+                        TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)),
+                        overflow="clip",
+                    )
+
+
+def _draw_event_bonus(rqd: EventDetailRequest, images: dict, styles: _EventDetailStyles) -> None:
+    detail = rqd.event_info
+    if not (detail.bonus_attr or detail.bonus_chara_id):
+        return
+    with HSplit().set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
+        if detail.bonus_attr:
+            TextBox("加成属性", styles.label)
+            ImageBox(images["attr"], size=(None, 40))
+        if rqd.event_assets.bonus_chara_path:
+            TextBox("加成角色", styles.label)
+            bonus_chara_images = [
+                images[f"bonus_chara_{index}"] for index in range(len(rqd.event_assets.bonus_chara_path))
+            ]
+            with Grid(col_count=5 if len(bonus_chara_images) < 20 else 7).set_sep(4, 4):
+                for image in bonus_chara_images:
+                    ImageBox(image, size=(None, 40))
+
+
+def _draw_event_detail_panel(
+    rqd: EventDetailRequest,
+    now,
+    wl_chapters: list[dict],
+    images: dict,
+    card_layers: list[CardFullThumbnailLayers],
+) -> None:
+    styles = _EventDetailStyles(
+        label=TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50)),
+        text=TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)),
+        chapter_label=TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=(50, 50, 50)),
+        chapter_time=TextStyle(font=DEFAULT_FONT, size=13, color=(70, 70, 70)),
+        current_chapter_badge=TextStyle(font=DEFAULT_BOLD_FONT, size=11, color=(70, 70, 70)),
+    )
+    with (
+        VSplit()
+        .set_padding(16)
+        .set_sep(16)
+        .set_item_align("t")
+        .set_content_align("t")
+        .set_item_bg(roundrect_bg(alpha=80))
+    ):
+        ImageBox(images["logo"], size=(None, 150)).set_omit_parent_bg(True)
+        _draw_event_identity(rqd, images, styles)
+        _draw_event_timing(
+            rqd.event_info,
+            now,
+            wl_chapters,
+            images,
+            styles,
+        )
+        _draw_event_cards(rqd.event_cards, card_layers, styles)
+        _draw_event_bonus(rqd, images, styles)
+
+
+async def _build_event_detail_canvas(rqd: EventDetailRequest) -> Canvas:
+    detail = rqd.event_info
+    now = request_now(rqd.timezone)
+    wl_chapters = _normalize_wl_chapters(detail.wl_time_list, rqd.timezone)
+    use_story_bg = detail.event_type != "world_bloom"
+    card_layers, images = await asyncio.gather(
+        _load_event_detail_card_layers(rqd),
+        _load_event_detail_images(rqd, wl_chapters, use_story_bg),
+    )
+    event_bg = images["bg"]
     h = 1024
     w = min(int(h * 1.6), event_bg.size[0] * h // event_bg.size[1] if event_bg else int(h * 1.6))
     bg = ImageBg(event_bg, blur=False) if event_bg else SEKAI_BLUE_BG
+    with Canvas(bg=bg, w=w, h=h).set_padding(BG_PADDING).set_content_align("r") as canvas:
+        with Frame().set_size((w - BG_PADDING * 2, h - BG_PADDING * 2)).set_content_align("lb").set_padding((64, 0)):
+            if use_story_bg and (event_chara_img := images.get("chara")) is not None:
+                ImageBox(event_chara_img, size=(None, int(h * 0.9)), use_alpha_blend=True).set_offset((0, BG_PADDING))
+        _draw_event_detail_panel(rqd, now, wl_chapters, images, card_layers)
 
-    async def draw(w, h):
-        with Canvas(bg=bg, w=w, h=h).set_padding(BG_PADDING).set_content_align("r") as canvas:
-            with (
-                Frame().set_size((w - BG_PADDING * 2, h - BG_PADDING * 2)).set_content_align("lb").set_padding((64, 0))
-            ):
-                if use_story_bg and event_chara_img is not None:
-                    ImageBox(event_chara_img, size=(None, int(h * 0.9)), use_alpha_blend=True).set_offset(
-                        (0, BG_PADDING)
-                    )
-            with (
-                VSplit()
-                .set_padding(16)
-                .set_sep(16)
-                .set_item_align("t")
-                .set_content_align("t")
-                .set_item_bg(roundrect_bg(alpha=80))
-            ):
-                # logo
-                ImageBox(event_logo, size=(None, 150)).set_omit_parent_bg(True)
-
-                # 活动ID和类型和箱活
-                with VSplit().set_padding(16).set_sep(12).set_item_align("l").set_content_align("l"):
-                    with HSplit().set_padding(0).set_sep(8).set_item_align("l").set_content_align("l"):
-                        TextBox(rqd.region.upper(), label_style)
-                        TextBox(f"{detail.id}", text_style)
-                        Spacer(w=8)
-                        TextBox("类型", label_style)
-                        TextBox(f"{detail.event_type_name}", text_style)
-                        if detail.banner_cid:
-                            Spacer(w=8)
-                            if ban_chara_icon is not None:
-                                ImageBox(ban_chara_icon, size=(30, 30))
-                            TextBox(f"{banner_index}箱", label_style)
-
-                # 活动时间
-
-                with VSplit().set_padding(16).set_sep(12).set_item_align("c").set_content_align("c"):
-                    with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
-                        TextBox("开始时间", label_style)
-                        TextBox(start_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
-                    with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
-                        TextBox("结束时间", label_style)
-                        TextBox(end_time.strftime("%Y-%m-%d %H:%M:%S"), text_style)
-
-                    with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
-                        if start_time <= now <= end_time:
-                            TextBox(f"距结束还有{get_readable_timedelta(end_time - now)}", text_style)
-                        elif now > end_time:
-                            TextBox("活动已结束", text_style)
-                        else:
-                            TextBox(f"距开始还有{get_readable_timedelta(start_time - now)}", text_style)
-
-                    if detail.event_type == "world_bloom":
-                        cur_chapter = None
-                        for chapter in wl_chapters:
-                            if _is_wl_chapter_current(chapter, now):
-                                cur_chapter = chapter
-                                break
-                        if cur_chapter:
-                            TextBox(
-                                f"距章节结束还有{get_readable_timedelta(cur_chapter['end_time'] - now)}", text_style
-                            )
-                        if wl_chapters:
-                            with VSplit().set_padding(0).set_sep(5).set_item_align("l").set_content_align("l"):
-                                for chapter in wl_chapters:
-                                    with HSplit().set_padding(0).set_sep(6).set_item_align("c").set_content_align("l"):
-                                        icon = _ev.get(chapter.get("character_icon_key"))
-                                        if icon is not None:
-                                            ImageBox(icon, size=(22, 22), image_size_mode="fill")
-                                        else:
-                                            Spacer(w=22, h=22).set_bg(RoundRectBg(chapter["color"], 11))
-                                        is_current = chapter is cur_chapter
-                                        with (
-                                            VSplit()
-                                            .set_padding(0)
-                                            .set_sep(0)
-                                            .set_item_align("l")
-                                            .set_content_align("l")
-                                        ):
-                                            with (
-                                                HSplit()
-                                                .set_padding(0)
-                                                .set_sep(4)
-                                                .set_item_align("c")
-                                                .set_content_align("l")
-                                            ):
-                                                label_box = TextBox(
-                                                    chapter["chapter_label"],
-                                                    chapter_label_style,
-                                                    overflow="shrink",
-                                                    wrap=False,
-                                                )
-                                                if not is_current:
-                                                    label_box.set_w(260)
-                                                if is_current:
-                                                    TextBox(
-                                                        "当前",
-                                                        current_chapter_badge_style,
-                                                        overflow="shrink",
-                                                        wrap=False,
-                                                    ).set_padding((5, 1)).set_bg(RoundRectBg((255, 231, 105, 255), 4))
-                                            TextBox(
-                                                f"{chapter['start_time'].strftime('%m-%d %H:%M')} ~ "
-                                                f"{chapter['end_time'].strftime('%m-%d %H:%M')}",
-                                                chapter_time_style,
-                                                overflow="shrink",
-                                                wrap=False,
-                                            ).set_w(260)
-
-                    # 进度条
-                    event_duration = end_time - start_time
-                    progress = _clamp((now - start_time) / event_duration) if event_duration.total_seconds() > 0 else 0
-                    progress_w, progress_h, border = 360, 8, 1
-                    if (
-                        detail.event_type == "world_bloom"
-                        and len(wl_chapters) > 0
-                        and event_duration.total_seconds() > 0
-                    ):
-                        chapter_segments = _wl_chapter_progress_segments(wl_chapters, start_time, end_time, now)
-                        with Frame().set_padding(8).set_content_align("lt"):
-                            Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
-                                RoundRectBg(_WL_PROGRESS_BORDER_COLOR, 4)
-                            )
-                            for segment_start, segment_end, color in chapter_segments:
-                                segment_x = round(progress_w * segment_start)
-                                segment_end_x = round(progress_w * segment_end)
-                                segment_width = max(1, segment_end_x - segment_x)
-                                Spacer(w=segment_width, h=progress_h).set_bg(RoundRectBg(color, 0)).set_offset(
-                                    (border + segment_x, border)
-                                )
-                    else:
-                        with Frame().set_padding(8).set_content_align("lt"):
-                            Spacer(w=progress_w + border * 2, h=progress_h + border * 2).set_bg(
-                                RoundRectBg(_WL_PROGRESS_BORDER_COLOR, 4)
-                            )
-                            Spacer(w=int(progress_w * progress), h=progress_h).set_bg(
-                                RoundRectBg((255, 255, 255, 255), 4)
-                            ).set_offset((border, border))
-                # 活动卡片
-                event_cards = rqd.event_cards
-                if event_cards:
-                    with HSplit().set_padding(16).set_sep(16).set_item_align("c").set_content_align("c"):
-                        TextBox("活动卡片", label_style)
-                        event_cards = event_cards[:8]
-                        card_num = len(event_cards)
-                        if card_num <= 4:
-                            col_count = card_num
-                        elif card_num <= 6:
-                            col_count = 3
-                        else:
-                            col_count = 4
-                        with Grid(col_count=col_count).set_sep(4, 4):
-                            for card, layers in zip(event_cards, card_layers):
-                                with VSplit().set_padding(0).set_sep(2).set_item_align("c").set_content_align("c"):
-                                    CardFullThumbnailBox(layers, size=(80, 80))
-                                    TextBox(
-                                        f"ID:{card.card_id}",
-                                        TextStyle(font=DEFAULT_FONT, size=16, color=(75, 75, 75)),
-                                        overflow="clip",
-                                    )
-
-                # 加成
-                if detail.bonus_attr or detail.bonus_chara_id:
-                    with HSplit().set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
-                        if detail.bonus_attr:
-                            TextBox("加成属性", label_style)
-                            ImageBox(
-                                _ev["attr"],
-                                size=(None, 40),
-                            )
-                        if rqd.event_assets.bonus_chara_path:
-                            TextBox("加成角色", label_style)
-                            bonus_chara_image = [
-                                _ev[f"bonus_chara_{i}"] for i in range(len(rqd.event_assets.bonus_chara_path))
-                            ]
-                            with Grid(col_count=5 if len(bonus_chara_image) < 20 else 7).set_sep(4, 4):
-                                for image in bonus_chara_image:
-                                    ImageBox(image, size=(None, 40))
-
-        add_request_watermark(canvas, rqd)
-        return canvas
-
-    return await draw(w, h)
+    add_request_watermark(canvas, rqd)
+    return canvas
 
 
 async def compose_event_detail_image(rqd: EventDetailRequest) -> Image.Image:
