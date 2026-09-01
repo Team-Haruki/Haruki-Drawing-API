@@ -494,7 +494,9 @@ class _MusicDetailRenderer:
 
     def _leaderboard_cell(self, row: int, column: int):
         matrix = self.rqd.leaderboard_matrix or []
-        if row < len(matrix) and column < len(matrix[row]) and (info := matrix[row][column]):
+        row_data = matrix[row] if row < len(matrix) else []
+        info = row_data[column] if column < len(row_data) else None
+        if info:
             music_num = self.rqd.leaderboard_music_num or 1
             return (
                 (info.rank - 1) / max(1, music_num - 1),
