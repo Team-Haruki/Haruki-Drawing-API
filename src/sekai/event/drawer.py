@@ -896,7 +896,7 @@ async def _get_event_list_entry_image(d, now, style1: TextStyle, style2: TextSty
 async def _build_event_list_canvas(rqd: EventListRequest) -> Canvas:
     event_list = rqd.event_info
 
-    row_count = math.ceil(math.sqrt(len(event_list)))
+    row_count = max(1, math.ceil(math.sqrt(len(event_list))))
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
     now = request_now(rqd.timezone)
