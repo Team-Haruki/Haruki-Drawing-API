@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+from src.sekai.profile.custom_profile import limits as limits_module
 from src.sekai.profile.custom_profile.limits import ensure_raster_size, validate_custom_profile_card
 
 LIMITS = {
@@ -92,6 +93,22 @@ def test_custom_profile_rejects_too_many_elements() -> None:
 def test_custom_profile_rejects_invalid_scene_shapes(card, message) -> None:
     with pytest.raises(ValueError, match=message):
         validate_custom_profile_card(card, **LIMITS)
+
+
+def test_custom_profile_accepts_explicitly_empty_bucket() -> None:
+    validate_custom_profile_card({"customProfileCard": {"shapes": None}}, **LIMITS)
+
+
+def test_tmp_validation_ignores_parser_tokens_without_a_style(monkeypatch) -> None:
+    monkeypatch.setattr(limits_module, "parse_tmp_text", lambda *_args: [object()])
+
+    limits_module._validate_tmp_text_styles(
+        "ignored",
+        12,
+        label="card.customProfileCard.texts[0]",
+        max_scale=LIMITS["max_scale"],
+        max_text_size=LIMITS["max_text_size"],
+    )
 
 
 @pytest.mark.parametrize("bucket", ["characterIcons", "materials", "userInterfaceIcons"])

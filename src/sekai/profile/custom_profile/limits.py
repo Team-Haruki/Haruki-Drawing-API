@@ -156,6 +156,102 @@ def _validate_tmp_text_styles(
         _validate_tmp_style(style, label=label, max_scale=max_scale, max_text_size=max_text_size)
 
 
+def _content_bucket_items(layout: dict[str, Any], bucket: str) -> list:
+    items = layout.get(bucket, [])
+    if items is None:
+        return []
+    if not isinstance(items, list):
+        raise ValueError(f"card.customProfileCard.{bucket} must be an array")
+    if bucket in UNSUPPORTED_DYNAMIC_BUCKETS and items:
+        raise ValueError(
+            f"card.customProfileCard.{bucket} is unsupported without Unity DynamicAtlasStudio texture data"
+        )
+    return items
+
+
+def _validate_object_transform(object_data: object, *, label: str, max_scale: float) -> None:
+    if not isinstance(object_data, dict):
+        raise ValueError(f"{label}.objectData must be an object")
+
+    scale = object_data.get("scale") or {}
+    if not isinstance(scale, dict):
+        raise ValueError(f"{label}.objectData.scale must be an object")
+    sx = _finite_number(scale.get("x", 1.0), f"{label}.objectData.scale.x")
+    sy = _finite_number(scale.get("y", sx), f"{label}.objectData.scale.y")
+    if sx <= 0 or sy <= 0 or sx > max_scale or sy > max_scale:
+        raise ValueError(f"{label}.objectData.scale must be within (0, {max_scale:g}] on both axes")
+
+    for group in ("position", "rotation"):
+        values = object_data.get(group) or {}
+        if not isinstance(values, dict):
+            raise ValueError(f"{label}.objectData.{group} must be an object")
+        for axis, value in values.items():
+            _finite_number(value, f"{label}.objectData.{group}.{axis}")
+
+
+def _validate_text_content(
+    item: dict[str, Any],
+    *,
+    label: str,
+    max_scale: float,
+    max_text_size: float,
+    max_text_length: int,
+) -> None:
+    text = str(item.get("text", "") or "")
+    if len(text) > max_text_length:
+        raise ValueError(f"{label}.text has {len(text)} characters; limit is {max_text_length}")
+    size = _finite_number(item.get("size", 1.0), f"{label}.size")
+    if size <= 0 or size > max_text_size:
+        raise ValueError(f"{label}.size must be within (0, {max_text_size:g}]")
+    _validate_tmp_text_styles(text, size, label=label, max_scale=max_scale, max_text_size=max_text_size)
+
+
+def _validate_item_scalars(
+    item: dict[str, Any],
+    *,
+    bucket: str,
+    label: str,
+    max_scale: float,
+    max_text_size: float,
+) -> None:
+    max_line_spacing = max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM * max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
+    for numeric_key in ("alpha", "outlineAlpha", "outlineSize", "lineSpacing"):
+        if numeric_key not in item or item[numeric_key] is None:
+            continue
+        number = _finite_number(item[numeric_key], f"{label}.{numeric_key}")
+        if bucket == "texts" and numeric_key == "lineSpacing" and abs(number) > max_line_spacing:
+            raise ValueError(f"{label}.lineSpacing must be within [-{max_line_spacing:g}, {max_line_spacing:g}]")
+
+
+def _validate_content_item(
+    item: object,
+    *,
+    bucket: str,
+    label: str,
+    max_scale: float,
+    max_text_size: float,
+    max_text_length: int,
+) -> None:
+    if not isinstance(item, dict):
+        raise ValueError(f"{label} must be an object")
+    _validate_object_transform(item.get("objectData"), label=label, max_scale=max_scale)
+    if bucket == "texts":
+        _validate_text_content(
+            item,
+            label=label,
+            max_scale=max_scale,
+            max_text_size=max_text_size,
+            max_text_length=max_text_length,
+        )
+    _validate_item_scalars(
+        item,
+        bucket=bucket,
+        label=label,
+        max_scale=max_scale,
+        max_text_size=max_text_size,
+    )
+
+
 def validate_custom_profile_card(
     card: dict[str, Any],
     *,
@@ -172,68 +268,21 @@ def validate_custom_profile_card(
 
     element_count = 0
     for bucket in CONTENT_BUCKETS:
-        items = layout.get(bucket, [])
-        if items is None:
-            continue
-        if not isinstance(items, list):
-            raise ValueError(f"card.customProfileCard.{bucket} must be an array")
-        if bucket in UNSUPPORTED_DYNAMIC_BUCKETS and items:
-            raise ValueError(
-                f"card.customProfileCard.{bucket} is unsupported without Unity DynamicAtlasStudio texture data"
-            )
+        items = _content_bucket_items(layout, bucket)
         element_count += len(items)
         if element_count > max_elements:
             raise ValueError(f"custom profile has {element_count} elements; limit is {max_elements}")
 
         for index, item in enumerate(items):
             label = f"card.customProfileCard.{bucket}[{index}]"
-            if not isinstance(item, dict):
-                raise ValueError(f"{label} must be an object")
-            object_data = item.get("objectData")
-            if not isinstance(object_data, dict):
-                raise ValueError(f"{label}.objectData must be an object")
-
-            scale = object_data.get("scale") or {}
-            if not isinstance(scale, dict):
-                raise ValueError(f"{label}.objectData.scale must be an object")
-            sx = _finite_number(scale.get("x", 1.0), f"{label}.objectData.scale.x")
-            sy = _finite_number(scale.get("y", sx), f"{label}.objectData.scale.y")
-            if sx <= 0 or sy <= 0 or sx > max_scale or sy > max_scale:
-                raise ValueError(f"{label}.objectData.scale must be within (0, {max_scale:g}] on both axes")
-
-            for group in ("position", "rotation"):
-                values = object_data.get(group) or {}
-                if not isinstance(values, dict):
-                    raise ValueError(f"{label}.objectData.{group} must be an object")
-                for axis, value in values.items():
-                    _finite_number(value, f"{label}.objectData.{group}.{axis}")
-
-            if bucket == "texts":
-                text = str(item.get("text", "") or "")
-                if len(text) > max_text_length:
-                    raise ValueError(f"{label}.text has {len(text)} characters; limit is {max_text_length}")
-                size = _finite_number(item.get("size", 1.0), f"{label}.size")
-                if size <= 0 or size > max_text_size:
-                    raise ValueError(f"{label}.size must be within (0, {max_text_size:g}]")
-                _validate_tmp_text_styles(
-                    text,
-                    size,
-                    label=label,
-                    max_scale=max_scale,
-                    max_text_size=max_text_size,
-                )
-
-            for numeric_key in ("alpha", "outlineAlpha", "outlineSize", "lineSpacing"):
-                if numeric_key in item and item[numeric_key] is not None:
-                    number = _finite_number(item[numeric_key], f"{label}.{numeric_key}")
-                    if bucket == "texts" and numeric_key == "lineSpacing":
-                        max_line_spacing = (
-                            max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM * max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
-                        )
-                        if abs(number) > max_line_spacing:
-                            raise ValueError(
-                                f"{label}.lineSpacing must be within [-{max_line_spacing:g}, {max_line_spacing:g}]"
-                            )
+            _validate_content_item(
+                item,
+                bucket=bucket,
+                label=label,
+                max_scale=max_scale,
+                max_text_size=max_text_size,
+                max_text_length=max_text_length,
+            )
 
 
 def ensure_raster_size(size: tuple[int, int], *, max_pixels: int, label: str) -> tuple[int, int]:
