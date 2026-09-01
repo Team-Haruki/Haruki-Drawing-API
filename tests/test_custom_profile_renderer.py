@@ -28,6 +28,7 @@ from src.sekai.profile.custom_profile.renderer import (
     TMPDynamicFontField,
     TMPFontLibrary,
     TMPStaticAtlasField,
+    _TMPGlyphContourBuilder,
     build_arg_parser,
     harden_rgba_alpha,
     resize_rgba_premul,
@@ -793,6 +794,35 @@ def test_custom_profile_vector_sdf_budget_runs_before_numpy_allocation(tmp_path:
             0,
             SimpleNamespace(gradient_scale=1.0),
         )
+
+
+def test_custom_profile_vector_contour_builder_flattens_all_pen_segments() -> None:
+    builder = _TMPGlyphContourBuilder(scale=2.0)
+
+    builder.consume("moveTo", ((0.0, 0.0),))
+    builder.consume("lineTo", ((1.0, 0.0),))
+    builder.consume("qCurveTo", ((2.0, 1.0), (3.0, 0.0)))
+    builder.consume("curveTo", ((4.0, 1.0), (5.0, 1.0), (6.0, 0.0)))
+    builder.consume("closePath", ())
+
+    contours = builder.finish()
+    assert len(contours) == 1
+    assert contours[0][0] == (0.0, 0.0)
+    assert contours[0][1] == (2.0, 0.0)
+    assert contours[0][-1] == (12.0, 0.0)
+
+
+def test_custom_profile_vector_contour_builder_handles_implicit_quadratic_endpoints() -> None:
+    builder = _TMPGlyphContourBuilder(scale=1.0)
+
+    builder.consume("moveTo", ((0.0, 0.0),))
+    builder.consume("qCurveTo", ((2.0, 2.0), (4.0, 0.0), None))
+    builder.consume("endPath", ())
+
+    contours = builder.finish()
+    assert len(contours) == 1
+    assert contours[0][0] == (0.0, 0.0)
+    assert contours[0][-1] == (3.0, 1.0)
 
 
 def test_custom_profile_retained_raster_budget_rejects_before_next_allocation(tmp_path: Path) -> None:

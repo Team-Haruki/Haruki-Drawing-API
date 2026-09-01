@@ -10,7 +10,7 @@ import json
 import math
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
@@ -831,6 +831,129 @@ class TMPDynamicGlyphSDF:
     bbox: tuple[int, int, int, int]
     pad: int
     sample_size: float
+
+
+@dataclass
+class _TMPGlyphContourBuilder:
+    scale: float
+    contours: list[list[tuple[float, float]]] = field(default_factory=list)
+    contour: list[tuple[float, float]] = field(default_factory=list)
+    pos: tuple[float, float] | None = None
+    start: tuple[float, float] | None = None
+
+    def _append_point(self, point: tuple[float, float]) -> None:
+        self.contour.append((float(point[0]) * self.scale, float(point[1]) * self.scale))
+
+    def _close_contour(self) -> None:
+        if len(self.contour) >= 2:
+            self.contours.append(self.contour)
+        self.contour = []
+
+    def _flatten_quadratic(
+        self,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+    ) -> None:
+        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+            u = 1.0 - t
+            self._append_point(
+                (
+                    u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
+                    u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
+                )
+            )
+
+    def _flatten_cubic(
+        self,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+    ) -> None:
+        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+            u = 1.0 - t
+            self._append_point(
+                (
+                    u * u * u * p0[0] + 3.0 * u * u * t * p1[0] + 3.0 * u * t * t * p2[0] + t * t * t * p3[0],
+                    u * u * u * p0[1] + 3.0 * u * u * t * p1[1] + 3.0 * u * t * t * p2[1] + t * t * t * p3[1],
+                )
+            )
+
+    def _consume_cubic(self, args: tuple[Any, ...]) -> None:
+        assert self.pos is not None
+        curve_points = [tuple(point) for point in args]
+        for index in range(0, len(curve_points), 3):
+            if index + 2 >= len(curve_points):
+                break
+            p1, p2, p3 = curve_points[index : index + 3]
+            self._flatten_cubic(self.pos, p1, p2, p3)
+            self.pos = p3
+
+    @staticmethod
+    def _quadratic_points(args: tuple[Any, ...]) -> tuple[list[tuple[float, float]], tuple[float, float]] | None:
+        points = [None if point is None else tuple(point) for point in args]
+        if not points:
+            return None
+        if points[-1] is None:
+            off_curves = [point for point in points[:-1] if point is not None]
+            if not off_curves:
+                return None
+            final = (
+                (off_curves[0][0] + off_curves[-1][0]) * 0.5,
+                (off_curves[0][1] + off_curves[-1][1]) * 0.5,
+            )
+            points = [*off_curves, final]
+        final_point = points[-1]
+        if final_point is None:
+            return None
+        return [point for point in points[:-1] if point is not None], final_point
+
+    def _consume_quadratic(self, args: tuple[Any, ...]) -> None:
+        assert self.pos is not None
+        resolved = self._quadratic_points(args)
+        if resolved is None:
+            return
+        off_curves, final_point = resolved
+        if not off_curves:
+            self.pos = final_point
+            self._append_point(self.pos)
+            return
+        current = self.pos
+        for index, control in enumerate(off_curves):
+            end = final_point if index == len(off_curves) - 1 else self._midpoint(control, off_curves[index + 1])
+            self._flatten_quadratic(current, control, end)
+            current = end
+        self.pos = final_point
+
+    @staticmethod
+    def _midpoint(first: tuple[float, float], second: tuple[float, float]) -> tuple[float, float]:
+        return (first[0] + second[0]) * 0.5, (first[1] + second[1]) * 0.5
+
+    def consume(self, op: str, args: tuple[Any, ...]) -> None:
+        if op == "moveTo":
+            self._close_contour()
+            self.pos = tuple(args[0])
+            self.start = self.pos
+            self._append_point(self.pos)
+        elif op == "lineTo" and self.pos is not None:
+            self.pos = tuple(args[0])
+            self._append_point(self.pos)
+        elif op == "curveTo" and self.pos is not None:
+            self._consume_cubic(args)
+        elif op == "qCurveTo" and self.pos is not None:
+            self._consume_quadratic(args)
+        elif op == "closePath":
+            self._close_contour()
+            self.pos = self.start
+        elif op == "endPath":
+            self._close_contour()
+
+    def finish(self) -> list[list[tuple[float, float]]]:
+        self._close_contour()
+        return self.contours
 
 
 @dataclass(frozen=True)
@@ -9389,113 +9512,10 @@ class PNGRenderer:
             self._store_vector_glyph(key, l2_key, None)
             return None
 
-        scale = sample_size / max(1.0, units_per_em)
-        contours: list[list[tuple[float, float]]] = []
-        contour: list[tuple[float, float]] = []
-        pos: tuple[float, float] | None = None
-        start: tuple[float, float] | None = None
-
-        def scaled(point: tuple[float, float]) -> tuple[float, float]:
-            return float(point[0]) * scale, float(point[1]) * scale
-
-        def append_point(point: tuple[float, float]) -> None:
-            contour.append(scaled(point))
-
-        def close_contour() -> None:
-            nonlocal contour
-            if len(contour) >= 2:
-                contours.append(contour)
-            contour = []
-
-        def flatten_quadratic(
-            p0: tuple[float, float],
-            p1: tuple[float, float],
-            p2: tuple[float, float],
-        ) -> None:
-            for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
-                t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
-                u = 1.0 - t
-                append_point(
-                    (
-                        u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
-                        u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
-                    )
-                )
-
-        def flatten_cubic(
-            p0: tuple[float, float],
-            p1: tuple[float, float],
-            p2: tuple[float, float],
-            p3: tuple[float, float],
-        ) -> None:
-            for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
-                t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
-                u = 1.0 - t
-                append_point(
-                    (
-                        u * u * u * p0[0] + 3.0 * u * u * t * p1[0] + 3.0 * u * t * t * p2[0] + t * t * t * p3[0],
-                        u * u * u * p0[1] + 3.0 * u * u * t * p1[1] + 3.0 * u * t * t * p2[1] + t * t * t * p3[1],
-                    )
-                )
-
+        builder = _TMPGlyphContourBuilder(sample_size / max(1.0, units_per_em))
         for op, args in pen.value:
-            if op == "moveTo":
-                close_contour()
-                pos = tuple(args[0])
-                start = pos
-                append_point(pos)
-            elif op == "lineTo" and pos is not None:
-                pos = tuple(args[0])
-                append_point(pos)
-            elif op == "curveTo" and pos is not None:
-                curve_points = [tuple(point) for point in args]
-                for idx in range(0, len(curve_points), 3):
-                    if idx + 2 >= len(curve_points):
-                        break
-                    p1, p2, p3 = curve_points[idx : idx + 3]
-                    flatten_cubic(pos, p1, p2, p3)
-                    pos = p3
-            elif op == "qCurveTo" and pos is not None:
-                points = [None if point is None else tuple(point) for point in args]
-                if not points:
-                    continue
-                if points[-1] is None:
-                    off_curves = [point for point in points[:-1] if point is not None]
-                    if not off_curves:
-                        continue
-                    final = (
-                        (off_curves[0][0] + off_curves[-1][0]) * 0.5,
-                        (off_curves[0][1] + off_curves[-1][1]) * 0.5,
-                    )
-                    points = [*off_curves, final]
-                final_point = points[-1]
-                if final_point is None:
-                    continue
-                off_curves = [point for point in points[:-1] if point is not None]
-                if not off_curves:
-                    pos = final_point
-                    append_point(pos)
-                    continue
-                current = pos
-                for idx, control in enumerate(off_curves):
-                    if idx == len(off_curves) - 1:
-                        end = final_point
-                    else:
-                        next_control = off_curves[idx + 1]
-                        end = (
-                            (control[0] + next_control[0]) * 0.5,
-                            (control[1] + next_control[1]) * 0.5,
-                        )
-                    flatten_quadratic(current, control, end)
-                    current = end
-                pos = final_point
-            elif op == "closePath":
-                close_contour()
-                pos = start
-            elif op == "endPath":
-                close_contour()
-
-        close_contour()
+            builder.consume(op, args)
+        contours = builder.finish()
         if not contours:
             self._store_vector_glyph(key, l2_key, None)
             return None
