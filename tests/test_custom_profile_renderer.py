@@ -25,9 +25,12 @@ from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
     PreparedLayer,
     RenderedLayer,
+    StyledLine,
     TMPDynamicFontField,
     TMPDynamicGlyphSDF,
     TMPFontLibrary,
+    TMPGlyphMetrics,
+    TMPNativeCharacterInfo,
     TMPStaticAtlasField,
     _TMPGlyphContourBuilder,
     build_arg_parser,
@@ -97,6 +100,102 @@ def test_custom_profile_tmp_parser_tolerates_o_in_hex_color() -> None:
     assert len(runs) == 1
     assert runs[0].text == "●"
     assert runs[0].style.color == "#ffbdba"
+
+
+def test_custom_profile_native_text_layout_keeps_runs_breaks_and_empty_lines(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    base_style = _base_tmp_style()
+    spaced_style = replace(base_style, cspace=2.0)
+    lines = [
+        StyledLine([TextRun("A\n", spaced_style), TextRun("B", base_style)], base_style, trailing_newline_count=2),
+        StyledLine([TextRun("", base_style)], base_style),
+    ]
+    metrics = TMPGlyphMetrics(1.0, 1.0, 0.0, 1.0, 1.0, 0, 0, 1, 1, 1.0, 0)
+
+    monkeypatch.setattr(renderer, "tmp_native_element_scale", lambda *_: 1.0)
+    monkeypatch.setattr(renderer, "tmp_native_current_em_scale", lambda *_: 1.0)
+    monkeypatch.setattr(renderer, "tmp_native_raw_line_gap", lambda *_: 0.0)
+    monkeypatch.setattr(renderer, "tmp_native_line_initial_x", lambda *_: 0.0)
+    monkeypatch.setattr(renderer, "tmp_closes_cspace_before_next_run", lambda style, _next: style.cspace > 0.0)
+    monkeypatch.setattr(renderer, "tmp_cspace_advance", lambda cspace: cspace)
+    monkeypatch.setattr(renderer, "tmp_native_style_extents", lambda *_: (6.0, -2.0))
+    monkeypatch.setattr(renderer, "tmp_preferred_width", lambda width: width)
+    monkeypatch.setattr(renderer, "tmp_preferred_height", lambda height, _face_height: height)
+    monkeypatch.setattr(renderer.tmp_font_library, "active_asset", lambda *_: None)
+    monkeypatch.setattr(
+        renderer,
+        "tmp_native_measure_line_runs",
+        lambda line, *_args, **_kwargs: (
+            [(run, 0.0, float(len(run.text) * 10)) for run in line.runs],
+            float(sum(len(run.text.replace("\n", "")) for run in line.runs) * 10),
+            0.0,
+            20.0,
+            24.0,
+        ),
+    )
+
+    def fake_character(
+        char,
+        style,
+        _font_name,
+        _font_path,
+        line_index,
+        index,
+        x_advance,
+        line_offset,
+        _first_character_index,
+        max_ascender,
+        max_descender,
+        visible_count,
+        *_args,
+        **_kwargs,
+    ):
+        next_advance = x_advance + 10.0
+        ascender = 9.0 if char == "\n" else 8.0
+        visible = char != "\n"
+        info = TMPNativeCharacterInfo(
+            index=index,
+            char=char,
+            line_index=line_index,
+            x_origin=x_advance,
+            x_advance=next_advance,
+            glyph_origin_x=x_advance,
+            bottom_left_x=x_advance,
+            bottom_left_y=-2.0 - line_offset,
+            top_left_x=x_advance,
+            top_left_y=ascender - line_offset,
+            top_right_x=next_advance,
+            top_right_y=ascender - line_offset,
+            bottom_right_x=next_advance,
+            bottom_right_y=-2.0 - line_offset,
+            vertex_padding=0.0,
+            raw_left_x=x_advance,
+            raw_right_x=next_advance,
+            raw_top_y=ascender - line_offset,
+            raw_bottom_y=-2.0 - line_offset,
+            baseline=-line_offset,
+            ascender=ascender - line_offset,
+            descender=-2.0 - line_offset,
+            adjusted_ascender=ascender,
+            adjusted_descender=-2.0,
+            visible=visible,
+            style=style,
+            metrics=metrics,
+            sdf_scale=1.0,
+        )
+        return info, next_advance, max(max_ascender, ascender), min(max_descender, -2.0), visible_count + visible
+
+    monkeypatch.setattr(renderer, "tmp_native_layout_character", fake_character)
+
+    layout = renderer.tmp_native_text_layout(lines, "font", tmp_path / "font.ttf", 24.0, 1.0, 24.0)
+
+    assert layout is not None
+    assert [character.char for character in layout.characters] == ["A", "B", "\n", "\n"]
+    assert layout.characters[0].x_advance == 8.0
+    assert [line.visible_character_count for line in layout.lines] == [2, 0]
+    assert [(line.first_character_index, line.last_character_index) for line in layout.lines] == [(0, 3), (4, 4)]
+    assert layout.lines[0].baseline == 0.0
+    assert layout.lines[1].baseline < 0.0
 
 
 def _write_png(path: Path, size: tuple[int, int] = (3, 2)) -> None:

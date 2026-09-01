@@ -10,7 +10,7 @@ import json
 import math
 import sys
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
@@ -686,6 +686,46 @@ class TMPNativeTextLayout:
             max_descender=self.max_descender,
             content_height=self.content_height,
         )
+
+
+@dataclass(frozen=True)
+class _TMPNativeLayoutConfig:
+    font_name: str
+    font_path: Path
+    layout_mode: str
+    base_scale: float
+    current_em_scale: float
+    raw_line_gap: float
+    line_spacing: float
+    line_spacing_delta: float
+    paragraph_spacing: float
+    outline_dilate: float
+    margin_width: float
+    source_metrics_only: bool
+
+
+@dataclass
+class _TMPNativeLayoutState:
+    dominant_size: float
+    line_offset: float = 0.0
+    start_of_line_ascender: float = 0.0
+    element_descender: float = 0.0
+    is_driven_line_spacing: bool = False
+    max_text_ascender: float | None = None
+    rendered_width: float = 0.0
+    accumulated_line_height: float = 0.0
+    lines: list[TMPNativeLineInfo] = field(default_factory=list)
+    characters: list[TMPNativeCharacterInfo] = field(default_factory=list)
+
+
+@dataclass
+class _TMPNativeLineState:
+    x_advance: float
+    max_ascender: float = TMP_LARGE_NEGATIVE_FLOAT
+    max_descender: float = TMP_LARGE_POSITIVE_FLOAT
+    visible_character_count: int = 0
+    has_character: bool = False
+    line_break_adjusted_ascender: float | None = None
 
 
 @dataclass(frozen=True)
@@ -6881,6 +6921,240 @@ class PNGRenderer:
                     outline_dilate,
                 )
 
+    def _tmp_append_native_layout_character(
+        self,
+        char: str,
+        style: TextStyle,
+        line_index: int,
+        first_character_index: int,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> TMPNativeCharacterInfo:
+        (
+            char_info,
+            line_state.x_advance,
+            line_state.max_ascender,
+            line_state.max_descender,
+            line_state.visible_character_count,
+        ) = self.tmp_native_layout_character(
+            char,
+            style,
+            config.font_name,
+            config.font_path,
+            line_index,
+            len(state.characters),
+            line_state.x_advance,
+            state.line_offset,
+            first_character_index,
+            line_state.max_ascender,
+            line_state.max_descender,
+            line_state.visible_character_count,
+            config.layout_mode,
+            config.current_em_scale,
+            config.outline_dilate,
+            source_metrics_only=config.source_metrics_only,
+        )
+        state.characters.append(char_info)
+        return char_info
+
+    def _tmp_native_layout_runs(
+        self,
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> _TMPNativeLineState:
+        line_state = _TMPNativeLineState(self.tmp_native_line_initial_x(line, config.margin_width))
+        for run_index, run in enumerate(line.runs):
+            for char in run.text:
+                if char in {"\r", "\n"}:
+                    continue
+                line_state.has_character = True
+                self._tmp_append_native_layout_character(
+                    char,
+                    run.style,
+                    line_index,
+                    first_character_index,
+                    line_state,
+                    state,
+                    config,
+                )
+            next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
+            next_style = next_run.style if next_run is not None else line.style
+            if self.tmp_closes_cspace_before_next_run(run.style, next_style):
+                line_state.x_advance -= self.tmp_cspace_advance(run.style.cspace)
+                if state.characters:
+                    state.characters[-1] = replace(state.characters[-1], x_advance=line_state.x_advance)
+        return line_state
+
+    def _tmp_native_layout_line_breaks(
+        self,
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        for break_index in range(line.trailing_newline_count):
+            line_state.has_character = True
+            char_info = self._tmp_append_native_layout_character(
+                "\n",
+                line.style,
+                line_index,
+                first_character_index,
+                line_state,
+                state,
+                config,
+            )
+            line_state.line_break_adjusted_ascender = char_info.adjusted_ascender
+            if break_index + 1 < line.trailing_newline_count:
+                line_state.x_advance = self.tmp_native_line_initial_x(line, config.margin_width)
+
+    def _tmp_resolve_native_line_extents(
+        self,
+        line: StyledLine,
+        line_state: _TMPNativeLineState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        if not line_state.has_character:
+            line_state.max_ascender, line_state.max_descender = self.tmp_native_style_extents(
+                config.font_name,
+                line.style,
+            )
+        if line_state.max_ascender <= TMP_LARGE_NEGATIVE_FLOAT:
+            line_state.max_ascender = 0.0
+        if line_state.max_descender >= TMP_LARGE_POSITIVE_FLOAT:
+            line_state.max_descender = 0.0
+
+    @staticmethod
+    def _tmp_adjust_native_line_offset(
+        state: _TMPNativeLayoutState,
+        line_state: _TMPNativeLineState,
+    ) -> None:
+        if state.line_offset <= 0.0 or state.is_driven_line_spacing:
+            return
+        baseline_adjustment_delta = line_state.max_ascender - state.start_of_line_ascender
+        if abs(baseline_adjustment_delta) > 0.01:
+            state.element_descender -= baseline_adjustment_delta
+            state.line_offset += baseline_adjustment_delta
+
+    @staticmethod
+    def _tmp_record_native_line(
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        run_metrics: list[tuple[TextRun, float, float]],
+        line_width: float,
+        line_min_x: float,
+        line_max_x: float,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        baseline = -state.line_offset
+        line_ascender = line_state.max_ascender - state.line_offset
+        line_descender = line_state.max_descender - state.line_offset
+        # TMP keeps m_ElementDescender as the current generated line's descender,
+        # not the union minimum. Later lines can move upward with negative spacing.
+        state.element_descender = line_descender
+        if state.max_text_ascender is None:
+            state.max_text_ascender = line_ascender
+        line_height = line_ascender - line_descender + config.raw_line_gap * config.base_scale
+        line_width = max(1.0, line_width)
+        state.rendered_width = max(state.rendered_width, line_width)
+        state.accumulated_line_height = max(state.accumulated_line_height, -baseline + line_height)
+        state.lines.append(
+            TMPNativeLineInfo(
+                index=line_index,
+                styled_line=line,
+                run_metrics=run_metrics,
+                first_character_index=first_character_index,
+                last_character_index=max(first_character_index, len(state.characters) - 1),
+                visible_character_count=line_state.visible_character_count,
+                baseline=baseline,
+                ascender=line_ascender,
+                descender=line_descender,
+                line_height=line_height,
+                width=line_width,
+                max_advance=line_width,
+                line_extents_min_x=line_min_x,
+                line_extents_max_x=line_max_x,
+                y_down=-baseline,
+            )
+        )
+
+    def _tmp_advance_native_line(
+        self,
+        line: StyledLine,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        if line.style.line_height is None:
+            line_break_ascender = (
+                line_state.line_break_adjusted_ascender
+                if line_state.line_break_adjusted_ascender is not None
+                else line_state.max_ascender
+            )
+            state.line_offset += (
+                0.0
+                - line_state.max_descender
+                + line_break_ascender
+                + (config.raw_line_gap + config.line_spacing_delta) * config.base_scale
+                + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
+            )
+            state.start_of_line_ascender = line_break_ascender
+            state.is_driven_line_spacing = False
+            return
+        state.line_offset += (
+            self.tmp_explicit_line_height(line.style.line_height)
+            + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
+        )
+        state.is_driven_line_spacing = True
+
+    def _tmp_native_layout_line(
+        self,
+        line: StyledLine,
+        line_index: int,
+        line_count: int,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        run_metrics, line_width, line_min_x, line_max_x, line_dominant_size = self.tmp_native_measure_line_runs(
+            line,
+            config.font_name,
+            config.font_path,
+            line_index,
+            config.layout_mode,
+            config.current_em_scale,
+            config.outline_dilate,
+            config.margin_width,
+            source_metrics_only=config.source_metrics_only,
+        )
+        state.dominant_size = max(state.dominant_size, line_dominant_size)
+        first_character_index = len(state.characters)
+        line_state = self._tmp_native_layout_runs(line, line_index, first_character_index, state, config)
+        self._tmp_native_layout_line_breaks(line, line_index, first_character_index, line_state, state, config)
+        self._tmp_resolve_native_line_extents(line, line_state, config)
+        self._tmp_adjust_native_line_offset(state, line_state)
+        self._tmp_record_native_line(
+            line,
+            line_index,
+            first_character_index,
+            run_metrics,
+            line_width,
+            line_min_x,
+            line_max_x,
+            line_state,
+            state,
+            config,
+        )
+        if line_index + 1 < line_count:
+            self._tmp_advance_native_line(line, line_state, state, config)
+
     def tmp_native_text_layout(
         self,
         lines: list[StyledLine],
@@ -6900,219 +7174,30 @@ class PNGRenderer:
 
         base_scale = self.tmp_native_element_scale(font_name, base_size)
         current_em_scale = self.tmp_native_current_em_scale(base_size)
-        line_spacing_delta = TMP_PREFAB_LINE_SPACING_DELTA
-        paragraph_spacing = TMP_PREFAB_PARAGRAPH_SPACING if layout_mode == "preferred" else 0.0
-        raw_line_gap = self.tmp_native_raw_line_gap(font_name) if self.tmp_native_line_gap else 0.0
-        line_offset = 0.0
-        start_of_line_ascender = 0.0
-        element_descender = 0.0
-        is_driven_line_spacing = False
-        max_text_ascender: float | None = None
-        rendered_width = 0.0
-        accumulated_line_height = 0.0
-        native_lines: list[TMPNativeLineInfo] = []
-        characters: list[TMPNativeCharacterInfo] = []
-        native_margin_width = max(0.0, float(margin_width or 0.0))
+        config = _TMPNativeLayoutConfig(
+            font_name=font_name,
+            font_path=font_path,
+            layout_mode=layout_mode,
+            base_scale=base_scale,
+            current_em_scale=current_em_scale,
+            raw_line_gap=self.tmp_native_raw_line_gap(font_name) if self.tmp_native_line_gap else 0.0,
+            line_spacing=line_spacing,
+            line_spacing_delta=TMP_PREFAB_LINE_SPACING_DELTA,
+            paragraph_spacing=TMP_PREFAB_PARAGRAPH_SPACING if layout_mode == "preferred" else 0.0,
+            outline_dilate=outline_dilate,
+            margin_width=max(0.0, float(margin_width or 0.0)),
+            source_metrics_only=source_metrics_only,
+        )
+        state = _TMPNativeLayoutState(dominant_size)
 
         for line_index, line in enumerate(lines):
-            run_metrics, line_width, line_min_x, line_max_x, line_dominant_size = self.tmp_native_measure_line_runs(
-                line,
-                font_name,
-                font_path,
-                line_index,
-                layout_mode,
-                current_em_scale,
-                outline_dilate,
-                native_margin_width,
-                source_metrics_only=source_metrics_only,
-            )
-            dominant_size = max(dominant_size, line_dominant_size)
-            first_character_index = len(characters)
-            max_line_ascender = TMP_LARGE_NEGATIVE_FLOAT
-            max_line_descender = TMP_LARGE_POSITIVE_FLOAT
-            visible_character_count = 0
-            x_advance = self.tmp_native_line_initial_x(line, native_margin_width)
-            has_line_character = False
-            line_break_adjusted_ascender: float | None = None
+            self._tmp_native_layout_line(line, line_index, len(lines), state, config)
 
-            for run_index, run in enumerate(line.runs):
-                for char in run.text:
-                    if char in {"\r", "\n"}:
-                        continue
-                    has_line_character = True
-                    (
-                        char_info,
-                        x_advance,
-                        max_line_ascender,
-                        max_line_descender,
-                        visible_character_count,
-                    ) = self.tmp_native_layout_character(
-                        char,
-                        run.style,
-                        font_name,
-                        font_path,
-                        line_index,
-                        len(characters),
-                        x_advance,
-                        line_offset,
-                        first_character_index,
-                        max_line_ascender,
-                        max_line_descender,
-                        visible_character_count,
-                        layout_mode,
-                        current_em_scale,
-                        outline_dilate,
-                        source_metrics_only=source_metrics_only,
-                    )
-                    characters.append(char_info)
-                next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
-                next_style = next_run.style if next_run is not None else line.style
-                if self.tmp_closes_cspace_before_next_run(run.style, next_style):
-                    x_advance -= self.tmp_cspace_advance(run.style.cspace)
-                    if characters:
-                        previous = characters[-1]
-                        characters[-1] = TMPNativeCharacterInfo(
-                            index=previous.index,
-                            char=previous.char,
-                            line_index=previous.line_index,
-                            x_origin=previous.x_origin,
-                            x_advance=x_advance,
-                            glyph_origin_x=previous.glyph_origin_x,
-                            bottom_left_x=previous.bottom_left_x,
-                            bottom_left_y=previous.bottom_left_y,
-                            top_left_x=previous.top_left_x,
-                            top_left_y=previous.top_left_y,
-                            top_right_x=previous.top_right_x,
-                            top_right_y=previous.top_right_y,
-                            bottom_right_x=previous.bottom_right_x,
-                            bottom_right_y=previous.bottom_right_y,
-                            vertex_padding=previous.vertex_padding,
-                            raw_left_x=previous.raw_left_x,
-                            raw_right_x=previous.raw_right_x,
-                            raw_top_y=previous.raw_top_y,
-                            raw_bottom_y=previous.raw_bottom_y,
-                            baseline=previous.baseline,
-                            ascender=previous.ascender,
-                            descender=previous.descender,
-                            adjusted_ascender=previous.adjusted_ascender,
-                            adjusted_descender=previous.adjusted_descender,
-                            visible=previous.visible,
-                            style=previous.style,
-                            metrics=previous.metrics,
-                            sdf_scale=previous.sdf_scale,
-                        )
-
-            line_break_count = line.trailing_newline_count
-            line_break_adjusted_ascender: float | None = None
-            for break_index in range(line_break_count):
-                has_line_character = True
-                (
-                    char_info,
-                    x_advance,
-                    max_line_ascender,
-                    max_line_descender,
-                    visible_character_count,
-                ) = self.tmp_native_layout_character(
-                    "\n",
-                    line.style,
-                    font_name,
-                    font_path,
-                    line_index,
-                    len(characters),
-                    x_advance,
-                    line_offset,
-                    first_character_index,
-                    max_line_ascender,
-                    max_line_descender,
-                    visible_character_count,
-                    layout_mode,
-                    current_em_scale,
-                    outline_dilate,
-                    source_metrics_only=source_metrics_only,
-                )
-                characters.append(char_info)
-                line_break_adjusted_ascender = char_info.adjusted_ascender
-                if break_index + 1 < line_break_count:
-                    x_advance = self.tmp_native_line_initial_x(line, native_margin_width)
-
-            if not has_line_character:
-                max_line_ascender, max_line_descender = self.tmp_native_style_extents(font_name, line.style)
-
-            if max_line_ascender <= TMP_LARGE_NEGATIVE_FLOAT:
-                max_line_ascender = 0.0
-            if max_line_descender >= TMP_LARGE_POSITIVE_FLOAT:
-                max_line_descender = 0.0
-
-            if line_offset > 0.0 and not is_driven_line_spacing:
-                baseline_adjustment_delta = max_line_ascender - start_of_line_ascender
-                if abs(baseline_adjustment_delta) > 0.01:
-                    element_descender -= baseline_adjustment_delta
-                    line_offset += baseline_adjustment_delta
-
-            baseline = -line_offset
-            line_ascender = max_line_ascender - line_offset
-            line_descender = max_line_descender - line_offset
-            # TMP keeps m_ElementDescender as the current generated line's
-            # descender, not the union minimum. With negative line spacing or
-            # explicit <line-height=0>, later lines can move upward; preferred
-            # height then shrinks to match the native RectTransform instead of
-            # expanding to the visual union of every line.
-            element_descender = line_descender
-            if max_text_ascender is None:
-                max_text_ascender = line_ascender
-
-            line_height = line_ascender - line_descender + raw_line_gap * base_scale
-            line_width = max(1.0, line_width)
-            rendered_width = max(rendered_width, line_width)
-            accumulated_line_height = max(accumulated_line_height, -baseline + line_height)
-            native_lines.append(
-                TMPNativeLineInfo(
-                    index=line_index,
-                    styled_line=line,
-                    run_metrics=run_metrics,
-                    first_character_index=first_character_index,
-                    last_character_index=max(first_character_index, len(characters) - 1),
-                    visible_character_count=visible_character_count,
-                    baseline=baseline,
-                    ascender=line_ascender,
-                    descender=line_descender,
-                    line_height=line_height,
-                    width=line_width,
-                    max_advance=line_width,
-                    line_extents_min_x=line_min_x,
-                    line_extents_max_x=line_max_x,
-                    y_down=-baseline,
-                )
-            )
-
-            if line_index + 1 >= len(lines):
-                continue
-            if line.style.line_height is None:
-                line_break_ascender = (
-                    line_break_adjusted_ascender if line_break_adjusted_ascender is not None else max_line_ascender
-                )
-                line_offset += (
-                    0.0
-                    - max_line_descender
-                    + line_break_ascender
-                    + (raw_line_gap + line_spacing_delta) * base_scale
-                    + (line_spacing + paragraph_spacing) * current_em_scale
-                )
-                start_of_line_ascender = line_break_ascender
-                is_driven_line_spacing = False
-            else:
-                line_offset += (
-                    self.tmp_explicit_line_height(line.style.line_height)
-                    + (line_spacing + paragraph_spacing) * current_em_scale
-                )
-                is_driven_line_spacing = True
-
-        if not native_lines:
+        if not state.lines:
             return None
-        if max_text_ascender is None:
-            max_text_ascender = 0.0
-        content_height = max(1.0, max_text_ascender - element_descender)
-        preferred_width = self.tmp_preferred_width(max(1.0, rendered_width))
+        max_text_ascender = state.max_text_ascender or 0.0
+        content_height = max(1.0, max_text_ascender - state.element_descender)
+        preferred_width = self.tmp_preferred_width(max(1.0, state.rendered_width))
         preferred_height = self.tmp_preferred_height(
             content_height,
             (asset.ascent_line - asset.descent_line) * base_scale
@@ -7121,20 +7206,20 @@ class PNGRenderer:
         )
         return TMPNativeTextLayout(
             layout_mode=layout_mode,
-            lines=native_lines,
-            characters=characters,
+            lines=state.lines,
+            characters=state.characters,
             preferred_width=preferred_width,
             preferred_height=preferred_height,
             content_height=preferred_height,
             max_ascender=max_text_ascender,
-            max_descender=element_descender,
-            accumulated_line_height=max(1.0, accumulated_line_height),
-            dominant_size=dominant_size,
+            max_descender=state.element_descender,
+            accumulated_line_height=max(1.0, state.accumulated_line_height),
+            dominant_size=state.dominant_size,
             base_scale=base_scale,
             current_em_scale=current_em_scale,
-            raw_line_gap=raw_line_gap,
-            line_spacing_delta=line_spacing_delta,
-            paragraph_spacing=paragraph_spacing,
+            raw_line_gap=config.raw_line_gap,
+            line_spacing_delta=config.line_spacing_delta,
+            paragraph_spacing=config.paragraph_spacing,
         )
 
     def tmp_native_measure_line_runs(
