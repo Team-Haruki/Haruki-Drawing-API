@@ -160,13 +160,7 @@ def _derive_honor_bg_asset_name(asset_name: str) -> str:
     return "honor_bg_" + parts[3]
 
 
-def _build_normal_honor(req: dict, honor_id: int, honor_level: int, fc_ap_override: int | None) -> dict | None:
-    """honor/builder_normal.go:15-185."""
-    info = _honor_by_id()[honor_id]
-    group = _honor_group(info.get("groupId", 0))
-    if group is None:
-        return None
-
+def _normal_honor_visual(info: dict, honor_level: int) -> tuple[str, str, int]:
     asset_name = info.get("assetbundleName", "")
     rarity = info.get("honorRarity", "")
     resolved = _resolve_level_visual(info.get("levels") or [], honor_level)
@@ -177,90 +171,135 @@ def _build_normal_honor(req: dict, honor_id: int, honor_level: int, fc_ap_overri
             rarity = resolved["honorRarity"]
         if honor_level <= 0:
             honor_level = resolved.get("level", 0)
-    req["honor_level"] = honor_level
+    return asset_name, rarity, honor_level
 
-    group_bg = group.get("backgroundAssetbundleName") or ""
-    bg_asset_name = group_bg or asset_name
+
+def _normal_honor_group_type(group: dict, group_bg: str, asset_name: str) -> str:
     group_type = group.get("honorType", "")
-    if group_type == "world_link" or "event_wl" in bg_asset_name.strip() or "event_wl" in asset_name.strip():
-        group_type = "wl_event"
-    req["group_type"] = group_type
-    req["honor_rarity"] = rarity
-    mode = "main" if req["is_main_honor"] else "sub"
-    ra = common.ASSETS.region_asset
+    if group_type == "world_link" or "event_wl" in group_bg.strip() or "event_wl" in asset_name.strip():
+        return "wl_event"
+    return group_type
 
+
+def _normal_honor_image(group_type: str, group_bg: str, asset_name: str, mode: str) -> str:
+    ra = common.ASSETS.region_asset
+    bg_asset_name = group_bg or asset_name
     if group_type == "rank_match":
         honor_img = ra(f"rank_live/honor/{bg_asset_name}/degree_{mode}.png")
     elif group_bg:
         honor_img = ra(f"honor/{group_bg}/degree_{mode}.png")
     else:
         honor_img = ra(f"honor/{asset_name}/degree_{mode}.png")
-    if group_type in ("event", "wl_event") and not _exists(honor_img):
-        derived = _derive_honor_bg_asset_name(asset_name)
-        if derived:
-            candidate = ra(f"honor/{derived}/degree_{mode}.png")
-            if _exists(candidate):
-                honor_img = candidate
-    if group_type in ("event", "wl_event") and not _exists(honor_img):
-        fallback = ra(f"honor/{group_bg or asset_name}/rank_{mode}.png")
-        if _exists(fallback):
-            honor_img = fallback
-    req["honor_img_path"] = honor_img
+    if group_type not in ("event", "wl_event") or _exists(honor_img):
+        return honor_img
+    derived = _derive_honor_bg_asset_name(asset_name)
+    candidate = ra(f"honor/{derived}/degree_{mode}.png") if derived else ""
+    if candidate and _exists(candidate):
+        return candidate
+    fallback = ra(f"honor/{bg_asset_name}/rank_{mode}.png")
+    return fallback if _exists(fallback) else honor_img
 
-    if asset_name and group_type in ("event", "wl_event", "rank_match", "sekai_echo"):
-        if group_type == "rank_match":
-            req["rank_img_path"] = ra(f"rank_live/honor/{asset_name}/{mode}.png")
-        elif group_type == "sekai_echo":
-            candidate = ra(f"honor/{asset_name}/rank_{mode}.png")
-            if _exists(candidate):
-                req["rank_img_path"] = candidate
-        else:  # event / wl_event
-            candidate = ra(f"honor/{asset_name}/rank_{mode}.png")
-            if candidate != honor_img:
-                req["rank_img_path"] = candidate
 
-    frame_name = group.get("frameName") or ""
-    honor_type = "normal"
-    if (
+def _add_normal_honor_rank_image(req: dict, group_type: str, asset_name: str, mode: str) -> None:
+    if not asset_name or group_type not in ("event", "wl_event", "rank_match", "sekai_echo"):
+        return
+    ra = common.ASSETS.region_asset
+    if group_type == "rank_match":
+        req["rank_img_path"] = ra(f"rank_live/honor/{asset_name}/{mode}.png")
+        return
+    candidate = ra(f"honor/{asset_name}/rank_{mode}.png")
+    if group_type == "sekai_echo":
+        if _exists(candidate):
+            req["rank_img_path"] = candidate
+    elif candidate != req["honor_img_path"]:
+        req["rank_img_path"] = candidate
+
+
+def _normal_honor_type(group_type: str, frame_name: str, bg_asset_name: str, asset_name: str) -> str:
+    is_birthday = (
         group_type == "birthday"
         or frame_name.startswith("honor_frame_birthday")
         or bg_asset_name.startswith("honor_bg_birthday")
         or asset_name.startswith("honor_bg_birthday")
-    ):
-        honor_type = "birthday"
+    )
+    return "birthday" if is_birthday else "normal"
+
+
+def _birthday_frame_name(frame_name: str, bg_asset_name: str, asset_name: str) -> str:
+    if frame_name:
+        return frame_name
+    for candidate in (bg_asset_name, asset_name):
+        if candidate.startswith("honor_bg_birthday_"):
+            return "honor_frame_birthday_" + candidate.removeprefix("honor_bg_birthday_")
+    return ""
+
+
+def _add_normal_honor_frame(
+    req: dict,
+    honor_type: str,
+    rarity_rank: int,
+    frame_name: str,
+    bg_asset_name: str,
+    asset_name: str,
+    mode: str,
+) -> None:
+    if honor_type == "birthday" and rarity_rank <= 1:
+        return
+    if honor_type == "birthday":
+        frame_name = _birthday_frame_name(frame_name, bg_asset_name, asset_name)
+    static_frame = common.ASSETS.static(f"honor/frame_degree_{mode[0]}_{rarity_rank}.png")
+    if not frame_name:
+        req["frame_img_path"] = static_frame
+        return
+    is_birthday_frame = frame_name.startswith("honor_frame_birthday")
+    start_rare = 3 if frame_name.startswith("event") else 2
+    ra = common.ASSETS.region_asset
+    frame_path = ra(f"honor_frame/{frame_name}/frame_degree_{mode[0]}_{rarity_rank}.png")
+    req["frame_img_path"] = (
+        frame_path if (is_birthday_frame or rarity_rank >= start_rare) and _exists(frame_path) else static_frame
+    )
+    if is_birthday_frame and req["frame_img_path"] == frame_path:
+        level_path = ra(f"honor_frame/{frame_name}/frame_degree_level_{rarity_rank}.png")
+        if _exists(level_path):
+            req["frame_degree_level_img_path"] = level_path
+
+
+def _add_normal_honor_score(
+    req: dict, honor_id: int, group_type: str, asset_name: str, honor_level: int, fc_ap_override: int | None
+) -> None:
+    has_score = honor_id in _DIFF_SCORE
+    if not has_score and group_type not in ("event", "wl_event"):
+        return
+    if has_score:
+        req["group_type"] = "fc_ap"
+    scroll_path = common.ASSETS.region_asset(f"honor/{asset_name}/scroll.png")
+    if _exists(scroll_path):
+        req["scroll_img_path"] = scroll_path
+    req["fc_or_ap_level"] = str(honor_level if fc_ap_override is None else fc_ap_override)
+
+
+def _build_normal_honor(req: dict, honor_id: int, honor_level: int, fc_ap_override: int | None) -> dict | None:
+    """honor/builder_normal.go:15-185."""
+    info = _honor_by_id()[honor_id]
+    group = _honor_group(info.get("groupId", 0))
+    if group is None:
+        return None
+    asset_name, rarity, honor_level = _normal_honor_visual(info, honor_level)
+    req["honor_level"] = honor_level
+    group_bg = group.get("backgroundAssetbundleName") or ""
+    bg_asset_name = group_bg or asset_name
+    group_type = _normal_honor_group_type(group, group_bg, asset_name)
+    req["group_type"] = group_type
+    req["honor_rarity"] = rarity
+    mode = "main" if req["is_main_honor"] else "sub"
+    req["honor_img_path"] = _normal_honor_image(group_type, group_bg, asset_name, mode)
+    _add_normal_honor_rank_image(req, group_type, asset_name, mode)
+    frame_name = group.get("frameName") or ""
+    honor_type = _normal_honor_type(group_type, frame_name, bg_asset_name, asset_name)
     req["honor_type"] = honor_type
     rarity_rank = _RARITY_RANK.get(rarity, 1)
-
-    if not (honor_type == "birthday" and rarity_rank <= 1):  # rank-1 birthday: no frame overlays
-        if honor_type == "birthday" and not frame_name:
-            if bg_asset_name.startswith("honor_bg_birthday_"):
-                frame_name = "honor_frame_birthday_" + bg_asset_name.removeprefix("honor_bg_birthday_")
-            elif asset_name.startswith("honor_bg_birthday_"):
-                frame_name = "honor_frame_birthday_" + asset_name.removeprefix("honor_bg_birthday_")
-        if frame_name:
-            is_birthday_frame = frame_name.startswith("honor_frame_birthday")
-            start_rare = 3 if frame_name.startswith("event") else 2
-            frame_path = ra(f"honor_frame/{frame_name}/frame_degree_{mode[0]}_{rarity_rank}.png")
-            if (is_birthday_frame or rarity_rank >= start_rare) and _exists(frame_path):
-                req["frame_img_path"] = frame_path
-            else:
-                req["frame_img_path"] = common.ASSETS.static(f"honor/frame_degree_{mode[0]}_{rarity_rank}.png")
-            if is_birthday_frame and req["frame_img_path"] == frame_path:
-                level_path = ra(f"honor_frame/{frame_name}/frame_degree_level_{rarity_rank}.png")
-                if _exists(level_path):
-                    req["frame_degree_level_img_path"] = level_path
-        else:
-            req["frame_img_path"] = common.ASSETS.static(f"honor/frame_degree_{mode[0]}_{rarity_rank}.png")
-
-    has_score = honor_id in _DIFF_SCORE
-    if has_score or group_type in ("event", "wl_event"):
-        if has_score:
-            req["group_type"] = "fc_ap"
-        scroll_path = ra(f"honor/{asset_name}/scroll.png")
-        if _exists(scroll_path):
-            req["scroll_img_path"] = scroll_path
-        req["fc_or_ap_level"] = str(honor_level if fc_ap_override is None else fc_ap_override)
-
+    _add_normal_honor_frame(req, honor_type, rarity_rank, frame_name, bg_asset_name, asset_name, mode)
+    _add_normal_honor_score(req, honor_id, group_type, asset_name, honor_level, fc_ap_override)
     if group_type in ("character", "achievement") or req["group_type"].startswith("fc_ap"):
         req["lv_img_path"] = common.ASSETS.static("honor/icon_degreeLv.png")
         req["lv6_img_path"] = common.ASSETS.static("honor/icon_degreeLv6.png")
@@ -448,40 +487,37 @@ def _build_pcards(suite: dict) -> list[dict]:
     return pcards
 
 
+def _music_count_from_clear_rows(clears: list[dict], difficulty: str) -> dict:
+    entry = {"difficulty": difficulty, "clear": 0, "fc": 0, "ap": 0}
+    match = next((item for item in clears if str(item.get("musicDifficultyType", "")).lower() == difficulty), None)
+    if match is not None:
+        entry.update(clear=match.get("liveClear", 0), fc=match.get("fullCombo", 0), ap=match.get("allPerfect", 0))
+    return entry
+
+
+def _music_count_from_results(stats: list[dict], difficulty: str) -> dict:
+    seen: set[int] = set()
+    entry = {"difficulty": difficulty, "clear": 0, "fc": 0, "ap": 0}
+    for item in stats:  # first-win per musicId, array order (order-sensitive)
+        if str(item.get("musicDifficultyType", "")).lower() != difficulty:
+            continue
+        music_id = item.get("musicId")
+        if music_id in seen:
+            continue
+        seen.add(music_id)
+        entry["clear"] += 1  # unconditional, playResult is not consulted
+        entry["fc"] += int(bool(item.get("fullComboFlg")))
+        entry["ap"] += int(bool(item.get("fullPerfectFlg")))
+    return entry
+
+
 def _build_music_counts(suite: dict) -> list[dict]:
     """controller_helpers.go:329-371 — fixture lacks clear counts, so aggregate userMusicResults."""
     clears = suite.get("userMusicDifficultyClearCounts") or []
-    result: list[dict] = []
     if clears:
-        for difficulty in _DIFFICULTIES:
-            entry = {"difficulty": difficulty, "clear": 0, "fc": 0, "ap": 0}
-            for item in clears:
-                if str(item.get("musicDifficultyType", "")).lower() == difficulty:
-                    entry["clear"] = item.get("liveClear", 0)
-                    entry["fc"] = item.get("fullCombo", 0)
-                    entry["ap"] = item.get("allPerfect", 0)
-                    break
-            result.append(entry)
-        return result
-
+        return [_music_count_from_clear_rows(clears, difficulty) for difficulty in _DIFFICULTIES]
     stats = suite.get("userMusicResults") or []
-    for difficulty in _DIFFICULTIES:
-        seen: set[int] = set()
-        clear = fc = ap = 0
-        for item in stats:  # first-win per musicId, array order (order-sensitive)
-            if str(item.get("musicDifficultyType", "")).lower() != difficulty:
-                continue
-            music_id = item.get("musicId")
-            if music_id in seen:
-                continue
-            seen.add(music_id)
-            clear += 1  # unconditional, playResult is not consulted
-            if item.get("fullComboFlg"):
-                fc += 1
-            if item.get("fullPerfectFlg"):
-                ap += 1
-        result.append({"difficulty": difficulty, "clear": clear, "fc": fc, "ap": ap})
-    return result
+    return [_music_count_from_results(stats, difficulty) for difficulty in _DIFFICULTIES]
 
 
 def _build_fc_ap_levels(music_counts: list[dict]) -> dict[int, int]:
@@ -778,14 +814,17 @@ def _inventory_item(
     return item
 
 
-def _build_inventory_items(suite: dict) -> list[dict]:
-    """controller.go:82-296, in code order."""
-    gamedata = suite.get("userGamedata", {})
-    charged = suite.get("userChargedCurrency") or {}
-    ra = common.ASSETS.region_asset
-    items: list[dict] = []
+def _positive_inventory_entries(rows: list[dict], id_key: str) -> list[tuple[int, int]]:
+    return [
+        (row.get(id_key, 0), row.get("quantity", 0))
+        for row in rows
+        if row.get(id_key, 0) > 0 and row.get("quantity", 0) > 0
+    ]
 
-    items.append(
+
+def _currency_inventory_items(gamedata: dict, charged: dict) -> list[dict]:
+    ra = common.ASSETS.region_asset
+    items = [
         _inventory_item(
             item_id=0,
             name="金币",
@@ -796,7 +835,7 @@ def _build_inventory_items(suite: dict) -> list[dict]:
             quantity=gamedata.get("coin", 0),
             seq=0,
         )
-    )
+    ]
     if charged.get("free", 0) > 0:
         items.append(
             _inventory_item(
@@ -836,11 +875,13 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=3,
             )
         )
+    return items
 
-    for mat in suite.get("userMaterials") or []:
-        material_id, quantity = mat.get("materialId", 0), mat.get("quantity", 0)
-        if material_id <= 0 or quantity <= 0:
-            continue
+
+def _material_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    ra = common.ASSETS.region_asset
+    for material_id, quantity in _positive_inventory_entries(rows, "materialId"):
         meta = _meta_by_id("materials").get(material_id, {})
         name = str(meta.get("name", "")).strip() or f"材料 {material_id}"
         items.append(
@@ -855,11 +896,12 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("seq", 0), material_id),
             )
         )
+    return items
 
-    for ticket in suite.get("userGachaTickets") or []:
-        ticket_id, quantity = ticket.get("gachaTicketId", 0), ticket.get("quantity", 0)
-        if ticket_id <= 0 or quantity <= 0:
-            continue
+
+def _gacha_ticket_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    for ticket_id, quantity in _positive_inventory_entries(rows, "gachaTicketId"):
         meta = _meta_by_id("gachaTickets").get(ticket_id, {})
         items.append(
             _inventory_item(
@@ -873,11 +915,13 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("seq", 0), ticket_id),
             )
         )
+    return items
 
-    for ticket in suite.get("userPracticeTickets") or []:
-        ticket_id, quantity = ticket.get("practiceTicketId", 0), ticket.get("quantity", 0)
-        if ticket_id <= 0 or quantity <= 0:
-            continue
+
+def _practice_ticket_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    ra = common.ASSETS.region_asset
+    for ticket_id, quantity in _positive_inventory_entries(rows, "practiceTicketId"):
         meta = _meta_by_id("practiceTickets").get(ticket_id, {})
         items.append(
             _inventory_item(
@@ -891,11 +935,13 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("characterId", 0) * 1000 + meta.get("exp", 0), ticket_id),
             )
         )
+    return items
 
-    for ticket in suite.get("userSkillPracticeTickets") or []:
-        ticket_id, quantity = ticket.get("skillPracticeTicketId", 0), ticket.get("quantity", 0)
-        if ticket_id <= 0 or quantity <= 0:
-            continue
+
+def _skill_practice_ticket_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    ra = common.ASSETS.region_asset
+    for ticket_id, quantity in _positive_inventory_entries(rows, "skillPracticeTicketId"):
         meta = _meta_by_id("skillPracticeTickets").get(ticket_id, {})
         items.append(
             _inventory_item(
@@ -909,11 +955,12 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("characterId", 0) * 1000 + meta.get("exp", 0), ticket_id),
             )
         )
+    return items
 
-    for item in suite.get("userGachaCeilItems") or []:
-        item_id, quantity = item.get("gachaCeilItemId", 0), item.get("quantity", 0)
-        if item_id <= 0 or quantity <= 0:
-            continue
+
+def _gacha_ceil_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    for item_id, quantity in _positive_inventory_entries(rows, "gachaCeilItemId"):
         meta = _meta_by_id("gachaCeilItems").get(item_id, {})
         items.append(
             _inventory_item(
@@ -927,11 +974,12 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("seq", 0), item_id),
             )
         )
+    return items
 
-    for material in suite.get("userMysekaiMaterials") or []:
-        material_id, quantity = material.get("mysekaiMaterialId", 0), material.get("quantity", 0)
-        if material_id <= 0 or quantity <= 0:
-            continue
+
+def _mysekai_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    for material_id, quantity in _positive_inventory_entries(rows, "mysekaiMaterialId"):
         meta = _meta_by_id("mysekaiMaterials").get(material_id, {})
         items.append(
             _inventory_item(
@@ -945,11 +993,13 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 seq=_fallback_seq(meta.get("seq", 0), material_id),
             )
         )
+    return items
 
-    for boost in suite.get("userBoostItems") or []:
-        boost_id, quantity = boost.get("boostItemId", 0), boost.get("quantity", 0)
-        if boost_id <= 0 or quantity <= 0:
-            continue
+
+def _boost_inventory_items(rows: list[dict]) -> list[dict]:
+    items = []
+    ra = common.ASSETS.region_asset
+    for boost_id, quantity in _positive_inventory_entries(rows, "boostItemId"):
         meta = _meta_by_id("boostItems").get(boost_id, {})
         recovery = meta.get("recoveryValue", 0)
         items.append(
@@ -965,6 +1015,19 @@ def _build_inventory_items(suite: dict) -> list[dict]:
                 recovery_value=recovery if recovery > 0 else None,
             )
         )
+    return items
+
+
+def _build_inventory_items(suite: dict) -> list[dict]:
+    """controller.go:82-296, in code order."""
+    items = _currency_inventory_items(suite.get("userGamedata", {}), suite.get("userChargedCurrency") or {})
+    items.extend(_material_inventory_items(suite.get("userMaterials") or []))
+    items.extend(_gacha_ticket_inventory_items(suite.get("userGachaTickets") or []))
+    items.extend(_practice_ticket_inventory_items(suite.get("userPracticeTickets") or []))
+    items.extend(_skill_practice_ticket_inventory_items(suite.get("userSkillPracticeTickets") or []))
+    items.extend(_gacha_ceil_inventory_items(suite.get("userGachaCeilItems") or []))
+    items.extend(_mysekai_inventory_items(suite.get("userMysekaiMaterials") or []))
+    items.extend(_boost_inventory_items(suite.get("userBoostItems") or []))
     return items
 
 

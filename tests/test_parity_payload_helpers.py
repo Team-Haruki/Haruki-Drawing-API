@@ -230,6 +230,121 @@ def test_resolve_level_visual_returns_none_without_usable_levels() -> None:
     assert gen_profile._resolve_level_visual([{"level": 1}], 1) is None
 
 
+class _FakeProfileAssets:
+    @staticmethod
+    def region_asset(*paths: str) -> str:
+        return f"region/{paths[0]}"
+
+    @staticmethod
+    def static(path: str) -> str:
+        return f"static/{path}"
+
+
+def test_build_normal_honor_composes_event_assets(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = {
+        "groupId": 10,
+        "assetbundleName": "event_rank",
+        "honorRarity": "high",
+        "levels": [],
+    }
+    group = {"honorType": "event", "backgroundAssetbundleName": "event_bg", "frameName": "event_frame"}
+    monkeypatch.setattr(gen_profile, "_honor_by_id", lambda: {1: info})
+    monkeypatch.setattr(gen_profile, "_honor_group", lambda _group_id: group)
+    monkeypatch.setattr(gen_profile.common, "ASSETS", _FakeProfileAssets())
+    monkeypatch.setattr(gen_profile, "_exists", lambda _path: True)
+
+    result = gen_profile._build_normal_honor({"is_main_honor": True}, 1, 4, None)
+
+    assert result is not None
+    assert result["group_type"] == "event"
+    assert result["honor_img_path"] == "region/honor/event_bg/degree_main.png"
+    assert result["rank_img_path"] == "region/honor/event_rank/rank_main.png"
+    assert result["frame_img_path"] == "region/honor_frame/event_frame/frame_degree_m_3.png"
+    assert result["scroll_img_path"] == "region/honor/event_rank/scroll.png"
+    assert result["fc_or_ap_level"] == "4"
+
+
+def test_build_normal_honor_omits_rank_one_birthday_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    info = {"groupId": 10, "assetbundleName": "honor_bg_birthday_test", "honorRarity": "", "levels": []}
+    group = {"honorType": "birthday", "backgroundAssetbundleName": "", "frameName": ""}
+    monkeypatch.setattr(gen_profile, "_honor_by_id", lambda: {1: info})
+    monkeypatch.setattr(gen_profile, "_honor_group", lambda _group_id: group)
+    monkeypatch.setattr(gen_profile.common, "ASSETS", _FakeProfileAssets())
+    monkeypatch.setattr(gen_profile, "_exists", lambda _path: True)
+
+    result = gen_profile._build_normal_honor({"is_main_honor": False}, 1, 1, None)
+
+    assert result is not None
+    assert result["honor_type"] == "birthday"
+    assert "frame_img_path" not in result
+
+
+def test_build_music_counts_uses_clear_rows_or_first_result_per_music() -> None:
+    clear_rows = [
+        {"musicDifficultyType": "MASTER", "liveClear": 10, "fullCombo": 8, "allPerfect": 3},
+    ]
+    clear_counts = gen_profile._build_music_counts({"userMusicDifficultyClearCounts": clear_rows})
+    assert next(item for item in clear_counts if item["difficulty"] == "master") == {
+        "difficulty": "master",
+        "clear": 10,
+        "fc": 8,
+        "ap": 3,
+    }
+
+    results = [
+        {"musicDifficultyType": "master", "musicId": 1, "fullComboFlg": True},
+        {"musicDifficultyType": "master", "musicId": 1, "fullPerfectFlg": True},
+        {"musicDifficultyType": "master", "musicId": 2, "fullPerfectFlg": True},
+    ]
+    result_counts = gen_profile._build_music_counts({"userMusicResults": results})
+    assert next(item for item in result_counts if item["difficulty"] == "master") == {
+        "difficulty": "master",
+        "clear": 2,
+        "fc": 1,
+        "ap": 1,
+    }
+
+
+def test_build_inventory_items_preserves_resource_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    metadata = {
+        "materials": {1: {"name": "Material", "seq": 10}},
+        "gachaTickets": {2: {"name": "Gacha", "assetbundleName": "gacha", "seq": 20}},
+        "practiceTickets": {3: {"name": "Practice", "exp": 100}},
+        "skillPracticeTickets": {4: {"name": "Skill", "exp": 200}},
+        "gachaCeilItems": {5: {"name": "Ceil", "assetbundleName": "ceil", "seq": 30}},
+        "mysekaiMaterials": {6: {"name": "MySekai", "iconAssetbundleName": "mysekai", "seq": 40}},
+        "boostItems": {7: {"name": "Boost", "recoveryValue": 5, "seq": 50}},
+    }
+    monkeypatch.setattr(gen_profile, "_meta_by_id", lambda table: metadata[table])
+    monkeypatch.setattr(gen_profile.common, "ASSETS", _FakeProfileAssets())
+    suite = {
+        "userGamedata": {"coin": 10},
+        "userChargedCurrency": {"free": 20},
+        "userMaterials": [{"materialId": 1, "quantity": 1}, {"materialId": 0, "quantity": 99}],
+        "userGachaTickets": [{"gachaTicketId": 2, "quantity": 2}],
+        "userPracticeTickets": [{"practiceTicketId": 3, "quantity": 3}],
+        "userSkillPracticeTickets": [{"skillPracticeTicketId": 4, "quantity": 4}],
+        "userGachaCeilItems": [{"gachaCeilItemId": 5, "quantity": 5}],
+        "userMysekaiMaterials": [{"mysekaiMaterialId": 6, "quantity": 6}],
+        "userBoostItems": [{"boostItemId": 7, "quantity": 7}],
+    }
+
+    items = gen_profile._build_inventory_items(suite)
+
+    assert [item["resource_type"] for item in items] == [
+        "coin",
+        "jewel",
+        "material",
+        "gacha_ticket",
+        "practice_ticket",
+        "skill_practice_ticket",
+        "gacha_ceil_item",
+        "mysekai_material",
+        "boost_item",
+    ]
+    assert items[-1]["recovery_value"] == 5
+
+
 def test_render_skill_detail_handles_effect_character_and_invalid_placeholders(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeMasterData:
         @staticmethod
