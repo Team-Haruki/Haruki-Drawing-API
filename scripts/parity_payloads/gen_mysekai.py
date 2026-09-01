@@ -1304,6 +1304,55 @@ def _pick_fixture_detail_ids() -> list[int]:
     return [i for i in ids if not (i in seen or seen.add(i))]
 
 
+def _fixture_detail_request(
+    fixture_id: int,
+    fixture: dict,
+    main_genres: dict[int, dict],
+    sub_genres: dict[int, dict],
+    costs: list[dict],
+    disassemble: list[dict],
+) -> tuple[dict, bool]:
+    main = main_genres.get(int(fixture.get("mysekaiFixtureMainGenreId", 0))) or {}
+    grid = fixture.get("gridSize") or {}
+    request: dict[str, Any] = {
+        "title": f"【{common.REGION.upper()}-{fixture_id}】{fixture.get('name', '')}",
+        "images": _fixture_color_images(fixture),
+        "main_genre_name": main.get("name", ""),
+        "main_genre_image_path": ASSETS.region_asset(
+            f"mysekai/icon/category_icon/{main.get('assetbundleName', '')}.png"
+        ),
+        "size": {key: int(grid.get(key, 0) or 0) for key in ("width", "depth", "height")},
+        "first_put_cost": int(fixture.get("firstPutCost", 0) or 0),
+        "second_put_cost": int(fixture.get("secondPutCost", 0) or 0),
+        "basic_info": _fixture_basic_info(fixture),
+    }
+    optional_lists = {
+        "tags": _fixture_tags(fixture),
+        "reaction_character_groups": _reaction_character_groups(fixture_id),
+        "recycle_materials": _material_cost_list(
+            [row for row in disassemble if int(row.get("mysekaiFixtureId", 0)) == fixture_id]
+        ),
+    }
+    request.update({key: value for key, value in optional_lists.items() if value})
+    sub_id = int(fixture.get("mysekaiFixtureSubGenreId", 0) or 0)
+    if sub_id:
+        sub = sub_genres.get(sub_id) or {}
+        request["sub_genre_name"] = sub.get("name", "")
+        request["sub_genre_image_path"] = ASSETS.region_asset(
+            f"mysekai/icon/category_icon/{sub.get('assetbundleName', '')}.png"
+        )
+    blueprint = _find_fixture_blueprint(fixture_id)
+    if not blueprint:
+        return request, False
+    request["basic_info"] += _fixture_blueprint_info(blueprint)
+    cost = _material_cost_list(
+        [row for row in costs if int(row.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))]
+    )
+    if cost:
+        request["cost_materials"] = cost
+    return request, bool(blueprint.get("isEnableSketch"))
+
+
 def build_fixture_details() -> list[dict]:
     fixture_map = _md_map("mysekaiFixtures")
     main_genres = _md_map("mysekaiFixtureMainGenres")
@@ -1317,49 +1366,14 @@ def build_fixture_details() -> list[dict]:
         fixture = fixture_map.get(fixture_id)
         if not fixture:
             continue
-        main = main_genres.get(int(fixture.get("mysekaiFixtureMainGenreId", 0))) or {}
-        grid = fixture.get("gridSize") or {}
-        request: dict[str, Any] = {
-            "title": f"【{common.REGION.upper()}-{fixture_id}】{fixture.get('name', '')}",
-            "images": _fixture_color_images(fixture),
-            "main_genre_name": main.get("name", ""),
-            "main_genre_image_path": ASSETS.region_asset(
-                f"mysekai/icon/category_icon/{main.get('assetbundleName', '')}.png"
-            ),
-            "size": {k: int(grid.get(k, 0) or 0) for k in ("width", "depth", "height")},
-            "first_put_cost": int(fixture.get("firstPutCost", 0) or 0),
-            "second_put_cost": int(fixture.get("secondPutCost", 0) or 0),
-            "basic_info": _fixture_basic_info(fixture),
-        }
-        tags = _fixture_tags(fixture)
-        if tags:
-            request["tags"] = tags
-        reaction_groups = _reaction_character_groups(fixture_id)
-        if reaction_groups:
-            request["reaction_character_groups"] = reaction_groups
-        recycle = _material_cost_list([r for r in disassemble if int(r.get("mysekaiFixtureId", 0)) == fixture_id])
-        if recycle:
-            request["recycle_materials"] = recycle
-        sub_id = int(fixture.get("mysekaiFixtureSubGenreId", 0) or 0)
-        if sub_id != 0:
-            sub = sub_genres.get(sub_id) or {}
-            request["sub_genre_name"] = sub.get("name", "")
-            request["sub_genre_image_path"] = ASSETS.region_asset(
-                f"mysekai/icon/category_icon/{sub.get('assetbundleName', '')}.png"
-            )
-        blueprint = _find_fixture_blueprint(fixture_id)
-        if blueprint:
-            request["basic_info"] = request["basic_info"] + _fixture_blueprint_info(blueprint)
-            cost = _material_cost_list(
-                [r for r in costs if int(r.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))]
-            )
-            if cost:
-                request["cost_materials"] = cost
-            if blueprint.get("isEnableSketch") and not fabricated_friendcodes:
-                # External source (pjsk-static.8823.eu.org) — fabricated offline.
-                request["friendcodes"] = ["1145141919810", "8931145141919", "4545145141919", "1919810893931"]
-                request["friendcode_source"] = "sekai.8823.eu.org"
-                fabricated_friendcodes = True
+        request, supports_sketch = _fixture_detail_request(
+            fixture_id, fixture, main_genres, sub_genres, costs, disassemble
+        )
+        if supports_sketch and not fabricated_friendcodes:
+            # External source (pjsk-static.8823.eu.org) — fabricated offline.
+            request["friendcodes"] = ["1145141919810", "8931145141919", "4545145141919", "1919810893931"]
+            request["friendcode_source"] = "sekai.8823.eu.org"
+            fabricated_friendcodes = True
         requests.append(request)
     return requests
 
@@ -1371,20 +1385,7 @@ def build_fixture_details() -> list[dict]:
 _GATE_MAX_LEVEL = 40
 
 
-def build_door_upgrade() -> dict:
-    """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
-    merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
-
-    user_materials = {
-        int(i.get("mysekaiMaterialId", 0)): int(i.get("quantity", 0))
-        for i in _nested_list(merged, "userMysekaiMaterials")
-    }
-    spec_levels = {
-        int(i.get("mysekaiGateId", 0)): int(i.get("mysekaiGateLevel", 0))
-        for i in _nested_list(merged, "userMysekaiGates")
-        if int(i.get("mysekaiGateId", 0))
-    }
-
+def _gate_materials_by_id() -> dict[int, list[list[dict]]]:
     gate_temp: dict[int, list[list[dict]]] = {}
     for item in MD.get("mysekaiGateMaterialGroups"):
         group_id = int(item.get("groupId", 0))
@@ -1395,62 +1396,95 @@ def build_door_upgrade() -> dict:
         gate_temp[gate_id][level - 1].append(
             {"material_id": int(item.get("mysekaiMaterialId", 0)), "quantity": int(item.get("quantity", 0))}
         )
+    return gate_temp
 
-    spec_gate_id, best_level = 0, 0
-    for gate_id in sorted(spec_levels):
-        level = spec_levels[gate_id]
-        if level == _GATE_MAX_LEVEL or level <= best_level:
-            continue
-        best_level, spec_gate_id = level, gate_id
-    if spec_gate_id and spec_gate_id in gate_temp:
-        gate_temp = {spec_gate_id: gate_temp[spec_gate_id]}
 
-    material_icons = _icon_map("mysekaiMaterials", "iconAssetbundleName")
-    green, red, gray = [0, 200, 0], [200, 0, 0], [50, 50, 50]
+def _selected_gate_materials(
+    gate_materials: dict[int, list[list[dict]]], spec_levels: dict[int, int]
+) -> dict[int, list[list[dict]]]:
+    eligible = [(gate_id, level) for gate_id, level in sorted(spec_levels.items()) if 0 < level < _GATE_MAX_LEVEL]
+    if not eligible:
+        return gate_materials
+    gate_id, _ = max(eligible, key=lambda item: item[1])
+    return {gate_id: gate_materials[gate_id]} if gate_id in gate_materials else gate_materials
 
-    gate_materials: list[dict] = []
-    for gate_id in sorted(gate_temp):
-        level_mats = gate_temp[gate_id]
-        current_level = spec_levels.get(gate_id, 0)
-        if 0 < current_level < len(level_mats):
-            level_mats = level_mats[current_level:]
-        elif current_level >= len(level_mats):
-            level_mats = []
 
-        sum_materials: dict[int, int] = {}
-        out_levels: list[dict] = []
-        for index, items in enumerate(level_mats):
-            if not items:
-                continue
-            level_color = gray
-            out_items: list[dict] = []
-            for item in items:
-                material_id = item["material_id"]
-                sum_materials[material_id] = sum_materials.get(material_id, 0) + item["quantity"]
-                user_qty = user_materials.get(material_id, 0)
-                color = green
-                if user_qty < sum_materials[material_id]:
-                    color = red
-                    level_color = red
-                out_items.append(
-                    {
-                        "image_path": ASSETS.region_asset(
-                            f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
-                        ),
-                        "quantity": item["quantity"],
-                        "color": color,
-                        "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
-                    }
-                )
-            out_levels.append({"level": current_level + index + 1, "color": level_color, "items": out_items})
-        gate_materials.append(
+def _gate_level_items(
+    items: list[dict],
+    sum_materials: dict[int, int],
+    user_materials: dict[int, int],
+    material_icons: dict[int, str],
+) -> tuple[list[dict], bool]:
+    result = []
+    missing = False
+    for item in items:
+        material_id = item["material_id"]
+        sum_materials[material_id] = sum_materials.get(material_id, 0) + item["quantity"]
+        user_qty = user_materials.get(material_id, 0)
+        insufficient = user_qty < sum_materials[material_id]
+        missing = missing or insufficient
+        result.append(
             {
-                "id": gate_id,
-                "level": current_level,
-                "gate_icon_path": _gate_icon_path(gate_id, 0),
-                "level_materials": out_levels,
+                "image_path": ASSETS.region_asset(
+                    f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
+                ),
+                "quantity": item["quantity"],
+                "color": [200, 0, 0] if insufficient else [0, 200, 0],
+                "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
             }
         )
+    return result, missing
+
+
+def _gate_level_materials(
+    level_mats: list[list[dict]],
+    current_level: int,
+    user_materials: dict[int, int],
+    material_icons: dict[int, str],
+) -> list[dict]:
+    if current_level > 0:
+        level_mats = level_mats[current_level:] if current_level < len(level_mats) else []
+    sum_materials: dict[int, int] = {}
+    result = []
+    for index, items in enumerate(level_mats):
+        if not items:
+            continue
+        out_items, missing = _gate_level_items(items, sum_materials, user_materials, material_icons)
+        result.append(
+            {
+                "level": current_level + index + 1,
+                "color": [200, 0, 0] if missing else [50, 50, 50],
+                "items": out_items,
+            }
+        )
+    return result
+
+
+def build_door_upgrade() -> dict:
+    """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
+    merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
+    user_materials = {
+        int(item.get("mysekaiMaterialId", 0)): int(item.get("quantity", 0))
+        for item in _nested_list(merged, "userMysekaiMaterials")
+    }
+    spec_levels = {
+        int(item.get("mysekaiGateId", 0)): int(item.get("mysekaiGateLevel", 0))
+        for item in _nested_list(merged, "userMysekaiGates")
+        if int(item.get("mysekaiGateId", 0))
+    }
+    gate_temp = _selected_gate_materials(_gate_materials_by_id(), spec_levels)
+    material_icons = _icon_map("mysekaiMaterials", "iconAssetbundleName")
+    gate_materials = [
+        {
+            "id": gate_id,
+            "level": spec_levels.get(gate_id, 0),
+            "gate_icon_path": _gate_icon_path(gate_id, 0),
+            "level_materials": _gate_level_materials(
+                level_mats, spec_levels.get(gate_id, 0), user_materials, material_icons
+            ),
+        }
+        for gate_id, level_mats in sorted(gate_temp.items())
+    ]
 
     return {
         "profile": _profile_card(merged, include_suite=False, suite_name=True),
@@ -1465,26 +1499,31 @@ def build_door_upgrade() -> dict:
 _MUSIC_TAG_ORDER = ["light_music_club", "street", "idol", "theme_park", "school_refusal", "vocaloid", "other"]
 
 
-def build_music_record() -> dict:
-    """show_id=true (the `/mss id` variant) so record ids are drawn too."""
-    merged = _raw_mysekai()
-    obtained_records = {
-        int(i.get("mysekaiMusicRecordId", 0)): int(i.get("obtainedAt", 0))
-        for i in _nested_list(merged, "userMysekaiMusicRecords")
-    }
-    musics = _md_map("musics")
+def _limited_music_windows() -> dict[int, list[dict]]:
     limited_by_music: dict[int, list[dict]] = {}
     for item in MD.get("limitedTimeMusics"):
         music_id = int(item.get("musicId", 0))
         if music_id:
             limited_by_music.setdefault(music_id, []).append(item)
+    return limited_by_music
+
+
+def _music_tags_by_id() -> dict[int, str]:
     tag_by_music: dict[int, str] = {}
     for item in MD.get("musicTags"):
         music_id, tag = int(item.get("musicId", 0)), item.get("musicTag", "")
         if not music_id or not tag or tag in ("all", "vocaloid"):
             continue
         tag_by_music.setdefault(music_id, tag)
+    return tag_by_music
 
+
+def _collect_music_record_catalog(
+    obtained_records: dict[int, int],
+    musics: dict[int, dict],
+    limited_by_music: dict[int, list[dict]],
+    tag_by_music: dict[int, str],
+) -> tuple[dict[str, list[int]], dict[int, int], set[int]]:
     category_music_ids: dict[str, list[int]] = {tag: [] for tag in _MUSIC_TAG_ORDER}
     music_obtained_at: dict[int, int] = {}
     music_present: set[int] = set()
@@ -1505,8 +1544,11 @@ def build_music_record() -> dict:
             music_present.add(music_id)
         tag = tag_by_music.get(music_id) or "vocaloid"
         category_music_ids[tag].append(music_id)
+    return category_music_ids, music_obtained_at, music_present
 
-    tag_icons = {
+
+def _music_record_tag_icons() -> dict[str, str]:
+    return {
         "light_music_club": ASSETS.static("icon_light_sound.png"),
         "idol": ASSETS.static("icon_idol.png"),
         "street": ASSETS.static("icon_street.png"),
@@ -1516,42 +1558,70 @@ def build_music_record() -> dict:
         "other": "",
     }
 
-    total_count = obtained_count = 0
-    categories: list[dict] = []
-    for tag in _MUSIC_TAG_ORDER:
-        music_ids = sorted(
-            category_music_ids[tag],
-            key=lambda m: (0, music_obtained_at.get(m, 0), m) if m in music_present else (1, 0, m),
-        )
-        category_total, category_obtained = len(music_ids), 0
-        records: list[dict] = []
-        for music_id in music_ids:
-            total_count += 1
-            if music_obtained_at.get(music_id, 0) != 0:
-                obtained_count += 1
-                category_obtained += 1
-            ab = musics[music_id].get("assetbundleName", "")
-            if not ab:  # counted above but skipped (music_record_builder.go:133-142)
-                continue
+
+def _music_record_category(
+    tag: str,
+    music_ids: list[int],
+    music_obtained_at: dict[int, int],
+    music_present: set[int],
+    musics: dict[int, dict],
+    tag_icons: dict[str, str],
+) -> tuple[dict | None, int, int]:
+    music_ids = sorted(
+        music_ids,
+        key=lambda music_id: (
+            (0, music_obtained_at.get(music_id, 0), music_id) if music_id in music_present else (1, 0, music_id)
+        ),
+    )
+    total = len(music_ids)
+    obtained = sum(music_obtained_at.get(music_id, 0) != 0 for music_id in music_ids)
+    if not total:
+        return None, 0, 0
+    records = []
+    for music_id in music_ids:
+        asset_name = musics[music_id].get("assetbundleName", "")
+        if asset_name:  # missing bundle is counted but not rendered
             records.append(
                 {
                     "id": music_id,
-                    "image_path": ASSETS.region_asset(f"music/jacket/{ab}/{ab}.png"),
+                    "image_path": ASSETS.region_asset(f"music/jacket/{asset_name}/{asset_name}.png"),
                     "obtained": music_obtained_at.get(music_id, 0) != 0,
                 }
             )
-        if not category_total:
-            continue
-        categories.append(
-            {
-                "tag": tag,
-                "tag_icon_path": tag_icons[tag],
-                "progress_message": (
-                    f"{category_obtained}/{category_total} ({_pct(category_obtained, category_total):.1f}%)"
-                ),
-                "musicrecords": records,
-            }
+    return (
+        {
+            "tag": tag,
+            "tag_icon_path": tag_icons[tag],
+            "progress_message": f"{obtained}/{total} ({_pct(obtained, total):.1f}%)",
+            "musicrecords": records,
+        },
+        total,
+        obtained,
+    )
+
+
+def build_music_record() -> dict:
+    """show_id=true (the `/mss id` variant) so record ids are drawn too."""
+    merged = _raw_mysekai()
+    obtained_records = {
+        int(item.get("mysekaiMusicRecordId", 0)): int(item.get("obtainedAt", 0))
+        for item in _nested_list(merged, "userMysekaiMusicRecords")
+    }
+    musics = _md_map("musics")
+    category_music_ids, music_obtained_at, music_present = _collect_music_record_catalog(
+        obtained_records, musics, _limited_music_windows(), _music_tags_by_id()
+    )
+    tag_icons = _music_record_tag_icons()
+    total_count = obtained_count = 0
+    categories: list[dict] = []
+    for tag in _MUSIC_TAG_ORDER:
+        category, total, obtained = _music_record_category(
+            tag, category_music_ids[tag], music_obtained_at, music_present, musics, tag_icons
         )
+        total_count += total
+        obtained_count += obtained
+        if category is not None:
+            categories.append(category)
 
     body: dict[str, Any] = {
         "profile": _profile_card(merged, include_suite=False),
@@ -1743,25 +1813,17 @@ def build_talk_list() -> dict:
 def _resolve_housing_competition() -> tuple[dict, bool]:
     """resolveHousingCompetition (housing_competition.go:312-370): active first,
     else fall back to the most recent past competition."""
-    active: dict | None = None
-    latest_past: dict | None = None
 
     def start_at(item: dict) -> int:
         return int(item.get("reviewStartAt", 0) or 0) or int(item.get("submitStartAt", 0) or 0)
 
-    for item in MD.get("mysekaiHousingCompetitions"):
-        start, aggregate = start_at(item), int(item.get("aggregateAt", 0) or 0)
-        if start <= 0 or aggregate <= 0:
-            continue
-        if start <= NOW_MS < aggregate:
-            if active is None or (start_at(active), active["id"]) < (start, item["id"]):
-                active = item
-        elif start <= NOW_MS:
-            if latest_past is None or (start_at(latest_past), latest_past["id"]) < (start, item["id"]):
-                latest_past = item
+    competitions = MD.get("mysekaiHousingCompetitions")
+    valid = [item for item in competitions if start_at(item) > 0 and int(item.get("aggregateAt", 0) or 0) > 0]
+    active = [item for item in valid if start_at(item) <= NOW_MS < int(item.get("aggregateAt", 0) or 0)]
     if active:
-        return active, True
-    return latest_past or MD.get("mysekaiHousingCompetitions")[-1], False
+        return max(active, key=lambda item: (start_at(item), item["id"])), True
+    past = [item for item in valid if start_at(item) <= NOW_MS]
+    return max(past, key=lambda item: (start_at(item), item["id"])) if past else competitions[-1], False
 
 
 def _fake_thumbnail_b64(color: tuple[int, int, int]) -> str:

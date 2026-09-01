@@ -141,3 +141,85 @@ def test_map_harvest_points_builds_birthday_metadata_and_skips_tone_gust(monkeyp
     assert result[0]["fallback_image_path"].endswith("mdl_site_wood_common_fieldtree01.png")
     assert result[0]["size"] == 50
     assert result[0]["offset_x"] == 7.5
+
+
+def test_gate_material_helpers_keep_first_gate_on_equal_level_and_accumulate_cost(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    gate_materials = {1: [[{"material_id": 10, "quantity": 2}], [{"material_id": 10, "quantity": 3}]], 2: [[]]}
+
+    selected = gen._selected_gate_materials(gate_materials, {1: 3, 2: 3})
+    levels = gen._gate_level_materials(gate_materials[1], 0, {10: 4}, {10: "material_ten"})
+
+    assert selected == {1: gate_materials[1]}
+    assert levels[0]["items"][0]["sum_quantity"] == "4/2"
+    assert levels[0]["color"] == [50, 50, 50]
+    assert levels[1]["items"][0]["sum_quantity"] == "4/5"
+    assert levels[1]["color"] == [200, 0, 0]
+
+
+def test_music_record_category_counts_missing_asset_and_sorts_obtained_first(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    category, total, obtained = gen._music_record_category(
+        "street",
+        [2, 1],
+        {1: 10},
+        {1},
+        {1: {"assetbundleName": "one"}, 2: {"assetbundleName": ""}},
+        {"street": "street.png"},
+    )
+
+    assert total == 2
+    assert obtained == 1
+    assert category is not None
+    assert category["progress_message"] == "1/2 (50.0%)"
+    assert category["musicrecords"] == [{"id": 1, "image_path": "asset/music/jacket/one/one.png", "obtained": True}]
+
+
+def test_fixture_detail_request_adds_optional_blueprint_data(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    monkeypatch.setattr(gen, "_fixture_color_images", lambda _fixture: ["image"])
+    monkeypatch.setattr(gen, "_fixture_basic_info", lambda _fixture: ["basic"])
+    monkeypatch.setattr(gen, "_fixture_tags", lambda _fixture: ["tag"])
+    monkeypatch.setattr(gen, "_reaction_character_groups", lambda _fixture_id: [{"number": 1}])
+    monkeypatch.setattr(gen, "_material_cost_list", lambda rows: [{"rows": len(rows)}] if rows else [])
+    monkeypatch.setattr(gen, "_find_fixture_blueprint", lambda _fixture_id: {"id": 9, "isEnableSketch": True})
+    monkeypatch.setattr(gen, "_fixture_blueprint_info", lambda _blueprint: ["blueprint"])
+    fixture = {
+        "name": "Chair",
+        "mysekaiFixtureMainGenreId": 1,
+        "mysekaiFixtureSubGenreId": 2,
+        "gridSize": {"width": 1, "depth": 2, "height": 3},
+    }
+
+    request, supports_sketch = gen._fixture_detail_request(
+        1,
+        fixture,
+        {1: {"name": "Main", "assetbundleName": "main"}},
+        {2: {"name": "Sub", "assetbundleName": "sub"}},
+        [{"mysekaiBlueprintId": 9}],
+        [{"mysekaiFixtureId": 1}],
+    )
+
+    assert supports_sketch is True
+    assert request["basic_info"] == ["basic", "blueprint"]
+    assert request["tags"] == ["tag"]
+    assert request["cost_materials"] == [{"rows": 1}]
+    assert request["recycle_materials"] == [{"rows": 1}]
+
+
+def test_resolve_housing_competition_prefers_latest_active(monkeypatch) -> None:
+    competitions = [
+        {"id": 1, "submitStartAt": 10, "aggregateAt": 100},
+        {"id": 2, "reviewStartAt": 20, "aggregateAt": 100},
+        {"id": 3, "submitStartAt": 1, "aggregateAt": 5},
+    ]
+
+    class _Master:
+        @staticmethod
+        def get(_name: str) -> list[dict]:
+            return competitions
+
+    monkeypatch.setattr(gen, "MD", _Master())
+    monkeypatch.setattr(gen, "NOW_MS", 50)
+
+    assert gen._resolve_housing_competition() == (competitions[1], True)
