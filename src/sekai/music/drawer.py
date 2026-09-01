@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 
@@ -302,405 +303,364 @@ def _draw_custom_chart_tags(info: CustomChartInfo | None, width: int):
             ).set_bg(roundrect_bg(fill=(255, 255, 255, 95), radius=10))
 
 
-async def _build_music_detail_canvas(rqd: MusicDetailRequest) -> Canvas:
-    # 数据准备
-    mid = rqd.music_info.id
-    name = rqd.music_info.title
-    custom_chart = rqd.custom_chart_info
-    composer = rqd.music_info.composer
-    lyricist = rqd.music_info.lyricist
-    arranger = rqd.music_info.arranger
-    mv_info = rqd.music_info.mv_info
-    publish_time = datetime_from_millis(rqd.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
-    bpm = rqd.bpm
-    is_full_length = rqd.music_info.is_full_length
-    cover_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)
-    length = rqd.length
-    cn_name = rqd.cn_name
-    region = rqd.region
-    vocal_info = rqd.vocal.vocal_info
-    vocal_logos_raw = {} if custom_chart else rqd.vocal.vocal_assets
-    # has_append = rqd.difficulty.has_append
+@dataclass(frozen=True)
+class _MusicDetailAssets:
+    cover: ImageSource
+    vocal_logos: dict[str, ImageSource]
+    event_banner: ImageSource | None
 
-    # 并行加载封面、banner和所有vocal logos
-    _logo_names = list(vocal_logos_raw.keys())
-    _logo_paths = list(vocal_logos_raw.values())
-    _img_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _logo_paths]
-    if rqd.event_banner_path and not custom_chart:
-        _img_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path))
-    _t0 = time.perf_counter()
-    _img_results = await asyncio.gather(*_img_tasks) if _img_tasks else []
+
+async def _load_music_detail_assets(rqd: MusicDetailRequest) -> _MusicDetailAssets:
+    cover = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)
+    custom_chart = rqd.custom_chart_info
+    vocal_logo_paths = {} if custom_chart else rqd.vocal.vocal_assets
+    logo_names = list(vocal_logo_paths)
+    image_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in vocal_logo_paths.values()]
+    load_event_banner = bool(rqd.event_banner_path and not custom_chart)
+    if load_event_banner:
+        image_tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path))
+
+    started_at = time.perf_counter()
+    image_results = await asyncio.gather(*image_tasks) if image_tasks else []
     logger.debug(
         "[perf] compose_music_detail_image preload %d images: %.3fs",
-        len(_img_tasks),
-        time.perf_counter() - _t0,
+        len(image_tasks),
+        time.perf_counter() - started_at,
     )
-    vocal_logos = {}
-    for i, name_ in enumerate(_logo_names):
-        if _img_results[i]:
-            vocal_logos[name_] = _img_results[i]
-    event_banner = _img_results[len(_logo_names)] if rqd.event_banner_path and not custom_chart else None
+    vocal_logos = {name: image_results[index] for index, name in enumerate(logo_names) if image_results[index]}
+    event_banner = image_results[len(logo_names)] if load_event_banner else None
+    return _MusicDetailAssets(cover, vocal_logos, event_banner)
 
-    if is_full_length:
-        name += " [FULL]"
 
-    audio_len = length
-    bpm_main = f"{bpm} BPM" if bpm else "?"
-    if custom_chart:
-        if custom_chart.published_at:
-            publish_time = datetime_from_millis(custom_chart.published_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
-        if custom_chart.bpm:
-            bpm_main = f"{custom_chart.bpm} BPM"
+class _MusicDetailRenderer:
+    def __init__(self, rqd: MusicDetailRequest, assets: _MusicDetailAssets) -> None:
+        self.rqd = rqd
+        self.assets = assets
+        self.custom_chart = rqd.custom_chart_info
+        self.mid = rqd.music_info.id
+        self.name = rqd.music_info.title + (" [FULL]" if rqd.music_info.is_full_length else "")
+        self.publish_time = datetime_from_millis(rqd.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        self.bpm_main = f"{rqd.bpm} BPM" if rqd.bpm else "?"
+        if self.custom_chart:
+            if self.custom_chart.published_at:
+                self.publish_time = datetime_from_millis(self.custom_chart.published_at, rqd.timezone).strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+            if self.custom_chart.bpm:
+                self.bpm_main = f"{self.custom_chart.bpm} BPM"
+        self.event_id = None if self.custom_chart else rqd.event_id
+        self.caption_vocals = _build_caption_vocals(rqd.vocal.vocal_info, assets.vocal_logos)
 
-    diff_lvs = rqd.difficulty.level
-    diff_counts = rqd.difficulty.note_count
-    has_append = rqd.difficulty.has_append
-
-    event_id = None if custom_chart else rqd.event_id
-
-    caption_vocals = _build_caption_vocals(vocal_info, vocal_logos)
-
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
-            with (
-                VSplit()
-                .set_content_align("lt")
-                .set_item_align("lt")
-                .set_sep(8)
-                .set_padding(16)
-                .set_item_bg(roundrect_bg(alpha=80))
-            ):
-                # 附加标题
-                _draw_rqd_title(rqd)
-
-                # 歌曲标题
-                if custom_chart:
-                    custom_title = custom_chart.title or "自定义谱面"
-                    with VSplit().set_padding(16).set_sep(6).set_content_align("lt").set_item_align("lt").set_w(800):
-                        TextBox(
-                            f"【{region.upper()}-CUSTOM】{name} / {custom_title}",
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)),
-                            line_count=1,
-                            overflow="shrink",
-                        ).set_w(768)
-                        TextBox(
-                            f"ID：{custom_chart.score_id}",
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(20, 20, 20)),
-                            line_count=1,
-                            overflow="shrink",
-                        ).set_w(768)
-                        description = (custom_chart.description or "").strip()
-                        if description:
-                            TextBox(
-                                f"说明：{description}",
-                                TextStyle(font=DEFAULT_FONT, size=20, color=(85, 85, 85)),
-                                line_count=2,
-                                overflow="shrink",
-                                use_real_line_count=True,
-                            ).set_w(768)
-                else:
-                    name_text = f"【{region.upper()}-{mid}】{name}"
-                    if cn_name:
-                        name_text += f"  ({cn_name})"
+    def _draw_heading(self) -> None:
+        _draw_rqd_title(self.rqd)
+        if self.custom_chart:
+            custom_title = self.custom_chart.title or "自定义谱面"
+            with VSplit().set_padding(16).set_sep(6).set_content_align("lt").set_item_align("lt").set_w(800):
+                TextBox(
+                    f"【{self.rqd.region.upper()}-CUSTOM】{self.name} / {custom_title}",
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)),
+                    line_count=1,
+                    overflow="shrink",
+                ).set_w(768)
+                TextBox(
+                    f"ID：{self.custom_chart.score_id}",
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(20, 20, 20)),
+                    line_count=1,
+                    overflow="shrink",
+                ).set_w(768)
+                description = (self.custom_chart.description or "").strip()
+                if description:
                     TextBox(
-                        name_text,
-                        TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)),
+                        f"说明：{description}",
+                        TextStyle(font=DEFAULT_FONT, size=20, color=(85, 85, 85)),
+                        line_count=2,
+                        overflow="shrink",
                         use_real_line_count=True,
-                    ).set_padding(16).set_w(800)
+                    ).set_w(768)
+            return
 
-                with HSplit().set_content_align("c").set_item_align("c").set_sep(16):
-                    # 封面
-                    with Frame().set_padding(32):
-                        Spacer(w=300, h=300).set_bg(FillBg((0, 0, 0, 100))).set_offset((4, 4))
-                        ImageBox(cover_img, size=(None, 300))
-                    # 信息
-                    style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=30, color=(50, 50, 50))
-                    style2 = TextStyle(font=DEFAULT_FONT, size=30, color=(70, 70, 70))
-                    with HSplit().set_padding(16).set_sep(32).set_content_align("c").set_item_align("c"):
-                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
-                            TextBox("原曲", style1)
-                            if custom_chart:
-                                TextBox("谱面作者", style1)
-                            TextBox("作曲", style1)
-                            if not custom_chart:
-                                TextBox("作词", style1)
-                                TextBox("编曲", style1)
-                            TextBox("MV", style1)
-                            TextBox("时长", style1)
-                            TextBox("发布时间", style1)
-                            TextBox("BPM", style1)
+        name_text = f"【{self.rqd.region.upper()}-{self.mid}】{self.name}"
+        if self.rqd.cn_name:
+            name_text += f"  ({self.rqd.cn_name})"
+        TextBox(
+            name_text,
+            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)),
+            use_real_line_count=True,
+        ).set_padding(16).set_w(800)
 
-                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
-                            TextBox(f"{mid}", style2)
-                            if custom_chart:
-                                TextBox(custom_chart.author or "-", style2)
-                            TextBox(composer, style2)
-                            if not custom_chart:
-                                TextBox(lyricist, style2)
-                                TextBox(arranger, style2)
-                            mv_text = ""
-                            if mv_info:
-                                for item in mv_info:
-                                    if item == "original":
-                                        mv_text += "原版MV & "
-                                    if item == "mv":
-                                        mv_text += "3DMV & "
-                                    if item == "mv_2d":
-                                        mv_text += "2DMV & "
-                            mv_text = mv_text[:-3]
-                            if not mv_text:
-                                mv_text = "无"
-                            TextBox(mv_text, style2)
-                            TextBox(audio_len, style2)
-                            TextBox(publish_time, style2)
-                            TextBox(bpm_main, style2)
+    def _mv_text(self) -> str:
+        labels = {"original": "原版MV", "mv": "3DMV", "mv_2d": "2DMV"}
+        parts = [labels[item] for item in self.rqd.music_info.mv_info or [] if item in labels]
+        return " & ".join(parts) or "无"
 
-                # 限定时间
-                if rqd.limited_times and not custom_chart:
-                    with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
-                        TextBox("限定时间", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
-                        with VSplit().set_content_align("l").set_item_align("l").set_sep(4):
-                            for start, end in rqd.limited_times:
-                                start_at = datetime_from_millis(start, rqd.timezone)
-                                end_at = datetime_from_millis(end, rqd.timezone)
-                                TextBox(
-                                    f"{start_at.strftime('%Y-%m-%d %H:%M')} ~ {end_at.strftime('%Y-%m-%d %H:%M')}",
-                                    TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)),
-                                )
+    def _draw_summary_labels(self, style: TextStyle) -> None:
+        TextBox("原曲", style)
+        if self.custom_chart:
+            TextBox("谱面作者", style)
+        TextBox("作曲", style)
+        if not self.custom_chart:
+            TextBox("作词", style)
+            TextBox("编曲", style)
+        TextBox("MV", style)
+        TextBox("时长", style)
+        TextBox("发布时间", style)
+        TextBox("BPM", style)
 
-                if custom_chart:
-                    _draw_custom_chart_tags(custom_chart, 964)
+    def _draw_summary_values(self, style: TextStyle) -> None:
+        TextBox(f"{self.mid}", style)
+        if self.custom_chart:
+            TextBox(self.custom_chart.author or "-", style)
+        TextBox(self.rqd.music_info.composer, style)
+        if not self.custom_chart:
+            TextBox(self.rqd.music_info.lyricist, style)
+            TextBox(self.rqd.music_info.arranger, style)
+        TextBox(self._mv_text(), style)
+        TextBox(self.rqd.length, style)
+        TextBox(self.publish_time, style)
+        TextBox(self.bpm_main, style)
 
-                # 计算难度区域宽度
-                diff_order = rqd.difficulty.order or list(DIFF_COLORS.keys())
-                if not has_append:
-                    diff_order = [diff for diff in diff_order if diff != "append"]
-                diff_col_count = 6 if has_append else 5
-                diff_cell_size = 64
-                diff_hs = 8 if has_append else 20
-                diff_padding = 32
-                diff_section_w = diff_col_count * diff_cell_size + (diff_col_count - 1) * diff_hs + diff_padding * 2
-                total_w = 964
-                hsplit_gap = 8
-                custom_bottom_h = 146
-                if custom_chart:
-                    diff_section_w = 340
-                leaderboard_w = total_w - diff_section_w - hsplit_gap
+    def _draw_summary(self) -> None:
+        with HSplit().set_content_align("c").set_item_align("c").set_sep(16):
+            with Frame().set_padding(32):
+                Spacer(w=300, h=300).set_bg(FillBg((0, 0, 0, 100))).set_offset((4, 4))
+                ImageBox(self.assets.cover, size=(None, 300))
+            label_style = TextStyle(font=DEFAULT_HEAVY_FONT, size=30, color=(50, 50, 50))
+            value_style = TextStyle(font=DEFAULT_FONT, size=30, color=(70, 70, 70))
+            with HSplit().set_padding(16).set_sep(32).set_content_align("c").set_item_align("c"):
+                with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
+                    self._draw_summary_labels(label_style)
+                with VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
+                    self._draw_summary_values(value_style)
 
+    def _draw_limited_times(self) -> None:
+        if not self.rqd.limited_times or self.custom_chart:
+            return
+        with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
+            TextBox("限定时间", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
+            with VSplit().set_content_align("l").set_item_align("l").set_sep(4):
+                for start, end in self.rqd.limited_times:
+                    start_at = datetime_from_millis(start, self.rqd.timezone)
+                    end_at = datetime_from_millis(end, self.rqd.timezone)
+                    TextBox(
+                        f"{start_at.strftime('%Y-%m-%d %H:%M')} ~ {end_at.strftime('%Y-%m-%d %H:%M')}",
+                        TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)),
+                    )
+
+    def _difficulty_order(self) -> tuple[list[str], bool]:
+        has_append = self.rqd.difficulty.has_append
+        order = self.rqd.difficulty.order or list(DIFF_COLORS)
+        if not has_append:
+            order = [difficulty for difficulty in order if difficulty != "append"]
+        return order, has_append
+
+    def _draw_standard_difficulty(self, diff_order: list[str], has_append: bool) -> None:
+        col_count = 6 if has_append else 5
+        h_sep = 8 if has_append else 20
+        with HSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(32).set_h(196):
+            with Grid(col_count=col_count, item_size_mode="fixed").set_sep(h_sep=h_sep, v_sep=4):
+                for index, difficulty in enumerate(diff_order):
+                    if index >= len(self.rqd.difficulty.level) or self.rqd.difficulty.level[index] is None:
+                        continue
+                    color = DIFF_COLORS.get(difficulty, (80, 80, 80))
+                    TextBox(
+                        f"{self.rqd.difficulty.level[index]}",
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=WHITE),
+                    ).set_bg(roundrect_bg(fill=color, radius=12)).set_size((64, 64)).set_content_align(
+                        "c"
+                    ).set_overflow("clip")
+                for index, count in enumerate(self.rqd.difficulty.note_count):
+                    if count is None:
+                        continue
+                    difficulty = diff_order[index] if index < len(diff_order) else ""
+                    color = DIFF_COLORS.get(difficulty, (80, 80, 80))
+                    style = TextStyle(
+                        DEFAULT_BOLD_FONT,
+                        18,
+                        (80, 80, 80, 255),
+                        use_shadow=True,
+                        shadow_offset=1,
+                        shadow_color=color.c1 if isinstance(color, LinearGradient) else color,
+                    )
+                    with VSplit().set_content_align("c").set_item_align("c").set_sep(1):
+                        TextBox(f"{count}", style).set_size((64, None)).set_content_align("c").set_overflow("clip")
+                        TextBox("combo", style.replace(size=14)).set_size((64, None)).set_content_align(
+                            "c"
+                        ).set_overflow("clip")
+
+    def _leaderboard_keys(self) -> tuple[list[str], list[str]]:
+        live_types = _ordered_music_detail_leaderboard_keys(self.rqd.leaderboard_live_types, ("solo", "multi", "auto"))
+        targets = _ordered_music_detail_leaderboard_keys(self.rqd.leaderboard_targets, ("score", "pt", "pt/time"))
+        return live_types, targets
+
+    def _leaderboard_cell(self, row: int, column: int):
+        matrix = self.rqd.leaderboard_matrix or []
+        if row < len(matrix) and column < len(matrix[row]) and (info := matrix[row][column]):
+            music_num = self.rqd.leaderboard_music_num or 1
+            return (
+                (info.rank - 1) / max(1, music_num - 1),
+                f"#{info.rank}",
+                info.value,
+                DIFF_COLORS.get(info.diff, (50, 50, 50)),
+            )
+        return 0.5, "-", None, (50, 50, 50)
+
+    @staticmethod
+    def _leaderboard_bg(rank_ratio: float):
+        green, yellow, red = (200, 255, 200, 75), (255, 200, 150, 75), (255, 150, 150, 50)
+        if rank_ratio <= 0.5:
+            return lerp_color(green, yellow, rank_ratio)
+        return lerp_color(yellow, red, rank_ratio - 0.5)
+
+    def _draw_leaderboard(self, width: int) -> None:
+        if not (self.rqd.leaderboard_matrix and self.rqd.leaderboard_live_types and self.rqd.leaderboard_targets):
+            return
+        live_types, targets = self._leaderboard_keys()
+        th_w, th_h = 60, 36
+        tr_w, tr_h = 120, 36
+        gap = 4
+        with VSplit().set_sep(gap).set_padding(16).set_content_align("l").set_item_align("l").set_w(width).set_h(196):
+            with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
+                Spacer(w=th_w, h=th_h).set_bg(FillBg((255, 255, 255, 100)))
+                for target in targets:
+                    TextBox(
+                        self.rqd.leaderboard_targets[target], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))
+                    ).set_bg(FillBg((255, 255, 255, 100))).set_size((tr_w, th_h)).set_content_align("c")
+            for row, live_type in enumerate(live_types):
+                with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
+                    TextBox(
+                        self.rqd.leaderboard_live_types[live_type],
+                        TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50)),
+                    ).set_bg(FillBg((255, 255, 255, 50))).set_size((th_w, th_h)).set_content_align("c")
+                    for column, _target in enumerate(targets):
+                        rank_ratio, rank_text, value_text, text_color = self._leaderboard_cell(row, column)
+                        _build_music_detail_leaderboard_cell(
+                            tr_w,
+                            tr_h,
+                            self._leaderboard_bg(rank_ratio),
+                            rank_text,
+                            value_text,
+                            text_color,
+                            padding=8,
+                            gap=gap,
+                            rank_box_w=42,
+                        )
+
+    def _draw_difficulty_and_leaderboard(self) -> None:
+        diff_order, has_append = self._difficulty_order()
+        total_w = 964
+        gap = 8
+        diff_width = (
+            340
+            if self.custom_chart
+            else (6 if has_append else 5) * 64 + (5 if has_append else 4) * (8 if has_append else 20) + 64
+        )
+        leaderboard_width = total_w - diff_width - gap
+        with (
+            HSplit()
+            .set_content_align("lt")
+            .set_item_align("lt")
+            .set_sep(gap)
+            .set_omit_parent_bg(True)
+            .set_item_bg(roundrect_bg(alpha=80))
+            .set_w(total_w)
+        ):
+            if self.custom_chart:
+                _draw_custom_chart_difficulty(self.rqd, diff_width, 146)
+                _draw_custom_chart_info(self.rqd, leaderboard_width, 146)
+            else:
+                self._draw_standard_difficulty(diff_order, has_append)
+                self._draw_leaderboard(leaderboard_width)
+
+    def _draw_aliases(self) -> None:
+        if not self.rqd.alias or self.custom_chart:
+            return
+        alias_text = "，".join(self.rqd.alias)
+        font_size = max(10, 24 - get_str_display_length(alias_text) // 40)
+        with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
+            TextBox("歌曲别名", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
+            TextBox(
+                alias_text,
+                TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)),
+                use_real_line_count=True,
+            ).set_w(800)
+
+    def _draw_vocal(self, width: int = 964) -> None:
+        content_width = width - 32
+        max_text_width = max(120, min(420, content_width - 32))
+        max_icons_per_chip = max(1, (content_width - 12) // 34)
+        with Flow().set_content_align("lt").set_item_align("lt").set_sep(8, 8).set_padding(16).set_w(width):
+            for caption, vocals in sorted(self.caption_vocals.items(), key=lambda item: len(item[1])):
                 with (
-                    HSplit()
+                    VSplit().set_w(content_width).set_padding(0).set_sep(6).set_content_align("lt").set_item_align("lt")
+                ):
+                    TextBox(
+                        caption + "  ver.",
+                        TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)),
+                        line_count=2,
+                        overflow="shrink",
+                        use_real_line_count=True,
+                    ).set_w(content_width)
+                    with (
+                        Flow()
+                        .set_content_align("lt")
+                        .set_item_align("lt")
+                        .set_sep(6, 6)
+                        .set_padding(0)
+                        .set_w(content_width)
+                    ):
+                        for vocal in vocals:
+                            if vocal_name := vocal.get("vocal_name"):
+                                _draw_vocal_name_chip(vocal_name, max_text_width)
+                                continue
+                            chara_imgs = vocal.get("chara_imgs") or []
+                            for index in range(0, len(chara_imgs), max_icons_per_chip):
+                                _draw_vocal_image_chip(chara_imgs[index : index + max_icons_per_chip])
+                            for vocal_name in vocal.get("vocal_names") or []:
+                                _draw_vocal_name_chip(vocal_name, max_text_width)
+
+    def _draw_event(self) -> None:
+        with HSplit().set_sep(8).set_content_align("c").set_item_align("c").set_padding(16):
+            with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
+                TextBox("关联活动", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
+                TextBox(f"ID: {self.event_id}", TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
+            ImageBox(self.assets.event_banner, size=(None, 100))
+
+    def _draw_related_content(self) -> None:
+        if self.custom_chart:
+            return
+        if self.event_id is None:
+            self._draw_vocal()
+            return
+        with HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16):
+            self._draw_vocal(600)
+            self._draw_event()
+
+    def build_canvas(self) -> Canvas:
+        with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_item_bg(roundrect_bg(alpha=80)):
+                with (
+                    VSplit()
                     .set_content_align("lt")
                     .set_item_align("lt")
-                    .set_sep(hsplit_gap)
-                    .set_omit_parent_bg(True)
+                    .set_sep(8)
+                    .set_padding(16)
                     .set_item_bg(roundrect_bg(alpha=80))
-                    .set_w(total_w)
                 ):
-                    # 难度等级/物量
-                    if custom_chart:
-                        _draw_custom_chart_difficulty(rqd, diff_section_w, custom_bottom_h)
-                    else:
-                        vs = 4
-                        hs = diff_hs
-                        with (
-                            HSplit()
-                            .set_content_align("c")
-                            .set_item_align("c")
-                            .set_sep(vs)
-                            .set_padding(diff_padding)
-                            .set_h(196)
-                        ):
-                            with Grid(col_count=diff_col_count, item_size_mode="fixed").set_sep(h_sep=hs, v_sep=vs):
-                                # 难度等级
-                                for i, diff in enumerate(diff_order):
-                                    if i < len(diff_lvs) and diff_lvs[i] is not None:
-                                        color = DIFF_COLORS.get(diff, (80, 80, 80))
-                                        t = TextBox(
-                                            f"{diff_lvs[i]}", TextStyle(font=DEFAULT_BOLD_FONT, size=32, color=WHITE)
-                                        )
-                                        t.set_bg(roundrect_bg(fill=color, radius=12)).set_size(
-                                            (64, 64)
-                                        ).set_content_align("c").set_overflow("clip")
-                                # 物量
-                                for i, count in enumerate(diff_counts):
-                                    if count is None:
-                                        continue
-                                    diff = diff_order[i] if i < len(diff_order) else ""
-                                    color = DIFF_COLORS.get(diff, (80, 80, 80))
-                                    style = TextStyle(
-                                        DEFAULT_BOLD_FONT,
-                                        18,
-                                        (80, 80, 80, 255),
-                                        use_shadow=True,
-                                        shadow_offset=1,
-                                        shadow_color=color.c1 if isinstance(color, LinearGradient) else color,
-                                    )
-                                    with VSplit().set_content_align("c").set_item_align("c").set_sep(1):
-                                        TextBox(f"{count}", style).set_size((64, None)).set_content_align(
-                                            "c"
-                                        ).set_overflow("clip")
-                                        TextBox("combo", style.replace(size=14)).set_size((64, None)).set_content_align(
-                                            "c"
-                                        ).set_overflow("clip")
+                    self._draw_heading()
+                    self._draw_summary()
+                    self._draw_limited_times()
+                    if self.custom_chart:
+                        _draw_custom_chart_tags(self.custom_chart, 964)
+                    self._draw_difficulty_and_leaderboard()
+                    self._draw_aliases()
+                    self._draw_related_content()
+        add_request_watermark(canvas, self.rqd)
+        return canvas
 
-                    # 排行榜
-                    if custom_chart:
-                        _draw_custom_chart_info(rqd, leaderboard_w, custom_bottom_h)
-                    elif rqd.leaderboard_matrix and rqd.leaderboard_live_types and rqd.leaderboard_targets:
-                        live_type_keys = _ordered_music_detail_leaderboard_keys(
-                            rqd.leaderboard_live_types, ("solo", "multi", "auto")
-                        )
-                        target_keys = _ordered_music_detail_leaderboard_keys(
-                            rqd.leaderboard_targets, ("score", "pt", "pt/time")
-                        )
-                        leaderboard_music_num = rqd.leaderboard_music_num or 1
 
-                        th_w, th_h = 60, 36
-                        tr_w, tr_h = 120, 36
-                        gap = 4
-                        cell_padding = 8
-                        rank_box_w = 42
-
-                        with (
-                            VSplit()
-                            .set_sep(gap)
-                            .set_padding(16)
-                            .set_content_align("l")
-                            .set_item_align("l")
-                            .set_w(leaderboard_w)
-                            .set_h(196)
-                        ):
-                            # 表头行
-                            with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
-                                Spacer(w=th_w, h=th_h).set_bg(FillBg((255, 255, 255, 100)))
-                                for target in target_keys:
-                                    TextBox(
-                                        rqd.leaderboard_targets[target], TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50))
-                                    ).set_bg(FillBg((255, 255, 255, 100))).set_size((tr_w, th_h)).set_content_align("c")
-                            # 数据行
-                            for i, live_type in enumerate(live_type_keys):
-                                with HSplit().set_sep(gap).set_content_align("l").set_item_align("c"):
-                                    TextBox(
-                                        rqd.leaderboard_live_types[live_type],
-                                        TextStyle(DEFAULT_BOLD_FONT, 18, (50, 50, 50)),
-                                    ).set_bg(FillBg((255, 255, 255, 50))).set_size((th_w, th_h)).set_content_align("c")
-                                    for j, target in enumerate(target_keys):
-                                        info = (
-                                            rqd.leaderboard_matrix[i][j]
-                                            if i < len(rqd.leaderboard_matrix) and j < len(rqd.leaderboard_matrix[i])
-                                            else None
-                                        )
-                                        if info:
-                                            rank_ratio = (info.rank - 1) / max(1, leaderboard_music_num - 1)
-                                            text1, text2 = f"#{info.rank}", info.value
-                                            text_color = DIFF_COLORS.get(info.diff, (50, 50, 50))
-                                        else:
-                                            rank_ratio = 0.5
-                                            text1, text2 = "-", None
-                                            text_color = (50, 50, 50)
-
-                                        green, yellow, red = (
-                                            (200, 255, 200, 75),
-                                            (255, 200, 150, 75),
-                                            (255, 150, 150, 50),
-                                        )
-                                        bg_color = (
-                                            lerp_color(green, yellow, rank_ratio)
-                                            if rank_ratio <= 0.5
-                                            else lerp_color(yellow, red, rank_ratio - 0.5)
-                                        )
-
-                                        _build_music_detail_leaderboard_cell(
-                                            tr_w,
-                                            tr_h,
-                                            bg_color,
-                                            text1,
-                                            text2,
-                                            text_color,
-                                            padding=cell_padding,
-                                            gap=gap,
-                                            rank_box_w=rank_box_w,
-                                        )
-
-                # 别名
-                aliases = rqd.alias
-                if aliases and not custom_chart:
-                    alias_text = "，".join(aliases)
-                    font_size = max(10, 24 - get_str_display_length(alias_text) // 40 * 1)
-                    with HSplit().set_content_align("l").set_item_align("l").set_sep(16).set_padding(16):
-                        TextBox("歌曲别名", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
-                        aw = 800
-                        TextBox(
-                            alias_text,
-                            TextStyle(font=DEFAULT_FONT, size=font_size, color=(70, 70, 70)),
-                            use_real_line_count=True,
-                        ).set_w(aw)
-
-                def draw_vocal(width: int | None = None):
-                    # 歌手
-                    resolved_width = width or 964
-                    content_width = resolved_width - 32
-                    max_text_width = max(120, min(420, content_width - 32))
-                    max_icons_per_chip = max(1, (content_width - 12) // 34)
-                    with Flow().set_content_align("lt").set_item_align("lt").set_sep(8, 8).set_padding(16) as flow:
-                        flow.set_w(resolved_width)
-                        for caption, vocals in sorted(caption_vocals.items(), key=lambda x: len(x[1])):
-                            with (
-                                VSplit()
-                                .set_w(content_width)
-                                .set_padding(0)
-                                .set_sep(6)
-                                .set_content_align("lt")
-                                .set_item_align("lt")
-                            ):
-                                TextBox(
-                                    caption + "  ver.",
-                                    TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)),
-                                    line_count=2,
-                                    overflow="shrink",
-                                    use_real_line_count=True,
-                                ).set_w(content_width)
-                                with (
-                                    Flow()
-                                    .set_content_align("lt")
-                                    .set_item_align("lt")
-                                    .set_sep(6, 6)
-                                    .set_padding(0)
-                                    .set_w(content_width)
-                                ):
-                                    for vocal in vocals:
-                                        if vocal_name := vocal.get("vocal_name"):
-                                            _draw_vocal_name_chip(vocal_name, max_text_width)
-                                            continue
-
-                                        chara_imgs = vocal.get("chara_imgs") or []
-                                        for i in range(0, len(chara_imgs), max_icons_per_chip):
-                                            _draw_vocal_image_chip(chara_imgs[i : i + max_icons_per_chip])
-
-                                        for vn in vocal.get("vocal_names") or []:
-                                            _draw_vocal_name_chip(vn, max_text_width)
-
-                def draw_event():
-                    # 活动
-                    with HSplit().set_sep(8).set_content_align("c").set_item_align("c").set_padding(16):
-                        with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
-                            TextBox("关联活动", TextStyle(font=DEFAULT_HEAVY_FONT, size=24, color=(50, 50, 50)))
-                            TextBox(f"ID: {event_id}", TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)))
-                        ImageBox(event_banner, size=(None, 100))
-
-                if custom_chart:
-                    pass
-                elif event_id is not None:
-                    with (
-                        HSplit().set_omit_parent_bg(True).set_item_bg(roundrect_bg(alpha=80)).set_padding(0).set_sep(16)
-                    ):
-                        draw_vocal(600)
-                        draw_event()
-                else:
-                    draw_vocal(964)
-
-    add_request_watermark(canvas, rqd)
-    return canvas
+async def _build_music_detail_canvas(rqd: MusicDetailRequest) -> Canvas:
+    assets = await _load_music_detail_assets(rqd)
+    return _MusicDetailRenderer(rqd, assets).build_canvas()
 
 
 async def compose_music_detail_image(rqd: MusicDetailRequest) -> Image.Image:
