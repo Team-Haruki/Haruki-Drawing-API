@@ -1086,24 +1086,41 @@ _GENERAL_SAMPLING_MAP = {
 }
 
 
+def _native_challenge_live_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
+    if not isinstance(data, dict):
+        return {}
+    character_id = int(data.get("characterId", 0) or 0)
+    return {"challenge_character_icon": renderer.chara_icon_path(character_id)}
+
+
+def _native_character_rank_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    return {
+        f"character_rank_icon:{character_id}": renderer.chara_icon_path(character_id)
+        for _nickname, character_id in CHARA_LIST
+        if character_id is not None
+    }
+
+
+def _native_story_favorite_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    stories = renderer.profile_context.get("userStoryFavorites") or []
+    if not isinstance(stories, list):
+        return {}
+    return {
+        story_favorite_asset_key(story): renderer.story_favorite_image_path(story)
+        for story in stories
+        if isinstance(story, dict)
+    }
+
+
 def _native_general_asset_paths(renderer: PNGRenderer, file_name: str) -> dict[str, Path | None]:
-    asset_paths: dict[str, Path | None] = {}
     if file_name == "ChallengeLive":
-        data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
-        if isinstance(data, dict):
-            character_id = int(data.get("characterId", 0) or 0)
-            asset_paths["challenge_character_icon"] = renderer.chara_icon_path(character_id)
-    elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
-        for _nickname, character_id in CHARA_LIST:
-            if character_id is not None:
-                asset_paths[f"character_rank_icon:{character_id}"] = renderer.chara_icon_path(character_id)
-    elif file_name == "StoryFavorite":
-        stories = renderer.profile_context.get("userStoryFavorites") or []
-        if isinstance(stories, list):
-            for story in stories:
-                if isinstance(story, dict):
-                    asset_paths[story_favorite_asset_key(story)] = renderer.story_favorite_image_path(story)
-    return asset_paths
+        return _native_challenge_live_asset_paths(renderer)
+    if file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+        return _native_character_rank_asset_paths(renderer)
+    if file_name == "StoryFavorite":
+        return _native_story_favorite_asset_paths(renderer)
+    return {}
 
 
 def _native_general_labels(renderer: PNGRenderer) -> dict[str, str]:
