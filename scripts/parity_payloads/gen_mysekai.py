@@ -810,12 +810,11 @@ def _map_harvest_points(site_map: dict, birthday_char_by_pos: dict[str, int]) ->
     return [point for point in points if point is not None]
 
 
-def _map_resource_drops(raw_drops: list) -> list[dict]:
-    """buildMapResourceDrops (map_builder_resources.go:14-218)."""
+def _is_birthday_resource(resource_type: str, resource_id: int) -> bool:
+    return resource_type in ("material", "mysekai_material") and 174 <= resource_id <= 199
 
-    def is_birthday(resource_type: str, resource_id: int) -> bool:
-        return resource_type in ("material", "mysekai_material") and 174 <= resource_id <= 199
 
+def _group_map_resource_drops(raw_drops: list) -> dict[str, dict[str, dict]]:
     grouped_by_pos: dict[str, dict[str, dict]] = {}
     for drop in raw_drops:
         resource_type, resource_id, status, quantity, x, z = _drop_fields(drop)
@@ -849,49 +848,62 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
         if has_record:
             item["attachment_image_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
         group[key] = item
+    return grouped_by_pos
 
+
+def _map_drop_group_flags(group: dict[str, dict]) -> tuple[bool, bool, bool, bool]:
+    has_material = has_fixture = is_cotton = is_sapling = False
+    for key, item in group.items():
+        if key in ("mysekai_material_1", "mysekai_material_6") and item["quantity"] == 6:
+            item["hide"] = True
+        is_cotton = is_cotton or key in ("mysekai_material_21", "mysekai_material_22")
+        has_material = has_material or key.startswith("mysekai_material_")
+        has_fixture = has_fixture or item["type"] == "mysekai_fixture"
+        is_sapling = is_sapling or (_is_birthday_resource(item["type"], item["id"]) and item["quantity"] > 16)
+    return has_material, has_fixture, is_cotton, is_sapling
+
+
+def _map_drop_small_icon(
+    key: str, item: dict, has_material: bool, has_fixture: bool, is_cotton: bool, is_sapling: bool
+) -> bool | None:
+    small_icon = None
+    if has_fixture:
+        if has_material:
+            small_icon = not key.startswith("mysekai_material_")
+        else:
+            small_icon = item["type"] != "mysekai_fixture"
+    elif not key.startswith("mysekai_material_") and has_material:
+        small_icon = True
+    if is_cotton and key not in ("mysekai_material_21", "mysekai_material_22"):
+        small_icon = True
+    if is_sapling:
+        return not _is_birthday_resource(item["type"], item["id"])
+    if _is_birthday_resource(item["type"], item["id"]):
+        item["hide"] = True
+    return small_icon
+
+
+def _decorate_map_drop(key: str, item: dict, flags: tuple[bool, bool, bool, bool]) -> None:
+    small_icon = _map_drop_small_icon(key, item, *flags)
+    if small_icon is not None:
+        item["small_icon"] = small_icon
+    if item["rarity"] >= 2:
+        item["outline_color"] = [255, 50, 50, 150]
+        item["outline_width"] = 2
+    elif item.get("small_icon"):
+        item["outline_color"] = [50, 50, 255, 100]
+        item["outline_width"] = 1
+    if item["rarity"] >= 2 and not key.startswith("material_"):
+        item["light_size"] = 225 if item.get("small_icon") else 315
+
+
+def _map_resource_drops(raw_drops: list) -> list[dict]:
+    """buildMapResourceDrops (map_builder_resources.go:14-218)."""
     drops_out: list[dict] = []
-    for group in grouped_by_pos.values():
-        has_material = has_fixture = is_cotton = is_sapling = False
+    for group in _group_map_resource_drops(raw_drops).values():
+        flags = _map_drop_group_flags(group)
         for key, item in group.items():
-            if key in ("mysekai_material_1", "mysekai_material_6") and item["quantity"] == 6:
-                item["hide"] = True
-            if key in ("mysekai_material_21", "mysekai_material_22"):
-                is_cotton = True
-            if key.startswith("mysekai_material_"):
-                has_material = True
-            if item["type"] == "mysekai_fixture":
-                has_fixture = True
-            if is_birthday(item["type"], item["id"]) and item["quantity"] > 16:
-                is_sapling = True
-        for key, item in group.items():
-            small_icon, small_icon_set = False, False
-            if has_fixture:
-                if has_material:
-                    small_icon, small_icon_set = not key.startswith("mysekai_material_"), True
-                elif item["type"] == "mysekai_fixture":
-                    small_icon, small_icon_set = False, True
-                else:
-                    small_icon, small_icon_set = True, True
-            elif not key.startswith("mysekai_material_") and has_material:
-                small_icon, small_icon_set = True, True
-            if is_cotton and key not in ("mysekai_material_21", "mysekai_material_22"):
-                small_icon, small_icon_set = True, True
-            if is_sapling:
-                small_icon, small_icon_set = not is_birthday(item["type"], item["id"]), True
-            elif is_birthday(item["type"], item["id"]):
-                item["hide"] = True
-            if small_icon_set:
-                item["small_icon"] = small_icon
-
-            if item["rarity"] >= 2:
-                item["outline_color"] = [255, 50, 50, 150]
-                item["outline_width"] = 2
-            elif item.get("small_icon"):
-                item["outline_color"] = [50, 50, 255, 100]
-                item["outline_width"] = 1
-            if item["rarity"] >= 2 and not key.startswith("material_"):
-                item["light_size"] = 225 if item.get("small_icon") else 315
+            _decorate_map_drop(key, item, flags)
             drops_out.append(item)
 
     drops_out.sort(key=lambda d: (d["position_x"], d["position_z"], d["type"], d["id"]))
@@ -1037,20 +1049,16 @@ def _blueprint_fixture_ids(merged: dict) -> frozenset[int]:
 _FORCED_SUB_GENRE_MAIN_IDS = {4, 5, 7, 8, 9, 10, 11, 12, 13}
 
 
-def build_fixture_list() -> dict:
-    """/msf preset: show_id=true, obtained_source="fixture", show_* all true."""
-    merged = _raw_mysekai()
-    main_genres_md = _md_map("mysekaiFixtureMainGenres")
-    sub_genres_md = _md_map("mysekaiFixtureSubGenres")
-    obtained_ids = _user_fixture_ids()
-
+def _fixture_list_catalog(obtained_ids: frozenset[int]) -> tuple[dict[int, dict[int, list[dict]]], dict[str, Any]]:
     grouped: dict[int, dict[int, list[dict]]] = {}
-    main_all: dict[int, int] = {}
-    main_obtained: dict[int, int] = {}
-    sub_all: dict[int, dict[int, int]] = {}
-    sub_obtained: dict[int, dict[int, int]] = {}
-    total_all = total_obtained = 0
-
+    counts: dict[str, Any] = {
+        "main_all": {},
+        "main_obtained": {},
+        "sub_all": {},
+        "sub_obtained": {},
+        "total_all": 0,
+        "total_obtained": 0,
+    }
     for fixture in MD.get("mysekaiFixtures"):
         fixture_id = int(fixture.get("id", 0))
         if not fixture_id or str(fixture.get("mysekaiFixtureType", "")).lower() == "gate":
@@ -1063,8 +1071,8 @@ def build_fixture_list() -> dict:
             sub_id = -1
 
         grouped.setdefault(main_id, {})
-        sub_all.setdefault(main_id, {})
-        sub_obtained.setdefault(main_id, {})
+        counts["sub_all"].setdefault(main_id, {})
+        counts["sub_obtained"].setdefault(main_id, {})
 
         obtained = fixture_id in obtained_ids
         char_id = _birthday_character_id(fixture.get("name", ""))
@@ -1078,34 +1086,51 @@ def build_fixture_list() -> dict:
         grouped[main_id].setdefault(sub_id, []).append(row)
 
         if not char_id:  # birthday fixtures excluded from all progress stats
-            total_all += 1
-            main_all[main_id] = main_all.get(main_id, 0) + 1
-            sub_all[main_id][sub_id] = sub_all[main_id].get(sub_id, 0) + 1
+            counts["total_all"] += 1
+            counts["main_all"][main_id] = counts["main_all"].get(main_id, 0) + 1
+            counts["sub_all"][main_id][sub_id] = counts["sub_all"][main_id].get(sub_id, 0) + 1
             if obtained:
-                total_obtained += 1
-                main_obtained[main_id] = main_obtained.get(main_id, 0) + 1
-                sub_obtained[main_id][sub_id] = sub_obtained[main_id].get(sub_id, 0) + 1
+                counts["total_obtained"] += 1
+                counts["main_obtained"][main_id] = counts["main_obtained"].get(main_id, 0) + 1
+                counts["sub_obtained"][main_id][sub_id] = counts["sub_obtained"][main_id].get(sub_id, 0) + 1
+    return grouped, counts
 
-    main_genres: list[dict] = []
+
+def _fixture_sub_genres(
+    main_id: int,
+    groups: dict[int, list[dict]],
+    sub_genres_md: dict[int, dict],
+    counts: dict[str, Any],
+) -> list[dict]:
+    result = []
+    for sub_id in sorted(groups):
+        rows = sorted(groups[sub_id], key=lambda row: row["id"])
+        if not rows:
+            continue
+        sub_genre: dict[str, Any] = {"fixtures": rows}
+        info = sub_genres_md.get(sub_id) if sub_id != -1 and len(groups) > 1 else None
+        if info:
+            sub_genre["name"] = info.get("name", "")
+            sub_genre["image_path"] = ASSETS.region_asset(
+                f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"
+            )
+            total = counts["sub_all"][main_id].get(sub_id, 0)
+            if total > 0:
+                done = counts["sub_obtained"][main_id].get(sub_id, 0)
+                sub_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
+        result.append(sub_genre)
+    return result
+
+
+def _fixture_main_genres(
+    grouped: dict[int, dict[int, list[dict]]],
+    main_genres_md: dict[int, dict],
+    sub_genres_md: dict[int, dict],
+    counts: dict[str, Any],
+) -> list[dict]:
+    result = []
     for main_id in sorted(grouped):
-        sub_genres: list[dict] = []
-        for sub_id in sorted(grouped[main_id]):
-            rows = sorted(grouped[main_id][sub_id], key=lambda r: r["id"])
-            if not rows:
-                continue
-            sub_genre: dict[str, Any] = {"fixtures": rows}
-            if sub_id != -1 and len(grouped[main_id]) > 1:
-                info = sub_genres_md.get(sub_id)
-                if info:
-                    sub_genre["name"] = info.get("name", "")
-                    sub_genre["image_path"] = ASSETS.region_asset(
-                        f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"
-                    )
-                    total = sub_all[main_id].get(sub_id, 0)
-                    if total > 0:
-                        done = sub_obtained[main_id].get(sub_id, 0)
-                        sub_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
-            sub_genres.append(sub_genre)
+        sub_genres = _fixture_sub_genres(main_id, grouped[main_id], sub_genres_md, counts)
         if not sub_genres:
             continue
         main_info = main_genres_md.get(main_id) or {}
@@ -1114,20 +1139,31 @@ def build_fixture_list() -> dict:
             "image_path": ASSETS.region_asset(f"mysekai/icon/category_icon/{main_info.get('assetbundleName', '')}.png"),
             "sub_genres": sub_genres,
         }
-        total = main_all.get(main_id, 0)
+        total = counts["main_all"].get(main_id, 0)
         if total > 0:
-            done = main_obtained.get(main_id, 0)
+            done = counts["main_obtained"].get(main_id, 0)
             main_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
-        main_genres.append(main_genre)
+        result.append(main_genre)
+    return result
+
+
+def build_fixture_list() -> dict:
+    """/msf preset: show_id=true, obtained_source="fixture", show_* all true."""
+    merged = _raw_mysekai()
+    grouped, counts = _fixture_list_catalog(_user_fixture_ids())
+    main_genres = _fixture_main_genres(
+        grouped, _md_map("mysekaiFixtureMainGenres"), _md_map("mysekaiFixtureSubGenres"), counts
+    )
 
     body: dict[str, Any] = {
         "profile": _profile_card(merged, include_suite=False),
         "show_id": True,
         "main_genres": main_genres,
     }
-    if total_all > 0:
+    if counts["total_all"] > 0:
         body["progress_message"] = (
-            f"总收集进度（不含生日家具）: {total_obtained}/{total_all} ({_pct(total_obtained, total_all):.1f}%)"
+            f"总收集进度（不含生日家具）: {counts['total_obtained']}/{counts['total_all']} "
+            f"({_pct(counts['total_obtained'], counts['total_all']):.1f}%)"
         )
     return body
 
@@ -1649,24 +1685,7 @@ def _extract_group_cuids(group: dict) -> list[int]:
     ]
 
 
-def build_talk_list() -> dict:
-    merged = _merged()  # suite+mysekai merged path; talks always from suite
-    character_unit_id = next(
-        u["id"] for u in MD.get("gameCharacterUnits") if u.get("gameCharacterId") == TALK_CHARACTER_ID
-    )
-
-    obtained_fixture_ids = _blueprint_fixture_ids(merged)
-    fixture_map = _md_map("mysekaiFixtures")
-    main_genres_md = _md_map("mysekaiFixtureMainGenres")
-    unit_groups = _md_map("mysekaiGameCharacterUnitGroups")
-    archive_groups = _md_map("characterArchiveMysekaiCharacterTalkGroups")
-
-    user_talk_reads = {
-        int(i.get("mysekaiCharacterTalkId", 0)): bool(i.get("isRead"))
-        for i in _nested_list(merged, "userMysekaiCharacterTalks")
-        if int(i.get("mysekaiCharacterTalkId", 0))
-    }
-
+def _talk_condition_indexes() -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[dict]]]:
     condition_ids_by_fixture: dict[int, list[int]] = {}
     for condition in MD.get("mysekaiCharacterTalkConditions"):
         if condition.get("mysekaiCharacterTalkConditionType") != "mysekai_fixture_id":
@@ -1682,34 +1701,66 @@ def build_talk_list() -> dict:
     talks_by_group: dict[int, list[dict]] = {}
     for talk in MD.get("mysekaiCharacterTalks"):
         talks_by_group.setdefault(int(talk.get("mysekaiCharacterTalkConditionGroupId", 0)), []).append(talk)
+    return condition_ids_by_fixture, group_ids_by_condition, talks_by_group
 
+
+def _talks_for_fixture(
+    fixture_id: int,
+    condition_ids_by_fixture: dict[int, list[int]],
+    group_ids_by_condition: dict[int, list[int]],
+    talks_by_group: dict[int, list[dict]],
+) -> list[dict]:
+    group_ids: set[int] = set()
+    for condition_id in condition_ids_by_fixture.get(fixture_id, []):
+        group_ids.update(group_ids_by_condition.get(condition_id, []))
+    return [talk for group_id in sorted(group_ids) for talk in talks_by_group.get(group_id, [])]
+
+
+def _talk_archive_data(
+    talk: dict,
+    character_unit_id: int,
+    unit_groups: dict[int, dict],
+    archive_groups: dict[int, dict],
+) -> tuple[int, list[int]] | None:
+    group = unit_groups.get(int(talk.get("mysekaiGameCharacterUnitGroupId", 0)))
+    if not group:
+        return None
+    cuids = _extract_group_cuids(group)
+    if character_unit_id not in cuids:
+        return None
+    archive_id = int(talk.get("characterArchiveMysekaiCharacterTalkGroupId", 0))
+    archive = archive_groups.get(archive_id)
+    if archive and archive.get("archiveDisplayType") != "normal":
+        return None
+    return archive_id, cuids
+
+
+def _archive_talk_reads(
+    character_unit_id: int,
+    user_talk_reads: dict[int, bool],
+    unit_groups: dict[int, dict],
+    archive_groups: dict[int, dict],
+) -> dict[int, dict]:
+    condition_ids, group_ids, talks_by_group = _talk_condition_indexes()
     archive_reads: dict[int, dict] = {}
     for fixture in MD.get("mysekaiFixtures"):
         fixture_id = int(fixture.get("id", 0))
         if not fixture_id or fixture.get("mysekaiFixtureType") == "gate":
             continue
-        group_ids: set[int] = set()
-        for condition_id in condition_ids_by_fixture.get(fixture_id, []):
-            group_ids.update(group_ids_by_condition.get(condition_id, []))
-        for group_id in sorted(group_ids):
-            for talk in talks_by_group.get(group_id, []):
-                group = unit_groups.get(int(talk.get("mysekaiGameCharacterUnitGroupId", 0)))
-                if not group:
-                    continue
-                cuids = _extract_group_cuids(group)
-                if character_unit_id not in cuids:
-                    continue
-                archive_id = int(talk.get("characterArchiveMysekaiCharacterTalkGroupId", 0))
-                archive = archive_groups.get(archive_id)
-                if archive and archive.get("archiveDisplayType") != "normal":
-                    continue
-                read = archive_reads.setdefault(archive_id, {"fixture_ids": [], "cuids": [], "has_read": False})
-                if fixture_id not in read["fixture_ids"]:
-                    read["fixture_ids"].append(fixture_id)
-                read["cuids"] = cuids
-                if user_talk_reads.get(int(talk.get("id", 0))):
-                    read["has_read"] = True
+        for talk in _talks_for_fixture(fixture_id, condition_ids, group_ids, talks_by_group):
+            archive_data = _talk_archive_data(talk, character_unit_id, unit_groups, archive_groups)
+            if archive_data is None:
+                continue
+            archive_id, cuids = archive_data
+            read = archive_reads.setdefault(archive_id, {"fixture_ids": [], "cuids": [], "has_read": False})
+            if fixture_id not in read["fixture_ids"]:
+                read["fixture_ids"].append(fixture_id)
+            read["cuids"] = cuids
+            read["has_read"] = read["has_read"] or user_talk_reads.get(int(talk.get("id", 0)), False)
+    return archive_reads
 
+
+def _group_talk_reads(archive_reads: dict[int, dict]) -> tuple[dict[str, dict], dict[str, dict]]:
     single_reads: dict[str, dict] = {}
     multi_reads_map: dict[str, dict] = {}
     # Go iterates archiveReads in map order (nondeterministic); sorted archive id
@@ -1727,14 +1778,20 @@ def build_talk_list() -> dict:
             continue
         if len(item["cuids"]) > 1 and item["cuids"] not in entry["cuids_set"]:
             entry["cuids_set"].append(item["cuids"])
+    return single_reads, multi_reads_map
 
-    def fixture_row(fixture_id: int) -> dict:
-        return {
-            "id": fixture_id,
-            "image_path": _fixture_thumbnail_path(fixture_map.get(fixture_id) or {}),
-            "obtained": fixture_id in obtained_fixture_ids,
-        }
 
+def _talk_fixture_row(fixture_id: int, fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]) -> dict:
+    return {
+        "id": fixture_id,
+        "image_path": _fixture_thumbnail_path(fixture_map.get(fixture_id) or {}),
+        "obtained": fixture_id in obtained_fixture_ids,
+    }
+
+
+def _group_single_talk_reads(
+    single_reads: dict[str, dict], fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]
+) -> dict[int, list[dict]]:
     grouped_single: dict[int, list[dict]] = {}
     for key in sorted(single_reads):
         item = single_reads[key]
@@ -1744,26 +1801,30 @@ def build_talk_list() -> dict:
         main_genre_id = int((fixture_map.get(fixture_ids[0]) or {}).get("mysekaiFixtureMainGenreId", 0))
         grouped_single.setdefault(main_genre_id, []).append(
             {
-                "fixtures": [fixture_row(fid) for fid in fixture_ids],
+                "fixtures": [_talk_fixture_row(fid, fixture_map, obtained_fixture_ids) for fid in fixture_ids],
                 "noread_num": item["total"] - item["read"],
             }
         )
+    return grouped_single
 
-    def single_cmp(left: dict, right: dict) -> int:
-        lf, rf = left["fixtures"], right["fixtures"]
-        if len(lf) != len(rf):
-            return -1 if len(lf) > len(rf) else 1
-        for a, b in zip(lf, rf, strict=False):
-            if a["id"] != b["id"]:
-                return -1 if a["id"] > b["id"] else 1
-        if left["noread_num"] != right["noread_num"]:
-            return -1 if left["noread_num"] > right["noread_num"] else 1
-        return 0
 
+def _single_talk_cmp(left: dict, right: dict) -> int:
+    left_fixtures, right_fixtures = left["fixtures"], right["fixtures"]
+    if len(left_fixtures) != len(right_fixtures):
+        return -1 if len(left_fixtures) > len(right_fixtures) else 1
+    for left_fixture, right_fixture in zip(left_fixtures, right_fixtures, strict=False):
+        if left_fixture["id"] != right_fixture["id"]:
+            return -1 if left_fixture["id"] > right_fixture["id"] else 1
+    if left["noread_num"] != right["noread_num"]:
+        return -1 if left["noread_num"] > right["noread_num"] else 1
+    return 0
+
+
+def _single_talk_main_genres(grouped_single: dict[int, list[dict]], main_genres_md: dict[int, dict]) -> list[dict]:
     single_main_genres: list[dict] = []
     for main_genre_id in sorted(grouped_single):
         info = main_genres_md.get(main_genre_id) or {}
-        groups = sorted(grouped_single[main_genre_id], key=cmp_to_key(single_cmp))
+        groups = sorted(grouped_single[main_genre_id], key=cmp_to_key(_single_talk_cmp))
         single_main_genres.append(
             {
                 "name": info.get("name", ""),
@@ -1771,11 +1832,14 @@ def build_talk_list() -> dict:
                 "sub_genres": [groups],
             }
         )
+    return single_main_genres
 
-    total_talks = sum(i["total"] for i in single_reads.values())
-    total_reads = sum(i["read"] for i in single_reads.values())
 
+def _multi_talk_reads(
+    multi_reads_map: dict[str, dict], fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]
+) -> tuple[list[dict], int, int]:
     multi_reads: list[dict] = []
+    total_talks = total_reads = 0
     for key in sorted(multi_reads_map):
         item = multi_reads_map[key]
         total_talks += item["total"]
@@ -1784,13 +1848,45 @@ def build_talk_list() -> dict:
             continue
         multi_reads.append(
             {
-                "fixtures": [fixture_row(fid) for fid in item["fixture_ids"]],
+                "fixtures": [
+                    _talk_fixture_row(fixture_id, fixture_map, obtained_fixture_ids)
+                    for fixture_id in item["fixture_ids"]
+                ],
                 "noread_num": item["total"] - item["read"],
                 "character_ids": item["cuids_set"],
                 "chara_icon_path_groups": [[_chara_icon_path(cuid) for cuid in cuids] for cuids in item["cuids_set"]],
             }
         )
-    multi_reads.sort(key=lambda m: (-len(m["fixtures"]), m["fixtures"][0]["id"] if m["fixtures"] else 0))
+    multi_reads.sort(key=lambda item: (-len(item["fixtures"]), item["fixtures"][0]["id"] if item["fixtures"] else 0))
+    return multi_reads, total_talks, total_reads
+
+
+def build_talk_list() -> dict:
+    merged = _merged()  # suite+mysekai merged path; talks always from suite
+    character_unit_id = next(
+        unit["id"] for unit in MD.get("gameCharacterUnits") if unit.get("gameCharacterId") == TALK_CHARACTER_ID
+    )
+    obtained_fixture_ids = _blueprint_fixture_ids(merged)
+    fixture_map = _md_map("mysekaiFixtures")
+    user_talk_reads = {
+        int(item.get("mysekaiCharacterTalkId", 0)): bool(item.get("isRead"))
+        for item in _nested_list(merged, "userMysekaiCharacterTalks")
+        if int(item.get("mysekaiCharacterTalkId", 0))
+    }
+    archive_reads = _archive_talk_reads(
+        character_unit_id,
+        user_talk_reads,
+        _md_map("mysekaiGameCharacterUnitGroups"),
+        _md_map("characterArchiveMysekaiCharacterTalkGroups"),
+    )
+    single_reads, multi_reads_map = _group_talk_reads(archive_reads)
+    grouped_single = _group_single_talk_reads(single_reads, fixture_map, obtained_fixture_ids)
+    single_main_genres = _single_talk_main_genres(grouped_single, _md_map("mysekaiFixtureMainGenres"))
+    total_talks = sum(item["total"] for item in single_reads.values())
+    total_reads = sum(item["read"] for item in single_reads.values())
+    multi_reads, multi_total, multi_read = _multi_talk_reads(multi_reads_map, fixture_map, obtained_fixture_ids)
+    total_talks += multi_total
+    total_reads += multi_read
 
     return {
         "profile": _profile_card(merged, include_suite=True),

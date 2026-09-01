@@ -223,3 +223,84 @@ def test_resolve_housing_competition_prefers_latest_active(monkeypatch) -> None:
     monkeypatch.setattr(gen, "NOW_MS", 50)
 
     assert gen._resolve_housing_competition() == (competitions[1], True)
+
+
+def test_map_resource_drops_combines_and_decorates_position_groups(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    monkeypatch.setattr(gen, "_resource_image_path", lambda key: (f"asset/{key}", False))
+    monkeypatch.setattr(gen, "_resource_rarity", lambda key: 2 if key.endswith("_9") else 1)
+    drops = [
+        {"resourceType": "mysekai_material", "resourceId": 1, "quantity": 3, "positionX": 1, "positionZ": 1},
+        {"resourceType": "mysekai_material", "resourceId": 1, "quantity": 3, "positionX": 1, "positionZ": 1},
+        {"resourceType": "mysekai_fixture", "resourceId": 9, "quantity": 1, "positionX": 1, "positionZ": 1},
+    ]
+
+    result = gen._map_resource_drops(drops)
+    by_type = {item["type"]: item for item in result}
+
+    assert by_type["mysekai_material"]["quantity"] == 6
+    assert by_type["mysekai_material"]["hide"] is True
+    assert by_type["mysekai_material"]["small_icon"] is False
+    assert by_type["mysekai_fixture"]["small_icon"] is True
+    assert by_type["mysekai_fixture"]["outline_width"] == 2
+    assert by_type["mysekai_fixture"]["light_size"] == 225
+
+
+def test_fixture_list_catalog_excludes_birthday_progress(monkeypatch, tmp_path: Path) -> None:
+    fixtures = [
+        {
+            "id": 1,
+            "name": "Chair",
+            "mysekaiFixtureType": "normal",
+            "mysekaiFixtureMainGenreId": 1,
+            "mysekaiFixtureSubGenreId": 2,
+            "assetbundleName": "chair",
+        },
+        {
+            "id": 2,
+            "name": "Birthday",
+            "mysekaiFixtureType": "normal",
+            "mysekaiFixtureMainGenreId": 1,
+            "mysekaiFixtureSubGenreId": 3,
+            "assetbundleName": "birthday",
+        },
+    ]
+
+    class _Master:
+        @staticmethod
+        def get(_name: str) -> list[dict]:
+            return fixtures
+
+    monkeypatch.setattr(gen, "MD", _Master())
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    monkeypatch.setattr(gen, "_birthday_character_id", lambda name: 39 if name == "Birthday" else 0)
+
+    grouped, counts = gen._fixture_list_catalog(frozenset({1, 2}))
+
+    assert [row["id"] for rows in grouped[1].values() for row in rows] == [1, 2]
+    assert counts["total_all"] == 1
+    assert counts["total_obtained"] == 1
+
+
+def test_talk_read_helpers_separate_single_and_multi_unread_groups(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    archive_reads = {
+        1: {"fixture_ids": [10], "cuids": [17], "has_read": False},
+        2: {"fixture_ids": [20], "cuids": [17, 18], "has_read": False},
+        3: {"fixture_ids": [20], "cuids": [17, 18], "has_read": True},
+    }
+    fixture_map = {
+        10: {"id": 10, "mysekaiFixtureMainGenreId": 1, "assetbundleName": "single"},
+        20: {"id": 20, "mysekaiFixtureMainGenreId": 2, "assetbundleName": "multi"},
+    }
+
+    single, multi = gen._group_talk_reads(archive_reads)
+    grouped_single = gen._group_single_talk_reads(single, fixture_map, frozenset({10}))
+    multi_rows, total, read = gen._multi_talk_reads(multi, fixture_map, frozenset())
+
+    assert grouped_single[1][0]["noread_num"] == 1
+    assert grouped_single[1][0]["fixtures"][0]["obtained"] is True
+    assert total == 2
+    assert read == 1
+    assert multi_rows[0]["noread_num"] == 1
+    assert multi_rows[0]["character_ids"] == [[17, 18]]
