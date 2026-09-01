@@ -6,7 +6,15 @@ from PIL import Image
 import pytest
 
 import src.sekai.score.drawer as score_drawer
-from src.sekai.score.model import CustomRoomScoreRequest, MusicBoardItem, MusicBoardRequest
+from src.sekai.score.model import (
+    CustomRoomScoreRequest,
+    MusicBoardItem,
+    MusicBoardRequest,
+    MusicMetaInfo,
+    MusicMetaRequest,
+    ScoreControlRequest,
+    ScoreData,
+)
 
 
 def test_custom_room_score_canvas_covers_music_and_empty_rows(tmp_path, monkeypatch) -> None:
@@ -36,6 +44,64 @@ def test_load_custom_room_covers_accepts_an_empty_map() -> None:
 
     request = CustomRoomScoreRequest(target_point=0, candidate_pairs=[], music_list_map={})
     assert asyncio.run(score_drawer._build_custom_room_score_control_canvas(request)) is not None
+
+
+def test_score_control_canvas_renders_warnings_and_score_ranges(monkeypatch) -> None:
+    async def fake_image_loader(_base_dir, _path):
+        return Image.new("RGBA", (40, 40), (20, 80, 160, 255))
+
+    monkeypatch.setattr(score_drawer, "get_asset_image_ref", fake_image_loader)
+    request = ScoreControlRequest(
+        music_cover_path="cover.png",
+        music_id=123,
+        music_title="Control Song",
+        music_basic_point=97,
+        target_point=3500,
+        valid_scores=[
+            ScoreData(event_bonus=250, boost=0, score_min=0, score_max=9999),
+            ScoreData(event_bonus=260, boost=3, score_min=12345, score_max=54321),
+        ],
+        dt=1_700_000_000_000,
+    )
+
+    canvas = asyncio.run(score_drawer._build_score_control_canvas(request))
+    image = asyncio.run(canvas.get_img())
+
+    assert image.width > 0
+    assert image.height > 0
+
+
+def test_music_meta_canvas_renders_skill_breakdown(monkeypatch) -> None:
+    async def fake_image_loader(_base_dir, _path):
+        return Image.new("RGBA", (64, 64), (160, 80, 20, 255))
+
+    monkeypatch.setattr(score_drawer, "get_asset_image_ref", fake_image_loader)
+    request = MusicMetaRequest(
+        music_id=321,
+        music_title="Meta Song",
+        music_cover_path="meta.png",
+        metas=[
+            MusicMetaInfo(
+                difficulty="master",
+                music_time=120.0,
+                tap_count=900,
+                event_rate=220.0,
+                base_score=0.4,
+                base_score_auto=0.35,
+                skill_score_solo=[0.10, 0.05, 0.08, 0.03, 0.06],
+                skill_score_auto=[0.05, 0.02, 0.04, 0.01, 0.03],
+                skill_score_multi=[0.12, 0.06, 0.10, 0.04, 0.08],
+                fever_score=0.2,
+            )
+        ],
+        dt=1_700_000_000_000,
+    )
+
+    canvas = asyncio.run(score_drawer._build_music_meta_canvas([request]))
+    image = asyncio.run(canvas.get_img())
+
+    assert image.width > 0
+    assert image.height > 0
 
 
 @pytest.mark.parametrize("target", ["score", "pt", "pt/time", "time"])
