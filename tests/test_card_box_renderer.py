@@ -73,6 +73,86 @@ def _walk(widget):
         yield from _walk(child)
 
 
+class _RecordingPainter:
+    def __init__(self) -> None:
+        self.operations: list[tuple[str, tuple, dict]] = []
+
+    def roundrect(self, *args, **kwargs) -> None:
+        self.operations.append(("roundrect", args, kwargs))
+
+    def rect(self, *args, **kwargs) -> None:
+        self.operations.append(("rect", args, kwargs))
+
+    def paste(self, *args, **kwargs) -> None:
+        self.operations.append(("paste", args, kwargs))
+
+
+def _draw_frame(frame) -> _RecordingPainter:
+    painter = _RecordingPainter()
+    for draw_func in frame.draw_funcs:
+        draw_func(frame, painter)
+    return painter
+
+
+def test_card_box_stat_helpers_cover_fallbacks_and_ratios() -> None:
+    fallback = (1, 2, 3, 4)
+    assert card._safe_color(None, fallback) == fallback
+    assert card._safe_color("not-a-color", fallback) == fallback
+    assert card._safe_color("#112233") == (17, 34, 51, 255)
+    assert card._with_alpha((9, 8, 7), 6) == (9, 8, 7, 6)
+    assert card._normalize_card_box_attr(" COOL ") == "cool"
+    assert card._normalize_card_box_attr("other") == "unknown"
+    assert card._card_box_attr_label("cute") == "可爱"
+    assert card._card_box_attr_label("other") == "other"
+    assert card._card_box_attr_color("other") == card.CARD_BOX_ATTR_COLORS["unknown"]
+    assert card._stat_count_text(8, 3, True) == "3/8"
+    assert card._stat_count_text(8, 3, False) == "8"
+
+    empty = CardDistributionCharacterStat(character_id=1)
+    partial = CardDistributionCharacterStat(character_id=1, count=4, owned_count=3)
+    assert card._collection_ratio(empty, True) == 0.0
+    assert card._collection_ratio(partial, False) == 1.0
+    assert card._collection_ratio(partial, True) == 0.75
+
+
+def test_card_box_bar_helpers_execute_empty_and_filled_draw_paths() -> None:
+    color = (12, 34, 56, 200)
+
+    assert len(_draw_frame(card._stat_bar(40, 8, 0, color)).operations) == 1
+    assert len(_draw_frame(card._stat_bar(40, 8, 0.5, color)).operations) == 2
+    assert len(_draw_frame(card._full_color_bar(40, 4, color)).operations) == 1
+    assert len(_draw_frame(card._full_color_bar(40, 8, color)).operations) == 2
+    assert len(_draw_frame(card._mini_vertical_bar(8, 40, 0, color)).operations) == 1
+    assert len(_draw_frame(card._mini_vertical_bar(8, 40, 0.1, color)).operations) == 2
+    assert len(_draw_frame(card._mini_vertical_bar(8, 40, 0.75, color)).operations) == 3
+    assert _draw_frame(card._vertical_stat_bar(8, 40, 0, color)).operations == []
+    assert len(_draw_frame(card._vertical_stat_bar(8, 40, 0.5, color)).operations) == 1
+
+    placeholder = _draw_frame(card._circular_progress_avatar(None, 48, 0, color))
+    rendered = _draw_frame(card._circular_progress_avatar(Image.new("RGB", (8, 8), "red"), 48, 0.5, color))
+    assert [operation[0] for operation in placeholder.operations] == ["paste"]
+    assert [operation[0] for operation in rendered.operations] == ["paste"]
+
+
+def test_card_box_distribution_bars_cover_empty_zero_and_segmented_stats() -> None:
+    assert _draw_frame(card._attribute_bar_chart_frame(120, 60, [])).operations == []
+    attribute_stats = [
+        CardDistributionAttributeStat(attr="cool", count=0),
+        CardDistributionAttributeStat(attr="cute", count=2, bar_ratio=0, color_code="not-a-color"),
+        CardDistributionAttributeStat(attr="happy", count=3, bar_ratio=0.75, color_code="#334455"),
+    ]
+    attribute_ops = _draw_frame(card._attribute_bar_chart_frame(120, 60, attribute_stats)).operations
+    assert [operation[0] for operation in attribute_ops] == ["roundrect", "roundrect", "roundrect"]
+
+    assert _draw_frame(card._stacked_character_bar(100, 12, [], (1, 2, 3, 255))).operations == []
+    character_stats = [
+        CardDistributionCharacterStat(character_id=1, bar_count=1, color_code="not-a-color"),
+        CardDistributionCharacterStat(character_id=2, bar_count=3, color_code="#556677"),
+    ]
+    character_ops = _draw_frame(card._stacked_character_bar(100, 12, character_stats, (1, 2, 3, 255))).operations
+    assert [operation[0] for operation in character_ops] == ["rect", "rect"]
+
+
 @pytest.mark.anyio
 async def test_load_card_box_thumb_selects_available_training_state(monkeypatch) -> None:
     calls: list[str] = []
