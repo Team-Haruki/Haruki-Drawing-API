@@ -54,50 +54,64 @@ from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 OUT = REPO_ROOT / "out" / "skia-bench"
 
 
+async def _pillow_response_seconds(case, req, drawer, *, cold: bool) -> float:
+    """Compose and encode the whole Pillow response, including its route-level encode."""
+
+    if cold:
+        clear_all_caches()
+    started = time.perf_counter()
+    image = await getattr(drawer, case.compose)(req)
+    if isinstance(image, tuple):  # sk csb returns (canvas, scale)
+        image = image[0]
+    _encode_image(image, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
+    return time.perf_counter() - started
+
+
+async def _skia_response_seconds(case, req, tr_mod, *, cold: bool) -> float | None:
+    if cold:
+        clear_all_caches()
+    # Honor is the one endpoint left with a payload cache. Empty it so this measures
+    # the render rather than an in-process encoded-response cache lookup.
+    clear_skia_payload_cache()
+    started = time.perf_counter()
+    payload = await getattr(tr_mod, case.try_render)(req)
+    return None if payload is None else time.perf_counter() - started
+
+
+async def _warm_bench_paths(case, req, drawer, tr_mod) -> bool:
+    await _pillow_response_seconds(case, req, drawer, cold=False)
+    return await _skia_response_seconds(case, req, tr_mod, cold=False) is not None
+
+
+async def _measure_bench_backend(case, req, drawer, tr_mod, backend: str, *, cold: bool) -> float | None:
+    if backend == "pillow":
+        return await _pillow_response_seconds(case, req, drawer, cold=cold)
+    return await _skia_response_seconds(case, req, tr_mod, cold=cold)
+
+
+async def _collect_bench_times(case, req, drawer, tr_mod, *, reps: int, cold: bool):
+    times = {"pillow": [], "skia": []}
+    for index in range(reps):
+        order = ("pillow", "skia") if index % 2 == 0 else ("skia", "pillow")
+        for backend in order:
+            elapsed = await _measure_bench_backend(case, req, drawer, tr_mod, backend, cold=cold)
+            if elapsed is None:
+                return None
+            times[backend].append(elapsed)
+    return times
+
+
 async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dict | None:
-    async def pillow_bytes() -> float:
-        """compose + the encode the route would do — the whole cost of a Pillow response."""
-        if cold:
-            clear_all_caches()
-        t0 = time.perf_counter()
-        img = await getattr(drawer, case.compose)(req)
-        if isinstance(img, tuple):  # sk csb returns (canvas, scale)
-            img = img[0]
-        _encode_image(img, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
-        return time.perf_counter() - t0
-
-    async def skia_bytes() -> float | None:
-        if cold:
-            clear_all_caches()
-        # honor is the one endpoint left with a payload cache, and repeating the same request would
-        # HIT it -- reporting 0.05ms and a fake 22x, which is a cache lookup, not a render. (It
-        # would not hit in production either: honor's key folds in the watermark text, and that
-        # carries dt to the SECOND.) Empty it so this measures the render, which is what it claims.
-        clear_skia_payload_cache()
-        t0 = time.perf_counter()
-        payload = await getattr(tr_mod, case.try_render)(req)
-        if payload is None:
-            return None
-        return time.perf_counter() - t0
-
     if not case.try_render:
         return None
-    if not cold:  # warm both paths first; production never renders into an empty cache twice
-        await pillow_bytes()
-        if await skia_bytes() is None:
-            return None
-
-    p_times, s_times = [], []
-    for i in range(reps):
-        # alternate, so neither backend systematically warms the OS page cache for the other
-        for backend in ("pillow", "skia") if i % 2 == 0 else ("skia", "pillow"):
-            t = await (pillow_bytes() if backend == "pillow" else skia_bytes())
-            if t is None:
-                return None
-            (p_times if backend == "pillow" else s_times).append(t)
-
-    p, s = min(p_times), min(s_times)
-    return {"endpoint": case.name, "pillow": p, "skia": s, "speedup": p / s}
+    if not cold and not await _warm_bench_paths(case, req, drawer, tr_mod):
+        return None
+    times = await _collect_bench_times(case, req, drawer, tr_mod, reps=reps, cold=cold)
+    if times is None:
+        return None
+    pillow = min(times["pillow"])
+    skia = min(times["skia"])
+    return {"endpoint": case.name, "pillow": pillow, "skia": skia, "speedup": pillow / skia}
 
 
 async def main() -> int:
