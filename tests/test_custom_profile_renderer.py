@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 from PIL import Image, ImageFont
 import pytest
 
@@ -584,6 +585,151 @@ def test_custom_profile_renderer_normalizes_invalid_constructor_options(tmp_path
     assert renderer.position_scale == 2.0
     assert renderer.position_scale_x == 3.0
     assert renderer.position_scale_y == 2.0
+
+
+def test_custom_profile_oversized_scaled_shape_rasters_only_visible_region(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(
+        tmp_path,
+        canvas_w=64,
+        canvas_h=32,
+        origin_x=32,
+        origin_y=16,
+        position_scale_x=1.0,
+        position_scale_y=1.0,
+        max_layer_pixels=8_388_608,
+    )
+    shape_path = tmp_path / "square.png"
+    shape_path.touch()
+    source_mask = Image.new("L", (499, 317), 255)
+    renderer.shapes = {1: {"fileName": "square"}}
+    monkeypatch.setattr(renderer, "shape_resource_path", lambda _resource: shape_path)
+    monkeypatch.setattr(renderer, "shape_alpha_mask", lambda *_args: source_mask)
+    captured: dict[str, object] = {}
+
+    def fake_render_distance_field_shape(
+        _path,
+        _resource_file,
+        _fill_color,
+        _fill_alpha,
+        _outline_color,
+        _outline_alpha,
+        _outline_size,
+        output_size=None,
+        output_bounds=None,
+    ):
+        captured["output_size"] = output_size
+        captured["output_bounds"] = output_bounds
+        left, top, right, bottom = output_bounds
+        return Image.new("RGBA", (right - left, bottom - top), (255, 0, 0, 255))
+
+    monkeypatch.setattr(renderer, "render_distance_field_shape", fake_render_distance_field_shape)
+    object_data = {
+        "visible": True,
+        "position": {"x": 0, "y": 0},
+        "scale": {"x": 9.0, "y": 6.0},
+        "rotation": {"x": 0, "y": 0, "z": 0, "w": 1},
+    }
+    result = renderer.render_shape(
+        {
+            "id": 1,
+            "alpha": 1.0,
+            "outlineAlpha": 0.0,
+            "outlineSize": 0.0,
+            "objectData": object_data,
+        }
+    )
+
+    assert result is not None
+    assert captured["output_size"] == (4_491, 1_902)
+    bounds = captured["output_bounds"]
+    assert isinstance(bounds, tuple)
+    assert (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]) < 8_388_608
+    assert result[2] is True
+
+    prepared = renderer.prepare_transformed_layer(result, object_data, "shape")
+    assert prepared is not None
+    assert prepared.xy[0] <= 0
+    assert prepared.xy[1] <= 0
+    assert prepared.xy[0] + prepared.image.width >= renderer.canvas_w
+    assert prepared.xy[1] + prepared.image.height >= renderer.canvas_h
+
+
+def test_custom_profile_clipped_scaled_shape_preserves_full_layer_geometry(tmp_path: Path, monkeypatch) -> None:
+    shape_path = tmp_path / "square.png"
+    _write_png_color(shape_path, (40, 30), (255, 0, 0, 255))
+    renderers = [
+        _make_renderer(
+            tmp_path,
+            canvas_w=64,
+            canvas_h=32,
+            origin_x=32,
+            origin_y=16,
+            position_scale_x=1.0,
+            position_scale_y=1.0,
+            max_layer_pixels=max_pixels,
+        )
+        for max_pixels in (1_000_000, 50_000)
+    ]
+    for renderer in renderers:
+        renderer.shapes = {1: {"fileName": "square"}}
+        renderer.colors = {1: "#ff0000"}
+        monkeypatch.setattr(renderer, "shape_resource_path", lambda _resource: shape_path)
+
+    shape = {
+        "id": 1,
+        "colorId": 1,
+        "alpha": 1.0,
+        "outlineAlpha": 0.0,
+        "outlineSize": 0.0,
+        "objectData": {
+            "visible": True,
+            "layer": 1,
+            "position": {"x": -202, "y": 0},
+            "scale": {"x": 10.0, "y": 10.0},
+            "rotation": {"x": 0, "y": 0, "z": 0.173648, "w": 0.984808},
+        },
+    }
+    card = {"customProfileCard": {"shapes": [shape]}}
+
+    full = renderers[0].render_card(card)
+    clipped = renderers[1].render_card(card)
+
+    assert clipped.tobytes() == full.tobytes()
+    assert clipped.getpixel((10, 16))[:3] != (255, 255, 255)
+    assert clipped.getpixel((50, 16)) == (255, 255, 255, 255)
+
+
+def test_custom_profile_shape_region_samples_the_full_scaled_field(tmp_path: Path, monkeypatch) -> None:
+    renderer = _make_renderer(tmp_path)
+    shape_path = tmp_path / "shape.png"
+    shape_path.touch()
+    source = Image.new("RGBA", (8, 6))
+    source.putdata(
+        [
+            ((x * 29 + y * 7) % 256, 0, 0, (x * 11 + y * 31) % 256)
+            for y in range(source.height)
+            for x in range(source.width)
+        ]
+    )
+    monkeypatch.setattr(renderer, "shape_distance_field", lambda *_args: source.getchannel("R"))
+    monkeypatch.setattr(renderer, "shape_alpha_mask", lambda *_args: source.getchannel("A"))
+    output_size = (80, 60)
+    bounds = (15, 10, 65, 50)
+
+    full_field, full_alpha, full_fwidth = renderer.shape_shader_arrays(shape_path, "square", output_size)
+    region_field, region_alpha, region_fwidth = renderer.shape_shader_arrays(
+        shape_path,
+        "square",
+        output_size,
+        bounds,
+    )
+
+    np.testing.assert_array_equal(region_field, full_field[bounds[1] : bounds[3], bounds[0] : bounds[2]])
+    np.testing.assert_array_equal(region_alpha, full_alpha[bounds[1] : bounds[3], bounds[0] : bounds[2]])
+    np.testing.assert_array_equal(
+        region_fwidth[1:-1, 1:-1],
+        full_fwidth[bounds[1] + 1 : bounds[3] - 1, bounds[0] + 1 : bounds[2] - 1],
+    )
 
 
 def test_custom_profile_general_text_helpers_split_ascii_tokens_and_long_runs(tmp_path: Path) -> None:

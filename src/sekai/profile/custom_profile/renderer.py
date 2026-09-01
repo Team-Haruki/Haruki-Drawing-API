@@ -6096,20 +6096,93 @@ class PNGRenderer:
         path: Path,
         resource_file: str,
         output_size: tuple[int, int] | None,
+        output_bounds: tuple[int, int, int, int] | None = None,
     ) -> tuple[Any, Any, Any]:
         source_size = self.shape_alpha_mask(path, resource_file).size
-        if output_size is None or output_size == source_size:
+        if output_bounds is None and (output_size is None or output_size == source_size):
             return self.shape_shader_basis(path, resource_file)
 
         import numpy as np
 
-        field_img = self.shape_distance_field(path, resource_file).resize(output_size, Image.Resampling.BILINEAR)
-        alpha_img = self.shape_alpha_mask(path, resource_file).resize(output_size, Image.Resampling.BILINEAR)
+        full_width, full_height = output_size or source_size
+        if output_bounds is None:
+            left, top, right, bottom = (0, 0, full_width, full_height)
+        else:
+            left, top, right, bottom = output_bounds
+        region_size = (right - left, bottom - top)
+        source_box = (
+            left * source_size[0] / full_width,
+            top * source_size[1] / full_height,
+            right * source_size[0] / full_width,
+            bottom * source_size[1] / full_height,
+        )
+        field_img = self.shape_distance_field(path, resource_file).resize(
+            region_size,
+            Image.Resampling.BILINEAR,
+            box=source_box,
+        )
+        alpha_img = self.shape_alpha_mask(path, resource_file).resize(
+            region_size,
+            Image.Resampling.BILINEAR,
+            box=source_box,
+        )
         field = np.asarray(field_img, dtype=np.float32) / 255.0
         alpha = np.asarray(alpha_img, dtype=np.float32) / 255.0
         grad_y, grad_x = np.gradient(field)
         fwidth = np.abs(grad_x) + np.abs(grad_y)
         return field, alpha, fwidth
+
+    def visible_scaled_shape_bounds(
+        self,
+        output_size: tuple[int, int],
+        object_data: dict[str, Any],
+        *,
+        padding: int = 3,
+    ) -> tuple[int, int, int, int] | None:
+        """Return the local SDF pixels which can affect the final canvas."""
+
+        width, height = output_size
+        post_sx = float(self.position_scale_x)
+        post_sy = float(self.position_scale_y)
+        if not all(math.isfinite(value) and value > 0.0 for value in (post_sx, post_sy)):
+            return None
+
+        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
+        theta = math.radians(angle % 360.0)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        anchor_x, anchor_y = self.unity_point(object_data.get("position", {}))
+        pivot_x = width / 2.0
+        pivot_y = height / 2.0
+
+        local_corners: list[tuple[float, float]] = []
+        for canvas_x, canvas_y in (
+            (0.0, 0.0),
+            (float(self.canvas_w), 0.0),
+            (float(self.canvas_w), float(self.canvas_h)),
+            (0.0, float(self.canvas_h)),
+        ):
+            dx = canvas_x - anchor_x
+            dy = canvas_y - anchor_y
+            local_corners.append(
+                (
+                    pivot_x + (cos_t * dx + sin_t * dy) / post_sx,
+                    pivot_y + (-sin_t * dx + cos_t * dy) / post_sy,
+                )
+            )
+
+        left = max(0, math.floor(min(x for x, _ in local_corners)) - padding)
+        top = max(0, math.floor(min(y for _, y in local_corners)) - padding)
+        right = min(width, math.ceil(max(x for x, _ in local_corners)) + padding)
+        bottom = min(height, math.ceil(max(y for _, y in local_corners)) + padding)
+        if left >= right or top >= bottom:
+            return None
+        ensure_raster_size(
+            (right - left, bottom - top),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile visible scaled shape",
+        )
+        return (left, top, right, bottom)
 
     def render_distance_field_shape(
         self,
@@ -6121,10 +6194,16 @@ class PNGRenderer:
         outline_alpha: float,
         outline_size: float,
         output_size: tuple[int, int] | None = None,
+        output_bounds: tuple[int, int, int, int] | None = None,
     ) -> Image.Image:
         import numpy as np
 
-        field, texture_alpha, fwidth = self.shape_shader_arrays(path, resource_file, output_size)
+        field, texture_alpha, fwidth = self.shape_shader_arrays(
+            path,
+            resource_file,
+            output_size,
+            output_bounds,
+        )
         native_outline_size = max(0.0, min(1.0, outline_size))
         native_outer_fill_ratio = native_outline_size * SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR
         outer_fill_ratio = max(
@@ -6402,17 +6481,25 @@ class PNGRenderer:
         outline_size = float(item.get("outlineSize", 0.0))
         if self.shape_outline_mode == "sdf":
             output_size = None
+            output_bounds = None
             scale_consumed = False
             if self.shape_sdf_screen_fwidth:
                 scale = item.get("objectData", {}).get("scale", {})
                 sx = float(scale.get("x") or 1.0)
                 sy = float(scale.get("y") or sx or 1.0)
-                output_size = ensure_raster_size(
-                    (max(1, round(size[0] * sx)), max(1, round(size[1] * sy))),
-                    max_pixels=self.max_layer_pixels,
-                    label=f"custom profile scaled shape {resource_file or path.name}",
-                )
+                output_size = (max(1, round(size[0] * sx)), max(1, round(size[1] * sy)))
+                try:
+                    ensure_raster_size(
+                        output_size,
+                        max_pixels=self.max_layer_pixels,
+                        label=f"custom profile scaled shape {resource_file or path.name}",
+                    )
+                except RasterSizeLimitError:
+                    output_bounds = self.visible_scaled_shape_bounds(output_size, item.get("objectData", {}))
+                    if output_bounds is None:
+                        return Image.new("RGBA", (1, 1), (0, 0, 0, 0)), (0.5, 0.5), True
                 scale_consumed = True
+            render_kwargs = {"output_bounds": output_bounds} if output_bounds is not None else {}
             base = self.render_distance_field_shape(
                 path,
                 resource_file,
@@ -6422,8 +6509,13 @@ class PNGRenderer:
                 outline_alpha,
                 outline_size,
                 output_size,
+                **render_kwargs,
             )
-            return base, (base.width / 2, base.height / 2), scale_consumed
+            if output_bounds is None:
+                pivot = (base.width / 2, base.height / 2)
+            else:
+                pivot = (output_size[0] / 2 - output_bounds[0], output_size[1] / 2 - output_bounds[1])
+            return base, pivot, scale_consumed
         fill.putalpha(ImageChops.multiply(alpha_mask, Image.new("L", size, round(255 * fill_alpha_value))))
         if outline_alpha > 0 and outline_size > 0:
             if self.shape_outline_mode == "dilate":
