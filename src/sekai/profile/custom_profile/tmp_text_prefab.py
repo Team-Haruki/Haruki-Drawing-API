@@ -554,6 +554,14 @@ def _plain_tmp_layout(renderer: TMPTextLayoutProvider, source: _PlainTMPSource) 
     return _PlainTMPLayout(preferred_layout, mesh_layout, box_w, box_h, baselines, transform)
 
 
+def _plain_line_x(horizontal: str, box_width: float, line_width: float) -> float:
+    if horizontal == "center":
+        return (box_width - line_width) / 2.0
+    if horizontal == "right":
+        return box_width - line_width
+    return 0.0
+
+
 def _plain_tmp_ops(source: _PlainTMPSource, layout: _PlainTMPLayout) -> _PlainTMPOps | None:
     font = TMPTextFontRef(source.mesh.font_name, source.font_path)
     ops: list[TMPTextOp] = []
@@ -571,12 +579,7 @@ def _plain_tmp_ops(source: _PlainTMPSource, layout: _PlainTMPLayout) -> _PlainTM
         run_x = _finite(run_x)
         if run_x is None:
             return None
-        if source.mesh.horizontal == "center":
-            line_x = (layout.box_w - line_width) / 2.0
-        elif source.mesh.horizontal == "right":
-            line_x = layout.box_w - line_width
-        else:
-            line_x = 0.0
+        line_x = _plain_line_x(source.mesh.horizontal, layout.box_w, line_width)
         ops.append(
             TMPTextOp(
                 line_index=line_index,
