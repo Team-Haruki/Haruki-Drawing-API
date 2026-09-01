@@ -1275,42 +1275,24 @@ def build_general_prefab_display_list(
 
     asset_paths = asset_paths or {}
     story_favorite_resources = story_favorite_resources or {}
-    if file_name == "X":
-        ops = _x_ops(size, profile_context, metrics, palette)
-    elif file_name == "EditUserName":
-        ops = _edit_user_name_ops(size, profile_context, metrics, palette)
-    elif file_name == "Comment":
-        ops = _comment_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "TotalPower":
-        ops = _total_power_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "MultiLive":
-        ops = _multi_live_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "ChallengeLive":
-        ops = _challenge_live_ops(size, profile_context, labels, metrics, palette, asset_paths)
-    elif file_name == "CharacterRankAndChallengeStage":
-        ops = _character_rank_and_challenge_stage_ops(
-            size,
-            profile_context,
-            labels,
-            palette,
-            asset_paths,
-            scroll=False,
-        )
-    elif file_name == "CharacterRankAndChallengeStageScroll":
-        ops = _character_rank_and_challenge_stage_ops(
-            size,
-            profile_context,
-            labels,
-            palette,
-            asset_paths,
-            scroll=True,
-        )
-    elif file_name == "MusicClearInfo":
-        ops = _music_clear_info_ops(size, profile_context, labels, music_difficulties)
-    elif file_name == "MusicClearSelectTabInfo":
-        ops = _music_clear_select_tab_info_ops(size, profile_context, labels, music_difficulties, palette)
-    elif file_name == "StoryFavorite":
-        ops = _story_favorite_ops(
+    builders = {
+        "X": lambda: _x_ops(size, profile_context, metrics, palette),
+        "EditUserName": lambda: _edit_user_name_ops(size, profile_context, metrics, palette),
+        "Comment": lambda: _comment_ops(size, profile_context, labels, metrics, palette),
+        "TotalPower": lambda: _total_power_ops(size, profile_context, labels, metrics, palette),
+        "MultiLive": lambda: _multi_live_ops(size, profile_context, labels, metrics, palette),
+        "ChallengeLive": lambda: _challenge_live_ops(size, profile_context, labels, metrics, palette, asset_paths),
+        "CharacterRankAndChallengeStage": lambda: _character_rank_and_challenge_stage_ops(
+            size, profile_context, labels, palette, asset_paths, scroll=False
+        ),
+        "CharacterRankAndChallengeStageScroll": lambda: _character_rank_and_challenge_stage_ops(
+            size, profile_context, labels, palette, asset_paths, scroll=True
+        ),
+        "MusicClearInfo": lambda: _music_clear_info_ops(size, profile_context, labels, music_difficulties),
+        "MusicClearSelectTabInfo": lambda: _music_clear_select_tab_info_ops(
+            size, profile_context, labels, music_difficulties, palette
+        ),
+        "StoryFavorite": lambda: _story_favorite_ops(
             size,
             profile_context,
             labels,
@@ -1318,9 +1300,12 @@ def build_general_prefab_display_list(
             palette,
             asset_paths,
             story_favorite_resources,
-        )
-    else:
+        ),
+    }
+    builder = builders.get(file_name)
+    if builder is None:
         raise ValueError(f"unsupported shared GeneralContentView prefab: {file_name}")
+    ops = builder()
     if ops is None:
         return None
     return GeneralPrefabDisplayList(file_name, size, tuple(ops))
