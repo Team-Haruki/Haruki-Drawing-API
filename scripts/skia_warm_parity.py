@@ -147,7 +147,7 @@ def _bind(case: Case, mysekai_real):
     return (case, req, drawer, tr_mod), None
 
 
-async def run(cases: list[Case], backend: str, mysekai_real) -> list[dict]:
+def _bind_cases(cases: list[Case], backend: str, mysekai_real) -> tuple[list[tuple], dict[str, dict]]:
     bound = []
     rows: dict[str, dict] = {}
     for case in cases:
@@ -157,38 +157,86 @@ async def run(cases: list[Case], backend: str, mysekai_real) -> list[dict]:
             continue
         bound.append(b)
         rows[case.name] = {"endpoint": case.name, "backend": backend}
+    return bound, rows
 
-    # --- determinism + cold reference: caches cleared before EVERY render ---
-    for case, req, drawer, tr_mod in bound:
+
+async def _render_cold_reference(bound_case: tuple, backend: str, row: dict) -> None:
+    case, req, drawer, tr_mod = bound_case
+    try:
+        clear_all_caches()
+        first = await _render(case, req, drawer, tr_mod, backend)
+        clear_all_caches()
+        second = await _render(case, req, drawer, tr_mod, backend)
+    except Exception as exc:
+        row.update(status="error", error=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc(limit=4))
+        return
+    if first is None:
+        row["status"] = "no-path"
+        return
+    row["cold"] = first
+    row["status"] = "pending" if first == second else "nondeterministic"
+
+
+async def _render_cold_references(bound: list[tuple], backend: str, rows: dict[str, dict]) -> None:
+    for bound_case in bound:
+        await _render_cold_reference(bound_case, backend, rows[bound_case[0].name])
+
+
+async def _render_warm_pass(label: str, order: list[tuple], backend: str, rows: dict[str, dict]) -> None:
+    for case, req, drawer, tr_mod in order:
         row = rows[case.name]
         try:
-            clear_all_caches()
-            a = await _render(case, req, drawer, tr_mod, backend)
-            clear_all_caches()
-            b = await _render(case, req, drawer, tr_mod, backend)
+            row[label] = await _render(case, req, drawer, tr_mod, backend)
         except Exception as exc:
-            row.update(status="error", error=f"{type(exc).__name__}: {exc}", trace=traceback.format_exc(limit=4))
-            continue
-        if a is None:
-            row["status"] = "no-path"
-            continue
-        row["cold"] = a
-        if a != b:
-            # Content moves on its own (live countdown). A cache can't be blamed for this.
-            row["status"] = "nondeterministic"
-            continue
-        row["status"] = "pending"
+            row.update(status="error", error=f"{type(exc).__name__}: {exc}")
+
+
+async def _render_cold_after(bound_case: tuple, backend: str, row: dict) -> None:
+    if row.get("status") == "error":
+        return
+    case, req, drawer, tr_mod = bound_case
+    try:
+        clear_all_caches()
+        row["cold_after"] = await _render(case, req, drawer, tr_mod, backend)
+    except Exception as exc:
+        row.update(status="error", error=f"{type(exc).__name__}: {exc}")
+
+
+def _classify_cache_result(row: dict) -> None:
+    if row.get("status") == "error":
+        return
+    cold, forward, reverse, after = (
+        row.get("cold"),
+        row.get("warm_fwd"),
+        row.get("warm_rev"),
+        row.get("cold_after"),
+    )
+    if cold == forward == reverse:
+        row["status"] = "ok"
+        return
+    if cold != after:
+        row["status"] = "nondeterministic"
+        row["note"] = "two cold renders minutes apart disagree — time-dependent content"
+        return
+    row["status"] = "CACHE-DRIFT"
+    row["drift"] = {
+        "cold_vs_warm_fwd": "same" if cold == forward else "DIFFERENT",
+        "cold_vs_warm_rev": "same" if cold == reverse else "DIFFERENT",
+        "warm_fwd_vs_warm_rev": "same" if forward == reverse else "DIFFERENT",
+    }
+
+
+async def run(cases: list[Case], backend: str, mysekai_real) -> list[dict]:
+    bound, rows = _bind_cases(cases, backend, mysekai_real)
+
+    # --- determinism + cold reference: caches cleared before EVERY render ---
+    await _render_cold_references(bound, backend, rows)
 
     live = [b for b in bound if rows[b[0].name].get("status") == "pending"]
 
     # --- warm passes: caches stay hot across every case, forward then backward ---
-    for label, order in (("warm_fwd", live), ("warm_rev", list(reversed(live)))):
-        for case, req, drawer, tr_mod in order:
-            row = rows[case.name]
-            try:
-                row[label] = await _render(case, req, drawer, tr_mod, backend)
-            except Exception as exc:
-                row.update(status="error", error=f"{type(exc).__name__}: {exc}")
+    await _render_warm_pass("warm_fwd", live, backend, rows)
+    await _render_warm_pass("warm_rev", list(reversed(live)), backend, rows)
 
     # --- cold again, at the END of the run ---
     # The two cold renders above are back-to-back, so anything that moves on a clock coarser than a
@@ -196,35 +244,11 @@ async def run(cases: list[Case], backend: str, mysekai_real) -> list[dict]:
     # them and then "drifts" during the warm passes minutes later -- a cache defect that is really a
     # clock. Re-render cold once more, now, at the far end of the run: if THAT disagrees with the
     # first cold render, the content is time-dependent and the caches are exonerated.
-    for case, req, drawer, tr_mod in live:
-        row = rows[case.name]
-        if row.get("status") == "error":
-            continue
-        try:
-            clear_all_caches()
-            row["cold_after"] = await _render(case, req, drawer, tr_mod, backend)
-        except Exception as exc:
-            row.update(status="error", error=f"{type(exc).__name__}: {exc}")
+    for bound_case in live:
+        await _render_cold_after(bound_case, backend, rows[bound_case[0].name])
 
     for case, _req, _d, _t in live:
-        row = rows[case.name]
-        if row.get("status") == "error":
-            continue
-        cold, fwd, rev, after = row.get("cold"), row.get("warm_fwd"), row.get("warm_rev"), row.get("cold_after")
-        if cold == fwd == rev:
-            row["status"] = "ok"
-        elif cold != after:
-            row["status"] = "nondeterministic"  # moved with the clock, not with the cache
-            row["note"] = "two cold renders minutes apart disagree — time-dependent content"
-        else:
-            # Cold is reproducible across the whole run, yet a warm render disagrees with it.
-            # The only thing that changed is the state of the caches.
-            row["status"] = "CACHE-DRIFT"
-            row["drift"] = {
-                "cold_vs_warm_fwd": "same" if cold == fwd else "DIFFERENT",
-                "cold_vs_warm_rev": "same" if cold == rev else "DIFFERENT",
-                "warm_fwd_vs_warm_rev": "same" if fwd == rev else "DIFFERENT",
-            }
+        _classify_cache_result(rows[case.name])
     return list(rows.values())
 
 
