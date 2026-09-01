@@ -144,6 +144,70 @@ def test_suite_music_results_merges_flat_and_nested_results(monkeypatch: pytest.
 
 
 @pytest.mark.parametrize(
+    ("strategy", "expected"),
+    [
+        ("max", [3.0, 2.0, 1.0]),
+        ("min", [1.0, 2.0, 3.0]),
+        ("avg", [2.0, 2.0, 2.0]),
+        ("unchanged", [3.0, 1.0, 2.0]),
+    ],
+)
+def test_ordered_board_skills_applies_strategy_without_mutating_input(strategy: str, expected: list[float]) -> None:
+    skills = [3.0, 1.0, 2.0]
+
+    assert gen_music_score._ordered_board_skills(skills, strategy) == expected
+    assert skills == [3.0, 1.0, 2.0]
+
+
+def test_build_board_row_populates_each_live_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(gen_music_score, "_play_level", lambda _music_id, _difficulty: 30)
+    monkeypatch.setattr(gen_music_score, "_display_title", lambda _music: "Display title")
+    monkeypatch.setattr(gen_music_score, "_jacket_path", lambda _name: "cover.png")
+    skills = [1.0] * 5
+    meta = {
+        "difficulty": "master",
+        "event_rate": 120,
+        "music_time": 100.0,
+        "tap_count": 200,
+        "base_score": 100.0,
+        "base_score_auto": 80.0,
+        "fever_score": 20.0,
+        "skill_score_solo": [1.0] * 5,
+        "skill_score_auto": [1.0] * 5,
+        "skill_score_multi": [1.0] * 5,
+    }
+
+    row = gen_music_score._build_board_row(1, {"assetbundleName": "jacket"}, meta, skills, skills, 300_000, 400.0, 28.0)
+
+    assert row is not None
+    assert row["music_title"] == "Display title"
+    assert row["music_cover_path"] == "cover.png"
+    assert row["tps"] == 2.0
+    assert {"solo_score", "auto_score", "multi_score"} <= row.keys()
+    monkeypatch.setattr(gen_music_score, "_play_level", lambda _music_id, _difficulty: 0)
+    assert (
+        gen_music_score._build_board_row(1, {"assetbundleName": "jacket"}, meta, skills, skills, 300_000, 400.0, 28.0)
+        is None
+    )
+
+
+def test_find_valid_score_ranges_returns_exact_boundaries_and_honors_limit() -> None:
+    rows = gen_music_score._find_valid_score_ranges(target=1000, basic_point=100, max_event_bonus=3, limit=2)
+
+    assert rows == [
+        {"event_bonus": 0, "boost": 1, "score_min": 2_000_000, "score_max": 2_019_999},
+        {"event_bonus": 0, "boost": 2, "score_min": 0, "score_max": 19_999},
+    ]
+    for row in rows:
+        assert gen_music_score._calc_control_points(row["score_min"], row["event_bonus"], 100, row["boost"]) == 1000
+        assert gen_music_score._calc_control_points(row["score_max"], row["event_bonus"], 100, row["boost"]) == 1000
+
+
+def test_score_range_for_bonus_rejects_unreachable_target() -> None:
+    assert gen_music_score._score_range_for_bonus(target=1001, basic_point=100, event_bonus=0, boost=2) is None
+
+
+@pytest.mark.parametrize(
     ("requested", "expected_level"),
     [
         (3, 3),

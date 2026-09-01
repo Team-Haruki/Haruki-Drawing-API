@@ -597,75 +597,78 @@ def _populate_live_metrics(
         row["play_count_per_hour"] = play_count_per_hour
 
 
+def _ordered_board_skills(skills: list[float], strategy: str) -> list[float]:
+    ordered = list(skills)
+    if strategy == "max":
+        ordered.sort(reverse=True)
+    elif strategy == "min":
+        ordered.sort()
+    elif strategy == "avg":
+        ordered = [sum(ordered) / len(ordered)] * len(ordered)
+    return ordered
+
+
+def _build_board_row(
+    music_id: int,
+    music: dict,
+    meta: dict,
+    skills: list[float],
+    ordered_skills: list[float],
+    power: int,
+    deck_bonus: float,
+    play_interval: float,
+) -> dict | None:
+    level = _play_level(music_id, meta["difficulty"])
+    if level <= 0:
+        return None
+    solo_skill = _weighted_skill(meta["skill_score_solo"], ordered_skills, skills[0])
+    auto_skill = _weighted_skill(meta["skill_score_auto"], ordered_skills, skills[0])
+    multi_skill = _weighted_skill(meta["skill_score_multi"], ordered_skills, skills[0])
+    solo_score = meta["base_score"] + solo_skill
+    auto_score = meta["base_score_auto"] + auto_skill
+    multi_score = meta["base_score"] + multi_skill + meta["fever_score"] * 0.5 + 0.01875
+    row = {
+        "rank": 0,
+        "music_id": music_id,
+        "difficulty": meta["difficulty"],
+        "level": level,
+        "music_title": _display_title(music),
+        "music_cover_path": _jacket_path(music["assetbundleName"]),
+        "event_rate": meta["event_rate"],
+        "music_time": meta["music_time"],
+        "tps": meta["tap_count"] / meta["music_time"] if meta["music_time"] > 0 else 0.0,
+    }
+    for live_type, score, skill in (
+        ("solo", solo_score, solo_skill),
+        ("auto", auto_score, auto_skill),
+        ("multi", multi_score, multi_skill),
+    ):
+        _populate_live_metrics(
+            row,
+            live_type,
+            score,
+            skill / score if score > 0 else 0.0,
+            power,
+            deck_bonus,
+            play_interval,
+        )
+    return row
+
+
 def _build_board_rows(
     skills: list[float], strategy: str, power: int, deck_bonus: float, play_interval: float
 ) -> list[dict]:
     """board_request_rows.go:11-95 (unsorted; caller sorts + ranks)."""
-    sorted_skills = list(skills)
-    if strategy == "max":
-        sorted_skills.sort(reverse=True)
-    elif strategy == "min":
-        sorted_skills.sort()
-    elif strategy == "avg":
-        avg = sum(sorted_skills) / len(sorted_skills)
-        sorted_skills = [avg] * len(sorted_skills)
+    ordered_skills = _ordered_board_skills(skills, strategy)
     rows: list[dict] = []
     for music_id in sorted(_metas_by_music()):
         music = _music_by_id().get(music_id)
         if music is None:
             continue
-        title = _display_title(music)
-        cover = _jacket_path(music["assetbundleName"])
         for meta in _metas_by_music()[music_id]:
-            level = _play_level(music_id, meta["difficulty"])
-            if level <= 0:
-                continue
-            tps = meta["tap_count"] / meta["music_time"] if meta["music_time"] > 0 else 0.0
-            solo_skill = _weighted_skill(meta["skill_score_solo"], sorted_skills, skills[0])
-            auto_skill = _weighted_skill(meta["skill_score_auto"], sorted_skills, skills[0])
-            multi_skill = _weighted_skill(meta["skill_score_multi"], sorted_skills, skills[0])
-            solo_score = meta["base_score"] + solo_skill
-            auto_score = meta["base_score_auto"] + auto_skill
-            multi_score = meta["base_score"] + multi_skill + meta["fever_score"] * 0.5 + 0.01875
-            row = {
-                "rank": 0,
-                "music_id": music_id,
-                "difficulty": meta["difficulty"],
-                "level": level,
-                "music_title": title,
-                "music_cover_path": cover,
-                "event_rate": meta["event_rate"],
-                "music_time": meta["music_time"],
-                "tps": tps,
-            }
-            _populate_live_metrics(
-                row,
-                "solo",
-                solo_score,
-                solo_skill / solo_score if solo_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            _populate_live_metrics(
-                row,
-                "auto",
-                auto_score,
-                auto_skill / auto_score if auto_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            _populate_live_metrics(
-                row,
-                "multi",
-                multi_score,
-                multi_skill / multi_score if multi_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            rows.append(row)
+            row = _build_board_row(music_id, music, meta, skills, ordered_skills, power, deck_bonus, play_interval)
+            if row is not None:
+                rows.append(row)
     return rows
 
 
@@ -1073,36 +1076,41 @@ def _calc_control_points(score: int, event_bonus: int, basic_point: int, boost: 
     return base * _BOOST_BONUS[boost]
 
 
+def _score_range_for_bonus(target: int, basic_point: int, event_bonus: int, boost: int) -> dict | None:
+    left, right = 0, SCORE_CONTROL_MAX_SCORE
+    found = False
+    while left <= right:
+        mid = (left + right) // 2
+        points = _calc_control_points(mid, event_bonus, basic_point, boost)
+        if points <= target:
+            left = mid + 1
+            found = found or points == target
+        else:
+            right = mid - 1
+    if not found:
+        return None
+    score_max = right
+    left, right = 0, SCORE_CONTROL_MAX_SCORE
+    while left <= right:
+        mid = (left + right) // 2
+        if _calc_control_points(mid, event_bonus, basic_point, boost) >= target:
+            right = mid - 1
+        else:
+            left = mid + 1
+    return {"event_bonus": event_bonus, "boost": boost, "score_min": left, "score_max": score_max}
+
+
 def _find_valid_score_ranges(target: int, basic_point: int, max_event_bonus: int, limit: int) -> list[dict]:
     """score_control.go:145-201 (twin binary searches over [0, 2840000])."""
     result = []
     for event_bonus in range(max_event_bonus + 1):
         for boost in range(11):
-            boost_bonus = _BOOST_BONUS[boost]
-            if target % boost_bonus != 0:
+            if target % _BOOST_BONUS[boost] != 0:
                 continue
-            left, right = 0, SCORE_CONTROL_MAX_SCORE
-            found = False
-            while left <= right:
-                mid = (left + right) // 2
-                points = _calc_control_points(mid, event_bonus, basic_point, boost)
-                if points <= target:
-                    left = mid + 1
-                    if points == target:
-                        found = True
-                    continue
-                right = mid - 1
-            if not found:
+            score_range = _score_range_for_bonus(target, basic_point, event_bonus, boost)
+            if score_range is None:
                 continue
-            score_max = right
-            left, right = 0, SCORE_CONTROL_MAX_SCORE
-            while left <= right:
-                mid = (left + right) // 2
-                if _calc_control_points(mid, event_bonus, basic_point, boost) >= target:
-                    right = mid - 1
-                    continue
-                left = mid + 1
-            result.append({"event_bonus": event_bonus, "boost": boost, "score_min": left, "score_max": score_max})
+            result.append(score_range)
             if limit > 0 and len(result) >= limit:
                 return result
     return result
