@@ -1629,127 +1629,201 @@ def _current_round(groups: list[dict], total: int) -> tuple[int, int, int]:
         round_no += 1
 
 
-def _mission_rows(cid: int) -> tuple[list[dict], int, int, int, int, int]:
-    missions = sorted(
-        (m for m in MD.get("characterMissionV2s") if m.get("characterId") == cid),
-        key=lambda m: m["id"],
+def _character_missions(cid: int) -> list[dict]:
+    return sorted(
+        (mission for mission in MD.get("characterMissionV2s") if mission.get("characterId") == cid),
+        key=lambda mission: mission["id"],
     )
-    user_char = next((c for c in SUITE.get("userCharacters") or [] if c.get("characterId") == cid), None)
-    current_level = (user_char or {}).get("characterRank", 0)
-    current_exp = (user_char or {}).get("exp", 0)
-    current_total_exp = (user_char or {}).get("totalExp", 0)
 
-    char_levels = sorted(
+
+def _character_level_totals() -> tuple[list[tuple[int, int]], dict[int, int]]:
+    rows = sorted(
         (
             (row["level"], row.get("totalExp", 0))
             for row in MD.get("levels")
             if row.get("levelType", "").lower() == "character" and row.get("level", 0) > 0
         ),
     )
-    level_total = dict(char_levels)
-    if current_level > 0 and current_total_exp > 0:
-        base = level_total.get(current_level)
-        if base is not None and current_total_exp >= base:
-            current_exp = current_total_exp - base
+    return rows, dict(rows)
 
-    statuses = [s for s in _mission_statuses() if s.get("characterId") == cid]
-    pending_exp = 0
-    for status in statuses:
-        if str(status.get("missionStatus", "")).strip().lower() == "achieved":
-            pending_exp += _step_value(_param_groups(status.get("parameterGroupId", 0)), status.get("seq", 0), "exp")
 
-    final_level, final_exp = current_level, current_exp + pending_exp
+def _current_character_level(cid: int, level_total: dict[int, int]) -> tuple[int, int, int]:
+    user_char = next(
+        (character for character in SUITE.get("userCharacters") or [] if character.get("characterId") == cid), None
+    )
+    current_level = (user_char or {}).get("characterRank", 0)
+    current_exp = (user_char or {}).get("exp", 0)
+    current_total_exp = (user_char or {}).get("totalExp", 0)
+    base = level_total.get(current_level)
+    if current_level > 0 and current_total_exp > 0 and base is not None and current_total_exp >= base:
+        current_exp = current_total_exp - base
+    return current_level, current_exp, current_total_exp
+
+
+def _character_mission_statuses(cid: int) -> list[dict]:
+    return [status for status in _mission_statuses() if status.get("characterId") == cid]
+
+
+def _pending_mission_exp(statuses: list[dict]) -> int:
+    return sum(
+        _step_value(_param_groups(status.get("parameterGroupId", 0)), status.get("seq", 0), "exp")
+        for status in statuses
+        if str(status.get("missionStatus", "")).strip().lower() == "achieved"
+    )
+
+
+def _level_for_total_exp(char_levels: list[tuple[int, int]], total_exp: int) -> tuple[int, int]:
+    final_level, level_start = 1, 0
+    for level, level_total_exp in char_levels:
+        if level_total_exp > total_exp:
+            break
+        final_level, level_start = level, level_total_exp
+    return final_level, total_exp - level_start
+
+
+def _final_character_level(
+    current_level: int,
+    current_exp: int,
+    current_total_exp: int,
+    pending_exp: int,
+    char_levels: list[tuple[int, int]],
+    level_total: dict[int, int],
+) -> tuple[int, int]:
+    if not char_levels:
+        return current_level, current_exp + pending_exp
     base_total_exp = current_total_exp
     if base_total_exp <= 0 and current_level > 0 and current_level in level_total:
         base_total_exp = level_total[current_level] + current_exp
-    if char_levels:
-        final_total_exp = max(base_total_exp, 0) + pending_exp
-        final_level, level_start = 1, 0
-        for level, total_exp in char_levels:
-            if total_exp <= final_total_exp:
-                final_level, level_start = level, total_exp
-                continue
-            break
-        final_exp = final_total_exp - level_start
+    return _level_for_total_exp(char_levels, max(base_total_exp, 0) + pending_exp)
 
+
+def _mission_progress_by_type(cid: int) -> dict[str, int]:
     progress_by_type: dict[str, int] = {}
     for item in SUITE.get("userCharacterMissionV2s") or []:
         if item.get("characterId") != cid:
             continue
-        kind = item.get("characterMissionType", "")
-        progress_by_type[kind] = max(progress_by_type.get(kind, 0), item.get("progress", 0))
+        mission_type = item.get("characterMissionType", "")
+        progress_by_type[mission_type] = max(progress_by_type.get(mission_type, 0), item.get("progress", 0))
+    return progress_by_type
 
+
+def _mission_sequences(statuses: list[dict]) -> tuple[dict[int, int], dict[int, int]]:
     seq_by_mission: dict[int, int] = {}
     seq_by_group: dict[int, int] = {}
     for status in statuses:
-        mission_id, group_id, seq = status.get("missionId", 0), status.get("parameterGroupId", 0), status.get("seq", 0)
+        mission_id = status.get("missionId", 0)
+        group_id = status.get("parameterGroupId", 0)
+        seq = status.get("seq", 0)
         seq_by_mission[mission_id] = max(seq_by_mission.get(mission_id, 0), seq)
         seq_by_group[group_id] = max(seq_by_group.get(group_id, 0), seq)
+    return seq_by_mission, seq_by_group
 
-    rows = []
-    for mission in missions:
-        groups = _param_groups(mission.get("parameterGroupId", 0))
-        mission_type = mission.get("characterMissionType", "")
-        is_ex = mission_type in _EX_MISSION_TYPES
 
-        current = progress_by_type.get(mission_type, 0)
-        received = max(seq_by_mission.get(mission["id"], 0), seq_by_group.get(mission.get("parameterGroupId", 0), 0))
-        if is_ex:
-            cleared = sum(_step_value(groups, r, "requirement") for r in range(1, received + 1))
-            if current > 0:
-                if current < cleared:
-                    current = cleared + current
-            else:
-                current = cleared
-        elif current <= 0 and received > 0:
-            current = _step_value(groups, received, "requirement")
+def _mission_received_seq(mission: dict, seq_by_mission: dict[int, int], seq_by_group: dict[int, int]) -> int:
+    return max(
+        seq_by_mission.get(mission["id"], 0),
+        seq_by_group.get(mission.get("parameterGroupId", 0), 0),
+    )
 
-        if is_ex:
-            upper = sum(_step_value(groups, r, "requirement") for r in range(1, 31))
-        else:
-            upper = max((g.get("requirement", 0) for g in groups), default=0)
-        ratio = 0.0
-        if upper > 0:
-            ratio = 1.0 if current > upper else current / upper
 
-        row = {
-            "mission_id": mission["id"],
-            "mission_type": mission_type,
-            "title": _MISSION_TITLES.get(mission_type, mission_type),
-            "is_achievement": mission.get("isAchievementMission", False),
-            "is_ex": is_ex,
-            "current": current,
-            "ratio": ratio,
-        }
-        if upper > 0:
-            row["upper"] = upper
+def _mission_current(groups: list[dict], current: int, received: int, is_ex: bool) -> int:
+    if is_ex:
+        cleared = sum(_step_value(groups, round_no, "requirement") for round_no in range(1, received + 1))
+        if 0 < current < cleared:
+            return cleared + current
+        return current if current > 0 else cleared
+    if current <= 0 and received > 0:
+        return _step_value(groups, received, "requirement")
+    return current
 
-        if is_ex:
-            round_no, in_round, round_need = _current_round(groups, current)
-            if round_need > 0:
-                next_need = current + max(round_need - in_round, 0)
-                next_exp = _step_value(groups, round_no, "exp")
-                if next_need > 0:
-                    row["next_need"] = next_need
-                if next_exp > 0:
-                    row["next_exp"] = next_exp
-            if round_no > 0:
-                row["current_round"] = round_no
-            if in_round > 0:
-                row["current_round_progress"] = in_round
-            if round_need > 0:
-                row["current_round_need"] = round_need
-            row["ex_display_round_text"] = f"EX {round_no} 回目"
-        else:
-            for group_row in groups:
-                if group_row.get("requirement", 0) > current:
-                    if group_row.get("requirement", 0) > 0:
-                        row["next_need"] = group_row["requirement"]
-                    if group_row.get("exp", 0) > 0:
-                        row["next_exp"] = group_row["exp"]
-                    break
-        rows.append(row)
 
+def _mission_upper(groups: list[dict], is_ex: bool) -> int:
+    if is_ex:
+        return sum(_step_value(groups, round_no, "requirement") for round_no in range(1, 31))
+    return max((group.get("requirement", 0) for group in groups), default=0)
+
+
+def _mission_ratio(current: int, upper: int) -> float:
+    if upper <= 0:
+        return 0.0
+    return 1.0 if current > upper else current / upper
+
+
+def _add_ex_mission_progress(row: dict, groups: list[dict], current: int) -> None:
+    round_no, in_round, round_need = _current_round(groups, current)
+    if round_need > 0:
+        next_need = current + max(round_need - in_round, 0)
+        next_exp = _step_value(groups, round_no, "exp")
+        if next_need > 0:
+            row["next_need"] = next_need
+        if next_exp > 0:
+            row["next_exp"] = next_exp
+    if round_no > 0:
+        row["current_round"] = round_no
+    if in_round > 0:
+        row["current_round_progress"] = in_round
+    if round_need > 0:
+        row["current_round_need"] = round_need
+    row["ex_display_round_text"] = f"EX {round_no} 回目"
+
+
+def _add_standard_mission_progress(row: dict, groups: list[dict], current: int) -> None:
+    next_group = next((group for group in groups if group.get("requirement", 0) > current), None)
+    if not next_group:
+        return
+    if next_group.get("requirement", 0) > 0:
+        row["next_need"] = next_group["requirement"]
+    if next_group.get("exp", 0) > 0:
+        row["next_exp"] = next_group["exp"]
+
+
+def _mission_row(
+    mission: dict,
+    progress_by_type: dict[str, int],
+    seq_by_mission: dict[int, int],
+    seq_by_group: dict[int, int],
+) -> dict:
+    groups = _param_groups(mission.get("parameterGroupId", 0))
+    mission_type = mission.get("characterMissionType", "")
+    is_ex = mission_type in _EX_MISSION_TYPES
+    received = _mission_received_seq(mission, seq_by_mission, seq_by_group)
+    current = _mission_current(groups, progress_by_type.get(mission_type, 0), received, is_ex)
+    upper = _mission_upper(groups, is_ex)
+    row = {
+        "mission_id": mission["id"],
+        "mission_type": mission_type,
+        "title": _MISSION_TITLES.get(mission_type, mission_type),
+        "is_achievement": mission.get("isAchievementMission", False),
+        "is_ex": is_ex,
+        "current": current,
+        "ratio": _mission_ratio(current, upper),
+    }
+    if upper > 0:
+        row["upper"] = upper
+    if is_ex:
+        _add_ex_mission_progress(row, groups, current)
+    else:
+        _add_standard_mission_progress(row, groups, current)
+    return row
+
+
+def _mission_rows(cid: int) -> tuple[list[dict], int, int, int, int, int]:
+    missions = _character_missions(cid)
+    char_levels, level_total = _character_level_totals()
+    current_level, current_exp, current_total_exp = _current_character_level(cid, level_total)
+    statuses = _character_mission_statuses(cid)
+    pending_exp = _pending_mission_exp(statuses)
+    final_level, final_exp = _final_character_level(
+        current_level,
+        current_exp,
+        current_total_exp,
+        pending_exp,
+        char_levels,
+        level_total,
+    )
+    progress_by_type = _mission_progress_by_type(cid)
+    seq_by_mission, seq_by_group = _mission_sequences(statuses)
+    rows = [_mission_row(mission, progress_by_type, seq_by_mission, seq_by_group) for mission in missions]
     return rows, current_level, current_exp, pending_exp, final_level, final_exp
 
 
@@ -1802,87 +1876,113 @@ def build_education_character_mission_overview() -> str:
     return _emit("education_character_mission_overview", CharacterMissionOverviewRequest, body)
 
 
-def build_education_character_mission_all() -> str:
-    cid, mission_type = MISSION_CID, "play_live"
-    rows, *_ = _mission_rows(cid)
-    by_type = {row["mission_type"]: row for row in rows}
-    section_types = {
+def _mission_section_types(mission_type: str) -> list[str]:
+    return {
         "play_live": ["play_live", "play_live_ex"],
         "waiting_room": ["waiting_room", "waiting_room_ex"],
     }.get(mission_type, [mission_type])
 
-    sections = []
-    for section_type in section_types:
-        base = by_type[section_type]
-        mission = next(
-            m
-            for m in MD.get("characterMissionV2s")
-            if m.get("characterId") == cid and m.get("characterMissionType") == section_type
+
+def _mission_master(cid: int, mission_type: str) -> dict:
+    return next(
+        mission
+        for mission in MD.get("characterMissionV2s")
+        if mission.get("characterId") == cid and mission.get("characterMissionType") == mission_type
+    )
+
+
+def _ex_mission_display_rows(base: dict, groups: list[dict]) -> list[dict]:
+    max_round = max(base.get("current_round", 0), max((group.get("seq", 0) for group in groups), default=0))
+    display_rows = []
+    acc_requirement = acc_exp = 0
+    for round_no in range(1, max_round + 1):
+        requirement = _step_value(groups, round_no, "requirement")
+        exp = _step_value(groups, round_no, "exp")
+        acc_requirement += requirement
+        acc_exp += exp
+        display_rows.append(
+            {
+                "seq": round_no,
+                "requirement": requirement,
+                "acc_requirement": acc_requirement,
+                "exp": exp,
+                "acc_exp": acc_exp,
+            }
         )
-        groups = _param_groups(mission.get("parameterGroupId", 0))
+    return display_rows
 
-        display_rows = []
-        acc_requirement = acc_exp = 0
-        if base["is_ex"]:
-            max_round = max(base.get("current_round", 0), max((g.get("seq", 0) for g in groups), default=0))
-            for round_no in range(1, max_round + 1):
-                requirement = _step_value(groups, round_no, "requirement")
-                exp = _step_value(groups, round_no, "exp")
-                acc_requirement += requirement
-                acc_exp += exp
-                display_rows.append(
-                    {
-                        "seq": round_no,
-                        "requirement": requirement,
-                        "acc_requirement": acc_requirement,
-                        "exp": exp,
-                        "acc_exp": acc_exp,
-                    }
-                )
-        else:
-            for group_row in groups:
-                acc_exp += group_row.get("exp", 0)
-                display_rows.append(
-                    {
-                        "seq": group_row.get("seq", 0),
-                        "requirement": group_row.get("requirement", 0),
-                        # Go keeps acc_requirement == requirement for non-EX rows (spec caveat).
-                        "acc_requirement": group_row.get("requirement", 0),
-                        "exp": group_row.get("exp", 0),
-                        "acc_exp": acc_exp,
-                    }
-                )
 
-        if base["is_ex"] and base.get("current_round", 0) > 0:
-            reached_seq = base["current_round"]
-        else:
-            reached_seq = 0
-            for row in display_rows:
-                if row["requirement"] <= base["current"]:
-                    reached_seq = row["seq"]
-                    continue
-                break
+def _standard_mission_display_rows(groups: list[dict]) -> list[dict]:
+    display_rows = []
+    acc_exp = 0
+    for group in groups:
+        acc_exp += group.get("exp", 0)
+        display_rows.append(
+            {
+                "seq": group.get("seq", 0),
+                "requirement": group.get("requirement", 0),
+                # Go keeps acc_requirement == requirement for non-EX rows (spec caveat).
+                "acc_requirement": group.get("requirement", 0),
+                "exp": group.get("exp", 0),
+                "acc_exp": acc_exp,
+            }
+        )
+    return display_rows
 
-        section = {
-            "mission_type": base["mission_type"],
-            "title": base["title"],
-            "is_ex": base["is_ex"],
-            "current_total": base["current"],
-            "reached_seq": reached_seq,
-            "ratio": base["ratio"],
-            "display_rows": display_rows,
-        }
-        for src_key, dst_key in (
-            ("current_round", "current_round_no"),
-            ("current_round_progress", "current_round_progress"),
-            ("current_round_need", "current_round_need"),
-            ("upper", "upper"),
-            ("next_need", "next_need"),
-            ("next_exp", "next_exp"),
-        ):
-            if src_key in base:
-                section[dst_key] = base[src_key]
-        sections.append(section)
+
+def _mission_display_rows(base: dict, groups: list[dict]) -> list[dict]:
+    return _ex_mission_display_rows(base, groups) if base["is_ex"] else _standard_mission_display_rows(groups)
+
+
+def _mission_reached_seq(base: dict, display_rows: list[dict]) -> int:
+    if base["is_ex"] and base.get("current_round", 0) > 0:
+        return base["current_round"]
+    reached_seq = 0
+    for row in display_rows:
+        if row["requirement"] > base["current"]:
+            break
+        reached_seq = row["seq"]
+    return reached_seq
+
+
+_MISSION_SECTION_FIELDS = (
+    ("current_round", "current_round_no"),
+    ("current_round_progress", "current_round_progress"),
+    ("current_round_need", "current_round_need"),
+    ("upper", "upper"),
+    ("next_need", "next_need"),
+    ("next_exp", "next_exp"),
+)
+
+
+def _copy_mission_section_fields(base: dict, section: dict) -> None:
+    for src_key, dst_key in _MISSION_SECTION_FIELDS:
+        if src_key in base:
+            section[dst_key] = base[src_key]
+
+
+def _mission_section(cid: int, base: dict) -> dict:
+    mission = _mission_master(cid, base["mission_type"])
+    groups = _param_groups(mission.get("parameterGroupId", 0))
+    display_rows = _mission_display_rows(base, groups)
+    section = {
+        "mission_type": base["mission_type"],
+        "title": base["title"],
+        "is_ex": base["is_ex"],
+        "current_total": base["current"],
+        "reached_seq": _mission_reached_seq(base, display_rows),
+        "ratio": base["ratio"],
+        "display_rows": display_rows,
+    }
+    _copy_mission_section_fields(base, section)
+    return section
+
+
+def build_education_character_mission_all() -> str:
+    cid, mission_type = MISSION_CID, "play_live"
+    rows, *_ = _mission_rows(cid)
+    by_type = {row["mission_type"]: row for row in rows}
+    sections = [_mission_section(cid, by_type[section_type]) for section_type in _mission_section_types(mission_type)]
 
     body = {
         "profile": _profile(),

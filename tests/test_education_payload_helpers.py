@@ -214,3 +214,137 @@ def test_leader_helpers_use_legacy_fallback_and_ex_status(monkeypatch: pytest.Mo
     assert play_count == {1: 9}
     assert ex_count == {2: 27}
     assert ex_level == {2: 3}
+
+
+def test_mission_current_preserves_ex_cleared_round_arithmetic() -> None:
+    groups = [
+        {"seq": 1, "requirement": 10},
+        {"seq": 2, "requirement": 20},
+    ]
+
+    assert payloads._mission_current(groups, current=5, received=2, is_ex=True) == 35
+    assert payloads._mission_current(groups, current=40, received=2, is_ex=True) == 40
+    assert payloads._mission_current(groups, current=0, received=2, is_ex=True) == 30
+    assert payloads._mission_current(groups, current=0, received=2, is_ex=False) == 20
+
+
+def test_final_character_level_uses_total_exp_and_pending_rewards() -> None:
+    char_levels = [(1, 0), (2, 100), (3, 250)]
+
+    assert payloads._final_character_level(
+        current_level=2,
+        current_exp=20,
+        current_total_exp=0,
+        pending_exp=160,
+        char_levels=char_levels,
+        level_total=dict(char_levels),
+    ) == (3, 30)
+    assert payloads._final_character_level(2, 20, 0, 5, [], {}) == (2, 25)
+
+
+def test_mission_rows_combine_progress_status_and_pending_exp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        payloads,
+        "MD",
+        _FakeMasterData(
+            {
+                "levels": [
+                    {"levelType": "character", "level": 1, "totalExp": 0},
+                    {"levelType": "character", "level": 2, "totalExp": 100},
+                    {"levelType": "character", "level": 3, "totalExp": 250},
+                ],
+                "characterMissionV2s": [
+                    {"id": 1, "characterId": 6, "characterMissionType": "play_live", "parameterGroupId": 1},
+                    {"id": 2, "characterId": 6, "characterMissionType": "play_live_ex", "parameterGroupId": 101},
+                ],
+                "characterMissionV2ParameterGroups": [
+                    {"id": 1, "seq": 1, "requirement": 10, "exp": 5},
+                    {"id": 1, "seq": 2, "requirement": 20, "exp": 7},
+                    {"id": 101, "seq": 1, "requirement": 10, "exp": 2},
+                    {"id": 101, "seq": 2, "requirement": 20, "exp": 3},
+                ],
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        payloads,
+        "SUITE",
+        {
+            "userCharacters": [{"characterId": 6, "characterRank": 2, "exp": 9, "totalExp": 120}],
+            "userCharacterMissionV2s": [
+                {"characterId": 6, "characterMissionType": "play_live", "progress": 15},
+                {"characterId": 6, "characterMissionType": "play_live_ex", "progress": 3},
+            ],
+            "userCharacterMissionV2Statuses": [
+                {
+                    "characterId": 6,
+                    "missionId": 1,
+                    "parameterGroupId": 1,
+                    "seq": 1,
+                    "missionStatus": "achieved",
+                },
+                {"characterId": 6, "missionId": 2, "parameterGroupId": 101, "seq": 1},
+            ],
+        },
+    )
+
+    rows, current_level, current_exp, pending_exp, final_level, final_exp = payloads._mission_rows(6)
+
+    assert (current_level, current_exp, pending_exp, final_level, final_exp) == (2, 20, 5, 2, 25)
+    assert rows[0]["current"] == 15
+    assert rows[0]["next_need"] == 20
+    assert rows[1]["current"] == 13
+    assert rows[1]["current_round"] == 2
+    assert rows[1]["current_round_progress"] == 3
+    assert rows[1]["next_need"] == 30
+
+
+def test_mission_section_builds_standard_and_ex_display_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        payloads,
+        "MD",
+        _FakeMasterData(
+            {
+                "characterMissionV2s": [
+                    {"id": 1, "characterId": 6, "characterMissionType": "play_live", "parameterGroupId": 1},
+                    {"id": 2, "characterId": 6, "characterMissionType": "play_live_ex", "parameterGroupId": 101},
+                ],
+                "characterMissionV2ParameterGroups": [
+                    {"id": 1, "seq": 1, "requirement": 10, "exp": 2},
+                    {"id": 1, "seq": 2, "requirement": 20, "exp": 3},
+                    {"id": 101, "seq": 1, "requirement": 10, "exp": 2},
+                    {"id": 101, "seq": 2, "requirement": 20, "exp": 3},
+                ],
+            }
+        ),
+    )
+    standard = payloads._mission_section(
+        6,
+        {
+            "mission_type": "play_live",
+            "title": "standard",
+            "is_ex": False,
+            "current": 15,
+            "ratio": 0.75,
+            "upper": 20,
+        },
+    )
+    ex = payloads._mission_section(
+        6,
+        {
+            "mission_type": "play_live_ex",
+            "title": "ex",
+            "is_ex": True,
+            "current": 13,
+            "ratio": 0.1,
+            "current_round": 2,
+            "current_round_progress": 3,
+        },
+    )
+
+    assert standard["reached_seq"] == 1
+    assert standard["display_rows"][1]["acc_exp"] == 5
+    assert standard["upper"] == 20
+    assert ex["reached_seq"] == 2
+    assert ex["display_rows"][1]["acc_requirement"] == 30
+    assert ex["current_round_no"] == 2
