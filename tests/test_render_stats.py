@@ -167,6 +167,63 @@ def test_scene_completeness_is_optional_and_aggregated_per_endpoint():
     assert "scene_completeness" not in get_render_stats()["endpoints"]["card_list"]
 
 
+def test_scene_completeness_normalizes_invalid_metrics_and_merges_categories():
+    record_scene_completeness("ignored", None)
+    record_scene_completeness("ignored", ["not", "a", "mapping"])
+    record_scene_completeness(
+        "  ",
+        {
+            "complete": True,
+            "elements_total": "2",
+            "visible_elements": -3,
+            "native_elements": object(),
+            "issues_by_kind": {
+                None: {"missing": 9},
+                " ": {"missing": 9},
+                "invalid": "not a mapping",
+                "stamp": {"missing": -1, "unresolved": "3"},
+            },
+            "classifications_by_kind": {
+                "text": {"native": "2", "hybrid": "bad", "future": 50},
+            },
+        },
+    )
+    record_scene_completeness(
+        "unknown",
+        {
+            "complete": False,
+            "issues_by_kind": {"stamp": {"missing": 1}},
+            "classifications_by_kind": {"text": {"hidden": 1}},
+        },
+    )
+    record_render("unknown", "skia")
+
+    scene = get_render_stats()["endpoints"]["unknown"]["scene_completeness"]
+    assert scene["checked"] == 2
+    assert scene["complete"] == 1
+    assert scene["incomplete"] == 1
+    assert scene["elements_total"] == 2
+    assert scene["visible_elements"] == 0
+    assert scene["native_elements"] == 0
+    assert scene["issues_by_kind"] == {"stamp": {"missing": 1, "unresolved": 3}}
+    assert scene["classifications_by_kind"] == {"text": {"hidden": 1, "native": 2}}
+
+
+def test_scene_completeness_ignores_non_mapping_category_tables():
+    record_scene_completeness(
+        "custom_profile_card",
+        {
+            "issues_by_kind": "invalid",
+            "classifications_by_kind": ["invalid"],
+        },
+    )
+    record_render("custom_profile_card", "fallback")
+
+    scene = get_render_stats()["endpoints"]["custom_profile_card"]["scene_completeness"]
+    assert scene["issues_by_kind"] == {}
+    assert scene["classifications_by_kind"] == {}
+
+
 def test_error_stages_are_aggregate_only_and_reset() -> None:
     record_render("custom_profile_card", "error", error_stage="native_render")
     record_render("custom_profile_card", "error", error_stage="native_render")
