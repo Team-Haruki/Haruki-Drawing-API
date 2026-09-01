@@ -831,6 +831,35 @@ _AREA_TREE_AREA_ID = 11
 _AREA_FLOWER_AREA_ID = 13
 
 
+def _area_level_filter_result(
+    level: dict,
+    filter_attr: str,
+    filter_cid: int,
+    filter_piapro: bool,
+) -> tuple[bool, bool]:
+    target_cid = level.get("targetGameCharacterId", 0)
+    is_vs_item = _normalize_unit(level.get("targetUnit", "")) == "piapro" or target_cid in _PIAPRO_CHARACTER_IDS
+    matched = filter_piapro and is_vs_item
+    matched = matched or (filter_cid > 0 and target_cid == filter_cid)
+    matched = matched or bool(filter_attr and _normalize_attr(level.get("targetCardAttr", "")) == filter_attr)
+    return matched, is_vs_item
+
+
+def _area_location_matches_filter(
+    item: dict,
+    filter_unit: str,
+    filter_tree: bool,
+    filter_flower: bool,
+    is_vs_item: bool,
+) -> bool:
+    area_id = item.get("areaId")
+    return (
+        (filter_tree and area_id == _AREA_TREE_AREA_ID)
+        or (filter_flower and area_id == _AREA_FLOWER_AREA_ID)
+        or (bool(filter_unit) and _AREA_FILTER_UNIT_AREA_IDS.get(filter_unit) == area_id and not is_vs_item)
+    )
+
+
 def _area_item_matches_filter(
     item: dict,
     levels: list[dict],
@@ -842,28 +871,10 @@ def _area_item_matches_filter(
     filter_piapro: bool,
 ) -> bool:
     """areaItemMatchesFilter (snapshot_helpers.go:21-80)."""
-    matched = False
-    is_vs_item = False
-    for level in levels:
-        if _normalize_unit(level.get("targetUnit", "")) == "piapro":
-            is_vs_item = True
-            matched = matched or filter_piapro
-        target_cid = level.get("targetGameCharacterId", 0)
-        if target_cid > 0:
-            if target_cid in _PIAPRO_CHARACTER_IDS:
-                is_vs_item = True
-                matched = matched or filter_piapro
-            if filter_cid > 0 and target_cid == filter_cid:
-                matched = True
-        if filter_attr and _normalize_attr(level.get("targetCardAttr", "")) == filter_attr:
-            matched = True
-    if filter_tree and item.get("areaId") == _AREA_TREE_AREA_ID:
-        matched = True
-    if filter_flower and item.get("areaId") == _AREA_FLOWER_AREA_ID:
-        matched = True
-    if filter_unit and _AREA_FILTER_UNIT_AREA_IDS.get(filter_unit) == item.get("areaId") and not is_vs_item:
-        matched = True
-    return matched
+    results = [_area_level_filter_result(level, filter_attr, filter_cid, filter_piapro) for level in levels]
+    matched = any(result[0] for result in results)
+    is_vs_item = any(result[1] for result in results)
+    return matched or _area_location_matches_filter(item, filter_unit, filter_tree, filter_flower, is_vs_item)
 
 
 def _resolve_area_item_ids(
@@ -891,31 +902,48 @@ def _resolve_area_item_ids(
     return sorted(matched)
 
 
-def _area_shop_items(item_ids: list[int], now_ms: int) -> dict[int, dict[int, dict]]:
-    """resolveAreaItemShopItems + fillAreaItemShopItemsByShopSequence."""
-    item_set = set(item_ids)
+def _shop_items_by_resource_box() -> dict[int, dict]:
     shop_by_box: dict[int, dict] = {}
     for shop_item in MD.get("shopItems"):
         shop_by_box.setdefault(shop_item.get("resourceBoxId"), shop_item)
+    return shop_by_box
 
+
+def _shop_item_started(shop_item: dict, now_ms: int) -> bool:
+    return shop_item.get("startAt", 0) <= 0 or shop_item["startAt"] <= now_ms
+
+
+def _add_explicit_area_shop_details(
+    result: dict[int, dict[int, dict]],
+    box: dict,
+    shop_item: dict,
+    item_set: set[int],
+) -> None:
+    for detail in box.get("details", []):
+        is_area_item = str(detail.get("resourceType", "")).lower() == "area_item"
+        resource_id = detail.get("resourceId", 0)
+        resource_level = detail.get("resourceLevel", 0)
+        if not is_area_item or resource_id <= 0 or resource_level <= 0 or resource_id not in item_set:
+            continue
+        result.setdefault(resource_id, {}).setdefault(resource_level, shop_item)
+
+
+def _explicit_area_shop_items(item_ids: list[int], now_ms: int) -> dict[int, dict[int, dict]]:
+    item_set = set(item_ids)
+    shop_by_box = _shop_items_by_resource_box()
     result: dict[int, dict[int, dict]] = {}
+
     for box in MD.get("resourceBoxes"):
         if box.get("resourceBoxPurpose") != "shop_item":
             continue
         shop_item = shop_by_box.get(box["id"])
-        if not shop_item or (shop_item.get("startAt", 0) > 0 and shop_item["startAt"] > now_ms):
+        if not shop_item or not _shop_item_started(shop_item, now_ms):
             continue
-        for detail in box.get("details", []):
-            if (
-                str(detail.get("resourceType", "")).lower() != "area_item"
-                or detail.get("resourceId", 0) <= 0
-                or detail.get("resourceLevel", 0) <= 0
-                or detail["resourceId"] not in item_set
-            ):
-                continue
-            result.setdefault(detail["resourceId"], {}).setdefault(detail["resourceLevel"], shop_item)
+        _add_explicit_area_shop_details(result, box, shop_item, item_set)
+    return result
 
-    # Fallback: block assignment by shop sequence (snapshot_area.go:347-436).
+
+def _area_shop_targets(item_ids: list[int]) -> dict[int, list[tuple[int, list[int]]]]:
     area_by_id = {a["id"]: a for a in MD.get("areaItems")}
     targets_by_shop: dict[int, list[tuple[int, list[int]]]] = {}
     for item_id in item_ids:
@@ -928,15 +956,25 @@ def _area_shop_items(item_ids: list[int], now_ms: int) -> dict[int, dict[int, di
         levels = sorted({level["level"] for level in _area_item_levels(item_id) if level.get("level", 0) > 0})
         if levels:
             targets_by_shop.setdefault(shop_id, []).append((item_id, levels))
+    return targets_by_shop
 
+
+def _started_shop_items_by_shop(now_ms: int) -> dict[int, list[dict]]:
     shop_items_by_shop: dict[int, list[dict]] = {}
     for shop_item in MD.get("shopItems"):
         if shop_item.get("shopId", 0) <= 0:
             continue
-        if shop_item.get("startAt", 0) > 0 and shop_item["startAt"] > now_ms:
+        if not _shop_item_started(shop_item, now_ms):
             continue
         shop_items_by_shop.setdefault(shop_item["shopId"], []).append(shop_item)
+    return shop_items_by_shop
 
+
+def _assign_shop_sequence_targets(
+    result: dict[int, dict[int, dict]],
+    targets_by_shop: dict[int, list[tuple[int, list[int]]]],
+    shop_items_by_shop: dict[int, list[dict]],
+) -> None:
     for shop_id, targets in targets_by_shop.items():
         shop_items = shop_items_by_shop.get(shop_id, [])
         if not shop_items or not targets:
@@ -952,6 +990,12 @@ def _area_shop_items(item_ids: list[int], now_ms: int) -> dict[int, dict[int, di
             for idx in range(min(block, len(levels))):
                 slots.setdefault(levels[idx], shop_items[offset + idx])
             offset += block
+
+
+def _area_shop_items(item_ids: list[int], now_ms: int) -> dict[int, dict[int, dict]]:
+    """resolveAreaItemShopItems + fillAreaItemShopItemsByShopSequence."""
+    result = _explicit_area_shop_items(item_ids, now_ms)
+    _assign_shop_sequence_targets(result, _area_shop_targets(item_ids), _started_shop_items_by_shop(now_ms))
     return result
 
 
@@ -982,47 +1026,81 @@ def _released_caps(item_ids: list[int], shop_map: dict[int, dict[int, dict]]) ->
 # ===========================================================================
 
 
-def build_education_challenge_live() -> str:
-    scores = {r["characterId"]: r.get("highScore", 0) for r in SUITE.get("userChallengeLiveSoloResults") or []}
+def _challenge_scores_and_ranks() -> tuple[dict[int, int], dict[int, int]]:
+    scores = {row["characterId"]: row.get("highScore", 0) for row in SUITE.get("userChallengeLiveSoloResults") or []}
     ranks: dict[int, int] = {}
     for stage in SUITE.get("userChallengeLiveSoloStages") or []:
-        if stage.get("rank", 0) > ranks.get(stage.get("characterId", 0), 0):
-            ranks[stage["characterId"]] = stage["rank"]
-    claimed = {r["challengeLiveHighScoreRewardId"] for r in SUITE.get("userChallengeLiveSoloHighScoreRewards") or []}
+        character_id = stage.get("characterId", 0)
+        ranks[character_id] = max(ranks.get(character_id, 0), stage.get("rank", 0))
+    return scores, ranks
 
+
+def _challenge_rewards_by_character() -> dict[int, list[dict]]:
     rewards_by_char: dict[int, list[dict]] = {}
     for reward in MD.get("challengeLiveHighScoreRewards"):
         rewards_by_char.setdefault(reward["characterId"], []).append(reward)
-    boxes = _resource_boxes("challenge_live_high_score")
+    return rewards_by_char
 
+
+def _challenge_reward_totals(
+    rewards: list[dict],
+    claimed: set[int],
+    boxes: dict[int, dict],
+) -> tuple[int, int]:
+    jewel = shard = 0
+    for reward in rewards:
+        if reward["id"] in claimed:
+            continue
+        box = boxes.get(reward.get("resourceBoxId"))
+        box_jewel, box_shard = _challenge_box_totals(box or {})
+        jewel += box_jewel
+        shard += box_shard
+    return jewel, shard
+
+
+def _challenge_box_totals(box: dict) -> tuple[int, int]:
+    jewel = shard = 0
+    for detail in box.get("details", []):
+        kind = str(detail.get("resourceType", "")).lower()
+        if kind == "jewel":
+            jewel += detail.get("resourceQuantity", 0)
+        elif kind == "material" and detail.get("resourceId") == 15:
+            shard += detail.get("resourceQuantity", 0)
+    return jewel, shard
+
+
+def _challenge_rows(
+    scores: dict[int, int],
+    ranks: dict[int, int],
+    rewards_by_char: dict[int, list[dict]],
+    claimed: set[int],
+    boxes: dict[int, dict],
+) -> tuple[list[dict], int]:
+    rows = []
     max_user_score = 0
-    challenges = []
-    for cid in range(1, 27):
-        score = scores.get(cid, 0)
+    for character_id in range(1, 27):
+        score = scores.get(character_id, 0)
         max_user_score = max(max_user_score, score)
-        jewel = shard = 0
-        for reward in rewards_by_char.get(cid, []):
-            if reward["id"] in claimed:
-                continue
-            box = boxes.get(reward.get("resourceBoxId"))
-            if not box:
-                continue
-            for detail in box.get("details", []):
-                kind = str(detail.get("resourceType", "")).lower()
-                if kind == "jewel":
-                    jewel += detail.get("resourceQuantity", 0)
-                elif kind == "material" and detail.get("resourceId") == 15:
-                    shard += detail.get("resourceQuantity", 0)
-        challenges.append(
+        jewel, shard = _challenge_reward_totals(rewards_by_char.get(character_id, []), claimed, boxes)
+        rows.append(
             {
-                "chara_id": cid,
-                "rank": ranks.get(cid, 0),
+                "chara_id": character_id,
+                "rank": ranks.get(character_id, 0),
                 "score": score,
                 "jewel": jewel,
                 "shard": shard,
-                "chara_icon_path": ASSETS.chara_icon(cid),
+                "chara_icon_path": ASSETS.chara_icon(character_id),
             }
         )
+    return rows, max_user_score
+
+
+def build_education_challenge_live() -> str:
+    scores, ranks = _challenge_scores_and_ranks()
+    claimed = {r["challengeLiveHighScoreRewardId"] for r in SUITE.get("userChallengeLiveSoloHighScoreRewards") or []}
+    rewards_by_char = _challenge_rewards_by_character()
+    boxes = _resource_boxes("challenge_live_high_score")
+    challenges, max_user_score = _challenge_rows(scores, ranks, rewards_by_char, claimed, boxes)
 
     master_max = max((r.get("highScore", 0) for r in MD.get("challengeLiveHighScoreRewards")), default=0)
     max_score = max(max_user_score, master_max, 3_000_000)
@@ -1038,35 +1116,59 @@ def build_education_challenge_live() -> str:
     return _emit("education_challenge_live", ChallengeLiveDetailsRequest, body)
 
 
-def build_education_power_bonus() -> str:
-    user_levels = _user_area_levels()
-    item_ids = sorted(user_levels)
-    caps = _released_caps(item_ids, _area_shop_items(item_ids, NOW_MS))
-
-    level_rows = {(level["areaItemId"], level["level"]): level for level in MD.get("areaItemLevels")}
+def _empty_power_bonuses() -> tuple[dict[int, dict], dict[str, dict], dict[str, dict]]:
     chara = {cid: {"area_item": 0.0, "rank": 0.0, "fixture": 0.0} for cid in range(1, 27)}
-    unit = {u: {"area_item": 0.0, "gate": 0.0} for u in _UNIT_ORDER}
-    attr = {a: {"area_item": 0.0} for a in _ATTR_ORDER}
+    unit = {unit_name: {"area_item": 0.0, "gate": 0.0} for unit_name in _UNIT_ORDER}
+    attr = {attr_name: {"area_item": 0.0} for attr_name in _ATTR_ORDER}
+    return chara, unit, attr
 
-    for area in SUITE.get("userAreas") or []:
-        for item in area.get("areaItems") or []:
-            level_value = item.get("level", 0)
-            cap = caps.get(item.get("areaItemId", 0), 0)
-            if cap > 0 and level_value > cap:
-                level_value = cap
-            row = level_rows.get((item.get("areaItemId"), level_value))
-            if not row:
-                continue
-            bonus = row.get("power1BonusRate", 0.0)
-            if row.get("targetGameCharacterId", 0) > 0 and row["targetGameCharacterId"] in chara:
-                chara[row["targetGameCharacterId"]]["area_item"] += bonus
-            unit_key = _normalize_unit(row.get("targetUnit", ""))
-            if unit_key and unit_key in unit:
-                unit[unit_key]["area_item"] += bonus
-            attr_key = _normalize_attr(row.get("targetCardAttr", ""))
-            if attr_key and attr_key in attr:
-                attr[attr_key]["area_item"] += bonus
 
+def _user_area_items() -> list[dict]:
+    return [item for area in SUITE.get("userAreas") or [] for item in area.get("areaItems") or []]
+
+
+def _area_power_level_row(
+    item: dict,
+    caps: dict[int, int],
+    level_rows: dict[tuple[int, int], dict],
+) -> dict | None:
+    item_id = item.get("areaItemId", 0)
+    cap = caps.get(item_id, 0)
+    level_value = min(item.get("level", 0), cap) if cap > 0 else item.get("level", 0)
+    return level_rows.get((item_id, level_value))
+
+
+def _apply_area_power_row(
+    row: dict,
+    chara: dict[int, dict],
+    unit: dict[str, dict],
+    attr: dict[str, dict],
+) -> None:
+    bonus = row.get("power1BonusRate", 0.0)
+    character_id = row.get("targetGameCharacterId", 0)
+    if character_id > 0 and character_id in chara:
+        chara[character_id]["area_item"] += bonus
+    unit_key = _normalize_unit(row.get("targetUnit", ""))
+    if unit_key and unit_key in unit:
+        unit[unit_key]["area_item"] += bonus
+    attr_key = _normalize_attr(row.get("targetCardAttr", ""))
+    if attr_key and attr_key in attr:
+        attr[attr_key]["area_item"] += bonus
+
+
+def _apply_area_item_power_bonus(
+    caps: dict[int, int],
+    chara: dict[int, dict],
+    unit: dict[str, dict],
+    attr: dict[str, dict],
+) -> None:
+    level_rows = {(level["areaItemId"], level["level"]): level for level in MD.get("areaItemLevels")}
+    for item in _user_area_items():
+        if row := _area_power_level_row(item, caps, level_rows):
+            _apply_area_power_row(row, chara, unit, attr)
+
+
+def _apply_character_power_bonuses(chara: dict[int, dict]) -> None:
     rank_rows = {(r["characterId"], r["characterRank"]): r for r in MD.get("characterRanks")}
     for character in SUITE.get("userCharacters") or []:
         row = rank_rows.get((character.get("characterId"), character.get("characterRank")))
@@ -1077,6 +1179,8 @@ def build_education_power_bonus() -> str:
         if fixture.get("gameCharacterId") in chara:
             chara[fixture["gameCharacterId"]]["fixture"] += fixture.get("totalBonusRate", 0.0) * 0.1
 
+
+def _apply_gate_power_bonuses(unit: dict[str, dict]) -> None:
     gate_rows = {(g["mysekaiGateId"], g["level"]): g for g in MD.get("mysekaiGateLevels")}
     max_gate_bonus = 0.0
     for gate in SUITE.get("userMysekaiGates") or []:
@@ -1090,32 +1194,188 @@ def build_education_power_bonus() -> str:
         max_gate_bonus = max(max_gate_bonus, rate)
     unit["piapro"]["gate"] += max_gate_bonus
 
+
+def _character_power_rows(chara: dict[int, dict]) -> list[dict]:
+    return [
+        {
+            "chara_id": character_id,
+            "chara_icon_path": ASSETS.chara_icon(character_id),
+            **chara[character_id],
+            "total": (chara[character_id]["area_item"] + chara[character_id]["rank"] + chara[character_id]["fixture"]),
+        }
+        for character_id in range(1, 27)
+    ]
+
+
+def _unit_power_rows(unit: dict[str, dict]) -> list[dict]:
+    return [
+        {
+            "unit": unit_name,
+            "unit_icon_path": _unit_icon(unit_name),
+            **unit[unit_name],
+            "total": unit[unit_name]["area_item"] + unit[unit_name]["gate"],
+        }
+        for unit_name in _UNIT_ORDER
+    ]
+
+
+def _attr_power_rows(attr: dict[str, dict]) -> list[dict]:
+    return [
+        {
+            "attr": attr_name,
+            "attr_icon_path": _attr_icon(attr_name),
+            **attr[attr_name],
+            "total": attr[attr_name]["area_item"],
+        }
+        for attr_name in _ATTR_ORDER
+    ]
+
+
+def build_education_power_bonus() -> str:
+    user_levels = _user_area_levels()
+    item_ids = sorted(user_levels)
+    caps = _released_caps(item_ids, _area_shop_items(item_ids, NOW_MS))
+    chara, unit, attr = _empty_power_bonuses()
+    _apply_area_item_power_bonus(caps, chara, unit, attr)
+    _apply_character_power_bonuses(chara)
+    _apply_gate_power_bonuses(unit)
+
     body = {
         "profile": _profile(),
-        "chara_bonuses": [
-            {
-                "chara_id": cid,
-                "chara_icon_path": ASSETS.chara_icon(cid),
-                **chara[cid],
-                "total": chara[cid]["area_item"] + chara[cid]["rank"] + chara[cid]["fixture"],
-            }
-            for cid in range(1, 27)
-        ],
-        "unit_bonuses": [
-            {
-                "unit": u,
-                "unit_icon_path": _unit_icon(u),
-                **unit[u],
-                "total": unit[u]["area_item"] + unit[u]["gate"],
-            }
-            for u in _UNIT_ORDER
-        ],
-        "attr_bonuses": [
-            {"attr": a, "attr_icon_path": _attr_icon(a), **attr[a], "total": attr[a]["area_item"]} for a in _ATTR_ORDER
-        ],
+        "chara_bonuses": _character_power_rows(chara),
+        "unit_bonuses": _unit_power_rows(unit),
+        "attr_bonuses": _attr_power_rows(attr),
         "dt": NOW_MS,
     }
     return _emit("education_power_bonus", PowerBonusDetailRequest, body)
+
+
+def _user_area_materials() -> dict[int, int]:
+    materials = {AREA_COIN_MATERIAL_ID: SUITE.get("userGamedata", {}).get("coin", 0)}
+    for item in SUITE.get("userMaterials") or []:
+        if item.get("materialId", 0) > 0:
+            materials[item["materialId"]] = item.get("quantity", 0)
+    return materials
+
+
+def _visible_area_item_states(
+    item_ids: list[int],
+    user_levels: dict[int, int],
+    caps: dict[int, int],
+) -> tuple[list[tuple[int, dict, list[dict], int, int]], int]:
+    area_by_id = {item["id"]: item for item in MD.get("areaItems")}
+    states: list[tuple[int, dict, list[dict], int, int]] = []
+    for item_id in item_ids:
+        master = area_by_id.get(item_id)
+        levels = _area_item_levels(item_id)
+        if not master or not levels:
+            continue
+        cap = caps.get(item_id, 0)
+        current = min(user_levels.get(item_id, 0), cap) if cap > 0 else user_levels.get(item_id, 0)
+        max_visible = max(current, cap)
+        if max_visible > 0:
+            states.append((item_id, master, levels, current, max_visible))
+    min_current = max(min((state[3] for state in states), default=0), 0)
+    return states, min_current
+
+
+def _area_upgrade_material(
+    cost_entry: dict,
+    sum_materials: dict[int, int],
+    materials: dict[int, int],
+) -> dict:
+    cost = cost_entry.get("cost", {})
+    resource_type = cost.get("resourceType", "")
+    resource_id = cost.get("resourceId", 0)
+    material_id = AREA_COIN_MATERIAL_ID if str(resource_type).lower() == "coin" else resource_id
+    quantity = cost.get("quantity", 0)
+    sum_materials[material_id] = sum_materials.get(material_id, 0) + quantity
+    have = materials.get(material_id, 0)
+    return {
+        "material_id": material_id,
+        "material_icon_path": _material_icon(resource_type, resource_id),
+        "quantity": quantity,
+        "have_quantity": have,
+        "sum_quantity": sum_materials[material_id],
+        "is_enough": have >= sum_materials[material_id],
+    }
+
+
+def _area_item_level_info(
+    level: int,
+    current: int,
+    row_master: dict | None,
+    shop_item: dict | None,
+    sum_materials: dict[int, int],
+    materials: dict[int, int],
+) -> dict:
+    if not row_master:
+        return {"level": level, "bonus": 0.0, "can_upgrade": False, "materials": []}
+    row = {
+        "level": level,
+        "bonus": row_master.get("power1BonusRate", 0.0),
+        "can_upgrade": True,
+        "materials": [],
+    }
+    if level <= current:
+        return row
+    if not shop_item:
+        row["can_upgrade"] = False
+        return row
+    row["materials"] = [
+        _area_upgrade_material(cost_entry, sum_materials, materials) for cost_entry in shop_item.get("costs", [])
+    ]
+    row["can_upgrade"] = all(material["is_enough"] for material in row["materials"])
+    return row
+
+
+def _area_item_level_infos(
+    levels: list[dict],
+    shop_levels: dict[int, dict],
+    current: int,
+    min_current: int,
+    max_visible: int,
+    materials: dict[int, int],
+) -> list[dict]:
+    level_map = {level["level"]: level for level in levels}
+    sum_materials: dict[int, int] = {}
+    return [
+        _area_item_level_info(
+            level,
+            current,
+            level_map.get(level),
+            shop_levels.get(level),
+            sum_materials,
+            materials,
+        )
+        for level in range(min_current + 1, max_visible + 1)
+    ]
+
+
+def _area_item_info(
+    state: tuple[int, dict, list[dict], int, int],
+    min_current: int,
+    shop_map: dict[int, dict[int, dict]],
+    materials: dict[int, int],
+) -> dict:
+    item_id, master, levels, current, max_visible = state
+    asset_name = master.get("assetbundleName", "")
+    info = {
+        "item_id": item_id,
+        "current_level": current,
+        "item_icon_path": ASSETS.region_asset(f"areaitem/{asset_name}/{asset_name}.png"),
+        "levels": _area_item_level_infos(
+            levels,
+            shop_map.get(item_id) or {},
+            current,
+            min_current,
+            max_visible,
+            materials,
+        ),
+    }
+    if target := _area_item_target_icon(levels):
+        info["target_icon_path"] = target
+    return info
 
 
 def build_education_area_item() -> str:
@@ -1129,92 +1389,12 @@ def build_education_area_item() -> str:
     「/区域道具 mmj」 (unit idol → areaId 7, VS items excluded).
     """
     user_levels = _user_area_levels()
-    materials = {AREA_COIN_MATERIAL_ID: SUITE.get("userGamedata", {}).get("coin", 0)}
-    for item in SUITE.get("userMaterials") or []:
-        if item.get("materialId", 0) > 0:
-            materials[item["materialId"]] = item.get("quantity", 0)
-
+    materials = _user_area_materials()
     item_ids = _resolve_area_item_ids(filter_unit="idol")
     shop_map = _area_shop_items(item_ids, NOW_MS)
     caps = _released_caps(item_ids, shop_map)
-    area_by_id = {a["id"]: a for a in MD.get("areaItems")}
-
-    states = []
-    min_current = -1
-    for item_id in item_ids:
-        master = area_by_id.get(item_id)
-        levels = _area_item_levels(item_id)
-        if not master or not levels:
-            continue
-        current = user_levels.get(item_id, 0)
-        cap = caps.get(item_id, 0)
-        if cap > 0 and current > cap:
-            current = cap
-        max_visible = max(current, cap)
-        if max_visible <= 0:
-            continue
-        if min_current == -1 or current < min_current:
-            min_current = current
-        states.append((item_id, master, levels, current, max_visible))
-    min_current = max(min_current, 0)
-
-    area_items = []
-    for item_id, master, levels, current, max_visible in states:
-        level_map = {level["level"]: level for level in levels}
-        shop_levels = shop_map.get(item_id) or {}
-        sum_materials: dict[int, int] = {}
-        level_infos = []
-        for level in range(min_current + 1, max_visible + 1):
-            row_master = level_map.get(level)
-            if not row_master:
-                level_infos.append({"level": level, "bonus": 0.0, "can_upgrade": False, "materials": []})
-                continue
-            row = {
-                "level": level,
-                "bonus": row_master.get("power1BonusRate", 0.0),
-                "can_upgrade": True,
-                "materials": [],
-            }
-            if level > current:
-                shop_item = shop_levels.get(level)
-                if not shop_item:
-                    row["can_upgrade"] = False
-                else:
-                    for cost_entry in shop_item.get("costs", []):
-                        cost = cost_entry.get("cost", {})
-                        material_id = cost.get("resourceId", 0)
-                        if str(cost.get("resourceType", "")).lower() == "coin":
-                            material_id = AREA_COIN_MATERIAL_ID
-                        sum_materials[material_id] = sum_materials.get(material_id, 0) + cost.get("quantity", 0)
-                        have = materials.get(material_id, 0)
-                        is_enough = have >= sum_materials[material_id]
-                        if not is_enough:
-                            row["can_upgrade"] = False
-                        row["materials"].append(
-                            {
-                                "material_id": material_id,
-                                "material_icon_path": _material_icon(
-                                    cost.get("resourceType", ""), cost.get("resourceId", 0)
-                                ),
-                                "quantity": cost.get("quantity", 0),
-                                "have_quantity": have,
-                                "sum_quantity": sum_materials[material_id],
-                                "is_enough": is_enough,
-                            }
-                        )
-            level_infos.append(row)
-
-        info = {
-            "item_id": item_id,
-            "current_level": current,
-            "item_icon_path": ASSETS.region_asset(
-                f"areaitem/{master.get('assetbundleName', '')}/{master.get('assetbundleName', '')}.png"
-            ),
-            "levels": level_infos,
-        }
-        if target := _area_item_target_icon(levels):
-            info["target_icon_path"] = target
-        area_items.append(info)
+    states, min_current = _visible_area_item_states(item_ids, user_levels, caps)
+    area_items = [_area_item_info(state, min_current, shop_map, materials) for state in states]
 
     body = {"profile": _profile(), "area_items": area_items, "has_profile": True, "dt": NOW_MS}
     return _emit("education_area_item", AreaItemUpgradeMaterialsRequest, body)
@@ -1231,64 +1411,94 @@ def _area_item_target_icon(levels: list[dict]) -> str:
     return ""
 
 
-def build_education_bonds() -> str:
-    """User-bond view, cid<=0 (snapshot_bonds.go:10-244)."""
-    group_pairs = {
-        b["groupId"]: (b["characterId1"], b["characterId2"]) for b in MD.get("bonds") if b.get("groupId", 0) > 0
-    }
-    styles = {
+def _bond_styles() -> dict[int, dict]:
+    return {
         u["id"]: {"character_id": u.get("gameCharacterId", 0), "color_code": (u.get("colorCode") or "").strip()}
         for u in MD.get("gameCharacterUnits")
     }
-    char_ranks = {c["characterId"]: c.get("characterRank", 0) for c in SUITE.get("userCharacters") or []}
 
-    def base_id(game_id: int) -> int:
-        style = styles.get(game_id)
-        return style["character_id"] if style and style["character_id"] > 0 else game_id
 
-    def icon(game_id: int) -> str:
-        return ASSETS.chara_icon(base_id(game_id))
+def _bond_base_id(game_id: int, styles: dict[int, dict]) -> int:
+    style = styles.get(game_id)
+    return style["character_id"] if style and style["character_id"] > 0 else game_id
 
-    def color(game_id: int) -> list[int]:
-        style = styles.get(game_id)
-        code = (style or {}).get("color_code", "").lstrip("#")
-        if len(code) != 6:
-            return [100, 100, 100]
-        try:
-            return [int(code[i : i + 2], 16) for i in (0, 2, 4)]
-        except ValueError:
-            return [100, 100, 100]
 
+def _bond_color(game_id: int, styles: dict[int, dict]) -> list[int]:
+    code = (styles.get(game_id) or {}).get("color_code", "").lstrip("#")
+    if len(code) != 6:
+        return [100, 100, 100]
+    try:
+        return [int(code[i : i + 2], 16) for i in (0, 2, 4)]
+    except ValueError:
+        return [100, 100, 100]
+
+
+def _bond_level_totals() -> tuple[dict[int, int], int]:
     level_total = {}
     max_level = 0
     for row in MD.get("levels"):
         if row.get("levelType", "").lower() == "bonds" and row.get("level", 0) > 0:
             level_total[row["level"]] = row.get("totalExp", 0)
             max_level = max(max_level, row["level"])
+    return level_total, max_level
 
+
+def _bond_info(
+    entry: dict,
+    pair: tuple[int, int],
+    styles: dict[int, dict],
+    char_ranks: dict[int, int],
+    level_total: dict[int, int],
+    max_level: int,
+) -> dict:
+    rank, exp = entry.get("rank", 0), entry.get("exp", 0)
+    base_id1 = _bond_base_id(pair[0], styles)
+    base_id2 = _bond_base_id(pair[1], styles)
+    info = {
+        "chara_id1": pair[0],
+        "chara_id2": pair[1],
+        "chara_icon_path1": ASSETS.chara_icon(base_id1),
+        "chara_icon_path2": ASSETS.chara_icon(base_id2),
+        "chara_rank1": char_ranks.get(base_id1, 0),
+        "chara_rank2": char_ranks.get(base_id2, 0),
+        "bond_level": rank,
+        "has_bond": True,
+        "color1": _bond_color(pair[0], styles),
+        "color2": _bond_color(pair[1], styles),
+    }
+    if 0 < rank < max_level and rank in level_total and rank + 1 in level_total:
+        info["need_exp"] = max(level_total[rank + 1] - level_total[rank] - exp, 0)
+    return info
+
+
+def _bond_rows(
+    group_pairs: dict[int, tuple[int, int]],
+    styles: dict[int, dict],
+    char_ranks: dict[int, int],
+    level_total: dict[int, int],
+    max_level: int,
+) -> tuple[list[dict], int]:
     bonds = []
     user_max_rank = 0
     for entry in SUITE.get("userBonds") or []:
         pair = group_pairs.get(entry.get("bondsGroupId"))
         if not pair:
             continue
-        rank, exp = entry.get("rank", 0), entry.get("exp", 0)
+        rank = entry.get("rank", 0)
         user_max_rank = max(user_max_rank, rank)
-        info = {
-            "chara_id1": pair[0],
-            "chara_id2": pair[1],
-            "chara_icon_path1": icon(pair[0]),
-            "chara_icon_path2": icon(pair[1]),
-            "chara_rank1": char_ranks.get(base_id(pair[0]), 0),
-            "chara_rank2": char_ranks.get(base_id(pair[1]), 0),
-            "bond_level": rank,
-            "has_bond": True,
-            "color1": color(pair[0]),
-            "color2": color(pair[1]),
-        }
-        if 0 < rank < max_level and rank in level_total and rank + 1 in level_total:
-            info["need_exp"] = max(level_total[rank + 1] - level_total[rank] - exp, 0)
-        bonds.append(info)
+        bonds.append(_bond_info(entry, pair, styles, char_ranks, level_total, max_level))
+    return bonds, user_max_rank
+
+
+def build_education_bonds() -> str:
+    """User-bond view, cid<=0 (snapshot_bonds.go:10-244)."""
+    group_pairs = {
+        b["groupId"]: (b["characterId1"], b["characterId2"]) for b in MD.get("bonds") if b.get("groupId", 0) > 0
+    }
+    styles = _bond_styles()
+    char_ranks = {c["characterId"]: c.get("characterRank", 0) for c in SUITE.get("userCharacters") or []}
+    level_total, max_level = _bond_level_totals()
+    bonds, user_max_rank = _bond_rows(group_pairs, styles, char_ranks, level_total, max_level)
 
     if max_level == 0:
         max_level = user_max_rank
@@ -1323,10 +1533,9 @@ def _step_value(groups: list[dict], seq: int, key: str) -> int:
     return value
 
 
-def build_education_leader_count() -> str:
+def _leader_mission_progress() -> tuple[dict[int, int], dict[int, int], dict[int, bool], bool]:
     play_count: dict[int, int] = {}
     ex_count: dict[int, int] = {}
-    ex_level: dict[int, int] = {}
     has_play_live_ex: dict[int, bool] = {}
     has_play_live = False
     for item in SUITE.get("userCharacterMissionV2s") or []:
@@ -1340,12 +1549,23 @@ def build_education_leader_count() -> str:
         elif kind == "play_live_ex":
             ex_count[cid] = item.get("progress", 0)
             has_play_live_ex[cid] = True
+    return play_count, ex_count, has_play_live_ex, has_play_live
 
-    if not has_play_live:
-        for item in SUITE.get("userCharacterLiveUsageCounts") or []:
-            if item.get("characterId", 0) > 0 and str(item.get("characterLiveUsageType", "")).lower() == "leader":
-                play_count[item["characterId"]] = item.get("usageCount", 0)
 
+def _fallback_leader_play_counts(play_count: dict[int, int], has_play_live: bool) -> None:
+    if has_play_live:
+        return
+    for item in SUITE.get("userCharacterLiveUsageCounts") or []:
+        is_leader = str(item.get("characterLiveUsageType", "")).lower() == "leader"
+        if item.get("characterId", 0) > 0 and is_leader:
+            play_count[item["characterId"]] = item.get("usageCount", 0)
+
+
+def _leader_ex_statuses(
+    ex_count: dict[int, int],
+    has_play_live_ex: dict[int, bool],
+) -> dict[int, int]:
+    ex_level: dict[int, int] = {}
     requirements = _param_groups(101)
     for status in _mission_statuses():
         cid = status.get("characterId", 0)
@@ -1357,8 +1577,11 @@ def build_education_leader_count() -> str:
     for cid in range(1, 27):
         if has_play_live_ex.get(cid):
             ex_level[cid] = ex_level.get(cid, 0) + 1
+    return ex_level
 
-    leaders = [
+
+def _leader_rows(play_count: dict[int, int], ex_count: dict[int, int], ex_level: dict[int, int]) -> list[dict]:
+    rows = [
         {
             "chara_id": cid,
             "chara_icon_path": ASSETS.chara_icon(cid),
@@ -1368,11 +1591,21 @@ def build_education_leader_count() -> str:
         }
         for cid in range(1, 27)
     ]
-    leaders.sort(key=lambda x: (-(x["play_count"] + x["ex_count"]), x["chara_id"]))
+    rows.sort(key=lambda row: (-(row["play_count"] + row["ex_count"]), row["chara_id"]))
+    return rows
 
+
+def _leader_max_play(leaders: list[dict]) -> int:
     max_play = max((g.get("requirement", 0) for g in _param_groups(1)), default=0)
-    if max_play <= 0:
-        max_play = max((x["play_count"] for x in leaders), default=0)
+    return max_play if max_play > 0 else max((row["play_count"] for row in leaders), default=0)
+
+
+def build_education_leader_count() -> str:
+    play_count, ex_count, has_play_live_ex, has_play_live = _leader_mission_progress()
+    _fallback_leader_play_counts(play_count, has_play_live)
+    ex_level = _leader_ex_statuses(ex_count, has_play_live_ex)
+    leaders = _leader_rows(play_count, ex_count, ex_level)
+    max_play = _leader_max_play(leaders)
 
     body = {"profile": _profile(), "leader_counts": leaders, "max_play_count": max_play, "dt": NOW_MS}
     return _emit("education_leader_count", LeaderCountRequest, body)
