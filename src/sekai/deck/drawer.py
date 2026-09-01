@@ -642,46 +642,50 @@ _DECK_POWER_WIDTH = 100
 _DECK_CARD_WIDTH = 96
 
 
+def _draw_deck_compare_music_row(deck, assets: _DeckRecommendAssets) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0).set_h(_DECK_ROW_HEIGHT):
+        with Frame().set_content_align("c"):
+            if deck.music_diff and deck.music_diff in DIFF_COLORS:
+                Spacer(w=64, h=64).set_bg(FillBg(fill=DIFF_COLORS[deck.music_diff])).set_offset((3, 3))
+            music_img = assets.compare_music_imgs.get(deck.music_cover_path) if deck.music_cover_path else None
+            if music_img:
+                ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
+
+        title = deck.music_title or ""
+        if not title and deck.music_id is not None:
+            title = f"Music {deck.music_id}"
+        TextBox(
+            title,
+            TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(70, 70, 70)),
+            line_count=2,
+            use_real_line_count=True,
+        ).set_w(120).set_content_align("c")
+
+        meta_parts = []
+        if deck.music_id is not None:
+            meta_parts.append(str(deck.music_id))
+        if deck.music_diff:
+            meta_parts.append(deck.music_diff.upper())
+        if deck.music_query:
+            TextBox(
+                deck.music_query,
+                TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+                line_count=1,
+                use_real_line_count=True,
+            ).set_w(120).set_content_align("c")
+        if meta_text := " / ".join(meta_parts):
+            TextBox(
+                meta_text,
+                TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+            ).set_w(120).set_content_align("c")
+
+
 def _draw_deck_compare_music_column(rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle) -> None:
     with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
         TextBox("歌曲", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
         Spacer(h=6)
         for deck in rqd.deck_data:
-            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0).set_h(_DECK_ROW_HEIGHT):
-                with Frame().set_content_align("c"):
-                    if deck.music_diff and deck.music_diff in DIFF_COLORS:
-                        Spacer(w=64, h=64).set_bg(FillBg(fill=DIFF_COLORS[deck.music_diff])).set_offset((3, 3))
-                    music_img = assets.compare_music_imgs.get(deck.music_cover_path) if deck.music_cover_path else None
-                    if music_img:
-                        ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
-
-                title = deck.music_title or ""
-                if not title and deck.music_id is not None:
-                    title = f"Music {deck.music_id}"
-                TextBox(
-                    title,
-                    TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(70, 70, 70)),
-                    line_count=2,
-                    use_real_line_count=True,
-                ).set_w(120).set_content_align("c")
-
-                meta_parts = []
-                if deck.music_id is not None:
-                    meta_parts.append(str(deck.music_id))
-                if deck.music_diff:
-                    meta_parts.append(deck.music_diff.upper())
-                if deck.music_query:
-                    TextBox(
-                        deck.music_query,
-                        TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
-                        line_count=1,
-                        use_real_line_count=True,
-                    ).set_w(120).set_content_align("c")
-                if meta_text := " / ".join(meta_parts):
-                    TextBox(
-                        meta_text,
-                        TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
-                    ).set_w(120).set_content_align("c")
+            _draw_deck_compare_music_row(deck, assets)
 
 
 def _deck_score(rqd: DeckRequest, deck, target_score: bool, boost_bonus: int) -> int:
