@@ -40,8 +40,14 @@ from src.core.pillow_telemetry import (
 )
 import src.core.pjsk.profile as route_mod
 from src.sekai.profile.custom_profile.card_prefab import (
+    CardAlphaMaskOp,
     CardCoverArtOp,
     CardDisplayList,
+    CardFontRef,
+    CardRectOp,
+    CardSpriteOp,
+    CardSpriteRef,
+    CardTextOp,
     PillowCardAdapter,
 )
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
@@ -1725,6 +1731,110 @@ def test_native_card_member_declines_missing_required_art_without_mutating_scene
 
     assert not skia_mod._emit_native_card_member(_Renderer(), content, scene)
     assert builder.build()["root"]["children"] == []
+
+
+def test_prepare_native_card_display_list_resolves_cover_sprite_and_text(tmp_path, monkeypatch):
+    asset_root = tmp_path / "assets"
+    art_path = asset_root / "art.png"
+    fallback_path = asset_root / "fallback.png"
+    art_path.parent.mkdir(parents=True)
+    Image.new("RGBA", (2, 2), (1, 2, 3, 255)).save(art_path)
+    Image.new("RGBA", (2, 2), (4, 5, 6, 255)).save(fallback_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    cover = CardCoverArtOp(art_path, (20.0, 10.0))
+    sprite = CardSpriteOp(CardSpriteRef("fallback", fallback_path=fallback_path), (0.0, 0.0, 2.0, 2.0))
+    text = CardTextOp("native", (3.0, 4.0), 12, (255, 255, 255, 255))
+
+    class _Metrics:
+        @staticmethod
+        def anchor_placement(**kwargs):
+            assert kwargs == {"text": "native", "pos": (3.0, 4.0), "size": 12, "anchor": None}
+            return "mm", 8.5
+
+    prepared = skia_mod._prepare_native_card_display_list(
+        CardDisplayList("full", (20, 10), (cover, sprite, text)),
+        _Metrics(),
+    )
+
+    assert prepared is not None
+    assert prepared.asset_paths == {id(cover): "art.png", id(sprite): "fallback.png"}
+    assert prepared.text_placements == {id(text): ("mm", 8.5)}
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        CardCoverArtOp(Path("missing.png"), (20.0, 10.0)),
+        CardSpriteOp(CardSpriteRef("required", resource_policy="required"), (0.0, 0.0, 1.0, 1.0)),
+        CardTextOp("missing metrics", (0.0, 0.0), 12, (255, 255, 255, 255)),
+        CardRectOp((0.0, 0.0, 2.0, 2.0), (1, 2, 3, 128), radius=1.0),
+        CardAlphaMaskOp(CardSpriteRef("mask")),
+    ],
+)
+def test_prepare_native_card_display_list_declines_unsupported_ops(tmp_path, monkeypatch, op):
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    assert skia_mod._prepare_native_card_display_list(CardDisplayList("full", (20, 10), (op,)), None) is None
+
+
+def test_prepare_native_card_display_list_declines_incompatible_ready_ops(tmp_path, monkeypatch):
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    ready_path = asset_root / "ready.png"
+    outside_path = tmp_path / "outside.png"
+    Image.new("RGBA", (2, 2)).save(ready_path)
+    Image.new("RGBA", (2, 2)).save(outside_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    class _Metrics:
+        @staticmethod
+        def anchor_placement(**_kwargs):  # pragma: no cover - rejected before measurement
+            raise AssertionError("incompatible text must not be measured")
+
+    invalid_ops = (
+        CardCoverArtOp(ready_path, (20.0, 10.0), cover_align=(0.0, 0.5)),
+        CardSpriteOp(CardSpriteRef("outside", path=outside_path), (0.0, 0.0, 1.0, 1.0)),
+        CardTextOp(
+            "wrong font",
+            (0.0, 0.0),
+            12,
+            (255, 255, 255, 255),
+            font=CardFontRef(name="other"),
+        ),
+        CardTextOp(
+            "not bold",
+            (0.0, 0.0),
+            12,
+            (255, 255, 255, 255),
+            font=CardFontRef(bold=False),
+        ),
+        object(),
+    )
+
+    for op in invalid_ops:
+        assert skia_mod._prepare_native_card_display_list(CardDisplayList("full", (20, 10), (op,)), _Metrics()) is None
+
+
+def test_prepare_native_card_display_list_accepts_optional_and_supported_rects(tmp_path, monkeypatch):
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    optional = CardSpriteOp(CardSpriteRef("optional"), (0.0, 0.0, 1.0, 1.0))
+    square_src = CardRectOp((0.0, 0.0, 2.0, 2.0), (1, 2, 3, 128))
+    rounded_src_over = CardRectOp(
+        (0.0, 0.0, 2.0, 2.0),
+        (1, 2, 3, 128),
+        blend="src_over",
+        radius=1.0,
+    )
+
+    prepared = skia_mod._prepare_native_card_display_list(
+        CardDisplayList("full", (20, 10), (optional, square_src, rounded_src_over)),
+        None,
+    )
+
+    assert prepared is not None
+    assert prepared.asset_paths == {}
+    assert prepared.text_placements == {}
 
 
 @pytest.mark.skipif(

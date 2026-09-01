@@ -735,6 +735,77 @@ _CARD_SAMPLING_MAP = {
 }
 
 
+def _prepare_native_card_cover(op: CardCoverArtOp, asset_paths: dict[int, str]) -> bool:
+    status, asset_path = _existing_native_asset(op.path)
+    if status != "ready" or asset_path is None:
+        return False
+    if op.cover_align != (0.5, 0.5):
+        # Render IR Cover currently centers its source crop.
+        return False
+    asset_paths[id(op)] = asset_path
+    return True
+
+
+def _prepare_native_card_sprite(op: CardSpriteOp, asset_paths: dict[int, str]) -> bool:
+    status, asset_path = _existing_native_asset(op.resource.path)
+    if status == "outside":
+        return False
+    if status != "ready":
+        fallback_status, asset_path = _existing_native_asset(op.resource.fallback_path)
+        if fallback_status == "outside":
+            return False
+        status = fallback_status
+    if status == "ready" and asset_path is not None:
+        asset_paths[id(op)] = asset_path
+        return True
+    return op.resource.resource_policy != "required"
+
+
+def _prepare_native_card_text(
+    op: CardTextOp,
+    metrics: _NativeGeneralTextMetrics | None,
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    if metrics is None or op.font.name != "general" or not op.font.bold:
+        return False
+    text_placements[id(op)] = metrics.anchor_placement(
+        text=op.text,
+        pos=op.pos,
+        size=op.size,
+        anchor=op.anchor,
+    )
+    return True
+
+
+def _prepare_native_card_rect(op: Any) -> bool:
+    if not isinstance(op, CardRectOp):
+        return False
+    if op.radius <= 0.0 or op.blend != "src":
+        return True
+    translucent = (op.fill is not None and op.fill[3] < 255) or (op.outline is not None and op.outline[3] < 255)
+    # RoundRect has no Porter-Duff Src switch yet.
+    return not translucent
+
+
+def _prepare_native_card_op(
+    op: Any,
+    metrics: _NativeGeneralTextMetrics | None,
+    asset_paths: dict[int, str],
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    if isinstance(op, CardAlphaMaskOp):
+        # No active card path uses the legacy mask hook. Its rounded fallback and
+        # alpha-multiply contract need a dedicated shared native primitive.
+        return False
+    if isinstance(op, CardCoverArtOp):
+        return _prepare_native_card_cover(op, asset_paths)
+    if isinstance(op, CardSpriteOp):
+        return _prepare_native_card_sprite(op, asset_paths)
+    if isinstance(op, CardTextOp):
+        return _prepare_native_card_text(op, metrics, text_placements)
+    return _prepare_native_card_rect(op)
+
+
 def _prepare_native_card_display_list(
     display_list: CardDisplayList,
     metrics: _NativeGeneralTextMetrics | None,
@@ -744,54 +815,8 @@ def _prepare_native_card_display_list(
     asset_paths: dict[int, str] = {}
     text_placements: dict[int, tuple[str, float]] = {}
     for op in display_list.ops:
-        op_key = id(op)
-        if isinstance(op, CardAlphaMaskOp):
-            # No active card path uses the legacy mask hook. Its rounded fallback and
-            # alpha-multiply contract need a dedicated shared native primitive before this
-            # opt-in API can be truthfully classified native.
+        if not _prepare_native_card_op(op, metrics, asset_paths, text_placements):
             return None
-        if isinstance(op, CardCoverArtOp):
-            status, asset_path = _existing_native_asset(op.path)
-            if status != "ready" or asset_path is None:
-                return None
-            if op.cover_align != (0.5, 0.5):
-                # Render IR Cover currently centers its source crop.
-                return None
-            asset_paths[op_key] = asset_path
-            continue
-        if isinstance(op, CardSpriteOp):
-            status, asset_path = _existing_native_asset(op.resource.path)
-            if status == "outside":
-                return None
-            if status != "ready":
-                fallback_status, asset_path = _existing_native_asset(op.resource.fallback_path)
-                if fallback_status == "outside":
-                    return None
-                status = fallback_status
-            if status == "ready" and asset_path is not None:
-                asset_paths[op_key] = asset_path
-            elif op.resource.resource_policy == "required":
-                return None
-            continue
-        if isinstance(op, CardTextOp):
-            if metrics is None:
-                return None
-            if op.font.name != "general" or not op.font.bold:
-                return None
-            text_placements[op_key] = metrics.anchor_placement(
-                text=op.text,
-                pos=op.pos,
-                size=op.size,
-                anchor=op.anchor,
-            )
-            continue
-        if not isinstance(op, CardRectOp):
-            return None
-        if op.radius > 0.0 and op.blend == "src":
-            translucent = (op.fill is not None and op.fill[3] < 255) or (op.outline is not None and op.outline[3] < 255)
-            if translucent:
-                # RoundRect has no Porter-Duff Src switch yet.
-                return None
     return _PreparedCardDisplayList(display_list, asset_paths, text_placements)
 
 
