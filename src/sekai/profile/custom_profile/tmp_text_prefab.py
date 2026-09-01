@@ -204,6 +204,45 @@ class TMPTextDisplayList:
         return self.transform.map_point(op.pos)
 
 
+@dataclass(frozen=True, slots=True)
+class _PlainTMPMesh:
+    object_data: Mapping[str, Any]
+    raw_text: str
+    font_name: str
+    font_color: str
+    fill: Color
+    base_size: float
+    line_spacing: float
+    horizontal: HAlign
+    vertical: str
+
+
+@dataclass(frozen=True, slots=True)
+class _PlainTMPSource:
+    mesh: _PlainTMPMesh
+    font_path: Path
+    font_size: float
+    base_style: TextStyle
+    layout_lines: list[Any]
+    dominant_size: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PlainTMPLayout:
+    preferred: Any
+    mesh: Any
+    box_w: float
+    box_h: float
+    baselines: list[float]
+    transform: TMPTextTransform
+
+
+@dataclass(frozen=True, slots=True)
+class _PlainTMPOps:
+    line_widths: tuple[float, ...]
+    ops: tuple[TMPTextOp, ...]
+
+
 def _finite(value: Any) -> float | None:
     try:
         result = float(value)
@@ -354,18 +393,11 @@ def _object_transform(
     )
 
 
-def build_simple_tmp_text_display_list(
+def _plain_tmp_mesh(
     renderer: TMPTextLayoutProvider,
     item: Mapping[str, Any],
-    object_data: Mapping[str, Any] | None = None,
-) -> TMPTextDisplayList | None:
-    """Build a no-raster display list for a strictly plain TMP ``TextContent``.
-
-    The returned operation coordinates are relative to the centre of TMP's final text box.
-    Consequently the large local raster padding and the later alpha-bbox trim used by the Pillow
-    renderer cancel out and are not part of the native contract.
-    """
-
+    object_data: Mapping[str, Any] | None,
+) -> _PlainTMPMesh | None:
     if not _plain_runtime(renderer):
         return None
     mutable_item = dict(item)
@@ -394,21 +426,34 @@ def build_simple_tmp_text_display_list(
     vertical = _PLAIN_VERTICAL_ALIGNMENTS.get(int(mesh_state.align) & 0xFF00)
     if horizontal is None or vertical is None:
         return None
+    return _PlainTMPMesh(
+        object_data=resolved_object_data,
+        raw_text=raw_text,
+        font_name=font_name,
+        font_color=str(mesh_state.font_color),
+        fill=fill,
+        base_size=base_size,
+        line_spacing=line_spacing,
+        horizontal=horizontal,
+        vertical=vertical,
+    )
 
-    asset = renderer.tmp_font_library.active_asset(font_name)
+
+def _plain_tmp_source(renderer: TMPTextLayoutProvider, mesh: _PlainTMPMesh) -> _PlainTMPSource | None:
+    asset = renderer.tmp_font_library.active_asset(mesh.font_name)
     if asset is None or not _plain_dynamic_asset(renderer, asset):
         return None
-    font_path = _resolved_source_font(renderer, font_name, asset)
-    font_size = base_size * renderer.tmp_font_scale
+    font_path = _resolved_source_font(renderer, mesh.font_name, asset)
+    font_size = mesh.base_size * renderer.tmp_font_scale
     if font_path is None or not math.isfinite(font_size) or font_size <= 0.0:
         return None
-    if not _font_has_every_glyph(renderer, font_name, raw_text, font_size):
+    if not _font_has_every_glyph(renderer, mesh.font_name, mesh.raw_text, font_size):
         return None
 
     base_style = TextStyle(
-        color=str(mesh_state.font_color),
+        color=mesh.font_color,
         alpha=1.0,
-        size=base_size,
+        size=mesh.base_size,
         scale_x=1.0,
         cspace=0.0,
         mspace=None,
@@ -423,8 +468,7 @@ def build_simple_tmp_text_display_list(
         underline=False,
         strike=False,
     )
-    tokens = parse_tmp_text(raw_text, base_style)
-    # Local import preserves renderer.py -> tmp_text_prefab.py as a valid future dependency.
+    tokens = parse_tmp_text(mesh.raw_text, base_style)
     from src.sekai.profile.custom_profile.renderer import split_runs_by_line_with_style
 
     lines = split_runs_by_line_with_style(tokens, base_style)
@@ -433,14 +477,25 @@ def build_simple_tmp_text_display_list(
     layout_lines = [line for line in lines if renderer.include_empty_lines or line.runs]
     if not layout_lines:
         return None
-    dominant_size = max((line.style.size for line in layout_lines), default=base_size)
+    return _PlainTMPSource(
+        mesh=mesh,
+        font_path=font_path,
+        font_size=font_size,
+        base_style=base_style,
+        layout_lines=layout_lines,
+        dominant_size=max((line.style.size for line in layout_lines), default=mesh.base_size),
+    )
+
+
+def _plain_tmp_layout(renderer: TMPTextLayoutProvider, source: _PlainTMPSource) -> _PlainTMPLayout | None:
+    mesh = source.mesh
     preferred_layout = renderer.tmp_native_text_layout(
-        layout_lines,
-        font_name,
-        font_path,
-        base_size,
-        line_spacing,
-        dominant_size,
+        source.layout_lines,
+        mesh.font_name,
+        source.font_path,
+        mesh.base_size,
+        mesh.line_spacing,
+        source.dominant_size,
         "preferred",
         0.0,
         None,
@@ -448,16 +503,14 @@ def build_simple_tmp_text_display_list(
     )
     if preferred_layout is None:
         return None
-    # Plain styles cannot carry percent indentation.  A non-None result signals a provider
-    # mismatch or a future TMP feature that this display list must not silently approximate.
     if (
         renderer.tmp_resolve_percent_indent_margin_width(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
+            source.layout_lines,
+            mesh.font_name,
+            source.font_path,
+            mesh.base_size,
+            mesh.line_spacing,
+            source.dominant_size,
             0.0,
             preferred_layout,
         )
@@ -465,18 +518,18 @@ def build_simple_tmp_text_display_list(
     ):
         return None
     mesh_layout = renderer.tmp_native_text_layout(
-        layout_lines,
-        font_name,
-        font_path,
-        base_size,
-        line_spacing,
-        dominant_size,
+        source.layout_lines,
+        mesh.font_name,
+        source.font_path,
+        mesh.base_size,
+        mesh.line_spacing,
+        source.dominant_size,
         "mesh",
         0.0,
         None,
         source_metrics_only=True,
     )
-    if mesh_layout is None or len(mesh_layout.lines) != len(layout_lines):
+    if mesh_layout is None or len(mesh_layout.lines) != len(source.layout_lines):
         return None
 
     box_size = renderer.tmp_text_box_size(
@@ -491,18 +544,21 @@ def build_simple_tmp_text_display_list(
     baselines = renderer.tmp_native_baseline_downs(
         mesh_layout.line_layout,
         box_h,
-        "top" if renderer.text_vertical_mode == "tmp-native-top" else vertical,
+        "top" if renderer.text_vertical_mode == "tmp-native-top" else mesh.vertical,
     )
     if len(baselines) != len(mesh_layout.lines) or any(_finite(value) is None for value in baselines):
         return None
-
-    transform = _object_transform(renderer, resolved_object_data)
+    transform = _object_transform(renderer, mesh.object_data)
     if transform is None:
         return None
-    font = TMPTextFontRef(font_name, font_path)
+    return _PlainTMPLayout(preferred_layout, mesh_layout, box_w, box_h, baselines, transform)
+
+
+def _plain_tmp_ops(source: _PlainTMPSource, layout: _PlainTMPLayout) -> _PlainTMPOps | None:
+    font = TMPTextFontRef(source.mesh.font_name, source.font_path)
     ops: list[TMPTextOp] = []
     line_widths: list[float] = []
-    for line_index, (line_info, baseline) in enumerate(zip(mesh_layout.lines, baselines, strict=True)):
+    for line_index, (line_info, baseline) in enumerate(zip(layout.mesh.lines, layout.baselines, strict=True)):
         line_width = _finite(line_info.width)
         if line_width is None or line_width < 0.0 or len(line_info.run_metrics) > 1:
             return None
@@ -510,43 +566,68 @@ def build_simple_tmp_text_display_list(
         if not line_info.run_metrics:
             continue
         run, run_x, _run_width = line_info.run_metrics[0]
-        if not run.text or not _plain_style(run.style, base_style):
+        if not run.text or not _plain_style(run.style, source.base_style):
             return None
         run_x = _finite(run_x)
         if run_x is None:
             return None
-        if horizontal == "center":
-            line_x = (box_w - line_width) / 2.0
-        elif horizontal == "right":
-            line_x = box_w - line_width
+        if source.mesh.horizontal == "center":
+            line_x = (layout.box_w - line_width) / 2.0
+        elif source.mesh.horizontal == "right":
+            line_x = layout.box_w - line_width
         else:
             line_x = 0.0
         ops.append(
             TMPTextOp(
                 line_index=line_index,
                 text=run.text,
-                pos=(line_x + run_x - box_w / 2.0, float(baseline) - box_h / 2.0),
-                size=font_size,
-                fill=fill,
+                pos=(line_x + run_x - layout.box_w / 2.0, float(baseline) - layout.box_h / 2.0),
+                size=source.font_size,
+                fill=source.mesh.fill,
                 font=font,
             )
         )
-    if not ops:
+    return _PlainTMPOps(tuple(line_widths), tuple(ops)) if ops else None
+
+
+def build_simple_tmp_text_display_list(
+    renderer: TMPTextLayoutProvider,
+    item: Mapping[str, Any],
+    object_data: Mapping[str, Any] | None = None,
+) -> TMPTextDisplayList | None:
+    """Build a no-raster display list for a strictly plain TMP ``TextContent``.
+
+    The returned operation coordinates are relative to the centre of TMP's final text box.
+    Consequently the large local raster padding and the later alpha-bbox trim used by the Pillow
+    renderer cancel out and are not part of the native contract.
+    """
+
+    mesh = _plain_tmp_mesh(renderer, item, object_data)
+    if mesh is None:
+        return None
+    source = _plain_tmp_source(renderer, mesh)
+    if source is None:
+        return None
+    layout = _plain_tmp_layout(renderer, source)
+    if layout is None:
+        return None
+    rendered_ops = _plain_tmp_ops(source, layout)
+    if rendered_ops is None:
         return None
 
-    preferred_width = _finite(preferred_layout.preferred_width)
-    preferred_height = _finite(preferred_layout.preferred_height)
+    preferred_width = _finite(layout.preferred.preferred_width)
+    preferred_height = _finite(layout.preferred.preferred_height)
     if preferred_width is None or preferred_height is None:
         return None
     return TMPTextDisplayList(
-        text=raw_text,
-        font=font,
-        box_size=(box_w, box_h),
+        text=mesh.raw_text,
+        font=TMPTextFontRef(mesh.font_name, source.font_path),
+        box_size=(layout.box_w, layout.box_h),
         preferred_size=(preferred_width, preferred_height),
-        horizontal_alignment=horizontal,
-        vertical_alignment=vertical,
-        line_widths=tuple(line_widths),
-        baselines=tuple(float(value) for value in baselines),
-        transform=transform,
-        ops=tuple(ops),
+        horizontal_alignment=mesh.horizontal,
+        vertical_alignment=mesh.vertical,
+        line_widths=rendered_ops.line_widths,
+        baselines=tuple(float(value) for value in layout.baselines),
+        transform=layout.transform,
+        ops=rendered_ops.ops,
     )
