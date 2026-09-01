@@ -143,14 +143,18 @@ def build_gacha_list() -> str:
     return _emit("gacha_list", GachaListRequest, body)
 
 
-def build_gacha_detail() -> str:
-    gacha = _started_gachas()[-1]  # most recent started pool
-
+def _gacha_pickup_order(gacha: dict) -> list[int]:
     pickup_order: list[int] = []
+    seen: set[int] = set()
     for pickup in gacha.get("gachaPickups", []):
-        if pickup["cardId"] not in pickup_order:
-            pickup_order.append(pickup["cardId"])
+        card_id = pickup["cardId"]
+        if card_id not in seen:
+            pickup_order.append(card_id)
+            seen.add(card_id)
+    return pickup_order
 
+
+def _gacha_guaranteed_type(gacha: dict) -> str:
     guaranteed_type = ""
     for behavior in gacha.get("gachaBehaviors", []):
         kind = str(behavior.get("gachaBehaviorType", "")).lower()
@@ -158,13 +162,17 @@ def build_gacha_detail() -> str:
             guaranteed_type = "rarity_4"
         elif kind == "over_rarity_3_once" and guaranteed_type != "rarity_4":
             guaranteed_type = "rarity_3"
+    return guaranteed_type
 
+
+def _gacha_card_weights(gacha: dict) -> tuple[dict[str, int], dict[int, float], dict[int, str], dict[str, float]]:
     rarity_counts = dict.fromkeys(("rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday"), 0)
     card_weight: dict[int, float] = {}
     card_rarity: dict[int, str] = {}
     rarity_weights: dict[str, float] = {}
+    cards = MD.card_by_id()
     for detail in gacha.get("gachaDetails", []):
-        card = MD.card_by_id().get(detail["cardId"])
+        card = cards.get(detail["cardId"])
         if not card:
             continue
         rarity = card["cardRarityType"].lower()
@@ -172,7 +180,10 @@ def build_gacha_detail() -> str:
         rarity_counts[rarity] = rarity_counts.get(rarity, 0) + 1
         card_weight[card["id"]] = card_weight.get(card["id"], 0.0) + detail.get("weight", 0)
         rarity_weights[rarity] = rarity_weights.get(rarity, 0.0) + detail.get("weight", 0)
+    return rarity_counts, card_weight, card_rarity, rarity_weights
 
+
+def _gacha_normal_rates(gacha: dict, rarity_counts: dict[str, int]) -> tuple[dict[str, float], dict]:
     rarity_fraction: dict[str, float] = {}
     weight_info: dict = {"guaranteed_rates": {}}
     for rate in gacha.get("gachaCardRarityRates", []):
@@ -183,28 +194,46 @@ def build_gacha_detail() -> str:
         if rarity in rarity_counts:
             weight_info[f"{rarity}_rate"] = fraction
         rarity_fraction[rarity] = fraction
+    return rarity_fraction, weight_info
 
-    if guaranteed_type:
-        guaranteed = dict.fromkeys(("rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday"), 0.0)
-        guaranteed.update(rarity_fraction)
-        guaranteed[guaranteed_type] += guaranteed["rarity_2"]
-        guaranteed["rarity_2"] = 0.0
-        if guaranteed_type == "rarity_4":
-            guaranteed[guaranteed_type] += guaranteed["rarity_3"]
-            guaranteed["rarity_3"] = 0.0
-        weight_info["guaranteed_rates"] = guaranteed
 
-    def card_rate(card_id: int) -> float:
-        rarity = card_rarity.get(card_id, "")
-        total = rarity_weights.get(rarity, 0.0)
-        base = rarity_fraction.get(rarity, 0.0)
-        if not rarity or total <= 0 or base == 0:
-            return 0.0
-        return (card_weight.get(card_id, 0.0) / total) * base
+def _gacha_guaranteed_rates(rarity_fraction: dict[str, float], guaranteed_type: str) -> dict[str, float]:
+    guaranteed = dict.fromkeys(("rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday"), 0.0)
+    guaranteed.update(rarity_fraction)
+    guaranteed[guaranteed_type] += guaranteed["rarity_2"]
+    guaranteed["rarity_2"] = 0.0
+    if guaranteed_type == "rarity_4":
+        guaranteed[guaranteed_type] += guaranteed["rarity_3"]
+        guaranteed["rarity_3"] = 0.0
+    return guaranteed
 
+
+def _gacha_card_rate(
+    card_id: int,
+    card_rarity: dict[int, str],
+    rarity_weights: dict[str, float],
+    rarity_fraction: dict[str, float],
+    card_weight: dict[int, float],
+) -> float:
+    rarity = card_rarity.get(card_id, "")
+    total = rarity_weights.get(rarity, 0.0)
+    base = rarity_fraction.get(rarity, 0.0)
+    if not rarity or total <= 0 or base == 0:
+        return 0.0
+    return (card_weight.get(card_id, 0.0) / total) * base
+
+
+def _gacha_pickup_cards(
+    pickup_order: list[int],
+    card_rarity: dict[int, str],
+    rarity_weights: dict[str, float],
+    rarity_fraction: dict[str, float],
+    card_weight: dict[int, float],
+) -> list[dict]:
     pickup_cards = []
+    cards = MD.card_by_id()
     for card_id in pickup_order:
-        card = MD.card_by_id().get(card_id)
+        card = cards.get(card_id)
         if not card:
             continue
         card_rarity.setdefault(card_id, card["cardRarityType"].lower())
@@ -212,10 +241,43 @@ def build_gacha_detail() -> str:
             {
                 "id": card["id"],
                 "rarity": card["cardRarityType"],
-                "rate": card_rate(card["id"]),
+                "rate": _gacha_card_rate(card["id"], card_rarity, rarity_weights, rarity_fraction, card_weight),
                 "thumbnail_request": common.card_thumbnail(card, thumb_after=False),
             }
         )
+    return pickup_cards
+
+
+def _gacha_ceil_item_path(gacha: dict) -> str:
+    ceil_item_id = gacha.get("gachaCeilItemId") or 0
+    if not ceil_item_id:
+        return ""
+    ceil_item = next((item for item in MD.get("gachaCeilItems") if item["id"] == ceil_item_id), None)
+    abn = (ceil_item or {}).get("assetbundleName", "").strip()
+    if not abn:
+        return ""
+    return ASSETS.region_asset(
+        f"thumbnail/gacha_item/{abn}.png",
+        f"thumbnail/material/{abn}.png",
+        f"thumbnail/common_material/{abn}.png",
+    )
+
+
+def build_gacha_detail() -> str:
+    gacha = _started_gachas()[-1]  # most recent started pool
+    pickup_order = _gacha_pickup_order(gacha)
+    guaranteed_type = _gacha_guaranteed_type(gacha)
+    rarity_counts, card_weight, card_rarity, rarity_weights = _gacha_card_weights(gacha)
+    rarity_fraction, weight_info = _gacha_normal_rates(gacha, rarity_counts)
+    if guaranteed_type:
+        weight_info["guaranteed_rates"] = _gacha_guaranteed_rates(rarity_fraction, guaranteed_type)
+    pickup_cards = _gacha_pickup_cards(
+        pickup_order,
+        card_rarity,
+        rarity_weights,
+        rarity_fraction,
+        card_weight,
+    )
 
     info = {
         "id": gacha["id"],
@@ -234,16 +296,8 @@ def build_gacha_detail() -> str:
         "rarity_birthday_count": rarity_counts["rarity_birthday"],
         "pickup_count": len(pickup_order),
     }
-    ceil_item_id = gacha.get("gachaCeilItemId") or 0
-    if ceil_item_id:
-        ceil_item = next((c for c in MD.get("gachaCeilItems") if c["id"] == ceil_item_id), None)
-        abn = (ceil_item or {}).get("assetbundleName", "").strip()
-        if abn:
-            info["ceil_item_img_path"] = ASSETS.region_asset(
-                f"thumbnail/gacha_item/{abn}.png",
-                f"thumbnail/material/{abn}.png",
-                f"thumbnail/common_material/{abn}.png",
-            )
+    if ceil_item_path := _gacha_ceil_item_path(gacha):
+        info["ceil_item_img_path"] = ceil_item_path
 
     body = {
         "gacha": info,
@@ -328,6 +382,46 @@ def _character_name(character_id: int) -> str:
     return name or character.get("givenName", "").strip() or f"角色{character_id}"
 
 
+def _costume_optional_fields(costume: dict) -> dict:
+    fields = {}
+    for src_key, dst_key in (
+        ("costume3dRarity", "rarity"),
+        ("howToObtain", "how_to_obtain"),
+        ("designer", "designer"),
+        ("colorName", "color_name"),
+    ):
+        if costume.get(src_key):
+            fields[dst_key] = costume[src_key]
+    for src_key, dst_key in (
+        ("colorId", "color_id"),
+        ("publishedAt", "published_at"),
+        ("archivePublishedAt", "archive_published_at"),
+    ):
+        if costume.get(src_key, 0):
+            fields[dst_key] = costume[src_key]
+    if asset_bundle_name := _costume_abn(costume):
+        fields["asset_bundle_name"] = asset_bundle_name
+    return fields
+
+
+def _costume_variant_source_ids(variants: list[dict], source_cards: dict[int, list[int]]) -> list[int]:
+    return sorted({card_id for variant in variants for card_id in source_cards.get(variant["id"], [])})
+
+
+def _costume_variant_rows(variants: list[dict], source_cards: dict[int, list[int]]) -> list[dict]:
+    return [
+        {
+            "costume_id": variant["id"],
+            "color_id": variant.get("colorId", 0),
+            "color_name": variant.get("colorName", ""),
+            "asset_bundle_name": _costume_abn(variant),
+            "thumbnail_path": _costume_thumbnail_path(variant),
+            **({"source_card_ids": source_cards[variant["id"]]} if source_cards.get(variant["id"]) else {}),
+        }
+        for variant in variants
+    ]
+
+
 def _costume_basic(costume: dict, source_cards: dict[int, list[int]], variants: list[dict] | None = None) -> dict:
     character = MD.character_by_id().get(costume.get("characterId", 0))
     name = (costume.get("name") or "").strip() or _costume_abn(costume)
@@ -344,41 +438,16 @@ def _costume_basic(costume: dict, source_cards: dict[int, list[int]], variants: 
     }
     if character and character.get("gender"):
         basic["character_gender"] = character["gender"].strip()
-    for src_key, dst_key in (
-        ("costume3dRarity", "rarity"),
-        ("howToObtain", "how_to_obtain"),
-        ("designer", "designer"),
-        ("colorName", "color_name"),
-    ):
-        if costume.get(src_key):
-            basic[dst_key] = costume[src_key]
-    if _costume_abn(costume):
-        basic["asset_bundle_name"] = _costume_abn(costume)
-    if costume.get("colorId", 0):
-        basic["color_id"] = costume["colorId"]
-    if costume.get("publishedAt", 0):
-        basic["published_at"] = costume["publishedAt"]
-    if costume.get("archivePublishedAt", 0):
-        basic["archive_published_at"] = costume["archivePublishedAt"]
+    basic.update(_costume_optional_fields(costume))
     if source_cards.get(costume["id"]):
         basic["source_card_ids"] = source_cards[costume["id"]]
     if variants:
-        union = sorted({cid for v in variants for cid in source_cards.get(v["id"], [])})
+        union = _costume_variant_source_ids(variants, source_cards)
         if union:
             basic["source_card_ids"] = union
-        elif "source_card_ids" in basic:
-            del basic["source_card_ids"]
-        basic["variants"] = [
-            {
-                "costume_id": v["id"],
-                "color_id": v.get("colorId", 0),
-                "color_name": v.get("colorName", ""),
-                "asset_bundle_name": _costume_abn(v),
-                "thumbnail_path": _costume_thumbnail_path(v),
-                **({"source_card_ids": source_cards[v["id"]]} if source_cards.get(v["id"]) else {}),
-            }
-            for v in variants
-        ]
+        else:
+            basic.pop("source_card_ids", None)
+        basic["variants"] = _costume_variant_rows(variants, source_cards)
     return basic
 
 
@@ -392,8 +461,7 @@ def _costume_source_cards() -> dict[int, list[int]]:
     return out
 
 
-def _paginate_by_part(items: list[dict], page_size: int, page: int) -> list[dict]:
-    """Balanced by-part pagination (controller.go:186-236)."""
+def _costumes_by_part(items: list[dict]) -> tuple[dict[str, list[dict]], list[str]]:
     groups: dict[str, list[dict]] = {}
     seen_order: list[str] = []
     for item in items:
@@ -401,26 +469,47 @@ def _paginate_by_part(items: list[dict], page_size: int, page: int) -> list[dict
         groups.setdefault(part, []).append(item)
         if part not in seen_order:
             seen_order.append(part)
-    ordered = [p for p in _PART_ORDER if p in groups]
-    ordered += [p for p in seen_order if p not in ordered]
+    return groups, seen_order
+
+
+def _ordered_costume_parts(groups: dict[str, list[dict]], seen_order: list[str]) -> list[str]:
+    ordered = [part for part in _PART_ORDER if part in groups]
+    ordered.extend(part for part in seen_order if part not in ordered)
+    return ordered
+
+
+def _take_balanced_costume_page(
+    groups: dict[str, list[dict]],
+    ordered: list[str],
+    offsets: dict[str, int],
+    page_size: int,
+) -> list[dict]:
+    current: list[dict] = []
+    while len(current) < page_size:
+        added = False
+        for part in ordered:
+            offset = offsets[part]
+            if offset >= len(groups[part]):
+                continue
+            current.append(groups[part][offset])
+            offsets[part] += 1
+            added = True
+            if len(current) >= page_size:
+                break
+        if not added:
+            break
+    return current
+
+
+def _paginate_by_part(items: list[dict], page_size: int, page: int) -> list[dict]:
+    """Balanced by-part pagination (controller.go:186-236)."""
+    groups, seen_order = _costumes_by_part(items)
+    ordered = _ordered_costume_parts(groups, seen_order)
 
     offsets = dict.fromkeys(groups, 0)
     current: list[dict] = []
     for _ in range(page):
-        current = []
-        while len(current) < page_size:
-            added = False
-            for part in ordered:
-                group = groups[part]
-                if offsets[part] >= len(group):
-                    continue
-                current.append(group[offsets[part]])
-                offsets[part] += 1
-                added = True
-                if len(current) >= page_size:
-                    break
-            if not added:
-                break
+        current = _take_balanced_costume_page(groups, ordered, offsets, page_size)
     return current
 
 
@@ -506,8 +595,18 @@ def _resource_boxes(purpose: str) -> dict[int, dict]:
     return {b["id"]: b for b in MD.get("resourceBoxes") if b.get("resourceBoxPurpose") == purpose}
 
 
+def _vlive_reward_details(box: dict) -> list[dict]:
+    items = []
+    for detail in box.get("details", []):
+        image_path = _material_icon(detail.get("resourceType", ""), detail.get("resourceId", 0))
+        if not image_path.strip():
+            continue
+        quantity = detail.get("resourceQuantity", 0)
+        items.append({"image_path": image_path, "quantity": quantity if quantity > 0 else 1})
+    return items
+
+
 def _vlive_rewards(live: dict, boxes: dict[int, dict]) -> list[dict]:
-    items: list[dict] = []
     for reward in live.get("virtualLiveRewards") or []:
         kind = str(reward.get("virtualLiveType", "")).strip().lower()
         if kind and kind != "normal":
@@ -515,15 +614,10 @@ def _vlive_rewards(live: dict, boxes: dict[int, dict]) -> list[dict]:
         box = boxes.get(reward.get("resourceBoxId"))
         if not box:
             continue
-        for detail in box.get("details", []):
-            image_path = _material_icon(detail.get("resourceType", ""), detail.get("resourceId", 0))
-            if not image_path.strip():
-                continue
-            quantity = detail.get("resourceQuantity", 0)
-            items.append({"image_path": image_path, "quantity": quantity if quantity > 0 else 1})
+        items = _vlive_reward_details(box)
         if items:
-            break
-    return items
+            return items
+    return []
 
 
 def _vlive_characters(live: dict, unit_by_id: dict[int, dict]) -> list[dict]:
@@ -543,71 +637,99 @@ def _vlive_characters(live: dict, unit_by_id: dict[int, dict]) -> list[dict]:
     return items
 
 
+def _vlive_events() -> dict[int, dict]:
+    events = {}
+    for event in MD.get("events"):
+        if event.get("virtualLiveId"):
+            events.setdefault(event["virtualLiveId"], event)
+    return events
+
+
+def _vlive_schedules(live: dict) -> list[tuple[int, int]]:
+    windows = (
+        (_unix_ms(schedule.get("startAt")), _unix_ms(schedule.get("endAt")))
+        for schedule in live.get("virtualLiveSchedules") or []
+    )
+    return sorted(window for window in windows if window[0] and window[1] and window[0] < window[1])
+
+
+def _current_vlive_window(
+    schedules: list[tuple[int, int]],
+    now: int,
+) -> tuple[tuple[int, int] | None, bool, int]:
+    current = next((window for window in schedules if now < window[1]), None)
+    living = bool(current and now >= current[0])
+    rest_count = sum(1 for window in schedules if now < window[0])
+    return current, living, rest_count
+
+
+def _resolve_vlive(live: dict, now: int) -> tuple[dict, int, int, tuple[int, int], bool, int] | None:
+    start_at, end_at = _unix_ms(live.get("startAt")), _unix_ms(live.get("endAt"))
+    if not start_at or not end_at:
+        return None
+    if now >= end_at or start_at - now >= MS_7_DAYS or end_at - start_at >= MS_30_DAYS:
+        return None
+    current, living, rest_count = _current_vlive_window(_vlive_schedules(live), now)
+    if current is None:
+        current = (start_at, end_at)
+        living = now >= start_at
+    return live, start_at, end_at, current, living, rest_count
+
+
+def _vlive_banner_path(live: dict, event: dict | None) -> str:
+    abn = (live.get("assetbundleName") or "").strip()
+    if abn:
+        return ASSETS.region_asset(f"virtual_live/select/banner/{abn}/{abn}.png")
+    event_abn = ((event or {}).get("assetbundleName") or "").strip()
+    if not event_abn:
+        return ""
+    return ASSETS.region_asset(
+        f"home/banner/{event_abn}/{event_abn}.png",
+        f"event/{event_abn}/banner.png",
+        f"event_story/{event_abn}/screen_image/banner_event_story.png",
+    )
+
+
+def _vlive_brief(
+    resolved: tuple[dict, int, int, tuple[int, int], bool, int],
+    boxes: dict[int, dict],
+    unit_by_id: dict[int, dict],
+    event_by_vlive: dict[int, dict],
+) -> dict:
+    live, start_at, end_at, current, living, rest_count = resolved
+    name = (live.get("name") or "").strip()
+    brief: dict = {
+        "id": live["id"],
+        "name": name or f"Virtual Live #{live['id']}",
+        "start_at": start_at,
+        "end_at": end_at,
+        "living": living,
+        "rest_count": rest_count,
+        "current_start_at": current[0],
+        "current_end_at": current[1],
+    }
+    if banner_path := _vlive_banner_path(live, event_by_vlive.get(live["id"])):
+        brief["banner_path"] = banner_path
+    if rewards := _vlive_rewards(live, boxes):
+        brief["rewards"] = rewards
+    if characters := _vlive_characters(live, unit_by_id):
+        brief["characters"] = characters
+    return brief
+
+
 def build_vlive_list() -> str:
     now = VLIVE_NOW_MS
     boxes = _resource_boxes("virtual_live_reward")
     unit_by_id = {u["id"]: u for u in MD.get("gameCharacterUnits")}
-    event_by_vlive = {}
-    for event in MD.get("events"):
-        if event.get("virtualLiveId"):
-            event_by_vlive.setdefault(event["virtualLiveId"], event)
+    event_by_vlive = _vlive_events()
 
     resolved = []
     for live in MD.get("virtualLives"):
-        start_at, end_at = _unix_ms(live.get("startAt")), _unix_ms(live.get("endAt"))
-        if not start_at or not end_at:
-            continue
-        if now >= end_at or start_at - now >= MS_7_DAYS or end_at - start_at >= MS_30_DAYS:
-            continue
-
-        windows = (
-            (_unix_ms(s.get("startAt")), _unix_ms(s.get("endAt"))) for s in live.get("virtualLiveSchedules") or []
-        )
-        schedules = sorted(w for w in windows if w[0] and w[1] and w[0] < w[1])
-        current, living = None, False
-        for window in schedules:
-            if now < window[1]:
-                current = window
-                living = now >= window[0]
-                break
-        rest_count = sum(1 for window in schedules if now < window[0])
-        if current is None:
-            current = (start_at, end_at)
-            living = now >= start_at  # now < end_at is guaranteed by the filter
-        resolved.append((live, start_at, end_at, current, living, rest_count))
+        if entry := _resolve_vlive(live, now):
+            resolved.append(entry)
 
     resolved.sort(key=lambda entry: (entry[1], entry[0]["id"]))
-
-    lives = []
-    for live, start_at, end_at, current, living, rest_count in resolved:
-        name = (live.get("name") or "").strip()
-        brief: dict = {
-            "id": live["id"],
-            "name": name or f"Virtual Live #{live['id']}",
-            "start_at": start_at,
-            "end_at": end_at,
-            "living": living,
-            "rest_count": rest_count,
-        }
-        if current is not None:
-            brief["current_start_at"], brief["current_end_at"] = current
-        abn = (live.get("assetbundleName") or "").strip()
-        if abn:
-            brief["banner_path"] = ASSETS.region_asset(f"virtual_live/select/banner/{abn}/{abn}.png")
-        else:
-            event = event_by_vlive.get(live["id"])
-            event_abn = ((event or {}).get("assetbundleName") or "").strip()
-            if event_abn:
-                brief["banner_path"] = ASSETS.region_asset(
-                    f"home/banner/{event_abn}/{event_abn}.png",
-                    f"event/{event_abn}/banner.png",
-                    f"event_story/{event_abn}/screen_image/banner_event_story.png",
-                )
-        if rewards := _vlive_rewards(live, boxes):
-            brief["rewards"] = rewards
-        if characters := _vlive_characters(live, unit_by_id):
-            brief["characters"] = characters
-        lives.append(brief)
+    lives = [_vlive_brief(entry, boxes, unit_by_id, event_by_vlive) for entry in resolved]
 
     body = {"region": common.REGION, "lives": lives, "timezone": common.TIMEZONE, "dt": now}
     return _emit("vlive_list", VLiveListRequest, body)
