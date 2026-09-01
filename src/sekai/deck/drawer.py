@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 import logging
 import time
 
@@ -375,42 +376,46 @@ def build_recommend_title(
     return title + _recommend_live_suffix(live_type, live_name)
 
 
-async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
-    # 数据准备区
-    use_max_profile = rqd.is_max_deck
-    music_compare = rqd.music_compare
-    recommend_type = rqd.recommend_type
-    event_id = rqd.event_id
-    wl_chara_name = rqd.wl_chara_name
-    live_type = rqd.live_type
-    live_name = rqd.live_name
-    chara_name = rqd.chara_name
-    chara_icon = None
-    if rqd.chara_icon_path:
-        chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.chara_icon_path)
-    # 并行加载所有可选图标
-    _deck_tasks = {}
-    if rqd.wl_chara_icon_path:
-        _deck_tasks["wl_chara"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
-    if rqd.unit_logo_path:
-        _deck_tasks["unit_logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path)
-    if rqd.attr_icon_path:
-        _deck_tasks["attr_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_icon_path)
-    if not music_compare and rqd.music_cover_path:
-        _deck_tasks["music_cover"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_cover_path)
-    if rqd.canvas_thumbnail_path:
-        _deck_tasks["canvas_thumb"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.canvas_thumbnail_path)
-    # 收集卡牌缩略图和比较封面
-    _card_thumb_tasks = []
-    _card_thumb_keys = []
-    _compare_cover_paths = []
-    _planner_cover_paths = []
+@dataclass(frozen=True)
+class _DeckRecommendAssets:
+    chara_icon: ImageSource | None
+    wl_chara_icon: ImageSource | None
+    unit_logo: ImageSource | None
+    attr_icon: ImageSource | None
+    music_cover: ImageSource | None
+    canvas_thumbnail: ImageSource | None
+    card_layers: dict[tuple, object]
+    compare_music_imgs: dict[str, ImageSource]
+    planner_music_imgs: dict[str, ImageSource]
+
+
+def _deck_optional_asset_tasks(rqd: DeckRequest) -> dict[str, object]:
+    tasks = {}
+    optional_paths = {
+        "wl_chara": rqd.wl_chara_icon_path,
+        "unit_logo": rqd.unit_logo_path,
+        "attr_icon": rqd.attr_icon_path,
+    }
+    if not rqd.music_compare:
+        optional_paths["music_cover"] = rqd.music_cover_path
+    optional_paths["canvas_thumb"] = rqd.canvas_thumbnail_path
+    for key, path in optional_paths.items():
+        if path:
+            tasks[key] = get_asset_image_ref(ASSETS_BASE_DIR, path)
+    return tasks
+
+
+def _collect_deck_asset_requests(rqd: DeckRequest) -> tuple[list, list[tuple], list[str], list[str]]:
+    card_thumb_tasks = []
+    card_thumb_keys = []
+    compare_cover_paths = []
+    planner_cover_paths = []
     for deck in rqd.deck_data:
-        if music_compare and deck.music_cover_path and deck.music_cover_path not in dict.fromkeys(_compare_cover_paths):
-            _compare_cover_paths.append(deck.music_cover_path)
+        if rqd.music_compare and deck.music_cover_path and deck.music_cover_path not in compare_cover_paths:
+            compare_cover_paths.append(deck.music_cover_path)
         for card in deck.card_data:
-            _card_thumb_tasks.append(get_card_full_thumbnail_layers(card.card_thumbnail))
-            _card_thumb_keys.append(
+            card_thumb_tasks.append(get_card_full_thumbnail_layers(card.card_thumbnail))
+            card_thumb_keys.append(
                 (
                     card.card_thumbnail.card_id,
                     card.card_thumbnail.is_after_training,
@@ -418,50 +423,534 @@ async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
                 )
             )
     if rqd.event_planner:
-        for song in rqd.event_planner.songs:
-            if song.music_cover_path and song.music_cover_path not in dict.fromkeys(_planner_cover_paths):
-                _planner_cover_paths.append(song.music_cover_path)
-    _compare_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _compare_cover_paths]
-    _planner_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, p) for p in _planner_cover_paths]
+        planner_cover_paths.extend(
+            song.music_cover_path
+            for song in rqd.event_planner.songs
+            if song.music_cover_path and song.music_cover_path not in planner_cover_paths
+        )
+    return card_thumb_tasks, card_thumb_keys, compare_cover_paths, planner_cover_paths
 
-    # 并行执行所有加载
-    _dk = list(_deck_tasks.keys())
-    _t0 = time.perf_counter()
-    _all_results = await asyncio.gather(*_deck_tasks.values(), *_card_thumb_tasks, *_compare_tasks, *_planner_tasks)
+
+async def _load_deck_recommend_assets(rqd: DeckRequest) -> _DeckRecommendAssets:
+    chara_icon = None
+    if rqd.chara_icon_path:
+        chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.chara_icon_path)
+
+    deck_tasks = _deck_optional_asset_tasks(rqd)
+    card_thumb_tasks, card_thumb_keys, compare_cover_paths, planner_cover_paths = _collect_deck_asset_requests(rqd)
+
+    compare_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in compare_cover_paths]
+    planner_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in planner_cover_paths]
+    deck_keys = list(deck_tasks)
+    started_at = time.perf_counter()
+    results = await asyncio.gather(*deck_tasks.values(), *card_thumb_tasks, *compare_tasks, *planner_tasks)
     logger.debug(
         "[perf] compose_deck_recommend_image preload %d items: %.3fs",
-        len(_dk) + len(_card_thumb_tasks) + len(_compare_tasks) + len(_planner_tasks),
-        time.perf_counter() - _t0,
+        len(deck_keys) + len(card_thumb_tasks) + len(compare_tasks) + len(planner_tasks),
+        time.perf_counter() - started_at,
     )
-    _di = dict(zip(_dk, _all_results[: len(_dk)]))
-    _thumb_results = _all_results[len(_dk) : len(_dk) + len(_card_thumb_tasks)]
-    _compare_start = len(_dk) + len(_card_thumb_tasks)
-    _compare_end = _compare_start + len(_compare_tasks)
-    _compare_results = _all_results[_compare_start:_compare_end]
-    _planner_results = _all_results[_compare_end:]
 
-    wl_chara_icon = _di.get("wl_chara")
-    unit_logo = _di.get("unit_logo")
-    attr_icon = _di.get("attr_icon")
-    music_cover = _di.get("music_cover")
-    canvas_thumbnail = _di.get("canvas_thumb")
-    unit_filter = rqd.unit_filter
-    attr_filter = rqd.attr_filter
+    deck_images = dict(zip(deck_keys, results[: len(deck_keys)]))
+    thumbnail_end = len(deck_keys) + len(card_thumb_tasks)
+    thumbnail_results = results[len(deck_keys) : thumbnail_end]
+    compare_end = thumbnail_end + len(compare_tasks)
+    compare_results = results[thumbnail_end:compare_end]
+    planner_results = results[compare_end:]
+    return _DeckRecommendAssets(
+        chara_icon=chara_icon,
+        wl_chara_icon=deck_images.get("wl_chara"),
+        unit_logo=deck_images.get("unit_logo"),
+        attr_icon=deck_images.get("attr_icon"),
+        music_cover=deck_images.get("music_cover"),
+        canvas_thumbnail=deck_images.get("canvas_thumb"),
+        card_layers=dict(zip(card_thumb_keys, thumbnail_results)),
+        compare_music_imgs=dict(zip(compare_cover_paths, compare_results)),
+        planner_music_imgs=dict(zip(planner_cover_paths, planner_results)),
+    )
+
+
+def _deck_title(rqd: DeckRequest) -> str:
+    title = build_recommend_title(
+        rqd.recommend_type,
+        rqd.event_id,
+        rqd.wl_chara_name,
+        rqd.live_type,
+        rqd.live_name,
+    )
+    if rqd.event_planner:
+        title = title.replace("组卡", "规划")
+    return title
+
+
+def _deck_score_name(rqd: DeckRequest) -> str:
+    return "分数" if rqd.recommend_type in {"challenge", "challenge_all", "no_event"} else "PT"
+
+
+async def _draw_deck_event_banner(rqd: DeckRequest, title: str) -> str:
+    if rqd.recommend_type not in {"event", "wl", "bonus", "wl_bonus", "mysekai"} or not rqd.event_id:
+        return title
+    if not rqd.event_banner_path:
+        return rqd.event_name + " " + title
+    event_banner = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path)
+    ImageBox(event_banner, size=(None, 50))
+    return title
+
+
+def _draw_deck_title_extras(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    if rqd.recommend_type == "challenge":
+        if assets.chara_icon:
+            ImageBox(assets.chara_icon, size=(None, 50))
+        if rqd.chara_name:
+            TextBox(
+                rqd.chara_name,
+                TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)),
+            )
+    if rqd.is_wl and rqd.wl_chara_name:
+        if assets.wl_chara_icon is not None:
+            ImageBox(assets.wl_chara_icon, size=(None, 50))
+        TextBox(
+            f"{rqd.wl_chara_name} 章节",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)),
+        )
+    if assets.unit_logo and assets.attr_icon:
+        ImageBox(assets.unit_logo, size=(None, 60))
+        ImageBox(assets.attr_icon, size=(None, 50))
+    if rqd.is_max_deck:
+        TextBox(
+            f"({rqd.region}顶配)",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)),
+        )
+
+
+async def _draw_deck_title_row(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    title = _deck_title(rqd)
+
+    with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
+        title = await _draw_deck_event_banner(rqd, title)
+        TextBox(
+            title,
+            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)),
+            use_real_line_count=True,
+        )
+        _draw_deck_title_extras(rqd, assets)
+
+
+async def _draw_deck_settings(rqd: DeckRequest) -> None:
     excluded_cards = rqd.excluded_cards or []
-    boost = rqd.boost
-    boost_bonus = BOOST_BONUS_DICT.get(boost or 0, 1) if boost is not None else 1
-    result_decks = rqd.deck_data
-    result_algs = rqd.model_name or [""] * len(result_decks)
-    # The same card id can appear in multiple candidate decks with different
-    # flower-before/after skill art states, so card_id alone is not a safe key.
-    card_layers = dict(zip(_card_thumb_keys, _thumb_results))
-    compare_music_imgs = dict(zip(_compare_cover_paths, _compare_results))
-    planner_music_imgs = dict(zip(_planner_cover_paths, _planner_results))
+    if not any(
+        (
+            rqd.unit_filter,
+            rqd.attr_filter,
+            excluded_cards,
+            rqd.multi_live_score_up_lower_bound,
+            rqd.keep_after_training_state,
+        )
+    ):
+        return
 
-    # 绘图
+    with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
+        setting_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
+        TextBox("卡组设置:", setting_style)
+        if rqd.unit_filter or rqd.attr_filter:
+            TextBox("仅", setting_style)
+            if rqd.unit_filter:
+                unit_logo = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path)
+                ImageBox(unit_logo, size=(None, 40))
+            if rqd.attr_filter:
+                attr_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_icon_path)
+                ImageBox(attr_icon, size=(None, 35))
+            TextBox("上场", setting_style)
+        if excluded_cards:
+            TextBox(f"排除 {','.join(map(str, excluded_cards))}", setting_style)
+        if rqd.multi_live_score_up_lower_bound:
+            TextBox(f"实效≥{int(rqd.multi_live_score_up_lower_bound)}%", setting_style)
+        if rqd.keep_after_training_state:
+            TextBox("禁用双技能自动切换", setting_style)
+
+
+def _draw_deck_warning_or_music(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    if rqd.recommend_type in {"bonus", "wl_bonus"}:
+        TextBox(
+            "友情提醒：控分前请核对加成和体力设置",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)),
+        )
+        if rqd.recommend_type == "wl_bonus":
+            TextBox(
+                "WL仅支持自动组主队，支援队请自行配置",
+                TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
+            )
+        return
+    if rqd.recommend_type == "mysekai" or rqd.music_compare or rqd.event_planner:
+        return
+
+    with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
+        with Frame().set_size((50, 50)):
+            if rqd.music_id is not None and rqd.music_id != OMAKASE_MUSIC_ID:
+                if rqd.music_diff and rqd.music_diff in DIFF_COLORS:
+                    Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset((6, 6))
+                if assets.music_cover:
+                    ImageBox(assets.music_cover, size=(50, 50))
+            elif assets.music_cover:
+                ImageBox(assets.music_cover, size=(50, 50), shadow=True)
+        TextBox(
+            rqd.music_title or "",
+            TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70)),
+        )
+
+
+def _draw_deck_strategy(rqd: DeckRequest) -> None:
+    if rqd.recommend_type in {"bonus", "wl_bonus", "mysekai"}:
+        return
+    strategy_text = "  ".join(
+        part
+        for part in (
+            format_skill_order_text(rqd.skill_order_choose_strategy),
+            format_skill_reference_text(rqd.skill_reference_choose_strategy),
+        )
+        if part
+    ).strip()
+    if strategy_text:
+        TextBox(
+            strategy_text,
+            TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
+        )
+
+
+async def _draw_deck_header(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    with (
+        VSplit().set_content_align("lb").set_item_align("lb").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80))
+    ):
+        await _draw_deck_title_row(rqd, assets)
+        await _draw_deck_settings(rqd)
+        _draw_deck_warning_or_music(rqd, assets)
+        _draw_deck_strategy(rqd)
+        if rqd.is_max_deck:
+            TextBox(
+                "“顶配”为该服截止当前的全卡满养成配置(并非基于你的卡组计算)",
+                TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(200, 75, 75)),
+                use_real_line_count=True,
+            )
+
+
+_DECK_ROW_HEIGHT = 120
+_DECK_VERTICAL_SEP = 12
+_DECK_VALUE_OFFSET = 18
+_DECK_SCORE_WIDTH = 112
+_DECK_BONUS_WIDTH = 102
+_DECK_SKILL_WIDTH = 92
+_DECK_POWER_WIDTH = 100
+_DECK_CARD_WIDTH = 96
+
+
+def _draw_deck_compare_music_column(rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        TextBox("歌曲", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+        Spacer(h=6)
+        for deck in rqd.deck_data:
+            with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0).set_h(_DECK_ROW_HEIGHT):
+                with Frame().set_content_align("c"):
+                    if deck.music_diff and deck.music_diff in DIFF_COLORS:
+                        Spacer(w=64, h=64).set_bg(FillBg(fill=DIFF_COLORS[deck.music_diff])).set_offset((3, 3))
+                    music_img = assets.compare_music_imgs.get(deck.music_cover_path) if deck.music_cover_path else None
+                    if music_img:
+                        ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
+
+                title = deck.music_title or ""
+                if not title and deck.music_id is not None:
+                    title = f"Music {deck.music_id}"
+                TextBox(
+                    title,
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(70, 70, 70)),
+                    line_count=2,
+                    use_real_line_count=True,
+                ).set_w(120).set_content_align("c")
+
+                meta_parts = []
+                if deck.music_id is not None:
+                    meta_parts.append(str(deck.music_id))
+                if deck.music_diff:
+                    meta_parts.append(deck.music_diff.upper())
+                if deck.music_query:
+                    TextBox(
+                        deck.music_query,
+                        TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+                        line_count=1,
+                        use_real_line_count=True,
+                    ).set_w(120).set_content_align("c")
+                if meta_text := " / ".join(meta_parts):
+                    TextBox(
+                        meta_text,
+                        TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
+                    ).set_w(120).set_content_align("c")
+
+
+def _deck_score(rqd: DeckRequest, deck, target_score: bool, boost_bonus: int) -> int:
+    if rqd.recommend_type == "no_event":
+        score = deck.live_score or 0
+    elif rqd.recommend_type == "mysekai":
+        score = deck.mysekai_event_point or 0
+    else:
+        score = deck.score or 0
+    if rqd.boost is not None and target_score:
+        score = int(score * boost_bonus)
+    return score
+
+
+def _draw_deck_score_column(
+    rqd: DeckRequest,
+    heading_style: TextStyle,
+    secondary_heading_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    target_score = rqd.target == "score"
+    boost_bonus = BOOST_BONUS_DICT.get(rqd.boost or 0, 1) if rqd.boost is not None else 1
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        text = _deck_score_name(rqd) + ("∇" if target_score else "")
+        style = heading_style if target_score else secondary_heading_style
+        with Frame().set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c"):
+            TextBox(text, style).set_w(_DECK_SCORE_WIDTH).set_content_align("c")
+            if rqd.boost is not None and target_score:
+                TextBox(
+                    f"{rqd.boost}🔥(x{boost_bonus})",
+                    TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
+                ).set_w(_DECK_SCORE_WIDTH).set_content_align("c").set_offset((0, 28))
+        Spacer(h=6)
+        algorithms = rqd.model_name or [""] * len(rqd.deck_data)
+        for deck, algorithm in zip(rqd.deck_data, algorithms):
+            with Frame().set_content_align("rb").set_w(_DECK_SCORE_WIDTH).set_h(_DECK_ROW_HEIGHT):
+                algorithm_offset = 0
+                if rqd.recommend_type in {"challenge", "challenge_all"}:
+                    algorithm_offset = 20
+                    delta = deck.challenge_score_delta or 0
+                    color = (50, 150, 50) if delta > 0 else (150, 50, 50)
+                    TextBox(
+                        f"{delta:+d}",
+                        TextStyle(font=DEFAULT_FONT, size=15, color=color),
+                    ).set_w(_DECK_SCORE_WIDTH).set_content_align("c").set_offset((0, -8 - _DECK_VALUE_OFFSET * 2))
+                TextBox(
+                    format_algorithm_label(algorithm),
+                    TextStyle(
+                        font=DEFAULT_FONT,
+                        size=algorithm_label_font_size(algorithm),
+                        color=(125, 125, 125),
+                    ),
+                ).set_w(_DECK_SCORE_WIDTH).set_content_align("c").set_offset(
+                    (0, -8 - _DECK_VALUE_OFFSET * 2 + algorithm_offset)
+                )
+                with Frame().set_content_align("c"):
+                    TextBox(str(_deck_score(rqd, deck, target_score, boost_bonus)), value_style).set_w(
+                        _DECK_SCORE_WIDTH
+                    ).set_h(_DECK_ROW_HEIGHT).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
+
+
+def _deck_card_is_fixed(rqd: DeckRequest, card_id: int, character_id: int) -> bool:
+    return bool(
+        (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id)
+        or (rqd.fixed_characters_id and character_id in rqd.fixed_characters_id)
+    )
+
+
+def _story_read_color(value: bool | None) -> tuple[int, int, int, int]:
+    if value is None:
+        return (255, 255, 255, 255)
+    return (50, 150, 50, 255) if value else (150, 50, 50, 255)
+
+
+def _draw_deck_card(rqd: DeckRequest, assets: _DeckRecommendAssets, card) -> None:
+    card_id = card.card_thumbnail.card_id
+    card_key = (
+        card_id,
+        card.card_thumbnail.is_after_training,
+        card.card_thumbnail.card_thumbnail_path,
+    )
+    event_bonus = card.event_bonus_rate
+    show_event_bonus = event_bonus > 0
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(4)
+        .set_padding(0)
+        .set_size((_DECK_CARD_WIDTH, _DECK_ROW_HEIGHT))
+    ):
+        with Frame().set_w(_DECK_CARD_WIDTH).set_content_align("c"):
+            with Frame().set_content_align("rt"):
+                CardFullThumbnailBox(assets.card_layers[card_key], size=(None, 80))
+                fixed = _deck_card_is_fixed(rqd, card_id, card.chara_id)
+                card_id_style = TextStyle(
+                    font=DEFAULT_FONT,
+                    size=10,
+                    color=WHITE if fixed else (75, 75, 75),
+                )
+                card_id_bg = (200, 50, 50, 200) if fixed else (255, 255, 255, 200)
+                TextBox(str(card_id), card_id_style).set_bg(RoundRectBg(card_id_bg, 2)).set_offset((-2, 0))
+                if card.has_canvas_bonus:
+                    ImageBox(assets.canvas_thumbnail, size=(11, 11)).set_offset((-32, 65))
+
+        info_bg = RoundRectBg((255, 255, 255, 150), 2)
+        with HSplit().set_w(_DECK_CARD_WIDTH).set_content_align("c").set_item_align("c").set_sep(3).set_padding(0):
+            TextBox(
+                f"SLv.{card.skill_level}",
+                TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+            ).set_bg(info_bg)
+            TextBox(
+                f"↑{format_skill_rate(card.skill_rate)}%",
+                TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+            ).set_bg(info_bg)
+
+        with HSplit().set_w(_DECK_CARD_WIDTH).set_content_align("c").set_item_align("c").set_sep(3).set_padding(0):
+            if show_event_bonus:
+                event_bonus_str = f"+{event_bonus:.1f}%" if int(event_bonus) != event_bonus else f"+{int(event_bonus)}%"
+                TextBox(
+                    event_bonus_str,
+                    TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
+                ).set_bg(info_bg)
+            TextBox(
+                "前" if show_event_bonus else "前篇",
+                TextStyle(font=DEFAULT_FONT, size=12, color=_story_read_color(card.is_before_story)),
+            ).set_bg(info_bg)
+            TextBox(
+                "后" if show_event_bonus else "后篇",
+                TextStyle(font=DEFAULT_FONT, size=12, color=_story_read_color(card.is_after_story)),
+            ).set_bg(info_bg)
+
+
+def _draw_deck_cards_column(rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        TextBox("卡组", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+        Spacer(h=6)
+        for deck in rqd.deck_data:
+            with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
+                for card in deck.card_data:
+                    _draw_deck_card(rqd, assets, card)
+
+
+def _draw_deck_bonus_column(rqd: DeckRequest, heading_style: TextStyle, value_style: TextStyle) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        TextBox("加成", heading_style).set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+        Spacer(h=6)
+        for deck in rqd.deck_data:
+            if rqd.is_wl:
+                bonus = f"{deck.event_bonus_rate:.1f}+{deck.support_deck_bonus_rate:.1f}%"
+                total = f"{deck.event_bonus_rate + deck.support_deck_bonus_rate:.1f}%"
+            else:
+                bonus = None
+                total = f"{deck.event_bonus_rate:.1f}%"
+            with Frame().set_content_align("rb").set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT):
+                if bonus is not None:
+                    TextBox(
+                        bonus,
+                        TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150)),
+                    ).set_w(_DECK_BONUS_WIDTH).set_content_align("c").set_offset((0, -6 - _DECK_VALUE_OFFSET * 2))
+                with Frame().set_content_align("c"):
+                    TextBox(total, value_style).set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT).set_content_align(
+                        "c"
+                    ).set_offset((0, -_DECK_VALUE_OFFSET))
+
+
+def _draw_deck_skill_column(
+    rqd: DeckRequest,
+    heading_style: TextStyle,
+    secondary_heading_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    target_skill = rqd.target == "skill"
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        TextBox(
+            "实效" + ("∇" if target_skill else ""),
+            heading_style if target_skill else secondary_heading_style,
+        ).set_w(_DECK_SKILL_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+        Spacer(h=6)
+        for deck in rqd.deck_data:
+            with Frame().set_content_align("rb").set_w(_DECK_SKILL_WIDTH).set_h(_DECK_ROW_HEIGHT):
+                if rqd.multi_live_teammate_score_up is not None:
+                    TextBox(
+                        f"队友 {int(rqd.multi_live_teammate_score_up)}",
+                        TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
+                    ).set_w(_DECK_SKILL_WIDTH).set_content_align("c").set_offset((0, -8 - _DECK_VALUE_OFFSET * 2))
+                with Frame().set_content_align("c"):
+                    TextBox(f"{deck.multi_live_score_up:.1f}%", value_style).set_w(_DECK_SKILL_WIDTH).set_h(
+                        _DECK_ROW_HEIGHT
+                    ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
+
+
+def _draw_deck_power_column(
+    rqd: DeckRequest,
+    heading_style: TextStyle,
+    secondary_heading_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    target_power = rqd.target == "total_power"
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
+        TextBox(
+            "综合力" + ("∇" if target_power else ""),
+            heading_style if target_power else secondary_heading_style,
+        ).set_w(_DECK_POWER_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+        Spacer(h=6)
+        for deck in rqd.deck_data:
+            with Frame().set_content_align("rb").set_w(_DECK_POWER_WIDTH).set_h(_DECK_ROW_HEIGHT):
+                if rqd.multi_live_teammate_power is not None:
+                    TextBox(
+                        f"队友 {int(rqd.multi_live_teammate_power)}",
+                        TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
+                    ).set_w(_DECK_POWER_WIDTH).set_content_align("c").set_offset((0, -8 - _DECK_VALUE_OFFSET * 2))
+                with Frame().set_content_align("c"):
+                    TextBox(str(deck.total_power), value_style).set_w(_DECK_POWER_WIDTH).set_h(
+                        _DECK_ROW_HEIGHT
+                    ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
+
+
+def _draw_deck_results_table(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    with VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
+        if not rqd.deck_data:
+            TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
+            return
+
+        with HSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(0):
+            heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(0, 0, 0))
+            secondary_heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(75, 75, 75))
+            value_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
+            if rqd.music_compare:
+                _draw_deck_compare_music_column(rqd, assets, secondary_heading_style)
+            if rqd.recommend_type not in {"bonus", "wl_bonus"}:
+                _draw_deck_score_column(rqd, heading_style, secondary_heading_style, value_style)
+            _draw_deck_cards_column(rqd, assets, secondary_heading_style)
+            if rqd.recommend_type not in {"challenge", "challenge_all", "no_event"}:
+                _draw_deck_bonus_column(rqd, secondary_heading_style, value_style)
+            if rqd.live_type in {"multi", "cheerful"}:
+                _draw_deck_skill_column(rqd, heading_style, secondary_heading_style, value_style)
+            if rqd.recommend_type not in {"bonus", "wl_bonus"}:
+                _draw_deck_power_column(rqd, heading_style, secondary_heading_style, value_style)
+
+
+def _draw_deck_notes(rqd: DeckRequest) -> None:
+    note_text_width = 920 if rqd.music_compare else 760
+    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+        tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
+        if rqd.recommend_type not in {"bonus", "wl_bonus"}:
+            TextBox(
+                "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",
+                tip_style,
+                use_real_line_count=True,
+            ).set_w(note_text_width)
+        TextBox(
+            "功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责",
+            tip_style,
+            use_real_line_count=True,
+        ).set_w(note_text_width)
+        if algorithm_runtime_text := build_algorithm_runtime_text(rqd.cost_times, rqd.wait_times):
+            TextBox(
+                algorithm_runtime_text,
+                tip_style,
+                use_real_line_count=True,
+            ).set_w(note_text_width)
+
+
+async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
+    assets = await _load_deck_recommend_assets(rqd)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_padding(16):
-            if not use_max_profile:
+            if not rqd.is_max_deck:
                 await get_profile_card(rqd.profile.to_profile_card_request())
 
             with (
@@ -472,474 +961,13 @@ async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
                 .set_padding(16)
                 .set_bg(roundrect_bg(alpha=80))
             ):
-                # 标题
-                with (
-                    VSplit()
-                    .set_content_align("lb")
-                    .set_item_align("lb")
-                    .set_sep(16)
-                    .set_padding(16)
-                    .set_bg(roundrect_bg(alpha=80))
-                ):
-                    title = build_recommend_title(recommend_type, event_id, wl_chara_name, live_type, live_name)
-                    if rqd.event_planner:
-                        title = title.replace("组卡", "规划")
+                await _draw_deck_header(rqd, assets)
 
-                    score_name = "PT"
-                    if recommend_type in ["challenge", "challenge_all", "no_event"]:
-                        score_name = "分数"
-
-                    with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
-                        if recommend_type in ["event", "wl", "bonus", "wl_bonus", "mysekai"] and rqd.event_id:
-                            if rqd.event_banner_path:
-                                event_banner = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_banner_path)
-                                ImageBox(event_banner, size=(None, 50))
-                            else:
-                                title = rqd.event_name + " " + title
-
-                        TextBox(
-                            title,
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50)),
-                            use_real_line_count=True,
-                        )
-
-                        if recommend_type == "challenge":
-                            if chara_icon:
-                                ImageBox(chara_icon, size=(None, 50))
-                            if chara_name:
-                                TextBox(f"{chara_name}", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70)))
-                        if rqd.is_wl and wl_chara_name:
-                            if wl_chara_icon is not None:
-                                ImageBox(wl_chara_icon, size=(None, 50))
-                            TextBox(
-                                f"{wl_chara_name} 章节", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(70, 70, 70))
-                            )
-                        if unit_logo and attr_icon:
-                            ImageBox(unit_logo, size=(None, 60))
-                            ImageBox(attr_icon, size=(None, 50))
-
-                        if use_max_profile:
-                            TextBox(
-                                f"({rqd.region}顶配)", TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(50, 50, 50))
-                            )
-
-                    if any(
-                        [
-                            unit_filter,
-                            attr_filter,
-                            excluded_cards,
-                            rqd.multi_live_score_up_lower_bound,
-                            rqd.keep_after_training_state,
-                        ]
-                    ):
-                        with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
-                            setting_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
-                            TextBox("卡组设置:", setting_style)
-                            if unit_filter or attr_filter:
-                                TextBox("仅", setting_style)
-                                if unit_filter:
-                                    ImageBox(
-                                        await get_asset_image_ref(ASSETS_BASE_DIR, rqd.unit_logo_path), size=(None, 40)
-                                    )
-                                if attr_filter:
-                                    ImageBox(
-                                        await get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_icon_path), size=(None, 35)
-                                    )
-                                TextBox("上场", setting_style)
-                            if excluded_cards:
-                                TextBox(f"排除 {','.join(map(str, excluded_cards))}", setting_style)
-                            if rqd.multi_live_score_up_lower_bound:
-                                TextBox(f"实效≥{int(rqd.multi_live_score_up_lower_bound)}%", setting_style)
-                            if rqd.keep_after_training_state:
-                                TextBox("禁用双技能自动切换", setting_style)
-
-                    if recommend_type in ["bonus", "wl_bonus"]:
-                        TextBox(
-                            "友情提醒：控分前请核对加成和体力设置",
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)),
-                        )
-                        if recommend_type == "wl_bonus":
-                            TextBox(
-                                "WL仅支持自动组主队，支援队请自行配置",
-                                TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
-                            )
-                    elif recommend_type != "mysekai" and not music_compare and not rqd.event_planner:
-                        with HSplit().set_content_align("l").set_item_align("l").set_sep(16):
-                            with Frame().set_size((50, 50)):
-                                if rqd.music_id is not None and rqd.music_id != OMAKASE_MUSIC_ID:
-                                    if rqd.music_diff and rqd.music_diff in DIFF_COLORS:
-                                        Spacer(w=50, h=50).set_bg(FillBg(fill=DIFF_COLORS[rqd.music_diff])).set_offset(
-                                            (6, 6)
-                                        )
-                                    if music_cover:
-                                        ImageBox(music_cover, size=(50, 50))
-                                else:
-                                    if music_cover:
-                                        ImageBox(music_cover, size=(50, 50), shadow=True)
-                            TextBox(
-                                rqd.music_title or "", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(70, 70, 70))
-                            )
-
-                    if recommend_type not in ["bonus", "wl_bonus", "mysekai"]:
-                        skill_order_text = format_skill_order_text(rqd.skill_order_choose_strategy)
-                        skill_reference_text = format_skill_reference_text(rqd.skill_reference_choose_strategy)
-                        strategy_text = "  ".join(
-                            part for part in [skill_order_text, skill_reference_text] if part
-                        ).strip()
-                        if strategy_text:
-                            TextBox(
-                                strategy_text,
-                                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(70, 70, 70)),
-                            )
-
-                    info_text = ""
-
-                    if use_max_profile:
-                        info_text += "“顶配”为该服截止当前的全卡满养成配置(并非基于你的卡组计算)\n"
-
-                    if info_text:
-                        TextBox(
-                            info_text.strip(),
-                            TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(200, 75, 75)),
-                            use_real_line_count=True,
-                        )
-
-                # 表格
-                gh, vsp, voffset = 120, 12, 18
-                score_col_w = 112
-                bonus_col_w = 102
-                skill_col_w = 92
-                power_col_w = 100
-                card_col_w = 96
-                note_text_width = 920 if music_compare else 760
-                with (
-                    VSplit()
-                    .set_content_align("c")
-                    .set_item_align("c")
-                    .set_sep(16)
-                    .set_padding(16)
-                    .set_bg(roundrect_bg(alpha=80))
-                ):
-                    if len(rqd.deck_data) > 0:
-                        with HSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(0):
-                            th_style1 = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(0, 0, 0))
-                            th_style2 = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(75, 75, 75))
-                            th_main_sign = "∇"
-                            tb_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
-
-                            if music_compare:
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    TextBox("歌曲", th_style2).set_h(gh // 2).set_content_align("c")
-                                    Spacer(h=6)
-                                    for deck in result_decks:
-                                        with (
-                                            VSplit()
-                                            .set_content_align("c")
-                                            .set_item_align("c")
-                                            .set_sep(4)
-                                            .set_padding(0)
-                                            .set_h(gh)
-                                        ):
-                                            with Frame().set_content_align("c"):
-                                                if deck.music_diff and deck.music_diff in DIFF_COLORS:
-                                                    Spacer(w=64, h=64).set_bg(
-                                                        FillBg(fill=DIFF_COLORS[deck.music_diff])
-                                                    ).set_offset((3, 3))
-                                                music_img = None
-                                                if deck.music_cover_path:
-                                                    music_img = compare_music_imgs.get(deck.music_cover_path)
-                                                if music_img:
-                                                    ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
-
-                                            title = deck.music_title or ""
-                                            if not title and deck.music_id is not None:
-                                                title = f"Music {deck.music_id}"
-                                            TextBox(
-                                                title,
-                                                TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(70, 70, 70)),
-                                                line_count=2,
-                                                use_real_line_count=True,
-                                            ).set_w(120).set_content_align("c")
-
-                                            meta_parts = []
-                                            if deck.music_id is not None:
-                                                meta_parts.append(str(deck.music_id))
-                                            if deck.music_diff:
-                                                meta_parts.append(deck.music_diff.upper())
-                                            meta_text = " / ".join(meta_parts)
-                                            if deck.music_query:
-                                                TextBox(
-                                                    deck.music_query,
-                                                    TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
-                                                    line_count=1,
-                                                    use_real_line_count=True,
-                                                ).set_w(120).set_content_align("c")
-                                            if meta_text:
-                                                TextBox(
-                                                    meta_text,
-                                                    TextStyle(font=DEFAULT_FONT, size=11, color=(120, 120, 120)),
-                                                ).set_w(120).set_content_align("c")
-
-                            # 分数
-                            if recommend_type not in ["bonus", "wl_bonus"]:
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    target_score = rqd.target == "score"
-                                    text = score_name + th_main_sign if target_score else score_name
-                                    style = th_style1 if target_score else th_style2
-                                    with Frame().set_h(gh // 2).set_content_align("c"):
-                                        TextBox(text, style).set_w(score_col_w).set_content_align("c")
-                                        if boost is not None and target_score:
-                                            TextBox(
-                                                f"{boost}🔥(x{boost_bonus})",
-                                                TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
-                                            ).set_w(score_col_w).set_content_align("c").set_offset((0, 28))
-                                    Spacer(h=6)
-                                    for i, (deck, alg) in enumerate(zip(result_decks, result_algs)):
-                                        with Frame().set_content_align("rb").set_w(score_col_w).set_h(gh):
-                                            alg_offset = 0
-                                            # 挑战分数差距
-                                            if recommend_type in ["challenge", "challenge_all"]:
-                                                alg_offset = 20
-                                                dlt = rqd.deck_data[i].challenge_score_delta or 0
-                                                color = (50, 150, 50) if dlt > 0 else (150, 50, 50)
-                                                TextBox(
-                                                    f"{dlt:+d}", TextStyle(font=DEFAULT_FONT, size=15, color=color)
-                                                ).set_w(score_col_w).set_content_align("c").set_offset(
-                                                    (0, -8 - voffset * 2)
-                                                )
-                                            # 算法
-                                            TextBox(
-                                                format_algorithm_label(alg),
-                                                TextStyle(
-                                                    font=DEFAULT_FONT,
-                                                    size=algorithm_label_font_size(alg),
-                                                    color=(125, 125, 125),
-                                                ),
-                                            ).set_w(score_col_w).set_content_align("c").set_offset(
-                                                (0, -8 - voffset * 2 + alg_offset)
-                                            )
-                                            # 分数
-                                            score = deck.score or 0
-                                            if recommend_type == "no_event":
-                                                score = deck.live_score or 0
-                                            elif recommend_type == "mysekai":
-                                                score = deck.mysekai_event_point or 0
-                                            if boost is not None and target_score:
-                                                score = int(score * boost_bonus)
-                                            with Frame().set_content_align("c"):
-                                                TextBox(str(score), tb_style).set_w(score_col_w).set_h(
-                                                    gh
-                                                ).set_content_align("c").set_offset((0, -voffset))
-
-                            # 卡片
-                            with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                TextBox("卡组", th_style2).set_h(gh // 2).set_content_align("c")
-                                Spacer(h=6)
-                                for deck in result_decks:
-                                    with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
-                                        for card in deck.card_data:
-                                            card_id = card.card_thumbnail.card_id
-                                            card_key = (
-                                                card_id,
-                                                card.card_thumbnail.is_after_training,
-                                                card.card_thumbnail.card_thumbnail_path,
-                                            )
-                                            character_id = card.chara_id
-                                            event_bonus = card.event_bonus_rate
-                                            ep1_read, ep2_read = card.is_before_story, card.is_after_story
-                                            slv, sup = card.skill_level, format_skill_rate(card.skill_rate)
-
-                                            with (
-                                                VSplit()
-                                                .set_content_align("c")
-                                                .set_item_align("c")
-                                                .set_sep(4)
-                                                .set_padding(0)
-                                                .set_size((card_col_w, gh))
-                                            ):
-                                                with Frame().set_w(card_col_w).set_content_align("c"):
-                                                    with Frame().set_content_align("rt"):
-                                                        CardFullThumbnailBox(card_layers[card_key], size=(None, 80))
-                                                        if (rqd.fixed_cards_id and card_id in rqd.fixed_cards_id) or (
-                                                            rqd.fixed_characters_id
-                                                            and character_id in rqd.fixed_characters_id
-                                                        ):
-                                                            TextBox(
-                                                                str(card_id),
-                                                                TextStyle(font=DEFAULT_FONT, size=10, color=WHITE),
-                                                            ).set_bg(RoundRectBg((200, 50, 50, 200), 2)).set_offset(
-                                                                (-2, 0)
-                                                            )
-                                                        else:
-                                                            TextBox(
-                                                                str(card_id),
-                                                                TextStyle(
-                                                                    font=DEFAULT_FONT, size=10, color=(75, 75, 75)
-                                                                ),
-                                                            ).set_bg(RoundRectBg((255, 255, 255, 200), 2)).set_offset(
-                                                                (-2, 0)
-                                                            )
-                                                        if card.has_canvas_bonus:
-                                                            ImageBox(canvas_thumbnail, size=(11, 11)).set_offset(
-                                                                (-32, 65)
-                                                            )
-
-                                                info_bg = RoundRectBg((255, 255, 255, 150), 2)
-                                                with (
-                                                    HSplit()
-                                                    .set_w(card_col_w)
-                                                    .set_content_align("c")
-                                                    .set_item_align("c")
-                                                    .set_sep(3)
-                                                    .set_padding(0)
-                                                ):
-                                                    TextBox(
-                                                        f"SLv.{slv}",
-                                                        TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
-                                                    ).set_bg(info_bg)
-                                                    TextBox(
-                                                        f"↑{sup}%",
-                                                        TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
-                                                    ).set_bg(info_bg)
-
-                                                with (
-                                                    HSplit()
-                                                    .set_w(card_col_w)
-                                                    .set_content_align("c")
-                                                    .set_item_align("c")
-                                                    .set_sep(3)
-                                                    .set_padding(0)
-                                                ):
-                                                    show_event_bonus = event_bonus > 0
-                                                    if show_event_bonus:
-                                                        event_bonus_str = (
-                                                            f"+{event_bonus:.1f}%"
-                                                            if int(event_bonus) != event_bonus
-                                                            else f"+{int(event_bonus)}%"
-                                                        )
-                                                        TextBox(
-                                                            event_bonus_str,
-                                                            TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50)),
-                                                        ).set_bg(info_bg)
-                                                    read_fg, _read_bg = (50, 150, 50, 255), (255, 255, 255, 255)
-                                                    noread_fg, _noread_bg = (150, 50, 50, 255), (255, 255, 255, 255)
-                                                    none_fg, _none_bg = (255, 255, 255, 255), (255, 255, 255, 255)
-                                                    ep1_fg = (
-                                                        none_fg
-                                                        if ep1_read is None
-                                                        else (read_fg if ep1_read else noread_fg)
-                                                    )
-                                                    ep2_fg = (
-                                                        none_fg
-                                                        if ep2_read is None
-                                                        else (read_fg if ep2_read else noread_fg)
-                                                    )
-                                                    TextBox(
-                                                        "前" if show_event_bonus else "前篇",
-                                                        TextStyle(font=DEFAULT_FONT, size=12, color=ep1_fg),
-                                                    ).set_bg(info_bg)
-                                                    TextBox(
-                                                        "后" if show_event_bonus else "后篇",
-                                                        TextStyle(font=DEFAULT_FONT, size=12, color=ep2_fg),
-                                                    ).set_bg(info_bg)
-
-                            # 加成
-                            if recommend_type not in ["challenge", "challenge_all", "no_event"]:
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    TextBox("加成", th_style2).set_w(bonus_col_w).set_h(gh // 2).set_content_align("c")
-                                    Spacer(h=6)
-                                    for deck in result_decks:
-                                        if rqd.is_wl:
-                                            bonus = f"{deck.event_bonus_rate:.1f}+{deck.support_deck_bonus_rate:.1f}%"
-                                            total = f"{deck.event_bonus_rate + deck.support_deck_bonus_rate:.1f}%"
-                                        else:
-                                            bonus = None
-                                            total = f"{deck.event_bonus_rate:.1f}%"
-                                        with Frame().set_content_align("rb").set_w(bonus_col_w).set_h(gh):
-                                            if bonus is not None:
-                                                TextBox(
-                                                    bonus, TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150))
-                                                ).set_w(bonus_col_w).set_content_align("c").set_offset(
-                                                    (0, -6 - voffset * 2)
-                                                )
-                                            with Frame().set_content_align("c"):
-                                                TextBox(total, tb_style).set_w(bonus_col_w).set_h(gh).set_content_align(
-                                                    "c"
-                                                ).set_offset((0, -voffset))
-
-                            # 实效
-                            if rqd.live_type in ["multi", "cheerful"]:
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    target_skill = rqd.target == "skill"
-                                    text = "实效" + th_main_sign if target_skill else "实效"
-                                    style = th_style1 if target_skill else th_style2
-                                    TextBox(text, style).set_w(skill_col_w).set_h(gh // 2).set_content_align("c")
-                                    Spacer(h=6)
-                                    for deck in result_decks:
-                                        with Frame().set_content_align("rb").set_w(skill_col_w).set_h(gh):
-                                            if rqd.multi_live_teammate_score_up is not None:
-                                                teammate_text = f"队友 {int(rqd.multi_live_teammate_score_up)}"
-                                                TextBox(
-                                                    teammate_text,
-                                                    TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_w(skill_col_w).set_content_align("c").set_offset(
-                                                    (0, -8 - voffset * 2)
-                                                )
-                                            with Frame().set_content_align("c"):
-                                                TextBox(f"{deck.multi_live_score_up:.1f}%", tb_style).set_w(
-                                                    skill_col_w
-                                                ).set_h(gh).set_content_align("c").set_offset((0, -voffset))
-
-                            # 综合力和算法
-                            if recommend_type not in ["bonus", "wl_bonus"]:
-                                with VSplit().set_content_align("c").set_item_align("c").set_sep(vsp).set_padding(8):
-                                    target_power = rqd.target == "total_power"
-                                    text = "综合力" + th_main_sign if target_power else "综合力"
-                                    style = th_style1 if target_power else th_style2
-                                    TextBox(text, style).set_w(power_col_w).set_h(gh // 2).set_content_align("c")
-                                    Spacer(h=6)
-                                    for deck in result_decks:
-                                        with Frame().set_content_align("rb").set_w(power_col_w).set_h(gh):
-                                            if rqd.multi_live_teammate_power is not None:
-                                                teammate_text = f"队友 {int(rqd.multi_live_teammate_power)}"
-                                                TextBox(
-                                                    teammate_text,
-                                                    TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
-                                                ).set_w(power_col_w).set_content_align("c").set_offset(
-                                                    (0, -8 - voffset * 2)
-                                                )
-                                            with Frame().set_content_align("c"):
-                                                TextBox(str(deck.total_power), tb_style).set_w(power_col_w).set_h(
-                                                    gh
-                                                ).set_content_align("c").set_offset((0, -voffset))
-                    # 找不到结果
-                    else:
-                        TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
+                _draw_deck_results_table(rqd, assets)
 
                 if rqd.event_planner:
-                    draw_event_planner_block(rqd.event_planner, planner_music_imgs)
-
-                # 说明
-                with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-                    tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
-                    if recommend_type not in ["bonus", "wl_bonus"]:
-                        TextBox(
-                            "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",
-                            tip_style,
-                            use_real_line_count=True,
-                        ).set_w(note_text_width)
-                    TextBox(
-                        "功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责",
-                        tip_style,
-                        use_real_line_count=True,
-                    ).set_w(note_text_width)
-                    algorithm_runtime_text = build_algorithm_runtime_text(rqd.cost_times, rqd.wait_times)
-                    if algorithm_runtime_text:
-                        TextBox(
-                            algorithm_runtime_text,
-                            tip_style,
-                            use_real_line_count=True,
-                        ).set_w(note_text_width)
+                    draw_event_planner_block(rqd.event_planner, assets.planner_music_imgs)
+                _draw_deck_notes(rqd)
 
     add_request_watermark(canvas, rqd)
     return canvas
