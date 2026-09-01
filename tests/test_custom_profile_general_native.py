@@ -18,6 +18,15 @@ from src.core.pillow_telemetry import (
     end_pillow_touch_scope,
 )
 from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
+from src.sekai.profile.custom_profile.general_prefab import (
+    GeneralAssetImageOp,
+    GeneralPrefabDisplayList,
+    GeneralRoundedRectOp,
+    GeneralSpriteChoiceOp,
+    GeneralSpriteOp,
+    GeneralTextOp,
+    GeneralViewportOp,
+)
 from src.sekai.profile.custom_profile.renderer import GENERAL_NATIVE_SIZES
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.model import CustomProfileCardRenderRequest
@@ -171,6 +180,118 @@ def test_claimed_native_text_metrics_reject_malformed_results(tmp_path):
 
     with pytest.raises(ValueError, match="invalid Pillow-relative bbox"):
         metrics.text_bbox("Haruki", skia_mod.GeneralFontRef(), 24)
+
+
+def test_native_general_preflight_and_emission_cover_all_shared_ops(tmp_path, monkeypatch):
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    sprite_path = asset_root / "sprite.png"
+    choice_path = asset_root / "choice.png"
+    image_path = asset_root / "image.png"
+    for path in (sprite_path, choice_path, image_path):
+        Image.new("RGBA", (4, 4), (1, 2, 3, 255)).save(path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    class _Renderer:
+        @staticmethod
+        def unity_ui_sprite_path(name):
+            return {"sprite": sprite_path, "choice": choice_path}.get(name)
+
+    class _Metrics:
+        @staticmethod
+        def text_placement(op):
+            return "left", float(op.pos[1]) + 1.0
+
+    fallback_rect = GeneralRoundedRectOp((5, 0, 9, 4), 1.0, (20, 30, 40, 128))
+    fallback_text = GeneralTextOp("fallback", (14, 3), 4, (255, 255, 255, 255))
+    nested_text = GeneralTextOp("nested", (1, 2), 4, (255, 255, 255, 255))
+    display_list = GeneralPrefabDisplayList(
+        "test",
+        (32, 16),
+        (
+            GeneralSpriteOp("sprite", (0, 0, 4, 4), sliced_border=(1, 1, 1, 1), tint=(1, 1, 1, 1)),
+            GeneralSpriteOp("missing", (5, 0, 9, 4), resource_policy="fallback", fallback=fallback_rect),
+            GeneralSpriteChoiceOp(("missing", "choice"), (10, 0, 14, 4), sampling="bicubic"),
+            GeneralSpriteChoiceOp(("missing",), (14, 0, 18, 4), fallback_text=fallback_text),
+            GeneralAssetImageOp("plain", image_path, (18, 0, 22, 4), sampling="bilinear"),
+            GeneralAssetImageOp("clipped", image_path, (22, 0, 26, 4), clip_radius=1.0),
+            GeneralAssetImageOp(
+                "fallback",
+                None,
+                (26, 0, 30, 4),
+                resource_policy="fallback",
+                fallback=GeneralRoundedRectOp((26, 0, 30, 4), 1.0, (50, 60, 70, 255)),
+            ),
+            GeneralTextOp("direct", (1, 7), 4, (255, 255, 255, 255)),
+            GeneralViewportOp((0, 8), (8, 4), (8, 8), (nested_text,)),
+        ),
+    )
+
+    prepared = skia_mod._prepare_native_general_display_list(_Renderer(), _Metrics(), display_list)
+    assert prepared is not None
+    assert prepared.resource_paths[id(display_list.ops[0])] == "sprite.png"
+    assert prepared.resource_paths[id(display_list.ops[2])] == "choice.png"
+    assert prepared.resource_paths[id(display_list.ops[3])] is None
+    assert prepared.resource_paths[id(display_list.ops[4])] == "image.png"
+    assert prepared.text_placements[id(fallback_text)] == ("left", 4.0)
+    assert prepared.text_placements[id(nested_text)] == ("left", 3.0)
+
+    builder = skia_mod._new_builder(32, 16)
+    scene = skia_mod._SceneAssembler(builder, (32, 16), 1024 * 1024)
+    skia_mod._emit_native_general_ops(scene, prepared, display_list.ops)
+    nodes = list(_walk_nodes(builder.build()["root"]))
+
+    assert any(node["type"] == "SlicedImage" for node in nodes)
+    assert sum(node["type"] == "Image" for node in nodes) == 3
+    assert sum(node["type"] == "RoundRect" for node in nodes) == 2
+    assert {node["text"] for node in nodes if node["type"] == "Text"} == {"fallback", "direct", "nested"}
+    assert any(node.get("clip", {}).get("kind") == "pillow_rrect" for node in nodes)
+    assert any(node.get("clip", {}).get("kind") == "rect" for node in nodes)
+
+
+@pytest.mark.parametrize(
+    "op_factory",
+    [
+        lambda root, outside: GeneralSpriteOp("missing", (0, 0, 4, 4), resource_policy="required"),
+        lambda root, outside: GeneralSpriteOp("outside", (0, 0, 4, 4)),
+        lambda root, outside: GeneralSpriteChoiceOp(("outside",), (0, 0, 4, 4)),
+        lambda root, outside: GeneralAssetImageOp(
+            "required",
+            root / "missing.png",
+            (0, 0, 4, 4),
+            resource_policy="required",
+        ),
+        lambda root, outside: GeneralAssetImageOp("outside", outside, (0, 0, 4, 4)),
+        lambda root, outside: GeneralAssetImageOp(
+            "off-center-cover",
+            root / "ready.png",
+            (0, 0, 4, 4),
+            fit="cover",
+            align=(0.0, 0.5),
+        ),
+    ],
+)
+def test_native_general_preflight_declines_unsafe_resources(tmp_path, monkeypatch, op_factory):
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    ready_path = asset_root / "ready.png"
+    outside_path = tmp_path / "outside.png"
+    Image.new("RGBA", (2, 2)).save(ready_path)
+    Image.new("RGBA", (2, 2)).save(outside_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    class _Renderer:
+        @staticmethod
+        def unity_ui_sprite_path(name):
+            return outside_path if name == "outside" else None
+
+    class _Metrics:
+        @staticmethod
+        def text_placement(op):  # pragma: no cover - these cases contain no text
+            raise AssertionError(op)
+
+    display_list = GeneralPrefabDisplayList("unsafe", (8, 8), (op_factory(asset_root, outside_path),))
+    assert skia_mod._prepare_native_general_display_list(_Renderer(), _Metrics(), display_list) is None
 
 
 @pytest.mark.skipif(

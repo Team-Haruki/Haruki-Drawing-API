@@ -66,6 +66,8 @@ from src.sekai.profile.custom_profile.diagnostics import (
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralFontRef,
+    GeneralPrefabDisplayList,
+    GeneralPrefabOp,
     GeneralRoundedRectOp,
     GeneralSpriteChoiceOp,
     GeneralSpriteOp,
@@ -1069,6 +1071,282 @@ def _emit_native_card_member(renderer: PNGRenderer, content: Any, scene: _SceneA
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedGeneralDisplayList:
+    display_list: GeneralPrefabDisplayList
+    resource_paths: dict[int, str | None]
+    text_placements: dict[int, tuple[str, float]]
+
+
+_GENERAL_SAMPLING_MAP = {
+    "nearest": "nearest",
+    "bilinear": "linear",
+    "bicubic": "catmull_rom",
+    "lanczos": "catmull_rom",
+}
+
+
+def _native_general_asset_paths(renderer: PNGRenderer, file_name: str) -> dict[str, Path | None]:
+    asset_paths: dict[str, Path | None] = {}
+    if file_name == "ChallengeLive":
+        data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
+        if isinstance(data, dict):
+            character_id = int(data.get("characterId", 0) or 0)
+            asset_paths["challenge_character_icon"] = renderer.chara_icon_path(character_id)
+    elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+        for _nickname, character_id in CHARA_LIST:
+            if character_id is not None:
+                asset_paths[f"character_rank_icon:{character_id}"] = renderer.chara_icon_path(character_id)
+    elif file_name == "StoryFavorite":
+        stories = renderer.profile_context.get("userStoryFavorites") or []
+        if isinstance(stories, list):
+            for story in stories:
+                if isinstance(story, dict):
+                    asset_paths[story_favorite_asset_key(story)] = renderer.story_favorite_image_path(story)
+    return asset_paths
+
+
+def _native_general_labels(renderer: PNGRenderer) -> dict[str, str]:
+    return {
+        "comment_title": renderer.general_text("comment_title"),
+        "total_power": renderer.general_text("total_power"),
+        "multi_live_title": renderer.general_text("multi_live_title"),
+        "multi_live_count_suffix": renderer.general_text("multi_live_count_suffix"),
+        "challenge_live_title": renderer.general_text("challenge_live_title"),
+        "challenge_live_solo": renderer.general_text("challenge_live_solo"),
+        "character_rank_tab": renderer.general_text("character_rank_tab"),
+        "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
+        "music_clear": renderer.general_text("music_clear"),
+        "music_full_combo": renderer.general_text("music_full_combo"),
+        "music_all_perfect": renderer.general_text("music_all_perfect"),
+        "story_favorite_title": renderer.general_text("story_favorite_title"),
+        "not_set": renderer.general_text("not_set"),
+    }
+
+
+def _build_native_general_display_list(
+    renderer: PNGRenderer,
+    file_name: str,
+    metrics: _NativeGeneralTextMetrics,
+) -> GeneralPrefabDisplayList | None:
+    return build_general_prefab_display_list(
+        file_name,
+        size=GENERAL_NATIVE_SIZES[file_name],
+        profile_context=renderer.profile_context,
+        labels=_native_general_labels(renderer),
+        metrics=metrics,
+        palette=GENERAL_PREFAB_PALETTE,
+        asset_paths=_native_general_asset_paths(renderer, file_name),
+        music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
+        story_favorite_resources=renderer.story_favorite_resources,
+    )
+
+
+def _walk_general_ops(ops: tuple[GeneralPrefabOp, ...]):
+    for op in ops:
+        yield op
+        if isinstance(op, GeneralViewportOp):
+            yield from _walk_general_ops(op.children)
+
+
+def _resolve_native_general_sprite(renderer: PNGRenderer, op: GeneralSpriteOp) -> tuple[bool, str | None]:
+    path = renderer.unity_ui_sprite_path(op.name)
+    if path is None:
+        return op.resource_policy != "required", None
+    asset_path = _relative_asset_path(path)
+    return asset_path is not None, asset_path
+
+
+def _resolve_native_general_sprite_choice(
+    renderer: PNGRenderer,
+    op: GeneralSpriteChoiceOp,
+) -> tuple[bool, str | None]:
+    for name in op.names:
+        path = renderer.unity_ui_sprite_path(name)
+        if path is None:
+            continue
+        asset_path = _relative_asset_path(path)
+        return asset_path is not None, asset_path
+    return True, None
+
+
+def _resolve_native_general_asset(op: GeneralAssetImageOp) -> tuple[bool, str | None]:
+    if op.fit == "cover" and op.align != (0.5, 0.5):
+        # IR Image cover is deliberately centered. A future non-centered display-list
+        # operation must decline instead of silently changing its crop.
+        return False, None
+    status, asset_path = _existing_native_asset(op.path)
+    if status == "ready":
+        return True, asset_path
+    if status == "outside" or op.resource_policy == "required":
+        return False, None
+    return True, None
+
+
+def _prepare_native_general_op(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics,
+    op: GeneralPrefabOp,
+    resource_paths: dict[int, str | None],
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    op_key = id(op)
+    if isinstance(op, GeneralSpriteOp):
+        ready, resource_paths[op_key] = _resolve_native_general_sprite(renderer, op)
+        return ready
+    if isinstance(op, GeneralSpriteChoiceOp):
+        ready, resource_paths[op_key] = _resolve_native_general_sprite_choice(renderer, op)
+        if ready and resource_paths[op_key] is None and op.fallback_text is not None:
+            text_placements[id(op.fallback_text)] = metrics.text_placement(op.fallback_text)
+        return ready
+    if isinstance(op, GeneralAssetImageOp):
+        ready, resource_paths[op_key] = _resolve_native_general_asset(op)
+        return ready
+    if isinstance(op, GeneralTextOp):
+        text_placements[op_key] = metrics.text_placement(op)
+        return True
+    return isinstance(op, (GeneralRoundedRectOp, GeneralViewportOp))
+
+
+def _prepare_native_general_display_list(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics,
+    display_list: GeneralPrefabDisplayList,
+) -> _PreparedGeneralDisplayList | None:
+    resource_paths: dict[int, str | None] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+    for op in _walk_general_ops(display_list.ops):
+        if not _prepare_native_general_op(renderer, metrics, op, resource_paths, text_placements):
+            return None
+    return _PreparedGeneralDisplayList(display_list, resource_paths, text_placements)
+
+
+def _general_op_geometry(rect: tuple[float, float, float, float]) -> tuple[tuple[int, int], tuple[int, int]]:
+    left, top, right, bottom = rect
+    return (round(left), round(top)), (max(1, round(right - left)), max(1, round(bottom - top)))
+
+
+def _emit_native_general_rounded_rect(scene: _SceneAssembler, op: GeneralRoundedRectOp) -> None:
+    left, top, right, bottom = op.rect
+    if op.round_coordinates:
+        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+    scene.builder.roundrect(
+        (left, top),
+        (max(0.0, right - left), max(0.0, bottom - top)),
+        op.radius,
+        fill=op.fill,
+        stroke=op.outline,
+        stroke_width=op.width,
+    )
+
+
+def _emit_native_general_text(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralTextOp,
+) -> None:
+    align, baseline = prepared.text_placements[id(op)]
+    scene.builder.text(
+        op.text,
+        (float(op.pos[0]), baseline),
+        "bold",
+        float(op.size),
+        align=align,
+        baseline="alphabetic",
+        fill=op.fill,
+        font_name=_GENERAL_FONT_IR_NAME,
+    )
+
+
+def _emit_native_general_sprite(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralSpriteOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback is not None:
+            _emit_native_general_rounded_rect(scene, op.fallback)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
+    if op.sliced_border is not None:
+        scene.builder.sliced_image(path=asset_path, pos=pos, size=size, border=op.sliced_border, tint=tint)
+        return
+    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
+
+
+def _emit_native_general_sprite_choice(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralSpriteChoiceOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback_text is not None:
+            _emit_native_general_text(scene, prepared, op.fallback_text)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
+    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
+
+
+def _emit_native_general_asset(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralAssetImageOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback is not None:
+            _emit_native_general_rounded_rect(scene, op.fallback)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    sampling = "pillow_lanczos" if op.sampling == "lanczos" else _GENERAL_SAMPLING_MAP[op.sampling]
+    if op.clip_radius is None:
+        scene.builder.image(asset_path, pos, size, fit=op.fit, sampling=sampling)
+        return
+    # The legacy composer multiplies a discrete ImageDraw L mask into the resized alpha.
+    # ``pillow_rrect`` reproduces that contract without a request-local Pillow raster.
+    with scene.builder.group(offset=pos, size=size, clip=clip_pillow_rrect(op.clip_radius)):
+        scene.builder.image(asset_path, (0, 0), size, fit=op.fit, sampling=sampling)
+
+
+def _emit_native_general_op(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralPrefabOp,
+) -> None:
+    if isinstance(op, GeneralSpriteOp):
+        _emit_native_general_sprite(scene, prepared, op)
+        return
+    if isinstance(op, GeneralSpriteChoiceOp):
+        _emit_native_general_sprite_choice(scene, prepared, op)
+        return
+    if isinstance(op, GeneralRoundedRectOp):
+        _emit_native_general_rounded_rect(scene, op)
+        return
+    if isinstance(op, GeneralAssetImageOp):
+        _emit_native_general_asset(scene, prepared, op)
+        return
+    if isinstance(op, GeneralViewportOp):
+        with scene.builder.group(offset=op.offset, size=op.viewport_size, clip={"kind": "rect"}):
+            _emit_native_general_ops(scene, prepared, op.children)
+        return
+    if not isinstance(op, GeneralTextOp):
+        raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
+    _emit_native_general_text(scene, prepared, op)
+
+
+def _emit_native_general_ops(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    ops: tuple[GeneralPrefabOp, ...],
+) -> None:
+    for op in ops:
+        _emit_native_general_op(scene, prepared, op)
+
+
 def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
     """Replay shared GeneralContentView prefabs without a Pillow pixel surface.
 
@@ -1090,243 +1368,16 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
     if metrics is None:
         return None
 
-    asset_paths: dict[str, Path | None] = {}
-    if file_name == "ChallengeLive":
-        data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
-        if isinstance(data, dict):
-            character_id = int(data.get("characterId", 0) or 0)
-            asset_paths["challenge_character_icon"] = renderer.chara_icon_path(character_id)
-    elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
-        for _nickname, character_id in CHARA_LIST:
-            if character_id is not None:
-                asset_paths[f"character_rank_icon:{character_id}"] = renderer.chara_icon_path(character_id)
-    elif file_name == "StoryFavorite":
-        stories = renderer.profile_context.get("userStoryFavorites") or []
-        if isinstance(stories, list):
-            for story in stories:
-                if isinstance(story, dict):
-                    asset_paths[story_favorite_asset_key(story)] = renderer.story_favorite_image_path(story)
-
-    display_list = build_general_prefab_display_list(
-        file_name,
-        size=GENERAL_NATIVE_SIZES[file_name],
-        profile_context=renderer.profile_context,
-        labels={
-            "comment_title": renderer.general_text("comment_title"),
-            "total_power": renderer.general_text("total_power"),
-            "multi_live_title": renderer.general_text("multi_live_title"),
-            "multi_live_count_suffix": renderer.general_text("multi_live_count_suffix"),
-            "challenge_live_title": renderer.general_text("challenge_live_title"),
-            "challenge_live_solo": renderer.general_text("challenge_live_solo"),
-            "character_rank_tab": renderer.general_text("character_rank_tab"),
-            "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
-            "music_clear": renderer.general_text("music_clear"),
-            "music_full_combo": renderer.general_text("music_full_combo"),
-            "music_all_perfect": renderer.general_text("music_all_perfect"),
-            "story_favorite_title": renderer.general_text("story_favorite_title"),
-            "not_set": renderer.general_text("not_set"),
-        },
-        metrics=metrics,
-        palette=GENERAL_PREFAB_PALETTE,
-        asset_paths=asset_paths,
-        music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
-        story_favorite_resources=renderer.story_favorite_resources,
-    )
+    display_list = _build_native_general_display_list(renderer, file_name, metrics)
     if display_list is None:
         return "noop"
-
-    # Resolve every dependency before mutating the scene. Required resources decline the whole
-    # element; optional resources are omitted; fallback resources replay their rounded rectangle.
-    # A supplied path outside the asset root is never downgraded to "optional missing".
-    resource_paths: dict[int, str | None] = {}
-    text_placements: dict[int, tuple[str, float]] = {}
-
-    def walk_ops(ops):
-        for op in ops:
-            yield op
-            if isinstance(op, GeneralViewportOp):
-                yield from walk_ops(op.children)
-
-    for op in walk_ops(display_list.ops):
-        op_key = id(op)
-        if isinstance(op, GeneralSpriteOp):
-            path = renderer.unity_ui_sprite_path(op.name)
-            if path is not None:
-                asset_path = _relative_asset_path(path)
-                if asset_path is None:
-                    return None
-                resource_paths[op_key] = asset_path
-                continue
-            if op.resource_policy == "required":
-                return None
-            resource_paths[op_key] = None
-        elif isinstance(op, GeneralSpriteChoiceOp):
-            selected_path = None
-            for name in op.names:
-                path = renderer.unity_ui_sprite_path(name)
-                if path is None:
-                    continue
-                selected_path = _relative_asset_path(path)
-                if selected_path is None:
-                    return None
-                break
-            resource_paths[op_key] = selected_path
-            if selected_path is None and op.fallback_text is not None:
-                text_placements[id(op.fallback_text)] = metrics.text_placement(op.fallback_text)
-        elif isinstance(op, GeneralAssetImageOp):
-            if op.fit == "cover" and op.align != (0.5, 0.5):
-                # IR Image cover is deliberately centered. A future non-centered display-list
-                # operation must decline instead of silently changing its crop.
-                return None
-            asset_status, asset_path = _existing_native_asset(op.path)
-            if asset_status == "ready":
-                resource_paths[op_key] = asset_path
-                continue
-            if asset_status == "outside":
-                return None
-            if op.resource_policy == "required":
-                return None
-            resource_paths[op_key] = None
-        elif isinstance(op, GeneralTextOp):
-            text_placements[op_key] = metrics.text_placement(op)
-
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x") or 1.0)
-    sy = float(scale.get("y") or sx or 1.0)
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+    prepared = _prepare_native_general_display_list(renderer, metrics, display_list)
+    if prepared is None:
         return None
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-
-    def emit_rounded_rect(op: GeneralRoundedRectOp) -> None:
-        left, top, right, bottom = op.rect
-        if op.round_coordinates:
-            left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
-        scene.builder.roundrect(
-            (left, top),
-            (max(0.0, right - left), max(0.0, bottom - top)),
-            op.radius,
-            fill=op.fill,
-            stroke=op.outline,
-            stroke_width=op.width,
-        )
-
-    sampling_map = {
-        "nearest": "nearest",
-        "bilinear": "linear",
-        "bicubic": "catmull_rom",
-        "lanczos": "catmull_rom",
-    }
-
-    def emit_text(op: GeneralTextOp) -> None:
-        align, baseline = text_placements[id(op)]
-        scene.builder.text(
-            op.text,
-            (float(op.pos[0]), baseline),
-            "bold",
-            float(op.size),
-            align=align,
-            baseline="alphabetic",
-            fill=op.fill,
-            font_name=_GENERAL_FONT_IR_NAME,
-        )
-
-    def emit_ops(ops) -> None:
-        for op in ops:
-            op_key = id(op)
-            if isinstance(op, GeneralSpriteOp):
-                asset_path = resource_paths[op_key]
-                if asset_path is None:
-                    if op.fallback is not None:
-                        emit_rounded_rect(op.fallback)
-                    continue
-                left, top, right, bottom = op.rect
-                pos = (round(left), round(top))
-                size = (max(1, round(right - left)), max(1, round(bottom - top)))
-                tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
-                if op.sliced_border is not None:
-                    scene.builder.sliced_image(
-                        path=asset_path,
-                        pos=pos,
-                        size=size,
-                        border=op.sliced_border,
-                        tint=tint,
-                    )
-                else:
-                    scene.builder.image(
-                        asset_path,
-                        pos,
-                        size,
-                        sampling=sampling_map[op.sampling],
-                        tint=tint,
-                    )
-                continue
-            if isinstance(op, GeneralSpriteChoiceOp):
-                asset_path = resource_paths[op_key]
-                if asset_path is None:
-                    if op.fallback_text is not None:
-                        emit_text(op.fallback_text)
-                    continue
-                left, top, right, bottom = op.rect
-                scene.builder.image(
-                    asset_path,
-                    (round(left), round(top)),
-                    (max(1, round(right - left)), max(1, round(bottom - top))),
-                    sampling=sampling_map[op.sampling],
-                    tint=image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None,
-                )
-                continue
-            if isinstance(op, GeneralRoundedRectOp):
-                emit_rounded_rect(op)
-                continue
-            if isinstance(op, GeneralAssetImageOp):
-                asset_path = resource_paths[op_key]
-                if asset_path is None:
-                    if op.fallback is not None:
-                        emit_rounded_rect(op.fallback)
-                    continue
-                left, top, right, bottom = op.rect
-                pos = (round(left), round(top))
-                size = (max(1, round(right - left)), max(1, round(bottom - top)))
-                sampling = "pillow_lanczos" if op.sampling == "lanczos" else sampling_map[op.sampling]
-                if op.clip_radius is None:
-                    scene.builder.image(
-                        asset_path,
-                        pos,
-                        size,
-                        fit=op.fit,
-                        sampling=sampling,
-                    )
-                else:
-                    # The legacy composer multiplies a discrete ImageDraw L mask into the
-                    # resized alpha. ``pillow_rrect`` reproduces that contract in Rust without
-                    # a request-local Pillow raster or ``mem:`` image.
-                    with scene.builder.group(
-                        offset=pos,
-                        size=size,
-                        clip=clip_pillow_rrect(op.clip_radius),
-                    ):
-                        scene.builder.image(
-                            asset_path,
-                            (0, 0),
-                            size,
-                            fit=op.fit,
-                            sampling=sampling,
-                        )
-                continue
-            if isinstance(op, GeneralViewportOp):
-                with scene.builder.group(
-                    offset=op.offset,
-                    size=op.viewport_size,
-                    clip={"kind": "rect"},
-                ):
-                    # Dependency preflight above deliberately walked every child, including
-                    # rows wholly outside this viewport. Replay does the same under a hard clip.
-                    emit_ops(op.children)
-                continue
-            if not isinstance(op, GeneralTextOp):
-                raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
-            emit_text(op)
-
+    transform = _native_content_transform(renderer, content)
+    if transform is None:
+        return None
+    sx, sy, angle = transform
     with scene.builder.unity_subscene(
         size=display_list.size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1334,7 +1385,7 @@ def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssem
         post_scale=(renderer.position_scale_x, renderer.position_scale_y),
         rotation=angle,
     ):
-        emit_ops(display_list.ops)
+        _emit_native_general_ops(scene, prepared, display_list.ops)
     return "native"
 
 
