@@ -113,6 +113,22 @@ class _CardDetailImages:
     special_skill_type_icon: object | None
 
 
+@dataclass(frozen=True)
+class _CardListStyles:
+    name: TextStyle
+    card_id: TextStyle
+    leak: TextStyle
+    notice_label: TextStyle
+    notice_text: TextStyle
+
+
+@dataclass(frozen=True)
+class _CardListAssets:
+    term: object | None
+    fes: object | None
+    skills: dict[str, object]
+
+
 def is_non_limited_supply_type(value: str | None) -> bool:
     return (value or "").strip() in NON_LIMITED_SUPPLY_TYPES
 
@@ -851,174 +867,190 @@ async def try_render_card_detail_payload(
     )
 
 
-async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
-    """构建卡牌列表的 widget 树。
+async def _load_card_list_thumbs(card) -> list:
+    thumbnails = card.thumbnail_info or []
+    if not thumbnails:
+        return []
+    if len(thumbnails) == 1:
+        layers = await get_card_full_thumbnail_layers(thumbnails[0])
+        return [layers] if layers is not None else []
+    normal, after = await asyncio.gather(
+        get_card_full_thumbnail_layers(thumbnails[0]),
+        get_card_full_thumbnail_layers(thumbnails[1]),
+    )
+    return [layers for layers in (normal, after) if layers is not None]
 
-    两个后端共用:Pillow 走 :func:`compose_card_list_image`(canvas.get_img),Skia 走
-    :func:`try_render_card_list_payload`(IRPainter 影子层)。取代早期为逐像素对齐手写的
-    ``card_render`` list 场景构建器。
-    """
-    _t_total = time.perf_counter()
-    cards = rqd.cards
-    region = rqd.region  # noqa: F841
-    # 如果只有一张卡，调用详情函数
 
-    async def get_card_list_thumbs(card):
-        thumbnails = card.thumbnail_info or []
-        if not thumbnails:
-            return []
-        if len(thumbnails) == 1:
-            layers = await get_card_full_thumbnail_layers(thumbnails[0])
-            return [layers] if layers is not None else []
-        normal, after = await asyncio.gather(
-            get_card_full_thumbnail_layers(thumbnails[0]),
-            get_card_full_thumbnail_layers(thumbnails[1]),
-        )
-        return [layers for layers in (normal, after) if layers is not None]
+async def _load_card_list_pairs(rqd: CardListRequest) -> tuple[list[tuple], float]:
+    started_at = time.perf_counter()
+    thumbs = await asyncio.gather(*(_load_card_list_thumbs(card) for card in rqd.cards))
+    elapsed = time.perf_counter() - started_at
+    pairs = [(card, thumb_group) for card, thumb_group in zip(rqd.cards, thumbs) if thumb_group]
+    pairs.sort(key=lambda item: (item[0].release_at, item[0].card_id), reverse=True)
+    return pairs, elapsed
 
-    _t0 = time.perf_counter()
-    thumbs = await asyncio.gather(*[get_card_list_thumbs(card) for card in rqd.cards])
-    _t_thumbs = time.perf_counter() - _t0
 
-    # 并行获取所有缩略图
-    card_and_thumbs = [(card, thumb_group) for card, thumb_group in zip(cards, thumbs) if thumb_group]
+def _card_list_styles() -> _CardListStyles:
+    return _CardListStyles(
+        name=TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0)),
+        card_id=TextStyle(font=DEFAULT_FONT, size=20, color=(0, 0, 0)),
+        leak=TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0)),
+        notice_label=TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0)),
+        notice_text=TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0)),
+    )
 
-    # 按发布时间和ID排序
-    card_and_thumbs.sort(key=lambda x: (x[0].release_at, x[0].card_id), reverse=True)
 
-    # 样式定义
-    name_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(0, 0, 0))
-    id_style = TextStyle(font=DEFAULT_FONT, size=20, color=(0, 0, 0))
-    leak_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(200, 0, 0))
-    notice_label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(166, 90, 0))
-    notice_text_style = TextStyle(font=DEFAULT_FONT, size=22, color=(98, 68, 0))
-
-    # 使用传入的背景图片，如果没有则使用默认背景。ImageBg 可将 ref 直接发给 Rust。
+async def _card_list_background(rqd: CardListRequest):
     if rqd.background_img_path:
         try:
             bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.background_img_path, on_missing="raise")
-            bg = ImageBg(bg_img)
+            return ImageBg(bg_img)
         except (FileNotFoundError, OSError, ValueError):
-            bg = SEKAI_BLUE_BG
-    else:
-        bg = SEKAI_BLUE_BG
+            pass
+    return SEKAI_BLUE_BG
 
-    skill_icon_paths = sorted(
+
+def _card_list_preload_tasks(rqd: CardListRequest, card_and_thumbs: list[tuple]) -> tuple[dict[str, object], list[str]]:
+    skill_paths = sorted(
         {
             card.skill.skill_type_icon_path
             for card, _ in card_and_thumbs
             if card.skill and card.skill.skill_type_icon_path
         }
     )
-
-    preload_tasks: dict[str, asyncio.Future] = {}
+    tasks: dict[str, object] = {}
     if rqd.term_limited_icon_path:
-        preload_tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
+        tasks["term_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.term_limited_icon_path)
     if rqd.fes_limited_icon_path:
-        preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
-    for path in skill_icon_paths:
-        preload_tasks[f"skill::{path}"] = get_asset_image_ref(ASSETS_BASE_DIR, path)
+        tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
+    for path in skill_paths:
+        tasks[f"skill::{path}"] = get_asset_image_ref(ASSETS_BASE_DIR, path)
+    return tasks, skill_paths
 
-    _t0 = time.perf_counter()
-    preloaded: dict[str, object] = {}
-    if preload_tasks:
-        preload_keys = list(preload_tasks.keys())
-        preload_results = await asyncio.gather(*preload_tasks.values(), return_exceptions=True)
-        preloaded = dict(zip(preload_keys, preload_results))
-    _t_preload = time.perf_counter() - _t0
 
-    term_img = preloaded.get("term_img")
-    if isinstance(term_img, BaseException):
-        term_img = None
-    fes_img = preloaded.get("fes_img")
-    if isinstance(fes_img, BaseException):
-        fes_img = None
-    skill_icon_cache = {
+async def _load_card_list_assets(
+    rqd: CardListRequest,
+    card_and_thumbs: list[tuple],
+) -> tuple[_CardListAssets, list[str], float]:
+    tasks, skill_paths = _card_list_preload_tasks(rqd, card_and_thumbs)
+    started_at = time.perf_counter()
+    keys = list(tasks)
+    results = await asyncio.gather(*tasks.values(), return_exceptions=True) if tasks else []
+    preloaded = dict(zip(keys, results))
+    elapsed = time.perf_counter() - started_at
+    term = preloaded.get("term_img")
+    fes = preloaded.get("fes_img")
+    skills = {
         path: img
-        for path in skill_icon_paths
+        for path in skill_paths
         if (img := preloaded.get(f"skill::{path}")) is not None and not isinstance(img, BaseException)
     }
+    return (
+        _CardListAssets(
+            term=None if isinstance(term, BaseException) else term,
+            fes=None if isinstance(fes, BaseException) else fes,
+            skills=skills,
+        ),
+        skill_paths,
+        elapsed,
+    )
+
+
+def _draw_card_list_notice(rqd: CardListRequest, styles: _CardListStyles, panel_width: int, text_width: int) -> None:
+    if not rqd.title:
+        return
+    with (
+        HSplit()
+        .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
+        .set_padding(14)
+        .set_sep(12)
+        .set_content_align("l")
+        .set_item_align("c")
+        .set_w(panel_width)
+    ):
+        TextBox("提示", styles.notice_label)
+        TextBox(rqd.title, styles.notice_text, use_real_line_count=True).set_w(text_width)
+
+
+def _draw_card_list_limited_icon(supply_name: str, assets: _CardListAssets) -> None:
+    image = None
+    if supply_name in TERM_LIMITED_SUPPLY_TYPES:
+        image = assets.term
+    elif supply_name in FES_LIMITED_SUPPLY_TYPES:
+        image = assets.fes
+    if image:
+        ImageBox(image, size=(75, None))
+
+
+def _draw_card_list_card(
+    card,
+    thumb_group: list,
+    assets: _CardListAssets,
+    styles: _CardListStyles,
+    now,
+    timezone: str,
+) -> None:
+    limited = not is_non_limited_supply_type(card.supply_type)
+    background = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True) if limited else roundrect_bg(alpha=80)
+    with Frame().set_content_align("lb").set_bg(background):
+        if datetime_from_millis(card.release_at, timezone) > now:
+            TextBox("未上线", styles.leak).set_offset((4, -4))
+        with Frame().set_content_align("rb"):
+            if card.skill and card.skill.skill_type:
+                skill_img = assets.skills.get(card.skill.skill_type_icon_path)
+                if skill_img is not None:
+                    ImageBox(skill_img, image_size_mode="fit").set_w(32).set_margin(8)
+            with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
+                grid_width = 300
+                with HSplit().set_content_align("c").set_w(grid_width).set_padding(8).set_sep(16):
+                    supply_name = card.supply_type or ""
+                    for thumb in thumb_group:
+                        with Frame().set_content_align("rt"):
+                            CardFullThumbnailBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
+                            _draw_card_list_limited_icon(supply_name, assets)
+                TextBox(card.prefix, styles.name).set_w(grid_width).set_content_align("c")
+                card_id_text = f"ID:{card.card_id}"
+                if limited:
+                    card_id_text += f"【{card.supply_type}】"
+                TextBox(card_id_text, styles.card_id).set_w(grid_width).set_content_align("c")
+
+
+def _draw_card_list_grid(
+    rqd: CardListRequest,
+    card_and_thumbs: list[tuple],
+    assets: _CardListAssets,
+    styles: _CardListStyles,
+) -> None:
+    now = request_now(rqd.timezone)
+    with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
+        for card, thumb_group in card_and_thumbs:
+            _draw_card_list_card(card, thumb_group, assets, styles, now, rqd.timezone)
+
+
+async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
+    """构建由 Pillow 与 Skia 共用的卡牌列表 widget 树。"""
+    started_at = time.perf_counter()
+    card_and_thumbs, thumbs_elapsed = await _load_card_list_pairs(rqd)
+    styles = _card_list_styles()
+    background = await _card_list_background(rqd)
+    assets, skill_paths, preload_elapsed = await _load_card_list_assets(rqd, card_and_thumbs)
 
     list_panel_width, list_notice_text_width = get_notice_dimensions(300 * 3 + 16 * 2, min_width=300 * 3 + 16 * 2)
 
-    with Canvas(bg=bg).set_padding(BG_PADDING) as canvas:
+    with Canvas(bg=background).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
-            now = request_now(rqd.timezone)
-            if rqd.title:
-                with (
-                    HSplit()
-                    .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
-                    .set_padding(14)
-                    .set_sep(12)
-                    .set_content_align("l")
-                    .set_item_align("c")
-                    .set_w(list_panel_width)
-                ):
-                    TextBox("提示", notice_label_style)
-                    TextBox(rqd.title, notice_text_style, use_real_line_count=True).set_w(list_notice_text_width)
-            # 卡牌网格
-            with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
-                for i, (card, thumb_group) in enumerate(card_and_thumbs):
-                    # 背景设置 - 确保毛玻璃效果启用
-                    if not is_non_limited_supply_type(card.supply_type):
-                        # 限定卡牌：使用淡黄色背景，确保有足够的透明度
-                        bg = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True)
-                    else:
-                        # 普通卡牌：使用默认的半透明白色背景
-                        bg = roundrect_bg(alpha=80)  # 默认已经是半透明+毛玻璃效果
-
-                    with Frame().set_content_align("lb").set_bg(bg):
-                        # 检查是否为未来卡牌
-                        release_time = datetime_from_millis(card.release_at, rqd.timezone)
-                        if release_time > now:
-                            TextBox("未上线", leak_style).set_offset((4, -4))
-
-                        # 技能图标区域
-                        with Frame().set_content_align("rb"):
-                            # 根据skill_type自动匹配技能图标
-                            if card.skill and card.skill.skill_type:
-                                skill_icon_path = card.skill.skill_type_icon_path
-                                skill_img = skill_icon_cache.get(skill_icon_path)
-                                if skill_img is not None:
-                                    ImageBox(skill_img, image_size_mode="fit").set_w(32).set_margin(8)
-
-                            # 卡牌信息区域
-                            with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
-                                GW = 300
-                                with HSplit().set_content_align("c").set_w(GW).set_padding(8).set_sep(16):
-                                    supply_name = card.supply_type or ""
-                                    for thumb in thumb_group:
-                                        with Frame().set_content_align("rt"):
-                                            CardFullThumbnailBox(
-                                                thumb, size=(100, 100), image_size_mode="fill", shadow=True
-                                            )
-                                            limited_icon_width = 75
-                                            if supply_name in TERM_LIMITED_SUPPLY_TYPES:
-                                                if term_img:
-                                                    ImageBox(term_img, size=(limited_icon_width, None))
-                                            elif supply_name in FES_LIMITED_SUPPLY_TYPES:
-                                                if fes_img:
-                                                    ImageBox(fes_img, size=(limited_icon_width, None))
-
-                                # 卡牌名称
-                                name_text = card.prefix
-                                TextBox(name_text, name_style).set_w(GW).set_content_align("c")
-
-                                # ID和限定类型
-                                id_text = f"ID:{card.card_id}"
-                                if not is_non_limited_supply_type(card.supply_type):
-                                    id_text += f"【{card.supply_type}】"
-                                TextBox(id_text, id_style).set_w(GW).set_content_align("c")
+            _draw_card_list_notice(rqd, styles, list_panel_width, list_notice_text_width)
+            _draw_card_list_grid(rqd, card_and_thumbs, assets, styles)
 
     add_request_watermark(canvas, rqd)
     _perf_logger.info(
         "card/list build: %.3fs (thumbs=%.3fs, preload=%.3fs, cards=%d, rendered=%d, skills=%d)",
-        time.perf_counter() - _t_total,
-        _t_thumbs,
-        _t_preload,
+        time.perf_counter() - started_at,
+        thumbs_elapsed,
+        preload_elapsed,
         len(rqd.cards),
         len(card_and_thumbs),
-        len(skill_icon_paths),
+        len(skill_paths),
     )
     return canvas
 
