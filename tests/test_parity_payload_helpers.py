@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.parity_payloads import gen_card, gen_custom_profile, gen_music_score, gen_profile
+from scripts.parity_payloads import gen_card, gen_custom_profile, gen_deck_event, gen_music_score, gen_profile
 from scripts.parity_payloads.common import normalize_extended_json
 from scripts.parity_payloads.gen_sk_misc_stamp import count_csb_stop_texts
 
@@ -309,3 +309,106 @@ def test_stage_honor_capture_assets_copies_missing_public_assets(
 def test_capture_region_rejects_invalid_values(region: str) -> None:
     with pytest.raises(ValueError, match="region is invalid"):
         gen_custom_profile._capture_region({"region": region})
+
+
+def test_event_rank_by_event_prefers_results_and_fills_missing_embedded_ranks() -> None:
+    suite = {
+        "userEventResults": [{"eventId": 1, "rank": 10}],
+        "userEvents": [
+            {"eventId": 1, "rank": 20},
+            {"eventId": 2, "rank": 30},
+            {"eventId": 0, "rank": 40},
+            {"eventId": 3, "rank": 0},
+        ],
+    }
+
+    assert gen_deck_event._event_rank_by_event(suite) == {1: 10, 2: 30}
+
+
+def test_regular_event_history_applies_exact_rank_over_tier_and_synthesizes_missing_rows() -> None:
+    events = {
+        event_id: {
+            "id": event_id,
+            "name": f"Event {event_id}",
+            "startAt": event_id * 100,
+            "closedAt": event_id * 100 + 50,
+            "eventType": "marathon",
+            "assetbundleName": f"event_{event_id}",
+        }
+        for event_id in (1, 2, 3)
+    }
+    suite = {"userEvents": [{"eventId": 1, "rank": 20, "eventPoint": 123}, {"eventId": 99}]}
+
+    rows = gen_deck_event._regular_event_history(
+        suite,
+        events,
+        display_by_event={1: 100, 2: 200},
+        rank_by_event={1: 10, 3: 30},
+    )
+
+    rows_by_id = {row["id"]: row for row in rows}
+    assert rows_by_id[1]["rank"] == 10
+    assert "rank_display" not in rows_by_id[1]
+    assert rows_by_id[1]["event_point"] == 123
+    assert rows_by_id[2]["rank_display"] == "T200"
+    assert rows_by_id[3]["rank"] == 30
+
+
+def test_best_world_bloom_tier_uses_smallest_matching_closed_reward_range() -> None:
+    chapter = {"eventId": 7, "gameCharacterId": 39, "chapterEndAt": 100}
+    ranges = {
+        (7, 39): [
+            {"toRank": 100, "resourceBoxId": 1},
+            {"toRank": 50, "resourceBoxId": 2},
+            {"toRank": 10, "resourceBoxId": 3},
+        ]
+    }
+
+    assert (
+        gen_deck_event._best_world_bloom_tier(
+            chapter,
+            now=100,
+            honor_ids={11, 22},
+            box_honors={1: (11,), 2: (22,), 3: (99,)},
+            chapter_ranges=ranges,
+        )
+        == 50
+    )
+    assert (
+        gen_deck_event._best_world_bloom_tier(
+            chapter,
+            now=99,
+            honor_ids={11},
+            box_honors={1: (11,)},
+            chapter_ranges=ranges,
+        )
+        == 0
+    )
+
+
+def test_card_event_bonus_combines_best_matching_deck_and_card_bonus(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeMasterData:
+        @staticmethod
+        def get(table: str) -> list[dict]:
+            return {
+                "gameCharacterUnits": [
+                    {"id": 1, "gameCharacterId": 21, "unit": "unit_a"},
+                    {"id": 2, "gameCharacterId": 21, "unit": "unit_b"},
+                ],
+                "eventDeckBonuses": [
+                    {"eventId": 7, "gameCharacterUnitId": 1, "bonusRate": 20.0},
+                    {"eventId": 7, "gameCharacterUnitId": 2, "bonusRate": 90.0},
+                    {"eventId": 7, "cardAttr": "cute", "bonusRate": 10.0},
+                    {"eventId": 7, "cardAttr": "cool", "bonusRate": 80.0},
+                    {"eventId": 8, "cardAttr": "cute", "bonusRate": 100.0},
+                ],
+                "eventCards": [{"eventId": 7, "cardId": 100, "bonusRate": 15.0}],
+            }[table]
+
+    monkeypatch.setattr(gen_deck_event, "MD", FakeMasterData())
+    gen_deck_event._gcu_by_id.cache_clear()
+
+    card = {"id": 100, "characterId": 21, "attr": "cute", "supportUnit": "unit_a"}
+    assert gen_deck_event._card_event_bonus(card, 7) == 35.0
+
+    gen_deck_event._gcu_by_id.cache_clear()
