@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import pytest
 
 from src.sekai.profile.custom_profile import renderer as renderer_mod
@@ -595,3 +595,377 @@ def test_prepare_direct_sdf_quads_runs_layout_audit_and_skips_clipped_glyphs(
     assert renderer.prepare_direct_sdf_quads({}, {}) is None
     monkeypatch.setattr(renderer, "generate_text_data", lambda _item: SimpleNamespace(text="   ", font_id=1))
     assert renderer.prepare_direct_sdf_quads({}, {}) is None
+
+
+def test_resource_paths_cover_explicit_masterdata_shape_and_stamp_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _renderer(tmp_path)
+    explicit = renderer.assets / "explicit.png"
+    explicit.write_bytes(b"explicit")
+    shape_dir = tmp_path / "shape"
+    shape_dir.mkdir()
+    shape = shape_dir / "triangle.png"
+    shape.write_bytes(b"shape")
+    renderer.shape_sprite_dir = shape_dir
+
+    monkeypatch.setattr(
+        renderer,
+        "resolve_request_asset_path",
+        lambda value: explicit if value == "explicit.png" else None,
+    )
+    assert renderer.resource_path({"imagePath": "explicit.png"}) == explicit
+    assert renderer.shape_resource_path({"resourcePath": "explicit.png"}) == explicit
+    assert renderer.resource_path({"fileName": "missing"}) is None
+    assert renderer.shape_resource_path({"fileName": "triangle"}) is None
+    assert renderer.stamp_resource_path({"assetbundleName": "stamp"}) is None
+
+    renderer.masterdata = object()
+    assert renderer.resource_path({}) is None
+    assert renderer.shape_resource_path({}) is None
+    assert renderer.shape_resource_path({"fileName": "triangle"}) == shape
+    fallback = renderer.assets / "shape" / "fallback.png"
+    fallback.parent.mkdir()
+    fallback.write_bytes(b"fallback")
+    fallback_path = renderer.shape_resource_path({"fileName": "fallback.PNG"})
+    assert fallback_path is not None
+    assert fallback_path.exists()
+    assert fallback_path.name.lower() == fallback.name
+
+    nested = renderer.assets / "nested" / "resource.png"
+    nested.parent.mkdir()
+    nested.write_bytes(b"nested")
+    assert renderer.resource_path({"fileName": "resource", "resourceLoadVal": "custom_profile/nested"}) == nested
+    assert renderer._resource_relative_dirs({"resourceLoadVal": "custom_profile"}, None) == [
+        Path("."),
+        Path("custom_profile"),
+    ]
+    assert renderer._resource_relative_dirs({"resourceLoadVal": "elsewhere"}, "fallback") == [Path("fallback")]
+    assert renderer._existing_resource_path([Path("absent")], "none.png") is None
+
+    stamp = renderer.assets / "stamp" / "stamp" / "stamp.png"
+    stamp.parent.mkdir(parents=True)
+    stamp.write_bytes(b"stamp")
+    monkeypatch.setattr(
+        renderer,
+        "region_asset_candidate_paths",
+        lambda rels: [renderer.assets / rel for rel in rels],
+    )
+    assert renderer.stamp_resource_candidates({}) == []
+    assert renderer.stamp_resource_path({"assetbundleName": "stamp"}) == stamp
+
+
+def test_native_content_build_routing_and_render_statuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    renderer = _renderer(tmp_path)
+    buckets = (
+        ("general", "generals"),
+        ("general_background", "generalBackgrounds"),
+        ("story_background", "storyBackgrounds"),
+        ("stand_member", "standMembers"),
+        ("card_member", "cardMembers"),
+        ("honor", "honors"),
+        ("bonds_honor", "bondsHonors"),
+        ("collection", "collections"),
+        ("other", "others"),
+        ("character_icon", "characterIcons"),
+        ("material", "materials"),
+        ("user_interface_icon", "userInterfaceIcons"),
+        ("stamp", "stamps"),
+        ("shape", "shapes"),
+        ("text", "texts"),
+        ("mini_chara", "miniCharas"),
+        ("screen_filter", "screenFilters"),
+    )
+    layout = {
+        key: [{"id": index, "objectData": {"layer": len(buckets) - index, "visible": True}}]
+        for index, (_kind, key) in enumerate(buckets)
+    }
+    contents = renderer.build_native_contents({"customProfileCard": layout})
+    assert [content.layer for content in contents] == sorted(content.layer for content in contents)
+    assert {content.kind for content in contents} == {kind for kind, _key in buckets}
+
+    calls: list[str] = []
+    method_by_kind = {
+        "shape": "render_shape",
+        "text": "render_text",
+        "general": "render_general_content",
+        "collection": "render_collection_content",
+        "story_background": "render_image_content",
+        "stamp": "render_stamp_content",
+        "card_member": "render_card_member_content",
+        "honor": "render_honor_content",
+        "bonds_honor": "render_bonds_honor_content",
+        "mini_chara": "render_dynamic_content",
+        "screen_filter": "render_dynamic_content",
+    }
+    for method_name in set(method_by_kind.values()):
+        monkeypatch.setattr(
+            renderer,
+            method_name,
+            lambda *args, _name=method_name: calls.append(_name) or (_name, args),
+        )
+    routed_kinds = list(method_by_kind)
+    for index, kind in enumerate(routed_kinds):
+        content = renderer_mod.NativeContent(index, kind, {"id": index}, {"visible": True})
+        assert renderer.refresh_native_content(content)[0] == method_by_kind[kind]
+    unresolved = renderer.refresh_native_content(renderer_mod.NativeContent(0, "unknown", {"id": 9}, {"visible": True}))
+    assert isinstance(unresolved, renderer_mod.NativeUnresolvedContent)
+    assert calls
+
+    visible = renderer_mod.NativeContent(1, "shape", {}, {"visible": True})
+    hidden = renderer_mod.NativeContent(0, "shape", {}, {"visible": False})
+    assert renderer.render_content_for_card(hidden).status == "hidden"
+    monkeypatch.setattr(renderer, "refresh_native_content", lambda _content: None)
+    assert renderer.render_content_for_card(visible).status == "missing"
+    monkeypatch.setattr(renderer, "refresh_native_content", lambda _content: unresolved)
+    assert renderer.render_content_for_card(visible).status == "unresolved"
+    layer = (Image.new("RGBA", (2, 2), "red"), (1.0, 1.0))
+    monkeypatch.setattr(renderer, "refresh_native_content", lambda _content: layer)
+    assert renderer.render_content_for_card(visible).status == "rendered"
+    monkeypatch.setattr(renderer, "prepare_content_layer", lambda *_: renderer_mod.PreparedLayer(layer[0], (1, 1)))
+    prepared = renderer.render_and_prepare_content_for_card(visible)
+    assert prepared.prepared is not None
+
+
+def test_general_template_geometry_sliced_sprite_and_fitted_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _renderer(tmp_path)
+    required = renderer_mod.GENERAL_TEMPLATE_UNIT1_REQUIRED_IDS
+    positions = renderer_mod.GENERAL_TEMPLATE_UNIT1_POSITIONS
+    generals = [
+        {
+            "playerInfoResourceId": resource_id,
+            "objectData": {"position": {"x": positions[resource_id][0], "y": positions[resource_id][1]}},
+        }
+        for resource_id in required
+    ]
+    assert renderer.is_official_general_template({"customProfileCard": {"generals": [None, *generals]}})
+    shifted = [*generals]
+    shifted[0] = {**shifted[0], "objectData": {"position": {"x": 999, "y": 999}}}
+    assert not renderer.is_official_general_template({"customProfileCard": {"generals": shifted}})
+    assert not renderer.is_official_general_template({})
+
+    assert renderer.rect_transform_box((100, 80), (0, 0), (1, 1), (0, 0), (-20, -10), (0.5, 0.5)) == (
+        10.0,
+        5.0,
+        90.0,
+        75.0,
+    )
+    assert renderer.center_rect((100, 80), (10, -10), (20, 10)) == (50.0, 45.0, 70.0, 55.0)
+    canvas = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    renderer.paste_in_rect(canvas, Image.new("RGBA", (2, 2), "blue"), (2.2, 3.2, 8.2, 9.2))
+    assert canvas.getbbox() is not None
+
+    sprite = Image.new("RGBA", (6, 6), (255, 0, 0, 255))
+    assert renderer.resize_sliced_sprite(sprite, (12, 10), (2, 2, 2, 2)).size == (12, 10)
+    assert renderer.resize_sliced_sprite(sprite, (3, 3), (4, 4, 4, 4)).size == (3, 3)
+    assert renderer.resize_sliced_sprite(sprite, (2, 2), (0, 0, 0, 0)).getbbox() is not None
+    tinted = renderer.tint_image(sprite, (0.5, 0.25, 1.0, 0.5))
+    assert tinted.getpixel((0, 0)) == (128, 64, 255, 128)
+
+    image = Image.new("RGBA", (120, 60), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    monkeypatch.setattr(renderer, "general_font", lambda size: ImageFont.load_default(size=max(1, size)))
+    renderer.draw_fit_text(draw, (0, 0, 120, 30), "fits", max_size=20, anchor="lm")
+    renderer.draw_fit_text(draw, (0, 30, 50, 60), "much too wide", max_size=18, min_size=18, anchor="rm")
+    renderer.draw_fit_text(draw, (50, 30, 100, 60), "middle", max_size=14, anchor="mm")
+    renderer.draw_fit_text(draw, (100, 30, 120, 60), "x", max_size=12, anchor="lt")
+    assert image.getbbox() is not None
+
+
+def test_card_and_honor_candidate_generation_covers_all_layout_variants(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _renderer(tmp_path)
+    direct = renderer.assets / "direct.png"
+    direct.write_bytes(b"direct")
+    renderer.card_assets = {1: {"smallAfterTrainingPath": "direct.png"}}
+    monkeypatch.setattr(renderer, "resolve_request_asset_path", lambda value: direct if value == "direct.png" else None)
+    assert renderer.card_asset_path_for_state(1, True, "small") == direct
+    assert renderer.card_member_image_candidates({"id": 1, "type": 2, "useAfterSpecialTraining": True}) == [direct]
+    assert renderer.card_asset_path_for_state(2, False) is None
+    assert renderer.card_image_path_for_state(2, False) is None
+    assert renderer.card_member_image_candidates({"id": 2}) == []
+
+    renderer.masterdata = object()
+    renderer.cards = {2: {"assetbundleName": "bundle"}}
+    monkeypatch.setattr(renderer, "region_asset_candidate_paths", lambda rels: [renderer.assets / rel for rel in rels])
+    monkeypatch.setattr(renderer, "first_region_asset", lambda rels: renderer.assets / rels[-1] if rels else None)
+    for kind in ("deck", "clip", "small", "full"):
+        assert renderer.card_image_path_for_state(2, kind != "full", kind) is not None
+    for member_type in (0, 1, 2):
+        candidates = renderer.card_member_image_candidates(
+            {"id": 2, "type": member_type, "useAfterSpecialTraining": member_type != 0}
+        )
+        assert candidates
+    renderer.cards = {3: {}}
+    assert renderer.card_image_path_for_state(3, False) is None
+    assert renderer.card_member_image_candidates({"id": 3}) == []
+
+    assert renderer.honor_candidate_paths(None, {}, True) == []
+    monkeypatch.setattr(renderer, "derive_honor_background_asset_name", lambda _name: "derived")
+    honor = {"assetbundleName": "asset", "honorRarity": "highest"}
+    group = {
+        "backgroundAssetbundleName": "background",
+        "honorType": "rank_match",
+        "frameName": "event_frame",
+    }
+    main_paths = renderer.honor_candidate_paths(honor, group, True)
+    sub_paths = renderer.honor_candidate_paths(honor, group, False)
+    assert any("rank_live" in path.parts for path in main_paths)
+    assert any("frame_degree_m_4" in path.name for path in main_paths)
+    assert any("frame_degree_s_4" in path.name for path in sub_paths)
+    assert [renderer.honor_rarity_rank(value) for value in ("middle", "high", "highest", "low")] == [2, 3, 4, 1]
+
+
+def test_tmp_layout_modes_shader_padding_dynamic_source_and_run_positions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    renderer = _renderer(tmp_path)
+    renderer.tmp_font_scale = 2.0
+    renderer.tmp_line_height_factor = 1.5
+    library = SimpleNamespace(line_height=lambda *_args: 42.0)
+    renderer.tmp_font_library = library
+    for mode in ("base", "base-glyph", "style-only", "asset-face", "asset-face-scale", "face", "face-scale", "other"):
+        renderer.tmp_line_mode = mode
+        assert renderer.tmp_line_height(10.0, 8.0, "font") >= 1.0
+    library.line_height = lambda *_args: None
+    renderer.tmp_line_mode = "asset-face"
+    assert renderer.tmp_line_height(10.0, 8.0, "font") == 54.0
+    assert renderer.tmp_explicit_line_height(-1.0) == 0.0
+    renderer.tmp_line_mode = "face"
+    assert renderer.tmp_explicit_line_height(3.0) == 3.0
+
+    renderer.tmp_preferred_padding_x = 2.0
+    renderer.tmp_preferred_padding_y = 3.0
+    renderer.tmp_box_width = 50.0
+    renderer.tmp_box_width_factor = 1.5
+    sizes = {}
+    for mode in ("preferred", "prefab", "fixed", "content", "size-full", "other"):
+        renderer.tmp_box_mode = mode
+        sizes[mode] = renderer.tmp_text_box_size(20.0, 30.0, 10.0)
+    assert sizes["preferred"] == (32.0, 13.0)
+    assert sizes["fixed"] == (50.0, 10.0)
+    assert sizes["content"] == (30.0, 10.0)
+    assert all(width >= 1 and height >= 1 for width, height in sizes.values())
+
+    asset = SimpleNamespace(
+        gradient_scale=8.0,
+        face_dilate=0.2,
+        outline_width=0.3,
+        outline_softness=0.1,
+        weight_normal=0.0,
+        weight_bold=0.75,
+        underlay_offset_x=-0.4,
+        underlay_offset_y=0.6,
+        underlay_softness=0.2,
+        glow_offset=0.2,
+        glow_outer=0.4,
+        sharpness=0.0,
+        scale_ratio_a=0.9,
+        scale_ratio_b=0.8,
+        scale_ratio_c=0.7,
+    )
+    assert renderer.tmp_shader_ratios(asset, 0.1, has_ratios_keyword=True) == (0.9, 0.8, 0.7)
+    assert renderer.tmp_shader_padding(None, 0.0, has_underlay=False) > 0
+    assert renderer.tmp_shader_padding(asset, 0.2, enable_extra_padding=True, has_glow=True) > 0
+
+    active = SimpleNamespace(point_size=24.0, name="active")
+    fallback = SimpleNamespace(point_size=30.0, name="fallback")
+    font_path = tmp_path / "font.ttf"
+    candidates = [fallback]
+    runtime_paths = {id(active): font_path, id(fallback): font_path}
+    renderer.tmp_sdf_asset = lambda _name: active
+    renderer.tmp_font_library = SimpleNamespace(
+        metric_asset_candidates=lambda *_args, **_kwargs: candidates,
+        runtime_source_font_path=lambda candidate: runtime_paths.get(id(candidate)),
+        _source_glyph_metrics_for_asset=lambda candidate, ch, size: object() if candidate is fallback else None,
+    )
+    assert renderer.tmp_dynamic_glyph_source("font", "") is None
+    assert renderer.tmp_dynamic_glyph_source("font", " ") is None
+    assert renderer.tmp_dynamic_glyph_source("font", "AB") == (fallback, font_path, 30.0, "A")
+    renderer.tmp_font_library.runtime_source_font_path = lambda _candidate: None
+    assert renderer.tmp_dynamic_glyph_source("font", "A") is None
+
+    class FakeFont:
+        def getmetrics(self):
+            return 12, 4
+
+        def getbbox(self, _text: str, anchor: str | None = None):
+            return (-2, -3, 8, 7) if anchor == "mm" else (0, 0, 8, 10)
+
+    font = FakeFont()
+    style = _style(voffset=2.0)
+    monkeypatch.setattr(renderer, "tmp_native_baseline_offset", lambda current_style: current_style.voffset)
+    assert renderer.run_y_from_baseline(20, style, font, -3, 2) == 1.0
+    positions = []
+    for mode in ("font-metrics", "pil-mm", "font-ascent", "anchor-middle", "default"):
+        renderer.text_vertical_mode = mode
+        positions.append(renderer.run_y(10, 20, 8, style, font, -3, 2))
+    assert len(set(positions)) >= 3
+    renderer.text_vertical_mode = "font-metrics"
+    assert renderer.run_y(10, 20, 8, style, None, -3, 2) == 14.0
+
+
+def test_tmp_native_mesh_bounds_expand_only_for_visible_characters(tmp_path: Path) -> None:
+    renderer = _renderer(tmp_path)
+    style = _style()
+    metrics = renderer_mod.TMPGlyphMetrics(1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0)
+
+    def char(index: int, visible: bool, xs: tuple[float, float], ys: tuple[float, float]):
+        return renderer_mod.TMPNativeCharacterInfo(
+            index=index,
+            char="A",
+            line_index=0,
+            x_origin=0,
+            x_advance=1,
+            glyph_origin_x=0,
+            bottom_left_x=xs[0],
+            bottom_left_y=ys[0],
+            top_left_x=xs[0],
+            top_left_y=ys[1],
+            top_right_x=xs[1],
+            top_right_y=ys[1],
+            bottom_right_x=xs[1],
+            bottom_right_y=ys[0],
+            vertex_padding=0,
+            raw_left_x=xs[0],
+            raw_right_x=xs[1],
+            raw_top_y=ys[1],
+            raw_bottom_y=ys[0],
+            baseline=0,
+            ascender=ys[1],
+            descender=ys[0],
+            adjusted_ascender=ys[1],
+            adjusted_descender=ys[0],
+            visible=visible,
+            style=style,
+            metrics=metrics,
+            sdf_scale=1,
+        )
+
+    line = renderer_mod.TMPNativeLineInfo(0, StyledLine([], style), [], 0, 0, 1, 0, 1, -1, 2, 10, 10, 0, 10, 0)
+    layout = renderer_mod.TMPNativeTextLayout(
+        "tmp",
+        [line],
+        [char(0, False, (-100, 100), (-100, 100)), char(1, True, (-5, 15), (-4, 12))],
+        10,
+        10,
+        10,
+        1,
+        -1,
+        10,
+        20,
+        1,
+        1,
+        0,
+        0,
+        0,
+    )
+    assert renderer.tmp_native_mesh_pixel_bounds(layout, None, "left", 10, 10) == (0.0, 0.0, 10, 10)
+    assert renderer.tmp_native_mesh_pixel_bounds(layout, [8], "center", 20, 10) == (0.0, -4, 20, 12)
