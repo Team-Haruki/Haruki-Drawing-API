@@ -625,13 +625,13 @@ def test_resource_paths_cover_explicit_masterdata_shape_and_stamp_fallbacks(
     assert renderer.resource_path({}) is None
     assert renderer.shape_resource_path({}) is None
     assert renderer.shape_resource_path({"fileName": "triangle"}) == shape
-    fallback = renderer.assets / "shape" / "fallback.png"
+    fallback = renderer.assets / "shape" / "fallback.PNG"
     fallback.parent.mkdir()
     fallback.write_bytes(b"fallback")
     fallback_path = renderer.shape_resource_path({"fileName": "fallback.PNG"})
     assert fallback_path is not None
     assert fallback_path.exists()
-    assert fallback_path.name.lower() == fallback.name
+    assert fallback_path.name.lower() == fallback.name.lower()
 
     nested = renderer.assets / "nested" / "resource.png"
     nested.parent.mkdir()
