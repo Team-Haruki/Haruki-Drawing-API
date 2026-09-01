@@ -148,11 +148,7 @@ def _skip_empty_override(base: dict, key: str, value: Any) -> bool:
     return isinstance(value, list) and not value
 
 
-@cache
-def _merged() -> dict:
-    """mergeMySekaiData (snapshot/local_helpers.go:17-148), suite + mysekai."""
-    base = dict(common.load_suite())
-    mysekai = common.load_mysekai()
+def _merge_updated_resources(base: dict, mysekai: dict) -> set[str]:
     updated_keys: set[str] = set()
     for key, value in (mysekai.get("updatedResources") or {}).items():
         if _preserve_suite_key(key):
@@ -161,6 +157,10 @@ def _merged() -> dict:
         if _skip_empty_override(base, key, value):
             continue
         base[key] = value
+    return updated_keys
+
+
+def _merge_mysekai_fields(base: dict, mysekai: dict, updated_keys: set[str]) -> None:
     for key, value in mysekai.items():
         if key == "updatedResources" or _preserve_suite_key(key):
             continue
@@ -172,6 +172,15 @@ def _merged() -> dict:
         if key.startswith(("userMysekai", "mysekai")) and key in base and not _is_empty_value(base[key]):
             continue
         base[key] = value
+
+
+@cache
+def _merged() -> dict:
+    """mergeMySekaiData (snapshot/local_helpers.go:17-148), suite + mysekai."""
+    base = dict(common.load_suite())
+    mysekai = common.load_mysekai()
+    updated_keys = _merge_updated_resources(base, mysekai)
+    _merge_mysekai_fields(base, mysekai, updated_keys)
     return base
 
 
@@ -536,6 +545,28 @@ def _gate_icon_path(gate_id: int, gate_skin_id: int) -> str:
     return ASSETS.static(f"mysekai/gate_icon/gate_{gate_id}.png")
 
 
+def _visit_character_item(entry: dict, groups: dict[int, dict], units: dict[int, dict], seen: set[int]) -> dict | None:
+    group = groups.get(int(entry.get("mysekaiGameCharacterUnitGroupId", 0)))
+    if not group or int(group.get("gameCharacterUnitId2", 0)) != 0:
+        return None
+    unit_id = int(group.get("gameCharacterUnitId1", 0))
+    if not unit_id or unit_id in seen:
+        return None
+    seen.add(unit_id)
+    is_reservation = bool(entry.get("isReservation"))
+    item: dict[str, Any] = {
+        "sd_image_path": ASSETS.region_asset(f"character/character_sd_l/chr_sp_{unit_id}.png"),
+        "is_read": False,
+        "is_reservation": is_reservation,
+    }
+    char_id = int((units.get(unit_id) or {}).get("gameCharacterId", 0))
+    if char_id > 0:
+        item["memoria_image_path"] = ASSETS.region_asset(f"mysekai/item_preview/material/item_memoria_{char_id}.png")
+    if is_reservation:
+        item["reservation_icon_path"] = ASSETS.static("mysekai/invitationcard.png")
+    return item
+
+
 def _visit_characters(merged: dict) -> list[dict]:
     """extractVisitCharacters (controller_resources.go:90-146)."""
     visit = merged.get("userMysekaiGateCharacterVisit")
@@ -546,37 +577,15 @@ def _visit_characters(merged: dict) -> list[dict]:
     result: list[dict] = []
     seen: set[int] = set()
     for entry in visit.get("userMysekaiGateCharacters") or []:
-        group = groups.get(int(entry.get("mysekaiGameCharacterUnitGroupId", 0)))
-        if not group or int(group.get("gameCharacterUnitId2", 0)) != 0:
-            continue
-        unit_id = int(group.get("gameCharacterUnitId1", 0))
-        if not unit_id or unit_id in seen:
-            continue
-        seen.add(unit_id)
-        is_reservation = bool(entry.get("isReservation"))
-        item: dict[str, Any] = {
-            "sd_image_path": ASSETS.region_asset(f"character/character_sd_l/chr_sp_{unit_id}.png"),
-            "is_read": False,
-            "is_reservation": is_reservation,
-        }
-        char_id = int((units.get(unit_id) or {}).get("gameCharacterId", 0))
-        if char_id > 0:
-            item["memoria_image_path"] = ASSETS.region_asset(
-                f"mysekai/item_preview/material/item_memoria_{char_id}.png"
-            )
-        if is_reservation:
-            item["reservation_icon_path"] = ASSETS.static("mysekai/invitationcard.png")
-        result.append(item)
+        item = _visit_character_item(entry, groups, units, seen)
+        if item is not None:
+            result.append(item)
         if len(result) >= 6:
             break
     return result
 
 
-def _site_resource_numbers(merged: dict) -> list[dict]:
-    """extractSiteResourceNumbers (controller_resources.go:148-230)."""
-    harvest_maps = _nested_list(merged, "userMysekaiHarvestMaps")
-    if not harvest_maps:
-        return []
+def _resource_counts_by_site(harvest_maps: list[dict]) -> dict[int, dict[str, int]]:
     counts: dict[int, dict[str, int]] = {5: {}, 7: {}, 6: {}, 8: {}}
     for site_map in harvest_maps:
         site_id = int(site_map.get("mysekaiSiteId", 0))
@@ -587,33 +596,44 @@ def _site_resource_numbers(merged: dict) -> list[dict]:
                 continue
             key = f"{resource_type}_{resource_id}"
             counts[site_id][key] = counts[site_id].get(key, 0) + quantity
+    return counts
 
+
+def _site_resource_entries(res_map: dict[str, int]) -> list[dict]:
+    keys = sorted(res_map, key=lambda key: (-_resource_sort_score(key, res_map[key]), key))
+    resources: list[dict] = []
+    for key in keys:
+        image_path, has_record = _resource_image_path(key)
+        if not image_path:
+            continue
+        entry: dict[str, Any] = {
+            "image_path": image_path,
+            "number": res_map[key],
+            "text_color": _resource_text_color(key),
+            "has_music_record": has_record,
+        }
+        if has_record:
+            entry["music_record_icon_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
+        resources.append(entry)
+    return resources
+
+
+def _site_resource_numbers(merged: dict) -> list[dict]:
+    """extractSiteResourceNumbers (controller_resources.go:148-230)."""
+    harvest_maps = _nested_list(merged, "userMysekaiHarvestMaps")
+    if not harvest_maps:
+        return []
+    counts = _resource_counts_by_site(harvest_maps)
     result: list[dict] = []
     for site_id in (5, 7, 6, 8):
-        res_map = counts.get(site_id, {})
-        keys = sorted(res_map, key=lambda k: (-_resource_sort_score(k, res_map[k]), k))
-        resources: list[dict] = []
-        for key in keys:
-            image_path, has_record = _resource_image_path(key)
-            if not image_path:
-                continue
-            entry: dict[str, Any] = {
-                "image_path": image_path,
-                "number": res_map[key],
-                "text_color": _resource_text_color(key),
-                "has_music_record": has_record,
-            }
-            if has_record:
-                entry["music_record_icon_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
-            resources.append(entry)
-        if not resources:
-            continue
-        result.append(
-            {
-                "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
-                "resource_numbers": resources,
-            }
-        )
+        resources = _site_resource_entries(counts.get(site_id, {}))
+        if resources:
+            result.append(
+                {
+                    "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
+                    "resource_numbers": resources,
+                }
+            )
     return result
 
 
@@ -683,100 +703,111 @@ _SITE_CONFIGS: dict[int, dict[str, Any]] = {
 }
 
 
-def _birthday_refresh_icon_path(char_row: dict) -> str:
-    """resolveMysekaiBirthdayRefreshIconPath (controller_resources.go:341-405).
+def _birthday_refresh_candidates(base_dir: Path, name: str) -> list[tuple[int, str]]:
+    if not base_dir.is_dir():
+        return []
+    candidates = []
+    for entry in base_dir.iterdir():
+        if not entry.is_dir() or not entry.name.startswith(f"{name}_"):
+            continue
+        if not (entry / "icon_refresh.png").exists():
+            continue
+        try:
+            candidates.append((int(entry.name.removeprefix(f"{name}_")), entry.name))
+        except ValueError:
+            continue
+    return candidates
 
-    Scans the local asset tree for mysekai/birthday/{name}_{year}/icon_refresh.png,
-    preferring the current year, then the most recent past year, then the nearest
-    future year. Returns "" when nothing is synced locally (Go behaves the same).
-    """
+
+def _select_birthday_refresh(candidates: list[tuple[int, str]], current_year: int) -> str:
+    exact = next((entry for year, entry in candidates if year == current_year), "")
+    if exact:
+        return exact
+    past = [(year, entry) for year, entry in candidates if year < current_year]
+    if past:
+        return max(past)[1]
+    future = [(year, entry) for year, entry in candidates if year > current_year]
+    return min(future)[1] if future else ""
+
+
+def _birthday_refresh_icon_path(char_row: dict) -> str:
+    """resolveMysekaiBirthdayRefreshIconPath (controller_resources.go:341-405)."""
     name = (char_row.get("givenNameEnglish") or "").strip().lower()
     if not name:
         return ""
     current_year = datetime.now(JP_TZ).year
     base_dir = ASSETS.data_dir / "asset" / f"{common.REGION}-assets" / "ondemand" / "mysekai" / "birthday"
-    choose, choose_year, choose_future = "", 0, False
-    if base_dir.is_dir():
-        for entry in base_dir.iterdir():
-            if not entry.is_dir() or not entry.name.startswith(f"{name}_"):
-                continue
-            if not (entry / "icon_refresh.png").exists():
-                continue
-            try:
-                year = int(entry.name.removeprefix(f"{name}_"))
-            except ValueError:
-                continue
-            if year == current_year:
-                return ASSETS.region_asset(f"mysekai/birthday/{entry.name}/icon_refresh.png")
-            is_future = year > current_year
-            if (
-                not choose
-                or (not is_future and choose_future)
-                or (not is_future and not choose_future and year > choose_year)
-                or (is_future and choose_future and year < choose_year)
-            ):
-                choose, choose_year, choose_future = entry.name, year, is_future
-    if not choose:
+    chosen = _select_birthday_refresh(_birthday_refresh_candidates(base_dir, name), current_year)
+    if not chosen:
         # Construction-time dependency: record for the rsync manifest.
         ASSETS.candidates.add(
             f"asset/{common.REGION}-assets/ondemand/mysekai/birthday/{name}_{current_year}/icon_refresh.png"
         )
         return ""
-    return ASSETS.region_asset(f"mysekai/birthday/{choose}/icon_refresh.png")
+    return ASSETS.region_asset(f"mysekai/birthday/{chosen}/icon_refresh.png")
+
+
+def _birthday_harvest_image(
+    image_rel: str, x: float, z: float, birthday_char_by_pos: dict[str, int], characters: dict[int, dict]
+) -> str:
+    char_id = birthday_char_by_pos.get(_pos_key(x, z), 0)
+    if char_id <= 0:
+        return image_rel
+    return _birthday_refresh_icon_path(characters.get(char_id) or {}) or image_rel
+
+
+def _map_harvest_point(
+    point: dict,
+    harvest_fixtures: dict[int, dict],
+    birthday_char_by_pos: dict[str, int],
+    characters: dict[int, dict],
+) -> dict | None:
+    fixture_id = int(point.get("mysekaiSiteHarvestFixtureId", 0))
+    meta = harvest_fixtures.get(fixture_id) or {}
+    rarity_type = meta.get("mysekaiSiteHarvestFixtureRarityType", "")
+    asset_name = meta.get("assetbundleName", "")
+    fixture_type = meta.get("mysekaiSiteHarvestFixtureType", "")
+    if not rarity_type or not asset_name or fixture_type == "tone_gust" or "tone_gust" in asset_name.lower():
+        return None
+    x = float(point.get("positionX", point.get("position_x", 0)) or 0)
+    z = float(point.get("positionZ", point.get("position_z", 0)) or 0)
+    image_rel = f"mysekai/harvest_fixture_icon/{rarity_type}/{asset_name}.png"
+    extra: dict[str, Any] = {}
+    offset_x, offset_z = 0.0, -48.0
+    if fixture_type == "birthday_plant":
+        image_rel = _birthday_harvest_image(image_rel, x, z, birthday_char_by_pos, characters)
+        extra = {
+            "fallback_image_path": ASSETS.static(
+                "mysekai/harvest_fixture_icon/rarity_1/mdl_site_wood_common_fieldtree01.png"
+            ),
+            "size": 50,
+        }
+        offset_x, offset_z = 7.5, 0.0
+    result: dict[str, Any] = {
+        "image_path": image_rel if image_rel.startswith("asset/") else ASSETS.static(image_rel),
+        "position_x": x,
+        "position_z": z,
+        "status": point.get("userMysekaiSiteHarvestFixtureStatus")
+        or point.get("mysekaiSiteHarvestFixtureStatus")
+        or "spawned",
+        "offset_x": offset_x,
+        "offset_z": offset_z,
+        **extra,
+    }
+    if fixture_id > 0:
+        result["id"] = fixture_id
+    return result
 
 
 def _map_harvest_points(site_map: dict, birthday_char_by_pos: dict[str, int]) -> list[dict]:
     """map_builder.go:113-183."""
     harvest_fixtures = _md_map("mysekaiSiteHarvestFixtures")
     characters = _md_map("gameCharacters")
-    points: list[dict] = []
-    for point in site_map.get("userMysekaiSiteHarvestFixtures") or []:
-        fixture_id = int(point.get("mysekaiSiteHarvestFixtureId", 0))
-        meta = harvest_fixtures.get(fixture_id) or {}
-        rarity_type = meta.get("mysekaiSiteHarvestFixtureRarityType", "")
-        ab = meta.get("assetbundleName", "")
-        fixture_type = meta.get("mysekaiSiteHarvestFixtureType", "")
-        if not rarity_type or not ab:
-            continue
-        if fixture_type == "tone_gust" or "tone_gust" in ab.lower():
-            continue
-        status = (
-            point.get("userMysekaiSiteHarvestFixtureStatus")
-            or point.get("mysekaiSiteHarvestFixtureStatus")
-            or "spawned"
-        )
-        x = float(point.get("positionX", point.get("position_x", 0)) or 0)
-        z = float(point.get("positionZ", point.get("position_z", 0)) or 0)
-
-        image_rel = f"mysekai/harvest_fixture_icon/{rarity_type}/{ab}.png"
-        entry: dict[str, Any] = {}
-        offset_x, offset_z = 0.0, -48.0
-        if fixture_type == "birthday_plant":
-            entry["fallback_image_path"] = ASSETS.static(
-                "mysekai/harvest_fixture_icon/rarity_1/mdl_site_wood_common_fieldtree01.png"
-            )
-            char_id = birthday_char_by_pos.get(_pos_key(x, z), 0)
-            if char_id > 0:
-                birthday_path = _birthday_refresh_icon_path(characters.get(char_id) or {})
-                if birthday_path:
-                    image_rel = birthday_path
-            entry["size"] = 50
-            offset_x, offset_z = 7.5, 0.0
-
-        image_path = image_rel if image_rel.startswith("asset/") else ASSETS.static(image_rel)
-        point_out: dict[str, Any] = {
-            "image_path": image_path,
-            "position_x": x,
-            "position_z": z,
-            "status": status,
-            "offset_x": offset_x,
-            "offset_z": offset_z,
-        }
-        if fixture_id > 0:
-            point_out["id"] = fixture_id
-        point_out.update(entry)
-        points.append(point_out)
-    return points
+    points = (
+        _map_harvest_point(point, harvest_fixtures, birthday_char_by_pos, characters)
+        for point in site_map.get("userMysekaiSiteHarvestFixtures") or []
+    )
+    return [point for point in points if point is not None]
 
 
 def _map_resource_drops(raw_drops: list) -> list[dict]:
