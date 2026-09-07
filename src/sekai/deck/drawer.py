@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -14,7 +18,7 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import WHITE
+from src.sekai.base.paint_types import WHITE
 from src.sekai.base.plot import (
     FillBg,
     Frame,

@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
-from functools import partial
 import logging
 import re
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw, ImageFilter
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -17,26 +20,30 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.image_info import probe_alpha_bounds
+from src.sekai.base.paint_types import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font_desc
 from src.sekai.base.plot import (
+    AlphaTrimImageBox,
+    CanvasImageBox,
     Flow,
     Frame,
     Grid,
     HSplit,
     ImageBg,
     ImageBox,
+    PreResizedImageBox,
     RoundRectBg,
     Spacer,
     TextStyle,
     VSplit,
     Widget,
 )
+from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
     ImageSource,
     get_asset_image_ref,
-    get_img_from_path,
-    get_img_resized,
     get_str_display_length,
     run_in_pool,
 )
@@ -382,7 +389,7 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
     return title, sections
 
 
-def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
+def _build_command_help_panel(rqd: CommandHelpRenderRequest) -> Canvas:
     title, sections = _layout_command_help_markdown(rqd.markdown)
     title = (rqd.title or title or "指令帮助").strip()
     if not sections:
@@ -404,94 +411,109 @@ def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Ima
         height += section_h + section_gap
     height = max(360, height + _HELP_CARD_MARGIN - section_gap)
 
-    img = Image.new("RGBA", (_HELP_IMAGE_WIDTH, height), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img, "RGBA")
+    panel = Canvas(w=_HELP_IMAGE_WIDTH, h=height).set_padding(0)
 
-    def draw_glass_box(box: tuple[int, int, int, int], radius: int, fill_alpha: int = 112) -> None:
-        shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
-        shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-        shadow_draw.rounded_rectangle(
-            (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
-            radius=radius,
-            fill=(72, 96, 128, 30),
+    def draw(_widget, painter):
+        def draw_roundrect(box, radius, fill, outline=None, width=1):
+            painter.roundrect_src(
+                (box[0], box[1]),
+                (box[2] - box[0] + 1, box[3] - box[1] + 1),
+                fill,
+                radius,
+                stroke=outline,
+                stroke_width=width,
+            )
+
+        def draw_glass_box(box, radius, fill_alpha=112):
+            painter.drop_shadow_roundrect(
+                (box[0], box[1]),
+                (box[2] - box[0] + 1, box[3] - box[1] + 1),
+                radius,
+                (72, 96, 128, 30),
+                sigma=10,
+                offset=(4, 6),
+            )
+            draw_roundrect(box, radius, (255, 255, 255, fill_alpha), (255, 255, 255, 150), 2)
+
+        def draw_text(pos, text, font, fill):
+            painter.text(
+                text, (pos[0], ascender_top_to_painter_y(font.path, font.size, pos[1])), font, fill, mask_lerp=True
+            )
+
+        def draw_line(box, fill, width):
+            painter.roundrect_src((box[0], box[1]), (box[2] - box[0] + 1, width), fill, 0)
+
+        title_box = (
+            _HELP_CARD_MARGIN,
+            _HELP_CARD_MARGIN,
+            _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN,
+            _HELP_CARD_MARGIN + title_h,
         )
-        img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
-        draw.rounded_rectangle(
-            box,
-            radius=radius,
-            fill=(255, 255, 255, fill_alpha),
-            outline=(255, 255, 255, 150),
-            width=2,
-        )
-
-    title_box = (
-        _HELP_CARD_MARGIN,
-        _HELP_CARD_MARGIN,
-        _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN,
-        _HELP_CARD_MARGIN + title_h,
-    )
-    draw_glass_box(title_box, 22, 118)
-    draw.text(
-        (_HELP_CARD_MARGIN + 30, _HELP_CARD_MARGIN + 24),
-        title,
-        font=get_font(DEFAULT_HEAVY_FONT, 34),
-        fill=(24, 38, 58, 255),
-    )
-
-    y = title_box[3] + section_gap
-    for section, (_, section_h) in zip(sections, section_sizes, strict=True):
-        section_box = (_HELP_CARD_MARGIN, y, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, y + section_h)
-        draw_glass_box(section_box, 18, 102)
-        header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
-        draw.text(
-            (header_box[0], header_box[1]),
-            section.title,
-            font=get_font(DEFAULT_BOLD_FONT, 24),
+        draw_glass_box(title_box, 22, 118)
+        draw_text(
+            (_HELP_CARD_MARGIN + 30, _HELP_CARD_MARGIN + 24),
+            title,
+            font=get_font_desc(DEFAULT_HEAVY_FONT, 34),
             fill=(24, 38, 58, 255),
         )
-        draw.line(
-            (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
-            fill=(255, 255, 255, 86),
-            width=2,
-        )
 
-        text_y = section_box[1] + section_pad_y + 48
-        text_x = section_box[0] + section_pad_x
-        text_right = section_box[2] - section_pad_x
-        for line in section.lines:
-            text_y += line.gap_before
-            line_height = _command_help_line_height(line.size)
-            if line.bg is not None:
-                bg_box = (
-                    text_x + line.indent - 14,
-                    text_y - 4,
-                    text_right + 8,
-                    text_y + line_height - 1,
-                )
-                draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
-            if line.text:
-                font = get_font(line.font_name, line.size)
-                if line.label:
-                    draw.text(
-                        (text_x + line.indent, text_y),
-                        line.label,
-                        font=get_font(DEFAULT_BOLD_FONT, line.size),
-                        fill=(30, 45, 66, 255),
+        y = title_box[3] + section_gap
+        for section, (_, section_h) in zip(sections, section_sizes, strict=True):
+            section_box = (_HELP_CARD_MARGIN, y, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, y + section_h)
+            draw_glass_box(section_box, 18, 102)
+            header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
+            draw_text(
+                (header_box[0], header_box[1]),
+                section.title,
+                font=get_font_desc(DEFAULT_BOLD_FONT, 24),
+                fill=(24, 38, 58, 255),
+            )
+            draw_line(
+                (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
+                fill=(255, 255, 255, 86),
+                width=2,
+            )
+
+            text_y = section_box[1] + section_pad_y + 48
+            text_x = section_box[0] + section_pad_x
+            text_right = section_box[2] - section_pad_x
+            for line in section.lines:
+                text_y += line.gap_before
+                line_height = _command_help_line_height(line.size)
+                if line.bg is not None:
+                    bg_box = (
+                        text_x + line.indent - 14,
+                        text_y - 4,
+                        text_right + 8,
+                        text_y + line_height - 1,
                     )
-                text_offset = line.label_width if line.label_width > 0 else 0
-                draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
-            text_y += line_height
-        y += section_h + section_gap
+                    draw_roundrect(bg_box, radius=10, fill=line.bg)
+                if line.text:
+                    font = get_font_desc(line.font_name, line.size)
+                    if line.label:
+                        draw_text(
+                            (text_x + line.indent, text_y),
+                            line.label,
+                            font=get_font_desc(DEFAULT_BOLD_FONT, line.size),
+                            fill=(30, 45, 66, 255),
+                        )
+                    text_offset = line.label_width if line.label_width > 0 else 0
+                    draw_text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
+                text_y += line_height
+            y += section_h + section_gap
 
-    return img
+    panel.add_draw_func(draw)
+    return panel
+
+
+def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
+    return _build_command_help_panel(rqd).get_img_sync()
 
 
 async def _build_command_help_canvas(rqd: CommandHelpRenderRequest) -> Canvas:
-    panel = await run_in_pool(partial(_compose_command_help_image_sync, rqd))
+    panel = await run_in_pool(_build_command_help_panel, rqd)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        Frame().set_size(panel.size).add_draw_func(
-            lambda _widget, painter: painter.paste_with_alpha_blend(panel, (0, 0), exclude_on_hash=True)
-        )
+        CanvasImageBox(panel, use_alpha_blend=True)
     add_request_watermark(canvas, rqd)
     return canvas
 
@@ -502,7 +524,7 @@ async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Ima
 
 
 async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> EncodedImagePayload | None:
-    """Skia 路径：帮助面板位图经 mem 图传输,外壳走 IRPainter;不可用时返回 None 回退 Pillow。"""
+    """Render the shared help panel subtree natively; retain the normal fail-open path."""
     if not skia_plot_enabled():
         return None
     canvas = await _build_command_help_canvas(rqd)
@@ -548,37 +570,21 @@ def _resolve_alias_trim_path(rqd: AliasListRequest) -> str | None:
     return None
 
 
-def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
-    img = img.convert("RGBA")
-    bbox = img.getbbox()
-    if bbox:
-        img = img.crop(bbox)
-    alpha_floor = _ALIAS_TRIM_ALPHA_FLOOR
-    alpha = img.getchannel("A").point(
-        lambda v: 0 if v <= alpha_floor else min(255, int((v - alpha_floor) * 255 / (255 - alpha_floor)))
-    )
-    img.putalpha(alpha)
-    return img
+def _prepare_alias_trim_image(img: ImageSource) -> AlphaTrimImageBox:
+    bounds = probe_alpha_bounds(img) or (0, 0, img.width, img.height)
+    return AlphaTrimImageBox(img, bounds, _ALIAS_TRIM_ALPHA_FLOOR, use_alpha_blend=True)
 
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, Image.Image], float]:
+) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, ImageSource], float]:
     tasks = [
         # ImageBg keeps this lazy through the Skia path; Pillow resolves it during replay.
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
         *[get_asset_image_ref(ASSETS_BASE_DIR, card.thumbnail_path) for card in rqd.cards],
-        *[
-            get_img_resized(
-                ASSETS_BASE_DIR,
-                chara.icon_path,
-                _BIRTHDAY_CALENDAR_ICON_SIZE,
-                _BIRTHDAY_CALENDAR_ICON_SIZE,
-            )
-            for chara in rqd.all_characters
-        ],
+        *[get_asset_image_ref(ASSETS_BASE_DIR, chara.icon_path) for chara in rqd.all_characters],
     ]
     started = time.perf_counter()
     results = await asyncio.gather(*tasks)
@@ -599,10 +605,11 @@ async def _load_chara_birthday_assets(
 
 
 def _resolve_alias_trim_metrics(
-    trim_img: Image.Image, left_panel_w: int, left_panel_h: int
+    trim_img: AlphaTrimImageBox, left_panel_w: int, left_panel_h: int
 ) -> tuple[int, int, int, tuple[int, int]]:
     trim_display_h = max(500, min(920, left_panel_h + _ALIAS_TRIM_BOTTOM_OVERFLOW))
-    aspect_ratio = trim_img.width / max(1, trim_img.height)
+    width, height = trim_img.natural_size
+    aspect_ratio = width / max(1, height)
     max_allowed_overlap = max(_ALIAS_TRIM_MIN_OVERLAP, min(_ALIAS_TRIM_MAX_OVERLAP, int(left_panel_w * 0.18)))
     max_rendered_w = _ALIAS_TRIM_MAX_FRAME_W + max_allowed_overlap
     rendered_w = max(1, int(trim_display_h * aspect_ratio))
@@ -628,7 +635,7 @@ def _resolve_alias_trim_metrics(
 def _build_alias_info_panel(
     rqd: AliasListRequest,
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     aliases_count: int,
     panel_w: int,
     name_box_w: int,
@@ -691,7 +698,7 @@ def _build_alias_info_panel(
 
     if jacket_img is not None:
         detail_row.add_item(
-            ImageBox(jacket_img, size=(92, 92), use_alpha_blend=True, shadow=True)
+            PreResizedImageBox(jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True)
             .set_bg(
                 RoundRectBg(
                     fill=(255, 255, 255, 128),
@@ -764,7 +771,7 @@ def _build_alias_left_panel(
     rqd: AliasListRequest,
     aliases: list[str],
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     panel_w: int,
     flow_w: int,
     name_box_w: int,
@@ -808,7 +815,7 @@ def _build_alias_left_panel(
         Widget._thread_local.reset(token)
 
 
-def _build_alias_trim_panel(trim_img: Image.Image, left_panel_size: tuple[int, int]) -> Frame:
+def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, left_panel_size: tuple[int, int]) -> Frame:
     token = Widget._thread_local.set(None)
     try:
         left_panel_w, left_panel_h = left_panel_size
@@ -816,9 +823,8 @@ def _build_alias_trim_panel(trim_img: Image.Image, left_panel_size: tuple[int, i
             trim_img, left_panel_w, left_panel_h
         )
         trim_panel = Frame().set_size((trim_frame_w, trim_frame_h)).set_content_align("rb").set_allow_draw_outside(True)
-        trim_panel.add_item(
-            ImageBox(trim_img, size=(None, trim_display_h), use_alpha_blend=True).set_offset(trim_offset)
-        )
+        trim_img.image_size_mode = "fit"
+        trim_panel.add_item(trim_img.set_size((None, trim_display_h)).set_offset(trim_offset))
         return trim_panel
     finally:
         Widget._thread_local.reset(token)
@@ -828,7 +834,7 @@ def _resolve_alias_panel_widths(
     rqd: AliasListRequest,
     aliases: list[str],
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     target_h: int,
     style_name: TextStyle,
     style_meta: TextStyle,
@@ -1005,7 +1011,11 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
                         # 使用model中传入的icon_path
                         chara_icon = calendar_icons[chara.cid]
 
-                        b = ImageBox(chara_icon, size=(40, 40)).set_padding(4)
+                        b = PreResizedImageBox(
+                            chara_icon,
+                            pre_size=(_BIRTHDAY_CALENDAR_ICON_SIZE, _BIRTHDAY_CALENDAR_ICON_SIZE),
+                            size=(40, 40),
+                        ).set_padding(4)
                         if chara.cid == cid:
                             b.set_bg(roundrect_bg(radius=8, alpha=80))
                         TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
@@ -1031,14 +1041,13 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
     jacket_img = None
     if rqd.music_jacket_path:
-        jacket_img = await get_img_resized(ASSETS_BASE_DIR, rqd.music_jacket_path, 92, 92)
+        jacket_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)
     trim_img = None
     trim_path = _resolve_alias_trim_path(rqd)
     if trim_path:
         try:
-            trim_img = _prepare_alias_trim_image(
-                await get_img_from_path(ASSETS_BASE_DIR, trim_path, on_missing="raise")
-            )
+            trim_source = await get_asset_image_ref(ASSETS_BASE_DIR, trim_path, on_missing="raise")
+            trim_img = await run_in_pool(_prepare_alias_trim_image, trim_source)
         except (FileNotFoundError, OSError, ValueError):
             trim_img = None
 
@@ -1139,7 +1148,9 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
                                     )
                                 )
                         if jacket_img is not None:
-                            ImageBox(jacket_img, size=(92, 92), use_alpha_blend=True, shadow=True).set_bg(
+                            PreResizedImageBox(
+                                jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True
+                            ).set_bg(
                                 RoundRectBg(
                                     fill=(255, 255, 255, 128),
                                     radius=12,

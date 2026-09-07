@@ -17,7 +17,7 @@ from src.core.pillow_telemetry import (
     record_pillow_touch,
 )
 from src.sekai.base.painter import get_text_size
-from src.sekai.base.utils import get_asset_image_ref, run_in_pool
+from src.sekai.base.utils import get_asset_image_ref, resolve_image_source_sync, run_in_pool
 from src.sekai.skia_renderer.ir_painter import IRPainter
 from src.sekai.skia_renderer.render_stats import (
     get_render_stats,
@@ -136,7 +136,12 @@ def test_ir_painter_reports_pil_source_and_one_mem_raster(tmp_path):
     assert reasons[PILLOW_TOUCH_IRPAINTER_MEM_RASTER] == {"renders": 1, "touches": 1}
 
 
-def test_header_probe_placeholder_and_text_metric_are_reported(tmp_path):
+def test_header_probe_placeholder_and_text_metric_are_reported(tmp_path, monkeypatch):
+    from src.sekai.base import image_info
+
+    # Exercise the legacy adapter deliberately. A native header probe must not
+    # be counted as a Pillow dependency merely to preserve the old test result.
+    monkeypatch.setattr(image_info, "_native", lambda: None)
     Image.new("RGBA", (4, 5), "blue").save(tmp_path / "asset.png")
 
     async def exercise() -> None:
@@ -145,7 +150,7 @@ def test_header_probe_placeholder_and_text_metric_are_reported(tmp_path):
             ref = await get_asset_image_ref(tmp_path, "asset.png", on_missing="raise")
             placeholder = await get_asset_image_ref(tmp_path, "missing.png")
             assert ref.size == (4, 5)
-            assert placeholder.size[0] > 0
+            assert resolve_image_source_sync(placeholder).size[0] > 0
             assert get_text_size(ImageFont.load_default(), "metric")[0] > 0
             record_render("probe", "skia")
         finally:

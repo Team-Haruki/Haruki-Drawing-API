@@ -1,6 +1,8 @@
+from __future__ import annotations
+
 from pydantic import BaseModel, Field
 
-from src.sekai.base.painter import Color
+from src.sekai.base.paint_types import Color
 from src.sekai.base.timezone import TimeZoneRequest
 
 

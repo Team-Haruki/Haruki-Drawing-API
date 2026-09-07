@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 from datetime import timedelta
 import logging
 import math
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -15,9 +19,10 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, color_code_to_rgb
+from src.sekai.base.paint_types import color_code_to_rgb
 from src.sekai.base.plot import (
     Canvas,
+    CanvasImageBox,
     Frame,
     Grid,
     HSplit,
@@ -34,11 +39,7 @@ from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     collect_asset_signatures,
     get_asset_image_ref,
-    get_composed_image_cached,
-    get_composed_image_disk_cached,
     get_readable_timedelta,
-    put_composed_image_cache,
-    put_composed_image_disk_cache,
 )
 from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
 from src.sekai.deck.model import (
@@ -55,11 +56,10 @@ from src.sekai.profile.drawer import (
     get_profile_card,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 logger = logging.getLogger(__name__)
 _perf_logger = logging.getLogger("event.draw.perf")
-_EVENT_LIST_ENTRY_CACHE_NAMESPACE = "event_list_entry"
 _DEFAULT_WL_CHAPTER_COLOR = (75, 75, 75, 255)
 _WL_PROGRESS_BORDER_COLOR = (75, 75, 75, 255)
 
@@ -710,7 +710,7 @@ async def _preload_event_entry_assets(d) -> dict[str, object]:
     return dict(zip(keys, values))
 
 
-async def _compose_event_list_entry_image(
+def _build_event_list_entry_canvas(
     d,
     loaded: dict[str, object],
     phase: str,
@@ -724,12 +724,12 @@ async def _compose_event_list_entry_image(
             with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                 banner = loaded.get("banner")
                 if banner is not None:
-                    ImageBox(banner, size=(None, 40))
+                    ImageBox(banner, size=(None, 40), sampling="pillow_bicubic")
                 with Grid(col_count=3).set_padding(0).set_sep(1, 1):
                     card_layers = loaded.get("cards", [])
                     if card_layers:
                         for layers in card_layers:
-                            CardFullThumbnailBox(layers, size=(30, 30))
+                            CardFullThumbnailBox(layers, size=(30, 30), sampling="pillow_bicubic")
                 if not d.event_cards:
                     Spacer(h=60)
                 if d.event_cards and len(d.event_cards) <= 3:
@@ -741,44 +741,22 @@ async def _compose_event_list_entry_image(
                 TextBox(f"T {d.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                 with HSplit().set_padding(0).set_sep(4):
                     if loaded.get("attr") is not None:
-                        ImageBox(loaded["attr"], size=(None, 24))
+                        ImageBox(loaded["attr"], size=(None, 24), sampling="pillow_bicubic")
                     if loaded.get("unit") is not None:
-                        ImageBox(loaded["unit"], size=(None, 24))
+                        ImageBox(loaded["unit"], size=(None, 24), sampling="pillow_bicubic")
                     if loaded.get("chara") is not None:
-                        ImageBox(loaded["chara"], size=(None, 24))
+                        ImageBox(loaded["chara"], size=(None, 24), sampling="pillow_bicubic")
                     if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
                         Spacer(w=24, h=24)
 
-    return await canvas.get_img()
+    return canvas
 
 
-async def _get_event_list_entry_image(d, now, style1: TextStyle, style2: TextStyle) -> Image.Image:
+async def _get_event_list_entry_canvas(d, now, style1: TextStyle, style2: TextStyle):
     phase = _resolve_event_list_entry_phase(d.start_at, d.end_at, now)
     cache_key = _build_event_list_entry_cache_key(d, phase)
-
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("event/list entry memory hit: id=%s phase=%s", d.id, phase)
-        return cached
-
-    disk_cached = get_composed_image_disk_cached(_EVENT_LIST_ENTRY_CACHE_NAMESPACE, cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        _perf_logger.info("event/list entry disk hit: id=%s phase=%s", d.id, phase)
-        return disk_cached
-
     loaded = await _preload_event_entry_assets(d)
-    image = await _compose_event_list_entry_image(d, loaded, phase, style1, style2)
-    put_composed_image_cache(cache_key, image)
-    put_composed_image_disk_cache(_EVENT_LIST_ENTRY_CACHE_NAMESPACE, cache_key, image)
-    _perf_logger.info(
-        "event/list entry miss: id=%s phase=%s size=%dx%d",
-        d.id,
-        phase,
-        image.width,
-        image.height,
-    )
-    return image
+    return _build_event_list_entry_canvas(d, loaded, phase, style1, style2), cache_key
 
 
 # 合成活动列表图片
@@ -789,8 +767,8 @@ async def _build_event_list_canvas(rqd: EventListRequest) -> Canvas:
     style1 = TextStyle(font=DEFAULT_HEAVY_FONT, size=10, color=(50, 50, 50))
     style2 = TextStyle(font=DEFAULT_FONT, size=10, color=(70, 70, 70))
     now = request_now(rqd.timezone)
-    entry_images = (
-        await asyncio.gather(*[_get_event_list_entry_image(d, now, style1, style2) for d in event_list])
+    entry_canvases = (
+        await asyncio.gather(*[_get_event_list_entry_canvas(d, now, style1, style2) for d in event_list])
         if event_list
         else []
     )
@@ -802,8 +780,8 @@ async def _build_event_list_canvas(rqd: EventListRequest) -> Canvas:
                 TextStyle(font=DEFAULT_FONT, size=12, color=(0, 0, 100)),
             ).set_bg(roundrect_bg(radius=4, alpha=80)).set_padding(4)
             with Grid(row_count=row_count, vertical=True).set_sep(6, 6).set_item_align("lt").set_content_align("lt"):
-                for entry_image in entry_images:
-                    ImageBox(entry_image)
+                for entry_canvas, cache_key in entry_canvases:
+                    CanvasImageBox(entry_canvas, cache_key=cache_key)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -820,8 +798,8 @@ async def try_render_event_list_payload(rqd: EventListRequest) -> EncodedImagePa
     # drops the per-request `dt` — would serve a visibly stale timestamp: `event_info` is
     # stable for the whole event period, so the stale window is the 7d cache TTL, not seconds.
     # Keying on the full payload (dt included) is airtight but hits 0% of the time and would
-    # just churn the shared payload LRU. The entry sub-images ARE cached, keyed by
-    # (event, phase) in `_get_event_list_entry_image`, which is where the real cost sits.
+    # just churn the shared payload LRU. Entries stay as nested widget trees; Pillow
+    # caches decoded fragments in its shared memory pool, while Skia rasterizes them natively.
     if not skia_plot_enabled():
         return None
     return await render_canvas_payload(await _build_event_list_canvas(rqd), endpoint="event_list")

@@ -2,8 +2,9 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import encoded_image_payload_to_response, image_to_response
-from src.sekai.vlive.drawer import compose_vlive_list_image, try_render_vlive_list_payload
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
+from src.sekai.vlive.drawer import try_render_vlive_list_payload
 from src.sekai.vlive.model import VLiveListRequest
 
 router = APIRouter(tags=["VLive"])
@@ -18,10 +19,8 @@ async def vlive_list(request: VLiveListRequest):
     """
     try:
         payload = await try_render_vlive_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_vlive_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

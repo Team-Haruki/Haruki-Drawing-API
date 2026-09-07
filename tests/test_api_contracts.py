@@ -29,6 +29,7 @@ def test_cache_stats_endpoint_contract():
     assert "image_cache" in payload["caches"]
     assert "thumbnail_cache" in payload["caches"]
     assert "composed_image_cache" in payload["caches"]
+    assert "native_renderer_cache" in payload["caches"]
 
 
 def test_readiness_endpoint_contract():

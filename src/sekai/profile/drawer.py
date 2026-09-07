@@ -1,9 +1,15 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
 import logging
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
+
+from typing import TYPE_CHECKING
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -14,20 +20,13 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import (
-    ADAPTIVE_SHADOW,
-    ADAPTIVE_WB,
-    BLACK,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-    RED,
-    WHITE,
-    Painter,
-    ascender_top_to_painter_y,
-    get_font,
-    get_font_desc,
-    get_text_size,
-)
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.paint_types import ADAPTIVE_SHADOW, ADAPTIVE_WB, BLACK, RED, WHITE, get_font_desc
+from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size
+from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT
+
+if TYPE_CHECKING:
+    from src.sekai.base.painter import Painter
 from src.sekai.base.plot import (
     Canvas,
     CanvasImageBox,
@@ -240,8 +239,9 @@ class CardFullThumbnailBox(ImageBox):
         shadow=False,
         shadow_width=6,
         shadow_alpha=0.6,
+        sampling=None,
     ) -> None:
-        super().__init__(layers.base, image_size_mode=image_size_mode, size=size)
+        super().__init__(layers.base, image_size_mode=image_size_mode, size=size, sampling=sampling)
         self.layers = layers
         self.thumb_shadow = shadow
         self.thumb_shadow_width = shadow_width
@@ -259,7 +259,7 @@ class CardFullThumbnailBox(ImageBox):
         if self.thumb_shadow:
             p.shadow_roundrect((0, 0), (w, h), radius, self.thumb_shadow_width, self.thumb_shadow_alpha)
         p.push_clip_roundrect((0, 0), (w, h), radius)
-        p.paste(self.image, (0, 0), (w, h))
+        p.paste(self.image, (0, 0), (w, h), sampling=self.sampling)
         pcard = rqd.is_pcard
         if pcard:
             bar_h = round(24 * sy)
@@ -277,17 +277,21 @@ class CardFullThumbnailBox(ImageBox):
         # opaque; the clip only multiplies alpha, so it cannot undo that. alpha_composite keeps
         # dst alpha at 255 and is what the Skia backend already does for both paste variants.
         if layers.frame is not None:
-            p.paste_with_alpha_blend(layers.frame, (0, 0), (w, h))
+            p.paste_with_alpha_blend(layers.frame, (0, 0), (w, h), sampling=self.sampling)
         if pcard and rqd.train_rank and layers.rank is not None:
             rank_w, rank_h = max(1, round(w * 0.35)), max(1, round(h * 0.35))
-            p.paste_with_alpha_blend(layers.rank, (w - rank_w, h - rank_h), (rank_w, rank_h))
+            p.paste_with_alpha_blend(layers.rank, (w - rank_w, h - rank_h), (rank_w, rank_h), sampling=self.sampling)
         if layers.attr is not None:
-            p.paste_with_alpha_blend(layers.attr, (round(sx), 0), (max(1, round(w * 0.22)), max(1, round(h * 0.25))))
+            p.paste_with_alpha_blend(
+                layers.attr, (round(sx), 0), (max(1, round(w * 0.22)), max(1, round(h * 0.25))), sampling=self.sampling
+            )
         rare_scale = 0.17 if not pcard else 0.15
         rare_w, rare_h = max(1, round(w * rare_scale)), max(1, round(h * rare_scale))
         hoffset, voffset = round(6 * sx), round((24 if pcard else 6) * sy)
         for i in range(rare_count(rqd.rare)):
-            p.paste_with_alpha_blend(layers.rare, (hoffset + rare_w * i, h - rare_h - voffset), (rare_w, rare_h))
+            p.paste_with_alpha_blend(
+                layers.rare, (hoffset + rare_w * i, h - rare_h - voffset), (rare_w, rare_h), sampling=self.sampling
+            )
         p.pop_clip()
 
 

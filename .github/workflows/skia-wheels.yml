@@ -35,11 +35,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install skia-safe link dependencies (Linux)
+      - name: Install skia-safe build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup free-threaded Python
         uses: actions/setup-python@v6
@@ -49,10 +50,8 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      # skia-safe downloads the prebuilt Skia binaries archive into the crate's
-      # OUT_DIR (under rust/haruki_skia_renderer/target/), which rust-cache
-      # persists together with ~/.cargo, so the download only happens on a cold
-      # cache or a skia-bindings version bump.
+      # The minimal webp-decode feature combination builds Skia from source.
+      # Persist compiled outputs and downloaded sources across wheel builds.
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
@@ -84,7 +83,8 @@ jobs:
       - name: Smoke test wheel (import + IR capability handshake)
         run: |
           pip install dist/*.whl
-          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 17, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 28, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+          python -X gil=0 scripts/skia_codec_smoke.py
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v7

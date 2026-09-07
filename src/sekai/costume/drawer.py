@@ -1,22 +1,25 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
-from src.sekai.base.painter import (
-    BLACK,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-    Painter,
-    get_font,
-    get_font_desc,
-    get_text_size,
-)
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.image_info import probe_foreground_bounds
+from src.sekai.base.paint_types import BLACK, get_font_desc
+from src.sekai.base.text_layout import get_text_size
+from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT
+
+if TYPE_CHECKING:
+    from src.sekai.base.painter import Painter
 from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import ImageSource, get_asset_image_ref, resolve_image_source_sync, run_in_pool
+from src.sekai.base.utils import ImageSource, get_asset_image_ref, run_in_pool
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR
 
@@ -56,55 +59,12 @@ async def _load_optional_image(path: str | None) -> ImageSource | None:
     return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="placeholder")
 
 
-def _preview_foreground_bbox(image: Image.Image) -> tuple[int, int, int, int] | None:
-    source = image.convert("RGBA")
-    alpha_bbox = source.getchannel("A").getbbox()
-    if alpha_bbox and alpha_bbox != (0, 0, source.width, source.height):
-        return alpha_bbox
-
-    scale = min(1.0, PREVIEW_FOREGROUND_DETECT_WIDTH / source.width)
-    small_size = (max(1, round(source.width * scale)), max(1, round(source.height * scale)))
-    sample = source.resize(small_size, Image.Resampling.BILINEAR) if small_size != source.size else source
-    pixels = sample.load()
-    width, height = sample.size
-    edge_width = max(2, round(width * 0.02))
-    threshold = 36
-    min_col_hits = max(2, round(height * 0.015))
-    min_row_hits = max(2, round(width * 0.015))
-    col_hits = [0] * width
-    row_hits = [0] * height
-
-    for y in range(height):
-        edge_pixels = []
-        for x in range(edge_width):
-            edge_pixels.append(pixels[x, y])
-            edge_pixels.append(pixels[width - 1 - x, y])
-        bg_r = sum(item[0] for item in edge_pixels) // len(edge_pixels)
-        bg_g = sum(item[1] for item in edge_pixels) // len(edge_pixels)
-        bg_b = sum(item[2] for item in edge_pixels) // len(edge_pixels)
-
-        for x in range(width):
-            r, g, b, a = pixels[x, y]
-            if a > 16 and max(abs(r - bg_r), abs(g - bg_g), abs(b - bg_b)) > threshold:
-                col_hits[x] += 1
-                row_hits[y] += 1
-
-    xs = [idx for idx, hits in enumerate(col_hits) if hits >= min_col_hits]
-    ys = [idx for idx, hits in enumerate(row_hits) if hits >= min_row_hits]
-    if not xs or not ys:
-        return None
-
-    inv_scale = 1.0 / scale
-    return (
-        max(0, round(min(xs) * inv_scale)),
-        max(0, round(min(ys) * inv_scale)),
-        min(source.width, round((max(xs) + 1) * inv_scale)),
-        min(source.height, round((max(ys) + 1) * inv_scale)),
-    )
+def _preview_foreground_bbox(image: ImageSource) -> tuple[int, int, int, int] | None:
+    return probe_foreground_bounds(image, detect_width=PREVIEW_FOREGROUND_DETECT_WIDTH)
 
 
 def _costume_preview_cover_crop_box(
-    image: Image.Image,
+    image: ImageSource,
     target_size: tuple[int, int] = COSTUME_DETAIL_PREVIEW_SIZE,
 ) -> tuple[int, int, int, int]:
     width, height = image.size
@@ -310,9 +270,7 @@ async def _build_costume_detail_canvas(rqd: CostumeDetailRequest) -> Canvas:
     preview = await _load_optional_image(costume.preview_image_path)
     preview_crop = None
     if preview is not None:
-        # 前景检测需要真实像素（解码走全局缓存）；检测与像素循环都在线程池里做。
-        preview_pixels = await run_in_pool(resolve_image_source_sync, preview)
-        preview_crop = await run_in_pool(_costume_preview_cover_crop_box, preview_pixels, COSTUME_DETAIL_PREVIEW_SIZE)
+        preview_crop = await run_in_pool(_costume_preview_cover_crop_box, preview, COSTUME_DETAIL_PREVIEW_SIZE)
 
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=BLACK)
     label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))

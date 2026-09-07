@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -12,25 +16,30 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import (
-    BLACK,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-    DEFAULT_HEAVY_FONT,
+from src.sekai.base.image_source import missing_image_ref
+from src.sekai.base.paint_types import BLACK
+from src.sekai.base.plot import (
+    Canvas,
+    CanvasImageBox,
+    Grid,
+    HSplit,
+    ImageBg,
+    ImageBox,
+    Spacer,
+    TextBox,
+    TextStyle,
+    VSplit,
 )
-from src.sekai.base.plot import Canvas, Grid, HSplit, ImageBg, ImageBox, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     ImageSource,
-    concat_images,
     get_asset_image_ref,
     get_float_str,
-    get_img_from_path,
     get_readable_timedelta,
 )
 from src.sekai.profile.drawer import CardFullThumbnailBox, CardFullThumbnailLayers, get_card_full_thumbnail_layers
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, RESULT_ASSET_PATH
 
 # 从 model.py 导入数据模型
 from .model import (
@@ -44,36 +53,23 @@ logger = logging.getLogger(__name__)
 GACHA_LIST_LOGO_BOX_SIZE = (130, 60)
 
 
-async def get_unknown_fallback_image(path: str | None = None) -> Image.Image:
+async def get_unknown_fallback_image(path: str | None = None) -> ImageSource:
     """加载缺失图；优先按目标路径返回比例合适的 placeholder。"""
     if path:
         try:
-            return await get_img_from_path(ASSETS_BASE_DIR, path, on_missing="placeholder")
+            return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="placeholder")
         except IMAGE_LOAD_EXCEPTIONS:
             pass
     try:
-        return await get_img_from_path(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/unknown.jpg")
+        return await get_asset_image_ref(ASSETS_BASE_DIR, f"{RESULT_ASSET_PATH}/unknown.jpg")
     except IMAGE_LOAD_EXCEPTIONS:
-        return Image.new("RGBA", (256, 256), (220, 220, 220, 255))
-
-
-async def get_gacha_image_or_unknown(path: str | None, *, allow_empty: bool = False) -> Image.Image | None:
-    """加载卡池图片，缺图时自动回退到 UnKnown 占位图。"""
-    if path:
-        try:
-            return await get_img_from_path(ASSETS_BASE_DIR, path)
-        except IMAGE_LOAD_EXCEPTIONS:
-            return await get_unknown_fallback_image(path)
-    if allow_empty:
-        return None
-    return await get_unknown_fallback_image()
+        return missing_image_ref("gacha_unknown")
 
 
 async def get_gacha_image_ref_or_unknown(path: str | None, *, allow_empty: bool = False) -> ImageSource | None:
     """加载卡池图片（惰性引用），缺图时自动回退到 UnKnown 占位图。
 
-    与 :func:`get_gacha_image_or_unknown` 语义一致，但只探测图片头部而不解码像素，
-    仅供 ImageBox/ImageBg 等支持 ImageSource 的消费者使用。
+    只探测图片头部，缺图回退也保持为引用，由 ImageBox/ImageBg 在重放时解析。
     """
     if path:
         try:
@@ -112,18 +108,23 @@ async def get_rarity_img(
     rarity: str,
     rarity_img_path: str = f"{RESULT_ASSET_PATH}/card/rare_star_normal.png",
     birthday_img_path: str | None = f"{RESULT_ASSET_PATH}/card/rare_birthday.png",
-) -> Image.Image | None:
-    """获取稀有度图片"""
+) -> Canvas:
+    """保留稀有度拼接为共享子画布；缩放在整条星星拼完之后执行。"""
     if rarity == "rarity_birthday":
-        rare_img = await get_gacha_image_or_unknown(birthday_img_path)
+        rare_img = await get_gacha_image_ref_or_unknown(birthday_img_path)
         rare_num = 1
     else:
-        rare_img = await get_gacha_image_or_unknown(rarity_img_path)
+        rare_img = await get_gacha_image_ref_or_unknown(rarity_img_path)
         rare_num = int(rarity.split("_")[-1])
 
-    if rare_img:
-        return await concat_images([rare_img] * rare_num, "h")
-    return None
+    canvas = Canvas(w=rare_img.width * rare_num, h=rare_img.height).set_padding(0)
+
+    def draw_strip(_widget, painter):
+        for index in range(rare_num):
+            painter.paste_src(rare_img, (index * rare_img.width, 0), sampling="nearest")
+
+    canvas.add_draw_func(draw_strip)
+    return canvas
 
 
 # ======================= Constants ======================= #
@@ -311,7 +312,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
         len(_gd_coros),
         time.perf_counter() - _t0,
     )
-    _gd_cache: dict[str, ImageSource | CardFullThumbnailLayers | None] = {}
+    _gd_cache: dict[str, ImageSource | Canvas | CardFullThumbnailLayers | None] = {}
     for k, v in zip(_gd_keys, _gd_results):
         _gd_cache[k] = v if not isinstance(v, BaseException) else None
 
@@ -481,7 +482,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     rarity_img = _gd_cache.get(f"rarity_{rarity}")
                                     if rarity_img:
-                                        ImageBox(rarity_img, size=(None, 24))
+                                        CanvasImageBox(rarity_img, size=(None, 24), sampling="pillow_bicubic")
                                     else:
                                         TextBox(rarity_name, label_style)
 
@@ -502,7 +503,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     rarity_img = _gd_cache.get(f"rarity_{rarity}")
                                     if rarity_img:
-                                        ImageBox(rarity_img, size=(None, 24))
+                                        CanvasImageBox(rarity_img, size=(None, 24), sampling="pillow_bicubic")
                                     else:
                                         TextBox(rarity_name, label_style)
 

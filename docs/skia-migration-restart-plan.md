@@ -36,8 +36,10 @@
 Docker 条件安装 wheel + 构建期 IR capability 自检、扩展缺失时 fail-open 回退 Pillow 并打 ERROR、
 `/render-stats` 逐端点计数 + image.response `backend=` 字段。
 
-**剩余的是生产验收而非代码**:PR #33 合并、带扩展镜像的全关金丝雀与放量验收,以及
-[`skia-migration-todo.md`](./skia-migration-todo.md) 里的收尾项(双池预算合并、Pillow 退役等;**三角背景确定性播种已完成**,见 D3)。
+PR #33 已于 2026-07-15 合并；主云 `v3.0.0-rc2` 又在 2026-07-21 完成超过 48 小时的真实流量
+浸泡验收（`23,988 skia / 0 fallback / 0 error`）。迁移的发布关键路径已经结账，剩余内容仅是
+[`skia-migration-todo.md`](./skia-migration-todo.md) 中不阻塞发布的收尾项（双池预算合并、Pillow
+退役决策等；**三角背景确定性播种已完成**，见 D3）。
 
 ## 已拍板决策
 
@@ -288,8 +290,9 @@ card/box 与 card/list 的也已删(`f088c41`),只剩 honor(它的 key 里烤进
 2. honor alpha-mask 原语 —— **已完成**(`src/sekai/honor/skia.py`,pillow-only 归零)。
 3. chart 水印壳 —— **已完成**。
 4. CI wheel 流水线 —— **已完成**(`skia-wheels.yml`)+ native 测试进 CI + Docker 条件安装与构建期自检。
-5. 生产镜像集成与部署验收 —— **未完成**。PR #33 仍处于 open,带扩展镜像的全关金丝雀与放量验收都还没做;
-   这正是「现状一句话」里"剩余的是生产验收而非代码"所指,不要因为本条日志存在就当它已结账。
+5. 生产镜像集成与部署验收 —— **本段记录的是 2026-07-13 当时的未完成状态**。PR #33 后于
+   2026-07-15 合并，主云 `v3.0.0-rc2` 于 2026-07-21 完成超过 48 小时的真实流量浸泡验收；当前状态
+   以本文顶部「现状一句话」和 `skia-migration-todo.md` 为准。
 
 同期:IR capability 握手(当前 5)、`/render-stats` 与 `backend=` 可观测性、
 card/list 也收敛回共享 widget 树(`card_render.py` 与 `use_skia_card_list` 随之删除)、

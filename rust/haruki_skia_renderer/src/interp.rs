@@ -23,13 +23,16 @@ use skia_safe::{
 };
 
 use crate::ir::*;
-use crate::pillow_resize::{PillowResizeLimits, resize_rgba8_pillow_lanczos};
+use crate::pillow_resize::{
+    PillowFilter, PillowResizeLimits, resize_rgba8_pillow_bicubic, resize_rgba8_pillow_bilinear,
+    resize_rgba8_pillow_lanczos,
+};
 use crate::text_metrics::configured_text_font;
 use crate::{
     AssetDescriptor, NativeMetrics, RasterCacheOutcome, RenderedImage, decode_asset_descriptor,
     decode_asset_rgba_unpremul, draw_blur_glass_rect, draw_sekai_triangle_background,
-    draw_source_to_raster, encode_surface, load_asset_descriptor, load_typeface_checked,
-    raster_cache_snapshot, rasterize_asset_cached,
+    draw_source_to_raster, encode_rgba8, encode_surface, load_asset_descriptor,
+    load_typeface_checked, raster_cache_snapshot, rasterize_asset_cached,
 };
 
 #[cfg(not(test))]
@@ -82,6 +85,9 @@ fn apply_text_coverage_gamma(paint: &mut Paint) {
 
 /// Resolved typefaces for the scene's font roles.
 struct FontRegistry {
+    dir: String,
+    files: HashMap<String, String>,
+    role_files: [String; 3],
     regular: Typeface,
     bold: Typeface,
     heavy: Typeface,
@@ -117,6 +123,13 @@ impl FontRegistry {
             .map(|(key, file)| (key.clone(), load(file)))
             .collect();
         Self {
+            dir: fonts.dir.clone(),
+            files: fonts.extra.clone(),
+            role_files: [
+                fonts.default.clone(),
+                fonts.bold.clone(),
+                fonts.heavy.clone().unwrap_or_else(|| fonts.bold.clone()),
+            ],
             regular,
             bold,
             heavy,
@@ -223,6 +236,13 @@ fn run_font<'a>(is_emoji_run: bool, main: &'a Font, emoji: Option<&'a Font>) -> 
 /// `_owner` for an immutable `bytes` (or a tuple holding one). `Interp` declares `direct_images`
 /// before `mem_images`, so the `Image`s built from these `Data`s are dropped first.
 pub(crate) enum MemImage {
+    /// Tight little-endian float32 distance samples, used only by SdfQuad.
+    FloatField {
+        width: i32,
+        height: i32,
+        data: Data,
+        _owner: Option<BytesOwner>,
+    },
     /// PNG/JPEG bytes (decoded lazily via `Image::from_encoded`).
     Encoded {
         data: Data,
@@ -289,6 +309,10 @@ struct Interp {
     active_native_runtime_bytes: usize,
     canvas_w: f32,
     canvas_h: f32,
+    /// Logical-to-device scale for direct scaled rendering. Snapshot-backed nodes use this
+    /// to translate their logical bounds into the physical surface pixel coordinates expected
+    /// by `image_snapshot_with_bounds`.
+    device_scale: (f32, f32),
     /// True while rendering inside a `Transform` subtree (non-identity CTM). Image draws must
     /// then sample exactly once through the CTM, so `draw_image_node` skips the pre-rasterized
     /// raster-cache path (which would resample its integral-size intermediate a second time).
@@ -299,6 +323,12 @@ struct Interp {
     metrics: NativeMetrics,
 }
 
+#[derive(Clone, Copy)]
+struct DeviceSpace {
+    scale: (f32, f32),
+    logical_canvas: (f32, f32),
+}
+
 impl Interp {
     fn load_mem(&mut self, path: &str) -> Option<Image> {
         if let Some(image) = self.direct_images.get(path) {
@@ -306,6 +336,7 @@ impl Interp {
         }
         let key = path.strip_prefix("mem:")?;
         let image = match self.mem_images.get(key)? {
+            MemImage::FloatField { .. } => return None,
             MemImage::Encoded { data, .. } => Image::from_encoded(data.clone())?,
             MemImage::Raw {
                 width,
@@ -443,7 +474,9 @@ fn rgba_byte_len(width: i32, height: i32, label: &str) -> Result<usize, String> 
 fn mem_payload_bytes(mem_images: &HashMap<String, MemImage>) -> Result<usize, String> {
     mem_images.values().try_fold(0usize, |total, image| {
         let bytes = match image {
-            MemImage::Encoded { data, .. } | MemImage::Raw { data, .. } => data.size(),
+            MemImage::Encoded { data, .. }
+            | MemImage::Raw { data, .. }
+            | MemImage::FloatField { data, .. } => data.size(),
         };
         total
             .checked_add(bytes)
@@ -638,8 +671,33 @@ pub(crate) fn render_scene_inner(
     if scene.version != 2 {
         return Err(format!("unsupported scene IR version {}", scene.version));
     }
+    let mut vector_commands = 0;
+    if let Some(background) = &scene.background {
+        crate::vector::validate(background, &mut vector_commands)?;
+    }
+    crate::vector::validate(&scene.root, &mut vector_commands)?;
     if scene.canvas.width <= 0 || scene.canvas.height <= 0 {
         return Err("scene canvas must be positive".to_string());
+    }
+    let scale_started = Instant::now();
+    let requested_scale = if scene.scale.is_finite() && scene.scale > 0.0 {
+        scene.scale
+    } else {
+        1.0
+    };
+    let scaled = (requested_scale - 1.0).abs() > 1e-3;
+    let out_w = if scaled {
+        ((scene.canvas.width as f32) * requested_scale).floor() as i32
+    } else {
+        scene.canvas.width
+    };
+    let out_h = if scaled {
+        ((scene.canvas.height as f32) * requested_scale).floor() as i32
+    } else {
+        scene.canvas.height
+    };
+    if out_w <= 0 || out_h <= 0 {
+        return Err("scaled scene canvas must be positive".to_string());
     }
     let max_node_pixels = usize::try_from(scene.limits.max_node_pixels)
         .unwrap_or(usize::MAX)
@@ -647,33 +705,35 @@ pub(crate) fn render_scene_inner(
     let max_scene_bytes = usize::try_from(scene.limits.max_scene_bytes)
         .unwrap_or(usize::MAX)
         .max(1);
-    // Validate the generic isolate-then-place contract for the whole tree before memory sizing
-    // or any asset/font access. Scene.scale is a later whole-page resize, not an ancestor CTM.
+    if let Some(size) = &scene.post_resize {
+        if scene.scale != 1.0 {
+            return Err("post_resize cannot be combined with scene scale".to_string());
+        }
+        if size.width <= 0 || size.height <= 0 || size.width > 32767 || size.height > 32767 {
+            return Err("post_resize dimensions must be within 1..32767".to_string());
+        }
+        let output_bytes = rgba_byte_len(size.width, size.height, "post_resize output")?;
+        let source_bytes = rgba_byte_len(out_w, out_h, "post_resize source")?;
+        // At readback the surface and straight buffer coexist. At Skia encode the
+        // resized Vec and its owned image copy coexist. Resize scratch is bounded below.
+        if output_bytes.max(source_bytes) > max_scene_bytes / 2 {
+            return Err(
+                "post_resize readback or encoder copy exceeds scene byte limit".to_string(),
+            );
+        }
+    }
+    // RasterSubscene placement is validated for the whole tree before memory sizing or any
+    // asset/font access. Unsupported geometry or explicit-Transform nesting must route the
+    // request to Python's Pillow fallback without partially preparing the native scene.
     if let Some(background) = &scene.background {
         validate_raster_subscene_usage(background, false)?;
     }
     validate_raster_subscene_usage(&scene.root, false)?;
 
-    let output_surface_bytes = rgba_byte_len(
-        scene.canvas.width,
-        scene.canvas.height,
-        "scene output surface",
-    )?;
-    let scaled_output_bytes = if (scene.scale - 1.0).abs() > 1e-3 && scene.scale > 0.0 {
-        let out_w = ((scene.canvas.width as f32) * scene.scale).floor() as i32;
-        let out_h = ((scene.canvas.height as f32) * scene.scale).floor() as i32;
-        if out_w > 0 && out_h > 0 {
-            rgba_byte_len(out_w, out_h, "scaled scene output surface")?
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    let output_surface_bytes = rgba_byte_len(out_w, out_h, "scene output surface")?;
     let request_mem_bytes = mem_payload_bytes(&mem_images)?;
     let retained_base_bytes = output_surface_bytes
-        .checked_add(scaled_output_bytes)
-        .and_then(|value| value.checked_add(request_mem_bytes))
+        .checked_add(request_mem_bytes)
         .ok_or_else(|| "scene retained base byte count overflow".to_string())?;
     let background_subscene_peak = scene
         .background
@@ -690,21 +750,29 @@ pub(crate) fn render_scene_inner(
         .ok_or_else(|| "scene preflight byte count overflow".to_string())?;
     if preflight_total > max_scene_bytes {
         return Err(format!(
-            "scene output, request buffers, optional scaled output, and isolated-subscene runtime require at least \
+            "scene output, request buffers, and isolated-subscene runtime require at least \
              {preflight_total} bytes; scene limit is {max_scene_bytes}"
         ));
     }
     // PasteLerp reads and rewrites destination pixels. Validate its deliberately narrow
     // identity-CTM/integral contract for the WHOLE tree before allocating a surface, loading
     // fonts/assets, or drawing anything; any unsupported emitter output must fail open to
-    // Pillow, never leave a partially-rendered native scene.
+    // Pillow, never leave a partially-rendered native scene. Scene.scale is a real CTM.
     if let Some(background) = &scene.background {
-        validate_paste_lerp_usage(background, (0.0, 0.0), false, false)?;
+        validate_paste_lerp_usage(background, (0.0, 0.0), scaled, false)?;
     }
-    validate_paste_lerp_usage(&scene.root, (0.0, 0.0), false, false)?;
+    validate_paste_lerp_usage(&scene.root, (0.0, 0.0), scaled, false)?;
 
-    let mut surface = surfaces::raster_n32_premul((scene.canvas.width, scene.canvas.height))
+    let device_scale = (
+        out_w as f32 / scene.canvas.width as f32,
+        out_h as f32 / scene.canvas.height as f32,
+    );
+    let mut surface = surfaces::raster_n32_premul((out_w, out_h))
         .ok_or_else(|| "failed to create raster surface".to_string())?;
+    if scaled {
+        surface.canvas().scale(device_scale);
+    }
+    let scale_elapsed = scale_started.elapsed().as_secs_f64();
     let mut interp = Interp {
         base: PathBuf::from(&scene.assets_base_dir),
         fonts: FontRegistry::build(&scene.fonts),
@@ -722,7 +790,11 @@ pub(crate) fn render_scene_inner(
         active_native_runtime_bytes: subscene_runtime_peak,
         canvas_w: scene.canvas.width as f32,
         canvas_h: scene.canvas.height as f32,
-        in_transform: false,
+        device_scale,
+        // A global output scale is a real CTM. Bypass the integral-size raster cache just as a
+        // Transform node does, otherwise an asset is resized into an intermediate and sampled a
+        // second time by the canvas matrix.
+        in_transform: scaled,
         strict_asset_depth: 0,
         metrics: NativeMetrics::default(),
     };
@@ -734,10 +806,16 @@ pub(crate) fn render_scene_inner(
     // (-> PyRuntimeError -> Python fail-open to Pillow), never render a silently wrong image.
     if let Some(background) = &scene.background {
         validate_transform_subtrees(background, false)?;
-        validate_pillow_lanczos_usage(background, false)?;
+        validate_pillow_lanczos_usage(background, scaled)?;
     }
     validate_transform_subtrees(&scene.root, false)?;
-    validate_pillow_lanczos_usage(&scene.root, false)?;
+    validate_pillow_lanczos_usage(&scene.root, scaled)?;
+    if scaled {
+        if let Some(background) = &scene.background {
+            validate_direct_scale_subtrees(background)?;
+        }
+        validate_direct_scale_subtrees(&scene.root)?;
+    }
 
     // SdfQuad field references are validated up front so a bad one fails the WHOLE scene
     // (-> PyRuntimeError -> Python fail-open to Pillow) instead of silently skipping glyphs.
@@ -767,44 +845,27 @@ pub(crate) fn render_scene_inner(
     }
     render_node(&mut surface, &mut interp, (0.0, 0.0), &scene.root)?;
     interp.metrics.draw_elapsed = draw_started.elapsed().as_secs_f64();
-
-    // Optional output scaling: render at 1x then resize the raster (linear), matching
-    // plot.py Canvas.get_img(scale) which renders then BILINEAR-resizes the final image.
-    let scale_started = Instant::now();
-    let mut output_surface = None;
-    if (scene.scale - 1.0).abs() > 1e-3 && scene.scale > 0.0 {
-        // Truncate (floor for positives) to match plot.py's int(size * scale).
-        let out_w = ((scene.canvas.width as f32) * scene.scale).floor() as i32;
-        let out_h = ((scene.canvas.height as f32) * scene.scale).floor() as i32;
-        if out_w > 0
-            && out_h > 0
-            && let Some(mut scaled) = surfaces::raster_n32_premul((out_w, out_h))
-        {
-            let image = surface.image_snapshot();
-            let mut paint = Paint::default();
-            paint.set_anti_alias(true);
-            scaled.canvas().draw_image_rect_with_sampling_options(
-                &image,
-                None,
-                Rect::from_xywh(0.0, 0.0, out_w as f32, out_h as f32),
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-                &paint,
-            );
-            output_surface = Some(scaled);
-        }
-    }
-    interp.metrics.scale_elapsed = scale_started.elapsed().as_secs_f64();
+    interp.metrics.scale_elapsed = scale_elapsed;
     let mut metrics = std::mem::take(&mut interp.metrics);
     let cache = raster_cache_snapshot();
     metrics.raster_cache_entries = cache.entries;
     metrics.raster_cache_bytes = cache.bytes;
     drop(interp);
 
-    let mut rendered = encode_surface(
-        output_surface.unwrap_or(surface),
-        &scene.export_format,
-        scene.jpg_quality,
-    )?;
+    let mut rendered = if let Some(size) = &scene.post_resize {
+        let started = Instant::now();
+        let pixels = resize_output_surface(surface, size, max_scene_bytes)?;
+        metrics.scale_elapsed += started.elapsed().as_secs_f64();
+        encode_rgba8(
+            pixels,
+            size.width,
+            size.height,
+            &scene.export_format,
+            scene.jpg_quality,
+        )?
+    } else {
+        encode_surface(surface, &scene.export_format, scene.jpg_quality)?
+    };
     metrics.total_elapsed = total_started.elapsed().as_secs_f64();
     rendered.metrics = metrics;
     if profile_enabled() {
@@ -836,6 +897,29 @@ pub(crate) fn render_scene_inner(
         );
     }
     Ok(rendered)
+}
+
+fn resize_output_surface(
+    mut surface: Surface,
+    size: &CanvasIr,
+    max_scene_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let width = surface.width() as usize;
+    let height = surface.height() as usize;
+    let pixels = read_surface_straight_rgba8(&mut surface)?;
+    drop(surface);
+    let scratch_limit = max_scene_bytes
+        .checked_sub(pixels.len())
+        .ok_or_else(|| "post_resize source exceeds scene byte limit".to_string())?;
+    resize_rgba8_pillow_bilinear(
+        &pixels,
+        width,
+        height,
+        size.width as usize,
+        size.height as usize,
+        PillowResizeLimits::new(max_scene_bytes / 2, scratch_limit, 32767),
+    )
+    .map_err(|error| format!("post_resize failed: {error}"))
 }
 
 fn render_node(
@@ -906,8 +990,38 @@ fn render_node(
             surface.canvas().restore_to_count(save_count);
         }
         Node::Rect(rect) => render_rect(surface.canvas(), rect, off),
+        Node::VectorPath(path) => crate::vector::draw(
+            surface.canvas(),
+            path,
+            off,
+            interp.max_node_pixels,
+            interp.available_native_scene_bytes("vector coverage")?,
+        )?,
         Node::RoundRect(rr) => render_round_rect(surface.canvas(), rr, off),
         Node::PieSlice(pie) => render_pie_slice(surface.canvas(), pie, off),
+        Node::Arc(arc) => {
+            let width = arc.width.max(0.0);
+            let sweep = (arc.end_angle - arc.start_angle).clamp(0.0, 360.0);
+            if width > 0.0 && sweep > 0.0 {
+                let rect = Rect::from_xywh(
+                    arc.pos[0] + off.0,
+                    arc.pos[1] + off.1,
+                    arc.size[0],
+                    arc.size[1],
+                )
+                .with_inset((width * 0.5, width * 0.5));
+                let mut paint = Paint::default();
+                paint.set_anti_alias(false);
+                paint.set_style(PaintStyle::Stroke);
+                paint.set_stroke_width(width);
+                paint.set_color(color_of(arc.color));
+                // ImageDraw.arc replaces covered RGBA pixels, including alpha.
+                paint.set_blend_mode(BlendMode::Src);
+                surface
+                    .canvas()
+                    .draw_arc(rect, arc.start_angle, sweep, false, &paint);
+            }
+        }
         Node::Image(image) if image.blend == ImageBlend::PasteLerp => {
             interp.metrics.raster_cache_bypasses += 1;
             draw_paste_lerp_image(surface, interp, image, off)?
@@ -932,13 +1046,13 @@ fn render_node(
             );
             let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
             if src.intersect(canvas_rect) && !src.is_empty() && !dst.is_empty() {
-                let ibounds: IRect = src.round_out();
+                let ibounds = logical_rect_to_device(src, interp.device_scale);
                 if let Some(snap) = surface.image_snapshot_with_bounds(ibounds) {
                     let src_local = Rect::from_xywh(
-                        src.left - ibounds.left as f32,
-                        src.top - ibounds.top as f32,
-                        src.width(),
-                        src.height(),
+                        src.left * interp.device_scale.0 - ibounds.left as f32,
+                        src.top * interp.device_scale.1 - ibounds.top as f32,
+                        src.width() * interp.device_scale.0,
+                        src.height() * interp.device_scale.1,
                     );
                     let mut paint = Paint::default();
                     paint.set_anti_alias(true);
@@ -956,23 +1070,54 @@ fn render_node(
         }
         Node::SdfQuad(quad) => {
             let started = Instant::now();
-            draw_sdf_quad(surface, interp, quad, off);
+            draw_sdf_quad(surface, interp, quad, off)?;
             interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
             interp.metrics.sdf_quad_count += 1;
         }
         Node::SdfShape(shape) => draw_sdf_shape(surface, interp, shape, off)?,
         Node::Text(text) => {
             let abs = (text.pos[0] + off.0, text.pos[1] + off.1);
+            if text.engine == TextEngine::FreetypeBasic {
+                // The owned A8 buffer and SkData copy coexist while drawing. Include
+                // active isolated surfaces/retained assets in the remaining budget.
+                let max_mask_pixels = interp.max_node_pixels.min(
+                    interp.available_native_scene_bytes("FreeType text mask")?
+                        / if text.mask_lerp { 10 } else { 2 },
+                );
+                draw_basic_text(surface, &interp.fonts, text, abs, off, max_mask_pixels)?;
+                return Ok(());
+            }
             // Adaptive color samples the backdrop (needs the surface), so resolve it here and
             // pass a solid fill down; otherwise use the node's own fill (solid or gradient).
             let adaptive_fill;
             let fill: &Fill = if let Some(ad) = &text.adaptive {
                 if ad.pixelwise {
                     // Per-pixel light/dark selection needs its own masked draw path.
-                    draw_pixelwise_adaptive_text(surface, &interp.fonts, text, abs, off, ad);
+                    draw_pixelwise_adaptive_text(
+                        surface,
+                        &interp.fonts,
+                        text,
+                        abs,
+                        off,
+                        ad,
+                        DeviceSpace {
+                            scale: interp.device_scale,
+                            logical_canvas: (interp.canvas_w, interp.canvas_h),
+                        },
+                    );
                     return Ok(());
                 }
-                let color = resolve_adaptive_color(surface, &interp.fonts, text, abs, ad);
+                let color = resolve_adaptive_color(
+                    surface,
+                    &interp.fonts,
+                    text,
+                    abs,
+                    ad,
+                    DeviceSpace {
+                        scale: interp.device_scale,
+                        logical_canvas: (interp.canvas_w, interp.canvas_h),
+                    },
+                );
                 adaptive_fill = Fill::Solid(color);
                 &adaptive_fill
             } else {
@@ -980,7 +1125,28 @@ fn render_node(
             };
             draw_styled_text(surface.canvas(), &interp.fonts, text, abs, off, fill);
         }
-        Node::Shadow(shadow) => render_shadow(surface.canvas(), shadow, off),
+        Node::Shadow(shadow) => {
+            let mut scratch = 0;
+            if shadow.straight_rgba {
+                let mut bounds = Rect::from_xywh(
+                    shadow.pos[0] + off.0 + shadow.offset[0],
+                    shadow.pos[1] + off.1 + shadow.offset[1],
+                    shadow.size[0],
+                    shadow.size[1],
+                )
+                .with_outset((shadow.sigma * 3.0 + 1.0, shadow.sigma * 3.0 + 1.0));
+                if bounds.intersect(Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h)) {
+                    let bounds = logical_rect_to_device(bounds, interp.device_scale);
+                    scratch =
+                        rgba_byte_len(bounds.width(), bounds.height(), "straight RGBA shadow")?
+                            .checked_mul(3)
+                            .ok_or_else(|| "shadow scratch size overflow".to_string())?;
+                    interp.push_native_runtime_bytes(scratch, "straight RGBA shadow")?;
+                }
+            }
+            render_shadow(surface.canvas(), shadow, off);
+            interp.pop_native_runtime_bytes(scratch);
+        }
         Node::BlurGlass(glass) => {
             let rect = Rect::from_xywh(
                 glass.pos[0] + off.0,
@@ -988,23 +1154,27 @@ fn render_node(
                 glass.size[0],
                 glass.size[1],
             );
-            // Zero blur is a normal translucent panel. Avoid snapshotting the backdrop and
-            // allocating two temporary surfaces for the old near-zero sigma filter.
-            let backdrop = if glass.blur > 0.01 {
-                let mut bounds = rect.with_outset((12.0, 12.0));
-                let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
-                if bounds.intersect(canvas_rect) {
-                    let ibounds: IRect = bounds.round_out();
-                    surface
-                        .image_snapshot_with_bounds(ibounds)
-                        .map(|img| (img, (ibounds.left as f32, ibounds.top as f32)))
-                } else {
-                    None
-                }
-            } else {
+            // Alpha replacement needs the backdrop even without blur. The zero-blur
+            // fast path skips blur/downsample surfaces, not the sampled background.
+            if glass.blur <= 0.01 {
                 interp.metrics.zero_blur_fast_paths += 1;
-                None
-            };
+            }
+            let mut bounds = rect.with_outset((12.0, 12.0));
+            let canvas_rect = Rect::from_xywh(0.0, 0.0, interp.canvas_w, interp.canvas_h);
+            if !bounds.intersect(canvas_rect) {
+                return Ok(());
+            }
+            let ibounds = logical_rect_to_device(bounds, interp.device_scale);
+            // Backdrop, alpha-replacement layer, downsample and blur surfaces.
+            // The latter two are no larger than the padded region; charge the
+            // conservative peak before Skia allocates any of them.
+            let scratch = rgba_byte_len(ibounds.width(), ibounds.height(), "BlurGlass scratch")?
+                .checked_mul(if glass.blur > 0.01 { 4 } else { 2 })
+                .ok_or_else(|| "BlurGlass scratch size overflow".to_string())?;
+            interp.push_native_runtime_bytes(scratch, "BlurGlass scratch")?;
+            let backdrop = surface
+                .image_snapshot_with_bounds(ibounds)
+                .map(|img| (img, (ibounds.left as f32, ibounds.top as f32)));
             // Panel tint paint (solid or gradient shader), positioned in absolute coords like
             // every other fill so a gradient lands identically to a RoundRect of the same fill.
             let panel_paint = fill_paint(&glass.fill, off);
@@ -1019,7 +1189,10 @@ fn render_node(
                 glass.blur,
                 glass.corners,
                 glass.shadow_width,
+                interp.device_scale,
             );
+            drop(backdrop);
+            interp.pop_native_runtime_bytes(scratch);
         }
         Node::TriangleBg(bg) => {
             draw_sekai_triangle_background(
@@ -1078,7 +1251,7 @@ fn render_node(
     Ok(())
 }
 
-fn color_of(c: Color4) -> Color {
+pub(crate) fn color_of(c: Color4) -> Color {
     Color::from_argb(c[3], c[0], c[1], c[2])
 }
 
@@ -1091,7 +1264,9 @@ fn skia_image_sampling(mode: ImageSampling) -> Option<SamplingOptions> {
         ImageSampling::Linear => Some(SamplingOptions::new(FilterMode::Linear, MipmapMode::None)),
         ImageSampling::Cubic => Some(CubicResampler::mitchell().into()),
         ImageSampling::CatmullRom => Some(CubicResampler::catmull_rom().into()),
-        ImageSampling::PillowLanczos => None,
+        ImageSampling::PillowLanczos
+        | ImageSampling::PillowBicubic
+        | ImageSampling::PillowBilinear => None,
         ImageSampling::LinearMipmap => {
             Some(SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear))
         }
@@ -1119,6 +1294,9 @@ fn corner_radii(radius: f32, corners: &[bool; 4]) -> [Point; 4] {
 fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
     let rect = Rect::from_xywh(off.0, off.1, size[0], size[1]);
     match clip {
+        Clip::Ellipse => {
+            canvas.clip_rrect(RRect::new_oval(rect), ClipOp::Intersect, false);
+        }
         Clip::Rect => {
             canvas.clip_rect(rect, ClipOp::Intersect, true);
         }
@@ -1339,10 +1517,28 @@ fn render_round_rect(canvas: &Canvas, node: &RoundRectNode, off: (f32, f32)) {
     };
     let rrect = RRect::new_rect_radii(rect, &radii);
     if let Some(fill) = &node.fill {
-        canvas.draw_rrect(rrect, &fill_paint(fill, off));
+        let mut paint = fill_paint(fill, off);
+        if node.replace_pixels {
+            paint.set_anti_alias(false);
+            paint.set_blend_mode(BlendMode::Src);
+        }
+        canvas.draw_rrect(rrect, &paint);
     }
     if let Some(stroke) = &node.stroke {
-        canvas.draw_rrect(rrect, &stroke_paint(stroke, node.stroke_width, off));
+        let mut paint = stroke_paint(stroke, node.stroke_width, off);
+        if node.replace_pixels {
+            paint.set_anti_alias(false);
+            paint.set_blend_mode(BlendMode::Src);
+            let inset = node.stroke_width * 0.5;
+            let inner_radii =
+                radii.map(|r| Point::new((r.x - inset).max(0.0), (r.y - inset).max(0.0)));
+            canvas.draw_rrect(
+                RRect::new_rect_radii(rect.with_inset((inset, inset)), &inner_radii),
+                &paint,
+            );
+        } else {
+            canvas.draw_rrect(rrect, &paint);
+        }
     }
 }
 
@@ -1377,15 +1573,54 @@ fn render_shadow(canvas: &Canvas, node: &ShadowNode, off: (f32, f32)) {
         node.size[1],
     );
     let mut paint = Paint::default();
-    paint.set_anti_alias(true);
+    paint.set_anti_alias(!node.straight_rgba);
     let c = node.color;
     let alpha = (node.alpha.clamp(0.0, 1.0) * c[3] as f32) as u8;
-    paint.set_color(Color::from_argb(alpha, c[0], c[1], c[2]));
+    if node.straight_rgba {
+        // Blurred shape coverage g becomes straight RGB = white + (color-white)*g,
+        // alpha = color_alpha*g. Apply after blurring, on layer restoration.
+        let matrix = skia_safe::ColorMatrix::new(
+            0.0,
+            0.0,
+            0.0,
+            c[0] as f32 / 255.0 - 1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            c[1] as f32 / 255.0 - 1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            c[2] as f32 / 255.0 - 1.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            alpha as f32 / 255.0,
+            0.0,
+        );
+        let mut restore = Paint::default();
+        restore.set_color_filter(skia_safe::color_filters::matrix(&matrix, None));
+        let bounds = rect.with_outset((node.sigma * 3.0 + 1.0, node.sigma * 3.0 + 1.0));
+        canvas.save_layer(
+            &skia_safe::canvas::SaveLayerRec::default()
+                .bounds(&bounds)
+                .paint(&restore),
+        );
+        paint.set_color(Color::WHITE);
+    } else {
+        paint.set_color(Color::from_argb(alpha, c[0], c[1], c[2]));
+    }
     paint.set_mask_filter(MaskFilter::blur(BlurStyle::Normal, node.sigma, true));
     canvas.draw_rrect(RRect::new_rect_xy(rect, node.radius, node.radius), &paint);
+    if node.straight_rgba {
+        canvas.restore();
+    }
 }
 
-/// Walk the tree and hard-fail on any `SdfQuad` whose `field` is not a raw Alpha8 mem entry.
+/// Validate scalar field references before drawing; fields cannot be used as ordinary images.
 /// The contract is strict on purpose: the field is per-request data the emitter just shipped,
 /// so a missing/mistyped one is an emitter bug — erroring the scene reaches Python's fail-open
 /// catch, while skipping would serve an image with glyphs silently missing.
@@ -1445,9 +1680,10 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
 
 /// Validate the generic isolate-then-place raster boundary before any native resource access.
 ///
-/// Scene.scale is intentionally absent from `in_transform`: on this renderer baseline it is a
-/// final whole-page raster resize. Explicit Transform nodes remain unsupported because their
-/// arbitrary matrix would make the node's logical destination contract ambiguous.
+/// Scene.scale is intentionally not represented by `in_transform`: the completed snapshot is
+/// placed as one ordinary logical Image draw and the parent CTM performs its only resize.
+/// Explicit Transform nodes remain unsupported because their arbitrary matrix would make the
+/// node's logical destination contract ambiguous.
 fn validate_raster_subscene_usage(node: &Node, in_transform: bool) -> Result<(), String> {
     match node {
         Node::Group(group) => group
@@ -1485,7 +1721,17 @@ fn validate_raster_subscene_usage(node: &Node, in_transform: bool) -> Result<(),
             if !(0.0..=1.0).contains(&subscene.alpha) {
                 return Err("RasterSubscene alpha must be between 0 and 1".to_string());
             }
-            if subscene.sampling == ImageSampling::PillowLanczos {
+            if subscene.sampling == ImageSampling::PillowBicubic
+                && subscene.dst_size.iter().any(|value| value.fract() != 0.0)
+            {
+                return Err(
+                    "bicubic RasterSubscene requires integer destination dimensions".to_string(),
+                );
+            }
+            if matches!(
+                subscene.sampling,
+                ImageSampling::PillowLanczos | ImageSampling::PillowBilinear
+            ) {
                 return Err("RasterSubscene does not support pillow_lanczos sampling".to_string());
             }
             if let Some(shadow) = subscene.shadow {
@@ -1540,8 +1786,8 @@ fn validate_paste_lerp_usage(
             .children
             .iter()
             .try_for_each(|child| validate_paste_lerp_usage(child, (0.0, 0.0), false, false)),
-        // RasterSubscene is a fresh root surface: parent saveLayer state does not enter it, so
-        // straight-RGBA destination reads are safe inside this isolation boundary.
+        // RasterSubscene is a fresh root surface: parent Scene.scale/saveLayer state does not
+        // enter it, so straight-RGBA destination reads are safe inside this isolation boundary.
         Node::RasterSubscene(subscene) => subscene
             .children
             .iter()
@@ -1549,9 +1795,54 @@ fn validate_paste_lerp_usage(
         Node::Rect(rect) if rect.blend == ImageBlend::PasteLerp => {
             Err("paste_lerp is supported only by Image nodes".to_string())
         }
+        Node::Image(image) if image.alpha_floor.is_some() => {
+            let rect = image.source_rect.ok_or("alpha crop requires source_rect")?;
+            let coords = [
+                rect[0],
+                rect[1],
+                rect[2],
+                rect[3],
+                image.pos[0] + off.0,
+                image.pos[1] + off.1,
+            ];
+            if in_transform
+                || image.alpha_floor == Some(255)
+                || image.sampling != ImageSampling::Nearest
+                || image.fit != Fit::Stretch
+                || image.blend != ImageBlend::Src
+                || image.alpha != 1.0
+                || image.tint.is_some()
+                || image.shadow.is_some()
+                || image.blur_sigma != [0.0, 0.0]
+                || image.anchor != [0.0, 0.0]
+                || rect[0] < 0.0
+                || rect[1] < 0.0
+                || rect[2] <= rect[0]
+                || rect[3] <= rect[1]
+                || image.size != [rect[2] - rect[0], rect[3] - rect[1]]
+                || coords.iter().any(|v| !v.is_finite() || *v != v.round())
+            {
+                return Err("alpha crop requires an integral natural-size nearest Src placement without decorations".to_string());
+            }
+            Ok(())
+        }
+        Node::Text(text) if text.mask_lerp => {
+            if in_transform || in_mask_layer {
+                return Err(
+                    "mask_lerp Text needs an identity surface outside masked Group layers"
+                        .to_string(),
+                );
+            }
+            if text.engine != TextEngine::FreetypeBasic || !matches!(text.fill, Fill::Solid(_)) {
+                return Err("mask_lerp Text requires FreeType BASIC and a solid fill".to_string());
+            }
+            Ok(())
+        }
         Node::Image(image) if image.blend == ImageBlend::PasteLerp => {
             if in_transform {
-                return Err("paste_lerp Image inside Transform is unsupported".to_string());
+                return Err(
+                    "paste_lerp Image inside Transform/Scene.scale is unsupported".to_string(),
+                );
             }
             if in_mask_layer {
                 return Err(
@@ -1615,9 +1906,18 @@ fn validate_pillow_lanczos_usage(node: &Node, in_transform: bool) -> Result<(), 
             .children
             .iter()
             .try_for_each(|child| validate_pillow_lanczos_usage(child, true)),
-        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => {
+        Node::Image(image)
+            if matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) =>
+        {
             if in_transform {
-                return Err("pillow_lanczos Image inside Transform is unsupported".to_string());
+                return Err(
+                    "pillow_lanczos Image inside Transform/Scene.scale is unsupported".to_string(),
+                );
             }
             if !matches!(image.fit, Fit::Stretch | Fit::Cover) {
                 return Err(format!(
@@ -1641,20 +1941,34 @@ fn validate_pillow_lanczos_usage(node: &Node, in_transform: bool) -> Result<(), 
                         .to_string(),
                 );
             }
-            if image.path.starts_with("mem:") {
-                return Err(
-                    "pillow_lanczos Image requires an asset-backed straight RGBA8 source"
-                        .to_string(),
-                );
-            }
             Ok(())
         }
-        Node::UnityImage(image) if image.sampling == ImageSampling::PillowLanczos => Err(
-            "UnityImage does not support pillow_lanczos; use a zero-rotation UnitySubscene"
-                .to_string(),
-        ),
+        Node::UnityImage(image)
+            if matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) =>
+        {
+            Err(
+                "UnityImage does not support pillow_lanczos; use a zero-rotation UnitySubscene"
+                    .to_string(),
+            )
+        }
         Node::UnitySubscene(subscene) => {
-            if subscene.sampling == ImageSampling::PillowLanczos {
+            if matches!(
+                subscene.sampling,
+                ImageSampling::PillowBicubic | ImageSampling::PillowBilinear
+            ) {
+                return Err("pillow_bicubic UnitySubscene is unsupported".to_string());
+            }
+            if matches!(
+                subscene.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) {
                 let angle = subscene.rotation % 360.0;
                 if !angle.is_finite() || angle.abs() >= 1.0e-9 {
                     return Err("pillow_lanczos UnitySubscene requires zero rotation".to_string());
@@ -1669,11 +1983,61 @@ fn validate_pillow_lanczos_usage(node: &Node, in_transform: bool) -> Result<(), 
             .children
             .iter()
             .try_for_each(|child| validate_pillow_lanczos_usage(child, false)),
-        Node::SelfImage(image) if image.sampling == ImageSampling::PillowLanczos => {
+        Node::SelfImage(image)
+            if matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) =>
+        {
             Err("SelfImage does not support pillow_lanczos sampling".to_string())
         }
         _ => Ok(()),
     }
+}
+
+/// SdfQuad fields are prepared at final device resolution by the custom-profile renderer.
+/// Applying a second global matrix would resample the already-warped field and violate that
+/// contract. No current scaled endpoint emits SdfQuad; fail the scene open to Pillow if one ever
+/// does instead of silently double-scaling it.
+fn validate_direct_scale_subtrees(node: &Node) -> Result<(), String> {
+    match node {
+        Node::SdfQuad(_) => {
+            Err("SdfQuad does not support Scene.scale direct rendering".to_string())
+        }
+        Node::SdfShape(_) => {
+            Err("SdfShape does not support Scene.scale direct rendering".to_string())
+        }
+        Node::UnityImage(_) => {
+            Err("UnityImage does not support Scene.scale direct rendering".to_string())
+        }
+        Node::UnitySubscene(_) => {
+            Err("UnitySubscene does not support Scene.scale direct rendering".to_string())
+        }
+        // Children render at natural 1x on a fresh surface. Only the completed snapshot reaches
+        // the scaled parent canvas, where it is sampled once into the logical destination.
+        Node::RasterSubscene(_) => Ok(()),
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(validate_direct_scale_subtrees),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(validate_direct_scale_subtrees),
+        _ => Ok(()),
+    }
+}
+
+fn logical_rect_to_device(rect: Rect, scale: (f32, f32)) -> IRect {
+    Rect::new(
+        rect.left * scale.0,
+        rect.top * scale.1,
+        rect.right * scale.0,
+        rect.bottom * scale.1,
+    )
+    .round_out()
 }
 
 fn validate_sdf_quad_fields(
@@ -1697,6 +2061,16 @@ fn validate_sdf_quad_fields(
             .children
             .iter()
             .try_for_each(|child| validate_sdf_quad_fields(child, mem_images)),
+        Node::Image(image) => {
+            if image
+                .path
+                .strip_prefix("mem:")
+                .is_some_and(|key| matches!(mem_images.get(key), Some(MemImage::FloatField { .. })))
+            {
+                return Err("float32 fields cannot be drawn as images".into());
+            }
+            Ok(())
+        }
         Node::SdfQuad(quad) => {
             let Some(key) = quad.field.strip_prefix("mem:") else {
                 return Err(format!(
@@ -1705,6 +2079,7 @@ fn validate_sdf_quad_fields(
                 ));
             };
             match mem_images.get(key) {
+                Some(MemImage::FloatField { .. }) => Ok(()),
                 Some(MemImage::Raw {
                     color_type: ColorType::Alpha8,
                     ..
@@ -1750,8 +2125,57 @@ fn prepare_pillow_lanczos_sources(node: &Node, interp: &mut Interp) -> Result<()
             .children
             .iter()
             .try_for_each(|child| prepare_pillow_lanczos_sources(child, interp)),
-        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => {
+        Node::Image(image)
+            if matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) =>
+        {
             if interp.pillow_lanczos_sources.contains_key(&image.path) {
+                return Ok(());
+            }
+            if let Some(key) = image.path.strip_prefix("mem:") {
+                let data = match interp.mem_images.get(key) {
+                    Some(MemImage::Encoded { data, .. }) => data.clone(),
+                    _ => return Err("pillow_bicubic requires an encoded mem image".to_string()),
+                };
+                let mut codec = skia_safe::Codec::from_data(data).ok_or_else(|| {
+                    "pillow_bicubic failed to decode encoded mem image".to_string()
+                })?;
+                let dimensions = codec.dimensions();
+                let (width, height) = (dimensions.width, dimensions.height);
+                let bytes = validate_strict_asset_size(
+                    width,
+                    height,
+                    interp.max_node_pixels,
+                    "pillow_bicubic mem source",
+                )?;
+                interp.ensure_native_scene_bytes(bytes, "pillow_bicubic mem source")?;
+                let info = ImageInfo::new(
+                    (width, height),
+                    ColorType::RGBA8888,
+                    AlphaType::Unpremul,
+                    None,
+                );
+                let mut pixels = vec![0; bytes];
+                let result =
+                    codec.get_pixels_with_options(&info, &mut pixels, width as usize * 4, None);
+                if !matches!(result, skia_safe::codec::Result::Success) {
+                    return Err(format!(
+                        "pillow_bicubic mem source decode failed: {result:?}"
+                    ));
+                }
+                interp.retain_native_asset_bytes(bytes, "pillow_bicubic mem source")?;
+                interp.pillow_lanczos_sources.insert(
+                    image.path.clone(),
+                    PillowLanczosSource {
+                        pixels,
+                        width,
+                        height,
+                    },
+                );
                 return Ok(());
             }
             let (descriptor, _) = interp.describe_asset(&image.path).map_err(|err| {
@@ -1827,6 +2251,9 @@ fn prepare_strict_image_ref(path: &str, interp: &mut Interp, context: &str) -> R
     }
     if let Some(key) = path.strip_prefix("mem:") {
         let encoded = match interp.mem_images.get(key) {
+            Some(MemImage::FloatField { .. }) => {
+                return Err("float32 fields cannot be drawn as images".into());
+            }
             Some(MemImage::Encoded { .. }) => true,
             Some(MemImage::Raw { .. }) => false,
             None => {
@@ -1905,16 +2332,25 @@ fn prepare_strict_subscene_children(
         Node::RasterSubscene(subscene) => subscene.children.iter().try_for_each(|child| {
             prepare_strict_subscene_children(child, interp, "RasterSubscene")
         }),
-        Node::Image(image) if image.sampling == ImageSampling::PillowLanczos => interp
-            .pillow_lanczos_sources
-            .contains_key(&image.path)
-            .then_some(())
-            .ok_or_else(|| {
-                format!(
-                    "pillow_lanczos Image source was not prepared: {}",
-                    image.path
-                )
-            }),
+        Node::Image(image)
+            if matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) =>
+        {
+            interp
+                .pillow_lanczos_sources
+                .contains_key(&image.path)
+                .then_some(())
+                .ok_or_else(|| {
+                    format!(
+                        "pillow_lanczos Image source was not prepared: {}",
+                        image.path
+                    )
+                })
+        }
         Node::Image(image) => prepare_strict_image_ref(&image.path, interp, context),
         Node::SlicedImage(image) => prepare_strict_image_ref(&image.path, interp, context),
         Node::ImageBg(image) => prepare_strict_image_ref(&image.path, interp, context),
@@ -2924,10 +3360,12 @@ fn draw_unity_subscene(
         sub_surface.canvas().clear(Color::TRANSPARENT);
 
         let previous_canvas = (interp.canvas_w, interp.canvas_h);
+        let previous_device_scale = interp.device_scale;
         let previous_in_transform = interp.in_transform;
         let previous_strict_asset_depth = interp.strict_asset_depth;
         interp.canvas_w = width as f32;
         interp.canvas_h = height as f32;
+        interp.device_scale = (1.0, 1.0);
         interp.in_transform = false;
         interp.strict_asset_depth = previous_strict_asset_depth.saturating_add(1);
         let child_result = node
@@ -2936,11 +3374,17 @@ fn draw_unity_subscene(
             .try_for_each(|child| render_node(&mut sub_surface, interp, (0.0, 0.0), child));
         interp.canvas_w = previous_canvas.0;
         interp.canvas_h = previous_canvas.1;
+        interp.device_scale = previous_device_scale;
         interp.in_transform = previous_in_transform;
         interp.strict_asset_depth = previous_strict_asset_depth;
         child_result?;
 
-        if node.sampling == ImageSampling::PillowLanczos {
+        if matches!(
+            node.sampling,
+            ImageSampling::PillowLanczos
+                | ImageSampling::PillowBicubic
+                | ImageSampling::PillowBilinear
+        ) {
             draw_pillow_lanczos_unity_subscene(
                 surface.canvas(),
                 interp,
@@ -2971,17 +3415,19 @@ fn draw_raster_subscene(
         "RasterSubscene natural surface",
     )?;
     interp.push_native_runtime_bytes(surface_bytes, "RasterSubscene natural surface")?;
-
+    let mut resize_charge = 0;
     let result = (|| {
         let mut sub_surface = surfaces::raster_n32_premul((width, height))
             .ok_or_else(|| format!("failed to create RasterSubscene surface {width}x{height}"))?;
         sub_surface.canvas().clear(Color::TRANSPARENT);
 
         let previous_canvas = (interp.canvas_w, interp.canvas_h);
+        let previous_device_scale = interp.device_scale;
         let previous_in_transform = interp.in_transform;
         let previous_strict_asset_depth = interp.strict_asset_depth;
         interp.canvas_w = width as f32;
         interp.canvas_h = height as f32;
+        interp.device_scale = (1.0, 1.0);
         interp.in_transform = false;
         interp.strict_asset_depth = previous_strict_asset_depth.saturating_add(1);
         let child_result = node
@@ -2990,11 +3436,48 @@ fn draw_raster_subscene(
             .try_for_each(|child| render_node(&mut sub_surface, interp, (0.0, 0.0), child));
         interp.canvas_w = previous_canvas.0;
         interp.canvas_h = previous_canvas.1;
+        interp.device_scale = previous_device_scale;
         interp.in_transform = previous_in_transform;
         interp.strict_asset_depth = previous_strict_asset_depth;
         child_result?;
 
-        let image = sub_surface.image_snapshot();
+        let image = if node.sampling == ImageSampling::PillowBicubic {
+            let label = "bicubic RasterSubscene resize";
+            interp.push_native_runtime_bytes(surface_bytes, label)?;
+            resize_charge += surface_bytes;
+            let pixels = read_surface_straight_rgba8(&mut sub_surface)?;
+            let destination = (node.dst_size[0] as i32, node.dst_size[1] as i32);
+            let resized = pillow_resize_buffer_filtered(
+                &pixels,
+                (width, height),
+                destination,
+                interp.max_node_pixels,
+                interp.available_native_scene_bytes(label)?,
+                label,
+                PillowFilter::Bicubic,
+            )?;
+            let bytes = resized.len();
+            interp.push_native_runtime_bytes(bytes, label)?;
+            resize_charge += bytes;
+            drop(pixels);
+            interp.pop_native_runtime_bytes(surface_bytes);
+            resize_charge -= surface_bytes;
+            interp.push_native_runtime_bytes(bytes, label)?;
+            resize_charge += bytes;
+            let info = ImageInfo::new(destination, ColorType::RGBA8888, AlphaType::Unpremul, None);
+            let image = skia_safe::images::raster_from_data(
+                &info,
+                Data::new_copy(&resized),
+                destination.0 as usize * 4,
+            )
+            .ok_or_else(|| "failed to allocate bicubic RasterSubscene raster".to_string())?;
+            drop(resized);
+            interp.pop_native_runtime_bytes(bytes);
+            resize_charge -= bytes;
+            image
+        } else {
+            sub_surface.image_snapshot()
+        };
         let dst = Rect::from_xywh(
             node.pos[0] + off.0,
             node.pos[1] + off.1,
@@ -3008,6 +3491,7 @@ fn draw_raster_subscene(
             fit: Fit::Stretch,
             sampling: node.sampling,
             source_rect: None,
+            alpha_floor: None,
             alpha: node.alpha,
             anchor: [0.0, 0.0],
             tint: None,
@@ -3015,8 +3499,13 @@ fn draw_raster_subscene(
             blur_sigma: [0.0, 0.0],
             blend: ImageBlend::SrcOver,
         };
-        let sampling = skia_image_sampling(node.sampling)
-            .ok_or_else(|| "RasterSubscene does not support pillow_lanczos sampling".to_string())?;
+        let sampling = if node.sampling == ImageSampling::PillowBicubic {
+            SamplingOptions::default()
+        } else {
+            skia_image_sampling(node.sampling).ok_or_else(|| {
+                "RasterSubscene does not support pillow_lanczos sampling".to_string()
+            })?
+        };
         draw_image_placed(
             surface.canvas(),
             &image,
@@ -3026,6 +3515,7 @@ fn draw_raster_subscene(
         );
         Ok(())
     })();
+    interp.pop_native_runtime_bytes(resize_charge);
     interp.pop_native_runtime_bytes(surface_bytes);
     result
 }
@@ -3045,6 +3535,17 @@ pub(crate) fn shade_sdf_field(
     row_bytes: usize,
     shading: &SdfShading,
 ) -> Vec<u8> {
+    shade_sdf_samples(width, height, shading, |x, y| {
+        field[y * row_bytes + x] as f32 / 255.0
+    })
+}
+
+fn shade_sdf_samples(
+    width: usize,
+    height: usize,
+    shading: &SdfShading,
+    sample: impl Fn(usize, usize) -> f32,
+) -> Vec<u8> {
     let face_scale = shading.face_scale as f32;
     let face_w = shading.face_w as f32;
     let alpha = shading.alpha as f32;
@@ -3060,9 +3561,8 @@ pub(crate) fn shade_sdf_field(
 
     let mut patch = vec![0_u8; width * height * 4];
     for y in 0..height {
-        let row = &field[y * row_bytes..y * row_bytes + width];
         for x in 0..width {
-            let f = row[x] as f32 / 255.0;
+            let f = sample(x, y);
             let face_a = (f * face_scale - face_w).clamp(0.0, 1.0) * alpha;
             let (under_a, under_rgb) = match &underlay {
                 Some((u_scale, u_w, shift, u_rgb)) => {
@@ -3071,7 +3571,7 @@ pub(crate) fn shade_sdf_field(
                     let sy = y as i64 + shift[1] as i64;
                     let shifted =
                         if (0..width as i64).contains(&sx) && (0..height as i64).contains(&sy) {
-                            field[sy as usize * row_bytes + sx as usize] as f32 / 255.0
+                            sample(sx as usize, sy as usize)
                         } else {
                             0.0
                         };
@@ -3093,53 +3593,71 @@ pub(crate) fn shade_sdf_field(
     patch
 }
 
-/// Shade an SdfQuad's pre-warped A8 field and draw the straight-alpha patch src-over at its
-/// integer position — nearest sampling, no AA, ZERO geometric resampling (the field arrives
-/// already at display size). The field reference was validated up front, so a miss here only
-/// happens for test-constructed scenes; it degrades to skipping the node like other draws.
-fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off: (f32, f32)) {
-    let Some(key) = node.field.strip_prefix("mem:") else {
-        return;
+/// Shade A8 or unquantized float32 samples and draw src-over at the integer position.
+/// Field format and scratch budgets fail the whole scene; never skip a requested glyph.
+fn draw_sdf_quad(
+    surface: &mut Surface,
+    interp: &Interp,
+    node: &SdfQuadNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let key = node
+        .field
+        .strip_prefix("mem:")
+        .ok_or("SdfQuad requires a mem field")?;
+    let (width, height, data, row_bytes, float32) = match interp.mem_images.get(key) {
+        Some(MemImage::FloatField {
+            width,
+            height,
+            data,
+            ..
+        }) => (*width, *height, data, *width as usize * 4, true),
+        Some(MemImage::Raw {
+            width,
+            height,
+            row_bytes,
+            color_type: ColorType::Alpha8,
+            data,
+            ..
+        }) => (*width, *height, data, *row_bytes, false),
+        _ => return Err("SdfQuad field is missing or has an unsupported format".into()),
     };
-    let Some(MemImage::Raw {
-        width,
-        height,
-        row_bytes,
-        color_type: ColorType::Alpha8,
-        data,
-        ..
-    }) = interp.mem_images.get(key)
-    else {
-        return;
-    };
-    let (w, h) = (*width as usize, *height as usize);
+    let patch_bytes =
+        validate_strict_asset_size(width, height, interp.max_node_pixels, "SdfQuad patch")?;
+    // The owned patch and SkData copy coexist; enclosing subscene surfaces and
+    // retained request buffers are already accounted by the interpreter.
+    interp.ensure_native_scene_bytes(
+        patch_bytes
+            .checked_mul(2)
+            .ok_or("SdfQuad scratch overflow")?,
+        "SdfQuad scratch",
+    )?;
+    let (w, h) = (width as usize, height as usize);
     let bytes = data.as_bytes();
+    let pixel_bytes = if float32 { 4 } else { 1 };
     if bytes.len()
         < row_bytes
             .saturating_mul(h.saturating_sub(1))
-            .saturating_add(w)
+            .saturating_add(w * pixel_bytes)
     {
-        eprintln!(
-            "haruki_skia_renderer: SdfQuad field buffer too small, node skipped: {}",
-            node.field
-        );
-        return;
+        return Err("SdfQuad field buffer is too small".into());
     }
-    let patch = shade_sdf_field(bytes, w, h, *row_bytes, &node.shading);
+    let patch = if float32 {
+        shade_sdf_samples(w, h, &node.shading, |x, y| {
+            let offset = y * row_bytes + x * 4;
+            f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+        })
+    } else {
+        shade_sdf_field(bytes, w, h, row_bytes, &node.shading)
+    };
     let info = ImageInfo::new(
-        (*width, *height),
+        (width, height),
         ColorType::RGBA8888,
         AlphaType::Unpremul,
         None,
     );
-    let Some(image) = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), w * 4)
-    else {
-        eprintln!(
-            "haruki_skia_renderer: SdfQuad patch image build failed, node skipped: {}",
-            node.field
-        );
-        return;
-    };
+    let image = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), w * 4)
+        .ok_or("SdfQuad patch image allocation failed")?;
     let paint = Paint::default();
     surface.canvas().draw_image_with_sampling_options(
         &image,
@@ -3147,6 +3665,7 @@ fn draw_sdf_quad(surface: &mut Surface, interp: &Interp, node: &SdfQuadNode, off
         SamplingOptions::default(),
         Some(&paint),
     );
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -3217,8 +3736,12 @@ fn collect_image_prewarm_requests<'a>(
             }
         }
         Node::Image(image)
-            if image.sampling != ImageSampling::PillowLanczos
-                && image.blend != ImageBlend::PasteLerp
+            if !matches!(
+                image.sampling,
+                ImageSampling::PillowLanczos
+                    | ImageSampling::PillowBicubic
+                    | ImageSampling::PillowBilinear
+            ) && image.blend != ImageBlend::PasteLerp
                 && !image.path.starts_with("mem:")
                 && seen.insert(image_prewarm_key(image)) =>
         {
@@ -3421,6 +3944,8 @@ fn sampling_key(mode: ImageSampling) -> u8 {
         ImageSampling::LinearMipmap => 3,
         ImageSampling::CatmullRom => 4,
         ImageSampling::PillowLanczos => 5,
+        ImageSampling::PillowBicubic => 6,
+        ImageSampling::PillowBilinear => 7,
     }
 }
 
@@ -3431,6 +3956,26 @@ fn pillow_resize_buffer(
     max_node_pixels: usize,
     available_scene_bytes: usize,
     label: &str,
+) -> Result<Vec<u8>, String> {
+    pillow_resize_buffer_filtered(
+        source,
+        source_size,
+        destination_size,
+        max_node_pixels,
+        available_scene_bytes,
+        label,
+        PillowFilter::Lanczos,
+    )
+}
+
+fn pillow_resize_buffer_filtered(
+    source: &[u8],
+    source_size: (i32, i32),
+    destination_size: (i32, i32),
+    max_node_pixels: usize,
+    available_scene_bytes: usize,
+    label: &str,
+    filter: PillowFilter,
 ) -> Result<Vec<u8>, String> {
     let output_bytes = validate_strict_asset_size(
         destination_size.0,
@@ -3445,7 +3990,12 @@ fn pillow_resize_buffer(
         ));
     }
     let max_dimension = max_node_pixels.min(i32::MAX as usize).max(1);
-    resize_rgba8_pillow_lanczos(
+    let resize = match filter {
+        PillowFilter::Lanczos => resize_rgba8_pillow_lanczos,
+        PillowFilter::Bicubic => resize_rgba8_pillow_bicubic,
+        PillowFilter::Bilinear => resize_rgba8_pillow_bilinear,
+    };
+    resize(
         source,
         usize::try_from(source_size.0).map_err(|_| format!("{label} source width is invalid"))?,
         usize::try_from(source_size.1).map_err(|_| format!("{label} source height is invalid"))?,
@@ -3565,13 +4115,18 @@ fn rasterize_pillow_lanczos_image(
     };
 
     let available = interp.available_native_scene_bytes("pillow_lanczos Image resize")?;
-    let resized = pillow_resize_buffer(
+    let resized = pillow_resize_buffer_filtered(
         &source.pixels,
         source_size,
         resized_size,
         interp.max_node_pixels,
         available,
         "pillow_lanczos Image resize",
+        match node.sampling {
+            ImageSampling::PillowBicubic => PillowFilter::Bicubic,
+            ImageSampling::PillowBilinear => PillowFilter::Bilinear,
+            _ => PillowFilter::Lanczos,
+        },
     )?;
     let resized_bytes = resized.len();
     interp.push_native_runtime_bytes(resized_bytes, "pillow_lanczos Image resized raster")?;
@@ -3651,7 +4206,10 @@ fn rasterize_paste_lerp_source(
     node: &ImageNode,
     off: (f32, f32),
 ) -> Result<(Vec<u8>, i32, i32, Rect), String> {
-    if node.sampling == ImageSampling::PillowLanczos {
+    if matches!(
+        node.sampling,
+        ImageSampling::PillowLanczos | ImageSampling::PillowBicubic | ImageSampling::PillowBilinear
+    ) {
         return rasterize_pillow_lanczos_image(interp, node, off);
     }
 
@@ -3857,7 +4415,10 @@ fn draw_image_node(
     node: &ImageNode,
     off: (f32, f32),
 ) -> Result<(), String> {
-    if node.sampling == ImageSampling::PillowLanczos {
+    if matches!(
+        node.sampling,
+        ImageSampling::PillowLanczos | ImageSampling::PillowBicubic | ImageSampling::PillowBilinear
+    ) {
         interp.metrics.raster_cache_bypasses += 1;
         return draw_pillow_lanczos_image(canvas, interp, node, off);
     }
@@ -4042,6 +4603,16 @@ fn draw_image_placed(
     paint.set_alpha_f(alpha);
     if let Some(tint) = &node.tint {
         paint.set_color_filter(tint_filter(tint));
+    }
+    if let Some(floor) = node.alpha_floor {
+        let table: [u8; 256] = std::array::from_fn(|value| {
+            if value <= usize::from(floor) {
+                0
+            } else {
+                ((value - usize::from(floor)) * 255 / (255 - usize::from(floor))) as u8
+            }
+        });
+        paint.set_color_filter(color_filters::table_argb(&table, None, None, None));
     }
     let has_blur = node.blur_sigma[0] > 0.0 || node.blur_sigma[1] > 0.0;
     if has_blur {
@@ -4296,6 +4867,143 @@ fn draw_text_core(
 
 /// Draw a `TextNode`: optional outline under the fill (solid or gradient), with letter spacing
 /// and emoji-font routing.
+fn draw_basic_text(
+    surface: &mut Surface,
+    fonts: &FontRegistry,
+    node: &TextNode,
+    abs: (f32, f32),
+    off: (f32, f32),
+    max_pixels: usize,
+) -> Result<(), String> {
+    if node.stroke.is_some() || node.adaptive.is_some() || node.letter_spacing != 0.0 {
+        return Err(
+            "FreeType BASIC text does not yet support stroke, adaptive color or letter spacing"
+                .into(),
+        );
+    }
+    let role = match node.font.role {
+        FontRole::Default => 0,
+        FontRole::Bold => 1,
+        FontRole::Heavy => 2,
+    };
+    let name = node
+        .font
+        .name
+        .as_ref()
+        .and_then(|n| fonts.files.get(n))
+        .unwrap_or(&fonts.role_files[role]);
+    let mask = crate::basic_text::raster(
+        &fonts.dir,
+        name,
+        &node.text,
+        node.font.size,
+        max_pixels as u64,
+    )?;
+    if mask.width == 0 || mask.height == 0 {
+        return Ok(());
+    }
+    let x = abs.0
+        - match node.align {
+            HAlign::Left => 0.0,
+            HAlign::Center => mask.metrics.advance * 0.5,
+            HAlign::Right => mask.metrics.advance,
+        };
+    let y = abs.1
+        + match node.baseline {
+            Baseline::CjkTop => mask.reference_height,
+            Baseline::Ascender => mask.metrics.ascent,
+            Baseline::Alphabetic => 0.0,
+        };
+    let info = ImageInfo::new(
+        (mask.width as i32, mask.height as i32),
+        ColorType::Alpha8,
+        AlphaType::Premul,
+        None,
+    );
+    let image =
+        skia_safe::images::raster_from_data(&info, Data::new_copy(&mask.pixels), mask.width)
+            .ok_or("cannot create native text mask")?;
+    let mut paint = Paint::default();
+    apply_fill(&mut paint, &node.fill, off);
+    // FreeType already supplies coverage. Applying the CoreText calibration here would
+    // alter the correct glyph mask. Placement is pixel-snapped like ImageDraw BASIC.
+    // ImageDraw passes signed fractional starts through FreeType's 26.6 pen.
+    // Y points upward there, so the half-pixel tie is opposite to X's tie.
+    let x = x.trunc() + crate::basic_text::pixel((x.fract() * 64.0).round() as i64) as f32;
+    let y = y.trunc() - crate::basic_text::pixel((-y.fract() * 64.0).round() as i64) as f32;
+    if node.mask_lerp {
+        let Fill::Solid(fill) = node.fill else {
+            return Err("mask_lerp Text needs a solid fill".into());
+        };
+        return draw_mask_lerp_text(
+            surface,
+            &mask.pixels,
+            mask.width,
+            mask.height,
+            (x + mask.metrics.ink_bbox[0]) as i32,
+            (y + mask.metrics.ink_bbox[1]) as i32,
+            fill,
+        );
+    }
+    surface.canvas().draw_image(
+        &image,
+        (x + mask.metrics.ink_bbox[0], y + mask.metrics.ink_bbox[1]),
+        Some(&paint),
+    );
+    Ok(())
+}
+
+fn draw_mask_lerp_text(
+    surface: &mut Surface,
+    mask: &[u8],
+    mask_width: usize,
+    mask_height: usize,
+    origin_x: i32,
+    origin_y: i32,
+    fill: Color4,
+) -> Result<(), String> {
+    let left = origin_x.clamp(0, surface.width());
+    let top = origin_y.clamp(0, surface.height());
+    let right = (origin_x as i64 + mask_width as i64).clamp(0, surface.width() as i64) as i32;
+    let bottom = (origin_y as i64 + mask_height as i64).clamp(0, surface.height() as i64) as i32;
+    if right <= left || bottom <= top {
+        return Ok(());
+    }
+    let (width, height) = ((right - left) as usize, (bottom - top) as usize);
+    // The mask allocator's limit reserves ten bytes per mask pixel: A8 and its
+    // SkData copy plus this RGBA readback and the replacement raster copy.
+    let mut output = vec![0; width * height * 4];
+    let info = ImageInfo::new(
+        (width as i32, height as i32),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    if !surface.read_pixels(&info, &mut output, width * 4, (left, top)) {
+        return Err("failed to read mask_lerp text destination".into());
+    }
+    for y in 0..height {
+        for x in 0..width {
+            let coverage =
+                mask[(y + (top - origin_y) as usize) * mask_width + x + (left - origin_x) as usize];
+            let index = (y * width + x) * 4;
+            for channel in 0..4 {
+                output[index + channel] =
+                    pillow_paste_lerp_byte(output[index + channel], fill[channel], coverage);
+            }
+        }
+    }
+    let image = skia_safe::images::raster_from_data(&info, Data::new_copy(&output), width * 4)
+        .ok_or("failed to build mask_lerp text raster")?;
+    let mut paint = Paint::default();
+    paint.set_blend_mode(BlendMode::Src);
+    paint.set_anti_alias(false);
+    surface
+        .canvas()
+        .draw_image(&image, (left as f32, top as f32), Some(&paint));
+    Ok(())
+}
+
 fn draw_styled_text(
     canvas: &Canvas,
     fonts: &FontRegistry,
@@ -4362,6 +5070,7 @@ fn resolve_adaptive_color(
     node: &TextNode,
     abs: (f32, f32),
     ad: &AdaptiveColor,
+    device: DeviceSpace,
 ) -> Color4 {
     let font = configured_text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font_for(&node.text, node.font.size);
@@ -4379,9 +5088,9 @@ fn resolve_adaptive_color(
     let (_, metrics) = font.metrics();
     // Text ink box: x..x+advance vertically spanning ascent..descent around the baseline.
     let mut bounds = Rect::new(x, y + metrics.ascent, x + advance, y + metrics.descent);
-    let canvas_rect = Rect::from_xywh(0.0, 0.0, surface.width() as f32, surface.height() as f32);
+    let canvas_rect = Rect::from_xywh(0.0, 0.0, device.logical_canvas.0, device.logical_canvas.1);
     let lum = if bounds.intersect(canvas_rect) {
-        let ibounds: IRect = bounds.round_out();
+        let ibounds = logical_rect_to_device(bounds, device.scale);
         surface
             .image_snapshot_with_bounds(ibounds)
             .and_then(|img| average_luminance(&img))
@@ -4409,6 +5118,7 @@ fn draw_pixelwise_adaptive_text(
     abs: (f32, f32),
     off: (f32, f32),
     ad: &AdaptiveColor,
+    device: DeviceSpace,
 ) {
     let font = configured_text_font(fonts.resolve_ref(&node.font).clone(), node.font.size);
     let emoji = fonts.emoji_font_for(&node.text, node.font.size);
@@ -4425,23 +5135,30 @@ fn draw_pixelwise_adaptive_text(
     let advance = measure_advance(&font, emoji_ref, &node.text, node.letter_spacing);
     let (_, metrics) = font.metrics();
     let mut bounds = Rect::new(x, y + metrics.ascent, x + advance, y + metrics.descent);
-    let canvas_rect = Rect::from_xywh(0.0, 0.0, surface.width() as f32, surface.height() as f32);
+    let canvas_rect = Rect::from_xywh(0.0, 0.0, device.logical_canvas.0, device.logical_canvas.1);
     let mask = if bounds.intersect(canvas_rect) {
-        let ibounds: IRect = bounds.round_out();
+        let ibounds = logical_rect_to_device(bounds, device.scale);
         surface
             .image_snapshot_with_bounds(ibounds)
-            .and_then(|img| pixelwise_dark_mask(&img, ad.threshold))
+            .and_then(|img| {
+                pixelwise_dark_mask(&img, ad.threshold, (device.scale.0 + device.scale.1) * 0.5)
+            })
             .map(|mask| (mask, ibounds))
     } else {
         None
     };
     let Some((mask, ibounds)) = mask else {
         // No usable backdrop: fall back to the whole-run average path.
-        let color = resolve_adaptive_color(surface, fonts, node, abs, ad);
+        let color = resolve_adaptive_color(surface, fonts, node, abs, ad, device);
         draw_styled_text(surface.canvas(), fonts, node, abs, off, &Fill::Solid(color));
         return;
     };
-    let mask_rect = Rect::from_irect(ibounds);
+    let mask_rect = Rect::new(
+        ibounds.left as f32 / device.scale.0,
+        ibounds.top as f32 / device.scale.1,
+        ibounds.right as f32 / device.scale.0,
+        ibounds.bottom as f32 / device.scale.1,
+    );
     let canvas = surface.canvas();
     let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&mask_rect);
     canvas.save_layer(&layer);
@@ -4460,12 +5177,13 @@ fn draw_pixelwise_adaptive_text(
 
 /// Opaque-white-where-dark-text-applies mask: blur the backdrop like PIL BoxBlur(8)
 /// (equivalent gaussian sigma ~= sqrt((17^2 - 1) / 12)) and threshold its 601 luma.
-fn pixelwise_dark_mask(backdrop: &Image, threshold: f32) -> Option<Image> {
+fn pixelwise_dark_mask(backdrop: &Image, threshold: f32, device_scale: f32) -> Option<Image> {
     let w = backdrop.width().max(1);
     let h = backdrop.height().max(1);
     let mut blur_surface = surfaces::raster_n32_premul((w, h))?;
     let mut blur_paint = Paint::default();
-    let sigma = (17.0_f32 * 17.0 - 1.0).sqrt() / 12.0_f32.sqrt();
+    let kernel_width = (16.0 * device_scale.max(0.01) + 1.0).max(1.0);
+    let sigma = (kernel_width * kernel_width - 1.0).sqrt() / 12.0_f32.sqrt();
     blur_paint.set_image_filter(image_filters::blur(
         (sigma, sigma),
         TileMode::Clamp,
@@ -4516,6 +5234,25 @@ fn average_luminance(image: &Image) -> Option<f32> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unquantized_sdf_samples_preserve_sub_byte_coverage() {
+        let shading = super::SdfShading {
+            face_color: [255, 255, 255],
+            face_scale: 1000.0,
+            face_w: 500.0,
+            alpha: 1.0,
+            underlay: None,
+        };
+        let samples = [0.5005_f32, 0.5001, 0.4999];
+        let result = super::shade_sdf_samples(3, 1, &shading, |x, _| samples[x]);
+        assert_eq!(result, [255, 255, 255, 128, 255, 255, 255, 26, 0, 0, 0, 0]);
+        let quantized = samples.map(|value| (value * 255.0).round_ties_even() as u8);
+        assert_ne!(
+            result,
+            super::shade_sdf_field(&quantized, 3, 1, 3, &shading)
+        );
+    }
+
     use super::*;
 
     fn scene_json(extra_root: &str) -> String {
@@ -4600,7 +5337,65 @@ mod tests {
     }
 
     #[test]
-    fn skips_backdrop_work_for_zero_blur_glass() {
+    fn scene_scale_draws_directly_at_target_size_with_device_snapshots() {
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [4, 4], "size": [20, 20], "fill": [255, 0, 0, 255] },
+            { "type": "SelfImage", "pos": [28, 4], "size": [20, 20],
+              "source_rect": [4, 4, 24, 24], "sampling": "nearest" },
+            { "type": "BlurGlass", "pos": [4, 28], "size": [44, 14], "radius": 4,
+              "fill": [255, 255, 255, 80], "shadow_alpha": 0.2, "blur": 4 }
+            "#,
+        )
+        .replace("\"canvas\":", "\"scale\": 2.0, \"canvas\":");
+        let rendered = render(&json);
+        let (pixels, width, height) = decode_pixels(&rendered);
+
+        assert_eq!((width, height), (128, 96));
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+        assert_eq!(pixel(20, 20), &[255, 0, 0, 255]);
+        assert_eq!(pixel(76, 20), &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn post_resize_filters_completed_pixels_instead_of_scaling_geometry() {
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [0, 0], "size": [64, 48], "fill": [0, 0, 0, 255] },
+            { "type": "Rect", "pos": [32, 0], "size": [1, 48], "fill": [255, 255, 255, 255] }
+            "#,
+        )
+        .replace(
+            "\"canvas\":",
+            "\"post_resize\": {\"width\":96,\"height\":72}, \"canvas\":",
+        );
+        let rendered = render(&json);
+        let (pixels, width, height) = decode_pixels(&rendered);
+        assert_eq!((width, height), (96, 72));
+        // Pillow RGBA BILINEAR golden: a single white logical column spreads
+        // across three target columns, rather than a directly drawn 1.5px rectangle.
+        let row: Vec<u8> = (46..52).map(|x| pixels[(20 * 96 + x) * 4]).collect();
+        assert_eq!(row, [0, 43, 212, 128, 0, 0]);
+    }
+
+    #[test]
+    fn post_resize_rejects_unbounded_output_before_loading_assets() {
+        let json = scene_json(
+            r#"{ "type": "Image", "pos": [0,0], "size": [64,48], "path": "missing.png" }"#,
+        )
+        .replace(
+            "\"canvas\":",
+            "\"post_resize\": {\"width\":32768,\"height\":2}, \"canvas\":",
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("scene parses");
+        let error = render_scene_inner(&scene, HashMap::new())
+            .err()
+            .expect("must reject");
+        assert!(error.contains("post_resize dimensions"), "{error}");
+    }
+
+    #[test]
+    fn skips_blur_surfaces_for_zero_blur_glass() {
         let json = scene_json(
             r#"
             { "type": "BlurGlass", "pos": [4, 4], "size": [40, 24], "radius": 6,
@@ -4609,6 +5404,43 @@ mod tests {
         );
         let rendered = render(&json);
         assert_eq!(rendered.metrics.zero_blur_fast_paths, 1);
+    }
+
+    #[test]
+    fn zero_blur_glass_preserves_backdrop_color_and_replaces_alpha() {
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [0, 0], "size": [64, 48],
+              "fill": [180, 0, 0, 128], "blend": "src" },
+            { "type": "BlurGlass", "pos": [4, 4], "size": [40, 32], "radius": 6,
+              "fill": [255, 255, 255, 0], "shadow_alpha": 0, "blur": 0 }
+            "#,
+        );
+        let rendered = render(&json);
+        let (pixels, width, _) = decode_pixels(&rendered);
+        let center = &pixels[(20 * width as usize + 24) * 4..][..4];
+        assert!(center[0] >= 178 && center[0] <= 182, "{center:?}");
+        assert_eq!(&center[1..], &[0, 0, 255]);
+    }
+
+    #[test]
+    fn arcs_replace_alpha_and_respect_partial_sweeps() {
+        let json = scene_json(
+            r#"
+            { "type": "Rect", "pos": [0, 0], "size": [64, 48],
+              "fill": [0, 0, 0, 0], "blend": "src" },
+            { "type": "Arc", "pos": [8, 8], "size": [32, 32],
+              "start_angle": -90, "end_angle": 270, "color": [0, 0, 255, 190], "width": 4 },
+            { "type": "Arc", "pos": [8, 8], "size": [32, 32],
+              "start_angle": -90, "end_angle": 0, "color": [255, 0, 0, 128], "width": 4 }
+            "#,
+        );
+        let rendered = render(&json);
+        let (pixels, width, _) = decode_pixels(&rendered);
+        let pixel = |x: usize, y: usize| &pixels[(y * width as usize + x) * 4..][..4];
+        assert_eq!(pixel(34, 14), &[255, 0, 0, 128]);
+        assert_eq!(pixel(10, 24), &[0, 0, 255, 190]);
+        assert_eq!(pixel(24, 24)[3], 0);
     }
 
     #[test]
@@ -5422,6 +6254,19 @@ mod tests {
                 && !err.contains("asset load failed"),
             "unexpected error: {err}"
         );
+
+        let scaled = bare_scene_json(
+            (8, 8),
+            r#"{ "type": "Image", "path": "missing.png", "pos": [0, 0],
+                 "size": [8, 8], "fit": "stretch", "blend": "paste_lerp" }"#,
+        )
+        .replace("\"canvas\":", "\"scale\": 2.0, \"canvas\":");
+        let scene: Scene = serde_json::from_str(&scaled).expect("scene parses");
+        let err = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            err.contains("Transform/Scene.scale") && !err.contains("asset load failed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -6044,7 +6889,7 @@ mod tests {
     }
 
     #[test]
-    fn raster_subscene_scene_scale_matches_ordinary_image_final_resize() {
+    fn raster_subscene_scene_scale_draws_snapshot_once_at_device_size() {
         let root = r#"{
             "type": "Group", "size": [4, 2], "children": [
                 { "type": "RasterSubscene", "natural_size": [4, 1],
@@ -6084,8 +6929,8 @@ mod tests {
                 raster
                     .iter()
                     .zip(direct)
-                    .all(|(left, right)| left.abs_diff(*right) <= 6),
-                "RasterSubscene must match an ordinary Image under final Scene.scale: \
+                    .all(|(left, right)| left.abs_diff(*right) <= 1),
+                "RasterSubscene must sample natural->device like a direct Image draw: \
                  raster={raster_pixels:?} direct={direct_pixels:?}"
             );
         }

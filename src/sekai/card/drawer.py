@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base import (
@@ -14,13 +18,14 @@ from src.sekai.base import (
     SEKAI_BLUE_BG,
     add_request_watermark,
     color_code_to_rgb,
-    get_img_from_path,
     roundrect_bg,
 )
 from src.sekai.base.draw import CHARACTER_COLOR_CODE
-from src.sekai.base.painter import get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.image_source import ImageSource
 from src.sekai.base.plot import (
     Canvas,
+    CanvasImageBox,
     FillBg,
     Frame,
     Grid,
@@ -33,6 +38,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     get_asset_image_ref,
@@ -182,7 +188,7 @@ def _mini_vertical_bar(width: int, height: int, ratio: float, color: tuple[int, 
 
 
 def _circular_progress_avatar(
-    avatar_img: Image.Image | None,
+    avatar_img: ImageSource | None,
     size: int,
     ratio: float,
     color: tuple[int, int, int, int],
@@ -192,38 +198,27 @@ def _circular_progress_avatar(
     padding = ring_width + max(2, size // 28)
     inner_size = max(1, size - padding * 2)
     frame = Frame().set_size((size, size)).set_content_align("c")
+    badge = Canvas(w=size, h=size).set_padding(0)
 
     def draw(_widget, p):
-        avatar = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        d = ImageDraw.Draw(avatar)
-        avatar_pos = (padding, padding)
         if avatar_img is not None:
-            cropped_avatar = avatar_img.convert("RGBA").resize((inner_size, inner_size), Image.Resampling.LANCZOS)
-            mask = Image.new("L", (inner_size, inner_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, inner_size - 1, inner_size - 1), fill=255)
-            avatar.paste(cropped_avatar, avatar_pos, mask)
+            p.push_clip_ellipse((padding, padding), (inner_size, inner_size))
+            p.paste_src(avatar_img, (padding, padding), (inner_size, inner_size), sampling="pillow_lanczos")
+            p.pop_clip()
         else:
-            d.ellipse(
-                (
-                    avatar_pos[0],
-                    avatar_pos[1],
-                    avatar_pos[0] + inner_size - 1,
-                    avatar_pos[1] + inner_size - 1,
-                ),
-                fill=(218, 218, 218, 255),
-            )
-        box = (
-            ring_width // 2,
-            ring_width // 2,
-            size - ring_width // 2 - 1,
-            size - ring_width // 2 - 1,
-        )
-        d.arc(box, start=-90, end=270, fill=(183, 188, 198, 190), width=ring_width)
+            # Full ellipse, using the same binary mask as the source-image branch.
+            p.push_clip_ellipse((padding, padding), (inner_size, inner_size))
+            p.rect((padding, padding), (inner_size, inner_size), (218, 218, 218, 255))
+            p.pop_clip()
+        offset = ring_width // 2
+        ring_size = (size - 2 * offset, size - 2 * offset)
+        p.arc((offset, offset), ring_size, -90, 270, (183, 188, 198, 190), ring_width)
         if ratio > 0:
-            d.arc(box, start=-90, end=-90 + 360 * ratio, fill=color, width=ring_width)
-        p.paste(avatar, (0, 0))
+            p.arc((offset, offset), ring_size, -90, -90 + 360 * ratio, color, ring_width)
 
-    frame.add_draw_func(draw)
+    badge.add_draw_func(draw)
+    with frame:
+        CanvasImageBox(badge)
     return frame
 
 
@@ -1127,8 +1122,7 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
         preload_tasks["fes_img"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.fes_limited_icon_path)
     if rqd.character_icon_paths:
         for chara_id, path in rqd.character_icon_paths.items():
-            # 保持即时解码：角色头像会喂给 _circular_progress_avatar 做 convert/resize 像素处理
-            preload_tasks[f"chara::{chara_id}"] = get_img_from_path(ASSETS_BASE_DIR, path)
+            preload_tasks[f"chara::{chara_id}"] = get_asset_image_ref(ASSETS_BASE_DIR, path)
     for attr_stat in distribution.attribute_stats:
         if attr_stat.attr_icon_path:
             preload_tasks[f"attr::{attr_stat.attr}"] = get_asset_image_ref(ASSETS_BASE_DIR, attr_stat.attr_icon_path)

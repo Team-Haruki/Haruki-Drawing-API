@@ -5,9 +5,10 @@ elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; de
 uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse the shared
 ``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
 display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
-font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text.
-Still-unmigrated rich/decorative/static TMP and incomplete HonorDeck content is explicitly
-classified as hybrid and transported as bounded ``mem:`` rasters. A scene coverage
+font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text emits native IR Text;
+outlined dynamic TMP uses shared local gray fields, native SdfQuad shading and isolated text-layer resizes.
+Rotated/static TMP and HonorDeck content also use native primitives. Unsupported visible
+content is marked unresolved without invoking the legacy compositor. A scene coverage
 report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
 cannot mean "successfully encoded a partial card".
 
@@ -37,9 +38,10 @@ import logging
 import math
 from pathlib import Path
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.core.pillow_telemetry import (
@@ -87,7 +89,6 @@ from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
     bool_from_profile,
     content_data_id,
-    harden_rgba_alpha,
     hex_to_rgba,
     unity_tint_rgba,
 )
@@ -300,6 +301,8 @@ class _SceneAssembler:
     def direct_layer(self) -> Image.Image:
         """The accumulating full-canvas layer for decorative direct-raster texts."""
         if self._direct_layer is None:
+            from .pillow_runtime import Image
+
             self._direct_layer = Image.new("RGBA", self.canvas_size, (0, 0, 0, 0))
         return self._direct_layer
 
@@ -313,16 +316,34 @@ class _SceneAssembler:
         self._direct_layer = None
 
     def emit_sdf_quads(self, quads) -> None:
-        """Emit one decorative text element as native SdfQuad nodes (Phase 2): Python shipped the
-        display-warped A8 field per glyph, the node runs the shading pixel loop. The fields ride
-        the A8 raw-buffer transport (6-tuple, capability 9)."""
+        """Shade A8 or float32 glyph fields at integer positions on the current surface.
+
+        Neutral field inputs are local TMP glyphs; legacy decorative inputs are Pillow
+        fields already warped to the page and are explicitly counted as hybrid. Both use the
+        same raw-buffer transport and scalar shader; no RGBA glyph is sent by the native path.
+        """
         self.flush_direct_layer()
+        from .float_field import FloatField
+        from .gray_field import GrayField
+
         for quad in quads:
-            record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
             field = quad.field
-            self._reserve_mem(field.width * field.height)
+            if isinstance(field, (GrayField, FloatField)):
+                pixels = field.pixels
+            else:
+                record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
+                pixels = field.tobytes()
+            stride = field.width * (4 if isinstance(field, FloatField) else 1)
+            self._reserve_mem(stride * field.height)
             key = f"m{len(self.mem_images)}"
-            self.mem_images[key] = (field.width, field.height, field.width, "a8", "unpremul", field.tobytes())
+            self.mem_images[key] = (
+                field.width,
+                field.height,
+                stride,
+                "f32le" if isinstance(field, FloatField) else "a8",
+                "unpremul",
+                pixels,
+            )
             scalars = quad.scalars
             underlay = None
             if scalars.underlay is not None:
@@ -333,17 +354,41 @@ class _SceneAssembler:
                     "w": u.w,
                     "shift": [u.shift_x, u.shift_y],
                 }
-            self.builder.sdf_quad(
-                (quad.left, quad.top),
-                f"mem:{key}",
-                scalars.face_color,
-                scalars.face_scale,
-                scalars.face_w,
-                scalars.alpha,
-                underlay,
-            )
+
+            def emit(pos):
+                self.builder.sdf_quad(
+                    pos,
+                    f"mem:{key}",
+                    scalars.face_color,
+                    scalars.face_scale,
+                    scalars.face_w,
+                    scalars.alpha,
+                    underlay,
+                )
+
+            rotation = getattr(quad, "rotation", 0.0)
+            if rotation:
+                width, height = quad.rotated_size
+                with self.builder.raster_subscene(
+                    natural_size=(width, height),
+                    pos=(quad.left, quad.top),
+                    dst_size=(width, height),
+                    sampling="nearest",
+                ):
+                    with self.builder.unity_subscene(
+                        size=field.size,
+                        anchor=(width / 2, height / 2),
+                        object_scale=(1, 1),
+                        post_scale=(1, 1),
+                        rotation=-rotation,
+                    ):
+                        emit((0, 0))
+            else:
+                emit((quad.left, quad.top))
 
     def emit_layer(self, layer: Image.Image, inputs: LayerTransformInputs, renderer: PNGRenderer) -> None:
+        from src.sekai.base.paint_types import RasterResample
+
         """Place one element layer.
 
         Unrotated elements (the overwhelming majority — note position_scale is ~1.118 in the
@@ -368,13 +413,13 @@ class _SceneAssembler:
             if osx != 1.0 or osy != 1.0:
                 new_w = max(1, round(layer.width * osx))
                 new_h = max(1, round(layer.height * osy))
-                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
+                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), RasterResample.BICUBIC)
                 pivot = (pivot[0] * osx, pivot[1] * osy)
             psx, psy = inputs.position_scale
             if abs(psx - 1.0) >= 1.0e-6 or abs(psy - 1.0) >= 1.0e-6:
                 new_w = max(1, round(layer.width * psx))
                 new_h = max(1, round(layer.height * psy))
-                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), Image.Resampling.BICUBIC)
+                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), RasterResample.BICUBIC)
                 pivot = (pivot[0] * psx, pivot[1] * psy)
             sx = sy = 1.0
 
@@ -403,12 +448,12 @@ class _SceneAssembler:
             self.builder.image(ref, (0, 0), layer.size, sampling="catmull_rom")
 
 
-def _direct_text_quads(renderer: PNGRenderer, content: Any):
+def _direct_text_quads(renderer: PNGRenderer, content: Any, max_field_bytes: int):
     """SdfQuad records for a decorative direct-raster text element, or None.
 
     Mirrors render_content_direct_on_card's outer gates, then asks the shared seam
-    (prepare_direct_sdf_quads — the layout + PIL-warp half of the Pillow direct path) for the
-    per-glyph fields/scalars. None falls through to the Pillow-parity raster branches.
+    (prepare_direct_sdf_quads — shared layout and native gray8 warp) for the per-glyph
+    fields/scalars. None falls through to the Pillow-parity raster branches.
     """
     if content.kind != "text" or not content.object_data.get("visible", False):
         return None
@@ -418,7 +463,7 @@ def _direct_text_quads(renderer: PNGRenderer, content: Any):
         return None
     if not renderer.is_decorative_text_item(content.item):
         return None
-    return renderer.prepare_direct_sdf_quads(content.item, content.object_data)
+    return renderer.prepare_direct_sdf_quads(content.item, content.object_data, max_field_bytes=max_field_bytes)
 
 
 def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
@@ -472,6 +517,59 @@ def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _Sc
                 letter_spacing=op.letter_spacing,
                 font_name=font_name,
             )
+    return True
+
+
+def _emit_native_sdf_tmp_text(
+    renderer: PNGRenderer, content: Any, scene: _SceneAssembler, *, direct_declined: bool = False
+) -> bool:
+    """Shade shared local TMP fields and compose/resize the finished text layer natively."""
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    layer = renderer.prepare_tmp_sdf_text_layer(
+        content.item, max_field_bytes=scene.max_mem_bytes - scene.mem_bytes, direct_declined=direct_declined
+    )
+    if layer is None:
+        return False
+    left, top, right, bottom = layer.crop
+    natural = (right - left, bottom - top)
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    psx, psy = renderer.position_scale_x, renderer.position_scale_y
+    if not all(math.isfinite(v) and v > 0 for v in (sx, sy, psx, psy)):
+        return False
+    object_size = (max(1, round(natural[0] * sx)), max(1, round(natural[1] * sy)))
+    final_size = (max(1, round(object_size[0] * psx)), max(1, round(object_size[1] * psy)))
+    pivot = ((layer.layout.pivot[0] - left) * sx * psx, (layer.layout.pivot[1] - top) * sy * psy)
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    ax, ay = renderer.unity_point(content.object_data.get("position", {}))
+    scene.flush_direct_layer()
+
+    def emit(pos):
+        with scene.builder.raster_subscene(
+            natural_size=object_size, pos=pos, dst_size=final_size, sampling="pillow_bicubic"
+        ):
+            with scene.builder.raster_subscene(
+                natural_size=natural, pos=(0, 0), dst_size=object_size, sampling="pillow_bicubic"
+            ):
+                with scene.builder.group(offset=(-left, -top)):
+                    scene.emit_sdf_quads(layer.glyphs)
+
+    if abs(angle % 360.0) < _ANGLE_EPS:
+        emit((round(ax - pivot[0]), round(ay - pivot[1])))
+    else:
+        theta = math.radians(angle)
+        c, v = math.cos(theta), math.sin(theta)
+        dx, dy = final_size[0] / 2.0 - pivot[0], final_size[1] / 2.0 - pivot[1]
+        with scene.builder.unity_subscene(
+            size=final_size,
+            anchor=(ax + c * dx - v * dy, ay + v * dx + c * dy),
+            object_scale=(1.0, 1.0),
+            post_scale=(1.0, 1.0),
+            rotation=angle,
+        ):
+            emit((0, 0))
     return True
 
 
@@ -529,6 +627,8 @@ def _header_only_asset_ref(path, asset_path: str) -> AssetImageRef:
 
     stat = resolved.stat()
     record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
+    from .pillow_runtime import Image
+
     with Image.open(resolved) as probe:
         ensure_raster_size(
             probe.size,
@@ -1383,11 +1483,6 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
         if status != "ready":
             return None
         assert badge is not None
-        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
-        # size. Native custom-profile does not claim that filter yet; decline rather than
-        # silently substituting Catmull-Rom through a nested subscene.
-        if badge.size != slot.target_size:
-            return None
         slots.append(
             (
                 badge,
@@ -1434,9 +1529,13 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
             with scene.builder.unity_subscene(
                 size=badge.size,
                 anchor=(left + width / 2.0, top + height / 2.0),
-                object_scale=(1.0, 1.0),
+                # Keep paste_in_rect's compose-then-Lanczos resize separate from the outer
+                # panel's Unity scaling/rotation. The subtree retains lazy asset references;
+                # only Rust reads back and resizes the completed badge surface.
+                object_scale=(width / badge.size[0], height / badge.size[1]),
                 post_scale=(1.0, 1.0),
                 rotation=0.0,
+                sampling="pillow_lanczos" if badge.size != (width, height) else "catmull_rom",
             ):
                 badge.splice_into(
                     scene.builder,
@@ -1614,41 +1713,26 @@ def _build_scene(
             renderer.record_native_audit(card_ref, content, "rendered-native", None)
             report.observe(content, "native")
             continue
-        quads = _direct_text_quads(renderer, content)
+        quads = _direct_text_quads(renderer, content, scene.max_mem_bytes - scene.mem_bytes)
         if quads is not None:
             renderer.record_native_audit(card_ref, content, "rendered-direct", None)
             if quads:
                 scene.emit_sdf_quads(quads)
-                report.observe(content, "hybrid")
+                report.observe(content, "native")
             else:
                 report.observe(content, "noop")
             continue
-        if _is_direct_text_candidate(renderer, content) and renderer.render_content_direct_on_card(
-            scene.direct_layer(), content
-        ):
-            renderer.record_native_audit(card_ref, content, "rendered-direct", None)
-            report.observe(content, "hybrid")
+        # Match Pillow's direct-decoration attempt before its local text fallback.
+        # A missing static glyph declines the whole direct field sequence.
+        if _emit_native_sdf_tmp_text(renderer, content, scene, direct_declined=True):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
             continue
-        rendered = renderer.render_content_for_card(content)
-        renderer.record_native_audit(card_ref, content, rendered.status, rendered.result)
-        if not isinstance(rendered.result, tuple):
-            report.observe(
-                content,
-                rendered.status if rendered.status in {"hidden", "missing", "unresolved"} else "unresolved",
-            )
-            continue
-        report.observe(content, "hybrid")
-        inputs = renderer.layer_transform_inputs(rendered.result, content.object_data, content.kind)
-        layer = inputs.layer
-        if (
-            content.kind == "text"
-            and renderer.tmp_decorative_alpha_harden > 1.0
-            and renderer.is_decorative_text_item(content.item)
-        ):
-            # prepare_content_layer hardens AFTER the affine; hardening the local layer before it
-            # is the closest scene equivalent (non-default configs only; production is 1.0).
-            layer = harden_rgba_alpha(layer, renderer.tmp_decorative_alpha_harden)
-        scene.emit_layer(layer, inputs, renderer)
+        # Native service rendering never materializes a Pillow layer. Hidden objects need
+        # no pixels; an unsupported visible element makes the whole scene incomplete.
+        status = "unresolved" if content.object_data.get("visible", False) else "hidden"
+        renderer.record_native_audit(card_ref, content, status, None)
+        report.observe(content, status)
     scene.flush_direct_layer()
     report.mem_images = len(scene.mem_images)
     report.mem_bytes = scene.mem_bytes
@@ -1659,8 +1743,10 @@ def _build_scene(
 
 async def try_render_custom_profile_card_payload(
     request: CustomProfileCardRenderRequest,
+    *,
+    raise_errors: bool = False,
 ) -> EncodedImagePayload | None:
-    """Skia path for /profile/custom-profile-card; ``None`` means "Pillow, please"."""
+    """Native path; ``None`` is a declined render and the service reports an error."""
     if not skia_plot_enabled():
         _record(OUTCOME_DISABLED)
         return None
@@ -1668,7 +1754,7 @@ async def try_render_custom_profile_card_payload(
         native = load_native_renderer()
     except ImportError as exc:
         # Also where a too-old wheel (IR_CAPABILITY < 8, no Transform node) fails open.
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        logger.error("haruki_skia_renderer not importable (%s); declining native render", exc)
         _record(OUTCOME_FALLBACK)
         return None
 
@@ -1680,7 +1766,7 @@ async def try_render_custom_profile_card_payload(
     def _render():
         # Same construction as drawer._render_custom_profile_card_sync (the Pillow service path);
         # kept in one pool task so the event loop never sees the rasterization.
-        from src.sekai.profile.custom_profile import drawer as _drawer
+        from src.sekai.profile.custom_profile import resource_paths
         from src.settings import (
             CUSTOM_PROFILE_ASSETS_DIR,
             CUSTOM_PROFILE_FONTS_DIR,
@@ -1693,13 +1779,13 @@ async def try_render_custom_profile_card_payload(
 
         renderer = PNGRenderer(
             masterdata=None,
-            assets=_drawer._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
-            fonts=_drawer._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
+            assets=resource_paths._require_region_path("custom_profile_assets_dir", CUSTOM_PROFILE_ASSETS_DIR, region),
+            fonts=resource_paths._require_region_path("custom_profile_fonts_dir", CUSTOM_PROFILE_FONTS_DIR, region),
             resources=resources,
-            tmp_font_metadata=_drawer._optional_region_file(
+            tmp_font_metadata=resource_paths._optional_region_file(
                 "custom_profile_tmp_font_metadata", CUSTOM_PROFILE_TMP_FONT_METADATA, region
             ),
-            shape_sprite_dir=_drawer._require_region_path(
+            shape_sprite_dir=resource_paths._require_region_path(
                 "custom_profile_shape_sprite_dir", CUSTOM_PROFILE_SHAPE_SPRITE_DIR, region
             ),
             profile_context=profile_context,
@@ -1710,7 +1796,7 @@ async def try_render_custom_profile_card_payload(
             canvas_h=int(PROFILE_RENDER_VIEW_H),
             origin_x=PROFILE_RENDER_VIEW_W / 2.0,
             origin_y=PROFILE_RENDER_VIEW_H / 2.0,
-            unity_ui_sprite_dir=_drawer._require_region_path(
+            unity_ui_sprite_dir=resource_paths._require_region_path(
                 "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
             ),
             region=region,
@@ -1725,10 +1811,11 @@ async def try_render_custom_profile_card_payload(
     try:
         result, report = await run_in_pool(_render)
     except Exception:
-        # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
-        # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
-        logger.exception("custom_profile_card backend=skia failed; falling back to Pillow")
+        logger.exception("custom_profile_card backend=skia failed; declining native render")
         _record(OUTCOME_ERROR)
+        if raise_errors:
+            # Preserve validation ValueError -> HTTP 400 without invoking the old composer.
+            raise
         return None
     scene_metrics = report.metrics()
     record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, scene_metrics)
@@ -1754,7 +1841,7 @@ async def try_render_custom_profile_card_payload(
     try:
         payload = payload_from_native(result)
     except Exception:
-        logger.exception("custom_profile_card backend=skia returned an invalid payload; falling back to Pillow")
+        logger.exception("custom_profile_card backend=skia returned an invalid payload; declining native render")
         _record(OUTCOME_ERROR)
         return None
     payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}

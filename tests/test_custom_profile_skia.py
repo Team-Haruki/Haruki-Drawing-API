@@ -217,7 +217,7 @@ def test_sdf_quad_mem_field_records_pillow_touch():
     assert snapshot.counts[PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER] == 1
 
 
-def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
+def test_unsupported_content_is_incomplete_without_allocating_legacy_layers():
     contents = [
         NativeContent(
             layer=index,
@@ -244,8 +244,7 @@ def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
             raise AssertionError("regular content must not allocate the direct-text canvas")
 
         def render_content_for_card(self, content):
-            image = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
-            return RenderedLayer(content, "rendered", (image, (0.0, 0.0)))
+            raise AssertionError("unsupported content must not enter the retired compositor")
 
         def record_native_audit(self, *args):
             return None
@@ -265,10 +264,10 @@ def test_scene_does_not_allocate_empty_full_canvas_layers_for_regular_content():
 
     _, mem_images, report = _build_scene(_Renderer(), {})
 
-    assert len(mem_images) == 2
-    assert sum(len(entry[2]) for entry in mem_images.values()) == 2 * 4 * 4 * 4
-    assert report.complete
-    assert report.hybrid_elements == 2
+    assert not mem_images
+    assert not report.complete
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 2
 
 
 def test_sdf_shape_lowers_to_asset_node_without_pillow_raster(tmp_path, monkeypatch):
@@ -398,7 +397,7 @@ def test_static_image_lowers_to_unity_asset_node_without_pillow_raster(tmp_path,
 
 
 @pytest.mark.parametrize("honor_type", ["normal", "birthday"])
-def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collision(
+def test_honor_subscene_does_not_reenter_pillow_for_an_unsupported_neighbor(
     honor_type,
     tmp_path,
     monkeypatch,
@@ -487,10 +486,7 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
             return (100.0, 200.0)
 
         def render_content_for_card(self, content):
-            if content.kind == "honor":  # pragma: no cover - must not run
-                raise AssertionError("eligible honor must not enter the Pillow renderer")
-            image = Image.new("RGBA", (4, 4), (255, 0, 0, 255))
-            return RenderedLayer(content, "rendered", (image, (2.0, 2.0)))
+            raise AssertionError("native scene must never invoke the retired compositor")
 
         def layer_transform_inputs(self, result, object_data, content_kind):
             return LayerTransformInputs(
@@ -518,18 +514,19 @@ def test_normal_and_birthday_honor_use_shared_native_subscene_without_mem_collis
     subscene = next(node for node in scene["root"]["children"] if node["type"] == "UnitySubscene")
     subscene_paths = {node["path"] for node in _walk_ir_nodes(subscene["children"]) if node["type"] == "Image"}
 
-    # The earlier hybrid element owns m0. The shared honor tree stays asset-backed and cannot
-    # collide with (or overwrite) that request-memory key.
-    assert list(mem_images) == ["m0"]
+    # Unsupported neighboring content declines the scene instead of materializing m0.
+    # The eligible honor remains asset-backed, and no legacy pixels are allocated.
+    assert not mem_images
     assert subscene["size"] == [100, 40]
     assert subscene["object_scale"] == [0.75, 1.25]
     assert subscene["post_scale"] == [1.1, 1.2]
     assert f"{honor_type}_base.png" in subscene_paths
     assert f"{honor_type}_frame.png" in subscene_paths
-    assert PILLOW_TOUCH_IMAGE_HEADER_PROBE not in pillow_touches.counts
-    assert report.complete
+    assert not pillow_touches.counts
+    assert not report.complete
     assert report.native_elements == 1
-    assert report.hybrid_elements == 1
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 1
 
 
 def test_old_native_wheel_header_probe_stays_telemetry_hybrid(tmp_path, monkeypatch):
@@ -1116,42 +1113,33 @@ def test_route_serves_the_skia_payload_without_composing(monkeypatch):
         raise AssertionError("compose must not run when Skia produced a payload")
 
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
-    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", _must_not_compose)
+    monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", _must_not_compose)
 
     response = asyncio.run(route_mod.custom_profile_card(_request()))
     assert response.media_type == "image/png"
     assert response.body == payload.image_bytes
 
 
-def test_route_falls_back_to_pillow_compose(monkeypatch):
-    async def fake_try_render(request):
-        return None  # Skia declined
-
-    async def fake_compose(request):
-        return Image.new("RGBA", (8, 8), (255, 0, 0, 128))
-
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
-    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
-
-    response = asyncio.run(route_mod.custom_profile_card(_request()))
-    # The route pins PNG regardless of the global EXPORT_IMAGE_FORMAT (the card has transparency).
-    assert response.media_type == "image/png"
-    assert Image.open(BytesIO(response.body)).format == "PNG"
-
-
-def test_route_preserves_the_value_error_400(monkeypatch):
-    """try_render never raises, so an unrenderable card must still reach the Pillow compose and
-    surface its canonical ValueError as a 400."""
-
+def test_route_rejects_declined_native_render_without_pillow(monkeypatch):
     async def fake_try_render(request):
         return None
 
-    async def fake_compose(request):
+    async def must_not_compose(request):
+        raise AssertionError("Pillow fallback must not run")
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", must_not_compose)
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(route_mod.custom_profile_card(_request()))
+    assert excinfo.value.status_code == 500
+    assert "Native rendering failed" in excinfo.value.detail
+
+
+def test_route_preserves_the_value_error_400(monkeypatch):
+    async def fake_try_render(request):
         raise ValueError("bad card")
 
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
-    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose)
-
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(route_mod.custom_profile_card(_request()))
     assert excinfo.value.status_code == 400
@@ -1182,7 +1170,7 @@ def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
         raise AssertionError("validation must run before either renderer")
 
     monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", _must_not_render)
-    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", _must_not_render)
+    monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", _must_not_render)
 
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(route_mod.custom_profile_card(request))

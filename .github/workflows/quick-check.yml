@@ -93,10 +93,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Install skia-safe link dependencies
+      - name: Install skia-safe build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -159,7 +160,17 @@ jobs:
         run: uv run maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
       - name: Verify native renderer capability handshake
-        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 17, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 28, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+
+      - name: Verify native image codecs without Pillow
+        run: uv run python -X gil=0 scripts/skia_codec_smoke.py
+
+      - name: Run native renderer Rust tests
+        run: |
+          set -euo pipefail
+          pylib="$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")"
+          RUSTFLAGS="-L ${pylib} -C link-arg=-lpython3.14t" \
+            cargo test --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
       - name: Run pytest with native renderer
         env:

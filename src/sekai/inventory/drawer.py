@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_watermark, roundrect_bg
-from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT, get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 from .model import InventoryItem, InventoryListRequest, InventorySection
 

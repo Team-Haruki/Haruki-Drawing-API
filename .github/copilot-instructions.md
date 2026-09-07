@@ -2,6 +2,21 @@
 
 This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is mirrored as `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md`.
 
+## Native-only service (2026-09-07)
+
+Production dependencies exclude Pillow, Matplotlib and Pilmoji; they are in the development-only
+`legacy-renderer` group. Service routes and heavy workers require a native payload and never invoke
+legacy composers. Missing/stale native wheels or unresolved text fonts fail startup; setting
+`HARUKI_DRAWING__USE_SKIA_PLOT=false` also fails startup. Roll back the image to restore an older backend.
+Legacy compose functions remain for pixel-reference tools, not service recovery. References to fail-open
+below describe the earlier migration and must not be reintroduced into production routes.
+
+Release: `scripts/skia_release_gate.py` runs Linux cold/pure-service and strict warm parity; tag publishing
+requires `.github/workflows/renderer-release.yml` and uses its validated wheel. The configured fixture
+runner/paths are mandatory, never silently skipped. Private MySekai and uncaptured symbol/stamps are
+user-excluded diagnostic cases, not release blockers. The private real file was explicitly authorized
+for migration in this task and remains untracked; preserve it and its implementation.
+
 ## Project Overview
 
 Haruki Drawing API is a FastAPI-based image generation service for Project Sekai (プロセカ). It accepts JSON payloads and returns rendered PNG/JPG images (player profiles, cards, events, music, gacha, scores, charts, MySekai, etc.). It requires **CPython 3.14 free-threaded** (`-X gil=0`, a.k.a. 3.14t) and uses Granian as the ASGI server.
@@ -101,9 +116,10 @@ in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_imag
 `Painter`'s own disk cache (`PAINTER_CACHE_DIR`, swept via `Painter.cleanup_old_disk_cache()`).
 
 Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns exactly
-what `get_runtime_cache_stats()` builds, which is six keys: `image_cache`, `thumbnail_cache`,
+what `get_runtime_cache_stats()` builds, which is seven keys: `image_cache`, `thumbnail_cache`,
 `composed_image_cache`, `composed_image_disk_cache`, `skia_payload_cache` (a *fourth* in-memory pool, owned by
-the Skia chapter below — the three caches in the table above are not the whole dump), and
+the Skia chapter below — the three caches in the table above are not the whole dump), `native_renderer_cache`
+(the Rust Moka raster/dimension caches, or `available=false` when the extension is absent), and
 `custom_profile_caches` (the custom-profile renderer's process pools in
 `src/sekai/profile/custom_profile/cache.py`: parsed TMP metadata tables, glyph SDF/contours, sprite/atlas decodes —
 keyed with file signatures like everything else, sized by `custom_profile_glyph_cache_*` /
@@ -154,7 +170,7 @@ For deployment:
 ## Skia Backend (`rust/haruki_skia_renderer` + `src/sekai/skia_renderer/`)
 
 Drawing endpoints render through a Rust + Skia extension (PyO3, built with maturin). Python builds a widget
-tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pillow remains as the fallback.
+tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pillow is retained only as a development pixel reference.
 
 **IR-first rule.** The widget tree (`src/sekai/base/plot.py`) is the *only* layout carrier for a drawing
 endpoint. Both backends draw the same tree. If a primitive is missing, add it to `Painter` **and** to
@@ -190,21 +206,33 @@ rule:
 Card List is **not** one of them any more — it and Card Box have no dedicated scene builder and draw the shared
 `plot.py` widget tree like everything else.
 
-**Fail-open.** A missing, stale, or broken extension must degrade to Pillow, never 500. `try_render_*_payload`
-returns `None` to mean "Pillow, please". Never let a Skia error escape.
+**Pillow retirement is a separate gate.** `IRPainter` and `Painter` now share the pure
+`base/paint_context.py` interface; colors, image refs, font metrics and text layout no longer
+import the Pillow renderer on the native path. `scripts/skia_no_pillow.py` exercises each real
+payload in a fresh process with all `PIL` imports rejected and requires a successful native
+render. `skia_parity_sweep.py --strict` requires this evidence as well as pixel parity.
+See `docs/pillow-retirement-status.md` for current blockers; a `skia` backend label alone does
+not authorize deleting the fallback. Event/vlive list entries now use nested Canvas trees;
+these entries no longer use the old composed-image disk tier (Pillow still has the bounded
+in-memory fragment cache, and native rendering uses native asset caches).
+
+**Native required.** Missing/stale extensions fail startup. `try_render_*_payload` may return `None`
+for a declined render; service routes and heavy workers reject it through `require_native_payload`.
+Never reintroduce a service call to a legacy composer. Reference tools may still use the Pillow implementations.
 
 **One switch, env-only** (`HARUKI_` prefix, `__` nesting): `HARUKI_DRAWING__USE_SKIA_PLOT` (default on). It is the
-only Skia gate — the older per-endpoint gates (`use_skia_card_list`, `use_skia_card_box`) are gone. Rollback =
-flip the env var and restart; the image itself is unchanged. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
+only Skia gate — the older per-endpoint gates (`use_skia_card_list`, `use_skia_card_box`) are gone.
+The service requires it to remain true; false refuses startup. Roll back to an earlier image to restore
+an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_TEXT_HINTING`, `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **10**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 10). A too-old
-extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **28**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 28). A too-old
+extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
-self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
-wheel against that (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
+self-check needs **no** edit: it calls `load_native_renderer()`, which compares the installed
+wheel against `REQUIRED_NATIVE_IR_CAPABILITY` (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
 the image self-check and then silently fell back to Pillow at runtime). Four hardcoded copies of the
 number already exist (Rust, canvas.py, and the two CI assertions) — do not add a fifth.
 
@@ -274,8 +302,9 @@ collision between two *different* payloads (there is one payload per endpoint) �
 read the key material.
 
 Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
-an index) and installed conditionally by the Docker build. Wheels are Python-version-specific: **upgrading
-Python means rebuilding wheels first**, otherwise the image silently falls back to Pillow.
+an index). Docker requires exactly one matching wheel. Tag releases use the wheel produced by the full
+`renderer-release.yml` validation job. Wheels are Python-version-specific: **upgrading Python means
+rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 **Traps that have already cost real debugging time:**
 
@@ -292,8 +321,8 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
 - **Lazy image pixel operations belong on `ImageBox` / `Painter.paste*`.** Use `source_rect=(x0,y0,x1,y1)`,
   explicit `sampling` (`nearest|linear|catmull_rom`), and `ImageTint(..., "multiply"|"recolor")` to keep an
   `AssetImageRef` lazy through crop/resize/tint. Match the legacy pipeline, not just its last filter: misc alias
-  jackets and birthday calendar icons intentionally remain eager because padding makes them two-stage
-  BILINEAR→BICUBIC resizes (92→84 and 40→32); one lazy linear draw is not pixel-equivalent.
+  jackets and birthday calendar icons use `PreResizedImageBox` to preserve their two-stage
+  BILINEAR→BICUBIC resizes (92→84 and 40→32) lazily; one linear draw is not pixel-equivalent.
 - **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
   A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
 - **There are THREE paste primitives, not two.** Pillow's `paste(im, pos, im)` lerps the destination alpha toward

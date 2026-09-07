@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import Callable
 import contextvars
@@ -6,17 +8,21 @@ from dataclasses import dataclass
 from datetime import datetime
 import logging
 from types import TracebackType
-from typing import Literal, Self, TypedDict
+from typing import TYPE_CHECKING, Literal, Self, TypedDict
 
-from PIL import Image, ImageFont
+if TYPE_CHECKING:
+    from PIL import Image, ImageFont
+
+    from .painter import Painter
 
 from src.core.pillow_telemetry import PILLOW_TOUCH_IMAGE_DECODE, record_pillow_touch
+from src.sekai.base.font_metrics import get_layout_font
+from src.settings import DEFAULT_FONT
 
-from .painter import (
+from .paint_types import (
     ALIGN_MAP,
     ALIGN_TYPE,
     BLACK,
-    DEFAULT_FONT,
     ITEM_SIZE_MODE_TYPE,
     SHADOW,
     TRANSPARENT,
@@ -25,12 +31,11 @@ from .painter import (
     ImageSampling,
     ImageTint,
     LinearGradient,
-    Painter,
-    get_font,
+    RasterResample,
     get_font_desc,
-    get_text_size,
-    pillow_resample_for_image_sampling,
+    image_resample_filter as pillow_resample_for_image_sampling,
 )
+from .text_layout import get_text_size
 from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
 DEBUG = False
@@ -44,6 +49,8 @@ DEFAULT_SEP = 8
 def _open_image_copy(path: str) -> Image.Image:
     """Open image file safely and detach data from file descriptor."""
     record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
+    from PIL import Image
+
     with Image.open(path) as img:
         img.load()
         return img.copy()
@@ -1229,7 +1236,7 @@ class TextBox(Widget):
         return self
 
     def _get_pil_font(self) -> ImageFont:
-        return get_font(self.style.font, self.style.size)
+        return get_layout_font(self.style.font, self.style.size)
 
     def _get_font_desc(self) -> FontDesc:
         return get_font_desc(self.style.font, self.style.size)
@@ -1393,7 +1400,7 @@ class ColoredTextBox(Widget):
         return self
 
     def _get_pil_font(self) -> ImageFont:
-        return get_font(self.style.font, self.style.size)
+        return get_layout_font(self.style.font, self.style.size)
 
     def _get_font_desc(self) -> FontDesc:
         return get_font_desc(self.style.font, self.style.size)
@@ -1665,6 +1672,7 @@ class CanvasImageBox(Widget):
         size: tuple[int | None, int | None] | None = None,
         *,
         shadow: bool = False,
+        use_alpha_blend: bool = False,
         shadow_width: int = 6,
         shadow_alpha: float = 0.6,
         sampling: ImageSampling | None = None,
@@ -1677,6 +1685,7 @@ class CanvasImageBox(Widget):
         self.image_size_mode = image_size_mode or ("fit" if size and (size[0] or size[1]) else "original")
         if self.image_size_mode not in {"fit", "fill", "original"}:
             raise ValueError(f"unsupported canvas image size mode: {self.image_size_mode!r}")
+        self.use_alpha_blend = bool(use_alpha_blend)
         self.shadow = bool(shadow)
         self.shadow_width = int(shadow_width)
         self.shadow_alpha = float(shadow_alpha)
@@ -1722,7 +1731,38 @@ class CanvasImageBox(Widget):
             cache_key=self.cache_key,
             require_asset_backed=self.require_asset_backed,
             skip_on_error=self.skip_on_error,
+            use_alpha_blend=self.use_alpha_blend,
         )
+
+
+class AlphaTrimImageBox(CanvasImageBox):
+    """Crop nonzero alpha, remap it, then resize the completed raster with bicubic."""
+
+    def __init__(self, image: ImageSource, bounds: tuple[int, int, int, int], alpha_floor: int, **kwargs):
+        self.source_image = image
+        self.bounds = bounds
+        width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
+        intermediate = Canvas(w=width, h=height).set_padding(0)
+        intermediate.add_draw_func(
+            lambda _widget, painter: painter.paste_alpha_crop(image, (0, 0), bounds, alpha_floor)
+        )
+        super().__init__(intermediate, sampling="pillow_bicubic", **kwargs)
+
+
+class PreResizedImageBox(CanvasImageBox):
+    """Preserve a two-stage resize while keeping the input lazy on both backends.
+
+    ``pre_size`` is the intermediate raster size. Widget padding still reduces
+    the second-stage destination, just as it does for an ordinary ImageBox.
+    """
+
+    def __init__(self, image: ImageSource, pre_size: tuple[int, int], size=None, **kwargs) -> None:
+        self.source_image = image
+        intermediate = Canvas(w=pre_size[0], h=pre_size[1]).set_padding(0)
+        intermediate.add_draw_func(
+            lambda _widget, painter: painter.paste_src(image, (0, 0), pre_size, sampling="pillow_bilinear")
+        )
+        super().__init__(intermediate, size=size, sampling="pillow_bicubic", **kwargs)
 
 
 class Spacer(Widget):
@@ -1832,11 +1872,13 @@ class Canvas(Frame):
         size_limit = CANVAS_SIZE_LIMIT
         assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
         await prefetch_asset_refs(self)
+        from .painter import Painter
+
         p = Painter(size=size)
         self.draw(p)
         img = await p.get(cache_key)
         if scale:
-            img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
+            img = img.resize((int(size[0] * scale), int(size[1] * scale)), RasterResample.BILINEAR)
         if DEBUG:
             logging.debug(f"Canvas drawn in {(datetime.now() - t).total_seconds():.3f}s, size={size}")
             pass
@@ -1853,11 +1895,13 @@ class Canvas(Frame):
         size = self._get_self_size()
         size_limit = CANVAS_SIZE_LIMIT
         assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        from .painter import Painter
+
         p = Painter(size=size)
         self.draw(p)
         img = Painter._execute(p.operations, None, size)
         if scale:
-            img = img.resize((int(size[0] * scale), int(size[1] * scale)), Image.Resampling.BILINEAR)
+            img = img.resize((int(size[0] * scale), int(size[1] * scale)), RasterResample.BILINEAR)
         return img
 
 

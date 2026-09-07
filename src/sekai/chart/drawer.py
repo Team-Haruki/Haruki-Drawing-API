@@ -1,10 +1,14 @@
+from __future__ import annotations
+
 from io import BytesIO
 import json
 import logging
 import struct
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
 
 from src.core.debug import set_render_backend
@@ -18,7 +22,8 @@ from src.sekai.base.draw import (
     build_request_watermark_text,
     get_watermark_render_spec,
 )
-from src.sekai.base.painter import get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
@@ -140,8 +145,10 @@ async def generate_music_chart(rqd: GenerateMusicChartRequest) -> Image.Image:
     -------
     PIL.Image.Image
     """
+    from PIL import Image
 
     def render_png() -> Image.Image:
+
         image = Image.open(BytesIO(render_chart_png_bytes(rqd)))
         image.load()
         return image
@@ -192,7 +199,7 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
     try:
         native = load_native_renderer()
     except ImportError as exc:
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        logger.error("haruki_skia_renderer not importable (%s); declining native render", exc)
         _record(OUTCOME_FALLBACK)
         return None
     allow_raster = getattr(native, "RAW_BUFFER_CAPABILITY", 0) >= 1
@@ -237,7 +244,7 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
         result, transport = await run_in_pool(_render)
         payload = payload_from_native(result)
     except Exception:
-        logger.exception("chart backend=skia failed; falling back to Pillow")
+        logger.exception("chart backend=skia failed; declining native render")
         _record(OUTCOME_ERROR)
         return None
     _record(OUTCOME_SKIA, payload)

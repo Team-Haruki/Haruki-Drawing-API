@@ -1,17 +1,11 @@
-import asyncio
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
-import math
-import os
+from __future__ import annotations
 
-import matplotlib
-from matplotlib import font_manager
-import matplotlib.dates as mdates
-from matplotlib.figure import Figure
-import matplotlib.patheffects as patheffects
-from matplotlib.ticker import FuncFormatter
-from PIL import Image
+import asyncio
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -20,7 +14,7 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import BLACK, DEFAULT_BOLD_FONT, DEFAULT_FONT, lerp_color, rgb_to_color_code
+from src.sekai.base.paint_types import BLACK, lerp_color
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -38,11 +32,10 @@ from src.sekai.base.utils import (
     get_asset_image_ref,
     get_readable_datetime,
     get_readable_timedelta,
-    plt_fig_to_image,
     truncate,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR, DEFAULT_THREAD_POOL_SIZE
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 from .model import (
     CFRequest,
@@ -57,52 +50,16 @@ from .model import (
     TeamInfo,  # noqa: F401 - used in type annotations via Request classes
     WinRateRequest,
 )
-
-matplotlib.use("Agg")
-_matplotlib_workers = max(1, min(DEFAULT_THREAD_POOL_SIZE, os.cpu_count() or 1))
-_matplotlib_executor = ThreadPoolExecutor(max_workers=_matplotlib_workers, thread_name_prefix="sk-matplotlib")
-
-
-async def run_matplotlib_plot(func: Callable[[], Image.Image]) -> Image.Image:
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_matplotlib_executor, func)
-
-
-def shutdown_sk_drawer() -> None:
-    """关闭 sk drawer 模块持有的线程池"""
-    _matplotlib_executor.shutdown(wait=False)
-
-
-# matplotlib字体
-font_paths = []
-font_paths.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".otf"))
-font_paths.append(ASSETS_BASE_DIR / (DEFAULT_FONT + ".ttf"))
-for path in font_paths:
-    try:
-        font_manager.fontManager.addfont(path)
-        prop = font_manager.FontProperties(fname=path)
-        font_name = prop.get_name()
-        matplotlib.rcParams["font.family"] = [font_name]
-        matplotlib.rcParams["axes.unicode_minus"] = False
-    except Exception:
-        continue
+from .trace_spec import (
+    build_player_trace_spec,
+    build_rank_trace_spec,
+    event_title as get_event_id_and_name_text,
+    score_text as get_board_score_str,
+)
 
 SK_RECORD_TOLERANCE = timedelta(seconds=70)
 SK_CSB_STOP_THRESHOLD = timedelta(minutes=5)
 SK_PLAYCOUNT_MYSEKAI_THRESHOLD = 37
-RANK_TRACE_SCORE_COLORS = [
-    "#1d4ed8",
-    "#dc2626",
-    "#7c3aed",
-    "#d97706",
-    "#0891b2",
-    "#c026d3",
-    "#15803d",
-    "#be123c",
-    "#4b5563",
-    "#a16207",
-]
-PLOT_LABEL_PATH_EFFECTS = [patheffects.withStroke(linewidth=2.5, foreground="white", alpha=0.9)]
 
 
 def _collect_skl_display_ranks(current_ranks: list[RankInfo], forecast_columns: list) -> list[int]:
@@ -119,22 +76,6 @@ def _collect_speed_display_rows(ranks: list[SpeedInfo]) -> list[tuple[int, int, 
     )
 
 
-def get_event_id_and_name_text(region: str, event_id: int, event_name: str) -> str:
-    """
-    获取格式化的活动ID和名称文本
-
-    格式:
-    - 普通活动: [REGION-ID] Name
-    - WL活动: [REGION-ID-第Ch章单榜] Name
-    """
-    if event_id < 1000:
-        return f"【{region.upper()}-{event_id}】{event_name}"
-    else:
-        chapter_id = event_id // 1000
-        event_id = event_id % 1000
-        return f"【{region.upper()}-{event_id}-第{chapter_id}章单榜】{event_name}"
-
-
 # 获取榜线排名字符串
 def get_board_rank_str(rank: int) -> str:
     """
@@ -144,52 +85,6 @@ def get_board_rank_str(rank: int) -> str:
     """
     # 每3位加一个逗号
     return f"{rank:,}"
-
-
-def draw_day_night_bg(ax, start_time: datetime, end_time: datetime):
-    """
-    在 Matplotlib 图表中绘制昼夜交替背景
-
-    白天 (12:00) 偏亮，夜晚 (0:00) 偏暗
-    """
-
-    def get_time_bg_color(time: datetime) -> str:
-        night_color = (200, 200, 230)  # 0:00
-        day_color = (245, 245, 250)  # 12:00
-        ratio = math.sin(time.hour / 24 * math.pi * 2 - math.pi / 2)
-        color = lerp_color(night_color, day_color, (ratio + 1) / 2)
-        return rgb_to_color_code(color)
-
-    interval = timedelta(hours=1)
-    start_time = start_time.replace(minute=0, second=0, microsecond=0)
-    bg_times = [start_time]
-    while bg_times[-1] < end_time:
-        bg_times.append(bg_times[-1] + interval)
-    bg_colors = [get_time_bg_color(t) for t in bg_times]
-    for i in range(len(bg_times)):
-        start = bg_times[i]
-        end = min(bg_times[i] + interval, end_time)
-        if end <= start:
-            continue
-        ax.axvspan(start, end, facecolor=bg_colors[i], edgecolor=None, zorder=0)
-
-
-# 获取榜线分数字符串
-def get_board_score_str(score: int, width: int | None = None) -> str:
-    """
-    格式化分数字符串
-
-    例如: 123456 -> 12.3456w
-    """
-    if score is None:
-        ret = "?"
-    else:
-        score = int(score)
-        M = 10000
-        ret = f"{score // M}.{score % M:04d}w"
-    if width:
-        ret = ret.rjust(width)
-    return ret
 
 
 async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
@@ -866,246 +761,16 @@ async def try_render_sks_payload(rqd: SpeedRequest) -> EncodedImagePayload | Non
 
 
 async def _build_player_trace_canvas(rqd: PlayerTraceRequest) -> Canvas:
-    """
-    合成玩家排名追踪图表 (Rating Trace)
-
-    使用 Matplotlib 绘制双轴图表：
-    - 左轴: 分数折线图
-    - 右轴: 排名散点图
-
-    matplotlib renders the plot bitmap; the surrounding chrome (rounded card, WL
-    icon column, watermark) is a plot.py widget tree the Skia/IRPainter path can
-    render, shipping the bitmap as a mem-image.
-    """
-    eid = rqd.event_id
+    """Build the page from a shared, renderer-neutral player trace specification."""
+    spec = build_player_trace_spec(rqd)
     wl_chara_icon = None
     if rqd.wl_chara_icon_path:
         wl_chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
-    ranks = rqd.ranks
-    ranks2 = rqd.ranks2
-    compare_ranks = rqd.compare_rank_trace
-    compare_rank = rqd.compare_rank
+    from .trace_widget import TracePlotBox
 
-    ranks = [r for r in ranks if r.rank <= 100]
-    if not ranks:
-        raise ValueError("player trace requires at least one rank entry within top 100")
-    if ranks2 is not None:
-        ranks2 = [r for r in ranks2 if r.rank <= 100]
-        if not ranks2:
-            ranks2 = None
-    if compare_ranks is not None:
-        compare_ranks = [r for r in compare_ranks if r.score is not None]
-        if not compare_ranks:
-            compare_ranks = None
-
-    ranks.sort(key=lambda x: x.time)
-    name = truncate(ranks[-1].name, 40)
-    times = [rank.time for rank in ranks]
-    scores = [rank.score for rank in ranks]
-    rs = [rank.rank for rank in ranks]
-    if ranks2 is not None:
-        ranks2.sort(key=lambda x: x.time)
-        name2 = truncate(ranks2[-1].name, 40)
-        times2 = [rank.time for rank in ranks2]
-        scores2 = [rank.score for rank in ranks2]
-        rs2 = [rank.rank for rank in ranks2]
-    if compare_ranks is not None:
-        compare_ranks.sort(key=lambda x: x.time)
-        compare_rank = compare_rank or compare_ranks[-1].rank
-        compare_times = [rank.time for rank in compare_ranks]
-        compare_scores = [rank.score for rank in compare_ranks]
-    compare_line_score = rqd.compare_rank_line_score
-    compare_line_time = None
-    if compare_line_score is None and rqd.compare_rank_latest is not None:
-        compare_line_score = rqd.compare_rank_latest.score
-    if rqd.compare_rank_latest is not None:
-        compare_line_time = rqd.compare_rank_latest.time
-    if compare_line_score is None and compare_ranks is not None:
-        compare_line_score = compare_scores[-1]
-    if compare_line_time is None and compare_ranks is not None:
-        compare_line_time = compare_times[-1]
-    if compare_line_time is None:
-        compare_line_time = times[-1]
-    plot_times = list(times)
-    if ranks2 is not None:
-        plot_times.extend(times2)
-    if compare_ranks is not None:
-        plot_times.extend(compare_times)
-    plot_start = min(plot_times)
-    plot_end = max(plot_times)
-
-    def _render_player_trace_plot() -> Image.Image:
-        fig = Figure(figsize=(12, 8))
-        ax = fig.add_subplot(111)
-        try:
-            fig.subplots_adjust(wspace=0, hspace=0)
-
-            draw_day_night_bg(ax, plot_start, plot_end)
-
-            min_score = min(scores)
-            max_score = max(scores)
-            if ranks2 is not None:
-                min_score = min(min_score, min(scores2))
-                max_score = max(max_score, max(scores2))
-            if compare_ranks is not None:
-                min_score = min(min_score, min(compare_scores))
-                max_score = max(max_score, max(compare_scores))
-            if compare_line_score is not None and compare_ranks is None:
-                min_score = min(min_score, compare_line_score)
-                max_score = max(max_score, compare_line_score)
-
-            lines = []
-
-            color_p1 = ("royalblue", "cornflowerblue")
-            color_p2 = ("orangered", "coral")
-            color_compare = "dimgray"
-
-            # 绘制分数
-            (line_score,) = ax.plot(
-                times,
-                scores,
-                "o",
-                label=f"{name}分数",
-                color=color_p1[0],
-                markersize=1,
-                linewidth=0.5,
-            )
-            lines.append(line_score)
-            ax.annotate(
-                f"{get_board_score_str(scores[-1])}",
-                xy=(times[-1], scores[-1]),
-                xytext=(times[-1], scores[-1]),
-                color=color_p1[0],
-                fontsize=12,
-                ha="right",
-                path_effects=PLOT_LABEL_PATH_EFFECTS,
-            )
-            if ranks2 is not None:
-                (line_score2,) = ax.plot(
-                    times2, scores2, "o", label=f"{name2}分数", color=color_p2[0], markersize=1, linewidth=0.5
-                )
-                lines.append(line_score2)
-                ax.annotate(
-                    f"{get_board_score_str(scores2[-1])}",
-                    xy=(times2[-1], scores2[-1]),
-                    xytext=(times2[-1], scores2[-1]),
-                    color=color_p2[0],
-                    fontsize=12,
-                    ha="right",
-                    path_effects=PLOT_LABEL_PATH_EFFECTS,
-                )
-
-            if compare_ranks is not None:
-                compare_label = f"T{compare_rank}分数线" if compare_rank else "参考分数线"
-                (line_compare_score,) = ax.plot(
-                    compare_times,
-                    compare_scores,
-                    "o",
-                    label=compare_label,
-                    color=color_compare,
-                    markersize=1,
-                    linewidth=0.5,
-                    linestyle="--",
-                    alpha=0.85,
-                )
-                lines.append(line_compare_score)
-                ax.annotate(
-                    f"{compare_label} {get_board_score_str(compare_scores[-1])}",
-                    xy=(compare_times[-1], compare_scores[-1]),
-                    xytext=(compare_times[-1], compare_scores[-1]),
-                    color=color_compare,
-                    fontsize=12,
-                    ha="right",
-                    path_effects=PLOT_LABEL_PATH_EFFECTS,
-                )
-
-            if compare_line_score is not None and compare_ranks is None:
-                line_label = f"T{compare_rank}当前" if compare_rank else "参考当前"
-                line_latest = ax.axhline(
-                    y=compare_line_score,
-                    color="gray",
-                    linestyle=":",
-                    linewidth=0.8,
-                    alpha=0.9,
-                    label=line_label,
-                )
-                lines.append(line_latest)
-                ax.text(
-                    compare_line_time,
-                    compare_line_score,
-                    f"{line_label}: {get_board_score_str(compare_line_score)}",
-                    color="gray",
-                    fontsize=12,
-                    ha="right",
-                    va="bottom",
-                    path_effects=PLOT_LABEL_PATH_EFFECTS,
-                )
-
-            ax.set_ylim(min_score * 0.95, max_score * 1.05)
-            ax.set_xlim(plot_start, plot_end)
-            ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(x)))
-            ax.grid(True, linestyle="-", alpha=0.3, color="gray")
-            # 绘制排名
-            ax2 = ax.twinx()
-
-            (line_rank,) = ax2.plot(
-                times,
-                rs,
-                "o",
-                label=f"{name}排名",
-                color=color_p1[1],
-                markersize=0.7,
-                linewidth=0.5,
-            )
-            lines.append(line_rank)
-            ax2.annotate(
-                f"{int(rs[-1])}",
-                xy=(times[-1], rs[-1] * 1.02),
-                xytext=(times[-1], rs[-1] * 1.02),
-                color=color_p1[1],
-                fontsize=12,
-                ha="right",
-                path_effects=PLOT_LABEL_PATH_EFFECTS,
-            )
-            if ranks2 is not None:
-                (line_rank2,) = ax2.plot(
-                    times2, rs2, "o", label=f"{name2}排名", color=color_p2[1], markersize=0.7, linewidth=0.5
-                )
-                lines.append(line_rank2)
-                ax2.annotate(
-                    f"{int(rs2[-1])}",
-                    xy=(times2[-1], rs2[-1] * 1.02),
-                    xytext=(times2[-1], rs2[-1] * 1.02),
-                    color=color_p2[1],
-                    fontsize=12,
-                    ha="right",
-                    path_effects=PLOT_LABEL_PATH_EFFECTS,
-                )
-
-            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
-            ax2.set_ylim(110, -10)
-
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=plot_start.tzinfo))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            fig.autofmt_xdate()
-
-            if ranks2 is None:
-                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name}")
-            else:
-                ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} 玩家: {name} vs {name2}")
-
-            labels = [line.get_label() for line in lines]
-            legend = ax2.legend(lines, labels, loc="upper left")
-            legend.set_zorder(1000)
-
-            return plt_fig_to_image(fig)
-        finally:
-            fig.clear()
-
-    img = await run_matplotlib_plot(_render_player_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
+        TracePlotBox(spec).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
         if wl_chara_icon is not None:
             with (
                 VSplit()
@@ -1133,118 +798,16 @@ async def try_render_player_trace_payload(rqd: PlayerTraceRequest) -> EncodedIma
 
 # 合成排名追踪图片
 async def _build_rank_trace_canvas(rqd: RankTraceRequest) -> Canvas:
-    """
-    合成排名档位追踪与预测图表
-
-    分析特定档位的分数增长趋势，并根据预测分绘制参考线
-    """
-    eid = rqd.event_id
-    ranks = rqd.ranks
-    if not ranks:
-        raise ValueError("ranks must not be empty")
-    ranks.sort(key=lambda x: x.time)
-    times = [rank.time for rank in ranks]
-    scores = [rank.score for rank in ranks]
-    pred_scores = []
-    original_names = [rank.name for rank in ranks]
-    unique_names = list(dict.fromkeys(original_names))
+    """Build the page from the shared rank-line and hourly-speed specification."""
+    spec = build_rank_trace_spec(rqd)
     wl_chara_icon = None
     if rqd.wl_chara_icon_path:
         wl_chara_icon = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.wl_chara_icon_path)
 
-    # 时速计算
-    speeds = []
-    min_period = timedelta(minutes=50)
-    max_period = timedelta(minutes=60)
-    left = 0
-    for right in range(0, len(ranks)):
-        while ranks[right].time - ranks[left].time > max_period:
-            left += 1
-        if min_period <= ranks[right].time - ranks[left].time <= max_period:
-            speed = (
-                (ranks[right].score - ranks[left].score) / (ranks[right].time - ranks[left].time).total_seconds() * 3600
-            )
-            speeds.append(speed)
-        else:
-            speeds.append(-1)
+    from .trace_widget import TracePlotBox
 
-    # 附加排名预测
-    final_score = rqd.predict_ranks.score if rqd.predict_ranks is not None else None
-
-    max_score = max(scores + pred_scores)
-    min_score = min(scores + pred_scores)
-    if final_score is not None:
-        max_score = max(max_score, final_score)
-        min_score = min(min_score, final_score)
-
-    def _render_rank_trace_plot() -> Image.Image:
-        fig = Figure(figsize=(12, 8))
-        ax = fig.add_subplot(111)
-        try:
-            fig.subplots_adjust(wspace=0, hspace=0)
-
-            draw_day_night_bg(ax, times[0], times[-1])
-
-            num_unique_names = len(unique_names)
-            if num_unique_names > len(RANK_TRACE_SCORE_COLORS):
-                # 数量太多，直接使用同一个颜色
-                point_colors = [RANK_TRACE_SCORE_COLORS[0] for _ in ranks]
-            else:  # 否则为每个玩家分配不同颜色
-                name_to_color = {name: RANK_TRACE_SCORE_COLORS[idx] for idx, name in enumerate(unique_names)}
-
-                # 根据原始的、带重复的 name 列表来生成颜色列表
-                point_colors = [name_to_color.get(name) for name in original_names]
-
-            # 绘制分数，为不同uid的数据点使用不同颜色
-            score_points = ax.scatter(times, scores, c=point_colors, s=3, label="分数线", zorder=3)
-            if scores:
-                ax.annotate(
-                    f"{get_board_score_str(scores[-1])}",
-                    xy=(times[-1], scores[-1]),
-                    xytext=(times[-1], scores[-1]),
-                    color=point_colors[-1],
-                    fontsize=12,
-                    ha="right",
-                    path_effects=PLOT_LABEL_PATH_EFFECTS,
-                )
-
-            # 绘制预测线
-            if final_score is not None:
-                ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
-                ax.text(
-                    times[-1],
-                    final_score * 1.02,
-                    f"预测最终: {get_board_score_str(final_score)}",
-                    color="red",
-                    fontsize=12,
-                    ha="right",
-                )
-
-            # 绘制时速
-            ax2 = ax.twinx()
-            (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
-            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
-            valid_speeds = [speed for speed in speeds if speed >= 0]
-            max_speed = max(valid_speeds) if valid_speeds else 1
-            ax2.set_ylim(0, max_speed * 1.2)
-
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=times[0].tzinfo))
-            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-            fig.autofmt_xdate()
-            ax.set_title(f"{get_event_id_and_name_text(rqd.region, eid, '')} T{rqd.target_rank} 分数线")
-
-            lines = [score_points, line_speeds]
-            labels = [line.get_label() for line in lines]
-            legend = ax2.legend(lines, labels, loc="upper left")
-            legend.set_zorder(1000)
-
-            return plt_fig_to_image(fig)
-        finally:
-            fig.clear()
-
-    img = await run_matplotlib_plot(_render_rank_trace_plot)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
+        TracePlotBox(spec).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
         if rqd.wl_chara_icon_path is not None:
             with (
                 VSplit()

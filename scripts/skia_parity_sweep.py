@@ -2,8 +2,8 @@
 
 Successor of the sprint-era ``out/skia-parity-sweep/`` tooling: same mechanism
 (in-process Skia gates forced on, composed caches bypassed, per-endpoint diff
-stats + side-by-side PNG), but driven by 65 real request bodies covering 67
-explicit cases produced by ``scripts/parity_payloads/`` (all captured bodies
+stats + side-by-side PNG), but driven by captured/generated request bodies covering 71
+explicit cases (including four synthetic branch fixtures) produced by ``scripts/parity_payloads/`` (all captured bodies
 are pre-validated against the drawing pydantic models).
 
 This is a CORRECTNESS gate and nothing else. It does not time anything (see run_case), and it
@@ -28,8 +28,13 @@ Known deviations (not failures in the default development mode):
 - ``mysekai_*`` (except housing-competition): needs the gitignored
   ``src/sekai/mysekai/drawer.real.py``; the whole domain is ``skipped`` when absent.
 
-``--strict`` is the Pillow-removal gate. It accepts only ``ok`` rows and additionally
-requires complete case/budget/result coverage with no unmapped fixtures.
+``--strict`` is the public Pillow-removal gate. Required cases accept only ``ok`` rows and
+need complete case/budget/result coverage with no unmapped fixtures. Every required pixel-passing
+case must also render in a fresh subprocess that rejects all Pillow imports; native fallback
+or a missing native render is a failure. Proprietary MySekai and uncaptured symbol/stamps rows
+are diagnostic only; migration is checked separately and does not determine public release acceptance.
+A second fresh service check exercises the same request through FastAPI startup, ASGI routing and shutdown,
+guarding spawned workers too.
 
 CAVEAT: when local ``data/`` assets are incomplete, absolute pixel diffs mix
 genuine renderer drift with missing-asset artifacts. Treat the numbers as
@@ -70,11 +75,15 @@ if str(REPO_ROOT) not in sys.path:
 import numpy as np
 from PIL import Image, ImageChops
 
+from scripts.parity_payloads.retirement_fixture_contract import validate_retirement_branch
+from scripts.skia_no_pillow import run_clean_case
 from scripts.skia_parity_budgets import PARITY_BUDGETS
+from scripts.skia_service_no_pillow import run_service_case
 from src.settings import settings
 
 PAYLOAD_DIR = REPO_ROOT / "out" / "parity-payloads"
 DEFAULT_OUT_DIR = REPO_ROOT / "out" / "parity-sweep-real"
+SAVE_IMAGES = False  # CLI-only output option; preserve raw RGBA references for HTTP/release checks.
 
 # Sentinel drawer module: resolved at runtime from the gitignored drawer.real.py.
 MYSEKAI_REAL = "mysekai-real"
@@ -106,6 +115,7 @@ class Case:
     route_watermark: bool = False  # the route appends a raster watermark footer after compose
     note: str | None = None
     budget: tuple[float, float] | None = None  # None is tolerated only outside --strict.
+    release_required: bool = True  # Proprietary MySekai is migrated/audited separately, per release scope.
 
 
 def _case(
@@ -120,6 +130,7 @@ def _case(
     is_list: bool = False,
     route_watermark: bool = False,
     note: str | None = None,
+    release_required: bool = True,
 ) -> Case:
     return Case(
         name=name,
@@ -133,6 +144,7 @@ def _case(
         route_watermark=route_watermark,
         note=note,
         budget=PARITY_BUDGETS.get(name),
+        release_required=release_required and drawer != MYSEKAI_REAL,
     )
 
 
@@ -146,6 +158,16 @@ CASES: tuple[Case, ...] = (
     # ---- costume ----
     _case("costume_list", "costume", "costume_list", "CostumeListRequest"),
     _case("costume_detail", "costume", "costume_detail", "CostumeDetailRequest"),
+    _case(
+        "costume_detail_preview", "costume", "costume_detail", "CostumeDetailRequest", note="Synthetic preview branch"
+    ),
+    _case(
+        "costume_detail_preview_webp",
+        "costume",
+        "costume_detail",
+        "CostumeDetailRequest",
+        note="Synthetic WebP preview branch",
+    ),
     # ---- deck (direct in-process call, no heavy worker) ----
     _case("deck_recommend", "deck", "deck_recommend", "DeckRequest"),
     # ---- education ----
@@ -169,6 +191,14 @@ CASES: tuple[Case, ...] = (
     # ---- gacha ----
     _case("gacha_list", "gacha", "gacha_list", "GachaListRequest"),
     _case("gacha_detail", "gacha", "gacha_detail", "GachaDetailRequest"),
+    _case("gacha_list_missing_assets", "gacha", "gacha_list", "GachaListRequest", note="Missing logo/banner branch"),
+    _case(
+        "gacha_detail_missing_assets",
+        "gacha",
+        "gacha_detail",
+        "GachaDetailRequest",
+        note="Missing detail assets branch",
+    ),
     # ---- honor (migrated via IRBuilder scene + group alpha-mask; variants cover branches).
     # The /honor route rasters its watermark footer AFTER compose, so the harness applies the
     # same footer to the Pillow side (route_watermark) for full-image parity with the payload.
@@ -215,8 +245,9 @@ CASES: tuple[Case, ...] = (
     ),
     # ---- profile ----
     _case("profile", "profile", "profile", "ProfileRequest"),
-    # ---- custom profile (Pillow-only until the Phase-1 Skia scene lands). Payloads are built by
-    #      scripts/parity_payloads/gen_custom_profile.py from a real profile response
+    # ---- custom profile (progressive native scene; visible missing/unresolved content declines
+    #      the whole scene before Rust, and native_metrics distinguishes pure from hybrid).
+    #      Payloads are built by scripts/parity_payloads/gen_custom_profile.py from a real profile response
     #      (response.json) + local masterdata: the Cloud-inlined `resources` index is masterdata
     #      by other names plus derived asset paths, and the generated fixtures render
     #      byte-identical to the masterdata-mode CLI baseline (verified max_diff=0). The symbol
@@ -228,9 +259,9 @@ CASES: tuple[Case, ...] = (
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
         try_render_module="src.sekai.profile.custom_profile.skia",
-        # Unrotated elements integer-paste the same Pillow-rasterized layers, so the only diff is
-        # LSB compositing rounding (measured rgb max=1, alpha exact); rotated elements use the
-        # shared relaxed custom-profile budget in skia_parity_budgets.py.
+        # Static assets and SDF shapes lower without Pillow pixels; still-unmigrated prefab/text
+        # layers use bounded mem rasters. Transparent UnityImage resampling and rotated content
+        # use the shared custom-profile budget in skia_parity_budgets.py.
     ),
     _case(
         "custom_profile_card_collections",
@@ -241,12 +272,85 @@ CASES: tuple[Case, ...] = (
         try_render_module="src.sekai.profile.custom_profile.skia",
     ),
     _case(
+        "custom_profile_card_outlined_text",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Outlined TMP branch derived from the captured profile; native SDF layer",
+    ),
+    _case(
+        "custom_profile_card_decorative_text",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived decorative TMP field warp with rotation and nonuniform scale",
+    ),
+    _case(
+        "custom_profile_card_static_text",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived outlined TMP text using an extracted static atlas",
+    ),
+    _case(
+        "custom_profile_card_rotated_characters",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived TMP per-character rotation after SDF shading",
+    ),
+    _case(
+        "custom_profile_card_rotated_decorative",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived decorative TMP text with per-character and object rotation",
+    ),
+    _case(
+        "custom_profile_card_font_fallback",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived TMP missing/invisible glyph metrics fallback",
+    ),
+    _case(
+        "custom_profile_card_static_missing_glyphs",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Derived static EB missing glyphs with native float32 SDF shading",
+    ),
+    _case(
+        "custom_profile_card_honor_deck_resized",
+        "profile",
+        "custom_profile_card",
+        "CustomProfileCardRenderRequest",
+        drawer="src.sekai.profile.custom_profile.drawer",
+        try_render_module="src.sekai.profile.custom_profile.skia",
+        note="Captured HonorDeck badges swapped across main/sub slots, requiring Lanczos up/downscaling",
+    ),
+    _case(
         "custom_profile_card_symbol",
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
         try_render=None,
+        release_required=False,  # User excludes these uncaptured branches from release acceptance.
     ),
     _case(
         "custom_profile_card_stamps",
@@ -255,6 +359,7 @@ CASES: tuple[Case, ...] = (
         "CustomProfileCardRenderRequest",
         drawer="src.sekai.profile.custom_profile.drawer",
         try_render=None,
+        release_required=False,  # User excludes these uncaptured branches from release acceptance.
     ),
     # ---- score ----
     _case("score_control", "score", "score_control", "ScoreControlRequest"),
@@ -340,6 +445,11 @@ def _diff_stats(a: Image.Image, b: Image.Image) -> dict:
 
 
 def _save_sbs(out_dir: Path, name: str, pil: Image.Image, skia: Image.Image) -> str:
+    if SAVE_IMAGES:
+        # The RGB preview below cannot prove alpha parity. Keep both complete decoded rasters
+        # before converting either to RGB, including RGB values under transparent pixels.
+        pil.convert("RGBA").save(out_dir / f"{name}_reference.png")
+        skia.convert("RGBA").save(out_dir / f"{name}_native.png")
     pil, skia = _to_rgb(pil), _to_rgb(skia)
     w = max(pil.width, skia.width)
     h = max(pil.height, skia.height)
@@ -462,6 +572,9 @@ async def run_case(case: Case, req, compose, try_render, out_dir: Path) -> dict:
                 f"p99 {stats['p99']} (budget {p99_budget})"
             )
     row["sbs"] = _save_sbs(out_dir, case.name, pil, skia)
+    if SAVE_IMAGES:
+        row["reference_png"] = f"{case.name}_reference.png"
+        row["native_png"] = f"{case.name}_native.png"
     return row
 
 
@@ -472,6 +585,7 @@ async def _run_one(case: Case, mysekai_real, out_dir: Path) -> dict:
     if case.drawer == MYSEKAI_REAL and mysekai_real is None:
         return {"endpoint": case.name, "status": "skipped", "note": "drawer.real.py not present locally"}
     try:
+        validate_retirement_branch(case.name, raw)
         drawer = mysekai_real if case.drawer == MYSEKAI_REAL else importlib.import_module(case.drawer)
         tr_mod = importlib.import_module(case.try_render_module) if case.try_render_module else drawer
         bypass_caches(drawer, tr_mod)
@@ -505,7 +619,15 @@ async def _run_one(case: Case, mysekai_real, out_dir: Path) -> dict:
 def _is_failure(row: dict, *, strict: bool = False) -> bool:
     status = row.get("status", "")
     if strict:
-        return status != "ok"
+        # Trust the registered Case, not a report row that could incorrectly mark itself optional.
+        case = next((case for case in CASES if case.name == row.get("endpoint")), None)
+        if case is not None and not case.release_required:
+            return False
+        return (
+            status != "ok"
+            or row.get("no_pillow", {}).get("status") != "ok"
+            or row.get("service_no_pillow", {}).get("status") != "ok"
+        )
     if status in _OK_STATUSES:
         return False
     if status == "skia-none" and str(row.get("note", "")).startswith(_KNOWN_BLOCKED_PREFIX):
@@ -518,12 +640,13 @@ def _strict_gate_issues(rows: list[dict], fixture_names: set[str], only: set[str
     issues: list[str] = []
     case_names = [case.name for case in CASES]
     case_name_set = set(case_names)
+    required_names = {case.name for case in CASES if case.release_required}
     duplicate_cases = sorted(name for name, count in Counter(case_names).items() if count > 1)
     if duplicate_cases:
         issues.append(f"duplicate CASES entries: {duplicate_cases}")
 
-    missing_budget_entries = sorted(case_name_set - PARITY_BUDGETS.keys())
-    missing_budget_bindings = sorted(case.name for case in CASES if case.budget is None)
+    missing_budget_entries = sorted(required_names - PARITY_BUDGETS.keys())
+    missing_budget_bindings = sorted(case.name for case in CASES if case.release_required and case.budget is None)
     missing_budgets = sorted(set(missing_budget_entries) | set(missing_budget_bindings))
     if missing_budgets:
         issues.append(f"CASES without explicit parity budgets: {missing_budgets}")
@@ -543,7 +666,7 @@ def _strict_gate_issues(rows: list[dict], fixture_names: set[str], only: set[str
     duplicate_rows = sorted(name for name, count in Counter(row_names).items() if count > 1)
     if duplicate_rows:
         issues.append(f"duplicate result rows: {duplicate_rows}")
-    missing_rows = sorted(case_name_set - set(row_names))
+    missing_rows = sorted(required_names - set(row_names))
     if missing_rows:
         issues.append(f"CASES without result rows: {missing_rows}")
     unexpected_rows = sorted(set(row_names) - case_name_set)
@@ -551,6 +674,39 @@ def _strict_gate_issues(rows: list[dict], fixture_names: set[str], only: set[str
         issues.append(f"result rows without CASES entries: {unexpected_rows}")
 
     return issues
+
+
+def _registered_route_issues() -> list[str]:
+    """A new POST drawing route must not escape the gate by omitting its Case."""
+    from scripts.skia_service_no_pillow import route_for_case
+    from src.core.main import app
+
+    schema = app.openapi()
+    registered = {
+        path for path, methods in schema["paths"].items() if path.startswith("/api/pjsk") and "post" in methods
+    }
+    covered = set()
+    issues = []
+    for case in CASES:
+        try:
+            covered.add(route_for_case(case, schema))
+        except ValueError as exc:
+            if case.release_required:
+                issues.append(str(exc))
+    issues.extend(f"drawing route without a registered Case: {path}" for path in sorted(registered - covered))
+    return issues
+
+
+def _legacy_layout_issues() -> list[str]:
+    """Do not let two backends sharing BASIC metrics hide drift from an RAQM baseline."""
+    from PIL import ImageFont
+
+    if ImageFont.core.HAVE_RAQM:
+        return [
+            "TMP fallback metrics require the verified BASIC baseline; this Pillow build defaults to RAQM. "
+            "Native RAQM parity must be established before retiring Pillow in this environment."
+        ]
+    return []
 
 
 def _fmt(value, spec: str = "") -> str:
@@ -604,7 +760,8 @@ def write_summary_md(
         ),
         "",
         (
-            "Only `ok` rows are accepted in strict mode."
+            "Strict mode requires pixel parity, pure native drawers AND pure native service requests for public cases. "
+            "Proprietary MySekai and symbol/stamps rows are diagnostic and do not determine release acceptance."
             if strict
             else "known-blocked / pillow-only / skipped / no-payload rows are expected deviations, not failures."
         ),
@@ -624,6 +781,11 @@ def write_summary_md(
             if row.get("size_skia") and row.get("size_pil") != row.get("size_skia"):
                 size += " / " + "x".join(str(v) for v in row["size_skia"])
             note = row.get("note") or row.get("error") or ""
+            if strict:
+                check = row.get("no_pillow", {})
+                note += f"; no-Pillow: {check.get('status', 'not-run')} {check.get('error', '')}"
+                service = row.get("service_no_pillow", {})
+                note += f"; service: {service.get('status', 'not-run')} {service.get('error', '')}"
             lines.append(f"| {row['endpoint']} | {size} | {_fmt(row.get('mean'))} | {_fmt(row.get('p99'))} | {note} |")
         lines.append("")
     path = out_dir / "SUMMARY.md"
@@ -651,15 +813,23 @@ async def sweep(only: set[str] | None, out_dir: Path, mysekai_real) -> list[dict
 
 
 def main() -> int:
+    global SAVE_IMAGES
+
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--only", help="development-only comma-separated payload names to run (default: all)")
     parser.add_argument("--out-dir", default=str(DEFAULT_OUT_DIR), help="output directory for results/SBS images")
+    parser.add_argument(
+        "--save-images",
+        action="store_true",
+        help="also save independent RGBA Pillow/native PNGs for release comparisons",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",
         help="Pillow-removal gate: require all cases, budgets, fixtures and result rows; accept only status=ok",
     )
     args = parser.parse_args()
+    SAVE_IMAGES = args.save_images
 
     only: set[str] | None = None
     if args.only:
@@ -686,11 +856,31 @@ def main() -> int:
         bypass_caches(mysekai_real)
 
     rows = asyncio.run(sweep(only, out_dir, mysekai_real))
-    strict_issues = _strict_gate_issues(rows, on_disk, only) if args.strict else []
+    cases_by_name = {case.name: case for case in CASES}
+    for row in rows:
+        case = cases_by_name.get(row["endpoint"])
+        row["release_required"] = case.release_required if case is not None else True
+    if args.strict:
+        for row in rows:
+            case = cases_by_name.get(row["endpoint"])
+            if row.get("status") == "ok" and case is not None:
+                row["no_pillow"] = run_clean_case(case, PAYLOAD_DIR / f"{case.name}.json")
+                if row["no_pillow"].get("status") == "ok":
+                    row["service_no_pillow"] = run_service_case(case, PAYLOAD_DIR / f"{case.name}.json")
+    strict_issues = (
+        _strict_gate_issues(rows, on_disk, only) + _legacy_layout_issues() + _registered_route_issues()
+        if args.strict
+        else []
+    )
 
     results_path = out_dir / "results.json"
     with open(results_path, "w", encoding="utf-8") as fh:
-        json.dump({"payload_dir": str(PAYLOAD_DIR), "cases": rows}, fh, ensure_ascii=False, indent=2)
+        json.dump(
+            {"payload_dir": str(PAYLOAD_DIR), "cases": rows, "strict_issues": strict_issues},
+            fh,
+            ensure_ascii=False,
+            indent=2,
+        )
     summary_path = write_summary_md(rows, out_dir, strict=args.strict, strict_issues=strict_issues)
 
     counts = Counter(_summary_group_key(r) for r in rows)

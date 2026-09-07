@@ -163,9 +163,13 @@ def _contours_bytes(value: Any) -> int:
 
 
 def _image_bytes(value: Any) -> int:
-    """``PIL.Image.Image | None`` (RGBA sprites, L-mode atlas alphas)."""
+    """RGBA sprites, legacy L-mode images and immutable gray8 atlas fields."""
+    from .gray_field import GrayField
+
     if value is None:
         return 64
+    if isinstance(value, GrayField):
+        return len(value.pixels)
     return value.width * value.height * len(value.mode)
 
 

@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -13,18 +17,8 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import (
-    BLACK,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_FONT,
-    DEFAULT_HEAVY_FONT,
-    WHITE,
-    LinearGradient,
-    get_font,
-    get_font_desc,
-    get_text_size,
-    lerp_color,
-)
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.paint_types import BLACK, WHITE, LinearGradient, get_font_desc, lerp_color
 from src.sekai.base.plot import (
     Canvas,
     FillBg,
@@ -38,11 +32,12 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR, RESULT_ASSET_PATH
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, RESULT_ASSET_PATH
 
 # =========================== 从.model导入常量和数据类型 =========================== #
 from .model import (
@@ -898,9 +893,6 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
     r"""compose_play_progress_image
 
     合成打歌进度图片
-
-    TODO:
-        TextBox shadow 暂未实现
     """
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):

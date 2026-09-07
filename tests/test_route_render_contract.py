@@ -173,15 +173,14 @@ def test_no_new_hand_written_scene_builders():
 
 
 @pytest.mark.parametrize(("path", "endpoint"), _drawing_routes())
-def test_drawing_routes_fall_back_to_pillow(path, endpoint):
-    """FAIL-OPEN: a Skia problem must degrade to Pillow, never 500. Every route that calls
-    try_render must also have a Pillow compose path to fall back to."""
-    if path in _NO_SKIA_PATH:
-        pytest.skip(_NO_SKIA_PATH[path])
-    source = inspect.getsource(endpoint)
-    if "try_render" not in source:
-        pytest.skip("no Skia path (covered by test_every_drawing_route_has_a_skia_path)")
-
-    assert "compose" in source, (
-        f"{path} calls try_render but has no Pillow compose fallback; a Skia failure would 500 instead of degrading"
-    )
+def test_drawing_routes_never_reenter_the_legacy_compositor(path, endpoint):
+    """A declined native render is an error, even when dev Pillow is installed."""
+    tree = ast.parse(inspect.getsource(endpoint))
+    names = {
+        node.id if isinstance(node, ast.Name) else node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name | ast.Attribute)
+    }
+    assert not any(name.startswith("compose_") or name == "image_to_response" for name in names), path
+    if path not in _HEAVY_WORKER_ROUTES:
+        assert "require_native_payload" in names, path

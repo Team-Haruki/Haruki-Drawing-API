@@ -1,5 +1,7 @@
 # Skia Render IR 迁移缺口清单
 
+> 2026-09-07：Pillow 退役进度与严格门槛见 [当前审计](./pillow-retirement-status.md)。下文历史“已有 Skia 路径”的覆盖率不代表请求链已脱离 Pillow。
+
 本清单基于对 Pillow 组件库（`src/sekai/base/painter.py` + `plot.py` + `draw.py` + `img_utils.py`）
 与 Skia Render IR（`rust/haruki_skia_renderer/src/{ir,interp,lib}.rs` + `src/sekai/skia_renderer/ir_builder.py`）
 的逐功能对拍，记录二者的能力差距，作为后续迁移其余端点的工作依据。
@@ -82,8 +84,11 @@ Constraint A 刻意留在 Python —— `plot.py` 照常算布局，`IRPainter`�
 
 运行时内存图基础设施：`render_scene` 接受 `{key: 值}`，值可为 **编码字节（PNG/JPEG）** 或
 **`(w, h, rgba)` 原始像素元组**（零编解码，Rust 侧 `skia_safe::images::raster_from_data`）。IRPainter 默认
-走原始 RGBA（实测端到端比 PNG 快 ~1.6×）。输出缩放经 `Scene.scale`（1× 渲染后整图 resize，floor 截断
-匹配 `int(size*scale)`）。
+走原始 RGBA（实测端到端比 PNG 快 ~1.6×）。普通 Canvas 的输出缩放使用 `Scene.post_resize`：
+先在逻辑尺寸合成完整页面，再由原生 RGBA BILINEAR 缩放，匹配 `Canvas.get_img(scale)`；目标边长
+由 Python 按 `int(size*scale)` 计算。直接构造 IR 的调用方仍可使用 `Scene.scale` 的 canvas matrix
+变换；两种输出缩放不能同时启用。旧的普通 Canvas 直绘会放大字形、裁剪和素材采样差异，profile
+因此超出像素预算；改回完整画布缩放顺序后 mean 1.547、p99 15，已在原有预算内。
 
 端点级迁移状态（哪些端点走 Skia、各自的 payload 缓存策略）见
 [`skia-migration-todo.md`](./skia-migration-todo.md)；下方端点表是 2026-06-24 的历史快照。

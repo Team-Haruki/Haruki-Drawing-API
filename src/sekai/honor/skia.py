@@ -35,7 +35,8 @@ from src.sekai.base.draw import (
     build_request_watermark_text,
     get_watermark_render_spec,
 )
-from src.sekai.base.painter import get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.utils import run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
@@ -97,7 +98,7 @@ def _new_builder(width: int, height: int, export_format: str = "png") -> IRBuild
 async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayload | None:
     """Skia path for the /honor route: the shared badge tree + the route's raster watermark
     footer (``add_request_watermark_to_image`` equivalent), rendered natively in one pass.
-    Returns ``None`` (gate off / unsupported / failure) so the caller falls back to Pillow.
+    Returns ``None`` (gate off / unsupported / failure) so the service can reject the declined native render.
     """
     if not skia_plot_enabled():
         _record(OUTCOME_DISABLED)
@@ -105,7 +106,7 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
     try:
         native = load_native_renderer()
     except ImportError as exc:
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        logger.error("haruki_skia_renderer not importable (%s); declining native render", exc)
         _record(OUTCOME_FALLBACK)
         return None
 
@@ -129,7 +130,7 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         # DecompressionBombError or a plugin's struct.error, and anything that escapes here would
         # skip _record entirely and 500 instead of letting Pillow render (and raise the canonical
         # user-visible message).
-        logger.info("honor assets not loadable for the Skia path; falling back to Pillow", exc_info=True)
+        logger.info("honor assets not loadable for the Skia path; declining native render", exc_info=True)
         _record(OUTCOME_FALLBACK)
         return None
 
@@ -184,7 +185,7 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
             return None
         payload = payload_from_native(result)
     except Exception:
-        logger.exception("honor backend=skia failed; falling back to Pillow")
+        logger.exception("honor backend=skia failed; declining native render")
         _record(OUTCOME_ERROR)
         return None
     _record(OUTCOME_SKIA, payload)

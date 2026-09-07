@@ -18,10 +18,15 @@ pub struct Scene {
     pub jpg_quality: i32,
     pub fonts: FontsIr,
     pub canvas: CanvasIr,
-    /// Output scale: render at canvas size, then resize the final raster to
-    /// (round(w*scale), round(h*scale)) — mirrors plot.py `Canvas.get_img(scale)`.
+    /// Output scale: allocate the target raster and draw through a scaled canvas matrix.
+    /// The output dimensions truncate `canvas * scale`, matching plot.py.
     #[serde(default = "default_scale")]
     pub scale: f32,
+    /// Resize the completed raster with Pillow-compatible RGBA bilinear filtering.
+    /// Unlike `scale`, this preserves logical-pixel glyphs, masks, and backdrop sampling.
+    /// Cannot be combined with a non-identity scene matrix scale.
+    #[serde(default)]
+    pub post_resize: Option<CanvasIr>,
     /// Optional flat background painted before the root tree (TriangleBg or cover image).
     #[serde(default)]
     pub background: Option<Node>,
@@ -162,6 +167,8 @@ fn default_gradient_method() -> String {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind")]
 pub enum Clip {
+    #[serde(rename = "ellipse")]
+    Ellipse,
     #[serde(rename = "rect")]
     Rect,
     #[serde(rename = "rrect")]
@@ -250,6 +257,9 @@ pub enum ImageSampling {
     /// fixed-point coefficient, per-axis rounding, and unpremultiply pipeline. This is an
     /// explicit raster operation rather than a Skia SamplingOptions value.
     PillowLanczos,
+    /// Full-raster Keys a=-0.5 with widened downsampling support and 8-bit pass rounding.
+    PillowBicubic,
+    PillowBilinear,
     #[default]
     LinearMipmap,
 }
@@ -305,6 +315,8 @@ pub enum Node {
     Rect(RectNode),
     RoundRect(RoundRectNode),
     PieSlice(PieSliceNode),
+    Arc(ArcNode),
+    VectorPath(VectorPathNode),
     Image(ImageNode),
     SlicedImage(SlicedImageNode),
     UnityImage(UnityImageNode),
@@ -319,6 +331,57 @@ pub enum Node {
     TriangleBg(TriangleBgNode),
     ImageBg(ImageBgNode),
     Watermark(WatermarkNode),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", content = "points", rename_all = "snake_case")]
+pub enum VectorCommand {
+    Move(Vec2),
+    Line(Vec2),
+    Quad([f32; 4]),
+    Cubic([f32; 6]),
+    Ellipse([f32; 4]),
+    Close,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorCap {
+    #[default]
+    Butt,
+    Round,
+    Square,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorJoin {
+    Miter,
+    #[default]
+    Round,
+    Bevel,
+}
+
+/// Shared floating-point path, with nonzero winding and centered pixel strokes.
+#[derive(Debug, Deserialize)]
+pub struct VectorPathNode {
+    #[serde(default)]
+    pub pos: Vec2,
+    pub commands: Vec<VectorCommand>,
+    #[serde(default)]
+    pub fill: Option<Color4>,
+    #[serde(default)]
+    pub stroke: Option<Color4>,
+    #[serde(default = "default_scale")]
+    pub width: f32,
+    #[serde(default)]
+    pub dashes: Vec<f32>,
+    #[serde(default)]
+    pub phase: f32,
+    #[serde(default)]
+    pub cap: VectorCap,
+    #[serde(default)]
+    pub join: VectorJoin,
 }
 
 /// Per-glyph TMP-SDF text shading quad (requires IR_CAPABILITY >= 9).
@@ -336,8 +399,8 @@ pub enum Node {
 #[derive(Debug, Deserialize)]
 pub struct SdfQuadNode {
     pub pos: Vec2,
-    /// `mem:<key>` reference to the pre-warped A8 field. Anything but a raw Alpha8 mem entry
-    /// fails the whole scene loudly (-> Python fail-open to Pillow).
+    /// `mem:<key>` reference to an A8 or tight little-endian float32 distance field.
+    /// Other formats fail the whole scene (-> Python fail-open to Pillow).
     pub field: String,
     pub shading: SdfShading,
 }
@@ -476,6 +539,19 @@ pub struct RoundRectNode {
     pub stroke: Option<Fill>,
     #[serde(default = "default_stroke_width")]
     pub stroke_width: f32,
+    /// ImageDraw-style discrete coverage, Src writes and an inside outline.
+    #[serde(default)]
+    pub replace_pixels: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ArcNode {
+    pub pos: Vec2,
+    pub size: Vec2,
+    pub start_angle: f32,
+    pub end_angle: f32,
+    pub color: Color4,
+    pub width: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -512,6 +588,9 @@ pub struct ImageNode {
     /// before placement). Out-of-range coords are clamped. `None` = whole image.
     #[serde(default)]
     pub source_rect: Option<Rect4>,
+    /// Natural-size crop alpha LUT; isolate before resizing in a RasterSubscene (capability 23).
+    #[serde(default)]
+    pub alpha_floor: Option<u8>,
     #[serde(default = "default_alpha")]
     pub alpha: f32,
     /// Anchor of `pos` within the drawn rect: [0,0]=top-left (default), [1,1]=bottom-right,
@@ -538,7 +617,7 @@ pub struct ImageNode {
     /// `destination.paste(source, pos, source)`: source alpha linearly interpolates ALL four
     /// straight channels, including destination alpha. It is preflight-limited to integral,
     /// axis-aligned stretch draws without decorations or a masked-Group saveLayer (ordinary
-    /// Group clips and isolated subscene local surfaces are supported). Skia stores surfaces
+    /// Group clips and UnitySubscene local surfaces are supported). Skia stores surfaces
     /// premultiplied, so RGB hidden below alpha=0 cannot survive a surface round-trip and is
     /// not preserved.
     #[serde(default)]
@@ -606,10 +685,11 @@ pub struct UnitySubsceneNode {
 /// once into an explicit logical destination rectangle on the parent canvas.
 ///
 /// Unlike UnitySubscene this node has no custom-profile transform math: `pos` is the logical
-/// top-left and `dst_size` is the logical output size. The isolation contains Porter-Duff Src
-/// writes and straight-RGBA PasteLerp reads within the natural raster. `shadow` is applied once
-/// to the completed snapshot's alpha silhouette. A Scene.scale remains the scene's ordinary
-/// final-raster resize; this node does not add a hidden intermediate pre-resize.
+/// top-left and `dst_size` is the logical output size. That makes the final snapshot an ordinary
+/// Image draw, so a parent Scene.scale CTM expands the destination directly instead of
+/// pre-resizing the snapshot and sampling it a second time. The isolation contains Porter-Duff
+/// Src writes and straight-RGBA PasteLerp reads within the natural raster. `shadow` is applied
+/// once to the completed snapshot's alpha silhouette.
 #[derive(Debug, Deserialize)]
 pub struct RasterSubsceneNode {
     pub natural_size: [i32; 2],
@@ -657,6 +737,12 @@ pub struct TextNode {
     pub text: String,
     pub pos: Vec2,
     pub font: FontRef,
+    /// Explicit layout/scaler contract. The default retains platform Skia text.
+    #[serde(default)]
+    pub engine: TextEngine,
+    /// Lerp straight destination RGBA towards the fill using the glyph mask.
+    #[serde(default)]
+    pub mask_lerp: bool,
     #[serde(default)]
     pub align: HAlign,
     #[serde(default)]
@@ -673,6 +759,14 @@ pub struct TextNode {
     /// chosen from the average luminance behind the text — Painter `AdaptiveTextColor`).
     #[serde(default)]
     pub adaptive: Option<AdaptiveColor>,
+}
+
+#[derive(Debug, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TextEngine {
+    #[default]
+    Skia,
+    FreetypeBasic,
 }
 
 #[derive(Debug, Deserialize)]
@@ -723,6 +817,9 @@ pub struct ShadowNode {
     pub sigma: f32,
     #[serde(default = "default_shadow_color")]
     pub color: Color4,
+    /// Blur straight RGBA channels against transparent white, as Pillow does.
+    #[serde(default)]
+    pub straight_rgba: bool,
 }
 
 fn default_shadow_node_alpha() -> f32 {

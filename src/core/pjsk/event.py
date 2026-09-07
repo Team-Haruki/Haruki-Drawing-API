@@ -2,12 +2,9 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.event.drawer import (
-    compose_event_detail_image,
-    compose_event_list_image,
-    compose_event_planner_image,
-    compose_event_record_image,
     try_render_event_detail_payload,
     try_render_event_list_payload,
     try_render_event_planner_payload,
@@ -32,10 +29,8 @@ async def event_detail(request: EventDetailRequest):
     """
     try:
         payload = await try_render_event_detail_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_event_detail_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -50,10 +45,8 @@ async def event_record(request: EventRecordRequest):
     """
     try:
         payload = await try_render_event_record_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_event_record_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -68,10 +61,8 @@ async def event_list(request: EventListRequest):
     """
     try:
         payload = await try_render_event_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_event_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -86,10 +77,8 @@ async def event_planner(request: EventPlannerRequest):
     """
     try:
         payload = await try_render_event_planner_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_event_planner_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

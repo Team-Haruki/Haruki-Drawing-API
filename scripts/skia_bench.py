@@ -25,6 +25,7 @@ So: both sides produce RESPONSE BYTES, both start warm (the state a live process
 
 Run (repo root):
     uv run python -X gil=0 scripts/skia_bench.py [--cold] [--reps 3] [--only a,b]
+    uv run python -X gil=0 scripts/skia_bench.py --format jpg --jpg-quality 90
 """
 
 from __future__ import annotations
@@ -48,14 +49,28 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.skia_parity_sweep import CASES, _load_mysekai_real, setup
 from scripts.skia_warm_parity import _bind, clear_all_caches
 from src.core.utils import _encode_image
+from src.sekai.honor import skia as honor_skia
+from src.sekai.skia_renderer import canvas as skia_canvas
 from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
 OUT = REPO_ROOT / "out" / "skia-bench"
 
 
-async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dict | None:
-    async def pillow_bytes() -> float:
+async def bench_case(
+    case,
+    req,
+    drawer,
+    tr_mod,
+    *,
+    reps: int,
+    cold: bool,
+    output_format: str,
+    jpg_quality: int,
+) -> dict | None:
+    expected_media_type = "image/jpeg" if output_format == "jpg" else "image/png"
+
+    async def pillow_bytes() -> tuple[float, int]:
         """compose + the encode the route would do — the whole cost of a Pillow response."""
         if cold:
             clear_all_caches()
@@ -63,10 +78,10 @@ async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dic
         img = await getattr(drawer, case.compose)(req)
         if isinstance(img, tuple):  # sk csb returns (canvas, scale)
             img = img[0]
-        _encode_image(img, EXPORT_IMAGE_FORMAT, JPG_QUALITY)
-        return time.perf_counter() - t0
+        encoded, _, _ = _encode_image(img, output_format, jpg_quality)
+        return time.perf_counter() - t0, encoded.getbuffer().nbytes
 
-    async def skia_bytes() -> float | None:
+    async def skia_bytes() -> tuple[float, int] | None:
         if cold:
             clear_all_caches()
         # honor is the one endpoint left with a payload cache, and repeating the same request would
@@ -78,7 +93,11 @@ async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dic
         payload = await getattr(tr_mod, case.try_render)(req)
         if payload is None:
             return None
-        return time.perf_counter() - t0
+        # Some routes intentionally pin PNG (chart, custom profile, command help). They are not
+        # JPG encoder samples and must not silently contaminate a --format jpg result set.
+        if payload.media_type != expected_media_type:
+            return None
+        return time.perf_counter() - t0, len(payload.image_bytes)
 
     if not case.try_render:
         return None
@@ -87,17 +106,28 @@ async def bench_case(case, req, drawer, tr_mod, *, reps: int, cold: bool) -> dic
         if await skia_bytes() is None:
             return None
 
-    p_times, s_times = [], []
+    p_samples, s_samples = [], []
     for i in range(reps):
         # alternate, so neither backend systematically warms the OS page cache for the other
         for backend in ("pillow", "skia") if i % 2 == 0 else ("skia", "pillow"):
-            t = await (pillow_bytes() if backend == "pillow" else skia_bytes())
-            if t is None:
+            sample = await (pillow_bytes() if backend == "pillow" else skia_bytes())
+            if sample is None:
                 return None
-            (p_times if backend == "pillow" else s_times).append(t)
+            (p_samples if backend == "pillow" else s_samples).append(sample)
 
-    p, s = min(p_times), min(s_times)
-    return {"endpoint": case.name, "pillow": p, "skia": s, "speedup": p / s}
+    p, p_bytes = min(p_samples, key=lambda sample: sample[0])
+    s, s_bytes = min(s_samples, key=lambda sample: sample[0])
+    return {
+        "endpoint": case.name,
+        "format": output_format,
+        "jpg_quality": jpg_quality if output_format == "jpg" else None,
+        "pillow": p,
+        "skia": s,
+        "speedup": p / s,
+        "pillow_bytes": p_bytes,
+        "skia_bytes": s_bytes,
+        "size_ratio": s_bytes / p_bytes,
+    }
 
 
 async def main() -> int:
@@ -105,7 +135,19 @@ async def main() -> int:
     ap.add_argument("--cold", action="store_true", help="clear every cache before every render")
     ap.add_argument("--reps", type=int, default=3)
     ap.add_argument("--only", default="")
+    ap.add_argument("--format", choices=("configured", "png", "jpg"), default="configured")
+    ap.add_argument("--jpg-quality", type=int, default=JPG_QUALITY)
     args = ap.parse_args()
+
+    output_format = EXPORT_IMAGE_FORMAT if args.format == "configured" else args.format
+    jpg_quality = max(1, min(100, args.jpg_quality))
+    # Standard widget-tree routes read these module globals when building their IR. Honor has a
+    # small hand-built watermark shell and imports the values separately, so update both. Routes
+    # that deliberately pin PNG are detected by media type and excluded above.
+    skia_canvas.EXPORT_IMAGE_FORMAT = output_format
+    skia_canvas.JPG_QUALITY = jpg_quality
+    honor_skia.EXPORT_IMAGE_FORMAT = output_format
+    honor_skia.JPG_QUALITY = jpg_quality
 
     setup()
     mysekai_real = _load_mysekai_real()
@@ -120,7 +162,14 @@ async def main() -> int:
         if bound is None:
             continue
         try:
-            row = await bench_case(case, *bound[1:], reps=args.reps, cold=args.cold)
+            row = await bench_case(
+                case,
+                *bound[1:],
+                reps=args.reps,
+                cold=args.cold,
+                output_format=output_format,
+                jpg_quality=jpg_quality,
+            )
         except Exception as exc:
             print(f"  {case.name:30s} ERROR {type(exc).__name__}: {exc}")  # noqa: T201
             continue
@@ -129,30 +178,39 @@ async def main() -> int:
         rows.append(row)
         print(  # noqa: T201
             f"  {row['endpoint']:30s} pillow {row['pillow'] * 1000:7.1f}ms   "
-            f"skia {row['skia'] * 1000:7.1f}ms   {row['speedup']:5.2f}x"
+            f"skia {row['skia'] * 1000:7.1f}ms   {row['speedup']:5.2f}x   "
+            f"size {row['pillow_bytes'] / 1024:7.1f}/{row['skia_bytes'] / 1024:7.1f} KiB"
         )
 
     if not rows:
         print("no cases benchmarked")  # noqa: T201
         return 1
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    (OUT / "results.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    output_dir = OUT / output_format
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "results.json").write_text(json.dumps(rows, indent=1), encoding="utf-8")
 
     tp = sum(r["pillow"] for r in rows)
     ts = sum(r["skia"] for r in rows)
     sp = [r["speedup"] for r in rows]
     slower = [r["endpoint"] for r in rows if r["speedup"] < 1.0]
     mode = "COLD (every cache cleared)" if args.cold else "WARM (steady state)"
-    print(f"\n=== {len(rows)} cases, {mode}, both sides producing response bytes, min of {args.reps}")  # noqa: T201
+    format_label = f"{output_format.upper()} quality={jpg_quality}" if output_format == "jpg" else output_format.upper()
+    print(  # noqa: T201
+        f"\n=== {len(rows)} cases, {mode}, {format_label}, both sides producing response bytes, min of {args.reps}"
+    )
     print(f"  total    pillow {tp:6.2f}s   skia {ts:6.2f}s   -> {tp / ts:.2f}x")  # noqa: T201
     print(  # noqa: T201
         f"  median   pillow {statistics.median(r['pillow'] for r in rows) * 1000:5.0f}ms  "
         f"skia {statistics.median(r['skia'] for r in rows) * 1000:5.0f}ms"
     )
     print(f"  speedup  median {statistics.median(sp):.2f}x   best {max(sp):.2f}x   worst {min(sp):.2f}x")  # noqa: T201
+    print(  # noqa: T201
+        f"  bytes    pillow {sum(r['pillow_bytes'] for r in rows) / 1024 / 1024:.2f} MiB   "
+        f"skia {sum(r['skia_bytes'] for r in rows) / 1024 / 1024:.2f} MiB"
+    )
     print(f"  Skia slower on: {len(slower)}{' -> ' + str(slower) if slower else ''}")  # noqa: T201
-    print(f"  results: {OUT / 'results.json'}")  # noqa: T201
+    print(f"  results: {output_dir / 'results.json'}")  # noqa: T201
     return 0
 
 

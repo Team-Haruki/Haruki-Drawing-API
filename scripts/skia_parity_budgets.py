@@ -84,3 +84,21 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "stamp_list": (6.555, 130.1),
     "vlive_list": (1.002, 9.4),
 }
+
+# Synthetic branch fixtures keep their parent endpoint ceilings; no budget is widened.
+PARITY_BUDGETS.update(
+    {
+        "costume_detail_preview": PARITY_BUDGETS["costume_detail"],
+        "costume_detail_preview_webp": PARITY_BUDGETS["costume_detail"],
+        "gacha_list_missing_assets": PARITY_BUDGETS["gacha_list"],
+        "gacha_detail_missing_assets": PARITY_BUDGETS["gacha_detail"],
+        "custom_profile_card_rotated_decorative": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_rotated_characters": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_font_fallback": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_static_missing_glyphs": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_honor_deck_resized": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_static_text": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_decorative_text": PARITY_BUDGETS["custom_profile_card"],
+        "custom_profile_card_outlined_text": PARITY_BUDGETS["custom_profile_card"],
+    }
+)

@@ -4,12 +4,16 @@ Education 模块绘图函数
 提供挑战Live详情、加成详情、区域道具升级材料、羁绊等级、队长次数等图片的绘制功能。
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import math
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -20,7 +24,7 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import BLACK
+from src.sekai.base.paint_types import BLACK
 from src.sekai.base.plot import (
     FillBg,
     Frame,

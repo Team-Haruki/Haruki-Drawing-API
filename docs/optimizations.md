@@ -56,9 +56,10 @@ shutdown 阶段 `shutdown_utils()` 再兜底清理一次。
 新增 `shutdown_utils()`、`shutdown_painter()` 和 `shutdown_sk_drawer()`，在 lifespan 的 shutdown
 阶段依次调用，确保 `base/utils.py` 的 `ThreadPoolExecutor` 与 `base/painter.py` 的
 `ProcessPoolExecutor`（`_painter_process_pool`，由 `shutdown_painter()` 负责）优雅退出。
-`shutdown_utils()` 另外清空全部六份进程内缓存（`_image_cache` / `_thumb_cache` / missing-placeholder /
-`_load_asset_image_ref_cached` / `_composed_image_cache` / `skia_payload_cache`，
-逐个 `img.close()` 后清零字节计数），并再调一次 `cleanup_expired_tmp_files()`——注意它**只删已到期的条目**，
+`clear_runtime_memory_caches()` 是统一的进程内缓存清理入口：清理 `_image_cache` / `_thumb_cache` /
+missing-placeholder / 路径与 AssetRef 缓存 / `_composed_image_cache` / `skia_payload_cache` / custom-profile
+缓存，并调用原生扩展的 `clear_renderer_caches()` 清空 Rust Moka 栅格与尺寸缓存。`shutdown_utils()` 在关闭
+线程池后复用该入口，并再调一次 `cleanup_expired_tmp_files()`——注意它**只删已到期的条目**，
 未到期的会被重新排回待删列表，随进程退出而遗留在磁盘上，等下次启动的清理任务处理。
 
 **Painter 异常安全** (`base/painter.py`)

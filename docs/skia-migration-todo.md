@@ -1,5 +1,7 @@
 # Skia 迁移剩余工作清单
 
+> 2026-09-07：Pillow 退役进度与严格门槛见 [当前审计](./pillow-retirement-status.md)。下文历史“已有 Skia 路径”的覆盖率不代表请求链已脱离 Pillow。
+
 > 2026-07-12 盘点,2026-07-18 更新。迁移本体已完成:**65 个可渲染 payload 用例 65 ok / 0 失败**，
 > 另有 2 个 custom-profile 桶因缺真实 payload 记为 `no-payload`；pillow-only 已归零。
 > **`use_skia_plot` 是唯一的 Skia 门控,默认开**——`use_skia_card_list` / `skia_card_list_fallback_to_pillow` /
@@ -13,13 +15,14 @@
 > 完成一项就地打勾并注日期。相关:[`skia-migration-restart-plan.md`](./skia-migration-restart-plan.md)、
 > [`custom-profile-skia-feasibility.md`](./custom-profile-skia-feasibility.md)。
 
-**2026-07-19 当前检查点**：IR capability 10；pyo3 已升 0.29.0（两条 Dependabot advisory 的修复版，
-零代码改动）；全量 Ruff 通过，pytest `383 passed / 2 skipped`；冷态 parity 为
+**2026-07-21 当前检查点**：IR capability 10；pyo3 已升 0.29.0（两条 Dependabot advisory 的修复版，
+零代码改动）；全量 Ruff 通过，pytest `390 passed / 2 skipped`；冷态 parity 为
 `65 ok + 2 no-payload / 0 failure`；Skia 与 Pillow warm parity 均为
 `63 ok + 2 nondeterministic + 2 no-payload`，`CACHE-DRIFT + errors = 0`（`gacha_detail` 加入
 nondeterministic 行列：两次冷渲染隔分钟不一致，是倒计时内容随钟走——warm_fwd == warm_rev ==
 cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完成（见端点残余节）——drawer 层
-可转换的 eager 解码点就此清零，其余均为文档在案的刻意保留项。
+可转换的 eager 解码点就此清零，其余均为文档在案的刻意保留项。主云 `v3.0.0-rc2` 实例已连续运行
+53 小时 51 分钟且未重启，`/render-stats` 累计 `23,988 skia / 0 fallback / 0 error`，生产浸泡验收完成。
 
 ## 🔴 挡在生产收益前面(不做这些,生产永远 fail-open 回退 Pillow)
 
@@ -35,7 +38,12 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
       这以前是**零覆盖**:仓库里的 `drawer.py` 是抛 `NotImplementedError` 的 stub,CI 跑 stub,对拍则绕过路由
       按路径直接加载 real——所以"真实实现配不配得上当前 API 表面"从来没有任何东西验过。
       **它进不了 CI**(`drawer.real.py` 不在仓库里),所以必须是**发布前清单上的一条手工项**。
-- [ ] **全关金丝雀 → 生产放量验收**:带扩展镜像先全关(env)跑 48h 证明镜像无害,再开。
+- [x] **生产金丝雀 → 放量验收**（2026-07-21）：主云 `v3.0.0-rc2` 从
+      `2026-07-19 03:45:07 Asia/Shanghai` 连续运行至核验时共 53 小时 51 分钟，重启次数 0；
+      `/ready` 为 ready，`/render-stats` 累计 `23,988 skia / 0 fallback / 0 disabled / 0 error`。
+      其中 card/box 855 次、mysekai resource 2,683 次、mysekai map 3,165 次，足以确认原生扩展与
+      production-local MySekai 实现均在真实流量下工作。早期“扩展先全关 48h、再分波开启”的计划已被
+      实际采用的默认开启 + 真实流量浸泡取代；验收目标已满足，不再保留成未完成项。
       部署时三条必查,漏了都是**静默**出错(不报警、不 500,只是悄悄不对):
       ① **wheel 必须是 capability 10** —— 旧 wheel 握手失败会 fail-open 回 Pillow,服务正常、图也对,
          只是白白慢 3.6 倍;唯一的信号是 `/render-stats` 里 `fallback` 计数飙升。
@@ -43,7 +51,7 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
       ③ **内存限额必须真的落在绘图服务上** —— `deploy` 块此前一直挂在 screenshot-service 上(已修,`6c4e138`);
          没有限额时容器的 `memory.max` 读作 `"max"`,`read_cgroup_memory()` 返回 `None`,
          `readiness_unhealthy_cgroup_percent` 那道门**永远不会触发**。
-- [ ] **PR #33 合并**(所有者暂缓中;分支每多活一天,main 插队漂移风险多一天)。
+- [x] **PR #33 合并**（2026-07-15，merge commit `a8c118c`）。
 
 ## 🔴 已修:每个图片响应都在按"行"切块(2026-07-14)
 
@@ -148,7 +156,7 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
         (BoundedCache + 字形 SDF/轮廓 L2 + sprite/atlas 池 + TMP 表缓存 + 线程本地字体),
         renderer 五处接线,FreeTypeMetrics 加锁(先于本工作的并发竞态)。微基准
         (`scripts/bench_custom_profile_glyph_cache.py`,合成 fixture + 真字体):轮廓
-        851ms → **0.02ms**,load_font 24ms → 0.5ms。`/cache/stats` 第六键
+        851ms → **0.02ms**,load_font 24ms → 0.5ms。`/cache/stats` 第七键
         `custom_profile_caches`;knob 默认开启,归零即回滚。对抗性评审 6 条确认已修:
         **负缓存只留 L1**(瞬态失败不得在不变签名下毒化进程池,有回归测试钉住)、
         TMPFontAsset 补 frozen、清扫器假威胁注释纠正。13+1 个新测试;既有 1080 行零改动。
@@ -309,11 +317,14 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
       代表大图 encode 提升 `2.9-5.9x`,最终 63/63 SBS 通过,文件大小变化约 `-2%` 到 `+6%`。
 - [x] **Chart 中间 PNG 消除**(2026-07-13):`pjsekai-scores-rs RasterImage` 以只读 N32 buffer 跨扩展借用，
       完整路径只做最终一次编码；PyPI `0.5.0` 正式 wheel 全量验收 `63/63 ok`。
-- [x] ~~Scene.scale 整图 resize → canvas 矩阵直渲染~~ **实测否决**(2026-07-14):先量再改,量完发现不值得。
-      `scale_elapsed` 在两个受益端点上分别是 profile `0.005s`/43ms、winrate `0.004s`/19ms——占端到端不到 12%,
-      绝对值只有几毫秒。而矩阵直渲会把整个光栅化搬到放大后的分辨率上(draw 反而变贵),并改变文字 hinting
-      与抗锯齿的落点,拿"几毫秒"去换一次全端点像素验收和长期的两后端字形漂移风险,不划算。**保持整图 resize**
-      (且它与 Pillow `Canvas.get_img(scale)` 的"先渲染再 BILINEAR 缩放"语义天然一致,这本身就是对拍能过的原因)。
+- [x] **Scene.scale canvas matrix 直渲染**（2026-07-21，按发布后优化决策重新开启）：直接分配目标尺寸
+      surface，以 `out_w/logical_w`、`out_h/logical_h` 设置 canvas matrix，删除 1× 中间 surface 与最终整图
+      resize。缩放场景的 Image 绕过目标栅格中间层，确保资产只采样一次；SelfImage、BlurGlass 与 adaptive
+      Text 的逻辑快照 bounds 显式换算为设备像素，SdfQuad 若未来与 Scene.scale 组合则 fail-open（当前缩放
+      端点不含 SdfQuad）。profile + 四个 sk 缩放端点当时定向 parity `5 ok / 0 failure`；当前机暖态 PNG
+      基准 Skia 均快于 Pillow（五例合计 `0.30s vs 0.67s`）。但当时普通 case 没有像素预算，`ok` 只证明
+      尺寸一致；2026-07-31 的 strict budget 首次量化后有六个缩放 case 超预算。保留性能结果，但像素验收
+      重新打开，不能靠放宽预算直接关闭。
 - [x] **`card_full_thumbnail` 子树化**(2026-07-13):`CardFullThumbnailBox(ImageBox)` 经 Painter 原语
       在两后端原生绘制(底图/等级条/框/特训 rank/属性/星级/圆角 clip),profile、card detail/list/box、
       event detail/list、gacha、deck 全部迁移;Pillow 预合成 `get_card_full_thumbnail` 及其 composed/disk
@@ -369,7 +380,7 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
       前后 sha256 完全相同);对拍 skia `5.43s → 5.41s`——**噪声级**。
       结论:**这一条在 TODO 里被高估了**,真正的文本开销在 Python 的布局测量,不在 Rust 的绘制。
       因此同组的 `measure_str("哇")` 全局缓存**不做**:为 0.4% 量级的收益引入跨线程锁不划算。
-- [ ] ~~fs::metadata TTL(S)~~ → 已由上面的路径解析缓存覆盖(在 Python 侧,不在 Rust)。
+- [x] ~~fs::metadata TTL(S)~~ → 已由上面的路径解析缓存覆盖(在 Python 侧,不在 Rust)。
       余下:TriangleBg 按 seed 缓存 raster(M,播种前提已于 2026-07-14 解决,见下条;现在卡的是调色板按秒变);
       mem 图 content-hash 跨请求缓存(L,`get_asset_image_ref` 铺开后 mem 图已经很少,收益存疑)。
 - [x] **三角形背景的随机源**(2026-07-14):**没有去移植 PRNG——把散布提成了数据。**
@@ -465,7 +476,7 @@ cold_after 两后端均成立，非缓存漂移）。harvest point ref 化已完
       无 IR 变更)与 `paste_src`(Porter-Duff Src,底图四通道原样写入),外加 `Canvas.get_img_sync()`
       (custom-profile 的三处同步调用点)和公共 helper `skia_renderer.canvas.build_canvas_ir()`。
       11 个基线逐位一致;bonds 头像的 crop 顺序 drift(maxΔ52/5513px)一并归零。详见迁移记录条目 12。
-- [ ] **chart 仍手写 IR——但包的不是布局**(2026-07-14 复核):`chart/drawer.py` 直接用 `IRBuilder`
+- [x] **chart 仍手写 IR——但包的不是布局**(2026-07-14 复核，维持现状):`chart/drawer.py` 直接用 `IRBuilder`
       拼水印页脚外壳(谱面栅格由 `pjsekai-scores-rs` 产出,两后端同源;Pillow 侧是 crate PNG +
       通用 `add_request_watermark_to_image`),重复面仅水印页脚度量,且两边共用
       `get_watermark_render_spec`。honor 同形(徽章本体已是共享树,外壳里只剩 `SelfImage` 页脚)。

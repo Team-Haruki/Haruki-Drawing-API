@@ -41,15 +41,14 @@ mask — is byte-identical to the composer this replaced.
 from __future__ import annotations
 
 import os
+from typing import TYPE_CHECKING
 
-from src.sekai.base.painter import (
-    WHITE,
-    Painter,
-    ascender_top_to_painter_y,
-    get_font,
-    get_font_desc,
-    get_text_size,
-)
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.paint_types import WHITE, get_font_desc
+from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size
+
+if TYPE_CHECKING:
+    from src.sekai.base.painter import Painter
 from src.sekai.base.plot import Canvas, Widget
 from src.sekai.base.utils import ImageSource
 from src.settings import DEFAULT_BOLD_FONT

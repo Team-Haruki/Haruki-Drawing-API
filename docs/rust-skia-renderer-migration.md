@@ -3,10 +3,16 @@
 本文档记录 Haruki Drawing API 将 Pillow 绘制热点逐步迁移到 Rust + Skia renderer 的目标、决策和进度。
 
 > **本文按批次追加，含大量历史执行记录。带日期的小节与「验收记录」是当时的快照，不代表今天的代码。**
-> 当前状态以下面的「当前状态」小节为准；剩余工作见 [`skia-migration-todo.md`](./skia-migration-todo.md)，
-> Pillow / Skia 的逐功能能力差距见 [`skia-pillow-coverage-gaps.md`](./skia-pillow-coverage-gaps.md)。
+> 最新生产状态与验证证据以 [`pillow-retirement-status.md`](./pillow-retirement-status.md) 为准。
+> 下方旧阶段快照保留迁移历史，其中的 fail-open 和能力号 10 已不适用于当前生产版本。
 
-## 当前状态
+## 当前状态（2026-09-07）
+
+生产仅使用原生 Skia，Pillow/Matplotlib/Pilmoji 已转为开发对照依赖。启动必须通过原生能力与字体
+检查，路由和重任务没有 Pillow 恢复路径。当前 IR 能力号为 28；69 个公共必验样本通过 Linux
+冷/热门槛，私有 MySekai 与 symbol/stamps 按用户要求仅作诊断。完整记录见上述退役审计。
+
+## 早期全端点迁移完成时的状态快照
 
 - **迁移已全量完成**：`scripts/skia_parity_sweep.py` 当前有 65 个可渲染 payload 用例，结果为
   **65 ok / 0 failed**；另有 2 个 custom-profile 桶等待真实 payload，记为 `no-payload`。没有
@@ -198,7 +204,11 @@ Rust 解释器骨架（本阶段新增，当时与 `render_card_list`/`render_ca
 - A/B（真实 12 卡）：Card List 与 Rust 路径**逐字节一致**（`621539` bytes，`1036x922`）；Card Box 尺寸严格一致（`1316x368`，证明打包算法移植正确），像素仅 32/484288 处差 1 个通道 LSB（Python f64→JSON→serde f32 与 Rust 直接 f32 的表示噪声，视觉无差）。
 - **Rust 收尾已完成**：两端点全走 Python scene 后,删除了 Rust 侧全部写死 card 代码 —— `card_scene.rs`、`render_card_list`/`render_card_box` 及其 `*_inner`、card draw 函数、`CardListIr`/`CardBoxIr` 等 IR 结构、`build_box_groups`/`compute_box_layout`、`HARUKI_SKIA_CARD_LEGACY` 旧路径。当时 `lib.rs` 从 ~1970 行降到 ~739 行（此后又随目标栅格缓存 / `mtpng` / raw buffer transport 等通用基础设施回升，与 card 无关）；保留的共享渲染 helper(image 解码、`encode_surface`、`load_typeface`、`draw_blur_glass_rect`、三角形背景、`draw_cover_image`、`SimpleRng`)供 `interp` 复用。Rust 现已收敛为**纯 IR 解释器**，PyO3 面只有 `render_scene` / `renderer_cache_stats` / `clear_renderer_caches`。
 - **专用 card scene builder 也已退役**（2026-07-13，`29c54ef`「Return card/list to the shared widget tree」）：card/list 与 card/box 现在都画 `src/sekai/card/drawer.py` 的共享 widget 树（`_build_card_list_canvas` / `_build_box_canvas`），Pillow 走 `Canvas.get_img()`、Skia 走 `IRPainter`。`src/sekai/skia_renderer/card_render.py`（更早的 `card_list.py`/`card_box.py` 已并入其中）与 `scripts/compare_card_render.py` 已删除，`card_common.py` 只剩 `rare_count()`。**因此上面提到的 `build_card_list_scene` / `build_card_box_scene` / `card_scene.rs` 只是历史记录，代码中已不存在。**
-- 当时的待办与其后续：对拍补齐对齐/裁剪变体与 cover/contain fit（已补）；radial / adaptive 文本（已补）；card detail 等端点（已迁移）；card list 灰度验收（已完成，且随后回归共享 widget 树）。**仍未做**：把 Card Box 布局从"抄旧 Pillow"重新定义为有意的布局（旧 Pillow box drawer 自身有容器/内容 2× 溢出 bug，不值得对齐）。
+- 当时的待办与其后续：对拍补齐对齐/裁剪变体与 cover/contain fit（已补）；radial / adaptive 文本（已补）；card detail 等端点（已迁移）；card list 灰度验收（已完成，且随后回归共享 widget 树）。
+  **Card Box 布局也已结账**：当前共享 widget 树明确表达角色收集进度、稀有度统计和属性分组，宽度由
+  实际分组与表头共同计算。旧布局的 2× 溢出根因是 `show_id` 文本被 Grid 当作另一张卡；现在卡图与 ID
+  被封装为同一个 `VSplit` 单元，显示 ID 只增加单元高度、不再翻倍网格宽度。回归锁见
+  `tests/test_card_box_distribution.py::test_show_id_adds_height_without_doubling_card_box_width`。
 
 ### 文字对齐与粗细校准（2026-07-13）
 
@@ -621,7 +631,8 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 - `uv run maturin develop --release --manifest-path rust/haruki_skia_renderer/Cargo.toml`：通过，CPython 3.14t release 扩展已重建。
 - 最终全量真实 payload sweep：63/63 `ok`、0 failure、尺寸全部一致；结果与 SBS 位于 `out/parity-sweep-raster-cache-mtpng/`。
 - `music_list` 最终 mean abs diff `3.134`，保持在路径直传前后的视觉波动范围；目标缓存的逐级降采样避免了单步 740 -> 64 带来的锐化/混叠回归。
-- 结论：图片解码/缩放和 PNG encode 两类通用 Rust 瓶颈已完成第一轮治理；下一优先项为 `Scene.scale` 直渲染，以及评估其余高基数列表是否接入 lazy `AssetImageRef`。
+- 结论：图片解码/缩放和 PNG encode 两类通用 Rust 瓶颈已完成第一轮治理；后续的 `Scene.scale`
+  直渲染也已完成，其余候选为评估高基数列表是否接入 lazy `AssetImageRef`。
 
 2026-07-13 原始 asset 路径直传与 sampling：
 
@@ -706,16 +717,19 @@ Rust profile 样例，见 `out/rust-skia-card-list-test/skia-profile.log`：
 
 > 完整的收尾/生产化清单见 [`skia-migration-todo.md`](./skia-migration-todo.md)，这里只留与本文架构直接相关的项。
 
-- **`Scene.scale` 直渲染**：`interp.rs` 现在是"按 canvas 尺寸渲染后再整图 resize"（对齐 plot.py
-  `Canvas.get_img(scale)` 的语义），尚未改成 canvas matrix 直接按目标尺寸绘制。这是一次多余的重采样和
-  一次多余的整图分配——**但不是性能问题**：`skia_bench.py` 实测 `sk_winrate`（`scale=2.0`）Pillow `74.3ms`
-  vs Skia `21.1ms`（`3.52x`）。唯一真的慢于 Pillow 的是 **honor 系**（`0.41~0.63x`），因为 380×110 的徽章
-  摊不掉 IR + FFI + encode 的固定开销，与 `scale` 无关。
 - **文本 Font / measure cache**：Rust 每个 `Text` 节点仍现场 `Font::from_typeface`；typeface 本身已有进程级
   cache（cache miss 的字体读取已在锁外完成，见 `load_typeface_checked`）。
-- 是否在 JPG 输出场景单独做编码基准。
-- 是否把 Rust 目标栅格缓存的 `renderer_cache_stats()` / `clear_renderer_caches()` 接入 `/cache/stats` 与统一
-  清理入口（目前只有每次渲染的 `native_metrics` 经 `record_native_metrics()` 进入 `/render-stats`）。
+
+2026-07-21 已完成的原候选项：
+
+- `Scene.scale` 已改成目标 surface + canvas matrix 直绘；快照型节点完成逻辑/设备 bounds 换算，缩放端点
+  当时的定向 parity 显示 `5 ok / 0 failure`。但当时普通 case 没有像素预算，`ok` 只证明尺寸一致；
+  2026-07-31 加入显式 strict budget 后，六个缩放 case 超预算，仍需修复或逐项视觉验收。
+- `scripts/skia_bench.py --format jpg --jpg-quality 90` 现在用真实 payload 对比两边最终 JPEG 响应，同时记录
+  时间与体积。当前机四个代表端点暖态结果：Skia `0.69s`、Pillow `1.44s`（`2.09x`），总大小
+  `2.63 MiB` vs `2.70 MiB`。
+- `/cache/stats` 新增 `native_renderer_cache`，包含 Rust raster/dimension cache、配置和字体 fallback；
+  `clear_runtime_memory_caches()` 同时清理 Python、payload、custom-profile 与 Rust 缓存，warm parity 已复用该入口。
 
 已否决 / 已改变方向的旧待办：
 

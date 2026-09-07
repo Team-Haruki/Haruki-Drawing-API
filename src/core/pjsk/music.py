@@ -1,13 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.music.drawer import (
-    compose_basic_music_rewards_image,
-    compose_detail_music_rewards_image,
-    compose_music_brief_list_image,
-    compose_music_detail_image,
-    compose_music_list_image,
-    compose_play_progress_image,
     try_render_basic_music_rewards_payload,
     try_render_detail_music_rewards_payload,
     try_render_music_brief_list_payload,
@@ -36,10 +31,8 @@ async def music_detail(request: MusicDetailRequest):
     """
     try:
         payload = await try_render_music_detail_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_detail_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -53,10 +46,8 @@ async def music_brief_list(request: MusicBriefListRequest):
     """
     try:
         payload = await try_render_music_brief_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_brief_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -70,10 +61,8 @@ async def music_list(request: MusicListRequest):
     """
     try:
         payload = await try_render_music_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -87,10 +76,8 @@ async def music_progress(request: PlayProgressRequest):
     """
     try:
         payload = await try_render_play_progress_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_play_progress_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -104,10 +91,8 @@ async def music_rewards_detail(request: DetailMusicRewardsRequest):
     """
     try:
         payload = await try_render_detail_music_rewards_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_detail_music_rewards_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -121,9 +106,7 @@ async def music_rewards_basic(request: BasicMusicRewardsRequest):
     """
     try:
         payload = await try_render_basic_music_rewards_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_basic_music_rewards_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
