@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -292,3 +293,48 @@ def image_resample_filter(sampling: ImageSampling | None) -> RasterResample:
         "pillow_bilinear": RasterResample.BILINEAR,
         "pillow_lanczos": RasterResample.LANCZOS,
     }[sampling]
+
+
+_ImageBgPlacement = tuple[Position, Size, tuple[float, float], bool]
+
+
+def _image_bg_axis_offset(container: int, content: int, align: str, start_align: str) -> int:
+    if align == "c":
+        return (container - content) // 2
+    return 0 if align == start_align else container - content
+
+
+def _iter_image_bg_placements(
+    canvas_size: Size,
+    image_size: Size,
+    align: ALIGN_TYPE,
+    mode: str,
+) -> Iterator[_ImageBgPlacement]:
+    canvas_w, canvas_h = canvas_size
+    image_w, image_h = image_size
+    ha, va = ALIGN_MAP[align]
+    if mode == "fit":
+        scale = max(canvas_w / image_w, canvas_h / image_h)
+        width, height = int(image_w * scale), int(image_h * scale)
+        pos = (
+            _image_bg_axis_offset(canvas_w, width, ha, "l"),
+            _image_bg_axis_offset(canvas_h, height, va, "t"),
+        )
+        yield pos, (width, height), (width / image_w, height / image_h), True
+        return
+    if mode == "fill":
+        yield (0, 0), canvas_size, (canvas_w / image_w, canvas_h / image_h), True
+        return
+    if mode == "fixed":
+        pos = (
+            _image_bg_axis_offset(canvas_w, image_w, ha, "l"),
+            _image_bg_axis_offset(canvas_h, image_h, va, "t"),
+        )
+        yield pos, image_size, (1.0, 1.0), False
+        return
+    if mode == "repeat":
+        for y in range(0, canvas_h, image_h):
+            for x in range(0, canvas_w, image_w):
+                yield (x, y), image_size, (1.0, 1.0), False
+        return
+    raise ValueError(f"unsupported image background mode: {mode}")

@@ -8,6 +8,7 @@ from src.core.heavy_render_pool import (
     HeavyRenderTaskTimeoutError,
     get_heavy_render_worker_pool,
 )
+from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.misc.drawer import try_render_alias_list_payload
@@ -16,7 +17,11 @@ from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
 router = APIRouter(tags=["Misc"])
 
 
-@router.post("/chara-birthday", summary="Generate character birthday image")
+@router.post(
+    "/chara-birthday",
+    summary="Generate character birthday image",
+    responses=HEAVY_RENDER_ERROR_RESPONSES,
+)
 async def chara_birthday(request: CharaBirthdayRequest):
     """
     Generate a character birthday info image.
@@ -38,7 +43,11 @@ async def chara_birthday(request: CharaBirthdayRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/alias-list", summary="Generate alias list image")
+@router.post(
+    "/alias-list",
+    summary="Generate alias list image",
+    responses={500: HEAVY_RENDER_ERROR_RESPONSES[500]},
+)
 async def alias_list(request: AliasListRequest):
     """
     Generate a generic alias list image.

@@ -34,6 +34,25 @@ jobs:
           fi
           .venv314t/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
 
+      - name: Install native renderer build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/haruki_skia_renderer
+          shared-key: skia-renderer
+
+      - name: Build required native renderer
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/.venv314t
+        run: .venv314t/bin/maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
+
       - name: Verify free-threaded mode and imports
         run: |
           .venv314t/bin/python -X gil=0 - <<'PY'
@@ -55,7 +74,7 @@ jobs:
       # face and asserted the images were fine — it was validating a broken configuration.
       - name: Cache CI fonts
         id: font-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             data/SourceHanSansSC-Regular.otf
@@ -98,7 +117,10 @@ jobs:
             fi
             sleep 0.25
           done
-          curl -fsS http://127.0.0.1:18080/health >/dev/null
+          if ! curl -fsS http://127.0.0.1:18080/health >/dev/null; then
+            cat /tmp/haruki_granian.log
+            exit 1
+          fi
 
           UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/concurrent_fetch_images.py \
             --base-url http://127.0.0.1:18080 \

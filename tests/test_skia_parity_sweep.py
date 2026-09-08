@@ -40,6 +40,7 @@ def _run_main(
     case=None,
     budgets=None,
     extra_fixtures: tuple[str, ...] = (),
+    check_legacy_layout: bool = False,
 ) -> int:
     case = case or next(item for item in sweep_mod.CASES if item.name == "profile")
     budgets = {case.name: case.budget} if budgets is None else budgets
@@ -58,6 +59,8 @@ def _run_main(
     monkeypatch.setattr(sweep_mod, "PARITY_BUDGETS", budgets)
     monkeypatch.setattr(sweep_mod, "setup", lambda: None)
     monkeypatch.setattr(sweep_mod, "_registered_route_issues", lambda: [])
+    if not check_legacy_layout:
+        monkeypatch.setattr(sweep_mod, "_legacy_layout_issues", lambda: [])
     monkeypatch.setattr(sweep_mod, "_load_mysekai_real", lambda: None)
     monkeypatch.setattr(sweep_mod, "sweep", fake_sweep)
     argv = ["skia_parity_sweep.py", "--out-dir", str(tmp_path / "out")]
@@ -169,7 +172,12 @@ def test_raqm_reference_cannot_pass_through_two_shared_basic_backends(monkeypatc
     monkeypatch.setattr(ImageFont.core, "HAVE_RAQM", True)
     monkeypatch.setattr(sweep_mod, "run_clean_case", lambda *args: {"status": "ok", "native_renders": 1})
     monkeypatch.setattr(sweep_mod, "run_service_case", lambda *args: {"status": "ok"})
-    assert _run_main(monkeypatch, tmp_path, [{"endpoint": "profile", "status": "ok"}], strict=True) == 1
+    assert (
+        _run_main(
+            monkeypatch, tmp_path, [{"endpoint": "profile", "status": "ok"}], strict=True, check_legacy_layout=True
+        )
+        == 1
+    )
     results = json.loads((tmp_path / "out/results.json").read_text())
     assert any("RAQM" in issue for issue in results["strict_issues"])
 

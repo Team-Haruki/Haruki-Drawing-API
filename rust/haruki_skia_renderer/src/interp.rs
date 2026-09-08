@@ -6,23 +6,26 @@
 //! Reuses infrastructure from `lib.rs` (`pub(crate)` items): image decode,
 //! font loading, surface encode, blur glass, triangle background, cover image.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+use moka::sync::Cache;
 #[cfg(not(test))]
 use pyo3::buffer::PyBuffer;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, BlurStyle, Canvas, ClipOp, Color, Color4f, ColorType, CubicResampler,
-    Data, FilterMode, Font, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode, Paint,
-    PaintStyle, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface, TextBlob, TileMode,
-    Typeface, canvas::SrcRectConstraint, color_filters, gradient, image::CachingHint,
-    image_filters, surfaces,
+    Data, FilterMode, Font, FontHinting, IRect, Image, ImageInfo, MaskFilter, Matrix, MipmapMode,
+    Paint, PaintStyle, PathVerb, Point, RRect, Rect, RoundOut, SamplingOptions, Shader, Surface,
+    TextBlob, TileMode, Typeface, canvas::SrcRectConstraint, color_filters, gradient,
+    image::CachingHint, image_filters, surfaces,
 };
 
 use crate::ir::*;
+use crate::pillow_gray::{resize_l_pillow_bicubic, transform_l_pillow_bicubic};
 use crate::pillow_resize::{
     PillowFilter, PillowResizeLimits, resize_rgba8_pillow_bicubic, resize_rgba8_pillow_bilinear,
     resize_rgba8_pillow_lanczos,
@@ -95,6 +98,9 @@ struct FontRegistry {
     emoji: Option<Typeface>,
     /// Arbitrary named fonts (FontsIr.extra), addressable via FontRef.name.
     extra: HashMap<String, Typeface>,
+    /// Extra-font keys that resolved to sans-serif. SdfFontQuad is strict and must reject these
+    /// instead of generating a valid-looking field from the wrong face.
+    extra_fallbacks: HashSet<String>,
     /// How many of this scene's fonts could not be resolved and fell back to sans-serif.
     /// `load_typeface_checked` logs each distinct one at ERROR; this surfaces it per render.
     fallbacks: u64,
@@ -117,11 +123,16 @@ impl FontRegistry {
         // Only load an emoji typeface when explicitly configured (otherwise emoji codepoints
         // keep falling back to the main font, unchanged).
         let emoji = fonts.emoji.as_ref().map(|name| load(name));
-        let extra: HashMap<String, Typeface> = fonts
-            .extra
-            .iter()
-            .map(|(key, file)| (key.clone(), load(file)))
-            .collect();
+        let mut extra = HashMap::new();
+        let mut extra_fallbacks = HashSet::new();
+        for (key, file) in &fonts.extra {
+            let (typeface, fell_back) = load_typeface_checked(&fonts.dir, file);
+            fallbacks += u64::from(fell_back);
+            if fell_back {
+                extra_fallbacks.insert(key.clone());
+            }
+            extra.insert(key.clone(), typeface);
+        }
         Self {
             dir: fonts.dir.clone(),
             files: fonts.extra.clone(),
@@ -135,6 +146,7 @@ impl FontRegistry {
             heavy,
             emoji,
             extra,
+            extra_fallbacks,
             fallbacks,
         }
     }
@@ -155,6 +167,18 @@ impl FontRegistry {
             return tf;
         }
         self.resolve(font.role)
+    }
+
+    fn resolve_sdf_font(&self, font: &FontRef) -> Result<&Typeface, String> {
+        let Some(name) = &font.name else {
+            return Ok(self.resolve(font.role));
+        };
+        if self.extra_fallbacks.contains(name) {
+            return Err(format!("SdfFontQuad font resolved to fallback: {name}"));
+        }
+        self.extra
+            .get(name)
+            .ok_or_else(|| format!("SdfFontQuad references an unregistered font: {name}"))
     }
 
     fn emoji_font(&self, size: f32) -> Option<Font> {
@@ -267,6 +291,102 @@ struct SdfShapeSource {
     height: i32,
 }
 
+struct SdfAtlasSource {
+    alpha: Vec<u8>,
+    width: i32,
+    height: i32,
+}
+
+struct PreparedSdfAtlasField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+struct PreparedSdfFontField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SdfFontFieldCacheKey {
+    typeface_id: u32,
+    glyph_id: u16,
+    font_size_bits: u32,
+    bbox: [i32; 4],
+    padding: i32,
+    spread_bits: u32,
+}
+
+struct SdfFontBaseField {
+    pixels: Vec<u8>,
+    width: usize,
+    height: usize,
+    byte_size: u32,
+}
+
+const SDF_FONT_CURVE_STEPS: usize = 24;
+const SDF_FONT_MAX_DISTANCE_EVALUATIONS: usize = 64 * 1024 * 1024;
+
+const DEFAULT_SDF_FONT_CACHE_MB: u64 = 64;
+const DEFAULT_SDF_FONT_CACHE_MAX_ENTRY_MB: u64 = 4;
+const SDF_FONT_CACHE_MIB: u64 = 1024 * 1024;
+static SDF_FONT_FIELD_CACHE: OnceLock<Option<Cache<SdfFontFieldCacheKey, Arc<SdfFontBaseField>>>> =
+    OnceLock::new();
+static SDF_FONT_CACHE_LIMITS: OnceLock<(u64, u64)> = OnceLock::new();
+
+fn sdf_font_cache_limits() -> (u64, u64) {
+    *SDF_FONT_CACHE_LIMITS.get_or_init(|| {
+        let read_mb = |name: &str, default_mb: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(default_mb)
+                .saturating_mul(SDF_FONT_CACHE_MIB)
+        };
+        (
+            read_mb("HARUKI_SKIA_SDF_FONT_CACHE_MB", DEFAULT_SDF_FONT_CACHE_MB),
+            read_mb(
+                "HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB",
+                DEFAULT_SDF_FONT_CACHE_MAX_ENTRY_MB,
+            ),
+        )
+    })
+}
+
+fn sdf_font_field_cache() -> Option<&'static Cache<SdfFontFieldCacheKey, Arc<SdfFontBaseField>>> {
+    SDF_FONT_FIELD_CACHE
+        .get_or_init(|| {
+            let (max_bytes, _) = sdf_font_cache_limits();
+            (max_bytes > 0).then(|| {
+                Cache::builder()
+                    .max_capacity(max_bytes)
+                    .weigher(|_, value: &Arc<SdfFontBaseField>| value.byte_size)
+                    .build()
+            })
+        })
+        .as_ref()
+}
+
+pub(crate) fn sdf_font_cache_snapshot() -> (u64, u64, u64, u64) {
+    let (max_bytes, max_entry_bytes) = sdf_font_cache_limits();
+    let (entries, bytes) = sdf_font_field_cache()
+        .map(|cache| {
+            cache.run_pending_tasks();
+            (cache.entry_count(), cache.weighted_size())
+        })
+        .unwrap_or_default();
+    (max_bytes, max_entry_bytes, entries, bytes)
+}
+
+pub(crate) fn clear_sdf_font_cache() {
+    if let Some(cache) = sdf_font_field_cache() {
+        cache.invalidate_all();
+        cache.run_pending_tasks();
+    }
+}
+
 struct UnityImageSource {
     image: Image,
     width: i32,
@@ -296,6 +416,12 @@ struct Interp {
     /// Straight-RGBA source pixels for asset-backed custom-profile shapes, decoded before any
     /// drawing so a missing/corrupt source fails the whole scene instead of dropping one layer.
     sdf_shape_sources: HashMap<String, SdfShapeSource>,
+    /// Alpha-only static TMP atlas sources and fully warped glyph fields. The latter are keyed
+    /// by the stable address of the parsed IR node for this render.
+    sdf_atlas_sources: HashMap<String, SdfAtlasSource>,
+    sdf_atlas_fields: HashMap<usize, PreparedSdfAtlasField>,
+    /// Fully warped dynamic source-font glyph fields, keyed by parsed IR node address.
+    sdf_font_fields: HashMap<usize, PreparedSdfFontField>,
     /// Fully decoded straight-RGBA assets for UnityImage. Keeping these separate from the
     /// ordinary lazy image map makes corrupt pixel streams fail during scene preparation.
     unity_image_sources: HashMap<String, UnityImageSource>,
@@ -668,6 +794,9 @@ pub(crate) fn render_scene_inner(
     mem_images: HashMap<String, MemImage>,
 ) -> Result<RenderedImage, String> {
     let total_started = Instant::now();
+    if scene.export_format == "raw_rgba_premul" && scene.post_resize.is_some() {
+        return Err("raw fragments do not support post_resize".into());
+    }
     if scene.version != 2 {
         return Err(format!("unsupported scene IR version {}", scene.version));
     }
@@ -780,6 +909,9 @@ pub(crate) fn render_scene_inner(
         asset_descriptors: HashMap::new(),
         mem_images,
         sdf_shape_sources: HashMap::new(),
+        sdf_atlas_sources: HashMap::new(),
+        sdf_atlas_fields: HashMap::new(),
+        sdf_font_fields: HashMap::new(),
         unity_image_sources: HashMap::new(),
         pillow_lanczos_sources: HashMap::new(),
         max_node_pixels,
@@ -827,12 +959,38 @@ pub(crate) fn render_scene_inner(
         prepare_pillow_lanczos_sources(background, &mut interp)?;
         prepare_unity_subscene_assets(background, &mut interp)?;
         prepare_sdf_shape_sources(background, &mut interp)?;
+        prepare_sdf_atlas_fields(background, &mut interp)?;
+        prepare_sdf_font_fields(background, &mut interp)?;
         prepare_unity_image_assets(background, &mut interp)?;
     }
     prepare_pillow_lanczos_sources(&scene.root, &mut interp)?;
     prepare_unity_subscene_assets(&scene.root, &mut interp)?;
     prepare_sdf_shape_sources(&scene.root, &mut interp)?;
+    prepare_sdf_atlas_fields(&scene.root, &mut interp)?;
+    prepare_sdf_font_fields(&scene.root, &mut interp)?;
     prepare_unity_image_assets(&scene.root, &mut interp)?;
+    let mut sdf_shading_runtime_peak = max_sdf_quad_runtime_bytes(&scene.root, &interp.mem_images)?;
+    if let Some(background) = &scene.background {
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak
+            .max(max_sdf_quad_runtime_bytes(background, &interp.mem_images)?);
+    }
+    for field in interp.sdf_atlas_fields.values() {
+        let runtime_bytes = field
+            .width
+            .checked_mul(field.height)
+            .and_then(|pixels| pixels.checked_mul(8))
+            .ok_or_else(|| "SdfAtlasQuad shading runtime byte count overflow".to_string())?;
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak.max(runtime_bytes);
+    }
+    for field in interp.sdf_font_fields.values() {
+        let runtime_bytes = field
+            .width
+            .checked_mul(field.height)
+            .and_then(|pixels| pixels.checked_mul(8))
+            .ok_or_else(|| "SdfFontQuad shading runtime byte count overflow".to_string())?;
+        sdf_shading_runtime_peak = sdf_shading_runtime_peak.max(runtime_bytes);
+    }
+    interp.ensure_native_scene_bytes(sdf_shading_runtime_peak, "SDF shading patch runtime")?;
     // Asset preparation retained everything needed by strict subscenes. Replace the reservation
     // with actual push/pop accounting during drawing.
     interp.active_native_runtime_bytes = 0;
@@ -974,16 +1132,21 @@ fn render_node(
     match node {
         Node::Group(group) => {
             let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
-            let mask_rect = group
-                .mask
-                .as_ref()
-                .map(|_| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
+            let pillow_rrect_radius = match group.clip.as_ref() {
+                Some(Clip::PillowRRect { radius }) => Some(*radius),
+                _ => None,
+            };
+            let mask_rect = (group.mask.is_some() || pillow_rrect_radius.is_some())
+                .then(|| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
             if let Some(rect) = mask_rect {
                 let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&rect);
                 surface.canvas().save_layer(&layer);
             }
-            let clipped = group.clip.is_some();
-            if let Some(clip) = &group.clip {
+            let geometric_clip = group
+                .clip
+                .as_ref()
+                .filter(|clip| !matches!(clip, Clip::PillowRRect { .. }));
+            if let Some(clip) = geometric_clip {
                 let canvas = surface.canvas();
                 canvas.save();
                 apply_clip(canvas, child_off, group.size, clip);
@@ -991,17 +1154,35 @@ fn render_node(
             for child in &group.children {
                 render_node(surface, interp, child_off, child)?;
             }
-            if clipped {
+            if geometric_clip.is_some() {
                 surface.canvas().restore();
             }
             if let Some(rect) = mask_rect {
-                let mask_ref = group.mask.as_deref().unwrap_or_default();
-                if let Some(mask) = interp.load_direct(mask_ref) {
+                let generated_pillow_mask = pillow_rrect_radius.is_some();
+                let generated_mask = pillow_rrect_radius
+                    .map(|radius| {
+                        pillow_rounded_rectangle_mask(
+                            group.size,
+                            radius,
+                            interp.max_node_pixels,
+                            interp.available_native_scene_bytes("pillow_rrect mask")?,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(mask) = generated_mask.or_else(|| {
+                    group
+                        .mask
+                        .as_deref()
+                        .and_then(|mask_ref| interp.load_direct(mask_ref))
+                }) {
                     let mut keep = Paint::default();
-                    keep.set_anti_alias(true);
+                    // The generated mask already carries Pillow's discrete edge pixels, while
+                    // legacy external masks keep their historical filtered draw behavior.
+                    keep.set_anti_alias(!generated_pillow_mask);
                     keep.set_blend_mode(BlendMode::DstIn);
                     surface.canvas().draw_image_rect(&mask, None, rect, &keep);
                 } else {
+                    let mask_ref = group.mask.as_deref().unwrap_or_default();
                     if interp.strict_asset_depth > 0 {
                         surface.canvas().restore();
                         return Err(format!(
@@ -1114,6 +1295,18 @@ fn render_node(
         Node::SdfQuad(quad) => {
             let started = Instant::now();
             draw_sdf_quad(surface, interp, quad, off)?;
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
+        }
+        Node::SdfAtlasQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_atlas_quad(surface, interp, quad, off)?;
+            interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
+            interp.metrics.sdf_quad_count += 1;
+        }
+        Node::SdfFontQuad(quad) => {
+            let started = Instant::now();
+            draw_sdf_font_quad(surface, interp, quad, off)?;
             interp.metrics.sdf_quad_elapsed += started.elapsed().as_secs_f64();
             interp.metrics.sdf_quad_count += 1;
         }
@@ -1347,7 +1540,274 @@ fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
             let radii = corner_radii(*radius, corners);
             canvas.clip_rrect(RRect::new_rect_radii(rect, &radii), ClipOp::Intersect, true);
         }
+        Clip::PillowRRect { .. } => {
+            // This variant is a discrete alpha mask, not a geometric clip. Group handles it
+            // through an isolated saveLayer before this helper is called.
+        }
     }
+}
+
+fn pillow_rounded_rectangle_mask(
+    size: Vec2,
+    radius: f32,
+    max_node_pixels: usize,
+    available_scene_bytes: usize,
+) -> Result<Image, String> {
+    if !size[0].is_finite() || !size[1].is_finite() || !radius.is_finite() {
+        return Err("pillow_rrect contains a non-finite scalar".to_string());
+    }
+    let width = size[0].round() as i32;
+    let height = size[1].round() as i32;
+    if width <= 0 || height <= 0 {
+        return Err("pillow_rrect Group dimensions must be positive".to_string());
+    }
+    let byte_count =
+        validate_strict_asset_size(width, height, max_node_pixels, "pillow_rrect mask")?;
+    // `Data::new_copy` briefly coexists with the source Vec. Guard that construction peak,
+    // not merely the one retained raster copy used by the following DstIn draw.
+    let construction_peak = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "pillow_rrect mask construction byte count overflow".to_string())?;
+    if construction_peak > available_scene_bytes {
+        return Err(format!(
+            "pillow_rrect mask construction requires {construction_peak} bytes; only \
+             {available_scene_bytes} bytes remain in the scene limit"
+        ));
+    }
+    let x1 = width - 1;
+    let y1 = height - 1;
+    let mut diameter = (radius.max(0.0) * 2.0).min(x1.min(y1) as f32).round() as i32;
+    let full_x = diameter >= x1 - 1;
+    if full_x {
+        diameter = x1;
+    }
+    let full_y = diameter >= y1 - 1;
+    if full_y {
+        diameter = y1;
+    }
+
+    let mut rows = if full_x && full_y {
+        pillow_filled_ellipse_rows(width, height)
+    } else if diameter <= 0 {
+        vec![(0, x1); height as usize]
+    } else {
+        let corner_rows = pillow_filled_ellipse_rows(diameter + 1, diameter + 1);
+        let radius_i = diameter / 2;
+        let mut rows = vec![(0, x1); height as usize];
+        for y in 0..=radius_i.min(y1) {
+            let left = corner_rows[y as usize].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        let corner_top = y1 - diameter;
+        for y in (y1 - radius_i).max(0)..=y1 {
+            let corner_y = (y - corner_top).clamp(0, diameter) as usize;
+            let left = corner_rows[corner_y].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        rows
+    };
+    if rows.len() != height as usize {
+        return Err("pillow_rrect ellipse raster returned the wrong row count".to_string());
+    }
+
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_rrect row byte count overflow".to_string())?;
+    debug_assert_eq!(row_bytes * height as usize, byte_count);
+    let mut rgba = vec![0_u8; byte_count];
+    for (y, (left, right)) in rows.drain(..).enumerate() {
+        for x in left.max(0)..=right.min(x1) {
+            let offset = y * row_bytes + x as usize * 4;
+            rgba[offset..offset + 4].fill(255);
+        }
+    }
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Premul,
+        None,
+    );
+    skia_safe::images::raster_from_data(&info, Data::new_copy(&rgba), row_bytes)
+        .ok_or_else(|| "pillow_rrect mask image construction failed".to_string())
+}
+
+#[derive(Clone, Copy)]
+struct PillowQuarterState {
+    cx: i32,
+    cy: i32,
+    ex: i32,
+    ey: i32,
+    a2: i64,
+    b2: i64,
+    a2b2: i64,
+    finished: bool,
+}
+
+impl PillowQuarterState {
+    fn new(a: i32, b: i32) -> Self {
+        if a < 0 || b < 0 {
+            return Self {
+                cx: 0,
+                cy: 0,
+                ex: 0,
+                ey: 0,
+                a2: 0,
+                b2: 0,
+                a2b2: 0,
+                finished: true,
+            };
+        }
+        let a2 = i64::from(a) * i64::from(a);
+        let b2 = i64::from(b) * i64::from(b);
+        Self {
+            cx: a,
+            cy: b % 2,
+            ex: a % 2,
+            ey: b,
+            a2,
+            b2,
+            a2b2: a2 * b2,
+            finished: false,
+        }
+    }
+
+    fn delta(&self, x: i64, y: i64) -> i64 {
+        (self.a2 * y * y + self.b2 * x * x - self.a2b2).abs()
+    }
+
+    fn next(&mut self) -> Option<(i32, i32)> {
+        if self.finished {
+            return None;
+        }
+        let result = (self.cx, self.cy);
+        if self.cx == self.ex && self.cy == self.ey {
+            self.finished = true;
+            return Some(result);
+        }
+        let mut nx = self.cx;
+        let mut ny = self.cy + 2;
+        let mut next_delta = self.delta(i64::from(nx), i64::from(ny));
+        if nx > 1 {
+            let diagonal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy + 2));
+            if next_delta > diagonal_delta {
+                nx = self.cx - 2;
+                ny = self.cy + 2;
+                next_delta = diagonal_delta;
+            }
+            let horizontal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy));
+            if next_delta > horizontal_delta {
+                nx = self.cx - 2;
+                ny = self.cy;
+            }
+        }
+        self.cx = nx;
+        self.cy = ny;
+        Some(result)
+    }
+}
+
+struct PillowEllipseState {
+    outer: PillowQuarterState,
+    inner: PillowQuarterState,
+    py: i32,
+    pl: i32,
+    pr: i32,
+    buffer: Vec<(i32, i32, i32)>,
+    finished: bool,
+    leftmost: i32,
+}
+
+impl PillowEllipseState {
+    fn new(a: i32, b: i32, width: i32) -> Self {
+        let leftmost = a % 2;
+        let mut outer = PillowQuarterState::new(a, b);
+        let first = outer.next();
+        Self {
+            outer,
+            inner: PillowQuarterState::new(a - 2 * (width - 1), b - 2 * (width - 1)),
+            py: first.map_or(0, |(_, y)| y),
+            pl: leftmost,
+            pr: first.map_or(0, |(x, _)| x),
+            buffer: Vec::with_capacity(4),
+            finished: width < 1 || first.is_none(),
+            leftmost,
+        }
+    }
+
+    fn next(&mut self) -> Option<(i32, i32, i32)> {
+        if self.buffer.is_empty() {
+            if self.finished {
+                return None;
+            }
+            let y = self.py;
+            let mut left = self.pl;
+            let right = self.pr;
+            let mut outer_next = None;
+            while let Some(point @ (_, cy)) = self.outer.next() {
+                outer_next = Some(point);
+                if cy > y {
+                    break;
+                }
+            }
+            if let Some((cx, cy)) = outer_next.filter(|(_, cy)| *cy > y) {
+                self.pr = cx;
+                self.py = cy;
+            } else {
+                self.finished = true;
+            }
+
+            let mut inner_next = None;
+            while let Some(point @ (cx, cy)) = self.inner.next() {
+                inner_next = Some(point);
+                if cy <= y {
+                    left = cx;
+                } else {
+                    break;
+                }
+            }
+            self.pl = inner_next
+                .filter(|(_, cy)| *cy > y)
+                .map_or(self.leftmost, |(cx, _)| cx);
+
+            if (left > 0 || left < right) && y > 0 {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, y, right));
+            }
+            if y > 0 {
+                self.buffer.push((-right, y, -left));
+            }
+            if left > 0 || left < right {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, -y, right));
+            }
+            self.buffer.push((-right, -y, -left));
+        }
+        self.buffer.pop()
+    }
+}
+
+fn pillow_filled_ellipse_rows(width: i32, height: i32) -> Vec<(i32, i32)> {
+    let a = width - 1;
+    let b = height - 1;
+    let mut rows = vec![(0, -1); height.max(0) as usize];
+    let mut state = PillowEllipseState::new(a, b, a + b);
+    while let Some((x0, y, x1)) = state.next() {
+        let row = (y + b) / 2;
+        if !(0..height).contains(&row) {
+            continue;
+        }
+        let left = (x0 + a) / 2;
+        let right = (x1 + a) / 2;
+        let slot = &mut rows[row as usize];
+        if slot.1 < slot.0 {
+            *slot = (left, right);
+        } else {
+            slot.0 = slot.0.min(left);
+            slot.1 = slot.1.max(right);
+        }
+    }
+    rows
 }
 
 /// Resolve a gradient spec to (colors, positions) where positions are strictly increasing.
@@ -1685,6 +2145,12 @@ fn validate_transform_subtrees(node: &Node, in_transform: bool) -> Result<(), St
         }
         Node::SdfQuad(_) if in_transform => {
             Err("SdfQuad inside Transform would be double-transformed".to_string())
+        }
+        Node::SdfAtlasQuad(_) if in_transform => {
+            Err("SdfAtlasQuad inside Transform would be double-transformed".to_string())
+        }
+        Node::SdfFontQuad(_) if in_transform => {
+            Err("SdfFontQuad inside Transform would be double-transformed".to_string())
         }
         Node::SdfShape(_) if in_transform => {
             Err("SdfShape inside Transform would apply screen-space scale twice".to_string())
@@ -2145,6 +2611,46 @@ fn validate_sdf_quad_fields(
     }
 }
 
+fn max_sdf_quad_runtime_bytes(
+    node: &Node,
+    mem_images: &HashMap<String, MemImage>,
+) -> Result<usize, String> {
+    let children = match node {
+        Node::Group(group) => Some(group.children.as_slice()),
+        Node::Transform(transform) => Some(transform.children.as_slice()),
+        Node::UnitySubscene(subscene) => Some(subscene.children.as_slice()),
+        Node::RasterSubscene(subscene) => Some(subscene.children.as_slice()),
+        _ => None,
+    };
+    if let Some(children) = children {
+        return children.iter().try_fold(0usize, |peak, child| {
+            Ok(peak.max(max_sdf_quad_runtime_bytes(child, mem_images)?))
+        });
+    }
+    let Node::SdfQuad(quad) = node else {
+        return Ok(0);
+    };
+    let key = quad.field.strip_prefix("mem:").ok_or_else(|| {
+        format!(
+            "SdfQuad field must be a mem image reference: {}",
+            quad.field
+        )
+    })?;
+    let (MemImage::Raw { width, height, .. } | MemImage::FloatField { width, height, .. }) =
+        mem_images
+            .get(key)
+            .ok_or_else(|| format!("SdfQuad field references unknown mem image: {}", quad.field))?
+    else {
+        return Err(format!(
+            "SdfQuad field must be a raw mem image: {}",
+            quad.field
+        ));
+    };
+    rgba_byte_len(*width, *height, "SdfQuad shading patch")?
+        .checked_mul(2)
+        .ok_or_else(|| "SdfQuad shading runtime byte count overflow".to_string())
+}
+
 /// Decode every explicit Pillow-Lanczos Image to straight RGBA8 before drawing starts.
 ///
 /// General Image nodes are normally fail-soft. This sampling mode is not: a missing/corrupt
@@ -2529,7 +3035,688 @@ fn prepare_sdf_shape_sources(node: &Node, interp: &mut Interp) -> Result<(), Str
                 .sdf_shape_sources
                 .get(&shape.path)
                 .ok_or_else(|| format!("SdfShape source was not prepared: {}", shape.path))?;
-            sdf_shape_dimensions(shape, source.width, source.height, interp.max_node_pixels)?;
+            // The full logical patch may be much larger than the output canvas. Allocation is
+            // checked against the canvas-clipped patch in draw_sdf_shape instead.
+            sdf_shape_dimensions(shape, source.width, source.height, usize::MAX)?;
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sdf_atlas_node_key(node: &SdfAtlasQuadNode) -> usize {
+    node as *const SdfAtlasQuadNode as usize
+}
+
+fn validate_sdf_atlas_quad(
+    node: &SdfAtlasQuadNode,
+    max_node_pixels: usize,
+) -> Result<((usize, usize), (usize, usize), (usize, usize)), String> {
+    if node.path.starts_with("mem:") {
+        return Err("SdfAtlasQuad requires an asset-backed atlas".to_string());
+    }
+    if node
+        .pos
+        .iter()
+        .map(|value| f64::from(*value))
+        .chain(node.affine)
+        .any(|value| !value.is_finite())
+    {
+        return Err("SdfAtlasQuad contains a non-finite scalar".to_string());
+    }
+    let dimensions = |width: i64, height: i64, label: &str| -> Result<(usize, usize), String> {
+        if width <= 0 || height <= 0 {
+            return Err(format!("SdfAtlasQuad {label} dimensions must be positive"));
+        }
+        let width =
+            usize::try_from(width).map_err(|_| format!("SdfAtlasQuad {label} width overflows"))?;
+        let height = usize::try_from(height)
+            .map_err(|_| format!("SdfAtlasQuad {label} height overflows"))?;
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| format!("SdfAtlasQuad {label} pixel count overflows"))?;
+        if pixels > max_node_pixels {
+            return Err(format!(
+                "SdfAtlasQuad {label} {width}x{height} ({pixels} pixels) exceeds limit {max_node_pixels}"
+            ));
+        }
+        Ok((width, height))
+    };
+    let crop = dimensions(
+        i64::from(node.crop[2]) - i64::from(node.crop[0]),
+        i64::from(node.crop[3]) - i64::from(node.crop[1]),
+        "atlas crop",
+    )?;
+    dimensions(
+        i64::from(node.atlas_size[0]),
+        i64::from(node.atlas_size[1]),
+        "atlas metadata",
+    )?;
+    let field = dimensions(
+        i64::from(node.field_size[0]),
+        i64::from(node.field_size[1]),
+        "field",
+    )?;
+    let output = dimensions(
+        i64::from(node.size[0]),
+        i64::from(node.size[1]),
+        "warped field",
+    )?;
+    Ok((crop, field, output))
+}
+
+fn crop_sdf_atlas_alpha(
+    source: &SdfAtlasSource,
+    crop: [i32; 4],
+    width: usize,
+    height: usize,
+) -> Vec<u8> {
+    let mut output = vec![0_u8; width * height];
+    for destination_y in 0..height {
+        let source_y = i64::from(crop[1]) + destination_y as i64;
+        if !(0..i64::from(source.height)).contains(&source_y) {
+            continue;
+        }
+        for destination_x in 0..width {
+            let source_x = i64::from(crop[0]) + destination_x as i64;
+            if (0..i64::from(source.width)).contains(&source_x) {
+                output[destination_y * width + destination_x] =
+                    source.alpha[source_y as usize * source.width as usize + source_x as usize];
+            }
+        }
+    }
+    output
+}
+
+fn prepare_sdf_atlas_fields(node: &Node, interp: &mut Interp) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_atlas_fields(child, interp)),
+        Node::SdfAtlasQuad(quad) => {
+            let (crop_size, field_size, output_size) =
+                validate_sdf_atlas_quad(quad, interp.max_node_pixels)?;
+            if !interp.sdf_atlas_sources.contains_key(&quad.path) {
+                let (descriptor, _) = interp.describe_asset(&quad.path)?;
+                let rgba_bytes = validate_strict_asset_size(
+                    descriptor.width,
+                    descriptor.height,
+                    interp.max_node_pixels,
+                    "SdfAtlasQuad atlas",
+                )?;
+                let alpha_bytes = rgba_bytes / 4;
+                interp.ensure_native_scene_bytes(
+                    rgba_bytes.checked_add(alpha_bytes).ok_or_else(|| {
+                        "SdfAtlasQuad atlas decode byte count overflow".to_string()
+                    })?,
+                    "SdfAtlasQuad atlas decode",
+                )?;
+                let started = Instant::now();
+                let (rgba, width, height) = decode_asset_rgba_unpremul(&descriptor)?;
+                interp.metrics.asset_load_elapsed += started.elapsed().as_secs_f64();
+                if [width, height] != quad.atlas_size {
+                    return Err(format!(
+                        "SdfAtlasQuad atlas dimensions {width}x{height} do not match metadata {}x{}",
+                        quad.atlas_size[0], quad.atlas_size[1]
+                    ));
+                }
+                let alpha = rgba.chunks_exact(4).map(|pixel| pixel[3]).collect();
+                drop(rgba);
+                interp.retain_native_asset_bytes(alpha_bytes, "SdfAtlasQuad atlas alpha")?;
+                interp.sdf_atlas_sources.insert(
+                    quad.path.clone(),
+                    SdfAtlasSource {
+                        alpha,
+                        width,
+                        height,
+                    },
+                );
+            }
+            let crop_bytes = crop_size.0 * crop_size.1;
+            let field_bytes = field_size.0 * field_size.1;
+            let output_bytes = output_size.0 * output_size.1;
+            interp.ensure_native_scene_bytes(
+                crop_bytes
+                    .checked_add(field_bytes)
+                    .ok_or_else(|| "SdfAtlasQuad resize peak overflow".to_string())?,
+                "SdfAtlasQuad crop and resize",
+            )?;
+            interp.ensure_native_scene_bytes(
+                field_bytes
+                    .checked_add(output_bytes)
+                    .ok_or_else(|| "SdfAtlasQuad warp peak overflow".to_string())?,
+                "SdfAtlasQuad field warp",
+            )?;
+            let available = interp.available_native_scene_bytes("SdfAtlasQuad preparation")?;
+            let resize_available = available
+                .checked_sub(crop_bytes)
+                .ok_or_else(|| "SdfAtlasQuad crop exhausts the scene budget".to_string())?;
+            let resize_limits = PillowResizeLimits::new(
+                resize_available,
+                resize_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let source = interp
+                .sdf_atlas_sources
+                .get(&quad.path)
+                .ok_or_else(|| format!("SdfAtlasQuad atlas was not prepared: {}", quad.path))?;
+            let cropped = crop_sdf_atlas_alpha(source, quad.crop, crop_size.0, crop_size.1);
+            let field = resize_l_pillow_bicubic(
+                &cropped,
+                crop_size.0,
+                crop_size.1,
+                field_size.0,
+                field_size.1,
+                resize_limits,
+            )?;
+            drop(cropped);
+            let warp_available = available
+                .checked_sub(field_bytes)
+                .ok_or_else(|| "SdfAtlasQuad field exhausts the scene budget".to_string())?;
+            let warp_limits = PillowResizeLimits::new(
+                warp_available,
+                warp_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let warped = transform_l_pillow_bicubic(
+                &field,
+                field_size.0,
+                field_size.1,
+                output_size.0,
+                output_size.1,
+                quad.affine,
+                warp_limits,
+            )?;
+            drop(field);
+            interp.retain_native_asset_bytes(output_bytes, "SdfAtlasQuad warped field")?;
+            interp.sdf_atlas_fields.insert(
+                sdf_atlas_node_key(quad),
+                PreparedSdfAtlasField {
+                    pixels: warped,
+                    width: output_size.0,
+                    height: output_size.1,
+                },
+            );
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn sdf_font_node_key(node: &SdfFontQuadNode) -> usize {
+    node as *const SdfFontQuadNode as usize
+}
+
+#[derive(Clone, Copy)]
+struct SdfFontDimensions {
+    base: (usize, usize),
+    crop: (usize, usize),
+    field: (usize, usize),
+    output: (usize, usize),
+}
+
+fn validate_sdf_font_quad(
+    node: &SdfFontQuadNode,
+    max_node_pixels: usize,
+) -> Result<SdfFontDimensions, String> {
+    if node
+        .font
+        .name
+        .as_ref()
+        .is_none_or(|name| name.trim().is_empty())
+    {
+        return Err("SdfFontQuad requires a registered font name".to_string());
+    }
+    if !node.font.size.is_finite() || node.font.size <= 0.0 || node.font.size > 4096.0 {
+        return Err("SdfFontQuad font size is outside the native safety limit".to_string());
+    }
+    if !node.spread.is_finite() || node.spread <= 0.0 || node.spread > 4096.0 {
+        return Err("SdfFontQuad spread is outside the native safety limit".to_string());
+    }
+    if node.padding < 0 || node.crop_padding < 0 || node.crop_padding > node.padding {
+        return Err("SdfFontQuad padding is invalid".to_string());
+    }
+    if char::from_u32(node.codepoint).is_none() {
+        return Err(format!(
+            "SdfFontQuad codepoint is not a Unicode scalar: {}",
+            node.codepoint
+        ));
+    }
+    if node
+        .pos
+        .iter()
+        .map(|value| f64::from(*value))
+        .chain(node.affine)
+        .any(|value| !value.is_finite())
+    {
+        return Err("SdfFontQuad contains a non-finite scalar".to_string());
+    }
+
+    let bbox_width = i64::from(node.bbox[2]) - i64::from(node.bbox[0]);
+    let bbox_height = i64::from(node.bbox[3]) - i64::from(node.bbox[1]);
+    if bbox_width <= 0 || bbox_height <= 0 {
+        return Err("SdfFontQuad bbox must have positive dimensions".to_string());
+    }
+    let dimensions = |width: i64, height: i64, label: &str| -> Result<(usize, usize), String> {
+        if width <= 0 || height <= 0 {
+            return Err(format!("SdfFontQuad {label} dimensions must be positive"));
+        }
+        let width =
+            usize::try_from(width).map_err(|_| format!("SdfFontQuad {label} width overflows"))?;
+        let height =
+            usize::try_from(height).map_err(|_| format!("SdfFontQuad {label} height overflows"))?;
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| format!("SdfFontQuad {label} pixel count overflows"))?;
+        if pixels > max_node_pixels {
+            return Err(format!(
+                "SdfFontQuad {label} {width}x{height} ({pixels} pixels) exceeds limit {max_node_pixels}"
+            ));
+        }
+        Ok((width, height))
+    };
+    let base = dimensions(
+        bbox_width + i64::from(node.padding) * 2,
+        bbox_height + i64::from(node.padding) * 2,
+        "source field",
+    )?;
+    let crop = dimensions(
+        bbox_width + i64::from(node.crop_padding) * 2,
+        bbox_height + i64::from(node.crop_padding) * 2,
+        "cropped field",
+    )?;
+    let field = dimensions(
+        i64::from(node.field_size[0]),
+        i64::from(node.field_size[1]),
+        "resized field",
+    )?;
+    let output = dimensions(
+        i64::from(node.size[0]),
+        i64::from(node.size[1]),
+        "warped field",
+    )?;
+    Ok(SdfFontDimensions {
+        base,
+        crop,
+        field,
+        output,
+    })
+}
+
+fn sdf_outline_font(typeface: Typeface, size: f32) -> Font {
+    let mut font = Font::from_typeface(typeface, size);
+    // The legacy fontTools path used the unhinted design outline. Raster hinting here would
+    // make the cached SDF platform-dependent and move its edges away from that reference.
+    font.set_hinting(FontHinting::None)
+        .set_force_auto_hinting(false)
+        .set_embedded_bitmaps(false)
+        .set_subpixel(true)
+        .set_linear_metrics(true);
+    font
+}
+
+fn sdf_path_segment_count(path: &skia_safe::Path) -> Result<usize, String> {
+    path.iter().try_fold(0usize, |count, record| {
+        let added = match record.verb() {
+            PathVerb::Move => 0,
+            PathVerb::Line | PathVerb::Close => 1,
+            PathVerb::Quad | PathVerb::Conic | PathVerb::Cubic => SDF_FONT_CURVE_STEPS,
+        };
+        count
+            .checked_add(added)
+            .ok_or_else(|| "SdfFontQuad outline segment count overflow".to_string())
+    })
+}
+
+fn flatten_sdf_font_path(
+    path: &skia_safe::Path,
+    max_segment_bytes: usize,
+) -> Result<Vec<[f32; 4]>, String> {
+    let segment_count = sdf_path_segment_count(path)?;
+    let segment_bytes = segment_count
+        .checked_mul(std::mem::size_of::<[f32; 4]>())
+        .ok_or_else(|| "SdfFontQuad outline segment byte count overflow".to_string())?;
+    if segment_bytes > max_segment_bytes {
+        return Err(format!(
+            "SdfFontQuad outline requires {segment_bytes} bytes; limit is {max_segment_bytes}"
+        ));
+    }
+    let mut segments = Vec::with_capacity(segment_count);
+    for record in path.iter() {
+        let verb = record.verb();
+        let points = record.points();
+        let line = |segments: &mut Vec<[f32; 4]>, a: Point, b: Point| {
+            segments.push([a.x, a.y, b.x, b.y]);
+        };
+        match verb {
+            PathVerb::Move => {}
+            PathVerb::Line | PathVerb::Close => line(&mut segments, points[0], points[1]),
+            PathVerb::Quad => {
+                let [p0, p1, p2] = [points[0], points[1], points[2]];
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let next = Point::new(
+                        u * u * p0.x + 2.0 * u * t * p1.x + t * t * p2.x,
+                        u * u * p0.y + 2.0 * u * t * p1.y + t * t * p2.y,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+            PathVerb::Conic => {
+                let [p0, p1, p2] = [points[0], points[1], points[2]];
+                let weight = record.conic_weight();
+                if !weight.is_finite() || weight <= 0.0 {
+                    return Err("SdfFontQuad outline has an invalid conic weight".to_string());
+                }
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let denominator = u * u + 2.0 * weight * u * t + t * t;
+                    let next = Point::new(
+                        (u * u * p0.x + 2.0 * weight * u * t * p1.x + t * t * p2.x) / denominator,
+                        (u * u * p0.y + 2.0 * weight * u * t * p1.y + t * t * p2.y) / denominator,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+            PathVerb::Cubic => {
+                let [p0, p1, p2, p3] = [points[0], points[1], points[2], points[3]];
+                let mut previous = p0;
+                for step in 1..=SDF_FONT_CURVE_STEPS {
+                    let t = step as f32 / SDF_FONT_CURVE_STEPS as f32;
+                    let u = 1.0 - t;
+                    let next = Point::new(
+                        u * u * u * p0.x
+                            + 3.0 * u * u * t * p1.x
+                            + 3.0 * u * t * t * p2.x
+                            + t * t * t * p3.x,
+                        u * u * u * p0.y
+                            + 3.0 * u * u * t * p1.y
+                            + 3.0 * u * t * t * p2.y
+                            + t * t * t * p3.y,
+                    );
+                    line(&mut segments, previous, next);
+                    previous = next;
+                }
+            }
+        }
+    }
+    if segments.is_empty() {
+        return Err("SdfFontQuad glyph outline is empty".to_string());
+    }
+    Ok(segments)
+}
+
+fn build_sdf_font_base_field(
+    path: &skia_safe::Path,
+    bbox: [i32; 4],
+    padding: i32,
+    spread: f32,
+    dimensions: (usize, usize),
+    max_segment_bytes: usize,
+) -> Result<SdfFontBaseField, String> {
+    let segment_count = sdf_path_segment_count(path)?;
+    let evaluations = dimensions
+        .0
+        .checked_mul(dimensions.1)
+        .and_then(|pixels| pixels.checked_mul(segment_count))
+        .ok_or_else(|| "SdfFontQuad distance evaluation count overflow".to_string())?;
+    if evaluations > SDF_FONT_MAX_DISTANCE_EVALUATIONS {
+        return Err(format!(
+            "SdfFontQuad requires {evaluations} distance evaluations; native limit is \
+             {SDF_FONT_MAX_DISTANCE_EVALUATIONS}"
+        ));
+    }
+    let segments = flatten_sdf_font_path(path, max_segment_bytes)?;
+    let (width, height) = dimensions;
+    let mut pixels = vec![0_u8; width * height];
+    pixels
+        .par_chunks_mut(width)
+        .enumerate()
+        .for_each(|(y, row)| {
+            let py = (bbox[1] - padding) as f32 + y as f32 + 0.5;
+            for (x, output) in row.iter_mut().enumerate() {
+                let px = (bbox[0] - padding) as f32 + x as f32 + 0.5;
+                let mut min_distance = 1.0e9_f32;
+                let mut winding = 0_i32;
+                for [ax, ay, bx, by] in &segments {
+                    let vx = bx - ax;
+                    let vy = by - ay;
+                    let wx = px - ax;
+                    let wy = py - ay;
+                    let length_sq = vx * vx + vy * vy;
+                    let distance = if length_sq <= 1.0e-12 {
+                        (wx * wx + wy * wy).sqrt()
+                    } else {
+                        let t = ((wx * vx + wy * vy) / length_sq).clamp(0.0, 1.0);
+                        let dx = px - (ax + t * vx);
+                        let dy = py - (ay + t * vy);
+                        (dx * dx + dy * dy).sqrt()
+                    };
+                    min_distance = min_distance.min(distance);
+                    let cross = vx * (py - ay) - (px - ax) * vy;
+                    if *ay <= py && *by > py && cross > 0.0 {
+                        winding += 1;
+                    } else if *ay > py && *by <= py && cross < 0.0 {
+                        winding -= 1;
+                    }
+                }
+                let signed_distance = if winding != 0 {
+                    min_distance
+                } else {
+                    -min_distance
+                };
+                let value = (0.5 + signed_distance / (2.0 * spread)).clamp(0.0, 1.0);
+                *output = (value * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
+            }
+        });
+    let byte_size = u32::try_from(pixels.len())
+        .map_err(|_| "SdfFontQuad base field exceeds the cache weight type".to_string())?;
+    Ok(SdfFontBaseField {
+        pixels,
+        width,
+        height,
+        byte_size,
+    })
+}
+
+fn crop_sdf_font_field(
+    source: &SdfFontBaseField,
+    offset: usize,
+    dimensions: (usize, usize),
+) -> Result<Vec<u8>, String> {
+    let (width, height) = dimensions;
+    if offset
+        .checked_add(width)
+        .is_none_or(|right| right > source.width)
+        || offset
+            .checked_add(height)
+            .is_none_or(|bottom| bottom > source.height)
+    {
+        return Err("SdfFontQuad crop exceeds the generated field".to_string());
+    }
+    let mut output = vec![0_u8; width * height];
+    for y in 0..height {
+        let source_start = (y + offset) * source.width + offset;
+        output[y * width..(y + 1) * width]
+            .copy_from_slice(&source.pixels[source_start..source_start + width]);
+    }
+    Ok(output)
+}
+
+fn prepare_sdf_font_fields(node: &Node, interp: &mut Interp) -> Result<(), String> {
+    match node {
+        Node::Group(group) => group
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::Transform(transform) => transform
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::UnitySubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::RasterSubscene(subscene) => subscene
+            .children
+            .iter()
+            .try_for_each(|child| prepare_sdf_font_fields(child, interp)),
+        Node::SdfFontQuad(quad) => {
+            let dimensions = validate_sdf_font_quad(quad, interp.max_node_pixels)?;
+            let ch = char::from_u32(quad.codepoint)
+                .ok_or_else(|| format!("invalid SdfFontQuad codepoint: {}", quad.codepoint))?;
+            let typeface = interp.fonts.resolve_sdf_font(&quad.font)?.clone();
+            let typeface_id = typeface.unique_id();
+            let font = sdf_outline_font(typeface, quad.font.size);
+            let glyph_id = font.unichar_to_glyph(ch as i32);
+            if glyph_id == 0 {
+                return Err(format!(
+                    "SdfFontQuad font does not cover codepoint U+{:04X}",
+                    quad.codepoint
+                ));
+            }
+            let path = font.get_path(glyph_id).ok_or_else(|| {
+                format!(
+                    "SdfFontQuad font has no outline for codepoint U+{:04X}",
+                    quad.codepoint
+                )
+            })?;
+            let key = SdfFontFieldCacheKey {
+                typeface_id,
+                glyph_id,
+                font_size_bits: quad.font.size.to_bits(),
+                bbox: quad.bbox,
+                padding: quad.padding,
+                spread_bits: quad.spread.to_bits(),
+            };
+            let base_bytes = dimensions.base.0 * dimensions.base.1;
+            let available = interp.available_native_scene_bytes("SdfFontQuad preparation")?;
+            let max_segment_bytes = available
+                .checked_sub(base_bytes)
+                .ok_or_else(|| "SdfFontQuad source field exhausts the scene budget".to_string())?;
+            let (_, max_cache_entry_bytes) = sdf_font_cache_limits();
+            let did_build = Cell::new(false);
+            let build = || {
+                did_build.set(true);
+                build_sdf_font_base_field(
+                    &path,
+                    quad.bbox,
+                    quad.padding,
+                    quad.spread,
+                    dimensions.base,
+                    max_segment_bytes,
+                )
+                .map(Arc::new)
+            };
+            let base = if base_bytes as u64 <= max_cache_entry_bytes {
+                match sdf_font_field_cache() {
+                    Some(cache) => {
+                        if let Some(field) = cache.get(&key) {
+                            interp.metrics.sdf_font_cache_hits += 1;
+                            field
+                        } else {
+                            let field = cache
+                                .try_get_with(key, build)
+                                .map_err(|error| (*error).clone())?;
+                            if did_build.get() {
+                                interp.metrics.sdf_font_cache_misses += 1;
+                            } else {
+                                interp.metrics.sdf_font_cache_coalesced += 1;
+                            }
+                            field
+                        }
+                    }
+                    None => {
+                        interp.metrics.sdf_font_cache_bypasses += 1;
+                        build()?
+                    }
+                }
+            } else {
+                interp.metrics.sdf_font_cache_bypasses += 1;
+                build()?
+            };
+
+            let crop_bytes = dimensions.crop.0 * dimensions.crop.1;
+            let field_bytes = dimensions.field.0 * dimensions.field.1;
+            let output_bytes = dimensions.output.0 * dimensions.output.1;
+            interp.ensure_native_scene_bytes(
+                crop_bytes
+                    .checked_add(field_bytes)
+                    .ok_or_else(|| "SdfFontQuad resize peak overflow".to_string())?,
+                "SdfFontQuad crop and resize",
+            )?;
+            interp.ensure_native_scene_bytes(
+                field_bytes
+                    .checked_add(output_bytes)
+                    .ok_or_else(|| "SdfFontQuad warp peak overflow".to_string())?,
+                "SdfFontQuad field warp",
+            )?;
+            let crop_offset = usize::try_from(quad.padding - quad.crop_padding)
+                .map_err(|_| "SdfFontQuad crop offset overflows".to_string())?;
+            let cropped = crop_sdf_font_field(&base, crop_offset, dimensions.crop)?;
+            let resize_available = available
+                .checked_sub(crop_bytes)
+                .ok_or_else(|| "SdfFontQuad crop exhausts the scene budget".to_string())?;
+            let resize_limits = PillowResizeLimits::new(
+                resize_available,
+                resize_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let field = resize_l_pillow_bicubic(
+                &cropped,
+                dimensions.crop.0,
+                dimensions.crop.1,
+                dimensions.field.0,
+                dimensions.field.1,
+                resize_limits,
+            )?;
+            drop(cropped);
+            let warp_available = available
+                .checked_sub(field_bytes)
+                .ok_or_else(|| "SdfFontQuad field exhausts the scene budget".to_string())?;
+            let warp_limits = PillowResizeLimits::new(
+                warp_available,
+                warp_available,
+                interp.max_node_pixels.min(i32::MAX as usize),
+            );
+            let warped = transform_l_pillow_bicubic(
+                &field,
+                dimensions.field.0,
+                dimensions.field.1,
+                dimensions.output.0,
+                dimensions.output.1,
+                quad.affine,
+                warp_limits,
+            )?;
+            drop(field);
+            interp.retain_native_asset_bytes(output_bytes, "SdfFontQuad warped field")?;
+            interp.sdf_font_fields.insert(
+                sdf_font_node_key(quad),
+                PreparedSdfFontField {
+                    pixels: warped,
+                    width: dimensions.output.0,
+                    height: dimensions.output.1,
+                },
+            );
             Ok(())
         }
         _ => Ok(()),
@@ -2736,86 +3923,137 @@ fn sample_sdf_shape_channel(
     top * (1.0 - ty) + bottom * ty
 }
 
-fn sample_sdf_shape_row(
+fn sample_sdf_shape_row_range(
     source: &SdfShapeSource,
     out_width: usize,
     out_height: usize,
     y: usize,
     channel: usize,
+    left: usize,
+    right: usize,
 ) -> Vec<f32> {
-    (0..out_width)
+    (left..right)
         .map(|x| sample_sdf_shape_channel(source, out_width, out_height, x, y, channel))
         .collect()
 }
 
+#[cfg(test)]
 fn shade_sdf_shape(
     source: &SdfShapeSource,
     node: &SdfShapeNode,
     out_width: usize,
     out_height: usize,
 ) -> Result<Vec<u8>, String> {
-    let byte_len = out_width
-        .checked_mul(out_height)
+    shade_sdf_shape_region(
+        source,
+        node,
+        out_width,
+        out_height,
+        (0, 0, out_width, out_height),
+    )
+}
+
+fn shade_sdf_shape_region(
+    source: &SdfShapeSource,
+    node: &SdfShapeNode,
+    out_width: usize,
+    out_height: usize,
+    bounds: (usize, usize, usize, usize),
+) -> Result<Vec<u8>, String> {
+    let (left, top, right, bottom) = bounds;
+    if left >= right || top >= bottom || right > out_width || bottom > out_height {
+        return Err(format!(
+            "invalid SdfShape region {left},{top}..{right},{bottom} for {out_width}x{out_height}"
+        ));
+    }
+    let region_width = right - left;
+    let region_height = bottom - top;
+    let byte_len = region_width
+        .checked_mul(region_height)
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| "SdfShape output byte size overflow".to_string())?;
     let mut patch = Vec::new();
-    patch
-        .try_reserve_exact(byte_len)
-        .map_err(|_| format!("SdfShape output allocation rejected: {out_width}x{out_height}"))?;
+    patch.try_reserve_exact(byte_len).map_err(|_| {
+        format!("SdfShape output allocation rejected: {region_width}x{region_height}")
+    })?;
     patch.resize(byte_len, 0);
 
     let field_channel = match node.field_channel {
         SdfShapeFieldChannel::Red => 0,
         SdfShapeFieldChannel::Alpha => 3,
     };
-    let mut previous = sample_sdf_shape_row(source, out_width, out_height, 0, field_channel);
-    let mut current = previous.clone();
-    let mut next = sample_sdf_shape_row(
+    let softness = node.softness.max(0.0);
+    let sample_left = left.saturating_sub(1);
+    let sample_right = (right + 1).min(out_width);
+    let mut previous = sample_sdf_shape_row_range(
         source,
         out_width,
         out_height,
-        usize::from(out_height > 1),
+        top.saturating_sub(1),
         field_channel,
+        sample_left,
+        sample_right,
     );
-    let softness = node.softness.max(0.0);
+    let mut current = sample_sdf_shape_row_range(
+        source,
+        out_width,
+        out_height,
+        top,
+        field_channel,
+        sample_left,
+        sample_right,
+    );
+    let mut next = sample_sdf_shape_row_range(
+        source,
+        out_width,
+        out_height,
+        (top + 1).min(out_height - 1),
+        field_channel,
+        sample_left,
+        sample_right,
+    );
 
-    for y in 0..out_height {
-        let texture_alpha = sample_sdf_shape_row(source, out_width, out_height, y, 3);
-        for x in 0..out_width {
+    for y in top..bottom {
+        let texture_alpha =
+            sample_sdf_shape_row_range(source, out_width, out_height, y, 3, left, right);
+        for x in left..right {
+            let sample_x = x - sample_left;
+            let field = current[sample_x];
             let grad_x = if out_width <= 1 {
                 0.0
             } else if x == 0 {
-                current[1] - current[0]
+                current[sample_x + 1] - field
             } else if x + 1 == out_width {
-                current[x] - current[x - 1]
+                field - current[sample_x - 1]
             } else {
-                (current[x + 1] - current[x - 1]) * 0.5
+                (current[sample_x + 1] - current[sample_x - 1]) * 0.5
             };
             let grad_y = if out_height <= 1 {
                 0.0
             } else if y == 0 {
-                next[x] - current[x]
+                next[sample_x] - field
             } else if y + 1 == out_height {
-                current[x] - previous[x]
+                field - previous[sample_x]
             } else {
-                (next[x] - previous[x]) * 0.5
+                (next[sample_x] - previous[sample_x]) * 0.5
             };
             let fwidth = grad_x.abs() + grad_y.abs();
             let half_width = softness * 0.5 + fwidth;
             let edge0 = 0.5 - half_width;
             let edge1 = 0.5 + half_width;
             let span = (edge1 - edge0).max(1.0e-6);
-            let t = ((current[x] - edge0) / span).clamp(0.0, 1.0);
+            let t = ((field - edge0) / span).clamp(0.0, 1.0);
             let smooth = t * t * (3.0 - 2.0 * t);
+            let texture_alpha = texture_alpha[x - left];
             let face = if smooth >= 0.899999976 {
-                texture_alpha[x] * smooth * node.fill_alpha
+                texture_alpha * smooth * node.fill_alpha
             } else {
                 0.0
             };
-            let outline_distance = current[x] + smooth * 0.5 + node.face_dilate * 0.5;
+            let outline_distance = field + smooth * 0.5 + node.face_dilate * 0.5;
             let outline_t = (outline_distance * 10.0).clamp(0.0, 1.0);
             let outline_smooth = outline_t * outline_t * (3.0 - 2.0 * outline_t);
-            let outline = texture_alpha[x] * outline_smooth * node.outline_alpha;
+            let outline = texture_alpha * outline_smooth * node.outline_alpha;
             let outline_pixel =
                 outline_distance >= 1.0 - node.outer_fill_ratio && outline_distance < 1.0;
             let alpha = if outline_pixel { outline } else { face };
@@ -2824,24 +4062,65 @@ fn shade_sdf_shape(
             } else {
                 node.fill_color
             };
-            let pixel = &mut patch[(y * out_width + x) * 4..][..4];
+            let pixel = &mut patch[((y - top) * region_width + (x - left)) * 4..][..4];
             pixel[..3].copy_from_slice(&rgb);
             pixel[3] = (alpha * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
         }
 
-        if y + 1 < out_height {
+        if y + 1 < bottom {
             previous = current;
             current = next;
-            next = sample_sdf_shape_row(
+            next = sample_sdf_shape_row_range(
                 source,
                 out_width,
                 out_height,
                 (y + 2).min(out_height - 1),
                 field_channel,
+                sample_left,
+                sample_right,
             );
         }
     }
     Ok(patch)
+}
+
+fn sdf_shape_visible_bounds(
+    canvas_size: (i32, i32),
+    node: &SdfShapeNode,
+    patch_size: (i32, i32),
+    off: (f32, f32),
+    padding: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (width, height) = patch_size;
+    let anchor = (node.anchor[0] + off.0, node.anchor[1] + off.1);
+    let theta = (node.rotation % 360.0).to_radians();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let pivot = (width as f32 * 0.5, height as f32 * 0.5);
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (canvas_x, canvas_y) in [
+        (0.0, 0.0),
+        (canvas_size.0 as f32, 0.0),
+        (canvas_size.0 as f32, canvas_size.1 as f32),
+        (0.0, canvas_size.1 as f32),
+    ] {
+        let dx = canvas_x - anchor.0;
+        let dy = canvas_y - anchor.1;
+        let local_x = pivot.0 + (cos_t * dx + sin_t * dy) / node.post_scale[0];
+        let local_y = pivot.1 + (-sin_t * dx + cos_t * dy) / node.post_scale[1];
+        min_x = min_x.min(local_x);
+        min_y = min_y.min(local_y);
+        max_x = max_x.max(local_x);
+        max_y = max_y.max(local_y);
+    }
+    let left = ((min_x.floor() as i64) - i64::from(padding)).clamp(0, i64::from(width)) as i32;
+    let top = ((min_y.floor() as i64) - i64::from(padding)).clamp(0, i64::from(height)) as i32;
+    let right = ((max_x.ceil() as i64) + i64::from(padding)).clamp(0, i64::from(width)) as i32;
+    let bottom = ((max_y.ceil() as i64) + i64::from(padding)).clamp(0, i64::from(height)) as i32;
+    (left < right && top < bottom).then_some((left, top, right, bottom))
 }
 
 fn draw_sdf_shape(
@@ -2854,32 +4133,61 @@ fn draw_sdf_shape(
         .sdf_shape_sources
         .get(&node.path)
         .ok_or_else(|| format!("SdfShape source was not prepared: {}", node.path))?;
-    let (width, height) =
-        sdf_shape_dimensions(node, source.width, source.height, interp.max_node_pixels)?;
-    let patch_bytes = usize::try_from(width)
+    let (width, height) = sdf_shape_dimensions(node, source.width, source.height, usize::MAX)?;
+    let Some((crop_left, crop_top, crop_right, crop_bottom)) = sdf_shape_visible_bounds(
+        (surface.width(), surface.height()),
+        node,
+        (width, height),
+        off,
+        3,
+    ) else {
+        return Ok(());
+    };
+    let crop_width = crop_right - crop_left;
+    let crop_height = crop_bottom - crop_top;
+    let crop_pixels = usize::try_from(crop_width)
         .ok()
-        .and_then(|width| {
-            usize::try_from(height)
+        .and_then(|crop_width| {
+            usize::try_from(crop_height)
                 .ok()
-                .and_then(|height| width.checked_mul(height))
+                .and_then(|crop_height| crop_width.checked_mul(crop_height))
         })
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "SdfShape patch byte count overflow".to_string())?;
+        .ok_or_else(|| "SdfShape visible patch pixel count overflow".to_string())?;
+    if crop_pixels > interp.max_node_pixels {
+        return Err(format!(
+            "SdfShape visible patch {crop_width}x{crop_height} ({crop_pixels} pixels) exceeds limit {}",
+            interp.max_node_pixels
+        ));
+    }
+    let patch_bytes = crop_pixels
+        .checked_mul(4)
+        .ok_or_else(|| "SdfShape visible patch byte count overflow".to_string())?;
     interp.ensure_native_scene_bytes(
         patch_bytes
             .checked_mul(2)
             .ok_or_else(|| "SdfShape transient byte count overflow".to_string())?,
         "SdfShape patch",
     )?;
-    let patch = shade_sdf_shape(source, node, width as usize, height as usize)?;
+    let patch = shade_sdf_shape_region(
+        source,
+        node,
+        width as usize,
+        height as usize,
+        (
+            crop_left as usize,
+            crop_top as usize,
+            crop_right as usize,
+            crop_bottom as usize,
+        ),
+    )?;
     let info = ImageInfo::new(
-        (width, height),
+        (crop_width, crop_height),
         ColorType::RGBA8888,
         AlphaType::Unpremul,
         None,
     );
     let image =
-        skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), width as usize * 4)
+        skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), crop_width as usize * 4)
             .ok_or_else(|| "failed to build SdfShape raster image".to_string())?;
     let anchor = (node.anchor[0] + off.0, node.anchor[1] + off.1);
     let angle = node.rotation % 360.0;
@@ -2895,10 +4203,19 @@ fn draw_sdf_shape(
             .max(1.0);
         let left = (anchor.0 - width as f32 * 0.5 * node.post_scale[0]).round_ties_even();
         let top = (anchor.1 - height as f32 * 0.5 * node.post_scale[1]).round_ties_even();
+        let crop_dest_left = left + crop_left as f32 * final_width / width as f32;
+        let crop_dest_top = top + crop_top as f32 * final_height / height as f32;
+        let crop_dest_width = crop_width as f32 * final_width / width as f32;
+        let crop_dest_height = crop_height as f32 * final_height / height as f32;
         surface.canvas().draw_image_rect_with_sampling_options(
             &image,
             None,
-            Rect::from_xywh(left, top, final_width, final_height),
+            Rect::from_xywh(
+                crop_dest_left,
+                crop_dest_top,
+                crop_dest_width,
+                crop_dest_height,
+            ),
             CubicResampler::catmull_rom(),
             &paint,
         );
@@ -2927,7 +4244,7 @@ fn draw_sdf_shape(
     canvas.concat(&matrix);
     canvas.draw_image_with_sampling_options(
         &image,
-        (0.0, 0.0),
+        (crop_left as f32, crop_top as f32),
         CubicResampler::catmull_rom(),
         Some(&paint),
     );
@@ -3709,6 +5026,96 @@ fn draw_sdf_quad(
         Some(&paint),
     );
     Ok(())
+}
+
+/// Shade an SdfQuad's pre-warped A8 field and draw the straight-alpha patch src-over at its
+/// integer position — nearest sampling, no AA, ZERO geometric resampling (the field arrives
+/// already at display size). The field reference was validated up front, so a miss here only
+/// happens for test-constructed scenes; it degrades to skipping the node like other draws.
+fn draw_shaded_sdf_patch(
+    surface: &mut Surface,
+    field: &[u8],
+    width: usize,
+    height: usize,
+    row_bytes: usize,
+    shading: &SdfShading,
+    pos: (f32, f32),
+) -> Result<(), String> {
+    if field.len()
+        < row_bytes
+            .saturating_mul(height.saturating_sub(1))
+            .saturating_add(width)
+    {
+        return Err("SDF field buffer is smaller than its declared dimensions".to_string());
+    }
+    let patch = shade_sdf_field(field, width, height, row_bytes, shading);
+    let image_width =
+        i32::try_from(width).map_err(|_| "SDF patch width overflows i32".to_string())?;
+    let image_height =
+        i32::try_from(height).map_err(|_| "SDF patch height overflows i32".to_string())?;
+    let info = ImageInfo::new(
+        (image_width, image_height),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let image = skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), width * 4)
+        .ok_or_else(|| "SDF patch image build failed".to_string())?;
+    let paint = Paint::default();
+    surface.canvas().draw_image_with_sampling_options(
+        &image,
+        pos,
+        SamplingOptions::default(),
+        Some(&paint),
+    );
+    Ok(())
+}
+
+fn draw_sdf_atlas_quad(
+    surface: &mut Surface,
+    interp: &Interp,
+    node: &SdfAtlasQuadNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let field = interp
+        .sdf_atlas_fields
+        .get(&sdf_atlas_node_key(node))
+        .ok_or_else(|| format!("SdfAtlasQuad field was not prepared: {}", node.path))?;
+    draw_shaded_sdf_patch(
+        surface,
+        &field.pixels,
+        field.width,
+        field.height,
+        field.width,
+        &node.shading,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+    )
+}
+
+fn draw_sdf_font_quad(
+    surface: &mut Surface,
+    interp: &Interp,
+    node: &SdfFontQuadNode,
+    off: (f32, f32),
+) -> Result<(), String> {
+    let field = interp
+        .sdf_font_fields
+        .get(&sdf_font_node_key(node))
+        .ok_or_else(|| {
+            format!(
+                "SdfFontQuad field was not prepared for codepoint U+{:04X}",
+                node.codepoint
+            )
+        })?;
+    draw_shaded_sdf_patch(
+        surface,
+        &field.pixels,
+        field.width,
+        field.height,
+        field.width,
+        &node.shading,
+        (node.pos[0] + off.0, node.pos[1] + off.1),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -6123,6 +7530,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sdf_font_base_field_flattens_closed_outline_and_tracks_sign() {
+        let mut builder = skia_safe::PathBuilder::new();
+        builder
+            .move_to((0.0, 0.0))
+            .line_to((10.0, 0.0))
+            .line_to((10.0, 10.0))
+            .line_to((0.0, 10.0))
+            .close();
+        let path = builder.detach();
+        let segments = flatten_sdf_font_path(&path, 4 * std::mem::size_of::<[f32; 4]>())
+            .expect("rectangle flattens");
+        assert_eq!(segments.len(), 4, "Close must contribute the final edge");
+        let error = flatten_sdf_font_path(&path, 3 * std::mem::size_of::<[f32; 4]>())
+            .expect_err("segment budget must fail before allocation");
+        assert!(
+            error.contains("outline requires"),
+            "unexpected error: {error}"
+        );
+
+        let field = build_sdf_font_base_field(&path, [0, 0, 10, 10], 2, 2.0, (14, 14), 1024)
+            .expect("field builds");
+        assert!(field.pixels[7 * 14 + 7] > 240, "rectangle center is inside");
+        assert!(field.pixels[0] < 64, "padded corner is outside");
+
+        let error = match build_sdf_font_base_field(
+            &path,
+            [0, 0, 5000, 5000],
+            0,
+            2.0,
+            (5000, 5000),
+            1024,
+        ) {
+            Err(error) => error,
+            Ok(_) => panic!("distance evaluation budget must fail before the field allocation"),
+        };
+        assert!(
+            error.contains("distance evaluations"),
+            "unexpected error: {error}"
+        );
+    }
+
+    fn sdf_font_root(extra: &str) -> String {
+        format!(
+            r#"{{
+                "type": "SdfFontQuad",
+                "font": {{ "role": "default", "name": "dynamic", "size": 32 }},
+                "codepoint": 65,
+                "bbox": [0, -24, 20, 4],
+                "padding": 4,
+                "crop_padding": 2,
+                "field_size": [20, 28],
+                "spread": 4,
+                "pos": [0, 0],
+                "size": [20, 28],
+                "affine": [1, 0, 0, 0, 1, 0],
+                "shading": {{
+                    "face_color": [255, 255, 255], "face_scale": 1,
+                    "face_w": 0, "alpha": 1
+                }}
+                {extra}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn sdf_font_quad_rejects_registered_font_fallback() {
+        let json = bare_scene_json((32, 32), &sdf_font_root("")).replace(
+            r#""fonts": { "dir": "/tmp", "default": "missing", "bold": "missing" }"#,
+            r#""fonts": { "dir": "/tmp", "default": "missing", "bold": "missing",
+                           "extra": { "dynamic": "also-missing" } }"#,
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            error.contains("resolved to fallback"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sdf_font_quad_rejects_invalid_codepoint_before_font_access() {
+        let root = sdf_font_root("").replace("\"codepoint\": 65", "\"codepoint\": 1114112");
+        let scene: Scene = serde_json::from_str(&bare_scene_json((32, 32), &root)).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(
+            error.contains("Unicode scalar"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn sdf_scene_json(field: &str) -> String {
         bare_scene_json(
             (16, 16),
@@ -6169,6 +7667,20 @@ mod tests {
         let scene: Scene = serde_json::from_str(&json).expect("parses");
         let err = expect_scene_error(&scene, HashMap::new());
         assert!(err.contains("SdfQuad"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transform_rejects_sdf_font_quad() {
+        let json = bare_scene_json(
+            (32, 32),
+            &format!(
+                r#"{{ "type": "Transform", "matrix": [1, 0, 0, 1, 0, 0], "children": [{}] }}"#,
+                sdf_font_root("")
+            ),
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, HashMap::new());
+        assert!(error.contains("SdfFontQuad"), "unexpected error: {error}");
     }
 
     #[test]
@@ -6685,6 +8197,77 @@ mod tests {
         assert_eq!(pixels[3], 0, "canvas origin must stay transparent");
     }
 
+    #[test]
+    fn sdf_quad_shading_patch_is_included_in_scene_budget() {
+        let field = vec![255_u8; 64];
+        let mut mem = HashMap::new();
+        mem.insert("glyph".to_string(), a8_mem_image(8, 8, &field));
+        let json = sdf_scene_json("mem:glyph").replace(
+            "\"root\":",
+            "\"limits\":{\"max_node_pixels\":64,\"max_scene_bytes\":1200},\"root\":",
+        );
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let error = expect_scene_error(&scene, mem);
+        assert!(
+            error.contains("SDF shading patch runtime"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn sdf_atlas_quad_runs_asset_pixel_pipeline_without_mem_image() {
+        let fixture = fixture_path("sdf_quad_face_only_expected.png");
+        let fixture_dir = fixture
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "SdfAtlasQuad",
+            "path": "sdf_quad_face_only_expected.png",
+            "atlas_size": [64, 64],
+            "crop": [0, 0, 64, 64],
+            "field_size": [64, 64],
+            "pos": [0, 0],
+            "size": [64, 64],
+            "affine": [1, 0, 0, 0, 1, 0],
+            "shading": {
+                "face_color": [255, 255, 255],
+                "face_scale": 1,
+                "face_w": 0,
+                "alpha": 1,
+                "underlay": null
+            }
+        }"#;
+        let json = bare_scene_json((64, 64), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders");
+
+        assert_eq!(rendered.metrics.sdf_quad_count, 1);
+        let (actual, width, height) = decode_pixels(&rendered);
+        let (source, source_width, source_height) =
+            decode_fixture_rgba("sdf_quad_face_only_expected.png");
+        assert_eq!((width, height), (source_width, source_height));
+        for (pixel_index, (actual_pixel, source_pixel)) in actual
+            .chunks_exact(4)
+            .zip(source.chunks_exact(4))
+            .enumerate()
+        {
+            assert_eq!(
+                actual_pixel[3], source_pixel[3],
+                "alpha differs at pixel {pixel_index}"
+            );
+        }
+
+        let mismatch_json = json.replace("\"atlas_size\": [64, 64]", "\"atlas_size\": [63, 64]");
+        let mismatch_scene: Scene = serde_json::from_str(&mismatch_json).expect("parses");
+        let error = expect_scene_error(&mismatch_scene, HashMap::new());
+        assert!(
+            error.contains("do not match metadata"),
+            "unexpected error: {error}"
+        );
+    }
+
     fn test_sdf_shape_node() -> SdfShapeNode {
         SdfShapeNode {
             path: "shape.png".to_string(),
@@ -6724,6 +8307,51 @@ mod tests {
             "texture alpha must remain independent of the red SDF"
         );
         assert_eq!(patch[3], 0, "zero-distance corner must stay transparent");
+    }
+
+    #[test]
+    fn sdf_shape_region_matches_the_same_pixels_from_the_full_patch() {
+        let mut pixels = Vec::with_capacity(4 * 4 * 4);
+        for value in 0_u8..16 {
+            pixels.extend_from_slice(&[value.saturating_mul(17), 0, 0, 255]);
+        }
+        let source = SdfShapeSource {
+            pixels,
+            width: 4,
+            height: 4,
+        };
+        let node = test_sdf_shape_node();
+        let full = shade_sdf_shape(&source, &node, 9, 7).expect("shades full patch");
+        let bounds = (2, 1, 8, 6);
+        let region = shade_sdf_shape_region(&source, &node, 9, 7, bounds).expect("shades region");
+        let region_width = bounds.2 - bounds.0;
+
+        for y in bounds.1..bounds.3 {
+            let full_start = (y * 9 + bounds.0) * 4;
+            let region_start = (y - bounds.1) * region_width * 4;
+            assert_eq!(
+                &region[region_start..region_start + region_width * 4],
+                &full[full_start..full_start + region_width * 4],
+            );
+        }
+    }
+
+    #[test]
+    fn sdf_shape_oversized_logical_patch_is_clipped_to_the_canvas() {
+        let mut node = test_sdf_shape_node();
+        node.anchor = [1024.0, 454.5];
+        node.post_scale = [2048.0 / 1830.0, 909.0 / 813.0];
+        let logical_size = (4491, 1902);
+        assert!(logical_size.0 as usize * logical_size.1 as usize > 8 * 1024 * 1024);
+
+        let bounds = sdf_shape_visible_bounds((2048, 909), &node, logical_size, (0.0, 0.0), 3)
+            .expect("centred shape intersects the canvas");
+        let visible_width = (bounds.2 - bounds.0) as usize;
+        let visible_height = (bounds.3 - bounds.1) as usize;
+
+        assert!(visible_width < logical_size.0 as usize);
+        assert!(visible_height < logical_size.1 as usize);
+        assert!(visible_width * visible_height < 8 * 1024 * 1024);
     }
 
     #[test]
@@ -6768,6 +8396,39 @@ mod tests {
                 .any(|pixel| pixel[3] > 0 && pixel[..3] == [20, 120, 240]),
             "SdfShape must draw the shaded asset"
         );
+    }
+
+    #[test]
+    fn sdf_shape_oversized_asset_node_renders_only_its_visible_patch() {
+        let fixture_dir = fixture_path("sdf_quad_face_only_field.png")
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "SdfShape",
+            "path": "sdf_quad_face_only_field.png",
+            "anchor": [32, 32],
+            "sdf_scale": [64, 64],
+            "post_scale": [1, 1],
+            "rotation": 0,
+            "field_channel": "red",
+            "fill_color": [20, 120, 240],
+            "fill_alpha": 1,
+            "outline_color": [255, 255, 255],
+            "outline_alpha": 0,
+            "outer_fill_ratio": 0,
+            "face_dilate": 0,
+            "softness": 0
+        }"#;
+        let json = bare_scene_json((64, 64), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders clipped shape");
+        let (pixels, width, height) = decode_pixels(&rendered);
+
+        assert_eq!((width, height), (64, 64));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
     }
 
     #[test]

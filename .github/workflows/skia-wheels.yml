@@ -43,7 +43,7 @@ jobs:
             build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup free-threaded Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v7
         with:
           python-version: "3.14t"
 
@@ -83,7 +83,7 @@ jobs:
       - name: Smoke test wheel (import + IR capability handshake)
         run: |
           pip install dist/*.whl
-          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 28, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+          python -X gil=0 -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 29, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
           python -X gil=0 scripts/skia_codec_smoke.py
 
       - name: Upload wheel artifact

@@ -31,6 +31,7 @@ mod gray_affine;
 mod image_analysis;
 mod interp;
 mod ir;
+mod pillow_gray;
 mod pillow_resize;
 mod source_sdf;
 mod text_metrics;
@@ -182,6 +183,19 @@ fn render_scene(
     metrics.set_item("font_fallbacks", rendered.metrics.font_fallbacks)?;
     metrics.set_item("sdf_quad_count", rendered.metrics.sdf_quad_count)?;
     metrics.set_item("sdf_quad_elapsed", rendered.metrics.sdf_quad_elapsed)?;
+    metrics.set_item("sdf_font_cache_hits", rendered.metrics.sdf_font_cache_hits)?;
+    metrics.set_item(
+        "sdf_font_cache_misses",
+        rendered.metrics.sdf_font_cache_misses,
+    )?;
+    metrics.set_item(
+        "sdf_font_cache_coalesced",
+        rendered.metrics.sdf_font_cache_coalesced,
+    )?;
+    metrics.set_item(
+        "sdf_font_cache_bypasses",
+        rendered.metrics.sdf_font_cache_bypasses,
+    )?;
     dict.set_item("native_metrics", metrics)?;
     Ok(dict.unbind())
 }
@@ -414,7 +428,7 @@ fn validate_raw_image(
 /// 23 = natural-size alpha crop LUT, isolated before downstream raster resizing.
 /// 24 = WebP image sources and native foreground metadata are required by lazy layouts.
 // 28 = unquantized float32 SdfQuad fields and bounded fail-closed shading.
-pub const IR_CAPABILITY: u32 = 28;
+pub const IR_CAPABILITY: u32 = 29;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
@@ -633,6 +647,11 @@ pub(crate) struct NativeMetrics {
     /// SdfQuad nodes shaded in this scene, and the seconds spent shading + drawing them.
     pub(crate) sdf_quad_count: u64,
     pub(crate) sdf_quad_elapsed: f64,
+    /// Process-wide dynamic source-font SDF cache outcomes for this scene.
+    pub(crate) sdf_font_cache_hits: u64,
+    pub(crate) sdf_font_cache_misses: u64,
+    pub(crate) sdf_font_cache_coalesced: u64,
+    pub(crate) sdf_font_cache_bypasses: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -1228,7 +1247,25 @@ fn encode_surface(
     let started = Instant::now();
     let width = surface.width();
     let height = surface.height();
-    let data = if export_format == "jpg" {
+    let data = if export_format == "raw_rgba_premul" {
+        // Internal fragment transport: preserve the exact surface bytes. Encoding to PNG
+        // unpremultiplies and decoding premultiplies again, losing alpha-edge precision.
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let length = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or("fragment byte count overflow")?;
+        let mut pixels = vec![0; length];
+        if !surface.read_pixels(&info, &mut pixels, width as usize * 4, (0, 0)) {
+            return Err("fragment pixel readback failed".into());
+        }
+        EncodedBytes::Owned(pixels)
+    } else if export_format == "jpg" {
         let image = surface.image_snapshot();
         let quality = jpg_quality.clamp(1, 100) as u32;
         EncodedBytes::Skia(
@@ -1253,7 +1290,9 @@ fn encode_surface(
                 .ok_or_else(|| "failed to encode image".to_string())?,
         )
     };
-    let (media_type, filename) = if export_format == "jpg" {
+    let (media_type, filename) = if export_format == "raw_rgba_premul" {
+        ("application/octet-stream", "fragment.rgba")
+    } else if export_format == "jpg" {
         ("image/jpeg", "image.jpg")
     } else {
         ("image/png", "image.png")
@@ -2092,6 +2131,12 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     dict.set_item("raster_cache_oversample", snapshot.oversample)?;
     dict.set_item("raster_cache_entries", snapshot.entries)?;
     dict.set_item("raster_cache_bytes", snapshot.bytes)?;
+    let (sdf_max_bytes, sdf_max_entry_bytes, sdf_entries, sdf_bytes) =
+        interp::sdf_font_cache_snapshot();
+    dict.set_item("sdf_font_cache_max_bytes", sdf_max_bytes)?;
+    dict.set_item("sdf_font_cache_max_entry_bytes", sdf_max_entry_bytes)?;
+    dict.set_item("sdf_font_cache_entries", sdf_entries)?;
+    dict.set_item("sdf_font_cache_bytes", sdf_bytes)?;
     dict.set_item(
         "dimension_cache_entries",
         image_dimension_cache().entry_count(),
@@ -2125,6 +2170,7 @@ fn clear_renderer_caches() {
     let dimensions = image_dimension_cache();
     dimensions.invalidate_all();
     dimensions.run_pending_tasks();
+    interp::clear_sdf_font_cache();
 }
 
 fn resolve_asset_path(base: &Path, path: &str) -> Result<PathBuf, String> {
@@ -2284,6 +2330,29 @@ mod tests {
         surface.canvas().clear(Color::BLUE);
         let encoded = encode_surface_mtpng(&mut surface).expect("png encode");
         fs::write(path, encoded).expect("png write");
+    }
+
+    #[test]
+    fn raw_fragment_preserves_premultiplied_surface_bytes() {
+        let mut surface = surfaces::raster_n32_premul((17, 13)).expect("surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(97, 183, 39, 218));
+        surface.canvas().draw_circle((8.3, 6.2), 5.7, &paint);
+        let info = ImageInfo::new((17, 13), ColorType::RGBA8888, AlphaType::Premul, None);
+        let mut expected = vec![0u8; 17 * 13 * 4];
+        assert!(surface.read_pixels(&info, &mut expected, 17 * 4, (0, 0)));
+        assert!(
+            expected
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] > 0 && pixel[3] < 97)
+        );
+        let result = encode_surface(surface, "raw_rgba_premul", 90).expect("raw fragment");
+        assert_eq!(result.bytes.as_bytes(), expected.as_slice());
+        assert_eq!((result.width, result.height), (17, 13));
+        assert_eq!(result.media_type, "application/octet-stream");
+        assert_eq!(result.filename, "fragment.rgba");
     }
 
     #[test]

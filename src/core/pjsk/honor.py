@@ -1,14 +1,19 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.honor.drawer import try_render_full_honor_payload
 from src.sekai.honor.model import HonorRequest
 
-router = APIRouter(tags=["Honor"])
+router = APIRouter(tags=["Honor"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("", summary="Generate honor image")
+@router.post(
+    "",
+    summary="Generate honor image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def honor(request: HonorRequest):
     """
     Generate an honor/badge image.

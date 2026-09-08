@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import json
+import logging
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,6 +26,19 @@ from fastapi import HTTPException
 from PIL import Image, ImageChops, ImageDraw
 import pytest
 
+from src.core.debug import pop_request_context, push_request_context
+from src.sekai.profile.custom_profile.card_prefab import (
+    CardAlphaMaskOp,
+    CardFontRef,
+    CardRectOp,
+    CardSpriteOp,
+    CardSpriteRef,
+    CardTextOp,
+    PillowCardAdapter,
+)
+from src.sekai.profile.custom_profile.renderer import DirectSdfAtlasQuad, DirectSdfFontQuad
+from src.sekai.skia_renderer.render_stats import OUTCOME_ERROR
+
 try:
     import haruki_skia_renderer as _native
 except ImportError:  # pragma: no cover - extension not built
@@ -32,8 +46,6 @@ except ImportError:  # pragma: no cover - extension not built
 
 from src.core.image_payload import EncodedImagePayload
 from src.core.pillow_telemetry import (
-    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
-    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
     begin_pillow_touch_scope,
     end_pillow_touch_scope,
     take_pillow_touch_snapshot,
@@ -47,7 +59,6 @@ from src.sekai.profile.custom_profile.renderer import (
     LayerTransformInputs,
     NativeContent,
     PNGRenderer,
-    RenderedLayer,
 )
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.profile.custom_profile.skia import (
@@ -65,9 +76,13 @@ PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card.json
 
 @pytest.fixture(autouse=True)
 def _clean_stats():
+    tokens = push_request_context("test", "/api/pjsk/profile/custom-profile-card", "POST")
     reset_render_stats()
-    yield
-    reset_render_stats()
+    try:
+        yield
+    finally:
+        reset_render_stats()
+        pop_request_context(tokens)
 
 
 def _request() -> CustomProfileCardRenderRequest:
@@ -106,18 +121,27 @@ def _walk_ir_nodes(nodes):
 
 
 def test_missing_native_extension_records_fallback(monkeypatch):
-    """ImportError (missing wheel OR IR_CAPABILITY < 8) -> None + exactly one fallback."""
+    """ImportError (missing wheel or stale capability) -> None + exactly one fallback."""
     monkeypatch.setattr(skia_mod, "skia_plot_enabled", lambda: True)
+    persisted = []
 
     def _no_wheel():
         raise ImportError("haruki_skia_renderer not built")
 
     monkeypatch.setattr(skia_mod, "load_native_renderer", _no_wheel)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
 
     assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
     stats = _endpoint_stats()
     assert stats["fallback"] == 1
     assert stats["total"] == 1
+    assert len(persisted) == 1
+    assert persisted[0]["stage"] == "renderer_load"
+    assert persisted[0]["error_type"] == "ImportError"
 
 
 def test_disabled_gate_records_disabled_without_loading_native(monkeypatch):
@@ -134,7 +158,7 @@ def test_disabled_gate_records_disabled_without_loading_native(monkeypatch):
     assert stats["total"] == 1
 
 
-def test_pool_render_exception_is_contained_and_recorded(monkeypatch):
+def test_pool_render_exception_is_contained_and_recorded(monkeypatch, caplog):
     """FAIL-OPEN: nothing escaping the pool render may propagate — the route depends on None to
     reach the Pillow compose that raises the canonical user-visible error.
 
@@ -159,11 +183,17 @@ def test_pool_render_exception_is_contained_and_recorded(monkeypatch):
 
     monkeypatch.setattr(skia_mod, "_build_scene", _explode)
 
-    assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        assert asyncio.run(try_render_custom_profile_card_payload(_request())) is None
     stats = _endpoint_stats()
     assert stats["error"] == 1
     assert stats["total"] == 1
+    assert sum(stats["errors_by_stage"].values()) == 1
     assert not _Native.called
+    errors = [record for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert "committed_error stage=" in errors[0].message
 
 
 def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp_path):
@@ -184,7 +214,7 @@ def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp
         elements_total=1,
         visible_elements=1,
         missing_elements=1,
-        issues=[{"kind": "stamp", "status": "missing", "data_id": 1, "layer": 2}],
+        classifications_by_kind={"stamp": {"missing": 1}},
     )
     monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _Native())
     monkeypatch.setattr(skia_mod, "_build_scene", lambda renderer, card: (b"{}", {}, report))
@@ -197,7 +227,7 @@ def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp
     assert not _Native.called
 
 
-def test_sdf_quad_mem_field_records_pillow_touch():
+def test_sdf_quad_mem_field_rejects_pillow_field():
     token = begin_pillow_touch_scope()
     try:
         scene = skia_mod._SceneAssembler(skia_mod._new_builder(8, 8), (8, 8), 1024)
@@ -209,12 +239,13 @@ def test_sdf_quad_mem_field_records_pillow_touch():
             underlay=None,
         )
         quad = SimpleNamespace(field=Image.new("L", (2, 2), 255), left=1, top=1, scalars=scalars)
-        scene.emit_sdf_quads([quad])
+        assert not scene.emit_sdf_quads([quad])
         snapshot = take_pillow_touch_snapshot()
     finally:
         end_pillow_touch_scope(token)
 
-    assert snapshot.counts[PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER] == 1
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
 
 
 def test_unsupported_content_is_incomplete_without_allocating_legacy_layers():
@@ -529,7 +560,7 @@ def test_honor_subscene_does_not_reenter_pillow_for_an_unsupported_neighbor(
     assert report.unresolved_elements == 1
 
 
-def test_old_native_wheel_header_probe_stays_telemetry_hybrid(tmp_path, monkeypatch):
+def test_old_native_wheel_header_probe_rejects_without_pillow(tmp_path, monkeypatch):
     asset_path = tmp_path / "badge.png"
     Image.new("RGBA", (17, 9), (20, 40, 80, 255)).save(asset_path)
     monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
@@ -541,14 +572,13 @@ def test_old_native_wheel_header_probe_stays_telemetry_hybrid(tmp_path, monkeypa
 
     token = begin_pillow_touch_scope()
     try:
-        ref = skia_mod._header_only_asset_ref(asset_path, "badge.png")
+        with pytest.raises(skia_mod._NativeAssetInfoUnavailable):
+            skia_mod._header_only_asset_ref(asset_path, "badge.png")
         snapshot = take_pillow_touch_snapshot()
     finally:
         end_pillow_touch_scope(token)
 
-    assert ref.size == (17, 9)
-    assert snapshot.native_purity == "hybrid"
-    assert snapshot.counts[PILLOW_TOUCH_IMAGE_HEADER_PROBE] == 1
+    assert snapshot.counts == {}
 
 
 @pytest.mark.skipif(
@@ -631,14 +661,11 @@ def test_native_honor_declines_when_a_supplied_overlay_is_missing(tmp_path, monk
             path = Path(raw_path)
             return path.resolve() if path.is_file() else None
 
-        def render_content_for_card(self, content):
-            return RenderedLayer(content, "unresolved", None)
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("failed native honor preflight must decline before Pillow")
 
         def record_native_audit(self, *args):
             return None
-
-        def is_decorative_text_item(self, item):
-            return False
 
     ir_json, mem_images, report = _build_scene(_Renderer(), {})
     nodes = json.loads(ir_json)["root"]["children"]
@@ -1107,12 +1134,12 @@ def test_route_serves_the_skia_payload_without_composing(monkeypatch):
     )
 
     async def fake_try_render(request):
-        return payload
+        return skia_mod.CustomProfileSkiaAttempt(payload, "skia")
 
     async def _must_not_compose(request):  # pragma: no cover - must not run
         raise AssertionError("compose must not run when Skia produced a payload")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_try_render)
     monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", _must_not_compose)
 
     response = asyncio.run(route_mod.custom_profile_card(_request()))
@@ -1122,12 +1149,12 @@ def test_route_serves_the_skia_payload_without_composing(monkeypatch):
 
 def test_route_rejects_declined_native_render_without_pillow(monkeypatch):
     async def fake_try_render(request):
-        return None
+        return skia_mod.CustomProfileSkiaAttempt(None, "fallback")
 
     async def must_not_compose(request):
         raise AssertionError("Pillow fallback must not run")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_try_render)
     monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", must_not_compose)
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(route_mod.custom_profile_card(_request()))
@@ -1139,7 +1166,7 @@ def test_route_preserves_the_value_error_400(monkeypatch):
     async def fake_try_render(request):
         raise ValueError("bad card")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", fake_try_render)
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_try_render)
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(route_mod.custom_profile_card(_request()))
     assert excinfo.value.status_code == 400
@@ -1169,7 +1196,6 @@ def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
     async def _must_not_render(request):  # pragma: no cover - must not run
         raise AssertionError("validation must run before either renderer")
 
-    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_payload", _must_not_render)
     monkeypatch.setattr("src.sekai.profile.custom_profile.drawer.compose_custom_profile_card_image", _must_not_render)
 
     with pytest.raises(HTTPException) as excinfo:
@@ -1195,7 +1221,12 @@ def test_native_end_to_end_renders_the_real_payload(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
     request = CustomProfileCardRenderRequest.model_validate(json.loads(PAYLOAD_FILE.read_text(encoding="utf-8")))
 
-    payload = asyncio.run(try_render_custom_profile_card_payload(request))
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(try_render_custom_profile_card_payload(request))
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
     assert payload is not None, "the real parity payload must render via Skia, not fall back"
     assert payload.media_type == "image/png"
     assert payload.backend == "skia"
@@ -1207,6 +1238,13 @@ def test_native_end_to_end_renders_the_real_payload(monkeypatch):
     stats = _endpoint_stats()
     assert stats["skia"] == 1
     assert stats["total"] == 1
+    assert stats["native_pure"] == 1
+    assert stats["native_hybrid"] == 0
+    assert stats["pillow_touch_reasons"] == {}
+    assert pillow_touches.counts == {}
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert payload.native_metrics["custom_profile_mem_images"] == 0
+    assert payload.native_metrics["custom_profile_mem_bytes"] == 0
 
 
 @pytest.mark.skipif(
@@ -1290,3 +1328,1420 @@ def test_native_sdf_shape_matches_pillow_without_mem_transport(monkeypatch):
     assert mean <= 0.5
     assert local_mean <= 2.0, local_mean
     assert local_p99 <= 25, local_p99
+
+
+def test_route_records_final_5xx_class_for_committed_skia_error(monkeypatch):
+    persisted = []
+
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="native_render",
+            error_type="RuntimeError",
+        )
+
+    async def fake_compose(request):
+        raise RuntimeError("fallback failed")
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
+    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose, raising=False)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(route_mod.custom_profile_card(_request()))
+    assert excinfo.value.status_code == 500
+    assert len(persisted) == 1
+    assert persisted[0]["final_http_status"] == 500
+
+
+def test_route_records_skia_error_without_pillow_recovery(monkeypatch, caplog):
+    persisted = []
+
+    async def fake_attempt(request):
+        return skia_mod.CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="native_render",
+            error_type="RuntimeError",
+        )
+
+    async def fake_compose(request):
+        return Image.new("RGBA", (8, 8), (255, 0, 0, 128))
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_attempt)
+    monkeypatch.setattr(route_mod, "compose_custom_profile_card_image", fake_compose, raising=False)
+    monkeypatch.setattr(
+        skia_mod,
+        "persist_custom_profile_diagnostic",
+        lambda **kwargs: persisted.append(kwargs) or True,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        with pytest.raises(HTTPException) as error:
+            asyncio.run(route_mod.custom_profile_card(_request()))
+    assert error.value.status_code == 500
+    stats = _endpoint_stats()
+    assert stats["error"] == 1
+    assert stats["errors_by_stage"] == {"native_render": 1}
+    errors = [record for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert "committed_error stage=native_render error_type=RuntimeError" in errors[0].message
+    assert len(persisted) == 1
+    assert persisted[0]["final_http_status"] == 500
+
+
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "ASSET_INFO_CAPABILITY", 0) < 1,
+    reason="asset-backed bonds honor renderer is required",
+)
+@pytest.mark.parametrize("is_main_honor", [False, True], ids=["sub", "main"])
+def test_bonds_honor_category_only_fixture_is_native_pixel_pure(is_main_honor, tmp_path, monkeypatch):
+    from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets
+    from src.sekai.honor.model import HonorRequest
+    import src.sekai.skia_renderer.canvas as canvas_mod
+
+    badge_size = (380, 80) if is_main_honor else (180, 80)
+    paths = {
+        name: tmp_path / f"{name}.png" for name in ("left", "right", "one", "two", "mask", "frame", "word", "lv", "lv6")
+    }
+
+    left = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(left).rounded_rectangle(
+        (0, 0, badge_size[0] - 1, badge_size[1] - 1),
+        radius=12,
+        fill=(34, 91, 178, 239),
+    )
+    right = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(right).polygon(
+        ((0, 0), (badge_size[0] - 1, 0), (badge_size[0] - 20, badge_size[1] - 1), (18, badge_size[1] - 1)),
+        fill=(207, 69, 136, 219),
+    )
+    one = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(one).ellipse((4, 4, 95, 95), fill=(246, 197, 65, 232), outline=(255, 255, 255, 255), width=4)
+    two = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
+    ImageDraw.Draw(two).rounded_rectangle(
+        (6, 6, 93, 93),
+        radius=18,
+        fill=(76, 211, 172, 221),
+        outline=(255, 255, 255, 255),
+        width=4,
+    )
+    mask = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (3, 3, badge_size[0] - 4, badge_size[1] - 4),
+        radius=13,
+        fill=(255, 255, 255, 224),
+    )
+    frame = Image.new("RGBA", badge_size, (0, 0, 0, 0))
+    ImageDraw.Draw(frame).rounded_rectangle(
+        (1, 1, badge_size[0] - 2, badge_size[1] - 2),
+        radius=12,
+        outline=(250, 250, 255, 211),
+        width=3,
+    )
+    word = Image.new("RGBA", (92, 24), (0, 0, 0, 0))
+    ImageDraw.Draw(word).rounded_rectangle((0, 0, 91, 23), radius=5, fill=(255, 238, 145, 203))
+    lv = Image.new("RGBA", (22, 22), (255, 213, 66, 221))
+    lv6 = Image.new("RGBA", (22, 22), (238, 89, 142, 221))
+    images = {
+        "bonds_bg": left,
+        "bonds_bg2": right,
+        "chara_icon_1": one,
+        "chara_icon_2": two,
+        "mask_img": mask,
+        "frame_img": frame,
+        "word_img": word if is_main_honor else None,
+        "lv_img": lv,
+        "lv6_img": lv6,
+    }
+    for key, image in {
+        "left": left,
+        "right": right,
+        "one": one,
+        "two": two,
+        "mask": mask,
+        "frame": frame,
+        "word": word,
+        "lv": lv,
+        "lv6": lv6,
+    }.items():
+        image.save(paths[key])
+
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+    request_payload = {
+        "honor_type": "bonds",
+        "honor_level": 7,
+        "honor_rarity": "highest",
+        "is_main_honor": is_main_honor,
+        "bonds_bg_path": paths["left"].as_posix(),
+        "bonds_bg_path2": paths["right"].as_posix(),
+        "chara_icon_path": paths["one"].as_posix(),
+        "chara_icon_path2": paths["two"].as_posix(),
+        "mask_img_path": paths["mask"].as_posix(),
+        "frame_img_path": paths["frame"].as_posix(),
+        "lv_img_path": paths["lv"].as_posix(),
+        "lv6_img_path": paths["lv6"].as_posix(),
+    }
+    if is_main_honor:
+        request_payload["word_img_path"] = paths["word"].as_posix()
+    honor_request = HonorRequest.model_validate(request_payload)
+    angle = 9.0
+    object_data = {
+        "visible": True,
+        "position": {"x": 71.5, "y": -42.25},
+        "scale": {"x": 0.86, "y": 1.09},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(
+        layer=1,
+        kind="bonds_honor",
+        item={"id": 456, "fullSize": is_main_honor, "wordId": 0, "inverse": False},
+        object_data=object_data,
+    )
+    slot_key = f"456:7:{'main' if is_main_honor else 'sub'}:0:normal"
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = 1.113
+        position_scale_y = 1.087
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def __init__(self):
+            self.bonds_honor_requests = {slot_key: request_payload}
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def user_bonds_honor_level_for(self, honor_id):
+            return 7
+
+        def bonds_honor_slot_key(
+            self,
+            honor_id,
+            level,
+            full_size,
+            word_id,
+            inverse,
+            use_unit_virtual_singer=False,
+        ):
+            assert not use_unit_virtual_singer
+            return f"{honor_id}:{level}:{'main' if full_size else 'sub'}:{word_id}:{'reverse' if inverse else 'normal'}"
+
+        def resolve_request_asset_path(self, raw_path):
+            path = Path(raw_path)
+            return path.resolve() if path.is_file() else None
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible bonds honor must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {"bonds_honor": {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+    scene = json.loads(ir_json)
+    assert any(node.get("blend") == "paste_lerp" for node in _walk_ir_nodes(scene["root"]["children"]))
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+    pillow_badge = compose_full_honor_image_from_loaded_assets(honor_request, images)
+    assert pillow_badge is not None
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (pillow_badge, (pillow_badge.width / 2.0, pillow_badge.height / 2.0)),
+        object_data,
+        "bonds_honor",
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
+
+    assert mean <= 3.5, (is_main_honor, mean, p99)
+    assert p99 <= 35, (is_main_honor, mean, p99)
+
+
+def test_prepare_native_card_display_list_accepts_optional_and_supported_rects(tmp_path, monkeypatch):
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    optional = CardSpriteOp(CardSpriteRef("optional"), (0.0, 0.0, 1.0, 1.0))
+    square_src = CardRectOp((0.0, 0.0, 2.0, 2.0), (1, 2, 3, 128))
+    rounded_src_over = CardRectOp(
+        (0.0, 0.0, 2.0, 2.0),
+        (1, 2, 3, 128),
+        blend="src_over",
+        radius=1.0,
+    )
+
+    prepared = skia_mod._prepare_native_card_display_list(
+        CardDisplayList("full", (20, 10), (optional, square_src, rounded_src_over)),
+        None,
+    )
+
+    assert prepared is not None
+    assert prepared.asset_paths == {}
+    assert prepared.text_placements == {}
+
+
+def test_prepare_native_card_display_list_declines_incompatible_ready_ops(tmp_path, monkeypatch):
+    asset_root = tmp_path / "assets"
+    asset_root.mkdir()
+    ready_path = asset_root / "ready.png"
+    outside_path = tmp_path / "outside.png"
+    Image.new("RGBA", (2, 2)).save(ready_path)
+    Image.new("RGBA", (2, 2)).save(outside_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    class _Metrics:
+        @staticmethod
+        def anchor_placement(**_kwargs):  # pragma: no cover - rejected before measurement
+            raise AssertionError("incompatible text must not be measured")
+
+    invalid_ops = (
+        CardCoverArtOp(ready_path, (20.0, 10.0), cover_align=(0.0, 0.5)),
+        CardSpriteOp(CardSpriteRef("outside", path=outside_path), (0.0, 0.0, 1.0, 1.0)),
+        CardTextOp(
+            "wrong font",
+            (0.0, 0.0),
+            12,
+            (255, 255, 255, 255),
+            font=CardFontRef(name="other"),
+        ),
+        CardTextOp(
+            "not bold",
+            (0.0, 0.0),
+            12,
+            (255, 255, 255, 255),
+            font=CardFontRef(bold=False),
+        ),
+        object(),
+    )
+
+    for op in invalid_ops:
+        assert skia_mod._prepare_native_card_display_list(CardDisplayList("full", (20, 10), (op,)), _Metrics()) is None
+
+
+@pytest.mark.parametrize(
+    "op",
+    [
+        CardCoverArtOp(Path("missing.png"), (20.0, 10.0)),
+        CardSpriteOp(CardSpriteRef("required", resource_policy="required"), (0.0, 0.0, 1.0, 1.0)),
+        CardTextOp("missing metrics", (0.0, 0.0), 12, (255, 255, 255, 255)),
+        CardRectOp((0.0, 0.0, 2.0, 2.0), (1, 2, 3, 128), radius=1.0),
+        CardAlphaMaskOp(CardSpriteRef("mask")),
+    ],
+)
+def test_prepare_native_card_display_list_declines_unsupported_ops(tmp_path, monkeypatch, op):
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    assert skia_mod._prepare_native_card_display_list(CardDisplayList("full", (20, 10), (op,)), None) is None
+
+
+def test_prepare_native_card_display_list_resolves_cover_sprite_and_text(tmp_path, monkeypatch):
+    asset_root = tmp_path / "assets"
+    art_path = asset_root / "art.png"
+    fallback_path = asset_root / "fallback.png"
+    art_path.parent.mkdir(parents=True)
+    Image.new("RGBA", (2, 2), (1, 2, 3, 255)).save(art_path)
+    Image.new("RGBA", (2, 2), (4, 5, 6, 255)).save(fallback_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", asset_root)
+
+    cover = CardCoverArtOp(art_path, (20.0, 10.0))
+    sprite = CardSpriteOp(CardSpriteRef("fallback", fallback_path=fallback_path), (0.0, 0.0, 2.0, 2.0))
+    text = CardTextOp("native", (3.0, 4.0), 12, (255, 255, 255, 255))
+
+    class _Metrics:
+        @staticmethod
+        def anchor_placement(**kwargs):
+            assert kwargs == {"text": "native", "pos": (3.0, 4.0), "size": 12, "anchor": None}
+            return "mm", 8.5
+
+    prepared = skia_mod._prepare_native_card_display_list(
+        CardDisplayList("full", (20, 10), (cover, sprite, text)),
+        _Metrics(),
+    )
+
+    assert prepared is not None
+    assert prepared.asset_paths == {id(cover): "art.png", id(sprite): "fallback.png"}
+    assert prepared.text_placements == {id(text): ("mm", 8.5)}
+
+
+def test_native_honor_deck_declines_missing_plan_and_invalid_transform(monkeypatch):
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.0
+        position_scale_y = 1.0
+
+        def __init__(self):
+            self.profile_context = {"userProfileHonors": [{"seq": 1}]}
+
+        @staticmethod
+        def image_resource_for(kind, item):
+            return {"fileName": "HonorDeck"}
+
+        def center_rect(self, parent_size, center, size):
+            return PNGRenderer.center_rect(self, parent_size, center, size)
+
+        @staticmethod
+        def unity_ui_sprite_path(name):
+            return None
+
+    renderer = _Renderer()
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 1024)
+    content = NativeContent(1, "general", {}, {"visible": True})
+    real_build_plan = skia_mod.build_honor_deck_plan
+
+    monkeypatch.setattr(skia_mod, "build_honor_deck_plan", lambda rows: None)
+    assert skia_mod._emit_native_honor_deck(renderer, content, scene) is None
+
+    monkeypatch.setattr(skia_mod, "build_honor_deck_plan", real_build_plan)
+
+    def fake_badge(renderer, row, *, full_size):
+        width = 380 if full_size else 180
+        badge_builder = skia_mod._new_builder(width, 80)
+        badge_builder.rect((0, 0), (width, 80), fill=(20, 40, 80, 255))
+        return "ready", _native_subtree_from_builder(badge_builder)
+
+    monkeypatch.setattr(skia_mod, "_native_profile_honor_badge", fake_badge)
+    content.object_data["scale"] = {"x": math.nan, "y": 1}
+    assert skia_mod._emit_native_honor_deck(renderer, content, scene) is None
+    assert builder.build()["root"]["children"] == []
+
+
+def test_native_honor_deck_declines_background_outside_asset_root(monkeypatch):
+    def fake_badge(renderer, row, *, full_size):
+        width = 380 if full_size else 180
+        badge = skia_mod._new_builder(width, 80)
+        badge.rect((0, 0), (width, 80), fill=(20, 40, 80, 255))
+        return "ready", _native_subtree_from_builder(badge)
+
+    monkeypatch.setattr(skia_mod, "_native_profile_honor_badge", fake_badge)
+
+    class _Renderer:
+        def __init__(self):
+            self.profile_context = {"userProfileHonors": [{"seq": 1}]}
+
+        @staticmethod
+        def image_resource_for(kind, item):
+            return {"fileName": "HonorDeck"}
+
+        def center_rect(self, parent_size, center, size):
+            return PNGRenderer.center_rect(self, parent_size, center, size)
+
+        @staticmethod
+        def unity_ui_sprite_path(name):
+            return Path("/outside-assets/honor-panel.png")
+
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 1024)
+    content = NativeContent(1, "general", {}, {"visible": True})
+
+    assert skia_mod._emit_native_honor_deck(_Renderer(), content, scene) is None
+    assert builder.build()["root"]["children"] == []
+
+
+def test_native_honor_deck_resizes_badge_natively(monkeypatch):
+    badge = skia_mod._new_builder(10, 10)
+    badge.rect((0, 0), (10, 10), fill=(20, 40, 80, 255))
+    monkeypatch.setattr(
+        skia_mod,
+        "_native_profile_honor_badge",
+        lambda renderer, row, *, full_size: ("ready", _native_subtree_from_builder(badge)),
+    )
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = position_scale_y = 1.0
+        unity_ui_sprite_path = staticmethod(lambda _: None)
+        unity_point = staticmethod(lambda _: (160, 90))
+
+        def __init__(self):
+            self.profile_context = {"userProfileHonors": [{"seq": 1}]}
+
+        @staticmethod
+        def image_resource_for(kind, item):
+            return {"fileName": "HonorDeck"}
+
+        def center_rect(self, parent_size, center, size):
+            return PNGRenderer.center_rect(self, parent_size, center, size)
+
+    builder = skia_mod._new_builder(320, 180)
+    scene = skia_mod._SceneAssembler(builder, (320, 180), 1024)
+    content = NativeContent(1, "general", {}, {"visible": True})
+
+    assert skia_mod._emit_native_honor_deck(_Renderer(), content, scene) == "native"
+    assert "pillow_lanczos" in json.dumps(builder.build())
+    assert scene.mem_images == {}
+
+
+def test_native_profile_honor_badge_classifies_candidate_outcomes(monkeypatch):
+    keys = SimpleNamespace(profile_keys=("profile", "duplicate"), ordinary_keys=("ordinary",))
+    monkeypatch.setattr(skia_mod, "honor_deck_request_candidates", lambda **kwargs: keys)
+    renderer = SimpleNamespace(profile_honor_requests={}, honor_requests={})
+
+    assert skia_mod._native_profile_honor_badge(renderer, {}, full_size=False) == ("missing", None)
+
+    payload = {"honor_type": "normal"}
+    renderer.profile_honor_requests = {"profile": payload, "duplicate": payload}
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda value, request: ("unrenderable", None))
+    assert skia_mod._native_profile_honor_badge(renderer, {}, full_size=False) == ("missing", None)
+
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda value, request: ("hybrid", None))
+    assert skia_mod._native_profile_honor_badge(renderer, {}, full_size=False) == ("hybrid", None)
+
+    badge_builder = skia_mod._new_builder(180, 80)
+    badge_builder.rect((0, 0), (180, 80), fill=(20, 40, 80, 255))
+    badge = _native_subtree_from_builder(badge_builder)
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda value, request: ("ready", badge))
+    assert skia_mod._native_profile_honor_badge(renderer, {}, full_size=False) == ("ready", badge)
+
+
+def test_native_honor_decline_paths_leave_scene_untouched(monkeypatch):
+    builder = skia_mod._new_builder(100, 100)
+    scene = skia_mod._SceneAssembler(builder, (100, 100), 1024)
+    content = NativeContent(1, "honor", {}, {"visible": False})
+
+    assert not skia_mod._emit_native_honor(SimpleNamespace(), content, scene)
+
+    content.object_data["visible"] = True
+    candidate_result = None
+    monkeypatch.setattr(skia_mod, "_native_honor_candidates", lambda renderer, value: candidate_result)
+    assert not skia_mod._emit_native_honor(SimpleNamespace(), content, scene)
+
+    candidate_result = iter([None, object()])
+    assert not skia_mod._emit_native_honor(SimpleNamespace(), content, scene)
+
+    request = skia_mod.HonorRequest(honor_type="normal")
+    candidate_result = iter([request])
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda renderer, value: ("unrenderable", None))
+    assert not skia_mod._emit_native_honor(SimpleNamespace(), content, scene)
+
+    candidate_result = iter([request])
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda renderer, value: ("hybrid", None))
+    assert not skia_mod._emit_native_honor(SimpleNamespace(), content, scene)
+    assert builder.build()["root"]["children"] == []
+
+
+def test_native_honor_declines_invalid_scale_before_mutating_scene(monkeypatch):
+    badge_builder = skia_mod._new_builder(180, 80)
+    badge_builder.rect((0, 0), (180, 80), fill=(20, 40, 80, 255))
+    badge = _native_subtree_from_builder(badge_builder)
+    request = skia_mod.HonorRequest(honor_type="normal")
+    monkeypatch.setattr(skia_mod, "_native_honor_candidates", lambda renderer, content: iter([request]))
+    monkeypatch.setattr(skia_mod, "_lower_native_honor_request", lambda renderer, value: ("ready", badge))
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.0
+        position_scale_y = 1.0
+
+        @staticmethod
+        def unity_point(position):
+            return 10.0, 10.0
+
+    builder = skia_mod._new_builder(100, 100)
+    scene = skia_mod._SceneAssembler(builder, (100, 100), 1024)
+    content = NativeContent(1, "honor", {}, {"visible": True, "scale": {"x": -1, "y": 1}})
+
+    assert not skia_mod._emit_native_honor(_Renderer(), content, scene)
+    assert builder.build()["root"]["children"] == []
+
+
+def test_old_native_wheel_declines_honor_without_pillow_header_probe(tmp_path, monkeypatch):
+    asset_path = tmp_path / "badge.png"
+    Image.new("RGBA", (17, 9), (20, 40, 80, 255)).save(asset_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(
+        skia_mod,
+        "load_native_renderer",
+        lambda: SimpleNamespace(IR_CAPABILITY=REQUIRED_NATIVE_IR_CAPABILITY),
+    )
+
+    token = begin_pillow_touch_scope()
+    try:
+        with pytest.raises(skia_mod._NativeAssetInfoUnavailable, match="asset-info"):
+            skia_mod._header_only_asset_ref(asset_path, "badge.png")
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert snapshot.native_purity == "pure"
+    assert snapshot.counts == {}
+
+
+@pytest.mark.parametrize("honor_type", ["normal", "birthday"])
+def test_unsupported_element_cannot_allocate_mem_before_native_honor(
+    honor_type,
+    tmp_path,
+    monkeypatch,
+):
+    import src.sekai.skia_renderer.canvas as canvas_mod
+
+    base_path = tmp_path / f"{honor_type}_base.png"
+    frame_path = tmp_path / f"{honor_type}_frame.png"
+    Image.new("RGBA", (100, 40), (30, 80, 160, 255)).save(base_path)
+    Image.new("RGBA", (100, 40), (255, 255, 255, 32)).save(frame_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    class _NativeInfo:
+        ASSET_INFO_CAPABILITY = 1
+
+        @staticmethod
+        def asset_image_info(base, relative):
+            path = (Path(base) / relative).resolve()
+            stat = path.stat()
+            return {
+                "width": 100,
+                "height": 40,
+                "mode": "RGBA",
+                "mtime_ns": stat.st_mtime_ns,
+                "file_size": stat.st_size,
+            }
+
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: _NativeInfo())
+
+    unsupported = NativeContent(
+        layer=1,
+        kind="card_member",
+        item={"id": 9},
+        object_data={"visible": True},
+    )
+    honor = NativeContent(
+        layer=2,
+        kind="honor",
+        item={"id": 123, "fullSize": False},
+        object_data={
+            "visible": True,
+            "position": {"x": 5, "y": 6},
+            "scale": {"x": 0.75, "y": 1.25},
+            "rotation": {"z": 0, "w": 1},
+        },
+    )
+
+    class _Renderer:
+        rotation_sign = -1
+        position_scale_x = 1.1
+        position_scale_y = 1.2
+        tmp_decorative_alpha_harden = 1.0
+
+        def __init__(self):
+            self.honor_requests = {}
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [unsupported, honor]
+
+        def user_honor_level_for(self, honor_id):
+            assert honor_id == 123
+            return 2
+
+        def honor_slot_key(self, honor_id, level, full_size):
+            return f"{honor_id}:{level}:{'main' if full_size else 'sub'}"
+
+        def build_masterdata_honor_request(self, honor_id, level, full_size):
+            assert (honor_id, level, full_size) == (123, 2, False)
+            return skia_mod.HonorRequest(
+                honor_type=honor_type,
+                honor_level=2,
+                is_main_honor=False,
+                honor_img_path=base_path.as_posix(),
+                frame_img_path=frame_path.as_posix(),
+            )
+
+        def resolve_request_asset_path(self, raw_path):
+            path = Path(raw_path)
+            return path.resolve() if path.is_file() else None
+
+        def unity_point(self, position):
+            return (100.0, 200.0)
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("Skia scene assembly must not invoke the Pillow renderer")
+
+        def record_native_audit(self, *args):
+            return None
+
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(_Renderer(), {})
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+    scene = json.loads(ir_json)
+    subscene = next(node for node in scene["root"]["children"] if node["type"] == "UnitySubscene")
+    subscene_paths = {node["path"] for node in _walk_ir_nodes(subscene["children"]) if node["type"] == "Image"}
+
+    assert mem_images == {}
+    assert subscene["size"] == [100, 40]
+    assert subscene["object_scale"] == [0.75, 1.25]
+    assert subscene["post_scale"] == [1.1, 1.2]
+    assert f"{honor_type}_base.png" in subscene_paths
+    assert f"{honor_type}_frame.png" in subscene_paths
+    assert pillow_touches.counts == {}
+    assert not report.complete
+    assert report.native_elements == 1
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 1
+    assert report.metrics()["classifications_by_kind"] == {
+        "card_member": {"unresolved": 1},
+        "honor": {"native": 1},
+    }
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="current native renderer is required",
+)
+@pytest.mark.parametrize(
+    ("card_kind", "native_size", "cover_size", "crop_align", "blend"),
+    [
+        pytest.param("full", (220, 124), (220.0, 124.0), (0.5, 0.5), "src", id="full"),
+        pytest.param("deck", (96, 132), (96.0, 158.0), (0.5, 0.0), "src_over", id="clip"),
+    ],
+)
+def test_card_member_category_only_fixture_is_native_pixel_pure(
+    card_kind,
+    native_size,
+    cover_size,
+    crop_align,
+    blend,
+    tmp_path,
+    monkeypatch,
+):
+    """Top-level full and clip card members need no whole-profile fixture."""
+
+    asset_path = tmp_path / "category" / f"card_member_{card_kind}.png"
+    asset_path.parent.mkdir(parents=True)
+    source = Image.new("RGBA", (137, 181), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(source)
+    draw.rectangle((4, 6, 130, 175), fill=(36, 102, 191, 218))
+    draw.ellipse((18, 22, 119, 123), fill=(248, 194, 72, 181), outline=(253, 92, 104, 255), width=4)
+    draw.polygon(((9, 169), (68, 77), (128, 169)), fill=(72, 220, 173, 147))
+    source.save(asset_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    display_list = CardDisplayList(
+        card_kind,
+        native_size,
+        (CardCoverArtOp(asset_path, cover_size, crop_align=crop_align, blend=blend),),
+    )
+    angle = -13.0
+    object_data = {
+        "visible": True,
+        "position": {"x": -91.5, "y": 63.25},
+        "scale": {"x": 0.72, "y": 0.58},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(layer=1, kind="card_member", item={"id": 1}, object_data=object_data)
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = PROFILE_RENDER_VIEW_W / 1830.0
+        position_scale_y = PROFILE_RENDER_VIEW_H / 813.0
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def build_card_member_display_list(self, item):
+            return display_list
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible card member must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {"card_member": {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+    adapter = PillowCardAdapter(
+        lambda size, bold: None,
+        lambda *args, **kwargs: False,
+        lambda name: None,
+        lambda path: Image.open(path).convert("RGBA") if path == asset_path else None,
+    )
+    card_image = adapter.render(display_list)
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (card_image, (card_image.width / 2.0, card_image.height / 2.0)),
+        object_data,
+        "card_member",
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
+
+    assert mean <= 3.5, (card_kind, mean, p99)
+    assert p99 <= 40, (card_kind, mean, p99)
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="current native renderer is required",
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "general_background",
+        "story_background",
+        "stand_member",
+        "collection",
+        "other",
+        "character_icon",
+        "material",
+        "user_interface_icon",
+        "stamp",
+    ],
+)
+def test_static_category_only_fixture_is_native_pixel_pure_with_transform(kind, tmp_path, monkeypatch):
+    """Every direct-image category uses the same asset-only scene path.
+
+    This deliberately builds one category element rather than retaining a complete profile
+    request.  The transparent source, non-uniform downscale and rotation cover the operations
+    that the two existing whole-card fixtures do not exercise for every image bucket.
+    """
+
+    asset_path = tmp_path / "category" / f"{kind}.png"
+    asset_path.parent.mkdir(parents=True)
+    source = Image.new("RGBA", (71, 53), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(source)
+    draw.rounded_rectangle((2, 3, 62, 47), radius=9, fill=(34, 126, 211, 181), outline=(245, 92, 61, 255), width=3)
+    draw.polygon(((8, 42), (34, 7), (67, 45)), fill=(242, 205, 72, 137))
+    source.save(asset_path)
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+
+    angle = 17.0
+    object_data = {
+        "visible": True,
+        "position": {"x": 137.25, "y": -69.75},
+        "scale": {"x": 0.63, "y": 0.81},
+        "rotation": {"z": math.sin(math.radians(angle) / 2.0), "w": math.cos(math.radians(angle) / 2.0)},
+    }
+    content = NativeContent(layer=1, kind=kind, item={"id": 1}, object_data=object_data)
+
+    class _Renderer:
+        rotation_sign = 1
+        position_scale_x = PROFILE_RENDER_VIEW_W / 1830.0
+        position_scale_y = PROFILE_RENDER_VIEW_H / 813.0
+        origin_x = PROFILE_RENDER_VIEW_W / 2.0
+        origin_y = PROFILE_RENDER_VIEW_H / 2.0
+
+        def __init__(self):
+            self.stamp_assets = {1: {"imagePath": asset_path.as_posix()}}
+
+        def general_font_path(self):
+            return None
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def image_resource_for(self, content_kind, item):
+            return {"imagePath": asset_path.as_posix()}
+
+        def resource_path(self, resource):
+            return asset_path
+
+        def resolve_request_asset_path(self, raw_path):
+            return asset_path if Path(raw_path) == asset_path else None
+
+        def unity_point(self, position):
+            return (
+                self.origin_x + float(position.get("x", 0.0)) * self.position_scale_x,
+                self.origin_y - float(position.get("y", 0.0)) * self.position_scale_y,
+            )
+
+        def record_native_audit(self, *args):
+            return None
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("eligible direct-image content must not enter the Pillow renderer")
+
+    renderer = _Renderer()
+    token = begin_pillow_touch_scope()
+    try:
+        ir_json, mem_images, report = _build_scene(renderer, {})
+        native_result = _native.render_scene(ir_json, mem_images)
+        pillow_touches = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert report.complete
+    assert report.classifications_by_kind == {kind: {"native": 1}}
+    assert mem_images == {}
+    assert b"mem:" not in ir_json
+    assert pillow_touches.counts == {}
+
+    native_payload = skia_mod.payload_from_native(native_result)
+    native_image = Image.open(BytesIO(native_payload.image_bytes)).convert("RGBA")
+
+    transformer = object.__new__(PNGRenderer)
+    transformer.position_scale_x = renderer.position_scale_x
+    transformer.position_scale_y = renderer.position_scale_y
+    transformer.origin_x = renderer.origin_x
+    transformer.origin_y = renderer.origin_y
+    transformer.rotation_sign = renderer.rotation_sign
+    transformer.canvas_w = int(PROFILE_RENDER_VIEW_W)
+    transformer.canvas_h = int(PROFILE_RENDER_VIEW_H)
+    transformer.clip_canvas_transform = True
+    transformer.max_layer_pixels = 8 * 1024 * 1024
+    transformer.premultiply_alpha_transforms = False
+    prepared = transformer.prepare_transformed_layer(
+        (source, (source.width / 2.0, source.height / 2.0)),
+        object_data,
+        kind,
+        False,
+    )
+    assert prepared is not None
+    pillow_image = Image.new(
+        "RGBA",
+        (int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)),
+        (255, 255, 255, 255),
+    )
+    pillow_image.alpha_composite(prepared.image, prepared.xy)
+
+    mean, p99 = _local_rgb_diff_metrics(pillow_image, native_image)
+
+    # Rotated Custom Profile layers intentionally use one native matrix pass instead of
+    # Pillow's resize + rotate + supersample pipeline. This adversarial transparent fixture
+    # establishes the element-local relaxed budget; the whole-card release budget remains
+    # tighter because unchanged white pixels are included there.
+    assert mean <= 3.1, (kind, mean, p99)
+    assert p99 <= 33, (kind, mean, p99)
+
+
+def test_scene_oversized_tmp_text_uses_sparse_native_quads_before_pillow(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "<line-indent=98.4%><rotate=90>A"},
+        object_data={"visible": True},
+    )
+
+    class _Renderer:
+        tmp_decorative_direct_raster = True
+        is_decorative_text_item = staticmethod(lambda _: True)
+        text_layout = "tmp"
+        tmp_text_render_mode = "sdf"
+
+        def __init__(self):
+            self.direct_calls = []
+            self.audit = []
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("sparse TMP preflight must happen before Pillow rendering")
+
+        def prepare_direct_sdf_quads(self, item, object_data, **kwargs):
+            self.direct_calls.append((item, object_data, kwargs))
+            if not kwargs.get("defer_static_atlas"):
+                raise ValueError("TMP glyph fields exceed remaining native scene memory")
+            return []
+
+        def record_native_audit(self, *args):
+            self.audit.append(args)
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+    renderer = _Renderer()
+
+    _, mem_images, report = _build_scene(renderer, {})
+
+    assert mem_images == {}
+    assert len(renderer.direct_calls) == 2
+    assert renderer.direct_calls[0][2] == {"max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES}
+    assert renderer.direct_calls[1][2] == {
+        "max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES,
+        "defer_static_atlas": True,
+        "defer_dynamic_font": True,
+    }
+    assert renderer.audit[-1][2:] == ("rendered-direct", None)
+    assert report.complete
+    assert report.noop_elements == 1
+
+
+def test_scene_classifies_raw_whitespace_text_as_native_noop(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "   \n\t"},
+        object_data={"visible": True},
+    )
+
+    class _Renderer:
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def generate_text_data(self, item):
+            return SimpleNamespace(text=item["text"])
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("whitespace-only text must not enter the Pillow renderer")
+
+        def record_native_audit(self, *args):
+            return None
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+
+    _, mem_images, report = _build_scene(_Renderer(), {})
+
+    assert mem_images == {}
+    assert report.complete
+    assert report.noop_elements == 1
+    assert report.missing_elements == 0
+    assert report.metrics()["classifications_by_kind"] == {"text": {"noop": 1}}
+
+
+def test_scene_oversized_non_decorative_tmp_uses_sparse_native_quads(monkeypatch):
+    content = NativeContent(
+        layer=1,
+        kind="text",
+        item={"text": "<color=#ffffff>ordinary rich text"},
+        object_data={"visible": True},
+    )
+    quad = object()
+    emitted = []
+
+    class _Renderer:
+        tmp_decorative_direct_raster = True
+        is_decorative_text_item = staticmethod(lambda _: False)
+        text_layout = "tmp"
+        tmp_text_render_mode = "sdf"
+
+        def __init__(self):
+            self.direct_calls = []
+            self.audit = []
+
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return [content]
+
+        def prepare_direct_sdf_quads(self, item, object_data, **kwargs):
+            self.direct_calls.append((item, object_data, kwargs))
+            return [quad]
+
+        def prepare_tmp_sdf_text_layer(self, *args, **kwargs):
+            raise ValueError("TMP glyph fields exceed remaining native scene memory")
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("ordinary rich TMP must try the sparse native path first")
+
+        def record_native_audit(self, *args):
+            self.audit.append(args)
+
+    monkeypatch.setattr(skia_mod, "build_simple_tmp_text_display_list", lambda *_args: None)
+    monkeypatch.setattr(
+        skia_mod._SceneAssembler,
+        "emit_sdf_quads",
+        lambda _scene, quads: emitted.extend(quads) or True,
+    )
+    renderer = _Renderer()
+
+    _, mem_images, report = _build_scene(renderer, {})
+
+    assert mem_images == {}
+    assert renderer.direct_calls == [
+        (
+            content.item,
+            content.object_data,
+            {
+                "defer_static_atlas": True,
+                "defer_dynamic_font": True,
+                "max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES,
+            },
+        )
+    ]
+    assert emitted == [quad]
+    assert renderer.audit[-1][2:] == ("rendered-native", None)
+    assert report.complete
+    assert report.native_elements == 1
+    assert report.noop_elements == 0
+    assert report.hybrid_elements == 0
+    assert report.metrics()["classifications_by_kind"] == {"text": {"native": 1}}
+
+
+def test_native_omikuji_declines_invalid_transform_after_preparation(monkeypatch):
+    prepared = SimpleNamespace(font_path=Path("font.ttf"))
+    monkeypatch.setattr(skia_mod, "_prepare_native_omikuji", lambda *_args: prepared)
+    monkeypatch.setattr(skia_mod, "_native_content_transform", lambda *_args: None)
+
+    assert skia_mod._emit_native_omikuji_collection(object(), object(), object()) is False
+
+
+def test_prepare_native_omikuji_ops_rejects_unavailable_assets_and_decorative_text(monkeypatch):
+    asset_op = skia_mod.OmikujiAssetOp("background", Path("outside.png"), (0, 0, 10, 10))
+    monkeypatch.setattr(skia_mod, "_relative_asset_path", lambda _path: None)
+    assert skia_mod._prepare_native_omikuji_ops([asset_op], object()) is None
+
+    decorative = skia_mod.OmikujiTextOp("text", (0, 0), 12, (0, 0, 0, 255), decorative=True)
+    assert skia_mod._prepare_native_omikuji_ops([decorative], object()) is None
+
+
+def test_native_card_general_declines_failed_cards_and_transform(monkeypatch):
+    content = NativeContent(layer=1, kind="general", item={}, object_data={"visible": True})
+
+    class _Renderer:
+        def general_font_path(self):
+            return None
+
+    renderer = _Renderer()
+    monkeypatch.setattr(skia_mod, "_native_card_general_name", lambda *_args: "LeaderCard")
+    monkeypatch.setattr(skia_mod._NativeGeneralTextMetrics, "create", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_prepare_native_leader_card", lambda *_args: None)
+    assert skia_mod._emit_native_card_general(renderer, content, object()) is None
+
+    monkeypatch.setattr(skia_mod, "_prepare_native_leader_card", lambda *_args: [(object(), (0, 0))])
+    monkeypatch.setattr(skia_mod, "_native_content_transform", lambda *_args: None)
+    assert skia_mod._emit_native_card_general(renderer, content, object()) is None
+
+
+def test_native_card_general_helpers_decline_invalid_decks_and_preparation(monkeypatch):
+    class _Renderer:
+        def __init__(self):
+            self.profile_context = {"userDeck": ["invalid"]}
+
+    renderer = _Renderer()
+    assert skia_mod._prepare_native_leader_card(renderer, None) is None
+    assert skia_mod._profile_deck_display_lists(renderer) is None
+
+    monkeypatch.setattr(skia_mod, "_profile_deck_display_lists", lambda _renderer: None)
+    assert skia_mod._prepare_native_deck_cards(renderer, None) is None
+
+    display_list = SimpleNamespace(size=(10, 10), render_size=None)
+    monkeypatch.setattr(skia_mod, "_profile_deck_display_lists", lambda _renderer: [display_list] * 5)
+    monkeypatch.setattr(skia_mod, "_prepare_native_card_display_list", lambda *_args: None)
+    assert skia_mod._prepare_native_deck_cards(renderer, None) is None
+
+
+def test_native_content_result_declines_quads_rejected_by_scene(monkeypatch):
+    content = NativeContent(layer=1, kind="text", item={}, object_data={"visible": True})
+    for name in (
+        "_emit_native_asset_image",
+        "_emit_native_omikuji_collection",
+        "_emit_native_shape",
+        "_emit_native_card_member",
+        "_emit_native_honor",
+        "_emit_native_simple_tmp_text",
+    ):
+        monkeypatch.setattr(skia_mod, name, lambda *_args: False)
+    monkeypatch.setattr(skia_mod, "_emit_native_card_general", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_emit_native_honor_deck", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_emit_native_general", lambda *_args: None)
+    monkeypatch.setattr(skia_mod, "_is_empty_text_noop", lambda *_args: False)
+    monkeypatch.setattr(skia_mod, "_direct_text_quads", lambda *_args: [object()])
+
+    class _Scene:
+        def emit_sdf_quads(self, _quads):
+            return False
+
+    assert skia_mod._native_content_result(object(), content, _Scene()) is None
+
+
+def test_native_content_result_classifies_hidden_content_without_emitters():
+    content = NativeContent(layer=1, kind="general", item={}, object_data={"visible": False})
+
+    assert skia_mod._native_content_result(object(), content, object()) == ("hidden", "hidden")
+
+
+def test_scene_declines_unsupported_content_without_rendering_pillow_layers():
+    contents = [
+        NativeContent(
+            layer=index,
+            kind="general",
+            item={},
+            object_data={"visible": True},
+        )
+        for index in range(2)
+    ]
+
+    class _Renderer:
+        def native_card_ref(self, card):
+            return {}
+
+        def build_native_contents(self, card):
+            return contents
+
+        def render_content_for_card(self, content):  # pragma: no cover - must not run
+            raise AssertionError("Skia scene assembly must not invoke the Pillow renderer")
+
+        def record_native_audit(self, *args):
+            return None
+
+    _, mem_images, report = _build_scene(_Renderer(), {})
+
+    assert mem_images == {}
+    assert not report.complete
+    assert report.hybrid_elements == 0
+    assert report.unresolved_elements == 2
+    assert report.metrics()["classifications_by_kind"] == {"general": {"unresolved": 2}}
+
+
+def test_sdf_font_quad_emits_registered_font_without_mem_or_pillow_touch(tmp_path: Path, monkeypatch):
+    font_path = tmp_path / "tmp" / "dynamic.ttf"
+    font_path.parent.mkdir()
+    font_path.touch()
+    monkeypatch.setattr(skia_mod, "ASSETS_BASE_DIR", tmp_path)
+    scalars = SimpleNamespace(
+        face_color=(250, 240, 230),
+        face_scale=1.5,
+        face_w=0.35,
+        alpha=0.8,
+        underlay=None,
+    )
+    quad = DirectSdfFontQuad(
+        font_path=font_path,
+        codepoint=ord("A"),
+        sample_size=64.0,
+        bbox=(-2, -48, 40, 8),
+        padding=6,
+        crop_padding=3,
+        field_size=(42, 56),
+        spread=4.9,
+        size=(48, 60),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        left=3,
+        top=4,
+        scalars=scalars,
+    )
+
+    token = begin_pillow_touch_scope()
+    try:
+        scene = skia_mod._SceneAssembler(skia_mod._new_builder(80, 80), (80, 80), 1024)
+        assert scene.emit_sdf_quads([quad])
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    built = scene.builder.build()
+    node = built["root"]["children"][0]
+    font_name = node["font"]["name"]
+    assert built["fonts"]["extra"] == {font_name: str(font_path.resolve())}
+    assert node == {
+        "type": "SdfFontQuad",
+        "font": {"role": "default", "name": font_name, "size": 64.0},
+        "codepoint": ord("A"),
+        "bbox": [-2, -48, 40, 8],
+        "padding": 6,
+        "crop_padding": 3,
+        "field_size": [42, 56],
+        "spread": 4.9,
+        "pos": [3.0, 4.0],
+        "size": [48, 60],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [250, 240, 230],
+            "face_scale": 1.5,
+            "face_w": 0.35,
+            "alpha": 0.8,
+            "underlay": None,
+        },
+    }
+
+
+def test_sdf_atlas_quad_emits_without_mem_or_pillow_touch(monkeypatch):
+    monkeypatch.setattr(skia_mod, "_relative_asset_path", lambda path: "tmp/atlas.png")
+    scalars = SimpleNamespace(
+        face_color=(255, 240, 220),
+        face_scale=1.25,
+        face_w=0.4,
+        alpha=0.75,
+        underlay=None,
+    )
+    quad = DirectSdfAtlasQuad(
+        atlas_path=Path("ignored.png"),
+        atlas_size=(64, 64),
+        crop=(-1, 2, 5, 8),
+        field_size=(7, 9),
+        size=(11, 13),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        left=3,
+        top=4,
+        scalars=scalars,
+    )
+
+    token = begin_pillow_touch_scope()
+    try:
+        scene = skia_mod._SceneAssembler(skia_mod._new_builder(32, 32), (32, 32), 1024)
+        assert scene.emit_sdf_quads([quad])
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    node = scene.builder.build()["root"]["children"][0]
+    assert node == {
+        "type": "SdfAtlasQuad",
+        "path": "tmp/atlas.png",
+        "atlas_size": [64, 64],
+        "crop": [-1, 2, 5, 8],
+        "field_size": [7, 9],
+        "pos": [3.0, 4.0],
+        "size": [11, 13],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [255, 240, 220],
+            "face_scale": 1.25,
+            "face_w": 0.4,
+            "alpha": 0.75,
+            "underlay": None,
+        },
+    }
+
+
+def test_legacy_sdf_quad_is_declined_without_mem_or_pillow_touch():
+    token = begin_pillow_touch_scope()
+    try:
+        scene = skia_mod._SceneAssembler(skia_mod._new_builder(8, 8), (8, 8), 1024)
+        scalars = SimpleNamespace(
+            face_color=(255, 255, 255, 255),
+            face_scale=1.0,
+            face_w=0.5,
+            alpha=1.0,
+            underlay=None,
+        )
+        quad = SimpleNamespace(field=Image.new("L", (2, 2), 255), left=1, top=1, scalars=scalars)
+        emitted = scene.emit_sdf_quads([quad])
+        snapshot = take_pillow_touch_snapshot()
+    finally:
+        end_pillow_touch_scope(token)
+
+    assert not emitted
+    assert snapshot.counts == {}
+    assert scene.mem_images == {}
+    assert scene.builder.build()["root"]["children"] == []
+
+
+def _local_rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tuple[float, int]:
+    assert reference.size == rendered.size
+    white = Image.new("RGBA", reference.size, (255, 255, 255, 255))
+    reference_bbox = ImageChops.difference(reference, white).convert("RGB").getbbox()
+    rendered_bbox = ImageChops.difference(rendered, white).convert("RGB").getbbox()
+    assert reference_bbox is not None
+    assert rendered_bbox is not None
+    content_bbox = (
+        min(reference_bbox[0], rendered_bbox[0]),
+        min(reference_bbox[1], rendered_bbox[1]),
+        max(reference_bbox[2], rendered_bbox[2]),
+        max(reference_bbox[3], rendered_bbox[3]),
+    )
+    histogram = ImageChops.difference(reference, rendered).crop(content_bbox).convert("RGB").histogram()
+    channel_pixels = (content_bbox[2] - content_bbox[0]) * (content_bbox[3] - content_bbox[1]) * 3
+    mean = sum(value * histogram[channel * 256 + value] for channel in range(3) for value in range(256))
+    mean /= channel_pixels
+    threshold = channel_pixels * 0.99
+    seen = 0
+    for value in range(256):
+        seen += sum(histogram[channel * 256 + value] for channel in range(3))
+        if seen >= threshold:
+            return mean, value
+    return mean, 255

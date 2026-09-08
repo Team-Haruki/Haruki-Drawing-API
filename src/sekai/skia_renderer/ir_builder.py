@@ -116,6 +116,50 @@ def _fill_value(value: Color | Node) -> Node | list[int]:
     return value if isinstance(value, dict) else _color(value)
 
 
+def _validate_paste_lerp_image(
+    pos: Vec2,
+    size: Vec2,
+    fit: str,
+    alpha: float,
+    anchor: Vec2,
+    tint: Node | None,
+    shadow: Node | None,
+    source_rect: tuple[float, float, float, float] | None,
+    blur_sigma: float | Vec2 | None,
+) -> None:
+    sigma = (
+        (float(blur_sigma), float(blur_sigma))
+        if isinstance(blur_sigma, (int, float))
+        else (0.0, 0.0)
+        if blur_sigma is None
+        else (float(blur_sigma[0]), float(blur_sigma[1]))
+    )
+    values = tuple(float(value) for value in (*pos, *size, *anchor))
+    left = values[0] - values[2] * values[4]
+    top = values[1] - values[3] * values[5]
+    edges = (left, top, left + values[2], top + values[3])
+    if fit != "stretch":
+        raise ValueError("paste_lerp Image requires fit='stretch'")
+    if not math.isclose(float(alpha), 1.0, abs_tol=1.0e-9):
+        raise ValueError("paste_lerp Image requires alpha=1")
+    if (
+        source_rect is not None
+        or tint is not None
+        or shadow is not None
+        or any(not math.isclose(value, 0.0, abs_tol=1.0e-9) for value in sigma)
+    ):
+        raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
+    if (
+        values[2] <= 0.0
+        or values[3] <= 0.0
+        or any(
+            not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
+            for value in edges
+        )
+    ):
+        raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
+
+
 def _stops(stops: Sequence[tuple[Color, float]]) -> list[Node]:
     return [{"color": _color(c), "pos": float(p)} for c, p in stops]
 
@@ -165,6 +209,16 @@ def text_stroke(color: Color, width: float = 1.0) -> Node:
 def clip_rrect(radius: float, corners: Sequence[bool] = (True, True, True, True)) -> Node:
     """A rounded-rect clip for a Group; the clip rect is the group's offset+size."""
     return {"kind": "rrect", "radius": float(radius), "corners": [bool(c) for c in corners]}
+
+
+def clip_pillow_rrect(radius: float) -> Node:
+    """A discrete Pillow ``ImageDraw.rounded_rectangle`` mask for a Group.
+
+    Unlike :func:`clip_rrect`, this is an integer-pixel mask applied with ``DstIn``. It exists
+    for legacy compositions whose alpha contract is the non-antialiased L-mode mask rather
+    than Skia's coverage-antialiased rounded clip.
+    """
+    return {"kind": "pillow_rrect", "radius": float(radius)}
 
 
 def adaptive_color(
@@ -476,37 +530,7 @@ class IRBuilder:
         if blend not in {"src_over", "src", "paste_lerp"}:
             raise ValueError(f"unsupported Image blend: {blend!r}")
         if blend == "paste_lerp":
-            sigma = (
-                (float(blur_sigma), float(blur_sigma))
-                if isinstance(blur_sigma, (int, float))
-                else (0.0, 0.0)
-                if blur_sigma is None
-                else (float(blur_sigma[0]), float(blur_sigma[1]))
-            )
-            values = tuple(float(value) for value in (*pos, *size, *anchor))
-            left = values[0] - values[2] * values[4]
-            top = values[1] - values[3] * values[5]
-            edges = (left, top, left + values[2], top + values[3])
-            if fit != "stretch":
-                raise ValueError("paste_lerp Image requires fit='stretch'")
-            if float(alpha) != 1.0:
-                raise ValueError("paste_lerp Image requires alpha=1")
-            if (
-                source_rect is not None
-                or tint is not None
-                or shadow is not None
-                or any(value != 0.0 for value in sigma)
-            ):
-                raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
-            if (
-                values[2] <= 0.0
-                or values[3] <= 0.0
-                or any(
-                    not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
-                    for value in edges
-                )
-            ):
-                raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
+            _validate_paste_lerp_image(pos, size, fit, alpha, anchor, tint, shadow, source_rect, blur_sigma)
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),
@@ -796,6 +820,103 @@ class IRBuilder:
             },
         }
         return self._add(node)
+
+    def sdf_atlas_quad(
+        self,
+        *,
+        path: str,
+        atlas_size: Sequence[int],
+        crop: Sequence[int],
+        field_size: Sequence[int],
+        pos: Vec2,
+        size: Sequence[int],
+        affine: Sequence[float],
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """Asset-backed TMP-SDF glyph pipeline.
+
+        Rust extracts the atlas alpha, applies Pillow-compatible BICUBIC crop-resize and affine
+        warp, then uses the same shading scalars as :meth:`sdf_quad`. Python carries only TMP
+        layout and geometry. Requires IR_CAPABILITY >= 18.
+        """
+        if len(atlas_size) != 2 or len(crop) != 4 or len(field_size) != 2 or len(size) != 2 or len(affine) != 6:
+            raise ValueError("invalid SdfAtlasQuad geometry")
+        return self._add(
+            {
+                "type": "SdfAtlasQuad",
+                "path": path,
+                "atlas_size": [int(value) for value in atlas_size],
+                "crop": [int(value) for value in crop],
+                "field_size": [int(value) for value in field_size],
+                "pos": _vec(pos),
+                "size": [int(value) for value in size],
+                "affine": [float(value) for value in affine],
+                "shading": {
+                    "face_color": [int(value) for value in face_color],
+                    "face_scale": float(face_scale),
+                    "face_w": float(face_w),
+                    "alpha": float(alpha),
+                    "underlay": underlay,
+                },
+            }
+        )
+
+    def sdf_font_quad(
+        self,
+        *,
+        font_name: str,
+        codepoint: int,
+        sample_size: float,
+        bbox: Sequence[int],
+        padding: int,
+        crop_padding: int,
+        field_size: Sequence[int],
+        spread: float,
+        pos: Vec2,
+        size: Sequence[int],
+        affine: Sequence[float],
+        face_color: Sequence[int],
+        face_scale: float,
+        face_w: float,
+        alpha: float,
+        underlay: dict[str, Any] | None = None,
+    ) -> Node:
+        """Source-font TMP-SDF glyph pipeline.
+
+        Rust resolves and flattens the registered font glyph, builds its signed-distance field,
+        applies Pillow-compatible BICUBIC crop-resize and affine warp, then shades it like
+        :meth:`sdf_quad`. Requires IR_CAPABILITY >= 19.
+        """
+        if len(bbox) != 4 or len(field_size) != 2 or len(size) != 2 or len(affine) != 6:
+            raise ValueError("invalid SdfFontQuad geometry")
+        if not font_name.strip():
+            raise ValueError("SdfFontQuad needs a registered font name")
+        return self._add(
+            {
+                "type": "SdfFontQuad",
+                "font": {"role": "default", "name": font_name, "size": float(sample_size)},
+                "codepoint": int(codepoint),
+                "bbox": [int(value) for value in bbox],
+                "padding": int(padding),
+                "crop_padding": int(crop_padding),
+                "field_size": [int(value) for value in field_size],
+                "spread": float(spread),
+                "pos": _vec(pos),
+                "size": [int(value) for value in size],
+                "affine": [float(value) for value in affine],
+                "shading": {
+                    "face_color": [int(value) for value in face_color],
+                    "face_scale": float(face_scale),
+                    "face_w": float(face_w),
+                    "alpha": float(alpha),
+                    "underlay": underlay,
+                },
+            }
+        )
 
     def sdf_shape(
         self,
@@ -1148,9 +1269,9 @@ class IRBuilder:
             "fill": _fill_value(fill),
             "shadow_alpha": shadow_alpha,
         }
-        if blur != 4.0:
+        if not math.isclose(blur, 4.0, abs_tol=1.0e-9):
             node["blur"] = float(blur)
-        if shadow_width != 6.0:
+        if not math.isclose(shadow_width, 6.0, abs_tol=1.0e-9):
             node["shadow_width"] = float(shadow_width)
         if tuple(corners) != (True, True, True, True):
             node["corners"] = [bool(c) for c in corners]

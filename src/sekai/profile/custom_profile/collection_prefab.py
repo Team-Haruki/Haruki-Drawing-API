@@ -1,0 +1,241 @@
+"""Renderer-neutral display list for dynamic custom-profile collection prefabs."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal, TypeAlias
+
+Color = tuple[int, int, int, int]
+Rect = tuple[float, float, float, float]
+Sampling = Literal["nearest", "bilinear", "bicubic", "lanczos"]
+AssetPath = str | Path
+
+OMIKUJI_RESULT_NATIVE_SIZE = (1480.0, 490.0)
+OMIKUJI_UNIT_COLORS: Mapping[str, Color] = {
+    "piapro": (51, 204, 187, 255),
+    "light_sound": (68, 85, 221, 255),
+    "idol": (136, 221, 68, 255),
+    "street": (238, 17, 102, 255),
+    "theme_park": (255, 153, 0, 255),
+    "school_refusal": (136, 68, 153, 255),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class OmikujiAssetOp:
+    resource_key: str
+    path: AssetPath
+    rect: Rect
+    sampling: Sampling = "lanczos"
+    blend: Literal["src", "src_over"] = "src_over"
+
+
+@dataclass(frozen=True, slots=True)
+class OmikujiRectOp:
+    rect: Rect
+    fill: Color
+
+
+@dataclass(frozen=True, slots=True)
+class OmikujiTextOp:
+    text: str
+    pos: tuple[float, float]
+    size: int
+    fill: Color
+    anchor: str = "mm"
+    decorative: bool = False
+    rotation: float = 0.0
+
+
+OmikujiOp: TypeAlias = OmikujiAssetOp | OmikujiRectOp | OmikujiTextOp
+
+
+@dataclass(frozen=True, slots=True)
+class OmikujiDisplayList:
+    size: tuple[int, int]
+    ops: tuple[OmikujiOp, ...]
+
+
+def _append_vertical_line(
+    ops: list[OmikujiOp],
+    x: float,
+    y: float,
+    text: str,
+    size: int,
+    fill: Color,
+    *,
+    step: float,
+) -> None:
+    cursor_y = y
+    rotate_chars = {"、", "。", "，", "．", "・", "：", "；", "！", "？", "ー"}
+    small_kana = set("ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
+    for char in str(text or ""):
+        if char in {" ", "\u3000"}:
+            cursor_y += step * 0.5
+            continue
+        if char in rotate_chars:
+            ops.append(
+                OmikujiTextOp(
+                    char,
+                    (x, cursor_y + step * 0.28),
+                    size,
+                    fill,
+                    rotation=90.0,
+                )
+            )
+        else:
+            ops.append(
+                OmikujiTextOp(
+                    char,
+                    (
+                        x - step * 0.08 if char in small_kana else x,
+                        cursor_y + step * 0.16 if char in small_kana else cursor_y,
+                    ),
+                    size,
+                    fill,
+                )
+            )
+        cursor_y += step
+
+
+def _append_summary_ops(
+    ops: list[OmikujiOp],
+    summary: str,
+    *,
+    width: int,
+    height: int,
+    fill: Color,
+) -> None:
+    summary_size = round(height * 36.0 / 490.0)
+    lines = [line for line in summary.splitlines() if line]
+    for index, line in enumerate(lines):
+        _append_vertical_line(
+            ops,
+            width * 1251.0 / 1480.0 - index * width * 44.0 / 1480.0,
+            height * 49.0 / 490.0,
+            line,
+            summary_size,
+            fill,
+            step=height * 29.5 / 490.0,
+        )
+
+
+def _append_result_row_ops(
+    ops: list[OmikujiOp],
+    *,
+    title: str,
+    value: str,
+    title_left: float,
+    width: int,
+    height: int,
+    accent: Color,
+    text_fill: Color,
+) -> None:
+    if not title and not value:
+        return
+    title_top = height * 31.0 / 490.0
+    title_w = width * 44.0 / 1480.0
+    title_h = height * 94.0 / 490.0
+    ops.append(
+        OmikujiRectOp(
+            (
+                round(title_left),
+                round(title_top),
+                round(title_left + title_w),
+                round(title_top + title_h),
+            ),
+            accent,
+        )
+    )
+    clean_title = title.replace(" ", "")
+    if clean_title:
+        _append_vertical_line(
+            ops,
+            title_left + title_w / 2.0,
+            title_top + height * 27.0 / 490.0,
+            clean_title,
+            round(height * 40.0 / 490.0),
+            (255, 255, 255, 255),
+            step=height * 39.0 / 490.0,
+        )
+    if value:
+        _append_vertical_line(
+            ops,
+            title_left - width * 40.0 / 1480.0,
+            height * 55.0 / 490.0,
+            value,
+            round(height * 30.0 / 490.0),
+            text_fill,
+            step=height * 25.0 / 490.0,
+        )
+
+
+def build_omikuji_display_list(
+    omikuji: Mapping[str, object],
+    *,
+    background_path: AssetPath,
+    background_size: tuple[int, int],
+    fortune_path: AssetPath,
+    fortune_size: tuple[int, int],
+) -> OmikujiDisplayList:
+    """Build the complete ``CollectionCustomPrefabContentView`` result card."""
+
+    width, height = (int(background_size[0]), int(background_size[1]))
+    fortune_w, fortune_h = (int(fortune_size[0]), int(fortune_size[1]))
+    if width <= 0 or height <= 0 or fortune_w <= 0 or fortune_h <= 0:
+        raise ValueError("omikuji display-list assets need positive dimensions")
+
+    ops: list[OmikujiOp] = [
+        OmikujiAssetOp("background", background_path, (0, 0, width, height), sampling="nearest", blend="src")
+    ]
+    target_h = max(1, round(height * 300.0 / 490.0))
+    target_w = max(1, round(fortune_w * target_h / fortune_h))
+    fortune_left = round(width * 1309.0 / 1480.0)
+    fortune_top = round(height * 89.0 / 490.0)
+    ops.append(
+        OmikujiAssetOp(
+            "fortune",
+            fortune_path,
+            (fortune_left, fortune_top, fortune_left + target_w, fortune_top + target_h),
+            sampling="lanczos",
+        )
+    )
+
+    text_fill = (79, 79, 79, 255)
+    _append_summary_ops(
+        ops,
+        str(omikuji.get("summary", "") or ""),
+        width=width,
+        height=height,
+        fill=text_fill,
+    )
+
+    rows = (
+        (str(omikuji.get("title3", "") or ""), str(omikuji.get("description3", "") or "")),
+        (str(omikuji.get("title2", "") or ""), str(omikuji.get("description2", "") or "")),
+        (str(omikuji.get("title1", "") or ""), str(omikuji.get("description1", "") or "")),
+    )
+    accent = OMIKUJI_UNIT_COLORS.get(str(omikuji.get("unit", "") or ""), (76, 181, 210, 255))
+    title_lefts = (width * 430.0 / 1480.0, width * 584.0 / 1480.0, width * 736.0 / 1480.0)
+    for (title, value), title_left in zip(rows, title_lefts, strict=True):
+        _append_result_row_ops(
+            ops,
+            title=title,
+            value=value,
+            title_left=title_left,
+            width=width,
+            height=height,
+            accent=accent,
+            text_fill=text_fill,
+        )
+    return OmikujiDisplayList((width, height), tuple(ops))
+
+
+def __getattr__(name):
+    if name in {"PillowOmikujiAdapter", "OmikujiFontFactory", "OmikujiAssetLoader"}:
+        from . import pillow_collection_prefab
+
+        return getattr(pillow_collection_prefab, name)
+    raise AttributeError(name)

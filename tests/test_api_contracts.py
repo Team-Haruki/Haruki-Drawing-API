@@ -77,6 +77,7 @@ def test_inventory_endpoint_is_registered():
 
 
 def test_command_help_render_endpoint_contract():
+    pytest.importorskip("haruki_skia_renderer")
     response = asyncio.run(
         _request(
             "POST",
@@ -95,6 +96,7 @@ def test_command_help_render_endpoint_contract():
 
 
 def test_mysekai_housing_competition_endpoint_contract():
+    pytest.importorskip("haruki_skia_renderer")
     tiny_png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     response = asyncio.run(
         _request(

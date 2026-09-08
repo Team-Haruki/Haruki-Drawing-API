@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.score.drawer import (
@@ -15,10 +16,14 @@ from src.sekai.score.model import (
     ScoreControlRequest,
 )
 
-router = APIRouter(tags=["Score"])
+router = APIRouter(tags=["Score"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/control", summary="Generate score control image")
+@router.post(
+    "/control",
+    summary="Generate score control image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def score_control(request: ScoreControlRequest):
     """
     Generate a score control guide image.
@@ -33,7 +38,11 @@ async def score_control(request: ScoreControlRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/custom-room", summary="Generate custom room score control image")
+@router.post(
+    "/custom-room",
+    summary="Generate custom room score control image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def custom_room_score_control(request: CustomRoomScoreRequest):
     """
     Generate a custom room score control image.
@@ -48,7 +57,11 @@ async def custom_room_score_control(request: CustomRoomScoreRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/music-meta", summary="Generate music meta image")
+@router.post(
+    "/music-meta",
+    summary="Generate music meta image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_meta(request: list[MusicMetaRequest]):
     """
     Generate a music meta info image.
@@ -63,7 +76,11 @@ async def music_meta(request: list[MusicMetaRequest]):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/music-board", summary="Generate music board image")
+@router.post(
+    "/music-board",
+    summary="Generate music board image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def music_board(request: MusicBoardRequest):
     """
     Generate a music leaderboard image.

@@ -117,7 +117,7 @@ jobs:
       # Fonts are OFL/CC licensed and too large to vendor; download once and cache.
       - name: Cache CI fonts
         id: font-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             data/SourceHanSansSC-Regular.otf
@@ -160,7 +160,7 @@ jobs:
         run: uv run maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
       - name: Verify native renderer capability handshake
-        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 28, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+        run: uv run python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 29, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Verify native image codecs without Pillow
         run: uv run python -X gil=0 scripts/skia_codec_smoke.py

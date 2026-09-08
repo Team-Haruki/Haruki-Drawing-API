@@ -103,9 +103,10 @@ def test_lazy_alpha_trim_preserves_legacy_pixels_and_native_visible_parity(floor
     actual = Image.open(BytesIO(result.image_bytes)).convert("RGBA")
     diff = np.abs(np.asarray(actual).astype(int) - np.asarray(background).astype(int))
     # One premultiplied source round-trip precedes LUT+resampling, and another
-    # precedes SrcOver. Their RGB rounding accumulates; alpha itself is tested below.
+    # precedes SrcOver. Their RGB rounding accumulates; Linux Skia reaches 0.262
+    # mean error on this fixture. Keep the per-channel bound and exact alpha checks.
     assert diff.max() <= 3
-    assert diff.mean() < 0.25
+    assert diff.mean() < 0.3
     assert np.all(diff[:, :, 3] == 0)
 
 

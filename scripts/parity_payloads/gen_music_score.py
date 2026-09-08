@@ -55,6 +55,14 @@ DIFFICULTY_ORDER = {"easy": 1, "normal": 2, "hard": 3, "expert": 4, "master": 5,
 # board_helpers.go:62-79
 BOARD_PRIORITY = {"master": 6, "append": 5, "expert": 4, "hard": 3, "normal": 2, "easy": 1}
 BASE_DIFF_ORDER = ["easy", "normal", "hard", "expert", "master"]
+_CAPTION_VIRTUAL_SINGER = "Virtual Singer"
+_CAPTION_ANOTHER_VOCAL = "Another Vocal"
+_CAPTION_ORIGINAL_SONG = "Original Song"
+_CAPTION_CONNECT_LIVE = "Connect Live"
+_CAPTION_APRIL_FOOL = "April Fool"
+_CAPTION_ENSEMBLE_STARS = "Ensemble Stars!! Collab"
+_CAPTION_INSTRUMENTAL = "Inst."
+_TARGET_PT_TIME = "pt/time"
 
 # board_request.go:13-21
 BOARD_PAGE_SIZE = 50
@@ -219,41 +227,41 @@ def _categories(music: dict) -> list[str]:
 _CAPTION_OVERRIDES = {
     "セカイver.": "Sekai",
     "セカイ ver.": "Sekai",
-    "バーチャル・シンガーver.": "Virtual Singer",
-    "バーチャルシンガーver.": "Virtual Singer",
-    "アナザーボーカルver.": "Another Vocal",
-    "原曲ver.": "Original Song",
-    "原曲 ver.": "Original Song",
-    "ストリーミングライブver.": "Connect Live",
-    "ストリーミングライブ ver.": "Connect Live",
-    "エイプリルフールver.": "April Fool",
-    "あんさんぶるスターズ！！コラボver.": "Ensemble Stars!! Collab",
+    "バーチャル・シンガーver.": _CAPTION_VIRTUAL_SINGER,
+    "バーチャルシンガーver.": _CAPTION_VIRTUAL_SINGER,
+    "アナザーボーカルver.": _CAPTION_ANOTHER_VOCAL,
+    "原曲ver.": _CAPTION_ORIGINAL_SONG,
+    "原曲 ver.": _CAPTION_ORIGINAL_SONG,
+    "ストリーミングライブver.": _CAPTION_CONNECT_LIVE,
+    "ストリーミングライブ ver.": _CAPTION_CONNECT_LIVE,
+    "エイプリルフールver.": _CAPTION_APRIL_FOOL,
+    "あんさんぶるスターズ！！コラボver.": _CAPTION_ENSEMBLE_STARS,
     "「劇場版プロジェクトセカイ」ver.": "Movie",
     "sekai ver.": "Sekai",
     "sekai": "Sekai",
-    "virtual singer ver.": "Virtual Singer",
-    "virtual singer": "Virtual Singer",
-    "another vocal ver.": "Another Vocal",
-    "another vocal": "Another Vocal",
-    "original song ver.": "Original Song",
-    "original song": "Original Song",
-    "streaming live ver.": "Connect Live",
-    "streaming live": "Connect Live",
-    "instrumental ver.": "Inst.",
-    "instrumental": "Inst.",
-    "april fool 2022 ver.": "April Fool",
-    "april_fool_2022 ver.": "April Fool",
-    "april_fool_2022": "April Fool",
-    "april fool": "April Fool",
+    "virtual singer ver.": _CAPTION_VIRTUAL_SINGER,
+    _CAPTION_VIRTUAL_SINGER.lower(): _CAPTION_VIRTUAL_SINGER,
+    "another vocal ver.": _CAPTION_ANOTHER_VOCAL,
+    "another vocal": _CAPTION_ANOTHER_VOCAL,
+    "original song ver.": _CAPTION_ORIGINAL_SONG,
+    "original song": _CAPTION_ORIGINAL_SONG,
+    "streaming live ver.": _CAPTION_CONNECT_LIVE,
+    "streaming live": _CAPTION_CONNECT_LIVE,
+    "instrumental ver.": _CAPTION_INSTRUMENTAL,
+    "instrumental": _CAPTION_INSTRUMENTAL,
+    "april fool 2022 ver.": _CAPTION_APRIL_FOOL,
+    "april_fool_2022 ver.": _CAPTION_APRIL_FOOL,
+    "april_fool_2022": _CAPTION_APRIL_FOOL,
+    "april fool": _CAPTION_APRIL_FOOL,
     "sekai version": "Sekai",
-    "virtual singer version": "Virtual Singer",
-    "another vocal version": "Another Vocal",
-    "original song version": "Original Song",
-    "streaming live version": "Connect Live",
-    "instrumental version": "Inst.",
-    "april fool 2022 version": "April Fool",
-    "ensemble stars!! collab": "Ensemble Stars!! Collab",
-    "ensemble stars!! collab ver.": "Ensemble Stars!! Collab",
+    "virtual singer version": _CAPTION_VIRTUAL_SINGER,
+    "another vocal version": _CAPTION_ANOTHER_VOCAL,
+    "original song version": _CAPTION_ORIGINAL_SONG,
+    "streaming live version": _CAPTION_CONNECT_LIVE,
+    "instrumental version": _CAPTION_INSTRUMENTAL,
+    "april fool 2022 version": _CAPTION_APRIL_FOOL,
+    "ensemble stars!! collab": _CAPTION_ENSEMBLE_STARS,
+    "ensemble stars!! collab ver.": _CAPTION_ENSEMBLE_STARS,
     "movie ver.": "Movie",
     "movie": "Movie",
 }
@@ -261,16 +269,16 @@ _CAPTION_OVERRIDES = {
 # builder_helpers.go:131-139
 _TYPE_FALLBACKS = {
     "sekai": "Sekai",
-    "virtual_singer": "Virtual Singer",
-    "original_song": "Original Song",
-    "another_vocal": "Another Vocal",
-    "streaming_live": "Connect Live",
-    "instrumental": "Inst.",
-    "april_fool_2022": "April Fool",
+    "virtual_singer": _CAPTION_VIRTUAL_SINGER,
+    "original_song": _CAPTION_ORIGINAL_SONG,
+    "another_vocal": _CAPTION_ANOTHER_VOCAL,
+    "streaming_live": _CAPTION_CONNECT_LIVE,
+    "instrumental": _CAPTION_INSTRUMENTAL,
+    "april_fool_2022": _CAPTION_APRIL_FOOL,
 }
 
 # builder_helpers.go:141-162 (JP entries are identity mappings)
-_JP_LOCALIZE = {"sekai": "Sekai", "virtual singer": "Virtual Singer"}
+_JP_LOCALIZE = {"sekai": "Sekai", "virtual singer": _CAPTION_VIRTUAL_SINGER}
 
 
 def _localize_caption(caption: str) -> str:
@@ -298,14 +306,14 @@ def _normalize_caption(raw: str, vocal_type: str, assetbundle_name: str) -> str:
     if name.startswith("se_"):
         return _localize_caption("Sekai")
     if name.startswith("vs_"):
-        return _localize_caption("Virtual Singer")
+        return _localize_caption(_CAPTION_VIRTUAL_SINGER)
     if name.startswith("an_"):
-        return _localize_caption("Another Vocal")
+        return _localize_caption(_CAPTION_ANOTHER_VOCAL)
     fallback = _TYPE_FALLBACKS.get(vocal_type.strip().lower())
     if fallback:
         return _localize_caption(fallback)
     if key == "virtual singer":
-        return _localize_caption("Virtual Singer")
+        return _localize_caption(_CAPTION_VIRTUAL_SINGER)
     return trimmed
 
 
@@ -378,12 +386,7 @@ def _inject_omakase(metas: list[dict]) -> list[dict]:
         if item.get("difficulty") not in ("master", "expert", "hard"):
             continue
         count += 1
-        for k in scalar_keys:
-            agg[k] += float(item.get(k, 0.0))
-        for k in slice_keys:
-            base = agg[k]
-            for i, v in enumerate(item.get(k, [])[:6]):
-                base[i] += float(v)
+        _accumulate_omakase_meta(agg, item, scalar_keys, slice_keys)
     if count == 0:
         return metas
     for k in scalar_keys:
@@ -395,6 +398,15 @@ def _inject_omakase(metas: list[dict]) -> list[dict]:
     for difficulty in ("master", "expert", "hard"):
         metas.append({"music_id": 10000, "difficulty": difficulty, **{k: agg[k] for k in scalar_keys + slice_keys}})
     return metas
+
+
+def _accumulate_omakase_meta(agg: dict[str, object], item: dict, scalar_keys: list[str], slice_keys: list[str]) -> None:
+    for key in scalar_keys:
+        agg[key] += float(item.get(key, 0.0))
+    for key in slice_keys:
+        values = agg[key]
+        for index, value in enumerate(item.get(key, [])[:6]):
+            values[index] += float(value)
 
 
 @cache
@@ -481,15 +493,20 @@ def _suite_music_results() -> dict[str, dict[int, str]]:
     _collect_flat_results(store, suite.get("userMusicResults") or [])
     for music in suite.get("userMusics") or []:
         for status in music.get("userMusicDifficultyStatuses") or []:
-            results = []
-            for item in status.get("userMusicResults") or []:
-                merged = dict(item)
-                merged.setdefault("musicId", music.get("musicId"))
-                if not str(merged.get("musicDifficultyType", "") or "").strip():
-                    merged["musicDifficultyType"] = status.get("musicDifficultyType") or status.get("musicDifficulty")
-                results.append(merged)
-            _collect_flat_results(store, results)
+            _collect_flat_results(store, _nested_music_results(music, status))
     return store
+
+
+def _nested_music_results(music: dict, status: dict) -> list[dict]:
+    results = []
+    difficulty = status.get("musicDifficultyType") or status.get("musicDifficulty")
+    for item in status.get("userMusicResults") or []:
+        merged = dict(item)
+        merged.setdefault("musicId", music.get("musicId"))
+        if not str(merged.get("musicDifficultyType", "") or "").strip():
+            merged["musicDifficultyType"] = difficulty
+        results.append(merged)
+    return results
 
 
 def _music_results(diff: str) -> dict[int, str]:
@@ -580,82 +597,85 @@ def _populate_live_metrics(
         row["play_count_per_hour"] = play_count_per_hour
 
 
+def _ordered_board_skills(skills: list[float], strategy: str) -> list[float]:
+    ordered = list(skills)
+    if strategy == "max":
+        ordered.sort(reverse=True)
+    elif strategy == "min":
+        ordered.sort()
+    elif strategy == "avg":
+        ordered = [sum(ordered) / len(ordered)] * len(ordered)
+    return ordered
+
+
+def _build_board_row(
+    music_id: int,
+    music: dict,
+    meta: dict,
+    skills: list[float],
+    ordered_skills: list[float],
+    power: int,
+    deck_bonus: float,
+    play_interval: float,
+) -> dict | None:
+    level = _play_level(music_id, meta["difficulty"])
+    if level <= 0:
+        return None
+    solo_skill = _weighted_skill(meta["skill_score_solo"], ordered_skills, skills[0])
+    auto_skill = _weighted_skill(meta["skill_score_auto"], ordered_skills, skills[0])
+    multi_skill = _weighted_skill(meta["skill_score_multi"], ordered_skills, skills[0])
+    solo_score = meta["base_score"] + solo_skill
+    auto_score = meta["base_score_auto"] + auto_skill
+    multi_score = meta["base_score"] + multi_skill + meta["fever_score"] * 0.5 + 0.01875
+    row = {
+        "rank": 0,
+        "music_id": music_id,
+        "difficulty": meta["difficulty"],
+        "level": level,
+        "music_title": _display_title(music),
+        "music_cover_path": _jacket_path(music["assetbundleName"]),
+        "event_rate": meta["event_rate"],
+        "music_time": meta["music_time"],
+        "tps": meta["tap_count"] / meta["music_time"] if meta["music_time"] > 0 else 0.0,
+    }
+    for live_type, score, skill in (
+        ("solo", solo_score, solo_skill),
+        ("auto", auto_score, auto_skill),
+        ("multi", multi_score, multi_skill),
+    ):
+        _populate_live_metrics(
+            row,
+            live_type,
+            score,
+            skill / score if score > 0 else 0.0,
+            power,
+            deck_bonus,
+            play_interval,
+        )
+    return row
+
+
 def _build_board_rows(
     skills: list[float], strategy: str, power: int, deck_bonus: float, play_interval: float
 ) -> list[dict]:
     """board_request_rows.go:11-95 (unsorted; caller sorts + ranks)."""
-    sorted_skills = list(skills)
-    if strategy == "max":
-        sorted_skills.sort(reverse=True)
-    elif strategy == "min":
-        sorted_skills.sort()
-    elif strategy == "avg":
-        avg = sum(sorted_skills) / len(sorted_skills)
-        sorted_skills = [avg] * len(sorted_skills)
+    ordered_skills = _ordered_board_skills(skills, strategy)
     rows: list[dict] = []
     for music_id in sorted(_metas_by_music()):
         music = _music_by_id().get(music_id)
         if music is None:
             continue
-        title = _display_title(music)
-        cover = _jacket_path(music["assetbundleName"])
         for meta in _metas_by_music()[music_id]:
-            level = _play_level(music_id, meta["difficulty"])
-            if level <= 0:
-                continue
-            tps = meta["tap_count"] / meta["music_time"] if meta["music_time"] > 0 else 0.0
-            solo_skill = _weighted_skill(meta["skill_score_solo"], sorted_skills, skills[0])
-            auto_skill = _weighted_skill(meta["skill_score_auto"], sorted_skills, skills[0])
-            multi_skill = _weighted_skill(meta["skill_score_multi"], sorted_skills, skills[0])
-            solo_score = meta["base_score"] + solo_skill
-            auto_score = meta["base_score_auto"] + auto_skill
-            multi_score = meta["base_score"] + multi_skill + meta["fever_score"] * 0.5 + 0.01875
-            row = {
-                "rank": 0,
-                "music_id": music_id,
-                "difficulty": meta["difficulty"],
-                "level": level,
-                "music_title": title,
-                "music_cover_path": cover,
-                "event_rate": meta["event_rate"],
-                "music_time": meta["music_time"],
-                "tps": tps,
-            }
-            _populate_live_metrics(
-                row,
-                "solo",
-                solo_score,
-                solo_skill / solo_score if solo_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            _populate_live_metrics(
-                row,
-                "auto",
-                auto_score,
-                auto_skill / auto_score if auto_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            _populate_live_metrics(
-                row,
-                "multi",
-                multi_score,
-                multi_skill / multi_score if multi_score > 0 else 0.0,
-                power,
-                deck_bonus,
-                play_interval,
-            )
-            rows.append(row)
+            row = _build_board_row(music_id, music, meta, skills, ordered_skills, power, deck_bonus, play_interval)
+            if row is not None:
+                rows.append(row)
     return rows
 
 
 def _board_metric(row: dict, target: str, live_type: str) -> float:
     if target in ("score", "pt"):
         return row[f"{live_type}_{target}"]
-    if target == "pt/time":
+    if target == _TARGET_PT_TIME:
         return row[f"{live_type}_pt_per_hour"]
     if target == "tps":
         return row["tps"]
@@ -697,7 +717,7 @@ def _sort_board_rows(
 DETAIL_MUSIC_ID = 187  # ロウワー: event + append + outside-character vocals + 6 vocal versions
 
 _LEADERBOARD_LIVE_ORDER = ["solo", "multi", "auto"]
-_LEADERBOARD_TARGET_ORDER = ["score", "pt", "pt/time"]
+_LEADERBOARD_TARGET_ORDER = ["score", "pt", _TARGET_PT_TIME]
 
 
 def _leaderboard_value(row: dict, live_type: str, target: str) -> str:
@@ -706,7 +726,7 @@ def _leaderboard_value(row: dict, live_type: str, target: str) -> str:
         return f"{row[f'{live_type}_score'] * 100:.1f}%"
     if target == "pt":
         return str(round(row[f"{live_type}_pt"]))
-    if target == "pt/time":
+    if target == _TARGET_PT_TIME:
         return f"{row[f'{live_type}_pt_per_hour'] / 10000.0:.2f}w/h"
     return "-"
 
@@ -794,7 +814,7 @@ def gen_music_detail() -> str:
         body["leaderboard_matrix"] = matrix
         body["leaderboard_music_num"] = total
         body["leaderboard_live_types"] = {"solo": "单人", "multi": "多人", "auto": "AUTO"}
-        body["leaderboard_targets"] = {"score": "分数", "pt": "PT", "pt/time": "时速"}
+        body["leaderboard_targets"] = {"score": "分数", "pt": "PT", _TARGET_PT_TIME: "时速"}
     MusicDetailRequest.model_validate(body)
     common.write_payload("music_detail", body)
     return "music_detail"
@@ -1056,36 +1076,41 @@ def _calc_control_points(score: int, event_bonus: int, basic_point: int, boost: 
     return base * _BOOST_BONUS[boost]
 
 
+def _score_range_for_bonus(target: int, basic_point: int, event_bonus: int, boost: int) -> dict | None:
+    left, right = 0, SCORE_CONTROL_MAX_SCORE
+    found = False
+    while left <= right:
+        mid = (left + right) // 2
+        points = _calc_control_points(mid, event_bonus, basic_point, boost)
+        if points <= target:
+            left = mid + 1
+            found = found or points == target
+        else:
+            right = mid - 1
+    if not found:
+        return None
+    score_max = right
+    left, right = 0, SCORE_CONTROL_MAX_SCORE
+    while left <= right:
+        mid = (left + right) // 2
+        if _calc_control_points(mid, event_bonus, basic_point, boost) >= target:
+            right = mid - 1
+        else:
+            left = mid + 1
+    return {"event_bonus": event_bonus, "boost": boost, "score_min": left, "score_max": score_max}
+
+
 def _find_valid_score_ranges(target: int, basic_point: int, max_event_bonus: int, limit: int) -> list[dict]:
     """score_control.go:145-201 (twin binary searches over [0, 2840000])."""
     result = []
     for event_bonus in range(max_event_bonus + 1):
         for boost in range(11):
-            boost_bonus = _BOOST_BONUS[boost]
-            if target % boost_bonus != 0:
+            if target % _BOOST_BONUS[boost] != 0:
                 continue
-            left, right = 0, SCORE_CONTROL_MAX_SCORE
-            found = False
-            while left <= right:
-                mid = (left + right) // 2
-                points = _calc_control_points(mid, event_bonus, basic_point, boost)
-                if points <= target:
-                    left = mid + 1
-                    if points == target:
-                        found = True
-                    continue
-                right = mid - 1
-            if not found:
+            score_range = _score_range_for_bonus(target, basic_point, event_bonus, boost)
+            if score_range is None:
                 continue
-            score_max = right
-            left, right = 0, SCORE_CONTROL_MAX_SCORE
-            while left <= right:
-                mid = (left + right) // 2
-                if _calc_control_points(mid, event_bonus, basic_point, boost) >= target:
-                    right = mid - 1
-                    continue
-                left = mid + 1
-            result.append({"event_bonus": event_bonus, "boost": boost, "score_min": left, "score_max": score_max})
+            result.append(score_range)
             if limit > 0 and len(result) >= limit:
                 return result
     return result
@@ -1254,7 +1279,7 @@ def gen_score_music_meta() -> str:
 
 
 def gen_score_music_board() -> str:
-    live_type, target, ascend, page = "multi", "pt/time", False, 1
+    live_type, target, ascend, page = "multi", _TARGET_PT_TIME, False, 1
     strategy = "avg"  # board_request_query.go: default for non-solo
     skills = [BOARD_DEFAULT_MULTI_SKILL] * 5
     power, deck_bonus, interval = BOARD_DEFAULT_POWER, BOARD_DEFAULT_DECK_BONUS, BOARD_DEFAULT_MULTI_INTERVAL

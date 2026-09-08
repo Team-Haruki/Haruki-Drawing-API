@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFont
 import pytest
 
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope, take_pillow_touch_snapshot
@@ -30,7 +30,15 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("variant", SIZES)
-def test_placeholder_recipe_parity(variant):
+def test_placeholder_recipe_parity(variant, monkeypatch):
+    from src.sekai.base import pillow_placeholder
+
+    load_font = pillow_placeholder._load_placeholder_font
+    monkeypatch.setattr(
+        pillow_placeholder,
+        "_load_placeholder_font",
+        lambda size: load_font(size).font_variant(layout_engine=ImageFont.Layout.BASIC),
+    )
     source = MissingImageRef(variant)
     actual = Image.open(BytesIO(render_placeholder(source).data)).convert("RGBA")
     expected = build_placeholder(variant)

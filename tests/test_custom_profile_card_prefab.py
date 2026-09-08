@@ -460,3 +460,47 @@ def test_card_blend_values_are_closed() -> None:
         CardCoverArtOp(Path("art.png"), (10, 10), blend="multiply")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="unsupported card rect blend"):
         CardRectOp((0, 0, 1, 1), (0, 0, 0, 0), blend="multiply")  # type: ignore[arg-type]
+
+
+def test_pillow_adapter_reports_missing_required_card_art() -> None:
+    adapter = PillowCardAdapter(
+        lambda _size, _bold: ImageFont.load_default(),
+        lambda _image, _name, _rect, *, resample: False,
+        lambda _name: None,
+        lambda _path: None,
+    )
+    display_list = CardDisplayList(
+        "full",
+        (8, 8),
+        (CardCoverArtOp(Path("missing.png"), (8, 8)),),
+    )
+
+    with pytest.raises(FileNotFoundError, match="required card art"):
+        adapter.render(display_list)
+
+
+def test_pillow_adapter_uses_rounded_mask_fallback() -> None:
+    adapter = PillowCardAdapter(
+        lambda _size, _bold: ImageFont.load_default(),
+        lambda _image, _name, _rect, *, resample: False,
+        lambda _name: None,
+        lambda _path: None,
+    )
+    image = Image.new("RGBA", (20, 20), (10, 20, 30, 255))
+    masked = adapter.apply_ops(image, (CardAlphaMaskOp(CardSpriteRef("missing-mask"), 0.25),))
+
+    assert masked.getpixel((0, 0))[3] == 0
+    assert masked.getpixel((10, 10))[3] == 255
+
+
+def test_pillow_adapter_rejects_missing_required_sprite() -> None:
+    adapter = PillowCardAdapter(
+        lambda _size, _bold: ImageFont.load_default(),
+        lambda _image, _name, _rect, *, resample: False,
+        lambda _name: None,
+        lambda _path: None,
+    )
+    op = CardSpriteOp(CardSpriteRef("required", resource_policy="required"), (0, 0, 4, 4))
+
+    with pytest.raises(FileNotFoundError, match="required card sprite"):
+        adapter.apply_ops(Image.new("RGBA", (4, 4)), (op,))

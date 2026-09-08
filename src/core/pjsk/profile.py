@@ -4,6 +4,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
+from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
@@ -17,19 +18,22 @@ from src.settings import (
     CUSTOM_PROFILE_MAX_TEXT_SIZE,
 )
 
-router = APIRouter(tags=["Profile"])
+router = APIRouter(tags=["Profile"], responses=CUSTOM_PROFILE_ERROR_RESPONSES)
 logger = logging.getLogger(__name__)
 _custom_profile_render_slots = asyncio.Semaphore(CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS)
 
 
-async def try_render_custom_profile_card_payload(request: CustomProfileCardRenderRequest):
-    # Keep the specialized renderer's imports out of ordinary profile requests and startup.
-    from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_payload as render
+async def try_render_custom_profile_card_attempt(request: CustomProfileCardRenderRequest):
+    from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_attempt as render
 
-    return await render(request, raise_errors=True)
+    return await render(request)
 
 
-@router.post("", summary="Generate profile image")
+@router.post(
+    "",
+    summary="Generate profile image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def profile(request: ProfileRequest):
     """
     Generate a player profile image.
@@ -66,8 +70,13 @@ async def profile(request: ProfileRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/custom-profile-card", summary="Generate custom profile card image")
+@router.post(
+    "/custom-profile-card",
+    summary="Generate custom profile card image",
+    responses=CUSTOM_PROFILE_ERROR_RESPONSES,
+)
 async def custom_profile_card(request: CustomProfileCardRenderRequest):
+    attempt = None
     try:
         validate_custom_profile_card(
             dict(request.card),
@@ -78,11 +87,20 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
         )
         async with _custom_profile_render_slots:
             set_request_stage("custom_profile_card:compose_image")
-            payload = await try_render_custom_profile_card_payload(request)
+            attempt = await try_render_custom_profile_card_attempt(request)
+            attempt.tag_backend()
+            if attempt.error is not None:
+                raise attempt.error
+            payload = require_native_payload(attempt.payload)
             set_request_stage("custom_profile_card:image_to_response")
-            payload = require_native_payload(payload)
-            return encoded_image_payload_to_response(payload)
+            response = encoded_image_payload_to_response(payload)
+            attempt.record(response.status_code)
+            return response
     except ValueError as e:
+        if attempt is not None:
+            attempt.reject()
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        if attempt is not None:
+            attempt.record(500)
         raise HTTPException(status_code=500, detail=str(e))

@@ -127,5 +127,5 @@ def test_shading_checks_node_and_scratch_budgets(native, limit):
         "max_scene_bytes": 1024 if limit == "node" else 32,
     }
     field = FloatField(2, 2, bytes(16))
-    with pytest.raises(RuntimeError, match=r"SdfQuad.*limit|SdfQuad scratch"):
+    with pytest.raises(RuntimeError, match=r"SdfQuad.*limit|SdfQuad scratch|SDF shading patch runtime.*scene limit"):
         native.render_scene(json.dumps(ir).encode(), {"f": _raw(field)})

@@ -2,6 +2,7 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.education.drawer import (
@@ -23,10 +24,14 @@ from src.sekai.education.model import (
     PowerBonusDetailRequest,
 )
 
-router = APIRouter(tags=["Education"])
+router = APIRouter(tags=["Education"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/challenge-live", summary="Generate challenge live detail image")
+@router.post(
+    "/challenge-live",
+    summary="Generate challenge live detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
     """
     Generate a challenge live detail image.
@@ -41,7 +46,11 @@ async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/power-bonus", summary="Generate power bonus detail image")
+@router.post(
+    "/power-bonus",
+    summary="Generate power bonus detail image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def power_bonus_detail(request: PowerBonusDetailRequest):
     """
     Generate a power bonus detail image.
@@ -57,7 +66,11 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/area-item", summary="Generate area item upgrade materials image")
+@router.post(
+    "/area-item",
+    summary="Generate area item upgrade materials image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
     """
     Generate an area item upgrade materials image.
@@ -73,7 +86,11 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/bonds", summary="Generate bonds level image")
+@router.post(
+    "/bonds",
+    summary="Generate bonds level image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def bonds_level(request: BondsRequest):
     """
     Generate a bonds level image.
@@ -89,7 +106,11 @@ async def bonds_level(request: BondsRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/leader-count", summary="Generate leader count image")
+@router.post(
+    "/leader-count",
+    summary="Generate leader count image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def leader_count(request: LeaderCountRequest):
     """
     Generate a leader count image.
@@ -104,7 +125,11 @@ async def leader_count(request: LeaderCountRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/character-mission-overview", summary="Generate character mission overview image")
+@router.post(
+    "/character-mission-overview",
+    summary="Generate character mission overview image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def character_mission_overview(request: CharacterMissionOverviewRequest):
     try:
         payload = await try_render_character_mission_overview_payload(request)
@@ -114,7 +139,11 @@ async def character_mission_overview(request: CharacterMissionOverviewRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/character-mission-all", summary="Generate character mission full table image")
+@router.post(
+    "/character-mission-all",
+    summary="Generate character mission full table image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def character_mission_all(request: CharacterMissionAllRequest):
     try:
         payload = await try_render_character_mission_all_payload(request)

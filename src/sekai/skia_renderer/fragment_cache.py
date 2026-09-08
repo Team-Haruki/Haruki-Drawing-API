@@ -150,19 +150,15 @@ def render_cached_native_fragment(
     from .canvas import load_native_renderer
 
     native = load_native_renderer()
+    scene["export_format"] = "raw_rgba_premul"
     result = native.render_scene(json.dumps(scene, separators=(",", ":")).encode(), subtree.mem_images)
     # Preserve font-health reporting on the ordinary path when the configuration is broken.
     if result.get("native_metrics", {}).get("font_fallbacks"):
         return None
     size = raster_size or subtree.size
-    fragment = EncodedImageRef(bytes(result["image_bytes"]), size, "RGBA")
-    # Decode once on insertion, not once per render. Keep the actual premultiplied
-    # pixels produced by Skia's PNG decoder: unpremul round-trips change alpha edges.
-    decode = getattr(native, "decode_fragment_rgba", None)
-    if decode is not None:
-        pixels = decode(fragment.data)
-        if pixels is not None:
-            fragment = NativeRasterImageRef(pixels, size)
+    if result["media_type"] != "application/octet-stream":
+        raise RuntimeError("native renderer does not support lossless fragment transport")
+    fragment = NativeRasterImageRef(bytes(result["image_bytes"]), size)
     _cache.set(
         key,
         _Fragment(fragment, dependencies, bg_hour if _has_triangle(scene) else None),

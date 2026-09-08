@@ -86,6 +86,7 @@ from scripts.parity_payloads.retirement_fixture_contract import validate_retirem
 from scripts.skia_no_pillow import run_clean_case
 from scripts.skia_parity_budgets import PARITY_BUDGETS
 from scripts.skia_service_no_pillow import run_service_case
+from src.core.path_safety import resolve_cli_path
 from src.settings import settings
 
 PAYLOAD_DIR = REPO_ROOT / "out" / "parity-payloads"
@@ -94,6 +95,7 @@ SAVE_IMAGES = False  # CLI-only output option; preserve raw RGBA references for 
 
 # Sentinel drawer module: resolved at runtime from the gitignored drawer.real.py.
 MYSEKAI_REAL = "mysekai-real"
+CUSTOM_PROFILE_DRAWER = "src.sekai.profile.custom_profile.drawer"
 
 # Every cache getter a drawer module may consult before rebuilding. All are
 # monkeypatched to return None so both paths are actually exercised and the
@@ -264,7 +266,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render_module="src.sekai.profile.custom_profile.skia",
         # Static assets and SDF shapes lower without Pillow pixels; still-unmigrated prefab/text
         # layers use bounded mem rasters. Transparent UnityImage resampling and rotated content
@@ -275,7 +277,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render_module="src.sekai.profile.custom_profile.skia",
     ),
     _case(
@@ -355,7 +357,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render=None,
         release_required=False,  # User excludes these uncaptured branches from release acceptance.
     ),
@@ -364,7 +366,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render=None,
         release_required=False,  # User excludes these uncaptured branches from release acceptance.
     ),
@@ -849,7 +851,7 @@ def main() -> int:
             parser.error(f"unknown case name(s): {', '.join(sorted(unknown))}")
 
     setup()
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_cli_path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     on_disk = {p.stem for p in PAYLOAD_DIR.glob("*.json")}

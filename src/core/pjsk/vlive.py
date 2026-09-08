@@ -2,15 +2,20 @@ import traceback
 
 from fastapi import APIRouter, HTTPException
 
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.vlive.drawer import try_render_vlive_list_payload
 from src.sekai.vlive.model import VLiveListRequest
 
-router = APIRouter(tags=["VLive"])
+router = APIRouter(tags=["VLive"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/list", summary="Generate virtual live list image")
+@router.post(
+    "/list",
+    summary="Generate virtual live list image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def vlive_list(request: VLiveListRequest):
     """
     Generate a virtual live list image.

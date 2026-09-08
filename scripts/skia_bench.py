@@ -65,8 +65,8 @@ async def bench_case(
     *,
     reps: int,
     cold: bool,
-    output_format: str,
-    jpg_quality: int,
+    output_format: str = EXPORT_IMAGE_FORMAT,
+    jpg_quality: int = JPG_QUALITY,
 ) -> dict | None:
     expected_media_type = "image/jpeg" if output_format == "jpg" else "image/png"
     pillow_size = None
@@ -80,7 +80,7 @@ async def bench_case(
         img = await getattr(drawer, case.compose)(req)
         if isinstance(img, tuple):  # sk csb returns (canvas, scale)
             img = img[0]
-        if case.route_watermark:
+        if getattr(case, "route_watermark", False):
             from src.sekai.base.draw import add_request_watermark_to_image
 
             img = await add_request_watermark_to_image(img, req)

@@ -315,7 +315,17 @@ def test_two_stage_resize_cache_keeps_pixels_and_tracks_destination(native, pool
     assert pool.stats()["sets"] == 2
 
 
-def test_embedded_text_keeps_basic_pixels_with_cache_on_and_off(native, pool, real_fonts):
+def test_embedded_text_keeps_basic_pixels_with_cache_on_and_off(native, pool, real_fonts, monkeypatch):
+    from PIL import ImageFont
+
+    from src.sekai.base import painter
+
+    load_font = painter.get_font
+    monkeypatch.setattr(
+        painter,
+        "get_font",
+        lambda *args: load_font(*args).font_variant(layout_engine=ImageFont.Layout.BASIC),
+    )
     import json
 
     from src.sekai.base.plot import TextBox, TextStyle

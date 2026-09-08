@@ -8,7 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PIL import Image
+    from PIL import Image, ImageDraw
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -115,24 +115,35 @@ def _clean_command_help_inline(text: str) -> str:
 
 
 def _command_help_heading(line: str) -> tuple[str, int] | None:
-    match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
-    if not match:
+    stripped = line.strip()
+    level = len(stripped) - len(stripped.lstrip("#"))
+    if not 1 <= level <= 6 or len(stripped) <= level or not stripped[level].isspace():
         return None
-    return match.group(2), len(match.group(1))
+    heading = stripped[level:].strip()
+    return (heading, level) if heading else None
 
 
 def _command_help_bullet(line: str) -> str | None:
-    match = re.match(r"^[-*+]\s+(.+?)\s*$", line)
-    if not match:
+    stripped = line.strip()
+    if len(stripped) < 3 or stripped[0] not in "-*+" or not stripped[1].isspace():
         return None
-    return match.group(1)
+    bullet = stripped[2:].strip()
+    return bullet or None
 
 
 def _command_help_numbered(line: str) -> str | None:
-    match = re.match(r"^(\d+[.)])\s+(.+?)\s*$", line)
-    if not match:
+    stripped = line.strip()
+    digit_count = len(stripped) - len(stripped.lstrip("0123456789"))
+    marker_end = digit_count + 1
+    if (
+        digit_count == 0
+        or len(stripped) <= marker_end
+        or stripped[digit_count] not in ".)"
+        or not stripped[marker_end].isspace()
+    ):
         return None
-    return f"{match.group(1)} {match.group(2)}"
+    item = stripped[marker_end:].strip()
+    return f"{stripped[:marker_end]} {item}" if item else None
 
 
 def _wrap_command_help_text(font_name: str, size: int, text: str, max_width: int) -> list[str]:
@@ -265,49 +276,21 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
     section_title = "说明"
     in_code = False
 
-    def flush_section() -> None:
-        nonlocal lines
-        while lines and not lines[0].text:
-            lines.pop(0)
-        while lines and not lines[-1].text:
-            lines.pop()
-        if lines:
-            sections.append(_CommandHelpSection(section_title, lines))
-        lines = []
-
     for raw in markdown.splitlines():
         trimmed_right = raw.rstrip("\r\t ")
         trimmed = trimmed_right.strip()
         if trimmed.startswith("```"):
             in_code = not in_code
             continue
-        if in_code:
-            _append_command_help_wrapped_line(
-                lines,
-                trimmed_right,
-                font_name=DEFAULT_FONT,
-                size=20,
-                indent=26,
-                fill=(42, 52, 68, 255),
-                bg=(255, 255, 255, 116),
-                gap_before=2,
-            )
-            continue
-        if not trimmed:
-            lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
-            continue
-        if trimmed.startswith(("import ", "const ", "<")):
-            continue
-
         heading = _command_help_heading(trimmed)
-        if heading is not None:
+        if heading is not None and not in_code:
             text, level = heading
             text = _clean_command_help_inline(text)
             if level == 1:
                 title = text or title
                 continue
             if level == 2:
-                flush_section()
+                _flush_command_help_section(sections, section_title, lines)
                 section_title = text or "说明"
                 continue
             _append_command_help_wrapped_line(
@@ -319,73 +302,9 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
                 gap_before=16,
             )
             continue
+        _append_command_help_body_line(lines, trimmed_right, trimmed, in_code=in_code)
 
-        bullet = _command_help_bullet(trimmed)
-        if bullet is not None:
-            cleaned = _clean_command_help_inline(bullet)
-            if "：" in cleaned or ":" in cleaned:
-                _append_command_help_definition_line(lines, cleaned)
-                continue
-            _append_command_help_wrapped_line(
-                lines,
-                cleaned,
-                font_name=DEFAULT_FONT,
-                size=21,
-                indent=34,
-                fill=(50, 61, 78, 255),
-                gap_before=7,
-            )
-            continue
-
-        numbered = _command_help_numbered(trimmed)
-        if numbered is not None:
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(numbered),
-                font_name=DEFAULT_FONT,
-                size=21,
-                indent=36,
-                fill=(50, 61, 78, 255),
-                gap_before=7,
-            )
-            continue
-
-        if trimmed.startswith(">"):
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(trimmed.lstrip(">").strip()),
-                font_name=DEFAULT_FONT,
-                size=20,
-                indent=28,
-                fill=(87, 103, 126, 255),
-                bg=(255, 255, 255, 104),
-                gap_before=10,
-            )
-            continue
-
-        if trimmed.startswith("|") and "|" in trimmed[1:]:
-            _append_command_help_wrapped_line(
-                lines,
-                _clean_command_help_inline(trimmed),
-                font_name=DEFAULT_FONT,
-                size=18,
-                indent=24,
-                fill=(42, 52, 68, 255),
-                bg=(255, 255, 255, 112),
-                gap_before=6,
-            )
-            continue
-
-        _append_command_help_wrapped_line(
-            lines,
-            _clean_command_help_inline(trimmed),
-            font_name=DEFAULT_FONT,
-            size=21,
-            fill=(50, 61, 78, 255),
-            gap_before=7,
-        )
-
-    flush_section()
+    _flush_command_help_section(sections, section_title, lines)
     return title, sections
 
 
@@ -1214,3 +1133,278 @@ async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePa
         return None
     canvas = await _build_alias_list_canvas(rqd)
     return await render_canvas_payload(canvas, endpoint="alias_list")
+
+
+def _draw_birthday_calendar(all_characters, calendar_icons: dict[int, ImageSource], selected_cid: int) -> None:
+    with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
+        index = _birthday_calendar_start_index(all_characters)
+        for _ in range(len(all_characters)):
+            character = all_characters[index % len(all_characters)]
+            index += 1
+            with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
+                icon_box = ImageBox(calendar_icons[character.cid], size=(40, 40)).set_padding(4)
+                if character.cid == selected_cid:
+                    icon_box.set_bg(roundrect_bg(radius=8, alpha=80))
+                TextBox(f"{character.month}/{character.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
+
+
+def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
+    for index, item in enumerate(all_characters):
+        if item.cid == start_cid:
+            return index
+    return 0
+
+
+def _draw_birthday_cards(cards, card_thumbs: list[ImageSource], label_style: TextStyle) -> None:
+    with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+        TextBox("卡牌", label_style)
+        Spacer(w=8)
+        with Grid(col_count=6).set_sep(4, 4):
+            for index, thumb in enumerate(card_thumbs):
+                with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
+                    ImageBox(
+                        thumb,
+                        image_size_mode="fill",
+                        size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
+                        shadow=True,
+                        sampling="linear",
+                    )
+                    TextBox(f"{cards[index].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
+
+
+def _draw_birthday_optional_times(
+    rqd: CharaBirthdayRequest,
+    label_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    if not rqd.is_fifth_anniv:
+        return
+    with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+        if rqd.drop_time:
+            _draw_birthday_time_range(rqd, "💧露滴掉落时间", rqd.drop_time, label_style, value_style)
+        if rqd.flower_time:
+            _draw_birthday_time_range(rqd, "🌱浇水开放时间", rqd.flower_time, label_style, value_style)
+        if rqd.party_time:
+            _draw_birthday_time_range(rqd, "🎂派对开放时间", rqd.party_time, label_style, value_style)
+
+
+def _draw_birthday_time_range(
+    rqd: CharaBirthdayRequest,
+    label: str,
+    time_range: BirthdayEventTime,
+    label_style: TextStyle,
+    value_style: TextStyle,
+) -> None:
+    start_at = datetime_from_millis(time_range.start_at, rqd.timezone)
+    end_at = datetime_from_millis(time_range.end_at, rqd.timezone)
+    timezone_label = _birthday_timezone_label(start_at, end_at, rqd.timezone)
+    with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
+        TextBox(f"{label} ", label_style)
+        TextBox(
+            f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}",
+            value_style,
+        )
+
+
+def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
+    timezone_label = timezone or ""
+    if not timezone_label and start_at and start_at.tzinfo:
+        timezone_label = start_at.tzname() or ""
+    if not timezone_label and end_at and end_at.tzinfo:
+        timezone_label = end_at.tzname() or ""
+    return f" ({timezone_label})" if timezone_label else ""
+
+
+def _draw_command_help_section(
+    draw: ImageDraw.ImageDraw,
+    section: _CommandHelpSection,
+    section_box: tuple[int, int, int, int],
+    section_padding_x: int,
+    section_padding_y: int,
+) -> None:
+    header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
+    draw.text(
+        (header_box[0], header_box[1]),
+        section.title,
+        font=get_font(DEFAULT_BOLD_FONT, 24),
+        fill=(24, 38, 58, 255),
+    )
+    draw.line(
+        (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
+        fill=(255, 255, 255, 86),
+        width=2,
+    )
+
+    text_y = section_box[1] + section_padding_y + 48
+    text_x = section_box[0] + section_padding_x
+    text_right = section_box[2] - section_padding_x
+    for line in section.lines:
+        text_y += line.gap_before
+        line_height = _command_help_line_height(line.size)
+        if line.bg is not None:
+            bg_box = (
+                text_x + line.indent - 14,
+                text_y - 4,
+                text_right + 8,
+                text_y + line_height - 1,
+            )
+            draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
+        if line.text:
+            font = get_font(line.font_name, line.size)
+            if line.label:
+                draw.text(
+                    (text_x + line.indent, text_y),
+                    line.label,
+                    font=get_font(DEFAULT_BOLD_FONT, line.size),
+                    fill=(30, 45, 66, 255),
+                )
+            text_offset = line.label_width if line.label_width > 0 else 0
+            draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
+        text_y += line_height
+
+
+def _draw_command_help_glass_box(
+    img: Image.Image,
+    draw: ImageDraw.ImageDraw,
+    box: tuple[int, int, int, int],
+    radius: int,
+    fill_alpha: int = 112,
+) -> None:
+    from PIL import ImageDraw, ImageFilter
+
+    shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
+    shadow_draw.rounded_rectangle(
+        (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
+        radius=radius,
+        fill=(72, 96, 128, 30),
+    )
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
+    draw.rounded_rectangle(
+        box,
+        radius=radius,
+        fill=(255, 255, 255, fill_alpha),
+        outline=(255, 255, 255, 150),
+        width=2,
+    )
+
+
+def _command_help_section_layout(
+    sections: list[_CommandHelpSection],
+    content_width: int,
+    section_padding_y: int,
+    section_gap: int,
+    title_height: int,
+) -> tuple[list[tuple[int, int]], int]:
+    height = _HELP_CARD_MARGIN + title_height + section_gap
+    section_sizes: list[tuple[int, int]] = []
+    for section in sections:
+        section_h = section_padding_y * 2 + 42
+        for line in section.lines:
+            section_h += line.gap_before + _command_help_line_height(line.size)
+        section_h = max(92, section_h)
+        section_sizes.append((content_width, section_h))
+        height += section_h + section_gap
+    return section_sizes, max(360, height + _HELP_CARD_MARGIN - section_gap)
+
+
+def _append_command_help_body_line(
+    lines: list[_CommandHelpLine],
+    trimmed_right: str,
+    trimmed: str,
+    *,
+    in_code: bool,
+) -> None:
+    if in_code:
+        _append_command_help_wrapped_line(
+            lines,
+            trimmed_right,
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=26,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 116),
+            gap_before=2,
+        )
+        return
+    if not trimmed:
+        lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
+        return
+    if trimmed.startswith(("import ", "const ", "<")):
+        return
+
+    bullet = _command_help_bullet(trimmed)
+    if bullet is not None:
+        cleaned = _clean_command_help_inline(bullet)
+        if "：" in cleaned or ":" in cleaned:
+            _append_command_help_definition_line(lines, cleaned)
+        else:
+            _append_command_help_wrapped_line(
+                lines,
+                cleaned,
+                font_name=DEFAULT_FONT,
+                size=21,
+                indent=34,
+                fill=(50, 61, 78, 255),
+                gap_before=7,
+            )
+        return
+
+    numbered = _command_help_numbered(trimmed)
+    if numbered is not None:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(numbered),
+            font_name=DEFAULT_FONT,
+            size=21,
+            indent=36,
+            fill=(50, 61, 78, 255),
+            gap_before=7,
+        )
+        return
+    if trimmed.startswith(">"):
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed.lstrip(">").strip()),
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=28,
+            fill=(87, 103, 126, 255),
+            bg=(255, 255, 255, 104),
+            gap_before=10,
+        )
+        return
+    if trimmed.startswith("|") and "|" in trimmed[1:]:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed),
+            font_name=DEFAULT_FONT,
+            size=18,
+            indent=24,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 112),
+            gap_before=6,
+        )
+        return
+    _append_command_help_wrapped_line(
+        lines,
+        _clean_command_help_inline(trimmed),
+        font_name=DEFAULT_FONT,
+        size=21,
+        fill=(50, 61, 78, 255),
+        gap_before=7,
+    )
+
+
+def _flush_command_help_section(
+    sections: list[_CommandHelpSection],
+    section_title: str,
+    lines: list[_CommandHelpLine],
+) -> None:
+    while lines and not lines[0].text:
+        lines.pop(0)
+    while lines and not lines[-1].text:
+        lines.pop()
+    if lines:
+        sections.append(_CommandHelpSection(section_title, list(lines)))
+    lines.clear()

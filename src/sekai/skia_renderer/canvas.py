@@ -75,7 +75,7 @@ def skia_plot_enabled() -> bool:
 # wheel would render a triangle background with no triangles in it — so refuse it and fail open
 # to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
 # (quick-check.yml, skia-wheels.yml). Bump all four together.
-REQUIRED_NATIVE_IR_CAPABILITY = 28
+REQUIRED_NATIVE_IR_CAPABILITY = 29
 
 
 def load_native_renderer():
@@ -187,8 +187,8 @@ def build_canvas_ir(
     font_dir: str | None = None,
     default_font: str | None = None,
     bold_font: str | None = None,
-    heavy_font: str | None | _UnsetFont = _UNSET_FONT,
-    emoji_font: str | None | _UnsetFont = _UNSET_FONT,
+    heavy_font: str | _UnsetFont | None = _UNSET_FONT,
+    emoji_font: str | _UnsetFont | None = _UNSET_FONT,
     jpg_quality: int | None = None,
     text_engine: str = "skia",
 ) -> tuple[IRBuilder, dict[str, Any]]:

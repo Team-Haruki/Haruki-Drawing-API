@@ -56,6 +56,29 @@ def test_asset_image_ref_resolve_and_missing_placeholder(tmp_path):
     assert placeholder.size[0] > 0  # question-mark placeholder, not an exception
 
 
+def test_ir_painter_uses_mem_transport_for_asset_outside_root(tmp_path):
+    from src.sekai.skia_renderer.ir_painter import IRPainter
+    from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+
+    asset = tmp_path / "outside.png"
+    Image.new("RGBA", (8, 6), (1, 2, 3, 255)).save(asset)
+    stat = asset.stat()
+    ref = AssetImageRef(path=asset, size=(8, 6), mode="RGBA", mtime_ns=stat.st_mtime_ns, file_size=stat.st_size)
+    painter = IRPainter(
+        (8, 6),
+        assets_base_dir=str(tmp_path / "asset-root"),
+        font_dir=str(FONT_DIR),
+        default_font=DEFAULT_FONT,
+        bold_font=DEFAULT_BOLD_FONT,
+    )
+
+    painter.paste(ref, (0, 0), (8, 6))
+    scene, mem = painter.build_scene()
+
+    assert scene["root"]["children"][0]["path"] == "mem:m0"
+    assert set(mem) == {"m0"}
+
+
 def test_imagebg_keeps_asset_ref_lazy_and_emits_region_relative_effects(tmp_path, monkeypatch):
     """ImageBg construction and IR lowering must never turn a healthy asset ref into mem pixels.
 

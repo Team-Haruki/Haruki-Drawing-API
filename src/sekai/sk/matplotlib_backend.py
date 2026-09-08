@@ -1,11 +1,15 @@
 """Legacy plot backend, imported only by player/rank trace pixel composers."""
 
+from datetime import datetime, timedelta
+import math
+
 import matplotlib
 from matplotlib import dates as mdates, font_manager
 from matplotlib.figure import Figure
 import matplotlib.patheffects as patheffects
 from matplotlib.ticker import FixedFormatter, FixedLocator, FuncFormatter
 
+from src.sekai.base.paint_types import lerp_color, rgb_to_color_code
 from src.settings import ASSETS_BASE_DIR, DEFAULT_FONT
 
 matplotlib.use("Agg")
@@ -131,3 +135,31 @@ def render_trace_figure(spec):
         return plt_fig_to_image(fig)
     finally:
         fig.clear()
+
+
+def draw_day_night_bg(ax, start_time: datetime, end_time: datetime):
+    """
+    在 Matplotlib 图表中绘制昼夜交替背景
+
+    白天 (12:00) 偏亮，夜晚 (0:00) 偏暗
+    """
+
+    def get_time_bg_color(time: datetime) -> str:
+        night_color = (200, 200, 230)  # 0:00
+        day_color = (245, 245, 250)  # 12:00
+        ratio = math.sin(time.hour / 24 * math.pi * 2 - math.pi / 2)
+        color = lerp_color(night_color, day_color, (ratio + 1) / 2)
+        return rgb_to_color_code(color)
+
+    interval = timedelta(hours=1)
+    start_time = start_time.replace(minute=0, second=0, microsecond=0)
+    bg_times = [start_time]
+    while bg_times[-1] < end_time:
+        bg_times.append(bg_times[-1] + interval)
+    bg_colors = [get_time_bg_color(t) for t in bg_times]
+    for i in range(len(bg_times)):
+        start = bg_times[i]
+        end = min(bg_times[i] + interval, end_time)
+        if end <= start:
+            continue
+        ax.axvspan(start, end, facecolor=bg_colors[i], edgecolor=None, zorder=0)

@@ -34,7 +34,8 @@
 - 运行时核心远小于 11.7k 行:约 1.5k 行是 CLI/audit/probe 对拍体系,svg.py 920 行里运行时只用 TMP 富文本标签解析(SVG 渲染器是离线工具)。
 - `custom_profile_parallel_workers=1` + 默认 direct-raster 路径 → 渲染器内建并行分支实际是死代码。
 - **结果零跨请求缓存**:字形 SDF/图集/sprite 缓存全是实例属性,随请求丢弃;TMP metadata 每请求重新解析。
-- `mini_chara`/`screen_filter` 两类元素至今未实现(渲染时跳过),迁移无需覆盖。
+- `mini_chara`/`screen_filter` 依赖 Unity DynamicAtlasStudio 的进程内 texture/uvRect；生产
+  上游 schema 不携带它们，standalone 路由明确拒绝非空桶，禁止渲染时静默跳过。
 - 复用 `src/sekai/honor/drawer`(Pillow)渲染内嵌称号。
 
 ## 实施前性能基线(2048×909,3.14t,macOS,中位数)

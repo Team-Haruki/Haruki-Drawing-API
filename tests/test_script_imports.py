@@ -49,8 +49,9 @@ def test_every_script_import_is_installed(script: Path):
     missing = sorted(
         name
         for name in _toplevel_imports(script)
-        # `src` and `scripts` are the repo itself; stdlib, siblings and installed packages must resolve.
-        if name not in ("src", "scripts")
+        # The renderer is built from this repository in native-tests; lint-test has no extension.
+        # All registry dependencies still have to resolve here.
+        if name not in ("src", "scripts", "haruki_skia_renderer")
         and name not in sys.stdlib_module_names
         and not _is_sibling_module(script, name)
         and importlib.util.find_spec(name) is None
