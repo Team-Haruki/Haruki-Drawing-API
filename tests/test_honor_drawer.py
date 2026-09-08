@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from PIL import Image, ImageDraw
+import pytest
 
 from src.core.pillow_telemetry import (
     begin_pillow_touch_scope,
@@ -21,6 +22,35 @@ from src.sekai.honor.model import HonorRequest
 from src.sekai.honor.widget import FCAP_TEXT_SIZE, FCAP_TEXT_TOP_Y, build_honor_badge_canvas
 from src.sekai.skia_renderer.canvas import build_canvas_ir
 from src.settings import DEFAULT_BOLD_FONT
+
+
+@pytest.mark.parametrize(
+    ("group_type", "rank_path", "expected_pos"),
+    [
+        ("rank_match", "rank.png", (17, 42)),
+        ("wl_event", "/assets/honor_top_100_event/rank.png", (0, 0)),
+        ("event", "rank.png", (34, 42)),
+    ],
+)
+def test_normal_honor_selects_rank_overlay_position(
+    group_type: str, rank_path: str, expected_pos: tuple[int, int]
+) -> None:
+    rank = Image.new("RGBA", (10, 10), (255, 0, 0, 255))
+    image = compose_full_honor_image_from_loaded_assets(
+        HonorRequest(
+            honor_type="normal",
+            group_type=group_type,
+            rank_img_path=rank_path,
+            is_main_honor=False,
+        ),
+        {
+            "honor_img": Image.new("RGBA", (180, 80), (0, 0, 0, 0)),
+            "rank_img": rank,
+        },
+    )
+
+    assert image is not None
+    assert image.getpixel(expected_pos) == (255, 0, 0, 255)
 
 
 def test_event_honor_draws_scroll_level() -> None:

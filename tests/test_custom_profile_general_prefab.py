@@ -15,6 +15,8 @@ from src.sekai.profile.custom_profile.general_prefab import (
     GeneralTextOp,
     GeneralViewportOp,
     PillowGeneralPrefabAdapter,
+    _wrap_text,
+    _wrap_tokens,
     build_general_prefab_display_list,
 )
 
@@ -72,6 +74,32 @@ class FixtureMetrics:
         else:
             width = len(text) * 22
         return (0, 0, width, min(size, 30))
+
+
+class MonospaceMetrics:
+    def text_bbox(
+        self,
+        text: str,
+        font: GeneralFontRef,
+        size: int,
+    ) -> tuple[float, float, float, float]:
+        del font, size
+        return (0, 0, len(text), 1)
+
+
+def test_wrap_tokens_keeps_ascii_words_and_splits_cjk_and_punctuation() -> None:
+    assert _wrap_tokens("abc.def/ghi 中文!") == ["abc.def/ghi", " ", "中", "文", "!"]
+    assert _wrap_tokens("") == []
+
+
+def test_wrap_text_preserves_greedy_word_and_character_fallbacks() -> None:
+    metrics = MonospaceMetrics()
+    font = GeneralFontRef()
+
+    assert _wrap_text(metrics, "ab cd中文", font, 12, 4) == ["ab ", "cd中文"]
+    assert _wrap_text(metrics, "abcdef中", font, 12, 3) == ["abc", "def", "中"]
+    assert _wrap_text(metrics, "first\nsecond", font, 12, 20) == ["first", "second"]
+    assert _wrap_text(metrics, "", font, 12, 20) == [""]
 
 
 def _build(file_name: str, size: tuple[int, int]) -> GeneralPrefabDisplayList:

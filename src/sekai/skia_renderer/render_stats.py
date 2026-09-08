@@ -109,6 +109,41 @@ _SCENE_CLASSIFICATIONS: tuple[str, ...] = (
 )
 
 
+def _counter_bucket(counters: dict[str, dict[str, int]], name: str, keys: tuple[str, ...]) -> dict[str, int]:
+    bucket = counters.get(name)
+    if bucket is None:
+        bucket = dict.fromkeys(keys, 0)
+        counters[name] = bucket
+    return bucket
+
+
+def _record_native_purity(name: str, outcome: str, snapshot: PillowTouchSnapshot) -> None:
+    if outcome not in _NATIVE_OUTCOMES:
+        return
+    bucket = _counter_bucket(_native_purity_counters, name, NATIVE_PURITY_KEYS)
+    bucket[f"native_{snapshot.native_purity}"] += 1
+
+
+def _record_pillow_touches(name: str, outcome: str, snapshot: PillowTouchSnapshot) -> None:
+    if outcome not in _NATIVE_OUTCOMES or not snapshot.scoped or not snapshot.counts:
+        return
+    render_counts = _pillow_touch_render_counts.setdefault(name, {})
+    call_counts = _pillow_touch_call_counts.setdefault(name, {})
+    for reason, count in snapshot.counts.items():
+        render_counts[reason] = render_counts.get(reason, 0) + 1
+        call_counts[reason] = call_counts.get(reason, 0) + count
+
+
+def _record_error_stage(name: str, outcome: str, error_stage: str | None) -> None:
+    if outcome != OUTCOME_ERROR or not error_stage:
+        return
+    stage = str(error_stage).strip() or "unknown"
+    if stage not in _ERROR_STAGE_SET:
+        stage = "unknown"
+    stage_counts = _error_stage_counters.setdefault(name, {})
+    stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+
 def backend_for_outcome(outcome: str) -> str:
     """Map a render outcome to the ``backend=`` label used on the image.response log line."""
     return _BACKEND_BY_OUTCOME.get(outcome, BACKEND_PILLOW)
@@ -136,80 +171,84 @@ def record_native_metrics(metrics: dict | None) -> None:
         _font_fallbacks += fallbacks
 
 
+def _nonnegative_metric(metrics: dict, key: str) -> int:
+    try:
+        return max(0, int(metrics.get(key, 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _scene_counts_by_kind(raw_counts_by_kind: object, statuses: tuple[str, ...]) -> dict[str, dict[str, int]]:
+    if not isinstance(raw_counts_by_kind, dict):
+        return {}
+    counts_by_kind: dict[str, dict[str, int]] = {}
+    for raw_kind, raw_counts in raw_counts_by_kind.items():
+        kind = str(raw_kind or "").strip()
+        if not kind or not isinstance(raw_counts, dict):
+            continue
+        counts = {status: count for status in statuses if (count := _nonnegative_metric(raw_counts, status))}
+        if counts:
+            counts_by_kind[kind] = counts
+    return counts_by_kind
+
+
+def _new_scene_bucket() -> dict:
+    return {
+        "checked": 0,
+        "complete": 0,
+        "incomplete": 0,
+        **dict.fromkeys(_SCENE_SUM_KEYS, 0),
+        "issues_by_kind": {},
+        "classifications_by_kind": {},
+    }
+
+
+def _merge_counts_by_kind(
+    aggregate: dict[str, dict[str, int]],
+    update: dict[str, dict[str, int]],
+    default_statuses: tuple[str, ...] = (),
+) -> None:
+    for kind, counts in update.items():
+        kind_bucket = aggregate.setdefault(kind, dict.fromkeys(default_statuses, 0))
+        for status, count in counts.items():
+            kind_bucket[status] = kind_bucket.get(status, 0) + count
+
+
+def _merge_scene_metrics(
+    bucket: dict,
+    *,
+    complete: bool,
+    values: dict[str, int],
+    issues: dict[str, dict[str, int]],
+    classifications: dict[str, dict[str, int]],
+) -> None:
+    bucket["checked"] += 1
+    bucket["complete" if complete else "incomplete"] += 1
+    for key, value in values.items():
+        bucket[key] += value
+    _merge_counts_by_kind(bucket["issues_by_kind"], issues, ("missing", "unresolved"))
+    _merge_counts_by_kind(bucket["classifications_by_kind"], classifications)
+
+
 def record_scene_completeness(endpoint: str, metrics: dict | None) -> None:
     """Aggregate optional scene-coverage diagnostics without changing render outcomes."""
 
     if not isinstance(metrics, dict):
         return
     name = (endpoint or "").strip() or "unknown"
-    complete = bool(metrics.get("complete", False))
-    values: dict[str, int] = {}
-    for key in _SCENE_SUM_KEYS:
-        try:
-            values[key] = max(0, int(metrics.get(key, 0) or 0))
-        except (TypeError, ValueError):
-            values[key] = 0
-    raw_issues = metrics.get("issues_by_kind")
-    issues: dict[str, dict[str, int]] = {}
-    if isinstance(raw_issues, dict):
-        for raw_kind, raw_counts in raw_issues.items():
-            kind = str(raw_kind or "").strip()
-            if not kind or not isinstance(raw_counts, dict):
-                continue
-            issue_counts: dict[str, int] = {}
-            for status in ("missing", "unresolved"):
-                try:
-                    count = max(0, int(raw_counts.get(status, 0) or 0))
-                except (TypeError, ValueError):
-                    count = 0
-                if count:
-                    issue_counts[status] = count
-            if issue_counts:
-                issues[kind] = issue_counts
-    raw_classifications = metrics.get("classifications_by_kind")
-    classifications: dict[str, dict[str, int]] = {}
-    if isinstance(raw_classifications, dict):
-        for raw_kind, raw_counts in raw_classifications.items():
-            kind = str(raw_kind or "").strip()
-            if not kind or not isinstance(raw_counts, dict):
-                continue
-            classification_counts: dict[str, int] = {}
-            for status in _SCENE_CLASSIFICATIONS:
-                try:
-                    count = max(0, int(raw_counts.get(status, 0) or 0))
-                except (TypeError, ValueError):
-                    count = 0
-                if count:
-                    classification_counts[status] = count
-            if classification_counts:
-                classifications[kind] = classification_counts
+    values = {key: _nonnegative_metric(metrics, key) for key in _SCENE_SUM_KEYS}
+    issues = _scene_counts_by_kind(metrics.get("issues_by_kind"), ("missing", "unresolved"))
+    classifications = _scene_counts_by_kind(metrics.get("classifications_by_kind"), _SCENE_CLASSIFICATIONS)
 
     with _lock:
-        bucket = _scene_completeness.setdefault(
-            name,
-            {
-                "checked": 0,
-                "complete": 0,
-                "incomplete": 0,
-                **dict.fromkeys(_SCENE_SUM_KEYS, 0),
-                "issues_by_kind": {},
-                "classifications_by_kind": {},
-            },
+        bucket = _scene_completeness.setdefault(name, _new_scene_bucket())
+        _merge_scene_metrics(
+            bucket,
+            complete=bool(metrics.get("complete", False)),
+            values=values,
+            issues=issues,
+            classifications=classifications,
         )
-        bucket["checked"] += 1
-        bucket["complete" if complete else "incomplete"] += 1
-        for key, value in values.items():
-            bucket[key] += value
-        aggregate_issues = bucket["issues_by_kind"]
-        for kind, counts in issues.items():
-            kind_bucket = aggregate_issues.setdefault(kind, {"missing": 0, "unresolved": 0})
-            for status, count in counts.items():
-                kind_bucket[status] += count
-        aggregate_classifications = bucket["classifications_by_kind"]
-        for kind, counts in classifications.items():
-            kind_bucket = aggregate_classifications.setdefault(kind, {})
-            for status, count in counts.items():
-                kind_bucket[status] = kind_bucket.get(status, 0) + count
 
 
 def record_render(
@@ -234,32 +273,11 @@ def record_render(
         outcome = OUTCOME_ERROR
     snapshot = pillow_touches if pillow_touches is not None else take_pillow_touch_snapshot()
     with _lock:
-        bucket = _counters.get(name)
-        if bucket is None:
-            bucket = dict.fromkeys(OUTCOMES, 0)
-            _counters[name] = bucket
+        bucket = _counter_bucket(_counters, name, OUTCOMES)
         bucket[outcome] += 1
-
-        if outcome in _NATIVE_OUTCOMES:
-            purity_bucket = _native_purity_counters.get(name)
-            if purity_bucket is None:
-                purity_bucket = dict.fromkeys(NATIVE_PURITY_KEYS, 0)
-                _native_purity_counters[name] = purity_bucket
-            purity_bucket[f"native_{snapshot.native_purity}"] += 1
-
-        if outcome in _NATIVE_OUTCOMES and snapshot.scoped and snapshot.counts:
-            render_counts = _pillow_touch_render_counts.setdefault(name, {})
-            call_counts = _pillow_touch_call_counts.setdefault(name, {})
-            for reason, count in snapshot.counts.items():
-                render_counts[reason] = render_counts.get(reason, 0) + 1
-                call_counts[reason] = call_counts.get(reason, 0) + count
-
-        if outcome == OUTCOME_ERROR and error_stage:
-            stage = str(error_stage).strip() or "unknown"
-            if stage not in _ERROR_STAGE_SET:
-                stage = "unknown"
-            stage_counts = _error_stage_counters.setdefault(name, {})
-            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        _record_native_purity(name, outcome, snapshot)
+        _record_pillow_touches(name, outcome, snapshot)
+        _record_error_stage(name, outcome, error_stage)
 
 
 def record_worker_payload_backend(

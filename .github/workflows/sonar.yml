@@ -31,6 +31,20 @@ jobs:
       - name: Install CPython free-threaded
         run: uv python install cpython-3.14.3+freethreaded
 
+      - name: Install Skia link dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/haruki_skia_renderer
+          shared-key: sonar-skia-renderer
+
       - name: Create 3.14t venv and sync dependencies
         run: |
           uv venv .venv314t --python cpython-3.14.3+freethreaded
@@ -47,6 +61,14 @@ jobs:
             ln -s "$system_freetype" "$bundled_freetype"
           fi
           .venv314t/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
+
+      - name: Build haruki_skia_renderer in coverage environment
+        env:
+          VIRTUAL_ENV: ${{ github.workspace }}/.venv314t
+        run: .venv314t/bin/maturin develop --uv --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
+
+      - name: Verify native renderer capability handshake
+        run: .venv314t/bin/python -c "import haruki_skia_renderer as m; assert m.IR_CAPABILITY >= 20, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Generate Python coverage report
         run: |

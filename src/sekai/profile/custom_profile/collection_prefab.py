@@ -102,6 +102,78 @@ def _append_vertical_line(
         cursor_y += step
 
 
+def _append_summary_ops(
+    ops: list[OmikujiOp],
+    summary: str,
+    *,
+    width: int,
+    height: int,
+    fill: Color,
+) -> None:
+    summary_size = round(height * 36.0 / 490.0)
+    lines = [line for line in summary.splitlines() if line]
+    for index, line in enumerate(lines):
+        _append_vertical_line(
+            ops,
+            width * 1251.0 / 1480.0 - index * width * 44.0 / 1480.0,
+            height * 49.0 / 490.0,
+            line,
+            summary_size,
+            fill,
+            step=height * 29.5 / 490.0,
+        )
+
+
+def _append_result_row_ops(
+    ops: list[OmikujiOp],
+    *,
+    title: str,
+    value: str,
+    title_left: float,
+    width: int,
+    height: int,
+    accent: Color,
+    text_fill: Color,
+) -> None:
+    if not title and not value:
+        return
+    title_top = height * 31.0 / 490.0
+    title_w = width * 44.0 / 1480.0
+    title_h = height * 94.0 / 490.0
+    ops.append(
+        OmikujiRectOp(
+            (
+                round(title_left),
+                round(title_top),
+                round(title_left + title_w),
+                round(title_top + title_h),
+            ),
+            accent,
+        )
+    )
+    clean_title = title.replace(" ", "")
+    if clean_title:
+        _append_vertical_line(
+            ops,
+            title_left + title_w / 2.0,
+            title_top + height * 27.0 / 490.0,
+            clean_title,
+            round(height * 40.0 / 490.0),
+            (255, 255, 255, 255),
+            step=height * 39.0 / 490.0,
+        )
+    if value:
+        _append_vertical_line(
+            ops,
+            title_left - width * 40.0 / 1480.0,
+            height * 55.0 / 490.0,
+            value,
+            round(height * 30.0 / 490.0),
+            text_fill,
+            step=height * 25.0 / 490.0,
+        )
+
+
 def build_omikuji_display_list(
     omikuji: Mapping[str, object],
     *,
@@ -134,18 +206,13 @@ def build_omikuji_display_list(
     )
 
     text_fill = (79, 79, 79, 255)
-    summary_size = round(height * 36.0 / 490.0)
-    summary_lines = [line for line in str(omikuji.get("summary", "") or "").splitlines() if line]
-    for index, line in enumerate(summary_lines):
-        _append_vertical_line(
-            ops,
-            width * 1251.0 / 1480.0 - index * width * 44.0 / 1480.0,
-            height * 49.0 / 490.0,
-            line,
-            summary_size,
-            text_fill,
-            step=height * 29.5 / 490.0,
-        )
+    _append_summary_ops(
+        ops,
+        str(omikuji.get("summary", "") or ""),
+        width=width,
+        height=height,
+        fill=text_fill,
+    )
 
     rows = (
         (str(omikuji.get("title3", "") or ""), str(omikuji.get("description3", "") or "")),
@@ -153,47 +220,18 @@ def build_omikuji_display_list(
         (str(omikuji.get("title1", "") or ""), str(omikuji.get("description1", "") or "")),
     )
     accent = OMIKUJI_UNIT_COLORS.get(str(omikuji.get("unit", "") or ""), (76, 181, 210, 255))
-    title_size = round(height * 40.0 / 490.0)
-    value_size = round(height * 30.0 / 490.0)
     title_lefts = (width * 430.0 / 1480.0, width * 584.0 / 1480.0, width * 736.0 / 1480.0)
-    title_top = height * 31.0 / 490.0
-    title_w = width * 44.0 / 1480.0
-    title_h = height * 94.0 / 490.0
     for (title, value), title_left in zip(rows, title_lefts, strict=True):
-        if not title and not value:
-            continue
-        ops.append(
-            OmikujiRectOp(
-                (
-                    round(title_left),
-                    round(title_top),
-                    round(title_left + title_w),
-                    round(title_top + title_h),
-                ),
-                accent,
-            )
+        _append_result_row_ops(
+            ops,
+            title=title,
+            value=value,
+            title_left=title_left,
+            width=width,
+            height=height,
+            accent=accent,
+            text_fill=text_fill,
         )
-        clean_title = title.replace(" ", "")
-        if clean_title:
-            _append_vertical_line(
-                ops,
-                title_left + title_w / 2.0,
-                title_top + height * 27.0 / 490.0,
-                clean_title,
-                title_size,
-                (255, 255, 255, 255),
-                step=height * 39.0 / 490.0,
-            )
-        if value:
-            _append_vertical_line(
-                ops,
-                title_left - width * 40.0 / 1480.0,
-                height * 55.0 / 490.0,
-                value,
-                value_size,
-                text_fill,
-                step=height * 25.0 / 490.0,
-            )
     return OmikujiDisplayList((width, height), tuple(ops))
 
 
@@ -224,42 +262,47 @@ class PillowOmikujiAdapter:
             self._fonts[key] = font
         return font
 
+    def _draw_asset(self, image: Image.Image, op: OmikujiAssetOp) -> None:
+        source = self._asset_loader(Path(op.path))
+        if source is None:
+            raise FileNotFoundError(f"required omikuji asset is missing: {op.resource_key}")
+        left, top, right, bottom = op.rect
+        target_size = (max(1, round(right - left)), max(1, round(bottom - top)))
+        if source.size != target_size:
+            source = source.resize(target_size, self._RESAMPLING[op.sampling])
+        pos = (round(left), round(top))
+        if op.blend == "src":
+            image.paste(source, pos)
+        else:
+            image.alpha_composite(source, pos)
+
+    def _draw_text(self, image: Image.Image, draw: ImageDraw.ImageDraw, op: OmikujiTextOp) -> None:
+        font = self._font(op.size, op.decorative)
+        if abs(op.rotation) < 1.0e-6:
+            draw.text(op.pos, op.text, font=font, fill=op.fill, anchor=op.anchor)
+            return
+        bbox = draw.textbbox((0, 0), op.text, font=font)
+        glyph = Image.new(
+            "RGBA",
+            (max(1, bbox[2] - bbox[0] + 8), max(1, bbox[3] - bbox[1] + 8)),
+            (0, 0, 0, 0),
+        )
+        ImageDraw.Draw(glyph).text((4 - bbox[0], 4 - bbox[1]), op.text, font=font, fill=op.fill)
+        glyph = glyph.rotate(op.rotation, expand=True)
+        image.alpha_composite(
+            glyph,
+            (round(op.pos[0] - glyph.width / 2.0), round(op.pos[1] - glyph.height / 2.0)),
+        )
+
     def render(self, display_list: OmikujiDisplayList) -> Image.Image:
         image = Image.new("RGBA", display_list.size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         for op in display_list.ops:
             if isinstance(op, OmikujiAssetOp):
-                source = self._asset_loader(Path(op.path))
-                if source is None:
-                    raise FileNotFoundError(f"required omikuji asset is missing: {op.resource_key}")
-                left, top, right, bottom = op.rect
-                target_size = (max(1, round(right - left)), max(1, round(bottom - top)))
-                if source.size != target_size:
-                    source = source.resize(target_size, self._RESAMPLING[op.sampling])
-                pos = (round(left), round(top))
-                if op.blend == "src":
-                    image.paste(source, pos)
-                else:
-                    image.alpha_composite(source, pos)
+                self._draw_asset(image, op)
                 continue
             if isinstance(op, OmikujiRectOp):
                 draw.rectangle(op.rect, fill=op.fill)
                 continue
-
-            font = self._font(op.size, op.decorative)
-            if abs(op.rotation) < 1.0e-6:
-                draw.text(op.pos, op.text, font=font, fill=op.fill, anchor=op.anchor)
-                continue
-            bbox = draw.textbbox((0, 0), op.text, font=font)
-            glyph = Image.new(
-                "RGBA",
-                (max(1, bbox[2] - bbox[0] + 8), max(1, bbox[3] - bbox[1] + 8)),
-                (0, 0, 0, 0),
-            )
-            ImageDraw.Draw(glyph).text((4 - bbox[0], 4 - bbox[1]), op.text, font=font, fill=op.fill)
-            glyph = glyph.rotate(op.rotation, expand=True)
-            image.alpha_composite(
-                glyph,
-                (round(op.pos[0] - glyph.width / 2.0), round(op.pos[1] - glyph.height / 2.0)),
-            )
+            self._draw_text(image, draw, op)
         return image

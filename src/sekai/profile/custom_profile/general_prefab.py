@@ -272,6 +272,52 @@ def _fit_text_op(
     return GeneralTextOp(text, (x, (top + bottom) // 2), min_size, fill, anchor, font)
 
 
+def _wrap_tokens(raw_line: str) -> list[str]:
+    tokens: list[str] = []
+    token = ""
+    for char in raw_line:
+        if char.isascii() and (char.isalnum() or char in "._-@:/#"):
+            token += char
+            continue
+        if token:
+            tokens.append(token)
+            token = ""
+        tokens.append(char)
+    if token:
+        tokens.append(token)
+    return tokens
+
+
+def _wrapped_text_width(
+    metrics: GeneralTextMetrics,
+    value: str,
+    font: GeneralFontRef,
+    size: int,
+) -> float:
+    return _text_size(metrics, value, font, size)[0]
+
+
+def _append_wrapped_token(
+    lines: list[str],
+    line: str,
+    token: str,
+    metrics: GeneralTextMetrics,
+    font: GeneralFontRef,
+    size: int,
+    max_width: int,
+) -> str:
+    if _wrapped_text_width(metrics, token, font, size) <= max_width:
+        return line + token
+    for char in token:
+        trial = line + char
+        if line and _wrapped_text_width(metrics, trial, font, size) > max_width:
+            lines.append(line)
+            line = char
+        else:
+            line = trial
+    return line
+
+
 def _wrap_text(
     metrics: GeneralTextMetrics,
     text: str,
@@ -280,43 +326,15 @@ def _wrap_text(
     max_width: int,
 ) -> list[str]:
     """The existing GeneralContentView greedy CJK/Latin wrapping, kept byte-for-byte in intent."""
-
-    def text_width(value: str) -> float:
-        return _text_size(metrics, value, font, size)[0]
-
-    def tokens_for(raw_line: str) -> list[str]:
-        tokens: list[str] = []
-        token = ""
-        for char in raw_line:
-            if char.isascii() and (char.isalnum() or char in "._-@:/#"):
-                token += char
-                continue
-            if token:
-                tokens.append(token)
-                token = ""
-            tokens.append(char)
-        if token:
-            tokens.append(token)
-        return tokens
-
     lines: list[str] = []
     for raw_line in text.splitlines() or [""]:
         line = ""
-        for token in tokens_for(raw_line):
+        for token in _wrap_tokens(raw_line):
             trial = line + token
-            if line and text_width(trial) > max_width:
+            if line and _wrapped_text_width(metrics, trial, font, size) > max_width:
                 lines.append(line)
                 line = ""
-            if text_width(token) > max_width:
-                for char in token:
-                    trial = line + char
-                    if line and text_width(trial) > max_width:
-                        lines.append(line)
-                        line = char
-                    else:
-                        line = trial
-            else:
-                line += token
+            line = _append_wrapped_token(lines, line, token, metrics, font, size, max_width)
         lines.append(line)
     return lines
 
@@ -1257,42 +1275,24 @@ def build_general_prefab_display_list(
 
     asset_paths = asset_paths or {}
     story_favorite_resources = story_favorite_resources or {}
-    if file_name == "X":
-        ops = _x_ops(size, profile_context, metrics, palette)
-    elif file_name == "EditUserName":
-        ops = _edit_user_name_ops(size, profile_context, metrics, palette)
-    elif file_name == "Comment":
-        ops = _comment_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "TotalPower":
-        ops = _total_power_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "MultiLive":
-        ops = _multi_live_ops(size, profile_context, labels, metrics, palette)
-    elif file_name == "ChallengeLive":
-        ops = _challenge_live_ops(size, profile_context, labels, metrics, palette, asset_paths)
-    elif file_name == "CharacterRankAndChallengeStage":
-        ops = _character_rank_and_challenge_stage_ops(
-            size,
-            profile_context,
-            labels,
-            palette,
-            asset_paths,
-            scroll=False,
-        )
-    elif file_name == "CharacterRankAndChallengeStageScroll":
-        ops = _character_rank_and_challenge_stage_ops(
-            size,
-            profile_context,
-            labels,
-            palette,
-            asset_paths,
-            scroll=True,
-        )
-    elif file_name == "MusicClearInfo":
-        ops = _music_clear_info_ops(size, profile_context, labels, music_difficulties)
-    elif file_name == "MusicClearSelectTabInfo":
-        ops = _music_clear_select_tab_info_ops(size, profile_context, labels, music_difficulties, palette)
-    elif file_name == "StoryFavorite":
-        ops = _story_favorite_ops(
+    builders = {
+        "X": lambda: _x_ops(size, profile_context, metrics, palette),
+        "EditUserName": lambda: _edit_user_name_ops(size, profile_context, metrics, palette),
+        "Comment": lambda: _comment_ops(size, profile_context, labels, metrics, palette),
+        "TotalPower": lambda: _total_power_ops(size, profile_context, labels, metrics, palette),
+        "MultiLive": lambda: _multi_live_ops(size, profile_context, labels, metrics, palette),
+        "ChallengeLive": lambda: _challenge_live_ops(size, profile_context, labels, metrics, palette, asset_paths),
+        "CharacterRankAndChallengeStage": lambda: _character_rank_and_challenge_stage_ops(
+            size, profile_context, labels, palette, asset_paths, scroll=False
+        ),
+        "CharacterRankAndChallengeStageScroll": lambda: _character_rank_and_challenge_stage_ops(
+            size, profile_context, labels, palette, asset_paths, scroll=True
+        ),
+        "MusicClearInfo": lambda: _music_clear_info_ops(size, profile_context, labels, music_difficulties),
+        "MusicClearSelectTabInfo": lambda: _music_clear_select_tab_info_ops(
+            size, profile_context, labels, music_difficulties, palette
+        ),
+        "StoryFavorite": lambda: _story_favorite_ops(
             size,
             profile_context,
             labels,
@@ -1300,9 +1300,12 @@ def build_general_prefab_display_list(
             palette,
             asset_paths,
             story_favorite_resources,
-        )
-    else:
+        ),
+    }
+    builder = builders.get(file_name)
+    if builder is None:
         raise ValueError(f"unsupported shared GeneralContentView prefab: {file_name}")
+    ops = builder()
     if ops is None:
         return None
     return GeneralPrefabDisplayList(file_name, size, tuple(ops))
@@ -1363,117 +1366,124 @@ class PillowGeneralPrefabAdapter(GeneralTextMetrics):
     ) -> tuple[float, float, float, float]:
         return self._metric_draw.textbbox((0, 0), text, font=self._font(font, size))
 
+    @staticmethod
+    def _draw_rounded_rect(draw: ImageDraw.ImageDraw, op: GeneralRoundedRectOp) -> None:
+        rect = tuple(round(value) for value in op.rect) if op.round_coordinates else op.rect
+        draw.rounded_rectangle(rect, radius=op.radius, fill=op.fill, outline=op.outline, width=op.width)
+
+    def _missing_resource(
+        self,
+        draw: ImageDraw.ImageDraw,
+        resource: str,
+        policy: ResourcePolicy,
+        fallback: GeneralRoundedRectOp | None,
+    ) -> None:
+        if policy == "required":
+            raise FileNotFoundError(f"required GeneralContentView resource is missing: {resource}")
+        if policy == "fallback":
+            if fallback is None:  # pragma: no cover - dataclass validation rejects this
+                raise RuntimeError(f"missing fallback operation for GeneralContentView resource: {resource}")
+            self._draw_rounded_rect(draw, fallback)
+
+    def _replay_sprite(self, target: Image.Image, draw: ImageDraw.ImageDraw, op: GeneralSpriteOp) -> None:
+        pasted = self._sprite_paster(
+            target,
+            op.name,
+            op.rect,
+            tint=op.tint,
+            sliced_border=op.sliced_border,
+            resample=self._RESAMPLING[op.sampling],
+        )
+        if not pasted:
+            self._missing_resource(draw, op.name, op.resource_policy, op.fallback)
+
+    def _replay_sprite_choice(
+        self,
+        target: Image.Image,
+        draw: ImageDraw.ImageDraw,
+        op: GeneralSpriteChoiceOp,
+    ) -> None:
+        pasted = any(
+            self._sprite_paster(
+                target,
+                name,
+                op.rect,
+                tint=op.tint,
+                resample=self._RESAMPLING[op.sampling],
+            )
+            for name in op.names
+        )
+        if pasted or op.fallback_text is None:
+            return
+        fallback = op.fallback_text
+        draw.text(
+            fallback.pos,
+            fallback.text,
+            font=self._font(fallback.font, fallback.size),
+            fill=fallback.fill,
+            anchor=fallback.anchor,
+        )
+
+    def _asset_image(self, op: GeneralAssetImageOp, width: int, height: int) -> Image.Image | None:
+        path = Path(op.path) if op.path is not None else None
+        source = self._asset_loader(path) if self._asset_loader is not None else None
+        if source is None:
+            return None
+        if op.fit != "cover":
+            return source.resize((width, height), self._RESAMPLING[op.sampling])
+        scale = max(width / source.width, height / source.height)
+        resized = source.resize(
+            (max(1, round(source.width * scale)), max(1, round(source.height * scale))),
+            self._RESAMPLING[op.sampling],
+        )
+        crop_left = round((resized.width - width) * op.align[0])
+        crop_top = round((resized.height - height) * op.align[1])
+        return resized.crop((crop_left, crop_top, crop_left + width, crop_top + height))
+
+    @staticmethod
+    def _clip_asset_image(image: Image.Image, width: int, height: int, radius: int) -> None:
+        mask = Image.new("L", image.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
+        image.putalpha(ImageChops.multiply(image.getchannel("A"), mask))
+
+    def _replay_asset(self, target: Image.Image, draw: ImageDraw.ImageDraw, op: GeneralAssetImageOp) -> None:
+        left, top, right, bottom = op.rect
+        width = max(1, round(right - left))
+        height = max(1, round(bottom - top))
+        resized = self._asset_image(op, width, height)
+        if resized is None:
+            self._missing_resource(draw, op.resource_key, op.resource_policy, op.fallback)
+            return
+        if op.clip_radius is not None:
+            self._clip_asset_image(resized, width, height, op.clip_radius)
+        target.alpha_composite(resized, (round(left), round(top)))
+
+    def _replay_viewport(self, target: Image.Image, op: GeneralViewportOp) -> None:
+        content = Image.new("RGBA", op.content_size, (0, 0, 0, 0))
+        self._replay(content, op.children)
+        viewport = content.crop((0, 0, op.viewport_size[0], op.viewport_size[1]))
+        target.alpha_composite(viewport, (round(op.offset[0]), round(op.offset[1])))
+
+    def _replay_op(self, target: Image.Image, draw: ImageDraw.ImageDraw, op: GeneralPrefabOp) -> None:
+        if isinstance(op, GeneralSpriteOp):
+            self._replay_sprite(target, draw, op)
+        elif isinstance(op, GeneralSpriteChoiceOp):
+            self._replay_sprite_choice(target, draw, op)
+        elif isinstance(op, GeneralRoundedRectOp):
+            self._draw_rounded_rect(draw, op)
+        elif isinstance(op, GeneralAssetImageOp):
+            self._replay_asset(target, draw, op)
+        elif isinstance(op, GeneralViewportOp):
+            self._replay_viewport(target, op)
+        else:
+            draw.text(op.pos, op.text, font=self._font(op.font, op.size), fill=op.fill, anchor=op.anchor)
+
+    def _replay(self, target: Image.Image, ops: tuple[GeneralPrefabOp, ...]) -> None:
+        draw = ImageDraw.Draw(target)
+        for op in ops:
+            self._replay_op(target, draw, op)
+
     def render(self, display_list: GeneralPrefabDisplayList) -> Image.Image:
         image = Image.new("RGBA", display_list.size, (0, 0, 0, 0))
-
-        def replay(target: Image.Image, ops: tuple[GeneralPrefabOp, ...]) -> None:
-            draw = ImageDraw.Draw(target)
-
-            def draw_rounded_rect(op: GeneralRoundedRectOp) -> None:
-                rect = tuple(round(value) for value in op.rect) if op.round_coordinates else op.rect
-                draw.rounded_rectangle(
-                    rect,
-                    radius=op.radius,
-                    fill=op.fill,
-                    outline=op.outline,
-                    width=op.width,
-                )
-
-            def missing_resource(
-                resource: str,
-                policy: ResourcePolicy,
-                fallback: GeneralRoundedRectOp | None,
-            ) -> None:
-                if policy == "required":
-                    raise FileNotFoundError(f"required GeneralContentView resource is missing: {resource}")
-                if policy == "fallback":
-                    if fallback is None:  # pragma: no cover - dataclass validation rejects this
-                        raise RuntimeError(f"missing fallback operation for GeneralContentView resource: {resource}")
-                    draw_rounded_rect(fallback)
-
-            for op in ops:
-                if isinstance(op, GeneralSpriteOp):
-                    pasted = self._sprite_paster(
-                        target,
-                        op.name,
-                        op.rect,
-                        tint=op.tint,
-                        sliced_border=op.sliced_border,
-                        resample=self._RESAMPLING[op.sampling],
-                    )
-                    if not pasted:
-                        missing_resource(op.name, op.resource_policy, op.fallback)
-                    continue
-                if isinstance(op, GeneralSpriteChoiceOp):
-                    pasted = any(
-                        self._sprite_paster(
-                            target,
-                            name,
-                            op.rect,
-                            tint=op.tint,
-                            resample=self._RESAMPLING[op.sampling],
-                        )
-                        for name in op.names
-                    )
-                    if not pasted and op.fallback_text is not None:
-                        fallback = op.fallback_text
-                        draw.text(
-                            fallback.pos,
-                            fallback.text,
-                            font=self._font(fallback.font, fallback.size),
-                            fill=fallback.fill,
-                            anchor=fallback.anchor,
-                        )
-                    continue
-                if isinstance(op, GeneralRoundedRectOp):
-                    draw_rounded_rect(op)
-                    continue
-                if isinstance(op, GeneralAssetImageOp):
-                    path = Path(op.path) if op.path is not None else None
-                    source = self._asset_loader(path) if self._asset_loader is not None else None
-                    if source is None:
-                        missing_resource(op.resource_key, op.resource_policy, op.fallback)
-                        continue
-                    left, top, right, bottom = op.rect
-                    width = max(1, round(right - left))
-                    height = max(1, round(bottom - top))
-                    if op.fit == "cover":
-                        scale = max(width / source.width, height / source.height)
-                        resized = source.resize(
-                            (
-                                max(1, round(source.width * scale)),
-                                max(1, round(source.height * scale)),
-                            ),
-                            self._RESAMPLING[op.sampling],
-                        )
-                        crop_left = round((resized.width - width) * op.align[0])
-                        crop_top = round((resized.height - height) * op.align[1])
-                        resized = resized.crop((crop_left, crop_top, crop_left + width, crop_top + height))
-                    else:
-                        resized = source.resize((width, height), self._RESAMPLING[op.sampling])
-                    if op.clip_radius is not None:
-                        mask = Image.new("L", resized.size, 0)
-                        ImageDraw.Draw(mask).rounded_rectangle(
-                            (0, 0, width - 1, height - 1),
-                            radius=op.clip_radius,
-                            fill=255,
-                        )
-                        resized.putalpha(ImageChops.multiply(resized.getchannel("A"), mask))
-                    target.alpha_composite(resized, (round(left), round(top)))
-                    continue
-                if isinstance(op, GeneralViewportOp):
-                    content = Image.new("RGBA", op.content_size, (0, 0, 0, 0))
-                    replay(content, op.children)
-                    viewport = content.crop((0, 0, op.viewport_size[0], op.viewport_size[1]))
-                    target.alpha_composite(viewport, (round(op.offset[0]), round(op.offset[1])))
-                    continue
-                draw.text(
-                    op.pos,
-                    op.text,
-                    font=self._font(op.font, op.size),
-                    fill=op.fill,
-                    anchor=op.anchor,
-                )
-
-        replay(image, display_list.ops)
+        self._replay(image, display_list.ops)
         return image

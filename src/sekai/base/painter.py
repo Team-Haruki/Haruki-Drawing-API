@@ -1,5 +1,5 @@
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import suppress
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime
@@ -252,6 +252,51 @@ ALIGN_TYPE = Literal[
     "rt",
     "rb",
 ]
+
+_ImageBgPlacement = tuple[Position, Size, tuple[float, float], bool]
+
+
+def _image_bg_axis_offset(container: int, content: int, align: str, start_align: str) -> int:
+    if align == "c":
+        return (container - content) // 2
+    return 0 if align == start_align else container - content
+
+
+def _iter_image_bg_placements(
+    canvas_size: Size,
+    image_size: Size,
+    align: ALIGN_TYPE,
+    mode: str,
+) -> Iterator[_ImageBgPlacement]:
+    canvas_w, canvas_h = canvas_size
+    image_w, image_h = image_size
+    ha, va = ALIGN_MAP[align]
+    if mode == "fit":
+        scale = max(canvas_w / image_w, canvas_h / image_h)
+        width, height = int(image_w * scale), int(image_h * scale)
+        pos = (
+            _image_bg_axis_offset(canvas_w, width, ha, "l"),
+            _image_bg_axis_offset(canvas_h, height, va, "t"),
+        )
+        yield pos, (width, height), (width / image_w, height / image_h), True
+        return
+    if mode == "fill":
+        yield (0, 0), canvas_size, (canvas_w / image_w, canvas_h / image_h), True
+        return
+    if mode == "fixed":
+        pos = (
+            _image_bg_axis_offset(canvas_w, image_w, ha, "l"),
+            _image_bg_axis_offset(canvas_h, image_h, va, "t"),
+        )
+        yield pos, image_size, (1.0, 1.0), False
+        return
+    if mode == "repeat":
+        for y in range(0, canvas_h, image_h):
+            for x in range(0, canvas_w, image_w):
+                yield (x, y), image_size, (1.0, 1.0), False
+        return
+    raise ValueError(f"unsupported image background mode: {mode}")
+
 
 ITEM_SIZE_MODE_TYPE = Literal["expand", "fixed"]
 
@@ -1324,6 +1369,60 @@ class Painter:
             "_impl_draw_random_triangle_bg", exclude_on_hash, (time_color, main_hue, size_fixed_rate)
         )
 
+    @staticmethod
+    def _adjust_text_overlay_alpha(overlay: Image.Image, color: Color) -> None:
+        if len(color) < 4 or color[3] == 255:
+            return
+        overlay_alpha = overlay.getchannel("A")
+        overlay_alpha = Image.eval(overlay_alpha, lambda alpha: int(alpha * color[3] / 255))
+        overlay.putalpha(overlay_alpha)
+
+    @staticmethod
+    def _resolve_text_fill(
+        fill: Color | LinearGradient | AdaptiveTextColor,
+    ) -> tuple[Color, LinearGradient | None, AdaptiveTextColor | None]:
+        if isinstance(fill, LinearGradient):
+            return BLACK, fill, None
+        if isinstance(fill, AdaptiveTextColor):
+            return fill.light[:3], None, fill
+        return fill, None, None
+
+    def _apply_adaptive_text_overlay(
+        self,
+        overlay: Image.Image,
+        overlay_size: Size,
+        text: str,
+        pos: Position,
+        font: Font,
+        align: str,
+        adaptive: AdaptiveTextColor,
+    ) -> Image.Image:
+        dark_overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+        dark_painter = Painter(dark_overlay)
+        dark_painter._text(text, (0, 0), font, fill=adaptive.dark[:3], align=align)
+
+        self._adjust_text_overlay_alpha(overlay, adaptive.light)
+        self._adjust_text_overlay_alpha(dark_overlay, adaptive.dark)
+
+        bg_img = self.img.crop(
+            (
+                pos[0] + self.offset[0],
+                pos[1] + self.offset[1],
+                pos[0] + self.offset[0] + overlay_size[0],
+                pos[1] + self.offset[1] + overlay_size[1],
+            )
+        )
+        if adaptive.pixelwise:
+            gray = bg_img.filter(ImageFilter.BoxBlur(radius=8)).convert("L")
+        else:
+            avg_color = np.array(bg_img).reshape(-1, 4).mean(axis=0)
+            gray = Image.new("RGB", bg_img.size, tuple(avg_color[:3].astype(int))).convert("L")
+
+        threshold = int(adaptive.threshold * 255)
+        mask = gray.point(lambda pixel: 255 if pixel > threshold else 0, "L")
+        overlay.paste(dark_overlay, (0, 0), mask)
+        return overlay
+
     def _impl_text(
         self,
         text: str,
@@ -1332,76 +1431,33 @@ class Painter:
         fill: Color | LinearGradient | AdaptiveTextColor = BLACK,
         align: str = "left",
     ):
-        def adjust_overlay_alpha_by_color(overlay: Image.Image, color: Color):
-            if len(color) < 4 or color[3] == 255:
-                return
-            overlay_alpha = overlay.getchannel("A")
-            overlay_alpha = Image.eval(overlay_alpha, lambda a: int(a * color[3] / 255))
-            overlay.putalpha(overlay_alpha)
-
         if isinstance(font, FontDesc):
             font = get_font(font.path, font.size)
 
-        if isinstance(fill, LinearGradient):
-            gradient = fill
-            adaptive = None
-            fill = BLACK
-        elif isinstance(fill, AdaptiveTextColor):
-            gradient = None
-            adaptive = fill
-            fill = fill.light[:3]
-        else:
-            gradient = None
-            adaptive = None
+        fill, gradient, adaptive = self._resolve_text_fill(fill)
 
-        if (len(fill) == 3 or fill[3] == 255) and not gradient and not adaptive:
+        if (len(fill) == 3 or fill[3] == 255) and gradient is None and adaptive is None:
             # 不透明，非渐变，非高对比度颜色
             self._text(text, pos, font, fill, align)
-        else:
-            text_size = get_text_size(font, text)
-            overlay_size = (text_size[0] + 10, text_size[1] + 10)
-            overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
-            p = Painter(overlay)
-            p._text(text, (0, 0), font, fill=fill, align=align)
+            return self
 
-            if gradient:
-                # 渐变颜色
-                gradient_img = gradient.get_img(overlay_size, overlay)
-                overlay = gradient_img
+        text_size = get_text_size(font, text)
+        overlay_size = (text_size[0] + 10, text_size[1] + 10)
+        overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
+        painter = Painter(overlay)
+        painter._text(text, (0, 0), font, fill=fill, align=align)
 
-            elif adaptive:
-                # 自适应颜色
-                dark_overlay = Image.new("RGBA", overlay_size, (0, 0, 0, 0))
-                dark_p = Painter(dark_overlay)
-                dark_p._text(text, (0, 0), font, fill=adaptive.dark[:3], align=align)
+        if gradient is not None:
+            # 渐变颜色
+            overlay = gradient.get_img(overlay_size, overlay)
+        elif adaptive is not None:
+            # 自适应颜色
+            overlay = self._apply_adaptive_text_overlay(overlay, overlay_size, text, pos, font, align, adaptive)
+        elif fill[3] < 255:
+            # 半透明颜色
+            self._adjust_text_overlay_alpha(overlay, fill)
 
-                adjust_overlay_alpha_by_color(overlay, adaptive.light)
-                adjust_overlay_alpha_by_color(dark_overlay, adaptive.dark)
-
-                bg_img = self.img.crop(
-                    (
-                        pos[0] + self.offset[0],
-                        pos[1] + self.offset[1],
-                        pos[0] + self.offset[0] + overlay_size[0],
-                        pos[1] + self.offset[1] + overlay_size[1],
-                    )
-                )
-
-                if adaptive.pixelwise:
-                    gray = bg_img.filter(ImageFilter.BoxBlur(radius=8)).convert("L")
-                else:
-                    avg_color = np.array(bg_img).reshape(-1, 4).mean(axis=0)
-                    gray = Image.new("RGB", bg_img.size, tuple(avg_color[:3].astype(int))).convert("L")
-
-                threshold = int(adaptive.threshold * 255)
-                mask = gray.point(lambda p: 255 if p > threshold else 0, "L")
-                overlay.paste(dark_overlay, (0, 0), mask)
-
-            elif fill[3] < 255:
-                # 半透明颜色
-                adjust_overlay_alpha_by_color(overlay, fill)
-
-            self.img.alpha_composite(overlay, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+        self.img.alpha_composite(overlay, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
 
         return self
 
@@ -1540,25 +1596,9 @@ class Painter:
         if fade > 0:
             image = ImageEnhance.Brightness(image).enhance(1 - fade)
 
-        ha, va = ALIGN_MAP[align]
-        if mode == "fit":
-            scale = max(self.w / image.width, self.h / image.height)
-            width, height = int(image.width * scale), int(image.height * scale)
-            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
-            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
-            return self._impl_paste(image, (x, y), (width, height))
-        if mode == "fill":
-            return self._impl_paste(image, (0, 0), self.size)
-        if mode == "fixed":
-            x = (self.w - image.width) // 2 if ha == "c" else (0 if ha == "l" else self.w - image.width)
-            y = (self.h - image.height) // 2 if va == "c" else (0 if va == "t" else self.h - image.height)
-            return self._impl_paste(image, (x, y))
-        if mode == "repeat":
-            for y in range(0, self.h, image.height):
-                for x in range(0, self.w, image.width):
-                    self._impl_paste(image, (x, y))
-            return self
-        raise ValueError(f"unsupported image background mode: {mode}")
+        for pos, size, _, resize in _iter_image_bg_placements(self.size, image.size, align, mode):
+            self._impl_paste(image, pos, size if resize else None)
+        return self
 
     def _resolve_sub_img(
         self,
@@ -1912,6 +1952,119 @@ class Painter:
 
         return self
 
+    def _blurglass_roundrect_background(
+        self,
+        bg_region: tuple[int, int, int, int],
+        fill: Color | Gradient,
+        blur: float,
+    ) -> Image.Image:
+        bg_size = (bg_region[2] - bg_region[0], bg_region[3] - bg_region[1])
+        if isinstance(fill, Gradient):
+            return fill.get_img(bg_size)
+        if len(fill) == 3 or fill[3] == 255:
+            rgba_fill = (*fill, 255) if len(fill) == 3 else fill
+            return Image.new("RGBA", bg_size, rgba_fill)
+
+        bg = self.img.crop(bg_region)
+        if blur > 0:
+            downsample = max(1, int(blur // 2))
+            if downsample > 1:
+                bg = bg.resize(
+                    (max(1, bg.width // downsample), max(1, bg.height // downsample)),
+                    Image.Resampling.BILINEAR,
+                )
+            blur_method = ImageFilter.GaussianBlur if downsample >= 2 else ImageFilter.BoxBlur
+            bg = bg.filter(blur_method(radius=blur / downsample))
+        bg.alpha_composite(Image.new("RGBA", bg.size, fill))
+        return bg
+
+    @staticmethod
+    def _blurglass_gradient_points(
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        pos: tuple[int, int],
+        size: tuple[int, int],
+        draw_size: Size,
+    ) -> dict[str, tuple[float, float]]:
+        width, height = draw_size
+        p1_scaled = (p1[0] * width, p1[1] * height)
+        p2_scaled = (p2[0] * width, p2[1] * height)
+        new_p1 = ((p1_scaled[0] - pos[0]) / size[0], (p1_scaled[1] - pos[1]) / size[1])
+        new_p2 = ((p2_scaled[0] - pos[0]) / size[0], (p2_scaled[1] - pos[1]) / size[1])
+        return {"p1": new_p1, "p2": new_p2}
+
+    def _apply_blurglass_edges(
+        self,
+        overlay: Image.Image,
+        aa_size: Size,
+        aa_sw: int,
+        aa_radius: float,
+        aa_scale: float,
+        aa_resize_method: Image.Resampling,
+        draw_size: Size,
+        shadow_width: int,
+        radius: int,
+        corners: tuple[bool, bool, bool, bool],
+        edge_strength: float | None,
+    ) -> None:
+        if edge_strength is None or edge_strength <= 0:
+            return
+        edge_width = min(4, min(draw_size) // 16, radius // 2)
+        if edge_width <= 0:
+            return
+
+        edge_overlay = Image.new("RGBA", aa_size, TRANSPARENT)
+        edge_draw = ImageDraw.Draw(edge_overlay)
+        aa_edge_width = int(edge_width * aa_scale)
+        edge_draw.rounded_rectangle(
+            (aa_sw, aa_sw, aa_size[0] - aa_sw - 1, aa_size[1] - aa_sw - 1),
+            outline=WHITE,
+            width=aa_edge_width,
+            radius=aa_radius,
+            corners=corners,
+        )
+        edge_overlay = edge_overlay.resize(draw_size, aa_resize_method)
+
+        alpha1 = int(255 * edge_strength)
+        alpha2 = int(255 * edge_strength * 0.75)
+        top_left_points = ((0, 0), (0.8, 0.4))
+        bottom_right_points = ((0.6, 0.8), (1.0, 1.0))
+        top_left_colors = ((255, 255, 255, alpha1), (255, 255, 255, 0))
+        bottom_right_colors = ((255, 255, 255, 0), (255, 255, 255, alpha2))
+        width, height = draw_size
+
+        edge_color_overlay = Image.new("RGBA", draw_size, TRANSPARENT)
+        gradient_specs = (
+            ((shadow_width, shadow_width), (width - shadow_width * 2, edge_width), top_left_colors, top_left_points),
+            ((shadow_width, shadow_width), (edge_width, height - shadow_width * 2), top_left_colors, top_left_points),
+            ((shadow_width, shadow_width), (radius, radius), top_left_colors, top_left_points),
+            (
+                (width - edge_width - shadow_width, shadow_width),
+                (edge_width, height - shadow_width * 2),
+                bottom_right_colors,
+                bottom_right_points,
+            ),
+            (
+                (shadow_width, height - edge_width - shadow_width),
+                (width - shadow_width * 2, edge_width),
+                bottom_right_colors,
+                bottom_right_points,
+            ),
+            (
+                (width - radius - shadow_width, height - radius - shadow_width),
+                (radius, radius),
+                bottom_right_colors,
+                bottom_right_points,
+            ),
+        )
+        for edge_pos, edge_size, colors, points in gradient_specs:
+            gradient_points = self._blurglass_gradient_points(*points, edge_pos, edge_size, draw_size)
+            edge_color = LinearGradient(*colors, **gradient_points).get_img(edge_size)
+            edge_color_overlay.paste(edge_color, edge_pos)
+
+        edge_overlay = ImageChops.multiply(edge_overlay, edge_color_overlay)
+        overlay.alpha_composite(edge_overlay)
+
     def _impl_blurglass_roundrect(
         self,
         pos: Position,
@@ -1948,27 +2101,7 @@ class Painter:
             pos[1] + size[1] - bg_offset // 2,
         )
 
-        if isinstance(fill, Gradient):
-            # 填充渐变色
-            bg = fill.get_img((bg_region[2] - bg_region[0], bg_region[3] - bg_region[1]))
-        elif len(fill) == 3 or fill[3] == 255:
-            # 填充纯色
-            if len(fill) == 3:
-                fill = (*fill, 255)
-            bg = Image.new("RGBA", (bg_region[2] - bg_region[0], bg_region[3] - bg_region[1]), fill)
-        else:
-            # 复制pos位置的size大小的原图模糊并混合颜色
-            bg = self.img.crop(bg_region)
-            if blur > 0:
-                downsample = max(1, int(blur // 2))
-                if downsample > 1:
-                    bg = bg.resize(
-                        (max(1, bg.width // downsample), max(1, bg.height // downsample)),
-                        Image.Resampling.BILINEAR,
-                    )
-                blur_method = ImageFilter.GaussianBlur if downsample >= 2 else ImageFilter.BoxBlur
-                bg = bg.filter(blur_method(radius=blur / downsample))
-            bg.alpha_composite(Image.new("RGBA", bg.size, fill))
+        bg = self._blurglass_roundrect_background(bg_region, fill, blur)
 
         # 超分绘制圆角矩形，缩放到目标大小
         overlay = Image.new("RGBA", (aa_size[0], aa_size[1]), (0, 0, 0, 0))
@@ -1993,58 +2126,19 @@ class Painter:
         overlay.alpha_composite(bg, (sw, sw))
 
         # 边缘效果
-        if edge_strength is not None and edge_strength > 0:
-            edge_width = min(4, min(draw_size) // 16, radius // 2)
-            if edge_width > 0:
-                edge_overlay = Image.new("RGBA", (aa_size[0], aa_size[1]), TRANSPARENT)
-                draw = ImageDraw.Draw(edge_overlay)
-                ew, aa_ew = edge_width, int(edge_width * aa_scale)
-                draw.rounded_rectangle(
-                    (aa_sw, aa_sw, aa_size[0] - aa_sw - 1, aa_size[1] - aa_sw - 1),
-                    outline=WHITE,
-                    width=aa_ew,
-                    radius=aa_r,
-                    corners=corners,
-                )
-
-                edge_overlay = edge_overlay.resize(draw_size, aa_resize_method)
-                alpha1, alpha2 = int(255 * edge_strength), int(255 * edge_strength * 0.75)
-                lt_points, rb_points = ((0, 0), (0.8, 0.4)), ((0.6, 0.8), (1.0, 1.0))
-                lt_colors = ((255, 255, 255, alpha1), (255, 255, 255, 0))
-                rb_colors = ((255, 255, 255, 0), (255, 255, 255, alpha2))
-                w, h = draw_size[0], draw_size[1]
-
-                def get_grad_p(
-                    p1: tuple[int, int], p2: tuple[int, int], _pos: tuple[int, int], _size: tuple[int, int]
-                ) -> dict[str, tuple[float, float]]:
-                    p1, p2 = (p1[0] * w, p1[1] * h), (p2[0] * w, p2[1] * h)
-                    newp1 = ((p1[0] - _pos[0]) / _size[0], (p1[1] - _pos[1]) / _size[1])
-                    newp2 = ((p2[0] - _pos[0]) / _size[0], (p2[1] - _pos[1]) / _size[1])
-                    return {"p1": newp1, "p2": newp2}
-
-                edge_color_overlay = Image.new("RGBA", draw_size, TRANSPARENT)
-                t_pos, t_size = (sw, sw), (w - sw * 2, ew)
-                edge_color_t = LinearGradient(*lt_colors, **get_grad_p(*lt_points, t_pos, t_size)).get_img(t_size)
-                edge_color_overlay.paste(edge_color_t, t_pos)
-                l_pos, l_size = (sw, sw), (ew, h - sw * 2)
-                edge_color_l = LinearGradient(*lt_colors, **get_grad_p(*lt_points, l_pos, l_size)).get_img(l_size)
-                edge_color_overlay.paste(edge_color_l, l_pos)
-                lt_pos, lt_size = (sw, sw), (radius, radius)
-                edge_color_lt = LinearGradient(*lt_colors, **get_grad_p(*lt_points, lt_pos, lt_size)).get_img(lt_size)
-                edge_color_overlay.paste(edge_color_lt, lt_pos)
-
-                r_pos, r_size = (w - ew - sw, sw), (ew, h - sw * 2)
-                edge_color_r = LinearGradient(*rb_colors, **get_grad_p(*rb_points, r_pos, r_size)).get_img(r_size)
-                edge_color_overlay.paste(edge_color_r, r_pos)
-                b_pos, b_size = (sw, h - ew - sw), (w - sw * 2, ew)
-                edge_color_b = LinearGradient(*rb_colors, **get_grad_p(*rb_points, b_pos, b_size)).get_img(b_size)
-                edge_color_overlay.paste(edge_color_b, b_pos)
-                rb_pos, rb_size = (w - radius - sw, h - radius - sw), (radius, radius)
-                edge_color_rb = LinearGradient(*rb_colors, **get_grad_p(*rb_points, rb_pos, rb_size)).get_img(rb_size)
-                edge_color_overlay.paste(edge_color_rb, rb_pos)
-
-                edge_overlay = ImageChops.multiply(edge_overlay, edge_color_overlay)
-                overlay.alpha_composite(edge_overlay)
+        self._apply_blurglass_edges(
+            overlay,
+            aa_size,
+            aa_sw,
+            aa_r,
+            aa_scale,
+            aa_resize_method,
+            draw_size,
+            sw,
+            radius,
+            corners,
+            edge_strength,
+        )
 
         # 贴回原图
         self.img.alpha_composite(overlay, (draw_pos[0], draw_pos[1]))

@@ -105,6 +105,14 @@ class HonorAssetResolution(Generic[SourceT]):
         return self.status == "ready"
 
 
+@dataclass(frozen=True, slots=True)
+class _HonorAssetLoadFailure:
+    status: Literal["unrenderable", "hybrid"]
+    reason: HonorAssetFailureReason
+    raw_path: str | None = None
+    detail: str | None = None
+
+
 def honor_asset_branch(request: HonorRequest) -> HonorAssetBranch:
     """Return the layout branch selected by ``HonorBadgeBox``."""
 
@@ -129,47 +137,59 @@ def _optional(image_key: str, *, on_supplied_missing: HonorAssetMissingPolicy = 
     )
 
 
+def _normal_honor_asset_specs(
+    request: HonorRequest, branch: Literal["normal", "birthday"]
+) -> tuple[HonorAssetSpec, ...]:
+    specs = [
+        _required("honor_img"),
+        _optional("rank_img", on_supplied_missing="ignore"),
+        _optional("frame_img"),
+    ]
+    # HonorBadgeBox returns from _add_frame before consulting the birthday level icon.
+    if branch == "birthday" and request.frame_img_path:
+        specs.append(_optional("frame_degree_level_img"))
+    group_type = str(request.group_type or "").strip().lower()
+    if group_type in _SCROLL_LEVEL_GROUP_TYPES:
+        specs.append(_optional("scroll_img"))
+    elif group_type in _STAR_LEVEL_GROUP_TYPES:
+        specs.extend((_optional("lv_img"), _optional("lv6_img")))
+    return tuple(specs)
+
+
+def _bonds_honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
+    specs = [_required("bonds_bg"), _required("bonds_bg2")]
+    # The shared tree intentionally returns a bare background when either character icon is
+    # absent. In that branch it never reads the lone icon, mask, frame, word, or level stars.
+    if not request.chara_icon_path or not request.chara_icon_path2:
+        return tuple(specs)
+    specs.extend(
+        (
+            _optional("chara_icon_1"),
+            _optional("chara_icon_2"),
+            _optional("mask_img"),
+            _optional("frame_img"),
+            _optional("lv_img"),
+            _optional("lv6_img"),
+        )
+    )
+    if request.is_main_honor:
+        specs.append(_optional("word_img"))
+    return tuple(specs)
+
+
 def honor_asset_specs(request: HonorRequest) -> tuple[HonorAssetSpec, ...]:
     """Return only the source fields that the selected widget branch can consume."""
 
     branch = honor_asset_branch(request)
-    specs: list[HonorAssetSpec] = []
     if branch == "empty":
-        specs.append(_required("empty_honor"))
+        specs = (_required("empty_honor"),)
     elif branch in {"normal", "birthday"}:
-        specs.extend(
-            (
-                _required("honor_img"),
-                _optional("rank_img", on_supplied_missing="ignore"),
-                _optional("frame_img"),
-            )
-        )
-        # HonorBadgeBox returns from _add_frame before consulting the birthday level icon.
-        if branch == "birthday" and request.frame_img_path:
-            specs.append(_optional("frame_degree_level_img"))
-        group_type = str(request.group_type or "").strip().lower()
-        if group_type in _SCROLL_LEVEL_GROUP_TYPES:
-            specs.append(_optional("scroll_img"))
-        elif group_type in _STAR_LEVEL_GROUP_TYPES:
-            specs.extend((_optional("lv_img"), _optional("lv6_img")))
+        specs = _normal_honor_asset_specs(request, branch)
     elif branch == "bonds":
-        specs.extend((_required("bonds_bg"), _required("bonds_bg2")))
-        # The shared tree intentionally returns a bare background when either character icon is
-        # absent.  In that branch it never reads the lone icon, mask, frame, word, or level stars.
-        if request.chara_icon_path and request.chara_icon_path2:
-            specs.extend(
-                (
-                    _optional("chara_icon_1"),
-                    _optional("chara_icon_2"),
-                    _optional("mask_img"),
-                    _optional("frame_img"),
-                    _optional("lv_img"),
-                    _optional("lv6_img"),
-                )
-            )
-            if request.is_main_honor:
-                specs.append(_optional("word_img"))
-    return tuple(specs)
+        specs = _bonds_honor_asset_specs(request)
+    else:
+        specs = ()
+    return specs
 
 
 def _failure_result(
@@ -212,6 +232,68 @@ def _unavailable_source_status(spec: HonorAssetSpec) -> Literal["ready", "hybrid
     return "ready" if spec.on_supplied_missing == "ignore" else "hybrid"
 
 
+def _load_failure_or_none(
+    spec: HonorAssetSpec,
+    *,
+    reason: Literal["path_unresolved", "source_unavailable"],
+    raw_path: str,
+    detail: str | None = None,
+    unresolved_path: bool = False,
+) -> _HonorAssetLoadFailure | None:
+    status = _unresolved_path_status(spec) if unresolved_path else _unavailable_source_status(spec)
+    if status == "ready":
+        return None
+    return _HonorAssetLoadFailure(status, reason, raw_path, detail)
+
+
+def _load_honor_asset_source(
+    request: HonorRequest,
+    spec: HonorAssetSpec,
+    *,
+    path_resolver: Callable[[str], ResolvedPathT | None],
+    source_factory: Callable[[ResolvedPathT], SourceT | None],
+) -> tuple[SourceT | None, _HonorAssetLoadFailure | None]:
+    raw_value = getattr(request, spec.path_field)
+    raw_path = str(raw_value) if raw_value else None
+    if raw_path is None:
+        failure = _HonorAssetLoadFailure("unrenderable", "path_absent") if spec.required else None
+        return None, failure
+
+    try:
+        resolved_path = path_resolver(raw_path)
+    except Exception as exc:
+        failure = _load_failure_or_none(
+            spec,
+            reason="path_unresolved",
+            raw_path=raw_path,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        return None, failure
+    if resolved_path is None:
+        failure = _load_failure_or_none(
+            spec,
+            reason="path_unresolved",
+            raw_path=raw_path,
+            unresolved_path=True,
+        )
+        return None, failure
+
+    try:
+        source = source_factory(resolved_path)
+    except Exception as exc:
+        failure = _load_failure_or_none(
+            spec,
+            reason="source_unavailable",
+            raw_path=raw_path,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+        return None, failure
+    if source is None:
+        failure = _load_failure_or_none(spec, reason="source_unavailable", raw_path=raw_path)
+        return None, failure
+    return source, None
+
+
 def resolve_honor_assets(
     request: HonorRequest,
     *,
@@ -248,78 +330,21 @@ def resolve_honor_assets(
 
     sources: dict[str, SourceT | None] = {}
     for spec in specs:
-        raw_value = getattr(request, spec.path_field)
-        raw_path = str(raw_value) if raw_value else None
-        if raw_path is None:
-            if spec.required:
-                return _failure_result(
-                    status="unrenderable",
-                    branch=branch,
-                    specs=specs,
-                    reason="path_absent",
-                    spec=spec,
-                )
-            sources[spec.image_key] = None
-            continue
-
-        try:
-            resolved_path = path_resolver(raw_path)
-        except Exception as exc:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
+        source, failure = _load_honor_asset_source(
+            request,
+            spec,
+            path_resolver=path_resolver,
+            source_factory=source_factory,
+        )
+        if failure is not None:
             return _failure_result(
-                status=status,
+                status=failure.status,
                 branch=branch,
                 specs=specs,
-                reason="path_unresolved",
+                reason=failure.reason,
                 spec=spec,
-                raw_path=raw_path,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
-        if resolved_path is None:
-            status = _unresolved_path_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="path_unresolved",
-                spec=spec,
-                raw_path=raw_path,
-            )
-
-        try:
-            source = source_factory(resolved_path)
-        except Exception as exc:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="source_unavailable",
-                spec=spec,
-                raw_path=raw_path,
-                detail=f"{type(exc).__name__}: {exc}",
-            )
-        if source is None:
-            status = _unavailable_source_status(spec)
-            if status == "ready":
-                sources[spec.image_key] = None
-                continue
-            return _failure_result(
-                status=status,
-                branch=branch,
-                specs=specs,
-                reason="source_unavailable",
-                spec=spec,
-                raw_path=raw_path,
+                raw_path=failure.raw_path,
+                detail=failure.detail,
             )
         sources[spec.image_key] = source
 

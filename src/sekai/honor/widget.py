@@ -183,31 +183,37 @@ class HonorBadgeBox(Widget):
     def _draw_empty(self, p: Painter) -> None:
         self._paste_overlay(p, self.images["empty_honor"], (3, 3))
 
+    def _draw_rank(self, p: Painter, base: ImageSource, group_type: str | None) -> None:
+        rank_img = self.images.get("rank_img")
+        if not rank_img:
+            return
+        if group_type == "rank_match":
+            rank_pos = (190, 0) if self.rqd.is_main_honor else (17, 42)
+        elif is_world_link_rank_style(group_type, self.rqd.rank_img_path):
+            rank_pos = (0, 0)
+        else:
+            rank_pos = resolve_event_rank_position(_size_of(base), _size_of(rank_img), self.rqd.is_main_honor)
+        self._paste_overlay(p, rank_img, rank_pos)
+
+    def _draw_normal_level(self, p: Painter, group_type: str | None) -> None:
+        if not honor_group_uses_scroll_level(group_type):
+            if group_type in ("character", "achievement"):
+                self._add_lv_star(p, self.rqd.honor_level)
+            return
+        scroll_img = self.images.get("scroll_img")
+        if scroll_img is not None:
+            self._paste_overlay(p, scroll_img, (215, 3) if self.rqd.is_main_honor else (37, 3))
+        if group_type == "fc_ap" or scroll_img is not None:
+            self._add_fcap_lv(p)
+
     def _draw_normal(self, p: Painter) -> None:
         rqd = self.rqd
         gtype = rqd.group_type
         base = self.images["honor_img"]
         p.paste_src(base, (0, 0))
         self._add_frame(p, rqd.honor_level)
-
-        rank_img = self.images.get("rank_img")
-        if rank_img:
-            if gtype == "rank_match":
-                rank_pos = (190, 0) if rqd.is_main_honor else (17, 42)
-            elif is_world_link_rank_style(gtype, rqd.rank_img_path):
-                rank_pos = (0, 0)
-            else:
-                rank_pos = resolve_event_rank_position(_size_of(base), _size_of(rank_img), rqd.is_main_honor)
-            self._paste_overlay(p, rank_img, rank_pos)
-
-        if honor_group_uses_scroll_level(gtype):
-            scroll_img = self.images.get("scroll_img")
-            if scroll_img is not None:
-                self._paste_overlay(p, scroll_img, (215, 3) if rqd.is_main_honor else (37, 3))
-            if gtype == "fc_ap" or scroll_img is not None:
-                self._add_fcap_lv(p)
-        elif gtype in ("character", "achievement"):
-            self._add_lv_star(p, rqd.honor_level)
+        self._draw_rank(p, base, gtype)
+        self._draw_normal_level(p, gtype)
 
     def _draw_bonds_op(self, p: Painter, op: FullResizeClipOp) -> None:
         source = self.images.get(op.source_key)

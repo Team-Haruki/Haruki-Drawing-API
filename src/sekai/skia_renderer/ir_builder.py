@@ -115,6 +115,50 @@ def _fill_value(value: Color | Node) -> Node | list[int]:
     return value if isinstance(value, dict) else _color(value)
 
 
+def _validate_paste_lerp_image(
+    pos: Vec2,
+    size: Vec2,
+    fit: str,
+    alpha: float,
+    anchor: Vec2,
+    tint: Node | None,
+    shadow: Node | None,
+    source_rect: tuple[float, float, float, float] | None,
+    blur_sigma: float | Vec2 | None,
+) -> None:
+    sigma = (
+        (float(blur_sigma), float(blur_sigma))
+        if isinstance(blur_sigma, (int, float))
+        else (0.0, 0.0)
+        if blur_sigma is None
+        else (float(blur_sigma[0]), float(blur_sigma[1]))
+    )
+    values = tuple(float(value) for value in (*pos, *size, *anchor))
+    left = values[0] - values[2] * values[4]
+    top = values[1] - values[3] * values[5]
+    edges = (left, top, left + values[2], top + values[3])
+    if fit != "stretch":
+        raise ValueError("paste_lerp Image requires fit='stretch'")
+    if not math.isclose(float(alpha), 1.0, abs_tol=1.0e-9):
+        raise ValueError("paste_lerp Image requires alpha=1")
+    if (
+        source_rect is not None
+        or tint is not None
+        or shadow is not None
+        or any(not math.isclose(value, 0.0, abs_tol=1.0e-9) for value in sigma)
+    ):
+        raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
+    if (
+        values[2] <= 0.0
+        or values[3] <= 0.0
+        or any(
+            not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
+            for value in edges
+        )
+    ):
+        raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
+
+
 def _stops(stops: Sequence[tuple[Color, float]]) -> list[Node]:
     return [{"color": _color(c), "pos": float(p)} for c, p in stops]
 
@@ -450,37 +494,7 @@ class IRBuilder:
         if blend not in {"src_over", "src", "paste_lerp"}:
             raise ValueError(f"unsupported Image blend: {blend!r}")
         if blend == "paste_lerp":
-            sigma = (
-                (float(blur_sigma), float(blur_sigma))
-                if isinstance(blur_sigma, (int, float))
-                else (0.0, 0.0)
-                if blur_sigma is None
-                else (float(blur_sigma[0]), float(blur_sigma[1]))
-            )
-            values = tuple(float(value) for value in (*pos, *size, *anchor))
-            left = values[0] - values[2] * values[4]
-            top = values[1] - values[3] * values[5]
-            edges = (left, top, left + values[2], top + values[3])
-            if fit != "stretch":
-                raise ValueError("paste_lerp Image requires fit='stretch'")
-            if not math.isclose(float(alpha), 1.0, abs_tol=1.0e-9):
-                raise ValueError("paste_lerp Image requires alpha=1")
-            if (
-                source_rect is not None
-                or tint is not None
-                or shadow is not None
-                or any(not math.isclose(value, 0.0, abs_tol=1.0e-9) for value in sigma)
-            ):
-                raise ValueError("paste_lerp Image does not support source_rect, tint, shadow, or blur")
-            if (
-                values[2] <= 0.0
-                or values[3] <= 0.0
-                or any(
-                    not math.isfinite(value) or not math.isclose(value, round(value), rel_tol=0.0, abs_tol=1.0e-6)
-                    for value in edges
-                )
-            ):
-                raise ValueError("paste_lerp Image requires a positive integral destination rectangle")
+            _validate_paste_lerp_image(pos, size, fit, alpha, anchor, tint, shadow, source_rect, blur_sigma)
         node: Node = {
             "type": "Image",
             "pos": _vec(pos),

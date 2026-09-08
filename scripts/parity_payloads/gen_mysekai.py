@@ -148,11 +148,7 @@ def _skip_empty_override(base: dict, key: str, value: Any) -> bool:
     return isinstance(value, list) and not value
 
 
-@cache
-def _merged() -> dict:
-    """mergeMySekaiData (snapshot/local_helpers.go:17-148), suite + mysekai."""
-    base = dict(common.load_suite())
-    mysekai = common.load_mysekai()
+def _merge_updated_resources(base: dict, mysekai: dict) -> set[str]:
     updated_keys: set[str] = set()
     for key, value in (mysekai.get("updatedResources") or {}).items():
         if _preserve_suite_key(key):
@@ -161,6 +157,10 @@ def _merged() -> dict:
         if _skip_empty_override(base, key, value):
             continue
         base[key] = value
+    return updated_keys
+
+
+def _merge_mysekai_fields(base: dict, mysekai: dict, updated_keys: set[str]) -> None:
     for key, value in mysekai.items():
         if key == "updatedResources" or _preserve_suite_key(key):
             continue
@@ -172,6 +172,15 @@ def _merged() -> dict:
         if key.startswith(("userMysekai", "mysekai")) and key in base and not _is_empty_value(base[key]):
             continue
         base[key] = value
+
+
+@cache
+def _merged() -> dict:
+    """mergeMySekaiData (snapshot/local_helpers.go:17-148), suite + mysekai."""
+    base = dict(common.load_suite())
+    mysekai = common.load_mysekai()
+    updated_keys = _merge_updated_resources(base, mysekai)
+    _merge_mysekai_fields(base, mysekai, updated_keys)
     return base
 
 
@@ -536,6 +545,28 @@ def _gate_icon_path(gate_id: int, gate_skin_id: int) -> str:
     return ASSETS.static(f"mysekai/gate_icon/gate_{gate_id}.png")
 
 
+def _visit_character_item(entry: dict, groups: dict[int, dict], units: dict[int, dict], seen: set[int]) -> dict | None:
+    group = groups.get(int(entry.get("mysekaiGameCharacterUnitGroupId", 0)))
+    if not group or int(group.get("gameCharacterUnitId2", 0)) != 0:
+        return None
+    unit_id = int(group.get("gameCharacterUnitId1", 0))
+    if not unit_id or unit_id in seen:
+        return None
+    seen.add(unit_id)
+    is_reservation = bool(entry.get("isReservation"))
+    item: dict[str, Any] = {
+        "sd_image_path": ASSETS.region_asset(f"character/character_sd_l/chr_sp_{unit_id}.png"),
+        "is_read": False,
+        "is_reservation": is_reservation,
+    }
+    char_id = int((units.get(unit_id) or {}).get("gameCharacterId", 0))
+    if char_id > 0:
+        item["memoria_image_path"] = ASSETS.region_asset(f"mysekai/item_preview/material/item_memoria_{char_id}.png")
+    if is_reservation:
+        item["reservation_icon_path"] = ASSETS.static("mysekai/invitationcard.png")
+    return item
+
+
 def _visit_characters(merged: dict) -> list[dict]:
     """extractVisitCharacters (controller_resources.go:90-146)."""
     visit = merged.get("userMysekaiGateCharacterVisit")
@@ -546,37 +577,15 @@ def _visit_characters(merged: dict) -> list[dict]:
     result: list[dict] = []
     seen: set[int] = set()
     for entry in visit.get("userMysekaiGateCharacters") or []:
-        group = groups.get(int(entry.get("mysekaiGameCharacterUnitGroupId", 0)))
-        if not group or int(group.get("gameCharacterUnitId2", 0)) != 0:
-            continue
-        unit_id = int(group.get("gameCharacterUnitId1", 0))
-        if not unit_id or unit_id in seen:
-            continue
-        seen.add(unit_id)
-        is_reservation = bool(entry.get("isReservation"))
-        item: dict[str, Any] = {
-            "sd_image_path": ASSETS.region_asset(f"character/character_sd_l/chr_sp_{unit_id}.png"),
-            "is_read": False,
-            "is_reservation": is_reservation,
-        }
-        char_id = int((units.get(unit_id) or {}).get("gameCharacterId", 0))
-        if char_id > 0:
-            item["memoria_image_path"] = ASSETS.region_asset(
-                f"mysekai/item_preview/material/item_memoria_{char_id}.png"
-            )
-        if is_reservation:
-            item["reservation_icon_path"] = ASSETS.static("mysekai/invitationcard.png")
-        result.append(item)
+        item = _visit_character_item(entry, groups, units, seen)
+        if item is not None:
+            result.append(item)
         if len(result) >= 6:
             break
     return result
 
 
-def _site_resource_numbers(merged: dict) -> list[dict]:
-    """extractSiteResourceNumbers (controller_resources.go:148-230)."""
-    harvest_maps = _nested_list(merged, "userMysekaiHarvestMaps")
-    if not harvest_maps:
-        return []
+def _resource_counts_by_site(harvest_maps: list[dict]) -> dict[int, dict[str, int]]:
     counts: dict[int, dict[str, int]] = {5: {}, 7: {}, 6: {}, 8: {}}
     for site_map in harvest_maps:
         site_id = int(site_map.get("mysekaiSiteId", 0))
@@ -587,33 +596,44 @@ def _site_resource_numbers(merged: dict) -> list[dict]:
                 continue
             key = f"{resource_type}_{resource_id}"
             counts[site_id][key] = counts[site_id].get(key, 0) + quantity
+    return counts
 
+
+def _site_resource_entries(res_map: dict[str, int]) -> list[dict]:
+    keys = sorted(res_map, key=lambda key: (-_resource_sort_score(key, res_map[key]), key))
+    resources: list[dict] = []
+    for key in keys:
+        image_path, has_record = _resource_image_path(key)
+        if not image_path:
+            continue
+        entry: dict[str, Any] = {
+            "image_path": image_path,
+            "number": res_map[key],
+            "text_color": _resource_text_color(key),
+            "has_music_record": has_record,
+        }
+        if has_record:
+            entry["music_record_icon_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
+        resources.append(entry)
+    return resources
+
+
+def _site_resource_numbers(merged: dict) -> list[dict]:
+    """extractSiteResourceNumbers (controller_resources.go:148-230)."""
+    harvest_maps = _nested_list(merged, "userMysekaiHarvestMaps")
+    if not harvest_maps:
+        return []
+    counts = _resource_counts_by_site(harvest_maps)
     result: list[dict] = []
     for site_id in (5, 7, 6, 8):
-        res_map = counts.get(site_id, {})
-        keys = sorted(res_map, key=lambda k: (-_resource_sort_score(k, res_map[k]), k))
-        resources: list[dict] = []
-        for key in keys:
-            image_path, has_record = _resource_image_path(key)
-            if not image_path:
-                continue
-            entry: dict[str, Any] = {
-                "image_path": image_path,
-                "number": res_map[key],
-                "text_color": _resource_text_color(key),
-                "has_music_record": has_record,
-            }
-            if has_record:
-                entry["music_record_icon_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
-            resources.append(entry)
-        if not resources:
-            continue
-        result.append(
-            {
-                "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
-                "resource_numbers": resources,
-            }
-        )
+        resources = _site_resource_entries(counts.get(site_id, {}))
+        if resources:
+            result.append(
+                {
+                    "image_path": ASSETS.region_asset(f"mysekai/site/sitemap/texture/img_harvest_site_{site_id}.png"),
+                    "resource_numbers": resources,
+                }
+            )
     return result
 
 
@@ -683,108 +703,118 @@ _SITE_CONFIGS: dict[int, dict[str, Any]] = {
 }
 
 
-def _birthday_refresh_icon_path(char_row: dict) -> str:
-    """resolveMysekaiBirthdayRefreshIconPath (controller_resources.go:341-405).
+def _birthday_refresh_candidates(base_dir: Path, name: str) -> list[tuple[int, str]]:
+    if not base_dir.is_dir():
+        return []
+    candidates = []
+    for entry in base_dir.iterdir():
+        if not entry.is_dir() or not entry.name.startswith(f"{name}_"):
+            continue
+        if not (entry / "icon_refresh.png").exists():
+            continue
+        try:
+            candidates.append((int(entry.name.removeprefix(f"{name}_")), entry.name))
+        except ValueError:
+            continue
+    return candidates
 
-    Scans the local asset tree for mysekai/birthday/{name}_{year}/icon_refresh.png,
-    preferring the current year, then the most recent past year, then the nearest
-    future year. Returns "" when nothing is synced locally (Go behaves the same).
-    """
+
+def _select_birthday_refresh(candidates: list[tuple[int, str]], current_year: int) -> str:
+    exact = next((entry for year, entry in candidates if year == current_year), "")
+    if exact:
+        return exact
+    past = [(year, entry) for year, entry in candidates if year < current_year]
+    if past:
+        return max(past)[1]
+    future = [(year, entry) for year, entry in candidates if year > current_year]
+    return min(future)[1] if future else ""
+
+
+def _birthday_refresh_icon_path(char_row: dict) -> str:
+    """resolveMysekaiBirthdayRefreshIconPath (controller_resources.go:341-405)."""
     name = (char_row.get("givenNameEnglish") or "").strip().lower()
     if not name:
         return ""
     current_year = datetime.now(JP_TZ).year
     base_dir = ASSETS.data_dir / "asset" / f"{common.REGION}-assets" / "ondemand" / "mysekai" / "birthday"
-    choose, choose_year, choose_future = "", 0, False
-    if base_dir.is_dir():
-        for entry in base_dir.iterdir():
-            if not entry.is_dir() or not entry.name.startswith(f"{name}_"):
-                continue
-            if not (entry / "icon_refresh.png").exists():
-                continue
-            try:
-                year = int(entry.name.removeprefix(f"{name}_"))
-            except ValueError:
-                continue
-            if year == current_year:
-                return ASSETS.region_asset(f"mysekai/birthday/{entry.name}/icon_refresh.png")
-            is_future = year > current_year
-            if (
-                not choose
-                or (not is_future and choose_future)
-                or (not is_future and not choose_future and year > choose_year)
-                or (is_future and choose_future and year < choose_year)
-            ):
-                choose, choose_year, choose_future = entry.name, year, is_future
-    if not choose:
+    chosen = _select_birthday_refresh(_birthday_refresh_candidates(base_dir, name), current_year)
+    if not chosen:
         # Construction-time dependency: record for the rsync manifest.
         ASSETS.candidates.add(
             f"asset/{common.REGION}-assets/ondemand/mysekai/birthday/{name}_{current_year}/icon_refresh.png"
         )
         return ""
-    return ASSETS.region_asset(f"mysekai/birthday/{choose}/icon_refresh.png")
+    return ASSETS.region_asset(f"mysekai/birthday/{chosen}/icon_refresh.png")
+
+
+def _birthday_harvest_image(
+    image_rel: str, x: float, z: float, birthday_char_by_pos: dict[str, int], characters: dict[int, dict]
+) -> str:
+    char_id = birthday_char_by_pos.get(_pos_key(x, z), 0)
+    if char_id <= 0:
+        return image_rel
+    return _birthday_refresh_icon_path(characters.get(char_id) or {}) or image_rel
+
+
+def _map_harvest_point(
+    point: dict,
+    harvest_fixtures: dict[int, dict],
+    birthday_char_by_pos: dict[str, int],
+    characters: dict[int, dict],
+) -> dict | None:
+    fixture_id = int(point.get("mysekaiSiteHarvestFixtureId", 0))
+    meta = harvest_fixtures.get(fixture_id) or {}
+    rarity_type = meta.get("mysekaiSiteHarvestFixtureRarityType", "")
+    asset_name = meta.get("assetbundleName", "")
+    fixture_type = meta.get("mysekaiSiteHarvestFixtureType", "")
+    if not rarity_type or not asset_name or fixture_type == "tone_gust" or "tone_gust" in asset_name.lower():
+        return None
+    x = float(point.get("positionX", point.get("position_x", 0)) or 0)
+    z = float(point.get("positionZ", point.get("position_z", 0)) or 0)
+    image_rel = f"mysekai/harvest_fixture_icon/{rarity_type}/{asset_name}.png"
+    extra: dict[str, Any] = {}
+    offset_x, offset_z = 0.0, -48.0
+    if fixture_type == "birthday_plant":
+        image_rel = _birthday_harvest_image(image_rel, x, z, birthday_char_by_pos, characters)
+        extra = {
+            "fallback_image_path": ASSETS.static(
+                "mysekai/harvest_fixture_icon/rarity_1/mdl_site_wood_common_fieldtree01.png"
+            ),
+            "size": 50,
+        }
+        offset_x, offset_z = 7.5, 0.0
+    result: dict[str, Any] = {
+        "image_path": image_rel if image_rel.startswith("asset/") else ASSETS.static(image_rel),
+        "position_x": x,
+        "position_z": z,
+        "status": point.get("userMysekaiSiteHarvestFixtureStatus")
+        or point.get("mysekaiSiteHarvestFixtureStatus")
+        or "spawned",
+        "offset_x": offset_x,
+        "offset_z": offset_z,
+        **extra,
+    }
+    if fixture_id > 0:
+        result["id"] = fixture_id
+    return result
 
 
 def _map_harvest_points(site_map: dict, birthday_char_by_pos: dict[str, int]) -> list[dict]:
     """map_builder.go:113-183."""
     harvest_fixtures = _md_map("mysekaiSiteHarvestFixtures")
     characters = _md_map("gameCharacters")
-    points: list[dict] = []
-    for point in site_map.get("userMysekaiSiteHarvestFixtures") or []:
-        fixture_id = int(point.get("mysekaiSiteHarvestFixtureId", 0))
-        meta = harvest_fixtures.get(fixture_id) or {}
-        rarity_type = meta.get("mysekaiSiteHarvestFixtureRarityType", "")
-        ab = meta.get("assetbundleName", "")
-        fixture_type = meta.get("mysekaiSiteHarvestFixtureType", "")
-        if not rarity_type or not ab:
-            continue
-        if fixture_type == "tone_gust" or "tone_gust" in ab.lower():
-            continue
-        status = (
-            point.get("userMysekaiSiteHarvestFixtureStatus")
-            or point.get("mysekaiSiteHarvestFixtureStatus")
-            or "spawned"
-        )
-        x = float(point.get("positionX", point.get("position_x", 0)) or 0)
-        z = float(point.get("positionZ", point.get("position_z", 0)) or 0)
-
-        image_rel = f"mysekai/harvest_fixture_icon/{rarity_type}/{ab}.png"
-        entry: dict[str, Any] = {}
-        offset_x, offset_z = 0.0, -48.0
-        if fixture_type == "birthday_plant":
-            entry["fallback_image_path"] = ASSETS.static(
-                "mysekai/harvest_fixture_icon/rarity_1/mdl_site_wood_common_fieldtree01.png"
-            )
-            char_id = birthday_char_by_pos.get(_pos_key(x, z), 0)
-            if char_id > 0:
-                birthday_path = _birthday_refresh_icon_path(characters.get(char_id) or {})
-                if birthday_path:
-                    image_rel = birthday_path
-            entry["size"] = 50
-            offset_x, offset_z = 7.5, 0.0
-
-        image_path = image_rel if image_rel.startswith("asset/") else ASSETS.static(image_rel)
-        point_out: dict[str, Any] = {
-            "image_path": image_path,
-            "position_x": x,
-            "position_z": z,
-            "status": status,
-            "offset_x": offset_x,
-            "offset_z": offset_z,
-        }
-        if fixture_id > 0:
-            point_out["id"] = fixture_id
-        point_out.update(entry)
-        points.append(point_out)
-    return points
+    points = (
+        _map_harvest_point(point, harvest_fixtures, birthday_char_by_pos, characters)
+        for point in site_map.get("userMysekaiSiteHarvestFixtures") or []
+    )
+    return [point for point in points if point is not None]
 
 
-def _map_resource_drops(raw_drops: list) -> list[dict]:
-    """buildMapResourceDrops (map_builder_resources.go:14-218)."""
+def _is_birthday_resource(resource_type: str, resource_id: int) -> bool:
+    return resource_type in ("material", "mysekai_material") and 174 <= resource_id <= 199
 
-    def is_birthday(resource_type: str, resource_id: int) -> bool:
-        return resource_type in ("material", "mysekai_material") and 174 <= resource_id <= 199
 
+def _group_map_resource_drops(raw_drops: list) -> dict[str, dict[str, dict]]:
     grouped_by_pos: dict[str, dict[str, dict]] = {}
     for drop in raw_drops:
         resource_type, resource_id, status, quantity, x, z = _drop_fields(drop)
@@ -818,49 +848,62 @@ def _map_resource_drops(raw_drops: list) -> list[dict]:
         if has_record:
             item["attachment_image_path"] = ASSETS.static(_MUSIC_RECORD_ICON)
         group[key] = item
+    return grouped_by_pos
 
+
+def _map_drop_group_flags(group: dict[str, dict]) -> tuple[bool, bool, bool, bool]:
+    has_material = has_fixture = is_cotton = is_sapling = False
+    for key, item in group.items():
+        if key in ("mysekai_material_1", "mysekai_material_6") and item["quantity"] == 6:
+            item["hide"] = True
+        is_cotton = is_cotton or key in ("mysekai_material_21", "mysekai_material_22")
+        has_material = has_material or key.startswith("mysekai_material_")
+        has_fixture = has_fixture or item["type"] == "mysekai_fixture"
+        is_sapling = is_sapling or (_is_birthday_resource(item["type"], item["id"]) and item["quantity"] > 16)
+    return has_material, has_fixture, is_cotton, is_sapling
+
+
+def _map_drop_small_icon(
+    key: str, item: dict, has_material: bool, has_fixture: bool, is_cotton: bool, is_sapling: bool
+) -> bool | None:
+    small_icon = None
+    if has_fixture:
+        if has_material:
+            small_icon = not key.startswith("mysekai_material_")
+        else:
+            small_icon = item["type"] != "mysekai_fixture"
+    elif not key.startswith("mysekai_material_") and has_material:
+        small_icon = True
+    if is_cotton and key not in ("mysekai_material_21", "mysekai_material_22"):
+        small_icon = True
+    if is_sapling:
+        return not _is_birthday_resource(item["type"], item["id"])
+    if _is_birthday_resource(item["type"], item["id"]):
+        item["hide"] = True
+    return small_icon
+
+
+def _decorate_map_drop(key: str, item: dict, flags: tuple[bool, bool, bool, bool]) -> None:
+    small_icon = _map_drop_small_icon(key, item, *flags)
+    if small_icon is not None:
+        item["small_icon"] = small_icon
+    if item["rarity"] >= 2:
+        item["outline_color"] = [255, 50, 50, 150]
+        item["outline_width"] = 2
+    elif item.get("small_icon"):
+        item["outline_color"] = [50, 50, 255, 100]
+        item["outline_width"] = 1
+    if item["rarity"] >= 2 and not key.startswith("material_"):
+        item["light_size"] = 225 if item.get("small_icon") else 315
+
+
+def _map_resource_drops(raw_drops: list) -> list[dict]:
+    """buildMapResourceDrops (map_builder_resources.go:14-218)."""
     drops_out: list[dict] = []
-    for group in grouped_by_pos.values():
-        has_material = has_fixture = is_cotton = is_sapling = False
+    for group in _group_map_resource_drops(raw_drops).values():
+        flags = _map_drop_group_flags(group)
         for key, item in group.items():
-            if key in ("mysekai_material_1", "mysekai_material_6") and item["quantity"] == 6:
-                item["hide"] = True
-            if key in ("mysekai_material_21", "mysekai_material_22"):
-                is_cotton = True
-            if key.startswith("mysekai_material_"):
-                has_material = True
-            if item["type"] == "mysekai_fixture":
-                has_fixture = True
-            if is_birthday(item["type"], item["id"]) and item["quantity"] > 16:
-                is_sapling = True
-        for key, item in group.items():
-            small_icon, small_icon_set = False, False
-            if has_fixture:
-                if has_material:
-                    small_icon, small_icon_set = not key.startswith("mysekai_material_"), True
-                elif item["type"] == "mysekai_fixture":
-                    small_icon, small_icon_set = False, True
-                else:
-                    small_icon, small_icon_set = True, True
-            elif not key.startswith("mysekai_material_") and has_material:
-                small_icon, small_icon_set = True, True
-            if is_cotton and key not in ("mysekai_material_21", "mysekai_material_22"):
-                small_icon, small_icon_set = True, True
-            if is_sapling:
-                small_icon, small_icon_set = not is_birthday(item["type"], item["id"]), True
-            elif is_birthday(item["type"], item["id"]):
-                item["hide"] = True
-            if small_icon_set:
-                item["small_icon"] = small_icon
-
-            if item["rarity"] >= 2:
-                item["outline_color"] = [255, 50, 50, 150]
-                item["outline_width"] = 2
-            elif item.get("small_icon"):
-                item["outline_color"] = [50, 50, 255, 100]
-                item["outline_width"] = 1
-            if item["rarity"] >= 2 and not key.startswith("material_"):
-                item["light_size"] = 225 if item.get("small_icon") else 315
+            _decorate_map_drop(key, item, flags)
             drops_out.append(item)
 
     drops_out.sort(key=lambda d: (d["position_x"], d["position_z"], d["type"], d["id"]))
@@ -1006,20 +1049,16 @@ def _blueprint_fixture_ids(merged: dict) -> frozenset[int]:
 _FORCED_SUB_GENRE_MAIN_IDS = {4, 5, 7, 8, 9, 10, 11, 12, 13}
 
 
-def build_fixture_list() -> dict:
-    """/msf preset: show_id=true, obtained_source="fixture", show_* all true."""
-    merged = _raw_mysekai()
-    main_genres_md = _md_map("mysekaiFixtureMainGenres")
-    sub_genres_md = _md_map("mysekaiFixtureSubGenres")
-    obtained_ids = _user_fixture_ids()
-
+def _fixture_list_catalog(obtained_ids: frozenset[int]) -> tuple[dict[int, dict[int, list[dict]]], dict[str, Any]]:
     grouped: dict[int, dict[int, list[dict]]] = {}
-    main_all: dict[int, int] = {}
-    main_obtained: dict[int, int] = {}
-    sub_all: dict[int, dict[int, int]] = {}
-    sub_obtained: dict[int, dict[int, int]] = {}
-    total_all = total_obtained = 0
-
+    counts: dict[str, Any] = {
+        "main_all": {},
+        "main_obtained": {},
+        "sub_all": {},
+        "sub_obtained": {},
+        "total_all": 0,
+        "total_obtained": 0,
+    }
     for fixture in MD.get("mysekaiFixtures"):
         fixture_id = int(fixture.get("id", 0))
         if not fixture_id or str(fixture.get("mysekaiFixtureType", "")).lower() == "gate":
@@ -1032,8 +1071,8 @@ def build_fixture_list() -> dict:
             sub_id = -1
 
         grouped.setdefault(main_id, {})
-        sub_all.setdefault(main_id, {})
-        sub_obtained.setdefault(main_id, {})
+        counts["sub_all"].setdefault(main_id, {})
+        counts["sub_obtained"].setdefault(main_id, {})
 
         obtained = fixture_id in obtained_ids
         char_id = _birthday_character_id(fixture.get("name", ""))
@@ -1047,34 +1086,51 @@ def build_fixture_list() -> dict:
         grouped[main_id].setdefault(sub_id, []).append(row)
 
         if not char_id:  # birthday fixtures excluded from all progress stats
-            total_all += 1
-            main_all[main_id] = main_all.get(main_id, 0) + 1
-            sub_all[main_id][sub_id] = sub_all[main_id].get(sub_id, 0) + 1
+            counts["total_all"] += 1
+            counts["main_all"][main_id] = counts["main_all"].get(main_id, 0) + 1
+            counts["sub_all"][main_id][sub_id] = counts["sub_all"][main_id].get(sub_id, 0) + 1
             if obtained:
-                total_obtained += 1
-                main_obtained[main_id] = main_obtained.get(main_id, 0) + 1
-                sub_obtained[main_id][sub_id] = sub_obtained[main_id].get(sub_id, 0) + 1
+                counts["total_obtained"] += 1
+                counts["main_obtained"][main_id] = counts["main_obtained"].get(main_id, 0) + 1
+                counts["sub_obtained"][main_id][sub_id] = counts["sub_obtained"][main_id].get(sub_id, 0) + 1
+    return grouped, counts
 
-    main_genres: list[dict] = []
+
+def _fixture_sub_genres(
+    main_id: int,
+    groups: dict[int, list[dict]],
+    sub_genres_md: dict[int, dict],
+    counts: dict[str, Any],
+) -> list[dict]:
+    result = []
+    for sub_id in sorted(groups):
+        rows = sorted(groups[sub_id], key=lambda row: row["id"])
+        if not rows:
+            continue
+        sub_genre: dict[str, Any] = {"fixtures": rows}
+        info = sub_genres_md.get(sub_id) if sub_id != -1 and len(groups) > 1 else None
+        if info:
+            sub_genre["name"] = info.get("name", "")
+            sub_genre["image_path"] = ASSETS.region_asset(
+                f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"
+            )
+            total = counts["sub_all"][main_id].get(sub_id, 0)
+            if total > 0:
+                done = counts["sub_obtained"][main_id].get(sub_id, 0)
+                sub_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
+        result.append(sub_genre)
+    return result
+
+
+def _fixture_main_genres(
+    grouped: dict[int, dict[int, list[dict]]],
+    main_genres_md: dict[int, dict],
+    sub_genres_md: dict[int, dict],
+    counts: dict[str, Any],
+) -> list[dict]:
+    result = []
     for main_id in sorted(grouped):
-        sub_genres: list[dict] = []
-        for sub_id in sorted(grouped[main_id]):
-            rows = sorted(grouped[main_id][sub_id], key=lambda r: r["id"])
-            if not rows:
-                continue
-            sub_genre: dict[str, Any] = {"fixtures": rows}
-            if sub_id != -1 and len(grouped[main_id]) > 1:
-                info = sub_genres_md.get(sub_id)
-                if info:
-                    sub_genre["name"] = info.get("name", "")
-                    sub_genre["image_path"] = ASSETS.region_asset(
-                        f"mysekai/icon/category_icon/{info.get('assetbundleName', '')}.png"
-                    )
-                    total = sub_all[main_id].get(sub_id, 0)
-                    if total > 0:
-                        done = sub_obtained[main_id].get(sub_id, 0)
-                        sub_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
-            sub_genres.append(sub_genre)
+        sub_genres = _fixture_sub_genres(main_id, grouped[main_id], sub_genres_md, counts)
         if not sub_genres:
             continue
         main_info = main_genres_md.get(main_id) or {}
@@ -1083,20 +1139,31 @@ def build_fixture_list() -> dict:
             "image_path": ASSETS.region_asset(f"mysekai/icon/category_icon/{main_info.get('assetbundleName', '')}.png"),
             "sub_genres": sub_genres,
         }
-        total = main_all.get(main_id, 0)
+        total = counts["main_all"].get(main_id, 0)
         if total > 0:
-            done = main_obtained.get(main_id, 0)
+            done = counts["main_obtained"].get(main_id, 0)
             main_genre["progress_message"] = f"{done}/{total} ({_pct(done, total):.1f}%)"
-        main_genres.append(main_genre)
+        result.append(main_genre)
+    return result
+
+
+def build_fixture_list() -> dict:
+    """/msf preset: show_id=true, obtained_source="fixture", show_* all true."""
+    merged = _raw_mysekai()
+    grouped, counts = _fixture_list_catalog(_user_fixture_ids())
+    main_genres = _fixture_main_genres(
+        grouped, _md_map("mysekaiFixtureMainGenres"), _md_map("mysekaiFixtureSubGenres"), counts
+    )
 
     body: dict[str, Any] = {
         "profile": _profile_card(merged, include_suite=False),
         "show_id": True,
         "main_genres": main_genres,
     }
-    if total_all > 0:
+    if counts["total_all"] > 0:
         body["progress_message"] = (
-            f"总收集进度（不含生日家具）: {total_obtained}/{total_all} ({_pct(total_obtained, total_all):.1f}%)"
+            f"总收集进度（不含生日家具）: {counts['total_obtained']}/{counts['total_all']} "
+            f"({_pct(counts['total_obtained'], counts['total_all']):.1f}%)"
         )
     return body
 
@@ -1273,6 +1340,55 @@ def _pick_fixture_detail_ids() -> list[int]:
     return [i for i in ids if not (i in seen or seen.add(i))]
 
 
+def _fixture_detail_request(
+    fixture_id: int,
+    fixture: dict,
+    main_genres: dict[int, dict],
+    sub_genres: dict[int, dict],
+    costs: list[dict],
+    disassemble: list[dict],
+) -> tuple[dict, bool]:
+    main = main_genres.get(int(fixture.get("mysekaiFixtureMainGenreId", 0))) or {}
+    grid = fixture.get("gridSize") or {}
+    request: dict[str, Any] = {
+        "title": f"【{common.REGION.upper()}-{fixture_id}】{fixture.get('name', '')}",
+        "images": _fixture_color_images(fixture),
+        "main_genre_name": main.get("name", ""),
+        "main_genre_image_path": ASSETS.region_asset(
+            f"mysekai/icon/category_icon/{main.get('assetbundleName', '')}.png"
+        ),
+        "size": {key: int(grid.get(key, 0) or 0) for key in ("width", "depth", "height")},
+        "first_put_cost": int(fixture.get("firstPutCost", 0) or 0),
+        "second_put_cost": int(fixture.get("secondPutCost", 0) or 0),
+        "basic_info": _fixture_basic_info(fixture),
+    }
+    optional_lists = {
+        "tags": _fixture_tags(fixture),
+        "reaction_character_groups": _reaction_character_groups(fixture_id),
+        "recycle_materials": _material_cost_list(
+            [row for row in disassemble if int(row.get("mysekaiFixtureId", 0)) == fixture_id]
+        ),
+    }
+    request.update({key: value for key, value in optional_lists.items() if value})
+    sub_id = int(fixture.get("mysekaiFixtureSubGenreId", 0) or 0)
+    if sub_id:
+        sub = sub_genres.get(sub_id) or {}
+        request["sub_genre_name"] = sub.get("name", "")
+        request["sub_genre_image_path"] = ASSETS.region_asset(
+            f"mysekai/icon/category_icon/{sub.get('assetbundleName', '')}.png"
+        )
+    blueprint = _find_fixture_blueprint(fixture_id)
+    if not blueprint:
+        return request, False
+    request["basic_info"] += _fixture_blueprint_info(blueprint)
+    cost = _material_cost_list(
+        [row for row in costs if int(row.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))]
+    )
+    if cost:
+        request["cost_materials"] = cost
+    return request, bool(blueprint.get("isEnableSketch"))
+
+
 def build_fixture_details() -> list[dict]:
     fixture_map = _md_map("mysekaiFixtures")
     main_genres = _md_map("mysekaiFixtureMainGenres")
@@ -1286,49 +1402,14 @@ def build_fixture_details() -> list[dict]:
         fixture = fixture_map.get(fixture_id)
         if not fixture:
             continue
-        main = main_genres.get(int(fixture.get("mysekaiFixtureMainGenreId", 0))) or {}
-        grid = fixture.get("gridSize") or {}
-        request: dict[str, Any] = {
-            "title": f"【{common.REGION.upper()}-{fixture_id}】{fixture.get('name', '')}",
-            "images": _fixture_color_images(fixture),
-            "main_genre_name": main.get("name", ""),
-            "main_genre_image_path": ASSETS.region_asset(
-                f"mysekai/icon/category_icon/{main.get('assetbundleName', '')}.png"
-            ),
-            "size": {k: int(grid.get(k, 0) or 0) for k in ("width", "depth", "height")},
-            "first_put_cost": int(fixture.get("firstPutCost", 0) or 0),
-            "second_put_cost": int(fixture.get("secondPutCost", 0) or 0),
-            "basic_info": _fixture_basic_info(fixture),
-        }
-        tags = _fixture_tags(fixture)
-        if tags:
-            request["tags"] = tags
-        reaction_groups = _reaction_character_groups(fixture_id)
-        if reaction_groups:
-            request["reaction_character_groups"] = reaction_groups
-        recycle = _material_cost_list([r for r in disassemble if int(r.get("mysekaiFixtureId", 0)) == fixture_id])
-        if recycle:
-            request["recycle_materials"] = recycle
-        sub_id = int(fixture.get("mysekaiFixtureSubGenreId", 0) or 0)
-        if sub_id != 0:
-            sub = sub_genres.get(sub_id) or {}
-            request["sub_genre_name"] = sub.get("name", "")
-            request["sub_genre_image_path"] = ASSETS.region_asset(
-                f"mysekai/icon/category_icon/{sub.get('assetbundleName', '')}.png"
-            )
-        blueprint = _find_fixture_blueprint(fixture_id)
-        if blueprint:
-            request["basic_info"] = request["basic_info"] + _fixture_blueprint_info(blueprint)
-            cost = _material_cost_list(
-                [r for r in costs if int(r.get("mysekaiBlueprintId", 0)) == int(blueprint.get("id", 0))]
-            )
-            if cost:
-                request["cost_materials"] = cost
-            if blueprint.get("isEnableSketch") and not fabricated_friendcodes:
-                # External source (pjsk-static.8823.eu.org) — fabricated offline.
-                request["friendcodes"] = ["1145141919810", "8931145141919", "4545145141919", "1919810893931"]
-                request["friendcode_source"] = "sekai.8823.eu.org"
-                fabricated_friendcodes = True
+        request, supports_sketch = _fixture_detail_request(
+            fixture_id, fixture, main_genres, sub_genres, costs, disassemble
+        )
+        if supports_sketch and not fabricated_friendcodes:
+            # External source (pjsk-static.8823.eu.org) — fabricated offline.
+            request["friendcodes"] = ["1145141919810", "8931145141919", "4545145141919", "1919810893931"]
+            request["friendcode_source"] = "sekai.8823.eu.org"
+            fabricated_friendcodes = True
         requests.append(request)
     return requests
 
@@ -1340,20 +1421,7 @@ def build_fixture_details() -> list[dict]:
 _GATE_MAX_LEVEL = 40
 
 
-def build_door_upgrade() -> dict:
-    """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
-    merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
-
-    user_materials = {
-        int(i.get("mysekaiMaterialId", 0)): int(i.get("quantity", 0))
-        for i in _nested_list(merged, "userMysekaiMaterials")
-    }
-    spec_levels = {
-        int(i.get("mysekaiGateId", 0)): int(i.get("mysekaiGateLevel", 0))
-        for i in _nested_list(merged, "userMysekaiGates")
-        if int(i.get("mysekaiGateId", 0))
-    }
-
+def _gate_materials_by_id() -> dict[int, list[list[dict]]]:
     gate_temp: dict[int, list[list[dict]]] = {}
     for item in MD.get("mysekaiGateMaterialGroups"):
         group_id = int(item.get("groupId", 0))
@@ -1364,62 +1432,95 @@ def build_door_upgrade() -> dict:
         gate_temp[gate_id][level - 1].append(
             {"material_id": int(item.get("mysekaiMaterialId", 0)), "quantity": int(item.get("quantity", 0))}
         )
+    return gate_temp
 
-    spec_gate_id, best_level = 0, 0
-    for gate_id in sorted(spec_levels):
-        level = spec_levels[gate_id]
-        if level == _GATE_MAX_LEVEL or level <= best_level:
-            continue
-        best_level, spec_gate_id = level, gate_id
-    if spec_gate_id and spec_gate_id in gate_temp:
-        gate_temp = {spec_gate_id: gate_temp[spec_gate_id]}
 
-    material_icons = _icon_map("mysekaiMaterials", "iconAssetbundleName")
-    green, red, gray = [0, 200, 0], [200, 0, 0], [50, 50, 50]
+def _selected_gate_materials(
+    gate_materials: dict[int, list[list[dict]]], spec_levels: dict[int, int]
+) -> dict[int, list[list[dict]]]:
+    eligible = [(gate_id, level) for gate_id, level in sorted(spec_levels.items()) if 0 < level < _GATE_MAX_LEVEL]
+    if not eligible:
+        return gate_materials
+    gate_id, _ = max(eligible, key=lambda item: item[1])
+    return {gate_id: gate_materials[gate_id]} if gate_id in gate_materials else gate_materials
 
-    gate_materials: list[dict] = []
-    for gate_id in sorted(gate_temp):
-        level_mats = gate_temp[gate_id]
-        current_level = spec_levels.get(gate_id, 0)
-        if 0 < current_level < len(level_mats):
-            level_mats = level_mats[current_level:]
-        elif current_level >= len(level_mats):
-            level_mats = []
 
-        sum_materials: dict[int, int] = {}
-        out_levels: list[dict] = []
-        for index, items in enumerate(level_mats):
-            if not items:
-                continue
-            level_color = gray
-            out_items: list[dict] = []
-            for item in items:
-                material_id = item["material_id"]
-                sum_materials[material_id] = sum_materials.get(material_id, 0) + item["quantity"]
-                user_qty = user_materials.get(material_id, 0)
-                color = green
-                if user_qty < sum_materials[material_id]:
-                    color = red
-                    level_color = red
-                out_items.append(
-                    {
-                        "image_path": ASSETS.region_asset(
-                            f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
-                        ),
-                        "quantity": item["quantity"],
-                        "color": color,
-                        "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
-                    }
-                )
-            out_levels.append({"level": current_level + index + 1, "color": level_color, "items": out_items})
-        gate_materials.append(
+def _gate_level_items(
+    items: list[dict],
+    sum_materials: dict[int, int],
+    user_materials: dict[int, int],
+    material_icons: dict[int, str],
+) -> tuple[list[dict], bool]:
+    result = []
+    missing = False
+    for item in items:
+        material_id = item["material_id"]
+        sum_materials[material_id] = sum_materials.get(material_id, 0) + item["quantity"]
+        user_qty = user_materials.get(material_id, 0)
+        insufficient = user_qty < sum_materials[material_id]
+        missing = missing or insufficient
+        result.append(
             {
-                "id": gate_id,
-                "level": current_level,
-                "gate_icon_path": _gate_icon_path(gate_id, 0),
-                "level_materials": out_levels,
+                "image_path": ASSETS.region_asset(
+                    f"mysekai/thumbnail/material/{material_icons.get(material_id, '')}.png"
+                ),
+                "quantity": item["quantity"],
+                "color": [200, 0, 0] if insufficient else [0, 200, 0],
+                "sum_quantity": f"{_fmt_qty(user_qty)}/{sum_materials[material_id]}",
             }
         )
+    return result, missing
+
+
+def _gate_level_materials(
+    level_mats: list[list[dict]],
+    current_level: int,
+    user_materials: dict[int, int],
+    material_icons: dict[int, str],
+) -> list[dict]:
+    if current_level > 0:
+        level_mats = level_mats[current_level:] if current_level < len(level_mats) else []
+    sum_materials: dict[int, int] = {}
+    result = []
+    for index, items in enumerate(level_mats):
+        if not items:
+            continue
+        out_items, missing = _gate_level_items(items, sum_materials, user_materials, material_icons)
+        result.append(
+            {
+                "level": current_level + index + 1,
+                "color": [200, 0, 0] if missing else [50, 50, 50],
+                "items": out_items,
+            }
+        )
+    return result
+
+
+def build_door_upgrade() -> dict:
+    """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
+    merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
+    user_materials = {
+        int(item.get("mysekaiMaterialId", 0)): int(item.get("quantity", 0))
+        for item in _nested_list(merged, "userMysekaiMaterials")
+    }
+    spec_levels = {
+        int(item.get("mysekaiGateId", 0)): int(item.get("mysekaiGateLevel", 0))
+        for item in _nested_list(merged, "userMysekaiGates")
+        if int(item.get("mysekaiGateId", 0))
+    }
+    gate_temp = _selected_gate_materials(_gate_materials_by_id(), spec_levels)
+    material_icons = _icon_map("mysekaiMaterials", "iconAssetbundleName")
+    gate_materials = [
+        {
+            "id": gate_id,
+            "level": spec_levels.get(gate_id, 0),
+            "gate_icon_path": _gate_icon_path(gate_id, 0),
+            "level_materials": _gate_level_materials(
+                level_mats, spec_levels.get(gate_id, 0), user_materials, material_icons
+            ),
+        }
+        for gate_id, level_mats in sorted(gate_temp.items())
+    ]
 
     return {
         "profile": _profile_card(merged, include_suite=False, suite_name=True),
@@ -1434,26 +1535,31 @@ def build_door_upgrade() -> dict:
 _MUSIC_TAG_ORDER = ["light_music_club", "street", "idol", "theme_park", "school_refusal", "vocaloid", "other"]
 
 
-def build_music_record() -> dict:
-    """show_id=true (the `/mss id` variant) so record ids are drawn too."""
-    merged = _raw_mysekai()
-    obtained_records = {
-        int(i.get("mysekaiMusicRecordId", 0)): int(i.get("obtainedAt", 0))
-        for i in _nested_list(merged, "userMysekaiMusicRecords")
-    }
-    musics = _md_map("musics")
+def _limited_music_windows() -> dict[int, list[dict]]:
     limited_by_music: dict[int, list[dict]] = {}
     for item in MD.get("limitedTimeMusics"):
         music_id = int(item.get("musicId", 0))
         if music_id:
             limited_by_music.setdefault(music_id, []).append(item)
+    return limited_by_music
+
+
+def _music_tags_by_id() -> dict[int, str]:
     tag_by_music: dict[int, str] = {}
     for item in MD.get("musicTags"):
         music_id, tag = int(item.get("musicId", 0)), item.get("musicTag", "")
         if not music_id or not tag or tag in ("all", "vocaloid"):
             continue
         tag_by_music.setdefault(music_id, tag)
+    return tag_by_music
 
+
+def _collect_music_record_catalog(
+    obtained_records: dict[int, int],
+    musics: dict[int, dict],
+    limited_by_music: dict[int, list[dict]],
+    tag_by_music: dict[int, str],
+) -> tuple[dict[str, list[int]], dict[int, int], set[int]]:
     category_music_ids: dict[str, list[int]] = {tag: [] for tag in _MUSIC_TAG_ORDER}
     music_obtained_at: dict[int, int] = {}
     music_present: set[int] = set()
@@ -1474,8 +1580,11 @@ def build_music_record() -> dict:
             music_present.add(music_id)
         tag = tag_by_music.get(music_id) or "vocaloid"
         category_music_ids[tag].append(music_id)
+    return category_music_ids, music_obtained_at, music_present
 
-    tag_icons = {
+
+def _music_record_tag_icons() -> dict[str, str]:
+    return {
         "light_music_club": ASSETS.static("icon_light_sound.png"),
         "idol": ASSETS.static("icon_idol.png"),
         "street": ASSETS.static("icon_street.png"),
@@ -1485,42 +1594,70 @@ def build_music_record() -> dict:
         "other": "",
     }
 
-    total_count = obtained_count = 0
-    categories: list[dict] = []
-    for tag in _MUSIC_TAG_ORDER:
-        music_ids = sorted(
-            category_music_ids[tag],
-            key=lambda m: (0, music_obtained_at.get(m, 0), m) if m in music_present else (1, 0, m),
-        )
-        category_total, category_obtained = len(music_ids), 0
-        records: list[dict] = []
-        for music_id in music_ids:
-            total_count += 1
-            if music_obtained_at.get(music_id, 0) != 0:
-                obtained_count += 1
-                category_obtained += 1
-            ab = musics[music_id].get("assetbundleName", "")
-            if not ab:  # counted above but skipped (music_record_builder.go:133-142)
-                continue
+
+def _music_record_category(
+    tag: str,
+    music_ids: list[int],
+    music_obtained_at: dict[int, int],
+    music_present: set[int],
+    musics: dict[int, dict],
+    tag_icons: dict[str, str],
+) -> tuple[dict | None, int, int]:
+    music_ids = sorted(
+        music_ids,
+        key=lambda music_id: (
+            (0, music_obtained_at.get(music_id, 0), music_id) if music_id in music_present else (1, 0, music_id)
+        ),
+    )
+    total = len(music_ids)
+    obtained = sum(music_obtained_at.get(music_id, 0) != 0 for music_id in music_ids)
+    if not total:
+        return None, 0, 0
+    records = []
+    for music_id in music_ids:
+        asset_name = musics[music_id].get("assetbundleName", "")
+        if asset_name:  # missing bundle is counted but not rendered
             records.append(
                 {
                     "id": music_id,
-                    "image_path": ASSETS.region_asset(f"music/jacket/{ab}/{ab}.png"),
+                    "image_path": ASSETS.region_asset(f"music/jacket/{asset_name}/{asset_name}.png"),
                     "obtained": music_obtained_at.get(music_id, 0) != 0,
                 }
             )
-        if not category_total:
-            continue
-        categories.append(
-            {
-                "tag": tag,
-                "tag_icon_path": tag_icons[tag],
-                "progress_message": (
-                    f"{category_obtained}/{category_total} ({_pct(category_obtained, category_total):.1f}%)"
-                ),
-                "musicrecords": records,
-            }
+    return (
+        {
+            "tag": tag,
+            "tag_icon_path": tag_icons[tag],
+            "progress_message": f"{obtained}/{total} ({_pct(obtained, total):.1f}%)",
+            "musicrecords": records,
+        },
+        total,
+        obtained,
+    )
+
+
+def build_music_record() -> dict:
+    """show_id=true (the `/mss id` variant) so record ids are drawn too."""
+    merged = _raw_mysekai()
+    obtained_records = {
+        int(item.get("mysekaiMusicRecordId", 0)): int(item.get("obtainedAt", 0))
+        for item in _nested_list(merged, "userMysekaiMusicRecords")
+    }
+    musics = _md_map("musics")
+    category_music_ids, music_obtained_at, music_present = _collect_music_record_catalog(
+        obtained_records, musics, _limited_music_windows(), _music_tags_by_id()
+    )
+    tag_icons = _music_record_tag_icons()
+    total_count = obtained_count = 0
+    categories: list[dict] = []
+    for tag in _MUSIC_TAG_ORDER:
+        category, total, obtained = _music_record_category(
+            tag, category_music_ids[tag], music_obtained_at, music_present, musics, tag_icons
         )
+        total_count += total
+        obtained_count += obtained
+        if category is not None:
+            categories.append(category)
 
     body: dict[str, Any] = {
         "profile": _profile_card(merged, include_suite=False),
@@ -1548,24 +1685,7 @@ def _extract_group_cuids(group: dict) -> list[int]:
     ]
 
 
-def build_talk_list() -> dict:
-    merged = _merged()  # suite+mysekai merged path; talks always from suite
-    character_unit_id = next(
-        u["id"] for u in MD.get("gameCharacterUnits") if u.get("gameCharacterId") == TALK_CHARACTER_ID
-    )
-
-    obtained_fixture_ids = _blueprint_fixture_ids(merged)
-    fixture_map = _md_map("mysekaiFixtures")
-    main_genres_md = _md_map("mysekaiFixtureMainGenres")
-    unit_groups = _md_map("mysekaiGameCharacterUnitGroups")
-    archive_groups = _md_map("characterArchiveMysekaiCharacterTalkGroups")
-
-    user_talk_reads = {
-        int(i.get("mysekaiCharacterTalkId", 0)): bool(i.get("isRead"))
-        for i in _nested_list(merged, "userMysekaiCharacterTalks")
-        if int(i.get("mysekaiCharacterTalkId", 0))
-    }
-
+def _talk_condition_indexes() -> tuple[dict[int, list[int]], dict[int, list[int]], dict[int, list[dict]]]:
     condition_ids_by_fixture: dict[int, list[int]] = {}
     for condition in MD.get("mysekaiCharacterTalkConditions"):
         if condition.get("mysekaiCharacterTalkConditionType") != "mysekai_fixture_id":
@@ -1581,34 +1701,66 @@ def build_talk_list() -> dict:
     talks_by_group: dict[int, list[dict]] = {}
     for talk in MD.get("mysekaiCharacterTalks"):
         talks_by_group.setdefault(int(talk.get("mysekaiCharacterTalkConditionGroupId", 0)), []).append(talk)
+    return condition_ids_by_fixture, group_ids_by_condition, talks_by_group
 
+
+def _talks_for_fixture(
+    fixture_id: int,
+    condition_ids_by_fixture: dict[int, list[int]],
+    group_ids_by_condition: dict[int, list[int]],
+    talks_by_group: dict[int, list[dict]],
+) -> list[dict]:
+    group_ids: set[int] = set()
+    for condition_id in condition_ids_by_fixture.get(fixture_id, []):
+        group_ids.update(group_ids_by_condition.get(condition_id, []))
+    return [talk for group_id in sorted(group_ids) for talk in talks_by_group.get(group_id, [])]
+
+
+def _talk_archive_data(
+    talk: dict,
+    character_unit_id: int,
+    unit_groups: dict[int, dict],
+    archive_groups: dict[int, dict],
+) -> tuple[int, list[int]] | None:
+    group = unit_groups.get(int(talk.get("mysekaiGameCharacterUnitGroupId", 0)))
+    if not group:
+        return None
+    cuids = _extract_group_cuids(group)
+    if character_unit_id not in cuids:
+        return None
+    archive_id = int(talk.get("characterArchiveMysekaiCharacterTalkGroupId", 0))
+    archive = archive_groups.get(archive_id)
+    if archive and archive.get("archiveDisplayType") != "normal":
+        return None
+    return archive_id, cuids
+
+
+def _archive_talk_reads(
+    character_unit_id: int,
+    user_talk_reads: dict[int, bool],
+    unit_groups: dict[int, dict],
+    archive_groups: dict[int, dict],
+) -> dict[int, dict]:
+    condition_ids, group_ids, talks_by_group = _talk_condition_indexes()
     archive_reads: dict[int, dict] = {}
     for fixture in MD.get("mysekaiFixtures"):
         fixture_id = int(fixture.get("id", 0))
         if not fixture_id or fixture.get("mysekaiFixtureType") == "gate":
             continue
-        group_ids: set[int] = set()
-        for condition_id in condition_ids_by_fixture.get(fixture_id, []):
-            group_ids.update(group_ids_by_condition.get(condition_id, []))
-        for group_id in sorted(group_ids):
-            for talk in talks_by_group.get(group_id, []):
-                group = unit_groups.get(int(talk.get("mysekaiGameCharacterUnitGroupId", 0)))
-                if not group:
-                    continue
-                cuids = _extract_group_cuids(group)
-                if character_unit_id not in cuids:
-                    continue
-                archive_id = int(talk.get("characterArchiveMysekaiCharacterTalkGroupId", 0))
-                archive = archive_groups.get(archive_id)
-                if archive and archive.get("archiveDisplayType") != "normal":
-                    continue
-                read = archive_reads.setdefault(archive_id, {"fixture_ids": [], "cuids": [], "has_read": False})
-                if fixture_id not in read["fixture_ids"]:
-                    read["fixture_ids"].append(fixture_id)
-                read["cuids"] = cuids
-                if user_talk_reads.get(int(talk.get("id", 0))):
-                    read["has_read"] = True
+        for talk in _talks_for_fixture(fixture_id, condition_ids, group_ids, talks_by_group):
+            archive_data = _talk_archive_data(talk, character_unit_id, unit_groups, archive_groups)
+            if archive_data is None:
+                continue
+            archive_id, cuids = archive_data
+            read = archive_reads.setdefault(archive_id, {"fixture_ids": [], "cuids": [], "has_read": False})
+            if fixture_id not in read["fixture_ids"]:
+                read["fixture_ids"].append(fixture_id)
+            read["cuids"] = cuids
+            read["has_read"] = read["has_read"] or user_talk_reads.get(int(talk.get("id", 0)), False)
+    return archive_reads
 
+
+def _group_talk_reads(archive_reads: dict[int, dict]) -> tuple[dict[str, dict], dict[str, dict]]:
     single_reads: dict[str, dict] = {}
     multi_reads_map: dict[str, dict] = {}
     # Go iterates archiveReads in map order (nondeterministic); sorted archive id
@@ -1626,14 +1778,20 @@ def build_talk_list() -> dict:
             continue
         if len(item["cuids"]) > 1 and item["cuids"] not in entry["cuids_set"]:
             entry["cuids_set"].append(item["cuids"])
+    return single_reads, multi_reads_map
 
-    def fixture_row(fixture_id: int) -> dict:
-        return {
-            "id": fixture_id,
-            "image_path": _fixture_thumbnail_path(fixture_map.get(fixture_id) or {}),
-            "obtained": fixture_id in obtained_fixture_ids,
-        }
 
+def _talk_fixture_row(fixture_id: int, fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]) -> dict:
+    return {
+        "id": fixture_id,
+        "image_path": _fixture_thumbnail_path(fixture_map.get(fixture_id) or {}),
+        "obtained": fixture_id in obtained_fixture_ids,
+    }
+
+
+def _group_single_talk_reads(
+    single_reads: dict[str, dict], fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]
+) -> dict[int, list[dict]]:
     grouped_single: dict[int, list[dict]] = {}
     for key in sorted(single_reads):
         item = single_reads[key]
@@ -1643,26 +1801,30 @@ def build_talk_list() -> dict:
         main_genre_id = int((fixture_map.get(fixture_ids[0]) or {}).get("mysekaiFixtureMainGenreId", 0))
         grouped_single.setdefault(main_genre_id, []).append(
             {
-                "fixtures": [fixture_row(fid) for fid in fixture_ids],
+                "fixtures": [_talk_fixture_row(fid, fixture_map, obtained_fixture_ids) for fid in fixture_ids],
                 "noread_num": item["total"] - item["read"],
             }
         )
+    return grouped_single
 
-    def single_cmp(left: dict, right: dict) -> int:
-        lf, rf = left["fixtures"], right["fixtures"]
-        if len(lf) != len(rf):
-            return -1 if len(lf) > len(rf) else 1
-        for a, b in zip(lf, rf, strict=False):
-            if a["id"] != b["id"]:
-                return -1 if a["id"] > b["id"] else 1
-        if left["noread_num"] != right["noread_num"]:
-            return -1 if left["noread_num"] > right["noread_num"] else 1
-        return 0
 
+def _single_talk_cmp(left: dict, right: dict) -> int:
+    left_fixtures, right_fixtures = left["fixtures"], right["fixtures"]
+    if len(left_fixtures) != len(right_fixtures):
+        return -1 if len(left_fixtures) > len(right_fixtures) else 1
+    for left_fixture, right_fixture in zip(left_fixtures, right_fixtures, strict=False):
+        if left_fixture["id"] != right_fixture["id"]:
+            return -1 if left_fixture["id"] > right_fixture["id"] else 1
+    if left["noread_num"] != right["noread_num"]:
+        return -1 if left["noread_num"] > right["noread_num"] else 1
+    return 0
+
+
+def _single_talk_main_genres(grouped_single: dict[int, list[dict]], main_genres_md: dict[int, dict]) -> list[dict]:
     single_main_genres: list[dict] = []
     for main_genre_id in sorted(grouped_single):
         info = main_genres_md.get(main_genre_id) or {}
-        groups = sorted(grouped_single[main_genre_id], key=cmp_to_key(single_cmp))
+        groups = sorted(grouped_single[main_genre_id], key=cmp_to_key(_single_talk_cmp))
         single_main_genres.append(
             {
                 "name": info.get("name", ""),
@@ -1670,11 +1832,14 @@ def build_talk_list() -> dict:
                 "sub_genres": [groups],
             }
         )
+    return single_main_genres
 
-    total_talks = sum(i["total"] for i in single_reads.values())
-    total_reads = sum(i["read"] for i in single_reads.values())
 
+def _multi_talk_reads(
+    multi_reads_map: dict[str, dict], fixture_map: dict[int, dict], obtained_fixture_ids: frozenset[int]
+) -> tuple[list[dict], int, int]:
     multi_reads: list[dict] = []
+    total_talks = total_reads = 0
     for key in sorted(multi_reads_map):
         item = multi_reads_map[key]
         total_talks += item["total"]
@@ -1683,13 +1848,45 @@ def build_talk_list() -> dict:
             continue
         multi_reads.append(
             {
-                "fixtures": [fixture_row(fid) for fid in item["fixture_ids"]],
+                "fixtures": [
+                    _talk_fixture_row(fixture_id, fixture_map, obtained_fixture_ids)
+                    for fixture_id in item["fixture_ids"]
+                ],
                 "noread_num": item["total"] - item["read"],
                 "character_ids": item["cuids_set"],
                 "chara_icon_path_groups": [[_chara_icon_path(cuid) for cuid in cuids] for cuids in item["cuids_set"]],
             }
         )
-    multi_reads.sort(key=lambda m: (-len(m["fixtures"]), m["fixtures"][0]["id"] if m["fixtures"] else 0))
+    multi_reads.sort(key=lambda item: (-len(item["fixtures"]), item["fixtures"][0]["id"] if item["fixtures"] else 0))
+    return multi_reads, total_talks, total_reads
+
+
+def build_talk_list() -> dict:
+    merged = _merged()  # suite+mysekai merged path; talks always from suite
+    character_unit_id = next(
+        unit["id"] for unit in MD.get("gameCharacterUnits") if unit.get("gameCharacterId") == TALK_CHARACTER_ID
+    )
+    obtained_fixture_ids = _blueprint_fixture_ids(merged)
+    fixture_map = _md_map("mysekaiFixtures")
+    user_talk_reads = {
+        int(item.get("mysekaiCharacterTalkId", 0)): bool(item.get("isRead"))
+        for item in _nested_list(merged, "userMysekaiCharacterTalks")
+        if int(item.get("mysekaiCharacterTalkId", 0))
+    }
+    archive_reads = _archive_talk_reads(
+        character_unit_id,
+        user_talk_reads,
+        _md_map("mysekaiGameCharacterUnitGroups"),
+        _md_map("characterArchiveMysekaiCharacterTalkGroups"),
+    )
+    single_reads, multi_reads_map = _group_talk_reads(archive_reads)
+    grouped_single = _group_single_talk_reads(single_reads, fixture_map, obtained_fixture_ids)
+    single_main_genres = _single_talk_main_genres(grouped_single, _md_map("mysekaiFixtureMainGenres"))
+    total_talks = sum(item["total"] for item in single_reads.values())
+    total_reads = sum(item["read"] for item in single_reads.values())
+    multi_reads, multi_total, multi_read = _multi_talk_reads(multi_reads_map, fixture_map, obtained_fixture_ids)
+    total_talks += multi_total
+    total_reads += multi_read
 
     return {
         "profile": _profile_card(merged, include_suite=True),
@@ -1712,25 +1909,17 @@ def build_talk_list() -> dict:
 def _resolve_housing_competition() -> tuple[dict, bool]:
     """resolveHousingCompetition (housing_competition.go:312-370): active first,
     else fall back to the most recent past competition."""
-    active: dict | None = None
-    latest_past: dict | None = None
 
     def start_at(item: dict) -> int:
         return int(item.get("reviewStartAt", 0) or 0) or int(item.get("submitStartAt", 0) or 0)
 
-    for item in MD.get("mysekaiHousingCompetitions"):
-        start, aggregate = start_at(item), int(item.get("aggregateAt", 0) or 0)
-        if start <= 0 or aggregate <= 0:
-            continue
-        if start <= NOW_MS < aggregate:
-            if active is None or (start_at(active), active["id"]) < (start, item["id"]):
-                active = item
-        elif start <= NOW_MS:
-            if latest_past is None or (start_at(latest_past), latest_past["id"]) < (start, item["id"]):
-                latest_past = item
+    competitions = MD.get("mysekaiHousingCompetitions")
+    valid = [item for item in competitions if start_at(item) > 0 and int(item.get("aggregateAt", 0) or 0) > 0]
+    active = [item for item in valid if start_at(item) <= NOW_MS < int(item.get("aggregateAt", 0) or 0)]
     if active:
-        return active, True
-    return latest_past or MD.get("mysekaiHousingCompetitions")[-1], False
+        return max(active, key=lambda item: (start_at(item), item["id"])), True
+    past = [item for item in valid if start_at(item) <= NOW_MS]
+    return max(past, key=lambda item: (start_at(item), item["id"])) if past else competitions[-1], False
 
 
 def _fake_thumbnail_b64(color: tuple[int, int, int]) -> str:

@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 
 import matplotlib
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 import pytest
 
 try:
@@ -13,7 +13,13 @@ except ImportError:  # pragma: no cover - native CI job exercises this file
     _native = None
 
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope, take_pillow_touch_snapshot
-from src.sekai.profile.custom_profile.collection_prefab import OMIKUJI_RESULT_NATIVE_SIZE
+from src.sekai.profile.custom_profile.collection_prefab import (
+    OMIKUJI_RESULT_NATIVE_SIZE,
+    OmikujiAssetOp,
+    OmikujiDisplayList,
+    PillowOmikujiAdapter,
+    build_omikuji_display_list,
+)
 from src.sekai.profile.custom_profile.renderer import PROFILE_RENDER_VIEW_H, PROFILE_RENDER_VIEW_W, PNGRenderer
 import src.sekai.profile.custom_profile.skia as skia_mod
 from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
@@ -193,6 +199,42 @@ def _legacy_omikuji(renderer: PNGRenderer, omikuji: dict, paths: dict[str, Path]
             step=height * 25.0 / 490.0,
         )
     return image
+
+
+@pytest.mark.parametrize("size", [(0, 10), (10, 0), (-1, 10)])
+def test_omikuji_display_list_rejects_non_positive_asset_dimensions(size: tuple[int, int]) -> None:
+    with pytest.raises(ValueError, match="positive dimensions"):
+        build_omikuji_display_list(
+            {},
+            background_path="background.png",
+            background_size=size,
+            fortune_path="fortune.png",
+            fortune_size=(10, 10),
+        )
+
+
+def test_omikuji_display_list_skips_empty_text_rows() -> None:
+    display_list = build_omikuji_display_list(
+        {},
+        background_path="background.png",
+        background_size=(148, 49),
+        fortune_path="fortune.png",
+        fortune_size=(10, 20),
+    )
+
+    assert display_list.size == (148, 49)
+    assert [type(op) for op in display_list.ops] == [OmikujiAssetOp, OmikujiAssetOp]
+
+
+def test_omikuji_adapter_reports_missing_required_asset() -> None:
+    adapter = PillowOmikujiAdapter(lambda _size, _decorative: ImageFont.load_default(), lambda _path: None)
+    display_list = OmikujiDisplayList(
+        (4, 4),
+        (OmikujiAssetOp("background", "missing.png", (0, 0, 4, 4), sampling="nearest", blend="src"),),
+    )
+
+    with pytest.raises(FileNotFoundError, match="background"):
+        adapter.render(display_list)
 
 
 def _rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tuple[float, int]:
