@@ -511,7 +511,9 @@ class _SceneAssembler:
             # Two SEPARATE sequential resizes, exactly like prepare_transformed_layer (combining
             # them changes pixels; the Pillow path is the parity baseline).
             osx, osy = inputs.object_scale
-            if osx != 1.0 or osy != 1.0:
+            if not math.isclose(osx, 1.0, rel_tol=0.0, abs_tol=0.0) or not math.isclose(
+                osy, 1.0, rel_tol=0.0, abs_tol=0.0
+            ):
                 new_w = max(1, round(layer.width * osx))
                 new_h = max(1, round(layer.height * osy))
                 layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), RasterResample.BICUBIC)
@@ -1676,7 +1678,7 @@ def _native_content_result(
     if _emit_native_simple_tmp_text(renderer, content, scene):
         return "rendered-native", "native"
 
-    quads = _direct_text_quads(renderer, content)
+    quads = _direct_text_quads(renderer, content, scene.max_mem_bytes - scene.mem_bytes)
     if quads is None:
         return None
     if not quads:

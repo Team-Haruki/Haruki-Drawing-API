@@ -2535,9 +2535,18 @@ def test_native_content_result_declines_quads_rejected_by_scene(monkeypatch):
     monkeypatch.setattr(skia_mod, "_emit_native_honor_deck", lambda *_args: None)
     monkeypatch.setattr(skia_mod, "_emit_native_general", lambda *_args: None)
     monkeypatch.setattr(skia_mod, "_is_empty_text_noop", lambda *_args: False)
-    monkeypatch.setattr(skia_mod, "_direct_text_quads", lambda *_args: [object()])
+
+    def direct_quads(renderer, item, max_field_bytes):
+        assert item is content
+        assert max_field_bytes == 768
+        return [object()]
+
+    monkeypatch.setattr(skia_mod, "_direct_text_quads", direct_quads)
 
     class _Scene:
+        max_mem_bytes = 1024
+        mem_bytes = 256
+
         def emit_sdf_quads(self, _quads):
             return False
 

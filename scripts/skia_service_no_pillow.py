@@ -19,12 +19,17 @@ import tempfile
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.core.path_safety import resolve_cli_path
+
 DEFAULT_REQUESTS = [{"path": "/api/pjsk/help/render", "payload": {"markdown": "# 帮助\n## 查询\n- 名称: Haruki 😀"}}]
 
 
 def _event(kind: str, **values):
-    directory = Path(os.environ["HARUKI_RETIREMENT_EVENTS"])
-    with (directory / f"{os.getpid()}.jsonl").open("a") as stream:
+    directory = resolve_cli_path(os.environ["HARUKI_RETIREMENT_EVENTS"], must_exist=True)
+    with resolve_cli_path(directory / f"{os.getpid()}.jsonl").open("a") as stream:
         stream.write(json.dumps({"kind": kind, "pid": os.getpid(), **values}) + "\n")
 
 
@@ -126,9 +131,10 @@ def run_service_check(requests=None, *, timeout=180):
         (root / "sitecustomize.py").write_text(
             "from scripts.skia_service_no_pillow import install_process_guard\ninstall_process_guard()\n"
         )
-        spec = root / "requests.json"
+        spec = resolve_cli_path(root / "requests.json")
         output = root / "result.json"
-        spec.write_text(json.dumps(requests))
+        with spec.open("w", encoding="utf-8") as stream:
+            json.dump(requests, stream)
         env = dict(os.environ)
         env.update(
             PYTHONPATH=os.pathsep.join((directory, str(ROOT), env.get("PYTHONPATH", ""))),
@@ -189,7 +195,7 @@ def run_service_case(case, payload_path: Path):
         from src.core.main import app
 
         path = route_for_case(case, app.openapi())
-        raw = json.loads(payload_path.read_text())
+        raw = json.loads(resolve_cli_path(payload_path, must_exist=True).read_text())
         validate_retirement_branch(case.name, raw)
         payload = (
             (raw if isinstance(raw, list) else [raw]) if case.is_list else (raw[0] if isinstance(raw, list) else raw)
@@ -201,22 +207,28 @@ def run_service_case(case, payload_path: Path):
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        input_path = resolve_cli_path(sys.argv[2], must_exist=True)
+        output_path = resolve_cli_path(sys.argv[3])
         try:
-            result = _worker(json.loads(Path(sys.argv[2]).read_text()))
+            result = _worker(json.loads(input_path.read_text()))
         except Exception:
             result = {"status": "blocked", "error": traceback.format_exc()}
-        Path(sys.argv[3]).write_text(json.dumps(result, ensure_ascii=False))
+        with output_path.open("w", encoding="utf-8") as stream:
+            json.dump(result, stream, ensure_ascii=False)
         return 0 if result["status"] == "ok" else 1
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--requests", type=Path, help="JSON array of {path, payload} requests")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
-    result = run_service_check(json.loads(args.requests.read_text()) if args.requests else None)
+    result = run_service_check(
+        json.loads(resolve_cli_path(args.requests, must_exist=True).read_text()) if args.requests else None
+    )
     encoded = json.dumps(result, ensure_ascii=False, indent=2)
     print(encoded)  # noqa: T201
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(encoded)
+        output_path = resolve_cli_path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(encoded)
     return 0 if result["status"] == "ok" else 1
 
 

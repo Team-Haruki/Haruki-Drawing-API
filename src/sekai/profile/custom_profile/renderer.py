@@ -8804,7 +8804,7 @@ class PNGRenderer:
             region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
 
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
             field_img = field_img.resize(
                 (max(1, round(field_img.width * style.scale_x)), field_img.height), Image.Resampling.BICUBIC
             )
@@ -9297,7 +9297,7 @@ class PNGRenderer:
             mask = glyph.crop((-px, -py, width - px, height - py))
         else:
             mask = GrayField(width, height, bytes(width * height))
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
             scaled_size = (max(1, round(mask.width * style.scale_x)), mask.height)
             if max_field_bytes is not None and scaled_size[0] * scaled_size[1] * 8 > max_field_bytes:
                 raise ValueError("fallback TMP scaled field exceeds remaining native scene memory")
@@ -9367,7 +9367,7 @@ class PNGRenderer:
             self.draw_text_mask_run(
                 ImageDraw.Draw(mask), (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size
             )
-            if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+            if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
                 new_w = max(1, round(mask.width * style.scale_x))
                 mask = mask.resize((new_w, mask.height), Image.Resampling.BICUBIC)
 
@@ -10146,7 +10146,7 @@ class PNGRenderer:
             font_name,
             font_size,
         )
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
             glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
@@ -10234,7 +10234,7 @@ class PNGRenderer:
             font_name,
             font_size,
         )
-        if self.tmp_scale_mode == "x" and style.scale_x != 1.0:
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
             glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
         if style.rotate:
             glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)

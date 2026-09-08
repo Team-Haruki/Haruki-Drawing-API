@@ -21,6 +21,10 @@ import tempfile
 import traceback
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from src.core.path_safety import resolve_cli_path
 
 
 class _NoPillow(importlib.abc.MetaPathFinder):
@@ -69,7 +73,7 @@ def _worker(spec: dict) -> dict:
     else:
         module = importlib.import_module(module_name)
     model = getattr(importlib.import_module(case["model_module"]), case["model_cls"])
-    raw = json.loads(Path(spec["payload_path"]).read_text())
+    raw = json.loads(resolve_cli_path(spec["payload_path"], must_exist=True).read_text())
     from scripts.parity_payloads.retirement_fixture_contract import validate_retirement_branch
 
     validate_retirement_branch(case["name"], raw)
@@ -137,15 +141,18 @@ def run_clean_case(case, payload_path: Path, *, timeout: float = 180) -> dict:
 
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "--worker":
+        input_path = resolve_cli_path(sys.argv[2], must_exist=True)
+        output_path = resolve_cli_path(sys.argv[3])
         try:
-            result = _worker(json.loads(Path(sys.argv[2]).read_text()))
+            result = _worker(json.loads(input_path.read_text()))
         except Exception as exc:
             result = {
                 "status": "blocked",
                 "error": f"{type(exc).__name__}: {exc}",
                 "trace": traceback.format_exc(limit=-12),
             }
-        Path(sys.argv[3]).write_text(json.dumps(result, ensure_ascii=False, indent=2))
+        with output_path.open("w", encoding="utf-8") as stream:
+            json.dump(result, stream, ensure_ascii=False, indent=2)
         return 0 if result["status"] == "ok" else 1
 
     parser = argparse.ArgumentParser(description=__doc__)
@@ -166,8 +173,9 @@ def main():
         result = run_clean_case(case, path) if path.is_file() else {"status": "no-payload"}
         rows.append({"endpoint": case.name, **result})
         print(f"{case.name}: {result['status']} {result.get('error', '')}", flush=True)  # noqa: T201
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    (args.out_dir / "results.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2))
+    out_dir = resolve_cli_path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    resolve_cli_path(out_dir / "results.json").write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     return 0 if rows and all(row["status"] == "ok" for row in rows) else 1
 
 

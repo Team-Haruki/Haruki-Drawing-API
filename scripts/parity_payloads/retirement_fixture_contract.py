@@ -1,5 +1,6 @@
 """Preconditions that keep synthetic branch requests from silently testing placeholders."""
 
+import math
 from pathlib import Path
 
 PREVIEW_PATH = "utils/retirement_fixtures/costume-preview.png"
@@ -40,8 +41,8 @@ def validate_retirement_branch(name: str, payload: dict, assets_dir: Path | None
             or not isinstance(texts[0].get("text"), str)
             or not texts[0]["text"].strip()
             or texts[0].get("objectData", {}).get("visible") is not True
-            or texts[0].get("outlineSize") != 0.25
-            or texts[0].get("outlineAlpha") != 1.0
+            or not _exact_number(texts[0].get("outlineSize"), 0.25)
+            or not _exact_number(texts[0].get("outlineAlpha"), 1.0)
             or any(value for key, value in layout.items() if key != "texts" and isinstance(value, list))
         ):
             raise ValueError("outlined TMP fixture must contain exactly one visible text with its outline enabled")
@@ -220,3 +221,8 @@ def validate_fallback_font_asset(region: str, font: str) -> None:
             raise ValueError("font fallback fixture requires missing U+200B source metrics")
     elif not asset.atlas_paths or any(not path.is_file() for path in asset.atlas_paths):
         raise ValueError("font fallback fixture requires its static atlas")
+
+
+def _exact_number(value, expected: float) -> bool:
+    # These are fixture sentinels, not computed measurements: no tolerance is allowed.
+    return isinstance(value, (int, float)) and math.isclose(value, expected, rel_tol=0.0, abs_tol=0.0)

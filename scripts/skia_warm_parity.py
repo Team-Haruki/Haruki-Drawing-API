@@ -81,6 +81,7 @@ from scripts.skia_parity_sweep import (
     _load_payload,
     setup,
 )
+from src.core.path_safety import resolve_cli_path
 from src.sekai.base import utils as base_utils
 
 OUT_DIR = REPO_ROOT / "out" / "warm-parity"
@@ -276,6 +277,7 @@ def main() -> int:
     args = ap.parse_args()
 
     setup()
+    args.out_dir = resolve_cli_path(args.out_dir)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     try:
         mysekai_real = _load_mysekai_real()
@@ -308,7 +310,7 @@ def main() -> int:
     issues = strict_warm_issues(all_rows) if args.strict else []
     if args.strict and (args.only or args.backend != "both"):
         issues.append("strict warm release validation requires the full sweep and both backends")
-    results = args.out_dir / "results.json"
+    results = resolve_cli_path(args.out_dir / "results.json")
     results.write_text(json.dumps({"cases": all_rows, "strict_issues": issues}, ensure_ascii=False, indent=2))
     failures = sum(1 for r in all_rows if r["status"] in ("CACHE-DRIFT", "error"))
     print(f"\nresults: {results}")  # noqa: T201

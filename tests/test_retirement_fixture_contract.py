@@ -245,3 +245,18 @@ def test_font_fallback_fixture_cannot_drop_its_missing_character_branch(monkeypa
         item["objectData"]["position"]["x"] = 9999
     with pytest.raises(ValueError, match="font fallback fixture"):
         validate_retirement_branch(name, request)
+
+
+@pytest.mark.parametrize("field", ["outlineSize", "outlineAlpha"])
+def test_outline_fixture_rejects_adjacent_float_values(field):
+    import math
+
+    from scripts.parity_payloads.gen_retirement_branches import build_outlined_text_request
+
+    original = {"card": {"customProfileCard": {"texts": [{"text": "TMP", "objectData": {"visible": True}}]}}}
+    request = build_outlined_text_request(original)
+    validate_retirement_branch("custom_profile_card_outlined_text", request)
+    text = request["card"]["customProfileCard"]["texts"][0]
+    text[field] = math.nextafter(text[field], math.inf)
+    with pytest.raises(ValueError, match="exactly one visible text"):
+        validate_retirement_branch("custom_profile_card_outlined_text", request)

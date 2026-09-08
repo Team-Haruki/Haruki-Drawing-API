@@ -24,6 +24,7 @@ import haruki_skia_renderer as native
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from src.core.path_safety import resolve_cli_path
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 
 TEXTS = ["未来 日本語テスト", "Haruki AVATAR To office", "j é e\u0301", "你好 abc 123", "  A  ", "", " "]
@@ -34,11 +35,13 @@ def main() -> int:
     parser.add_argument("--out-dir", type=Path, default=ROOT / "out" / "native-text-parity")
     parser.add_argument("--font-dir", type=Path, default=ROOT / "data")
     args = parser.parse_args()
+    args.out_dir = resolve_cli_path(args.out_dir)
+    args.font_dir = resolve_cli_path(args.font_dir, must_exist=True)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     previews = []
     for weight in ("Regular", "Bold", "Heavy"):
-        path = args.font_dir / f"SourceHanSansSC-{weight}.otf"
+        path = resolve_cli_path(args.font_dir / f"SourceHanSansSC-{weight}.otf", must_exist=True)
         for size in (8, 12, 16, 20, 24, 32, 48):
             font = ImageFont.truetype(str(path), size, layout_engine=ImageFont.Layout.BASIC)
             for text in TEXTS:
@@ -102,11 +105,13 @@ def main() -> int:
         for engine in ("skia", "freetype_basic")
     }
     report = {"ir_capability": native.IR_CAPABILITY, "summary": summary, "cases": rows}
-    (args.out_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    resolve_cli_path(args.out_dir / "report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     preview = Image.new("RGB", (800, 290 * len(previews)), "white")
     for i, panel in enumerate(previews):
         preview.paste(panel, (0, 290 * i))
-    preview.save(args.out_dir / "comparison.png")
+    preview.save(resolve_cli_path(args.out_dir / "comparison.png"))
     print(json.dumps(summary, indent=2))  # noqa: T201
     return int(summary["freetype_basic"]["metric_mismatches"] > 0 or summary["freetype_basic"]["pixel_max"] > 1)
 

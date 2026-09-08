@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 from typing import Any
 
 from src.core.debug import set_render_backend
@@ -315,7 +316,7 @@ async def _render_canvas_uncounted(
             return await _render_canvas_uncounted(
                 built, bg_hour=bg, scale=scale, export_format=export_format, text_engine=text_engine
             )
-    eff_scale = float(scale) if scale and scale != 1.0 else None
+    eff_scale = float(scale) if scale and not math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=0.0) else None
     eff_format = EXPORT_IMAGE_FORMAT if export_format is None else export_format
 
     def _render():
