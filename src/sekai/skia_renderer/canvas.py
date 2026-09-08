@@ -63,12 +63,13 @@ def skia_plot_enabled() -> bool:
 # resize for Image and UnitySubscene, 16 = straight-RGBA Pillow paste-mask blending for Image,
 # 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow,
 # 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp,
-# 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching.
+# 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching,
+# 20 = discrete Pillow-compatible rounded-rectangle Group mask.
 # An older wheel SILENTLY drops the fields it does not know (serde skips them) — a capability-6
 # wheel would render a triangle background with no triangles in it — so refuse it and fail open
 # to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
 # (quick-check.yml, skia-wheels.yml). Bump all four together.
-REQUIRED_NATIVE_IR_CAPABILITY = 19
+REQUIRED_NATIVE_IR_CAPABILITY = 20
 
 
 def load_native_renderer():
@@ -234,9 +235,9 @@ async def _render_canvas_uncounted(
     fail-open catch-all live in :func:`render_canvas_payload`."""
     try:
         native = load_native_renderer()
-    except ImportError as exc:
+    except ImportError:
         # Fail-open: a missing/broken native extension must degrade to Pillow, not 500.
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+        logger.exception("haruki_skia_renderer not importable; falling back to Pillow")
         return None
     bg = background_hour() if bg_hour is None else bg_hour
     eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None

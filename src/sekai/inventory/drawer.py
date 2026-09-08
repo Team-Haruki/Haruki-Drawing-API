@@ -32,6 +32,19 @@ DESC_STYLE = TextStyle(font=DEFAULT_FONT, size=12, color=(92, 100, 122))
 QTY_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=(38, 50, 76))
 ICON_FALLBACK_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(112, 122, 148))
 
+RESOURCE_TYPE_DESCRIPTIONS = {
+    "coin": "金币",
+    "jewel": "水晶",
+    "virtual_coin": "虚拟币",
+    "boost_item": "火罐",
+    "event_item": "活动",
+    "gacha_ticket": "招募",
+    "gacha_ceil_item": "招募",
+    "practice_ticket": "育成",
+    "skill_practice_ticket": "育成",
+    "mysekai_material": "MySekai",
+}
+
 
 async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
     icon_cache = await _load_inventory_icons(rqd.sections)
@@ -149,23 +162,7 @@ def _item_description_text(item: InventoryItem) -> str:
         return description
     if item.recovery_value:
         return f"+{item.recovery_value} 能量"
-    if item.resource_type == "coin":
-        return "金币"
-    if item.resource_type == "jewel":
-        return "水晶"
-    if item.resource_type == "virtual_coin":
-        return "虚拟币"
-    if item.resource_type == "boost_item":
-        return "火罐"
-    if item.resource_type == "event_item":
-        return "活动"
-    if item.resource_type in {"gacha_ticket", "gacha_ceil_item"}:
-        return "招募"
-    if item.resource_type in {"practice_ticket", "skill_practice_ticket"}:
-        return "育成"
-    if item.resource_type == "mysekai_material":
-        return "MySekai"
-    return f"ID {item.id}"
+    return RESOURCE_TYPE_DESCRIPTIONS.get(item.resource_type, f"ID {item.id}")
 
 
 def _format_quantity(value: int) -> str:
@@ -198,8 +195,6 @@ def _fits_lines(text: str, font_path: str, size: int, width: int, line_count: in
                 used_lines += 1
                 break
             clip_idx = _clip_text_to_width(line, font, width)
-            if clip_idx <= 0:
-                return False
             used_lines += 1
             line = line[clip_idx:]
     return used_lines <= line_count

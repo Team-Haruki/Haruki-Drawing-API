@@ -129,53 +129,59 @@ def roundrect_bg(
     return RoundRectBg(fill, radius, blur_glass=blur_glass, blur_glass_kwargs=blur_glass_kwargs or {})
 
 
+def _wrap_watermark_paragraph(raw_line: str, font, max_width: int) -> list[str]:
+    if not raw_line:
+        return [""]
+    segments = [segment.strip() for segment in re.split(r" {2,}", raw_line) if segment.strip()]
+    if not segments:
+        return [""]
+
+    lines: list[str] = []
+    current = segments[0]
+    for segment in segments[1:]:
+        candidate = f"{current}  {segment}"
+        text_w, _ = get_text_size(font, candidate)
+        if text_w > max_width:
+            lines.append(current)
+            current = segment
+        else:
+            current = candidate
+    lines.append(current)
+    return lines
+
+
+def _split_long_watermark_line(line: str, font, max_width: int) -> list[str]:
+    text_w, _ = get_text_size(font, line)
+    if text_w <= max_width:
+        return [line]
+
+    parts: list[str] = []
+    current = ""
+    for ch in line:
+        candidate = current + ch
+        text_w, _ = get_text_size(font, candidate)
+        if current and text_w > max_width:
+            parts.append(current)
+            current = ch
+        else:
+            current = candidate
+    if current:
+        parts.append(current)
+    return parts
+
+
 def wrap_watermark_text(text: str, font, max_width: int) -> list[str]:
     """
     优先按双空格分段换行，只在单段过长时才退回到段内拆分。
     """
     max_width = max(1, int(max_width))
-    lines: list[str] = []
+    paragraph_lines: list[str] = []
     for raw_line in str(text).split("\n"):
-        if not raw_line:
-            lines.append("")
-            continue
-
-        segments = [segment.strip() for segment in re.split(r" {2,}", raw_line) if segment.strip()]
-        if not segments:
-            lines.append("")
-            continue
-
-        current = ""
-        for segment in segments:
-            candidate = segment if not current else f"{current}  {segment}"
-            text_w, _ = get_text_size(font, candidate)
-            if current and text_w > max_width:
-                lines.append(current)
-                current = segment
-                continue
-            current = candidate
-
-        if current:
-            lines.append(current)
+        paragraph_lines.extend(_wrap_watermark_paragraph(raw_line, font, max_width))
 
     final_lines: list[str] = []
-    for line in lines:
-        text_w, _ = get_text_size(font, line)
-        if text_w <= max_width:
-            final_lines.append(line)
-            continue
-
-        current = ""
-        for ch in line:
-            candidate = current + ch
-            text_w, _ = get_text_size(font, candidate)
-            if current and text_w > max_width:
-                final_lines.append(current)
-                current = ch
-            else:
-                current = candidate
-        if current:
-            final_lines.append(current)
+    for line in paragraph_lines:
+        final_lines.extend(_split_long_watermark_line(line, font, max_width))
     return final_lines or [""]
 
 
@@ -293,31 +299,37 @@ def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     canvas.add_item(root).set_size(None)
 
 
-def build_request_watermark_text(request, extra_suffix: str | None = None) -> str:
-    timezone_name = None
-    dt_value = None
+def _request_watermark_context(request) -> tuple[str | None, int | None]:
     if isinstance(request, list | tuple):
         for item in request:
             timezone_name = getattr(item, "timezone", None)
             dt_value = getattr(item, "dt", None)
             if timezone_name is not None or dt_value is not None:
-                break
-    else:
-        timezone_name = getattr(request, "timezone", None)
-        dt_value = getattr(request, "dt", None)
+                return timezone_name, dt_value
+        return None, None
+    return getattr(request, "timezone", None), getattr(request, "dt", None)
+
+
+def _format_request_watermark_datetime(timezone_name: str | None, dt_value: int | None) -> str | None:
+    if timezone_name is None and dt_value is None:
+        return None
+    dt = datetime_from_millis(dt_value, timezone_name)
+    if dt is None:
+        dt = request_now(timezone_name)
+    timezone_label = (timezone_name or "").strip()
+    if not timezone_label and dt.tzinfo is not None:
+        timezone_label = dt.tzname() or ""
+    timestamp = dt.strftime("%Y-%m-%d %H:%M:%S")
+    return f"DT: {timestamp} ({timezone_label})" if timezone_label else f"DT: {timestamp}"
+
+
+def build_request_watermark_text(request, extra_suffix: str | None = None) -> str:
+    timezone_name, dt_value = _request_watermark_context(request)
+    datetime_prefix = _format_request_watermark_datetime(timezone_name, dt_value)
 
     text = DEFAULT_WATERMARK
-    if timezone_name is not None or dt_value is not None:
-        dt = datetime_from_millis(dt_value, timezone_name)
-        if dt is None:
-            dt = request_now(timezone_name)
-        timezone_label = (timezone_name or "").strip()
-        if not timezone_label and dt.tzinfo is not None:
-            timezone_label = dt.tzname() or ""
-        if timezone_label:
-            text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')} ({timezone_label})  {text}"
-        else:
-            text = f"DT: {dt.strftime('%Y-%m-%d %H:%M:%S')}  {text}"
+    if datetime_prefix is not None:
+        text = f"{datetime_prefix}  {text}"
 
     suffix = (extra_suffix or "").strip()
     if suffix:
