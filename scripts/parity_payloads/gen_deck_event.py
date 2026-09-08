@@ -356,22 +356,19 @@ def _sort_event_history(rows: list[dict]) -> None:
     rows.sort(key=key)
 
 
-def _build_event_record() -> dict:
-    suite = common.load_suite()
-    now = suite.get("now") or common.now_ms()
-    events_by_id = MD.event_by_id()
-    honor_ids = _user_honor_ids(suite)
-
-    # Rank lookup: userEventResults first, embedded userEvents rank fills gaps (:49-60).
+def _event_rank_by_event(suite: dict) -> dict[int, int]:
+    """userEventResults first; embedded userEvents rank fills gaps (:49-60)."""
     rank_by_event: dict[int, int] = {}
     for result in suite.get("userEventResults") or []:
         rank_by_event[result["eventId"]] = result.get("rank", 0)
     for ue in suite.get("userEvents") or []:
         if ue.get("eventId", 0) > 0 and ue.get("rank", 0) > 0:
             rank_by_event.setdefault(ue["eventId"], ue["rank"])
-    # JP region: no untrusted-rank dropping (:618-632).
+    return rank_by_event
 
-    # Regular events' honor T-tiers (:538-575).
+
+def _event_display_tiers(now: int, honor_ids: set[int]) -> dict[int, int]:
+    """Regular events' honor T-tiers (:538-575)."""
     display_by_event: dict[int, int] = {}
     for event in MD.get("events"):
         if not _ranking_settled(event, now):
@@ -380,97 +377,141 @@ def _build_event_record() -> dict:
         hit = [tiers[h] for h in honor_ids if tiers.get(h, 0) > 0]
         if hit:
             display_by_event[event["id"]] = min(hit)
+    return display_by_event
 
+
+def _apply_event_history_rank(row: dict, display_tier: int | None, exact_rank: int | None) -> None:
+    if display_tier is not None:
+        row["rank_display"] = f"T{display_tier}"
+        row["rank_tier"] = display_tier
+    if exact_rank is not None:
+        row["rank"] = exact_rank
+        row.pop("rank_display", None)
+        row.pop("rank_tier", None)
+
+
+def _regular_event_history(
+    suite: dict,
+    events_by_id: dict[int, dict],
+    display_by_event: dict[int, int],
+    rank_by_event: dict[int, int],
+) -> list[dict]:
     event_info: list[dict] = []
     seen_events: set[int] = set()
-    for ue in suite.get("userEvents") or []:
-        event = events_by_id.get(ue.get("eventId"))
-        if not event:
+    for user_event in suite.get("userEvents") or []:
+        event = events_by_id.get(user_event.get("eventId"))
+        if event is None:
             continue
-        row = _history_row(event, ue.get("eventPoint", 0))
-        if event["id"] in display_by_event:
-            row["rank_display"] = f"T{display_by_event[event['id']]}"
-            row["rank_tier"] = display_by_event[event["id"]]
-        if event["id"] in rank_by_event:  # exact rank wins and clears the tier display
-            row["rank"] = rank_by_event[event["id"]]
-            row.pop("rank_display", None)
-            row.pop("rank_tier", None)
+        row = _history_row(event, user_event.get("eventPoint", 0))
+        _apply_event_history_rank(row, display_by_event.get(event["id"]), rank_by_event.get(event["id"]))
         event_info.append(row)
         seen_events.add(event["id"])
+
     for event_id in sorted(display_by_event):  # deterministic stand-in for Go map order
         if event_id in seen_events or event_id not in events_by_id:
             continue
         row = _history_row(events_by_id[event_id], None)
-        row["rank_display"] = f"T{display_by_event[event_id]}"
-        row["rank_tier"] = display_by_event[event_id]
-        if event_id in rank_by_event:
-            row["rank"] = rank_by_event[event_id]
-            row.pop("rank_display", None)
-            row.pop("rank_tier", None)
+        _apply_event_history_rank(row, display_by_event[event_id], rank_by_event.get(event_id))
         event_info.append(row)
         seen_events.add(event_id)
+
     for event_id in sorted(rank_by_event):
         if event_id in seen_events or event_id not in events_by_id:
             continue
         row = _history_row(events_by_id[event_id], None)
-        row["rank"] = rank_by_event[event_id]
+        _apply_event_history_rank(row, None, rank_by_event[event_id])
         event_info.append(row)
         seen_events.add(event_id)
+    return event_info
 
-    # World bloom chapter T-tiers (:419-485).
-    wl_box_honors = _resource_box_honor_ids("world_bloom_chapter_ranking_reward")
-    chapter_ranges: dict[tuple[int, int], list[dict]] = {}
-    for rng in MD.get("worldBloomChapterRankingRewardRanges"):
-        chapter_ranges.setdefault((rng["eventId"], rng["gameCharacterId"]), []).append(rng)
+
+def _chapter_ranges_by_key() -> dict[tuple[int, int], list[dict]]:
+    ranges: dict[tuple[int, int], list[dict]] = {}
+    for row in MD.get("worldBloomChapterRankingRewardRanges"):
+        ranges.setdefault((row["eventId"], row["gameCharacterId"]), []).append(row)
+    return ranges
+
+
+def _best_world_bloom_tier(
+    chapter: dict,
+    now: int,
+    honor_ids: set[int],
+    box_honors: dict[int, tuple[int, ...]],
+    chapter_ranges: dict[tuple[int, int], list[dict]],
+) -> int:
+    character_id = chapter.get("gameCharacterId", 0)
+    closed_at = chapter.get("chapterEndAt", 0) or chapter.get("aggregateAt", 0)
+    if character_id <= 0 or closed_at <= 0 or now < closed_at:
+        return 0
+    best = 0
+    for row in chapter_ranges.get((chapter["eventId"], character_id), []):
+        if row.get("toRank", 0) <= 0 or row.get("resourceBoxId", 0) <= 0:
+            continue
+        if not honor_ids.intersection(box_honors.get(row["resourceBoxId"], ())):
+            continue
+        if best == 0 or row["toRank"] < best:
+            best = row["toRank"]
+    return best
+
+
+def _world_bloom_display_tiers(now: int, honor_ids: set[int]) -> dict[tuple[int, int], int]:
+    box_honors = _resource_box_honor_ids("world_bloom_chapter_ranking_reward")
+    chapter_ranges = _chapter_ranges_by_key()
     display_by_chapter: dict[tuple[int, int], int] = {}
     for chapter in MD.get("worldBlooms"):
-        char_id = chapter.get("gameCharacterId", 0)
-        if char_id <= 0:
-            continue
-        closed_at = chapter.get("chapterEndAt", 0) or chapter.get("aggregateAt", 0)
-        if closed_at <= 0 or now < closed_at:
-            continue
-        best = 0
-        for rng in chapter_ranges.get((chapter["eventId"], char_id), []):
-            if rng.get("toRank", 0) <= 0 or rng.get("resourceBoxId", 0) <= 0:
-                continue
-            if not honor_ids.intersection(wl_box_honors.get(rng["resourceBoxId"], ())):
-                continue
-            if best == 0 or rng["toRank"] < best:
-                best = rng["toRank"]
-        if best > 0:
-            display_by_chapter[(chapter["eventId"], char_id)] = best
+        tier = _best_world_bloom_tier(chapter, now, honor_ids, box_honors, chapter_ranges)
+        if tier > 0:
+            display_by_chapter[(chapter["eventId"], chapter["gameCharacterId"])] = tier
+    return display_by_chapter
 
+
+def _add_world_bloom_chara_icon(row: dict, character_id: int) -> None:
+    if character_id > 0:
+        row["wl_chara_icon_path"] = ASSETS.region_asset(f"character/character_sd_l/chr_sp_{character_id}.png")
+
+
+def _world_bloom_history(
+    suite: dict,
+    events_by_id: dict[int, dict],
+    display_by_chapter: dict[tuple[int, int], int],
+) -> list[dict]:
     wl_event_info: list[dict] = []
     seen_chapters: set[tuple[int, int]] = set()
-    for wb in suite.get("userWorldBlooms") or []:
-        event = events_by_id.get(wb.get("eventId"))
-        if not event:
+    for world_bloom in suite.get("userWorldBlooms") or []:
+        event = events_by_id.get(world_bloom.get("eventId"))
+        if event is None:
             continue
-        row = _history_row(event, wb.get("worldBloomChapterPoint", 0))
+        row = _history_row(event, world_bloom.get("worldBloomChapterPoint", 0))
         row["is_wl_event"] = True
-        key = (wb["eventId"], wb.get("gameCharacterId", 0))
-        if key in display_by_chapter:
-            row["rank_display"] = f"T{display_by_chapter[key]}"
-            row["rank_tier"] = display_by_chapter[key]
-        if wb.get("rank", 0) > 0:
-            row["rank"] = wb["rank"]
-            row.pop("rank_display", None)
-            row.pop("rank_tier", None)
-        if key[1] > 0:
-            row["wl_chara_icon_path"] = ASSETS.region_asset(f"character/character_sd_l/chr_sp_{key[1]}.png")
+        key = (world_bloom["eventId"], world_bloom.get("gameCharacterId", 0))
+        exact_rank = world_bloom.get("rank", 0) or None
+        _apply_event_history_rank(row, display_by_chapter.get(key), exact_rank)
+        _add_world_bloom_chara_icon(row, key[1])
         wl_event_info.append(row)
         seen_chapters.add(key)
+
     for key in sorted(display_by_chapter):
         if key in seen_chapters or key[0] not in events_by_id:
             continue
         row = _history_row(events_by_id[key[0]], None)
         row["is_wl_event"] = True
-        row["rank_display"] = f"T{display_by_chapter[key]}"
-        row["rank_tier"] = display_by_chapter[key]
-        row["wl_chara_icon_path"] = ASSETS.region_asset(f"character/character_sd_l/chr_sp_{key[1]}.png")
+        _apply_event_history_rank(row, display_by_chapter[key], None)
+        _add_world_bloom_chara_icon(row, key[1])
         wl_event_info.append(row)
         seen_chapters.add(key)
+    return wl_event_info
+
+
+def _build_event_record() -> dict:
+    suite = common.load_suite()
+    now = suite.get("now") or common.now_ms()
+    events_by_id = MD.event_by_id()
+    honor_ids = _user_honor_ids(suite)
+    rank_by_event = _event_rank_by_event(suite)
+    display_by_event = _event_display_tiers(now, honor_ids)
+    event_info = _regular_event_history(suite, events_by_id, display_by_event, rank_by_event)
+    display_by_chapter = _world_bloom_display_tiers(now, honor_ids)
+    wl_event_info = _world_bloom_history(suite, events_by_id, display_by_chapter)
 
     _sort_event_history(event_info)
     _sort_event_history(wl_event_info)
@@ -503,30 +544,37 @@ def _user_card_by_id() -> dict[int, dict]:
 
 def _card_event_bonus(card: dict, event_id: int) -> float:
     """Best-matching eventDeckBonuses rate + eventCards bonus (offline engine stand-in)."""
-    char_id = card["characterId"]
-    attr = card["attr"]
-    support = card.get("supportUnit", "none")
     best = 0.0
     for bonus in MD.get("eventDeckBonuses"):
-        if bonus["eventId"] != event_id:
-            continue
-        gcu_id = bonus.get("gameCharacterUnitId", 0)
-        if gcu_id:
-            gcu = _gcu_by_id().get(gcu_id)
-            if not gcu or gcu["gameCharacterId"] != char_id:
-                continue
-            if char_id > 20 and support not in ("none", "") and gcu["unit"] != support:
-                continue
-        if bonus.get("cardAttr") and bonus["cardAttr"] != attr:
-            continue
-        if not gcu_id and not bonus.get("cardAttr"):
-            continue
-        best = max(best, bonus.get("bonusRate", 0.0))
+        if _event_deck_bonus_matches(card, event_id, bonus):
+            best = max(best, bonus.get("bonusRate", 0.0))
+    return best + _event_card_bonus(card["id"], event_id)
+
+
+def _event_deck_bonus_matches(card: dict, event_id: int, bonus: dict) -> bool:
+    if bonus["eventId"] != event_id:
+        return False
+    gcu_id = bonus.get("gameCharacterUnitId", 0)
+    if gcu_id and not _event_bonus_gcu_matches(card, gcu_id):
+        return False
+    if bonus.get("cardAttr") and bonus["cardAttr"] != card["attr"]:
+        return False
+    return bool(gcu_id or bonus.get("cardAttr"))
+
+
+def _event_bonus_gcu_matches(card: dict, gcu_id: int) -> bool:
+    gcu = _gcu_by_id().get(gcu_id)
+    if not gcu or gcu["gameCharacterId"] != card["characterId"]:
+        return False
+    support = card.get("supportUnit", "none")
+    return card["characterId"] <= 20 or support in ("none", "") or gcu["unit"] == support
+
+
+def _event_card_bonus(card_id: int, event_id: int) -> float:
     for ec in MD.get("eventCards"):
-        if ec["eventId"] == event_id and ec["cardId"] == card["id"]:
-            best += ec.get("bonusRate", 0.0)
-            break
-    return best
+        if ec["eventId"] == event_id and ec["cardId"] == card_id:
+            return ec.get("bonusRate", 0.0)
+    return 0.0
 
 
 def _deck_card_raw(card_id: int, event_id: int) -> dict:

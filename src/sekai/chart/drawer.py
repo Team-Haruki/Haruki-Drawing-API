@@ -191,8 +191,8 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
         return None
     try:
         native = load_native_renderer()
-    except ImportError as exc:
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+    except ImportError:
+        logger.exception("haruki_skia_renderer not importable; falling back to Pillow")
         _record(OUTCOME_FALLBACK)
         return None
     allow_raster = getattr(native, "RAW_BUFFER_CAPABILITY", 0) >= 1

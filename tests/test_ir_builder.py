@@ -5,7 +5,17 @@ from __future__ import annotations
 import pytest
 
 from src.sekai.base.painter import get_font, get_text_size
-from src.sekai.skia_renderer.ir_builder import IRBuilder, image_shadow, image_tint, linear_gradient
+import src.sekai.skia_renderer.ir_builder as ir_builder_mod
+from src.sekai.skia_renderer.ir_builder import (
+    IRBuilder,
+    adaptive_color,
+    get_pil_font,
+    image_shadow,
+    image_tint,
+    linear_gradient,
+    pil_font_cache_info,
+    radial_gradient,
+)
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
 
@@ -95,7 +105,10 @@ def test_image_paste_lerp_serializes_only_for_integral_plain_stretch():
         {"pos": (2, 3), "size": (20, 10), "alpha": 0.5},
         {"pos": (2, 3), "size": (20, 10), "source_rect": (0, 0, 1, 1)},
         {"pos": (2, 3), "size": (20, 10), "tint": image_tint((255, 0, 0, 255))},
+        {"pos": (2, 3), "size": (20, 10), "shadow": image_shadow()},
         {"pos": (2, 3), "size": (20, 10), "blur_sigma": 1.0},
+        {"pos": (2, 3), "size": (20, 10), "blur_sigma": (0.0, 1.0)},
+        {"pos": (float("inf"), 3), "size": (20, 10)},
     )
     for kwargs in invalid_calls:
         with pytest.raises(ValueError, match="paste_lerp Image"):
@@ -232,6 +245,51 @@ def test_sliced_image_serializes_unity_border_tint_and_alpha():
     }
 
 
+def test_sdf_font_quad_serializes_registered_font_and_geometry():
+    builder = _builder()
+    builder.register_extra_font("tmp_dynamic", "/base/fonts/dynamic.ttf")
+    builder.sdf_font_quad(
+        font_name="tmp_dynamic",
+        codepoint=0x25CF,
+        sample_size=64.0,
+        bbox=(-2, -48, 40, 8),
+        padding=6,
+        crop_padding=3,
+        field_size=(42, 56),
+        spread=4.9,
+        pos=(3, 4),
+        size=(48, 60),
+        affine=(1.0, 0.1, -0.25, -0.2, 0.9, 0.5),
+        face_color=(250, 240, 230),
+        face_scale=1.5,
+        face_w=0.35,
+        alpha=0.8,
+    )
+
+    scene = builder.build()
+    assert scene["fonts"]["extra"] == {"tmp_dynamic": "/base/fonts/dynamic.ttf"}
+    assert scene["root"]["children"][0] == {
+        "type": "SdfFontQuad",
+        "font": {"role": "default", "name": "tmp_dynamic", "size": 64.0},
+        "codepoint": 0x25CF,
+        "bbox": [-2, -48, 40, 8],
+        "padding": 6,
+        "crop_padding": 3,
+        "field_size": [42, 56],
+        "spread": 4.9,
+        "pos": [3.0, 4.0],
+        "size": [48, 60],
+        "affine": [1.0, 0.1, -0.25, -0.2, 0.9, 0.5],
+        "shading": {
+            "face_color": [250, 240, 230],
+            "face_scale": 1.5,
+            "face_w": 0.35,
+            "alpha": 0.8,
+            "underlay": None,
+        },
+    }
+
+
 def test_background_omitted_when_unset():
     assert "background" not in _builder().build()
 
@@ -287,6 +345,7 @@ def test_image_tint_shadow_and_text_extras():
         (10, 10),
         fit="crop",
         sampling="cubic",
+        anchor=(0.5, 1.0),
         tint=image_tint((255, 0, 0, 255), "multiply"),
         shadow=image_shadow(0.5, (3, 3), 2.0),
         blur_sigma=(3.0, 1.5),
@@ -294,6 +353,7 @@ def test_image_tint_shadow_and_text_extras():
     img = b._root_children[-1]
     assert img["fit"] == "crop"
     assert img["sampling"] == "cubic"
+    assert img["anchor"] == [0.5, 1.0]
     assert img["tint"]["mode"] == "multiply"
     assert img["shadow"]["sigma"] == 2.0
     assert img["blur_sigma"] == [3.0, 1.5]
@@ -353,3 +413,176 @@ def test_parse_colored_segments():
 
     segs = parse_colored_segments("a<#ff0000>b<>c", default=(0, 0, 0, 255))
     assert segs == [("a", (0, 0, 0, 255)), ("b", (255, 0, 0, 255)), ("c", (0, 0, 0, 255))]
+
+
+class _MetricFont:
+    def getlength(self, text: str) -> float:
+        return float(len(text))
+
+    def getbbox(self, text: str) -> tuple[int, int, int, int]:
+        return (0, -2, len(text), 3)
+
+
+def test_font_cache_reprobes_fallback_and_evicts_oldest(monkeypatch):
+    cache = ir_builder_mod._thread_font_cache()
+    cache.clear()
+    loaded: list[tuple[str, str, int]] = []
+
+    def fake_load(font_dir: str, name: str, px: int):
+        loaded.append((font_dir, name, px))
+        return _MetricFont(), name != "missing"
+
+    monkeypatch.setattr(ir_builder_mod, "_load_pil_font", fake_load)
+    monkeypatch.setattr(ir_builder_mod, "_PIL_FONT_CACHE_MAX", 2)
+
+    assert get_pil_font("/fonts", "missing", 0.1) is not get_pil_font("/fonts", "missing", 0.1)
+    first = get_pil_font("/fonts", "first", 12.2)
+    assert get_pil_font("/fonts", "first", 12.4) is first
+    get_pil_font("/fonts", "second", 13)
+    get_pil_font("/fonts", "third", 14)
+
+    assert loaded.count(("/fonts", "missing", 1)) == 2
+    assert loaded.count(("/fonts", "first", 12)) == 1
+    assert pil_font_cache_info() == {"size": 2, "max": 2}
+    assert ("/fonts", "first", 12) not in cache
+    cache.clear()
+
+
+def test_load_pil_font_skips_broken_face_and_falls_back(monkeypatch):
+    from PIL import ImageFont
+
+    attempted: list[str] = []
+    sentinel = object()
+    monkeypatch.setattr(ir_builder_mod.os.path, "exists", lambda path: path.endswith((".otf", ".ttf")))
+
+    def fake_truetype(path: str, px: int):
+        attempted.append(path)
+        if path.endswith(".otf"):
+            raise OSError("broken face")
+        return sentinel
+
+    monkeypatch.setattr(ImageFont, "truetype", fake_truetype)
+    assert ir_builder_mod._load_pil_font("/fonts", "Face", 18) == (sentinel, True)
+    assert attempted == ["/fonts/Face.otf", "/fonts/Face.ttf"]
+
+    monkeypatch.setattr(ir_builder_mod.os.path, "exists", lambda _path: False)
+    monkeypatch.setattr(ImageFont, "load_default", lambda: sentinel)
+    fallback, resolved = ir_builder_mod._load_pil_font("/fonts", "Missing", 18)
+    assert fallback is sentinel
+    assert resolved is False
+
+
+def test_rich_text_layout_emits_wrapped_colored_and_shadowed_nodes(monkeypatch):
+    builder = _builder()
+    font = _MetricFont()
+    monkeypatch.setattr(builder, "_pil_font", lambda *_args, **_kwargs: font)
+
+    assert builder.measure_text("abc", "default", 12) == 3.0
+    assert builder.measure_text_ink("abc", "default", 12) == (3.0, 5.0)
+    assert builder.painter_baseline_y(7, "default", 12) == 12.0
+    assert builder.wrap_text("ab cd\nef", "default", 12, 3) == ["ab", "cd", "ef"]
+    assert builder.wrap_text("ab  cd", "default", 12, 2) == ["ab", "", "cd"]
+
+    multiline = builder.multiline_text(
+        "abcd efgh ijkl",
+        (10, 20),
+        "default",
+        10,
+        max_width=4,
+        max_lines=2,
+        line_height=11,
+        ellipsis=".",
+        baseline="alphabetic",
+    )
+    assert [node["text"] for node in multiline] == ["abcd", "efg."]
+    assert [node["pos"] for node in multiline] == [[10.0, 20.0], [10.0, 31.0]]
+
+    centered = builder.colored_text(
+        [("ab", None), ("c", (1, 2, 3, 255))],
+        (10, 40),
+        "default",
+        12,
+        align="center",
+        baseline="alphabetic",
+        default_fill=(9, 8, 7, 255),
+    )
+    assert [node["pos"][0] for node in centered] == [8.5, 10.5]
+    assert centered[0]["fill"] == [9, 8, 7, 255]
+    assert centered[1]["fill"] == [1, 2, 3, 255]
+
+    right = builder.colored_text(
+        [("a", None), ("bc", None)],
+        (10, 50),
+        "default",
+        12,
+        align="right",
+        baseline="alphabetic",
+    )
+    assert [node["pos"][0] for node in right] == [7.0, 8.0]
+
+    shadow, top = builder.shadowed_text(
+        "x",
+        (3, 4),
+        "bold",
+        14,
+        shadow_offset=(2, 3),
+        baseline="alphabetic",
+    )
+    assert shadow["pos"] == [5.0, 7.0]
+    assert top["pos"] == [3.0, 4.0]
+
+
+def test_extended_shapes_gradients_backgrounds_and_watermark():
+    builder = _builder()
+    gradient = radial_gradient(
+        stops=[((255, 0, 0, 255), 0.0), ((0, 0, 255, 128), 1.0)],
+        center=(4, 5),
+        radius_px=9,
+    )
+    builder.pieslice(
+        (1, 2),
+        (30, 40),
+        20,
+        250,
+        fill=gradient,
+        stroke=(2, 3, 4, 255),
+        stroke_width=3,
+    )
+    builder.watermark([("line", (4, 6), "center")], "default", 12, font_name="serif")
+    builder.blurglass(
+        (2, 4),
+        (40, 20),
+        6,
+        (10, 20, 30, 128),
+        blur=7,
+        shadow_width=9,
+        corners=(True, False, True, False),
+    )
+    builder.triangle_bg([], hour=8, time_color=False, main_hue=123.5)
+
+    scene = builder.build()
+    pie, watermark, glass = scene["root"]["children"]
+    assert pie["fill"] == gradient
+    assert pie["stroke_width"] == 3
+    assert watermark["font"]["name"] == "serif"
+    assert glass["blur"] == 7.0
+    assert glass["shadow_width"] == 9.0
+    assert glass["corners"] == [True, False, True, False]
+    assert scene["background"] == {
+        "type": "TriangleBg",
+        "hour": 8,
+        "time_color": False,
+        "main_hue": 123.5,
+        "tris": [],
+    }
+    assert adaptive_color(pixelwise=True)["pixelwise"] is True
+
+    builder.image_bg("bg.png", mode="cover", align="rb", blur=True, fade=0.25)
+    assert builder.build()["background"] == {
+        "type": "ImageBg",
+        "path": "bg.png",
+        "mode": "cover",
+        "align": "rb",
+        "blur": True,
+        "fade": 0.25,
+    }

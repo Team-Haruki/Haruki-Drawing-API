@@ -10,10 +10,13 @@ from src.sekai.profile.custom_profile.general_prefab import (
     GeneralPrefabDisplayList,
     GeneralPrefabPalette,
     GeneralRoundedRectOp,
+    GeneralSpriteChoiceOp,
     GeneralSpriteOp,
     GeneralTextOp,
     GeneralViewportOp,
     PillowGeneralPrefabAdapter,
+    _wrap_text,
+    _wrap_tokens,
     build_general_prefab_display_list,
 )
 
@@ -73,6 +76,32 @@ class FixtureMetrics:
         return (0, 0, width, min(size, 30))
 
 
+class MonospaceMetrics:
+    def text_bbox(
+        self,
+        text: str,
+        font: GeneralFontRef,
+        size: int,
+    ) -> tuple[float, float, float, float]:
+        del font, size
+        return (0, 0, len(text), 1)
+
+
+def test_wrap_tokens_keeps_ascii_words_and_splits_cjk_and_punctuation() -> None:
+    assert _wrap_tokens("abc.def/ghi 中文!") == ["abc.def/ghi", " ", "中", "文", "!"]
+    assert _wrap_tokens("") == []
+
+
+def test_wrap_text_preserves_greedy_word_and_character_fallbacks() -> None:
+    metrics = MonospaceMetrics()
+    font = GeneralFontRef()
+
+    assert _wrap_text(metrics, "ab cd中文", font, 12, 4) == ["ab ", "cd中文"]
+    assert _wrap_text(metrics, "abcdef中", font, 12, 3) == ["abc", "def", "中"]
+    assert _wrap_text(metrics, "first\nsecond", font, 12, 20) == ["first", "second"]
+    assert _wrap_text(metrics, "", font, 12, 20) == [""]
+
+
 def _build(file_name: str, size: tuple[int, int]) -> GeneralPrefabDisplayList:
     display_list = build_general_prefab_display_list(
         file_name,
@@ -102,6 +131,34 @@ def test_edit_user_name_display_list_keeps_fixture_fit_and_unity_geometry() -> N
             (490.0, 11.0, 532.0, 53.0),
             tint=PALETTE.dark_tint,
         ),
+    )
+
+
+def test_x_display_list_keeps_sprite_fallback_order_and_shared_text_layout() -> None:
+    display_list = build_general_prefab_display_list(
+        "X",
+        size=(548, 64),
+        profile_context={"userProfile": {"twitterId": "@sekai_test"}},
+        labels={},
+        metrics=FixtureMetrics(),
+        palette=PALETTE,
+    )
+
+    assert display_list is not None
+    assert display_list.ops == (
+        GeneralSpriteOp(
+            "bg_base_r16_wh",
+            (0.0, 0.0, 548.0, 64.0),
+            tint=PALETTE.input_tint,
+            sliced_border=(21, 21, 21, 21),
+        ),
+        GeneralSpriteChoiceOp(
+            ("x_icon", "icon_twitter_wh"),
+            (7.0, 13.0, 45.0, 51.0),
+            tint=PALETTE.dark_tint,
+            fallback_text=GeneralTextOp("X", (26.0, 32.0), 30, PALETTE.text, "mm"),
+        ),
+        GeneralTextOp("@sekai_test", (85, 32), 30, PALETTE.text, "lm"),
     )
 
 
@@ -195,6 +252,37 @@ def test_pillow_adapter_replays_ops_in_order_and_reuses_measured_font() -> None:
     assert calls == [("sprite", (0, 0, 4, 4), Image.Resampling.BICUBIC)]
     assert font_calls == [(12, True)]
     assert image.getbbox() is not None
+
+
+def test_pillow_adapter_sprite_choice_uses_first_available_then_text_fallback() -> None:
+    attempts: list[str] = []
+
+    def paste_sprite(image, name, rect, **kwargs):
+        del rect, kwargs
+        attempts.append(name)
+        if name != "second":
+            return False
+        ImageDraw.Draw(image).rectangle((0, 0, 3, 3), fill=(255, 0, 0, 255))
+        return True
+
+    adapter = PillowGeneralPrefabAdapter(lambda *_args: ImageFont.load_default(), paste_sprite)
+    choice = GeneralSpriteChoiceOp(
+        ("first", "second", "third"),
+        (0, 0, 4, 4),
+        fallback_text=GeneralTextOp("X", (2, 2), 12, (255, 255, 255, 255), "mm"),
+    )
+    image = adapter.render(GeneralPrefabDisplayList("choice", (8, 8), (choice,)))
+
+    assert attempts == ["first", "second"]
+    assert image.getbbox() is not None
+
+    attempts.clear()
+    fallback = PillowGeneralPrefabAdapter(
+        lambda *_args: ImageFont.load_default(),
+        lambda _image, name, _rect, **_kwargs: attempts.append(name) or False,
+    ).render(GeneralPrefabDisplayList("fallback", (16, 16), (choice,)))
+    assert attempts == ["first", "second", "third"]
+    assert fallback.getbbox() is not None
 
 
 def test_shared_general_prefab_rejects_an_unmigrated_name() -> None:
