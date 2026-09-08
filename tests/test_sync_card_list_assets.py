@@ -104,6 +104,26 @@ def test_extract_card_list_asset_paths_can_skip_fonts():
     assert not any(path in DEFAULT_FONT_FILES for path in paths)
 
 
+@pytest.mark.parametrize(
+    ("payload_update", "message"),
+    [
+        ({"cards": {}}, "cards must be a list"),
+        ({"cards": [{"skill": []}]}, r"cards\[0\]\.skill must be an object"),
+        ({"cards": [{"thumbnail_info": {}}]}, r"cards\[0\]\.thumbnail_info must be a list"),
+        ({"cards": [{"thumbnail_info": [[]]}]}, r"cards\[0\]\.thumbnail_info\[0\] must be an object"),
+    ],
+)
+def test_extract_card_list_asset_paths_rejects_invalid_shapes(payload_update, message):
+    with pytest.raises(TypeError, match=message):
+        extract_card_list_asset_paths(payload_update, include_fonts=False)
+
+
+def test_extract_card_list_asset_paths_accepts_null_optional_sections():
+    payload = {"cards": [{"skill": None, "special_skill_info": None, "thumbnail_info": None}]}
+
+    assert extract_card_list_asset_paths(payload, include_fonts=False) == []
+
+
 def test_split_remote_asset_paths_routes_game_assets_without_asset_prefix():
     drawing_paths, game_asset_paths = split_remote_asset_paths(
         [
@@ -130,11 +150,13 @@ def test_build_rsync_command_uses_files_from_manifest():
     assert command == [
         "rsync",
         "-aR",
+        "--protect-args",
         "--files-from",
         "out/assets.txt",
         "-e",
         "ssh -o BatchMode=yes -o ConnectTimeout=15",
         "--dry-run",
+        "--",
         "root@100.111.213.59:/data/HarukiServices/data/drawing/",
         "data",
     ]
@@ -150,7 +172,7 @@ def test_build_rsync_command_can_use_custom_ssh_port():
         dry_run=False,
     )
 
-    assert command[5] == "ssh -o BatchMode=yes -o ConnectTimeout=15 -p 60022"
+    assert command[6] == "ssh -o BatchMode=yes -o ConnectTimeout=15 -p 60022"
     assert command[-2] == "root@yamamoto.j8.network:/data/HarukiServices/data/drawing/"
 
 
@@ -170,21 +192,41 @@ def test_build_rsync_commands_splits_roots():
         [
             "rsync",
             "-aR",
+            "--protect-args",
             "--files-from",
             "out/drawing.txt",
             "-e",
             "ssh -o BatchMode=yes -o ConnectTimeout=15",
+            "--",
             "root@100.111.213.59:/data/HarukiServices/data/drawing/",
             "data",
         ],
         [
             "rsync",
             "-aR",
+            "--protect-args",
             "--files-from",
             "out/game-assets.txt",
             "-e",
             "ssh -o BatchMode=yes -o ConnectTimeout=15",
+            "--",
             "root@100.111.213.59:/data/HarukiServices/data/assets/",
             "data/asset",
         ],
     ]
+
+
+@pytest.mark.parametrize(
+    ("ssh_host", "remote_root"),
+    [("--rsh=evil", "/data/ok"), ("root@example", "/data/ok;touch-pwned"), ("root@example", "/data/../etc")],
+)
+def test_build_rsync_command_rejects_argument_injection(ssh_host: str, remote_root: str):
+    with pytest.raises(ValueError, match="unsafe"):
+        build_rsync_command(
+            ssh_host=ssh_host,
+            ssh_port=None,
+            remote_root=remote_root,
+            local_root=Path("data"),
+            manifest_path=Path("out/assets.txt"),
+            dry_run=False,
+        )

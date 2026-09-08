@@ -104,8 +104,8 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         return None
     try:
         native = load_native_renderer()
-    except ImportError as exc:
-        logger.error("haruki_skia_renderer not importable (%s); falling back to Pillow", exc)
+    except ImportError:
+        logger.exception("haruki_skia_renderer not importable; falling back to Pillow")
         _record(OUTCOME_FALLBACK)
         return None
 

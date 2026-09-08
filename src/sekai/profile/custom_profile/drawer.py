@@ -16,6 +16,7 @@ from src.settings import (
     CUSTOM_PROFILE_MAX_ELEMENTS,
     CUSTOM_PROFILE_MAX_LAYER_PIXELS,
     CUSTOM_PROFILE_MAX_SCALE,
+    CUSTOM_PROFILE_MAX_SCENE_BYTES,
     CUSTOM_PROFILE_MAX_TEXT_LENGTH,
     CUSTOM_PROFILE_MAX_TEXT_SIZE,
     CUSTOM_PROFILE_PARALLEL_WORKERS,
@@ -150,6 +151,7 @@ def _render_custom_profile_card_sync(
         unity_ui_sprite_dir=unity_ui_sprite_dir,
         region=region,
         max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+        max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
     )
     return renderer.render_card(card)
 

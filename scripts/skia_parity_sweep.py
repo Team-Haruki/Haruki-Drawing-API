@@ -71,6 +71,7 @@ import numpy as np
 from PIL import Image, ImageChops
 
 from scripts.skia_parity_budgets import PARITY_BUDGETS
+from src.core.path_safety import resolve_cli_path
 from src.settings import settings
 
 PAYLOAD_DIR = REPO_ROOT / "out" / "parity-payloads"
@@ -78,6 +79,7 @@ DEFAULT_OUT_DIR = REPO_ROOT / "out" / "parity-sweep-real"
 
 # Sentinel drawer module: resolved at runtime from the gitignored drawer.real.py.
 MYSEKAI_REAL = "mysekai-real"
+CUSTOM_PROFILE_DRAWER = "src.sekai.profile.custom_profile.drawer"
 
 # Every cache getter a drawer module may consult before rebuilding. All are
 # monkeypatched to return None so both paths are actually exercised and the
@@ -226,7 +228,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render_module="src.sekai.profile.custom_profile.skia",
         # Unrotated elements integer-paste the same Pillow-rasterized layers, so the only diff is
         # LSB compositing rounding (measured rgb max=1, alpha exact); rotated elements use the
@@ -237,7 +239,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render_module="src.sekai.profile.custom_profile.skia",
     ),
     _case(
@@ -245,7 +247,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render=None,
     ),
     _case(
@@ -253,7 +255,7 @@ CASES: tuple[Case, ...] = (
         "profile",
         "custom_profile_card",
         "CustomProfileCardRenderRequest",
-        drawer="src.sekai.profile.custom_profile.drawer",
+        drawer=CUSTOM_PROFILE_DRAWER,
         try_render=None,
     ),
     # ---- score ----
@@ -669,7 +671,7 @@ def main() -> int:
             parser.error(f"unknown case name(s): {', '.join(sorted(unknown))}")
 
     setup()
-    out_dir = Path(args.out_dir)
+    out_dir = resolve_cli_path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     on_disk = {p.stem for p in PAYLOAD_DIR.glob("*.json")}
