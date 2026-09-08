@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from io import BytesIO
 import json
+import math
 from pathlib import Path
 
 from PIL import Image, ImageChops
@@ -556,7 +557,8 @@ def test_card_general_prefabs_are_native_pixel_pure_and_match_pillow(monkeypatch
     reason="UnitySubscene-capable native renderer is required",
 )
 @pytest.mark.skipif(not PAYLOAD_FILE.is_file(), reason="custom profile parity fixture not present")
-def test_real_honor_deck_fixture_is_native_pixel_pure_and_matches_pillow(monkeypatch):
+@pytest.mark.parametrize("resize_rotation", [None, 0.0, 23.0])
+def test_real_honor_deck_fixture_is_native_pixel_pure_and_matches_pillow(monkeypatch, tmp_path, resize_rotation):
     from src.settings import settings
 
     request = _honor_deck_general_request()
@@ -566,6 +568,16 @@ def test_real_honor_deck_fixture_is_native_pixel_pure_and_matches_pillow(monkeyp
     assert request.resources["profileHonorRequests"]["profile:3"]["honor_type"] == "birthday"
     assert request.resources["profileHonorRequests"]["profile:2"]["honor_img_path"].startswith("asset/jp-assets/")
     assert request.resources["profileHonorRequests"]["profile:3"]["honor_img_path"].startswith("asset/jp-assets/")
+    if resize_rotation is not None:
+        from scripts.parity_payloads.gen_retirement_branches import build_honor_deck_resized_request
+
+        raw = build_honor_deck_resized_request(request.model_dump(mode="json"))
+        obj = raw["card"]["customProfileCard"]["generals"][0]["objectData"]
+        angle = math.radians(resize_rotation) / 2
+        obj["rotation"] = {"x": 0.0, "y": 0.0, "z": math.sin(angle), "w": math.cos(angle)}
+        if resize_rotation:
+            obj["scale"] = {"x": 1.25, "y": 0.72, "z": 1.0}
+        request = CustomProfileCardRenderRequest.model_validate(raw)
     pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
     captured: dict[str, object] = {}
 
@@ -608,6 +620,11 @@ def test_real_honor_deck_fixture_is_native_pixel_pure_and_matches_pillow(monkeyp
     scene = json.loads(captured["ir_json"])
     nodes = list(_walk_nodes(scene["root"]))
     assert sum(node["type"] == "UnitySubscene" for node in nodes) == 4
+    if resize_rotation is not None:
+        resized_badges = [node for node in nodes if node.get("sampling") == "pillow_lanczos"]
+        assert len(resized_badges) == 2
+        assert {tuple(node["size"]) for node in resized_badges} == {(180, 80), (380, 80)}
+        assert all(node["rotation"] == 0 for node in resized_badges)
 
     native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
     diff = ImageChops.difference(pillow, native)
@@ -615,6 +632,25 @@ def test_real_honor_deck_fixture_is_native_pixel_pure_and_matches_pillow(monkeyp
     assert mean <= 2.0, mean
     assert p99 <= 30, p99
     assert diff.getchannel("A").getbbox() is None
+    if resize_rotation is not None:
+        # White page margins cannot dilute a broken badge resize.
+        visible = ImageChops.difference(pillow.convert("RGB"), Image.new("RGB", pillow.size, "white")).getbbox()
+        assert visible is not None
+        mean, p99 = _rgb_diff_metrics(pillow.crop(visible), native.crop(visible))
+        assert mean <= 2.0, mean
+        assert p99 <= 30, p99
+
+        from scripts.skia_no_pillow import run_clean_case
+        from scripts.skia_parity_sweep import CASES
+
+        # Rotated variants deliberately differ from the fixed full-sweep fixture contract.
+        case_name = "custom_profile_card" if resize_rotation else "custom_profile_card_honor_deck_resized"
+        case = next(case for case in CASES if case.name == case_name)
+        request_file = tmp_path / "resized-honors.json"
+        request_file.write_text(request.model_dump_json())
+        check = run_clean_case(case, request_file)
+        assert check["status"] == "ok", check
+        assert check["native_renders"] > 0
 
 
 @pytest.mark.skipif(

@@ -1,7 +1,12 @@
+from __future__ import annotations
+
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
-from PIL import Image
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 # ============================ 工具函数 ============================ #
 
@@ -13,6 +18,8 @@ def open_image(file_path: str | Path, load: bool = True) -> Image.Image:
     参数 ``load`` 保留是为了兼容旧调用方；为保证并发安全，
     这里总是先解码再返回副本。
     """
+    from PIL import Image
+
     with Image.open(file_path) as img:
         img.load()
         return img.copy()
@@ -23,6 +30,8 @@ def multiply_image_by_color(img: Image.Image, color: tuple[int, ...]) -> Image.I
     将图像的每个像素按通道乘以指定颜色。传 RGB 颜色时补 A=255,A 通道保持不变;
     传 RGBA 颜色时 A 通道同样参与相乘(``ImageTint("multiply")`` 依赖这一点对齐 Skia 的 Modulate)。
     """
+    from PIL import Image
+
     if img.mode.upper() not in ["RGB", "RGBA"]:
         img = img.convert("RGBA")
     channel = 4 if img.mode.upper() == "RGBA" else 3
@@ -39,6 +48,8 @@ def mix_image_by_color(img: Image.Image, color: tuple[int, ...]) -> Image.Image:
     """
     将图像与指定颜色混合，使用颜色的A通道作为混合因子
     """
+    from PIL import Image
+
     if img.mode.upper() not in ["RGB", "RGBA"]:
         img = img.convert("RGBA")
     assert len(color) == 4, "Color must be a tuple of 4 elements (R, G, B, A)"
@@ -55,6 +66,8 @@ def adjust_image_alpha_inplace(img: Image.Image, value: float, method: str) -> N
     """
     调整图像的透明度（原地修改）
     """
+    from PIL import Image
+
     assert method in ("set", "multiply")
     if isinstance(value, float):
         value = int(value * 255)

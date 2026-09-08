@@ -1,5 +1,40 @@
+# Source-control and editor state
+.git/
+.github/
+.gitignore
+.idea/
+.vscode/
+.DS_Store
+
+# Local Python environments and caches
 .venv/
+.venv*/
 __pycache__/
-*.md
-LICENSE
-.git*
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Local configuration and request captures
+.env
+.env.*
+/*.json
+
+# Large runtime data and generated artifacts are bind-mounted or regenerated.
+data/
+out/
+build/
+dist/
+
+# The production MySekai implementation is proprietary and must only be bind-mounted
+# over the public stub at runtime. It must never enter a Docker build context.
+src/sekai/mysekai/drawer.real.py
+
+# Runtime images do not need repository-only material.
+docs/
+tests/
+
+# Cargo outputs are platform-specific build caches, not renderer source.
+rust/**/target/

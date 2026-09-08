@@ -24,6 +24,7 @@ DOMAINS = [
     "gen_gacha_costume_vlive_edu",
     "gen_mysekai",
     "gen_chart",
+    "gen_retirement_branches",
 ]
 
 

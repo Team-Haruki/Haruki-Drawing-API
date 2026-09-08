@@ -5,11 +5,10 @@ from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
 from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SERVER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
-from src.sekai.profile.custom_profile.drawer import compose_custom_profile_card_image
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
-from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_attempt
-from src.sekai.profile.drawer import compose_profile_image, try_render_profile_payload
+from src.sekai.profile.drawer import try_render_profile_payload
 from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileRequest
 from src.settings import (
     CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS,
@@ -22,6 +21,12 @@ from src.settings import (
 router = APIRouter(tags=["Profile"], responses=CUSTOM_PROFILE_ERROR_RESPONSES)
 logger = logging.getLogger(__name__)
 _custom_profile_render_slots = asyncio.Semaphore(CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS)
+
+
+async def try_render_custom_profile_card_attempt(request: CustomProfileCardRenderRequest):
+    from src.sekai.profile.custom_profile.skia import try_render_custom_profile_card_attempt as render
+
+    return await render(request)
 
 
 @router.post(
@@ -58,12 +63,9 @@ async def profile(request: ProfileRequest):
         )
         set_request_stage("profile:compose_image")
         payload = await try_render_profile_payload(request)
-        if payload is not None:
-            set_request_stage("profile:image_to_response")
-            return encoded_image_payload_to_response(payload)
-        image = await compose_profile_image(request)
+        payload = require_native_payload(payload)
         set_request_stage("profile:image_to_response")
-        return await image_to_response(image)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -85,19 +87,13 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
         )
         async with _custom_profile_render_slots:
             set_request_stage("custom_profile_card:compose_image")
-            # Defer the aggregate backend outcome until the final HTTP result is known. A
-            # canonical ValueError -> 400 is a rejected request, not production render traffic;
-            # a Skia failure recovered by Pillow still commits ``error`` below.
             attempt = await try_render_custom_profile_card_attempt(request)
             attempt.tag_backend()
-            payload = attempt.payload
-            if payload is None:
-                image = await compose_custom_profile_card_image(request)
+            if attempt.error is not None:
+                raise attempt.error
+            payload = require_native_payload(attempt.payload)
             set_request_stage("custom_profile_card:image_to_response")
-            if payload is not None:
-                response = encoded_image_payload_to_response(payload)
-            else:
-                response = await image_to_response(image, export_format="png")
+            response = encoded_image_payload_to_response(payload)
             attempt.record(response.status_code)
             return response
     except ValueError as e:

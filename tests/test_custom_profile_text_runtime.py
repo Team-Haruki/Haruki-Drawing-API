@@ -8,7 +8,8 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import pytest
 
-from src.sekai.profile.custom_profile import renderer as renderer_mod
+from src.sekai.profile.custom_profile import font_field, renderer as renderer_mod
+from src.sekai.profile.custom_profile.gray_field import GrayField
 from src.sekai.profile.custom_profile.renderer import (
     PNGRenderer,
     StyledLine,
@@ -204,7 +205,7 @@ def test_static_atlas_placement_field_and_render_paths(tmp_path: Path, monkeypat
     monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda _name, ch, _size: ch)
     monkeypatch.setattr(renderer, "tmp_native_visible_character", lambda ch: not ch.isspace())
     monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_args: 1.0)
-    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda _path: Image.new("L", (16, 16), 220))
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda _path: GrayField(16, 16, bytes([220]) * 256))
     monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_args: asset)
     monkeypatch.setattr(renderer, "tmp_display_padding", lambda *_args: 2)
     monkeypatch.setattr(
@@ -290,8 +291,8 @@ def test_vector_sdf_field_handles_contours_degenerate_edges_and_missing(tmp_path
     monkeypatch.setattr(renderer, "tmp_vector_glyph_contours", lambda *_args: (contours, np))
     field = renderer.tmp_vector_glyph_sdf_field(tmp_path / "font.ttf", "A", 16, (0, -6, 6, 0), 2, asset)
     assert field is not None
-    assert field.mode == "L"
-    assert field.getextrema()[1] > field.getextrema()[0]
+    assert isinstance(field, GrayField)
+    assert max(field.pixels) > min(field.pixels)
 
     monkeypatch.setattr(renderer, "tmp_vector_glyph_contours", lambda *_args: None)
     assert renderer.tmp_vector_glyph_sdf_field(tmp_path / "font.ttf", "A", 16, (0, 0, 2, 2), 1, asset) is None
@@ -314,7 +315,7 @@ def test_dynamic_glyph_builder_prefers_vector_then_raster_and_import_fallback(tm
     monkeypatch.setattr(renderer_mod, "alpha_mask_to_sdf_field", lambda mask, *_args: np.asarray(mask) / 255.0)
     raster = renderer.build_tmp_dynamic_glyph_sdf(source_path, "A", 16, asset)
     assert raster is not None
-    assert raster.field.mode == "L"
+    assert isinstance(raster.field, GrayField)
 
     monkeypatch.setattr(renderer, "tmp_dynamic_glyph_bounds", lambda *_args: None)
     assert renderer.build_tmp_dynamic_glyph_sdf(source_path, "A", 16, asset) is None
@@ -395,6 +396,10 @@ def test_render_tmp_sdf_run_fallback_modes_and_import_error(tmp_path: Path, monk
     monkeypatch.setattr(renderer_mod, "alpha_mask_to_sdf_field", lambda mask, *_args: np.asarray(mask) / 255.0)
     monkeypatch.setattr(renderer, "shade_tmp_sdf_field", lambda *_args: shaded)
 
+    monkeypatch.setattr(
+        font_field, "basic_text_field", lambda *args, **kwargs: (GrayField(6, 8, bytes([255]) * 48), (0, 0, 6, 8))
+    )
+    monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda _font, char, _size: char)
     renderer.tmp_dynamic_sdf = True
     assert renderer.render_tmp_sdf_run("font", tmp_path / "font.ttf", run, 16, "#000000", 0.0)[0] is shaded
     renderer.tmp_scale_mode = "x"
@@ -405,7 +410,9 @@ def test_render_tmp_sdf_run_fallback_modes_and_import_error(tmp_path: Path, monk
     monkeypatch.setattr(renderer, "render_tmp_static_atlas_run", lambda *_args: (shaded, (0, 0, 1, 1), 1))
     assert renderer.render_tmp_sdf_run("font", tmp_path / "font.ttf", run, 16, "#000000", 0.0)[0] is shaded
     monkeypatch.setattr(renderer, "render_tmp_static_atlas_run", lambda *_args: None)
-    monkeypatch.setattr(renderer_mod, "alpha_mask_to_sdf_field", lambda *_args: (_ for _ in ()).throw(ImportError()))
+    monkeypatch.setattr(
+        renderer, "prepare_tmp_fallback_sdf_character", lambda *_args: (_ for _ in ()).throw(ImportError())
+    )
     assert renderer.render_tmp_sdf_run("font", tmp_path / "font.ttf", run, 16, "#000000", 0.0) is None
 
 
@@ -548,7 +555,9 @@ def test_native_line_measurement_and_visual_metrics_cover_em_source_and_pillow(t
     source_visual = visual_metrics(renderer, regular, "font", tmp_path / "font.ttf", 18, 1.0, source_metrics_only=True)
     assert source_visual.advance == 6
 
-    monkeypatch.setattr(renderer_mod, "load_font", lambda *_args: object())
+    monkeypatch.setattr(renderer_mod, "TMPFallbackMetrics", lambda *_args: object())
+    monkeypatch.setattr(renderer, "measure_tmp_source_run", lambda *_args: measure)
+    monkeypatch.setattr(renderer, "measure_tmp_run", lambda *_args: measure)
     monkeypatch.setattr(renderer, "measure_tmp_run", lambda *_args: measure)
     pillow_visual = visual_metrics(renderer, regular, "font", tmp_path / "font.ttf", 18, 1.0)
     assert pillow_visual.right == 5
@@ -619,7 +628,7 @@ def test_native_character_layout_advance_and_metric_modes(tmp_path: Path, monkey
         glyph_metrics(renderer, "font", tmp_path / "font.ttf", "A", normal_style, source_metrics_only=True)
 
     fake_font = object()
-    monkeypatch.setattr(renderer_mod, "load_font", lambda *_args: fake_font)
+    monkeypatch.setattr(renderer_mod, "TMPFallbackMetrics", lambda *_args: fake_font)
     monkeypatch.setattr(renderer, "glyph_layout_metrics", lambda font, *_args: metrics if font is fake_font else None)
     assert glyph_metrics(renderer, "font", tmp_path / "font.ttf", "A", normal_style) is metrics
 

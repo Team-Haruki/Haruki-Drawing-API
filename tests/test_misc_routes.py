@@ -90,28 +90,17 @@ def test_alias_list_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> N
     assert asyncio.run(misc.alias_list(request)) is response
 
 
-def test_alias_list_falls_back_to_pillow(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_alias_list_rejects_missing_native_without_pillow(monkeypatch: pytest.MonkeyPatch) -> None:
     request = object()
-    image = object()
-    response = object()
 
-    async def native_renderer(received: Any) -> None:
-        assert received is request
+    async def native_renderer(_request):
         return None
 
-    async def pillow_renderer(received: Any) -> object:
-        assert received is request
-        return image
-
-    async def image_response(received: Any) -> object:
-        assert received is image
-        return response
-
     monkeypatch.setattr(misc, "try_render_alias_list_payload", native_renderer)
-    monkeypatch.setattr(misc, "compose_alias_list_image", pillow_renderer)
-    monkeypatch.setattr(misc, "image_to_response", image_response)
-
-    assert asyncio.run(misc.alias_list(request)) is response
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(misc.alias_list(request))
+    assert error.value.status_code == 500
+    assert "Pillow fallback is no longer available" in error.value.detail
 
 
 def test_alias_list_converts_renderer_errors(monkeypatch: pytest.MonkeyPatch) -> None:

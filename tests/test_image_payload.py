@@ -25,3 +25,12 @@ def test_heavy_render_pool_import_does_not_load_pillow():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_a_missing_native_payload_is_an_explicit_service_error():
+    import pytest
+
+    from src.core.image_payload import NativeRenderRequiredError, require_native_payload
+
+    with pytest.raises(NativeRenderRequiredError, match="Pillow fallback is no longer available"):
+        require_native_payload(None)

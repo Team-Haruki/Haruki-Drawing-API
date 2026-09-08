@@ -5,23 +5,24 @@ elements lower directly to Rust/Skia without a Pillow decode or NumPy raster; de
 uses native ``SdfQuad`` shading, and normal/birthday/bonds/empty honors reuse the shared
 ``HonorBadgeBox`` asset-backed subtree inside an isolated native subscene. Shared General/Card
 display lists replay native ``SlicedImage``/sprite/Text/viewport/card operations with strict Rust
-font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text also emits native IR Text;
-all remaining TMP/SDF text is offered to the asset-backed ``SdfAtlasQuad`` / ``SdfFontQuad``
-sparse-glyph path. Incomplete content is explicitly classified and
-rejected by a scene coverage report before Rust runs, so ``backend=skia`` cannot mean
-"successfully encoded a partial card".
+font metrics and Pillow-compatible Lanczos stages. Plain dynamic-font TMP text emits native IR Text;
+outlined dynamic TMP uses shared local gray fields, native SdfQuad shading and isolated text-layer resizes.
+Rotated/static TMP and HonorDeck content also use native primitives. Unsupported visible
+content is marked unresolved without invoking the legacy compositor. A scene coverage
+report rejects any visible missing/unresolved element before Rust runs, so ``backend=skia``
+cannot mean "successfully encoded a partial card".
 
-Honor dimensions come from the native asset-info API. An older wheel declines the native scene
-before rasterization; it cannot use a Pillow header probe and masquerade as native-pure.
+Honor dimensions come from the native asset-info API. An older wheel falls back to an explicitly
+telemetried Pillow header probe, so compatibility cannot masquerade as native-pure.
 
 Parity-critical mirrors of the Pillow path:
 - Unrotated, unscaled layers are pasted at ROUNDED integer positions (the ``angle ~ 0`` branch of
   ``prepare_canvas_clipped_transformed_layer``); the scene emits those as plain integer-placed
   images with no Transform, so they stay pixel-crisp instead of drifting subpixel.
-- Unity asset nodes reproduce the compatibility path's two-step dimension rounding and sampling
-  without materializing request-local Pillow layers.
-- Every TMP/SDF text is either asset/font-backed native IR or classified unresolved before Rust;
-  the Skia attempt never transports request pixels through ``mem:`` images.
+- Hybrid minification (combined scale < ~0.98) keeps the Python two-step BICUBIC pre-resize;
+  ``UnityImage`` performs the same two sequential dimension rounds natively.
+- Decorative direct-raster TMP texts draw onto full-canvas PIL layers exactly as in
+  ``render_card``; consecutive runs accumulate on one layer and flush in z-order.
 
 Fail-open: this function NEVER raises — every failure records exactly one outcome and returns
 ``None`` so the route falls back to Pillow, which raises the canonical user-visible errors.
@@ -38,9 +39,45 @@ import math
 from pathlib import Path
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from src.sekai.profile.custom_profile.collection_prefab import (
+    OmikujiAssetOp,
+    OmikujiRectOp,
+    OmikujiTextOp,
+    build_omikuji_display_list,
+)
+from src.sekai.profile.custom_profile.diagnostics import capture_safe_exception, persist_custom_profile_diagnostic
+from src.sekai.profile.custom_profile.general_prefab import (
+    GeneralPrefabDisplayList,
+    GeneralPrefabOp,
+    GeneralSpriteChoiceOp,
+)
+from src.sekai.profile.custom_profile.renderer import STATIC_IMAGE_CONTENT_KINDS, DirectSdfAtlasQuad, DirectSdfFontQuad
+from src.sekai.skia_renderer.ir_builder import clip_pillow_rrect
+
+_OMIKUJI_FONT_IR_NAME = "custom_profile_omikuji"
+_CARD_SAMPLING_MAP = {
+    "nearest": "nearest",
+    "bilinear": "linear",
+    "bicubic": "catmull_rom",
+    "lanczos": "pillow_lanczos",
+}
+_GENERAL_SAMPLING_MAP = {
+    "nearest": "nearest",
+    "bilinear": "linear",
+    "bicubic": "catmull_rom",
+    "lanczos": "catmull_rom",
+}
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.core.pillow_telemetry import (
+    PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
+    record_pillow_touch,
+)
 from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
 from src.sekai.honor.assets import resolve_honor_assets
 from src.sekai.honor.model import HonorRequest
@@ -53,23 +90,10 @@ from src.sekai.profile.custom_profile.card_prefab import (
     CardSpriteOp,
     CardTextOp,
 )
-from src.sekai.profile.custom_profile.collection_prefab import (
-    OmikujiAssetOp,
-    OmikujiRectOp,
-    OmikujiTextOp,
-    build_omikuji_display_list,
-)
-from src.sekai.profile.custom_profile.diagnostics import (
-    capture_safe_exception,
-    persist_custom_profile_diagnostic,
-)
 from src.sekai.profile.custom_profile.general_prefab import (
     GeneralAssetImageOp,
     GeneralFontRef,
-    GeneralPrefabDisplayList,
-    GeneralPrefabOp,
     GeneralRoundedRectOp,
-    GeneralSpriteChoiceOp,
     GeneralSpriteOp,
     GeneralTextOp,
     GeneralViewportOp,
@@ -90,9 +114,7 @@ from src.sekai.profile.custom_profile.renderer import (
     PROFILE_RENDER_VIEW_H,
     PROFILE_RENDER_VIEW_W,
     SHAPE_NATIVE_OUTLINE_FILL_RATIO_FACTOR,
-    STATIC_IMAGE_CONTENT_KINDS,
-    DirectSdfAtlasQuad,
-    DirectSdfFontQuad,
+    LayerTransformInputs,
     PNGRenderer,
     bool_from_profile,
     content_data_id,
@@ -103,7 +125,7 @@ from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
 from src.sekai.profile.custom_profile.tmp_text_prefab import build_simple_tmp_text_display_list
 from src.sekai.profile.model import CustomProfileCardRenderRequest
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
-from src.sekai.skia_renderer.ir_builder import IRBuilder, clip_pillow_rrect, image_tint
+from src.sekai.skia_renderer.ir_builder import IRBuilder, image_tint
 from src.sekai.skia_renderer.render_stats import (
     OUTCOME_DISABLED,
     OUTCOME_ERROR,
@@ -132,6 +154,10 @@ logger = logging.getLogger("custom_profile.draw.perf")
 # exactly one per attempt.
 CUSTOM_PROFILE_ENDPOINT = "custom_profile_card"
 
+# Mirror of prepare_transformed_layer's branch thresholds (renderer.py): the exact-integer paste
+# branch triggers at angle % 360 ~ 0; the minification carve-out keeps PIL resize semantics.
+_ANGLE_EPS = 1.0e-9
+_MIN_SCALE_FOLD = 0.98
 _REQUIRED_NATIVE_ASSET_INFO_CAPABILITY = 1
 _REQUIRED_NATIVE_TEXT_METRICS_CAPABILITY = 1
 _NATIVE_GENERAL_PREFABS = frozenset(
@@ -150,12 +176,7 @@ _NATIVE_GENERAL_PREFABS = frozenset(
     }
 )
 _GENERAL_FONT_IR_NAME = "custom_profile_general"
-_OMIKUJI_FONT_IR_NAME = "custom_profile_omikuji"
 _NATIVE_CARD_GENERAL_PREFABS = frozenset({"LeaderCard", "Deck"})
-
-
-class _NativeAssetInfoUnavailable(RuntimeError):
-    """The installed wheel cannot provide Pillow-free asset dimensions."""
 
 
 @dataclass(slots=True)
@@ -184,11 +205,8 @@ class CustomProfileSceneReport:
         return (
             self.visible_elements == classified_visible
             and self.elements_total == self.visible_elements + self.hidden_elements
-            and self.hybrid_elements == 0
             and self.missing_elements == 0
             and self.unresolved_elements == 0
-            and self.mem_images == 0
-            and self.mem_bytes == 0
         )
 
     def observe(self, content: Any, classification: str) -> None:
@@ -274,107 +292,6 @@ def _record(
         record_native_metrics(payload.native_metrics)
 
 
-def _tag_backend(outcome: str, payload: EncodedImagePayload | None = None) -> None:
-    """Set request/log backend metadata without committing aggregate counters."""
-    from src.core.debug import set_render_backend
-
-    backend = backend_for_outcome(outcome)
-    set_render_backend(backend)
-    if payload is not None:
-        payload.backend = backend
-
-
-class CustomProfileSkiaAttempt:
-    """One deferred Custom Profile backend outcome.
-
-    The route commits this only after it knows the final HTTP result. A request rejected with
-    the canonical 400 is not production render traffic and must not poison the pure-Skia gate;
-    a Skia failure recovered by a successful Pillow response is still recorded as ``error``.
-    Direct render/parity callers use :func:`try_render_custom_profile_card_payload`, which
-    commits immediately and preserves the historical payload-or-None contract.
-    """
-
-    def __init__(
-        self,
-        payload: EncodedImagePayload | None,
-        outcome: str,
-        *,
-        report: CustomProfileSceneReport | None = None,
-        error_stage: str | None = None,
-        error_type: str | None = None,
-        exception_diagnostic: dict[str, Any] | None = None,
-    ) -> None:
-        self.payload = payload
-        self.outcome = outcome
-        self.report = report
-        self.error_stage = error_stage
-        self.error_type = error_type
-        self.exception_diagnostic = exception_diagnostic
-        self._record_lock = threading.Lock()
-        self._recorded = False
-
-    def tag_backend(self) -> None:
-        """Make response/performance logs reflect this attempt before encoding starts."""
-
-        _tag_backend(self.outcome, self.payload)
-
-    def record(self, final_http_status: int | None = None) -> None:
-        """Commit aggregate metrics exactly once."""
-
-        with self._record_lock:
-            if self._recorded:
-                return
-            self._recorded = True
-        if self.outcome == OUTCOME_ERROR:
-            logger.error(
-                "custom_profile_card backend=skia committed_error stage=%s error_type=%s",
-                self.error_stage or "unknown",
-                self.error_type or "unknown",
-            )
-        if self.outcome == OUTCOME_ERROR or (
-            self.outcome == OUTCOME_FALLBACK
-            and (self.exception_diagnostic is not None or (self.report is not None and not self.report.complete))
-        ):
-            persist_custom_profile_diagnostic(
-                outcome=self.outcome,
-                stage=self.error_stage or ("scene_coverage" if self.report is not None else "unknown"),
-                error_type=self.error_type,
-                exception=self.exception_diagnostic,
-                scene_metrics=self.report.metrics() if self.report is not None else None,
-                final_http_status=final_http_status,
-            )
-        if self.report is not None:
-            record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, self.report.metrics())
-        _record(
-            self.outcome,
-            self.payload,
-            error_stage=self.error_stage,
-        )
-
-    def reject(self) -> None:
-        """Finalize a rejected request without counting it as production render traffic."""
-
-        with self._record_lock:
-            if self._recorded:
-                return
-            self._recorded = True
-        if self.outcome == OUTCOME_ERROR:
-            logger.warning(
-                "custom_profile_card backend=skia rejected_request stage=%s error_type=%s",
-                self.error_stage or "unknown",
-                self.error_type or "unknown",
-            )
-
-
-class _CustomProfileSkiaStageError(Exception):
-    """Internal carrier for a sanitized failure stage and any completed scene report."""
-
-    def __init__(self, stage: str, *, report: CustomProfileSceneReport | None = None) -> None:
-        super().__init__(stage)
-        self.stage = stage
-        self.report = report
-
-
 def _new_builder(width: int, height: int, *, general_font_path: Path | None = None) -> IRBuilder:
     # export_format is HARDCODED png: the route pins PNG (the card is RGBA with real
     # transparency), regardless of the global EXPORT_IMAGE_FORMAT.
@@ -394,17 +311,120 @@ def _new_builder(width: int, height: int, *, general_font_path: Path | None = No
 
 
 class _SceneAssembler:
-    """Accumulate an asset/font-backed scene without request-local Pillow pixels."""
+    """Accumulates the z-ordered element scene: mem rasters + Transform placements."""
 
     def __init__(self, builder: IRBuilder, canvas_size: tuple[int, int], max_mem_bytes: int) -> None:
-        del canvas_size, max_mem_bytes
         self.builder = builder
+        self.canvas_size = canvas_size
+        self.max_mem_bytes = max(1, int(max_mem_bytes))
         self.mem_bytes = 0
-        # Subtree splice still accepts a registry, but Custom Profile native success requires
-        # it to stay empty. Any node that would need request pixels is declined atomically.
+        # RGBA raw 3-tuples plus A8 raw-buffer 6-tuples (capability 9) share the registry.
         self.mem_images: dict[str, tuple] = {}
+        self._direct_layer: Image.Image | None = None
+
+    def _reserve_mem(self, byte_count: int) -> None:
+        total = self.mem_bytes + max(0, int(byte_count))
+        if total > self.max_mem_bytes:
+            raise ValueError(
+                f"custom profile native scene would retain {total} raw bytes; limit is {self.max_mem_bytes}"
+            )
+        self.mem_bytes = total
+
+    def _mem_ref(self, image: Image.Image) -> str:
+        record_pillow_touch(PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER)
+        rgba = image if image.mode == "RGBA" else image.convert("RGBA")
+        self._reserve_mem(rgba.width * rgba.height * 4)
+        key = f"m{len(self.mem_images)}"
+        self.mem_images[key] = (rgba.width, rgba.height, rgba.tobytes())
+        return f"mem:{key}"
+
+    def direct_layer(self) -> Image.Image:
+        """The accumulating full-canvas layer for decorative direct-raster texts."""
+        if self._direct_layer is None:
+            from .pillow_runtime import Image
+
+            self._direct_layer = Image.new("RGBA", self.canvas_size, (0, 0, 0, 0))
+        return self._direct_layer
+
+    def flush_direct_layer(self) -> None:
+        """Emit the accumulated direct-raster layer as one identity-placed image (keeps z-order:
+        called before any transformed element is emitted on top of it)."""
+        if self._direct_layer is None:
+            return
+        ref = self._mem_ref(self._direct_layer)
+        self.builder.image(ref, (0, 0), self.canvas_size, sampling="linear")
+        self._direct_layer = None
 
     def emit_sdf_quads(self, quads) -> bool:
+        """Atomically accept native scalar fields or asset-backed glyph descriptors."""
+        from .float_field import FloatField
+        from .gray_field import GrayField
+
+        quads = tuple(quads)
+        if any(isinstance(quad, (DirectSdfAtlasQuad, DirectSdfFontQuad)) for quad in quads):
+            return self._emit_asset_sdf_quads(quads)
+        if any(not isinstance(quad.field, (GrayField, FloatField)) for quad in quads):
+            return False
+        self.flush_direct_layer()
+        for quad in quads:
+            field = quad.field
+            pixels = field.pixels
+            stride = field.width * (4 if isinstance(field, FloatField) else 1)
+            self._reserve_mem(stride * field.height)
+            key = f"m{len(self.mem_images)}"
+            self.mem_images[key] = (
+                field.width,
+                field.height,
+                stride,
+                "f32le" if isinstance(field, FloatField) else "a8",
+                "unpremul",
+                pixels,
+            )
+            scalars = quad.scalars
+            underlay = None
+            if scalars.underlay is not None:
+                u = scalars.underlay
+                underlay = {
+                    "color": list(u.color),
+                    "scale": u.scale,
+                    "w": u.w,
+                    "shift": [u.shift_x, u.shift_y],
+                }
+
+            def emit(pos):
+                self.builder.sdf_quad(
+                    pos,
+                    f"mem:{key}",
+                    scalars.face_color,
+                    scalars.face_scale,
+                    scalars.face_w,
+                    scalars.alpha,
+                    underlay,
+                )
+
+            rotation = getattr(quad, "rotation", 0.0)
+            if rotation:
+                width, height = quad.rotated_size
+                with self.builder.raster_subscene(
+                    natural_size=(width, height),
+                    pos=(quad.left, quad.top),
+                    dst_size=(width, height),
+                    sampling="nearest",
+                ):
+                    with self.builder.unity_subscene(
+                        size=field.size,
+                        anchor=(width / 2, height / 2),
+                        object_scale=(1, 1),
+                        post_scale=(1, 1),
+                        rotation=-rotation,
+                    ):
+                        emit((0, 0))
+            else:
+                emit((quad.left, quad.top))
+
+        return True
+
+    def _emit_asset_sdf_quads(self, quads) -> bool:
         """Atomically emit a text element only when every glyph is asset/font-backed."""
 
         if any(not isinstance(quad, (DirectSdfFontQuad, DirectSdfAtlasQuad)) for quad in quads):
@@ -467,42 +487,117 @@ class _SceneAssembler:
                 continue
         return True
 
+    def emit_layer(self, layer: Image.Image, inputs: LayerTransformInputs, renderer: PNGRenderer) -> None:
+        from src.sekai.base.paint_types import RasterResample
 
-def _direct_text_quads(renderer: PNGRenderer, content: Any):
-    """Sparse native glyph records for any TMP/SDF text element, or ``None``.
+        """Place one element layer.
 
-    ``prepare_direct_sdf_quads`` is already the renderer-neutral sparse path used by Pillow for
-    decorative and oversized text. Restricting it here to ``is_decorative_text_item`` left
-    ordinary rich/effected TMP text as whole RGBA ``mem:`` layers even though the exact same
-    layout, warp, and shading descriptors were native-capable. Plain text still gets the cheaper
-    IR ``Text`` path first; this is the final native TMP option before the element is declined.
+        Unrotated elements (the overwhelming majority — note position_scale is ~1.118 in the
+        service target, so almost every element carries scale) reproduce the Pillow sequence
+        exactly: the two-step BICUBIC pre-resize in Python, then a rounded integer-position
+        paste — pixel-parity by construction. Only ROTATED elements go through a Transform
+        matrix (Pillow resamples those anyway; the single native pass replaces its resize +
+        rotate + 2x supersample, under the relaxed rotated-content parity budget), with the
+        minification carve-out keeping PIL's kernel-scaling resize semantics.
+        """
+        self.flush_direct_layer()
+        pivot = inputs.pivot
+        sx = inputs.object_scale[0] * inputs.position_scale[0]
+        sy = inputs.object_scale[1] * inputs.position_scale[1]
+        angle = inputs.angle % 360.0
+        rotated = abs(angle) >= _ANGLE_EPS
+
+        if not rotated or min(sx, sy) < _MIN_SCALE_FOLD:
+            # Two SEPARATE sequential resizes, exactly like prepare_transformed_layer (combining
+            # them changes pixels; the Pillow path is the parity baseline).
+            osx, osy = inputs.object_scale
+            if not math.isclose(osx, 1.0, rel_tol=0.0, abs_tol=0.0) or not math.isclose(
+                osy, 1.0, rel_tol=0.0, abs_tol=0.0
+            ):
+                new_w = max(1, round(layer.width * osx))
+                new_h = max(1, round(layer.height * osy))
+                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), RasterResample.BICUBIC)
+                pivot = (pivot[0] * osx, pivot[1] * osy)
+            psx, psy = inputs.position_scale
+            if abs(psx - 1.0) >= 1.0e-6 or abs(psy - 1.0) >= 1.0e-6:
+                new_w = max(1, round(layer.width * psx))
+                new_h = max(1, round(layer.height * psy))
+                layer = renderer.resize_layer_for_transform(layer, (new_w, new_h), RasterResample.BICUBIC)
+                pivot = (pivot[0] * psx, pivot[1] * psy)
+            sx = sy = 1.0
+
+        ax, ay = inputs.anchor
+        if not rotated:
+            # Pillow's angle~0 branch pastes at rounded integer positions; mirror it so
+            # unrotated content stays crisp (a float Transform would resample subpixel).
+            ref = self._mem_ref(layer)
+            self.builder.image(ref, (round(ax - pivot[0]), round(ay - pivot[1])), layer.size, sampling="linear")
+            return
+
+        theta = math.radians(angle)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        px, py = pivot
+        matrix = (
+            cos_t * sx,
+            -sin_t * sy,
+            ax - cos_t * sx * px + sin_t * sy * py,
+            sin_t * sx,
+            cos_t * sy,
+            ay - sin_t * sx * px - cos_t * sy * py,
+        )
+        ref = self._mem_ref(layer)
+        with self.builder.transform(matrix):
+            self.builder.image(ref, (0, 0), layer.size, sampling="catmull_rom")
+
+
+def _direct_text_quads(renderer: PNGRenderer, content: Any, max_field_bytes: int):
+    """SdfQuad records for a decorative direct-raster text element, or None.
+
+    Mirrors render_content_direct_on_card's outer gates, then asks the shared seam
+    (prepare_direct_sdf_quads — shared layout and native gray8 warp) for the per-glyph
+    fields/scalars. None falls through to the Pillow-parity raster branches.
     """
     if content.kind != "text" or not content.object_data.get("visible", False):
+        return None
+    if not renderer.tmp_decorative_direct_raster:
         return None
     if renderer.text_layout != "tmp" or renderer.tmp_text_render_mode != "sdf":
         return None
+    if not renderer.is_decorative_text_item(content.item):
+        return None
+    try:
+        return renderer.prepare_direct_sdf_quads(content.item, content.object_data, max_field_bytes=max_field_bytes)
+    except ValueError:
+        # Preserve the bounded sparse path for oversized glyph geometry. Normal-sized
+        # text retains the audited scalar-field shading and rotation order.
+        quads = _deferred_text_quads(renderer, content, max_field_bytes)
+        if quads is None:
+            raise
+        return quads
+
+
+def _deferred_text_quads(renderer: PNGRenderer, content: Any, max_field_bytes: int):
     return renderer.prepare_direct_sdf_quads(
         content.item,
         content.object_data,
+        max_field_bytes=max_field_bytes,
         defer_static_atlas=True,
         defer_dynamic_font=True,
-        source_metrics_only=True,
     )
 
 
-def _is_empty_text_noop(renderer: PNGRenderer, content: Any) -> bool:
-    """Return whether a visible text item has no drawable source characters.
+def _is_direct_text_candidate(renderer: PNGRenderer, content: Any) -> bool:
+    """Check the direct-text gates without allocating the full-canvas scratch layer."""
 
-    The compatibility renderer returns ``None`` for an empty/whitespace-only item. Treating that
-    as a missing element made an otherwise complete native scene fall back to Pillow, which then
-    drew exactly nothing. Keep tagged whitespace out of this shortcut because underline/strike
-    tags can make spaces visible; the raw whitespace-only case is unambiguously a no-op.
-    """
-
-    if content.kind != "text" or not content.object_data.get("visible", False):
-        return False
-    text = str(content.item.get("text", ""))
-    return not text.strip() and "<" not in text and ">" not in text
+    return (
+        content.kind == "text"
+        and bool(content.object_data.get("visible", False))
+        and renderer.tmp_decorative_direct_raster
+        and renderer.text_layout == "tmp"
+        and renderer.tmp_text_render_mode == "sdf"
+        and renderer.is_decorative_text_item(content.item)
+    )
 
 
 def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
@@ -542,6 +637,60 @@ def _emit_native_simple_tmp_text(renderer: PNGRenderer, content: Any, scene: _Sc
                 letter_spacing=op.letter_spacing,
                 font_name=font_name,
             )
+    return True
+
+
+def _emit_native_sdf_tmp_text(
+    renderer: PNGRenderer, content: Any, scene: _SceneAssembler, *, direct_declined: bool = False
+) -> bool:
+    """Shade shared local TMP fields and compose/resize the finished text layer natively."""
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    layer = renderer.prepare_tmp_sdf_text_layer(
+        content.item, max_field_bytes=scene.max_mem_bytes - scene.mem_bytes, direct_declined=direct_declined
+    )
+    if layer is None:
+        return False
+    left, top, right, bottom = layer.crop
+    natural = (right - left, bottom - top)
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    psx, psy = renderer.position_scale_x, renderer.position_scale_y
+    if not all(math.isfinite(v) and v > 0 for v in (sx, sy, psx, psy)):
+        return False
+    object_size = (max(1, round(natural[0] * sx)), max(1, round(natural[1] * sy)))
+    final_size = (max(1, round(object_size[0] * psx)), max(1, round(object_size[1] * psy)))
+    pivot = ((layer.layout.pivot[0] - left) * sx * psx, (layer.layout.pivot[1] - top) * sy * psy)
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    ax, ay = renderer.unity_point(content.object_data.get("position", {}))
+    scene.flush_direct_layer()
+
+    def emit(pos):
+        with scene.builder.raster_subscene(
+            natural_size=object_size, pos=pos, dst_size=final_size, sampling="pillow_bicubic"
+        ):
+            with scene.builder.raster_subscene(
+                natural_size=natural, pos=(0, 0), dst_size=object_size, sampling="pillow_bicubic"
+            ):
+                with scene.builder.group(offset=(-left, -top)):
+                    if not scene.emit_sdf_quads(layer.glyphs):
+                        raise ValueError("native text requires neutral glyph fields")
+
+    if abs(angle % 360.0) < _ANGLE_EPS:
+        emit((round(ax - pivot[0]), round(ay - pivot[1])))
+    else:
+        theta = math.radians(angle)
+        c, v = math.cos(theta), math.sin(theta)
+        dx, dy = final_size[0] / 2.0 - pivot[0], final_size[1] / 2.0 - pivot[1]
+        with scene.builder.unity_subscene(
+            size=final_size,
+            anchor=(ax + c * dx - v * dy, ay + v * dx + c * dy),
+            object_scale=(1.0, 1.0),
+            post_scale=(1.0, 1.0),
+            rotation=angle,
+        ):
+            emit((0, 0))
     return True
 
 
@@ -729,85 +878,6 @@ class _PreparedCardDisplayList:
     text_placements: dict[int, tuple[str, float]]
 
 
-_CARD_SAMPLING_MAP = {
-    "nearest": "nearest",
-    "bilinear": "linear",
-    "bicubic": "catmull_rom",
-    "lanczos": "pillow_lanczos",
-}
-
-
-def _prepare_native_card_cover(op: CardCoverArtOp, asset_paths: dict[int, str]) -> bool:
-    status, asset_path = _existing_native_asset(op.path)
-    if status != "ready" or asset_path is None:
-        return False
-    if op.cover_align != (0.5, 0.5):
-        # Render IR Cover currently centers its source crop.
-        return False
-    asset_paths[id(op)] = asset_path
-    return True
-
-
-def _prepare_native_card_sprite(op: CardSpriteOp, asset_paths: dict[int, str]) -> bool:
-    status, asset_path = _existing_native_asset(op.resource.path)
-    if status == "outside":
-        return False
-    if status != "ready":
-        fallback_status, asset_path = _existing_native_asset(op.resource.fallback_path)
-        if fallback_status == "outside":
-            return False
-        status = fallback_status
-    if status == "ready" and asset_path is not None:
-        asset_paths[id(op)] = asset_path
-        return True
-    return op.resource.resource_policy != "required"
-
-
-def _prepare_native_card_text(
-    op: CardTextOp,
-    metrics: _NativeGeneralTextMetrics | None,
-    text_placements: dict[int, tuple[str, float]],
-) -> bool:
-    if metrics is None or op.font.name != "general" or not op.font.bold:
-        return False
-    text_placements[id(op)] = metrics.anchor_placement(
-        text=op.text,
-        pos=op.pos,
-        size=op.size,
-        anchor=op.anchor,
-    )
-    return True
-
-
-def _prepare_native_card_rect(op: Any) -> bool:
-    if not isinstance(op, CardRectOp):
-        return False
-    if op.radius <= 0.0 or op.blend != "src":
-        return True
-    translucent = (op.fill is not None and op.fill[3] < 255) or (op.outline is not None and op.outline[3] < 255)
-    # RoundRect has no Porter-Duff Src switch yet.
-    return not translucent
-
-
-def _prepare_native_card_op(
-    op: Any,
-    metrics: _NativeGeneralTextMetrics | None,
-    asset_paths: dict[int, str],
-    text_placements: dict[int, tuple[str, float]],
-) -> bool:
-    if isinstance(op, CardAlphaMaskOp):
-        # No active card path uses the legacy mask hook. Its rounded fallback and
-        # alpha-multiply contract need a dedicated shared native primitive.
-        return False
-    if isinstance(op, CardCoverArtOp):
-        return _prepare_native_card_cover(op, asset_paths)
-    if isinstance(op, CardSpriteOp):
-        return _prepare_native_card_sprite(op, asset_paths)
-    if isinstance(op, CardTextOp):
-        return _prepare_native_card_text(op, metrics, text_placements)
-    return _prepare_native_card_rect(op)
-
-
 def _prepare_native_card_display_list(
     display_list: CardDisplayList,
     metrics: _NativeGeneralTextMetrics | None,
@@ -820,86 +890,6 @@ def _prepare_native_card_display_list(
         if not _prepare_native_card_op(op, metrics, asset_paths, text_placements):
             return None
     return _PreparedCardDisplayList(display_list, asset_paths, text_placements)
-
-
-def _emit_prepared_card_cover_art(
-    scene: _SceneAssembler,
-    prepared: _PreparedCardDisplayList,
-    op: CardCoverArtOp,
-) -> None:
-    display_list = prepared.display_list
-    cover_w = max(1, round(op.cover_size[0]))
-    cover_h = max(1, round(op.cover_size[1]))
-    crop_left = max(0, round((cover_w - display_list.size[0]) * op.crop_align[0]))
-    crop_top = max(0, round((cover_h - display_list.size[1]) * op.crop_align[1]))
-    scene.builder.image(
-        prepared.asset_paths[id(op)],
-        (-crop_left, -crop_top),
-        (cover_w, cover_h),
-        fit="cover",
-        sampling=_CARD_SAMPLING_MAP[op.sampling],
-        blend=op.blend,
-    )
-
-
-def _emit_prepared_card_rect(scene: _SceneAssembler, op: CardRectOp) -> None:
-    left, top, right, bottom = op.rect
-    if op.round_coordinates:
-        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
-    size = (max(0.0, right - left), max(0.0, bottom - top))
-    if op.radius > 0.0:
-        scene.builder.roundrect(
-            (left, top),
-            size,
-            op.radius,
-            fill=op.fill,
-            stroke=op.outline,
-            stroke_width=op.width,
-        )
-        return
-    scene.builder.rect(
-        (left, top),
-        size,
-        fill=op.fill,
-        stroke=op.outline,
-        stroke_width=op.width,
-        blend=op.blend,
-    )
-
-
-def _emit_prepared_card_text(
-    scene: _SceneAssembler,
-    prepared: _PreparedCardDisplayList,
-    op: CardTextOp,
-) -> None:
-    align, baseline = prepared.text_placements[id(op)]
-    scene.builder.text(
-        op.text,
-        (float(op.pos[0]), baseline),
-        "bold",
-        float(op.size),
-        align=align,
-        baseline="alphabetic",
-        fill=op.fill,
-        font_name=_GENERAL_FONT_IR_NAME,
-    )
-
-
-def _emit_prepared_card_sprite(
-    scene: _SceneAssembler,
-    prepared: _PreparedCardDisplayList,
-    op: CardSpriteOp,
-) -> None:
-    asset_path = prepared.asset_paths.get(id(op))
-    if asset_path is None:
-        return
-    left, top, right, bottom = op.rect
-    scene.builder.image(
-        asset_path,
-        (round(left), round(top)),
-        (max(1, round(right - left)), max(1, round(bottom - top))),
-        sampling=_CARD_SAMPLING_MAP[op.sampling],
-    )
 
 
 def _emit_prepared_card_ops(scene: _SceneAssembler, prepared: _PreparedCardDisplayList) -> None:
@@ -918,93 +908,6 @@ def _emit_prepared_card_ops(scene: _SceneAssembler, prepared: _PreparedCardDispl
         if not isinstance(op, CardSpriteOp):
             raise TypeError(f"unsupported native card display-list op: {type(op).__name__}")
         _emit_prepared_card_sprite(scene, prepared, op)
-
-
-def _native_card_general_name(renderer: PNGRenderer, content: Any) -> str | None:
-    if content.kind != "general" or not content.object_data.get("visible", False):
-        return None
-    resource_for = getattr(renderer, "image_resource_for", None)
-    if not callable(resource_for) or not callable(getattr(renderer, "general_font_path", None)):
-        return None
-    file_name = str(resource_for("general", content.item).get("fileName", "") or "")
-    return file_name if file_name in _NATIVE_CARD_GENERAL_PREFABS else None
-
-
-def _prepare_native_leader_card(
-    renderer: PNGRenderer,
-    metrics: _NativeGeneralTextMetrics | None,
-) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
-    deck = renderer.profile_context.get("userDeck") or {}
-    card_id = int(deck.get("leader", 0) or 0) if isinstance(deck, dict) else 0
-    if card_id <= 0:
-        return None
-    display_list = renderer.build_profile_leader_card_display_list(card_id)
-    prepared = _prepare_native_card_display_list(display_list, metrics) if display_list is not None else None
-    return [(prepared, (0, 0))] if prepared is not None else None
-
-
-def _profile_deck_display_lists(renderer: PNGRenderer) -> list[CardDisplayList] | None:
-    deck = renderer.profile_context.get("userDeck") or {}
-    if not isinstance(deck, dict):
-        return None
-    display_lists: list[CardDisplayList] = []
-    for index in range(5):
-        card_id = int(deck.get(f"member{index + 1}", 0) or 0)
-        display_list = renderer.build_profile_deck_card_display_list(card_id, leader=index == 0)
-        display_lists.append(
-            display_list or renderer.build_empty_profile_deck_card_display_list(GENERAL_DECK_CARD_RENDER_SIZE)
-        )
-    return display_lists
-
-
-def _prepare_native_deck_cards(
-    renderer: PNGRenderer,
-    metrics: _NativeGeneralTextMetrics | None,
-) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
-    display_lists = _profile_deck_display_lists(renderer)
-    if display_lists is None:
-        return None
-    card_w, card_h = display_lists[0].render_size or display_lists[0].size
-    gap = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - card_w * 5) / 4.0)
-    start_x = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - (card_w * 5 + gap * 4)) / 2.0)
-    top = GENERAL_NATIVE_SIZES["Deck"][1] - card_h
-    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]] = []
-    for index, display_list in enumerate(display_lists):
-        prepared = _prepare_native_card_display_list(display_list, metrics)
-        if prepared is None:
-            return None
-        prepared_cards.append((prepared, (round(start_x + index * (card_w + gap)), round(top))))
-    return prepared_cards
-
-
-def _emit_native_card_general_contents(
-    scene: _SceneAssembler,
-    outer_size: tuple[int, int],
-    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]],
-) -> None:
-    for prepared, (left, top) in prepared_cards:
-        display_list = prepared.display_list
-        render_size = display_list.render_size or display_list.size
-        if display_list.size == outer_size and (left, top) == (0, 0):
-            _emit_prepared_card_ops(scene, prepared)
-            continue
-        with scene.builder.unity_subscene(
-            size=display_list.size,
-            anchor=(left + render_size[0] / 2.0, top + render_size[1] / 2.0),
-            object_scale=(
-                render_size[0] / display_list.size[0],
-                render_size[1] / display_list.size[1],
-            ),
-            post_scale=(1.0, 1.0),
-            rotation=0.0,
-            sampling={
-                "nearest": "nearest",
-                "bilinear": "linear",
-                "bicubic": "catmull_rom",
-                "lanczos": "pillow_lanczos",
-            }[display_list.final_sampling],
-        ):
-            _emit_prepared_card_ops(scene, prepared)
 
 
 def _emit_native_card_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
@@ -1069,299 +972,6 @@ def _emit_native_card_member(renderer: PNGRenderer, content: Any, scene: _SceneA
     ):
         _emit_prepared_card_ops(scene, prepared)
     return True
-
-
-@dataclass(frozen=True, slots=True)
-class _PreparedGeneralDisplayList:
-    display_list: GeneralPrefabDisplayList
-    resource_paths: dict[int, str | None]
-    text_placements: dict[int, tuple[str, float]]
-
-
-_GENERAL_SAMPLING_MAP = {
-    "nearest": "nearest",
-    "bilinear": "linear",
-    "bicubic": "catmull_rom",
-    "lanczos": "catmull_rom",
-}
-
-
-def _native_challenge_live_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
-    data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
-    if not isinstance(data, dict):
-        return {}
-    character_id = int(data.get("characterId", 0) or 0)
-    return {"challenge_character_icon": renderer.chara_icon_path(character_id)}
-
-
-def _native_character_rank_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
-    return {
-        f"character_rank_icon:{character_id}": renderer.chara_icon_path(character_id)
-        for _nickname, character_id in CHARA_LIST
-        if character_id is not None
-    }
-
-
-def _native_story_favorite_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
-    stories = renderer.profile_context.get("userStoryFavorites") or []
-    if not isinstance(stories, list):
-        return {}
-    return {
-        story_favorite_asset_key(story): renderer.story_favorite_image_path(story)
-        for story in stories
-        if isinstance(story, dict)
-    }
-
-
-def _native_general_asset_paths(renderer: PNGRenderer, file_name: str) -> dict[str, Path | None]:
-    if file_name == "ChallengeLive":
-        return _native_challenge_live_asset_paths(renderer)
-    if file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
-        return _native_character_rank_asset_paths(renderer)
-    if file_name == "StoryFavorite":
-        return _native_story_favorite_asset_paths(renderer)
-    return {}
-
-
-def _native_general_labels(renderer: PNGRenderer) -> dict[str, str]:
-    return {
-        "comment_title": renderer.general_text("comment_title"),
-        "total_power": renderer.general_text("total_power"),
-        "multi_live_title": renderer.general_text("multi_live_title"),
-        "multi_live_count_suffix": renderer.general_text("multi_live_count_suffix"),
-        "challenge_live_title": renderer.general_text("challenge_live_title"),
-        "challenge_live_solo": renderer.general_text("challenge_live_solo"),
-        "character_rank_tab": renderer.general_text("character_rank_tab"),
-        "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
-        "music_clear": renderer.general_text("music_clear"),
-        "music_full_combo": renderer.general_text("music_full_combo"),
-        "music_all_perfect": renderer.general_text("music_all_perfect"),
-        "story_favorite_title": renderer.general_text("story_favorite_title"),
-        "not_set": renderer.general_text("not_set"),
-    }
-
-
-def _build_native_general_display_list(
-    renderer: PNGRenderer,
-    file_name: str,
-    metrics: _NativeGeneralTextMetrics,
-) -> GeneralPrefabDisplayList | None:
-    return build_general_prefab_display_list(
-        file_name,
-        size=GENERAL_NATIVE_SIZES[file_name],
-        profile_context=renderer.profile_context,
-        labels=_native_general_labels(renderer),
-        metrics=metrics,
-        palette=GENERAL_PREFAB_PALETTE,
-        asset_paths=_native_general_asset_paths(renderer, file_name),
-        music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
-        story_favorite_resources=renderer.story_favorite_resources,
-    )
-
-
-def _walk_general_ops(ops: tuple[GeneralPrefabOp, ...]):
-    for op in ops:
-        yield op
-        if isinstance(op, GeneralViewportOp):
-            yield from _walk_general_ops(op.children)
-
-
-def _resolve_native_general_sprite(renderer: PNGRenderer, op: GeneralSpriteOp) -> tuple[bool, str | None]:
-    path = renderer.unity_ui_sprite_path(op.name)
-    if path is None:
-        return op.resource_policy != "required", None
-    asset_path = _relative_asset_path(path)
-    return asset_path is not None, asset_path
-
-
-def _resolve_native_general_sprite_choice(
-    renderer: PNGRenderer,
-    op: GeneralSpriteChoiceOp,
-) -> tuple[bool, str | None]:
-    for name in op.names:
-        path = renderer.unity_ui_sprite_path(name)
-        if path is None:
-            continue
-        asset_path = _relative_asset_path(path)
-        return asset_path is not None, asset_path
-    return True, None
-
-
-def _resolve_native_general_asset(op: GeneralAssetImageOp) -> tuple[bool, str | None]:
-    if op.fit == "cover" and op.align != (0.5, 0.5):
-        # IR Image cover is deliberately centered. A future non-centered display-list
-        # operation must decline instead of silently changing its crop.
-        return False, None
-    status, asset_path = _existing_native_asset(op.path)
-    if status == "ready":
-        return True, asset_path
-    if status == "outside" or op.resource_policy == "required":
-        return False, None
-    return True, None
-
-
-def _prepare_native_general_op(
-    renderer: PNGRenderer,
-    metrics: _NativeGeneralTextMetrics,
-    op: GeneralPrefabOp,
-    resource_paths: dict[int, str | None],
-    text_placements: dict[int, tuple[str, float]],
-) -> bool:
-    op_key = id(op)
-    if isinstance(op, GeneralSpriteOp):
-        ready, resource_paths[op_key] = _resolve_native_general_sprite(renderer, op)
-        return ready
-    if isinstance(op, GeneralSpriteChoiceOp):
-        ready, resource_paths[op_key] = _resolve_native_general_sprite_choice(renderer, op)
-        if ready and resource_paths[op_key] is None and op.fallback_text is not None:
-            text_placements[id(op.fallback_text)] = metrics.text_placement(op.fallback_text)
-        return ready
-    if isinstance(op, GeneralAssetImageOp):
-        ready, resource_paths[op_key] = _resolve_native_general_asset(op)
-        return ready
-    if isinstance(op, GeneralTextOp):
-        text_placements[op_key] = metrics.text_placement(op)
-        return True
-    return isinstance(op, (GeneralRoundedRectOp, GeneralViewportOp))
-
-
-def _prepare_native_general_display_list(
-    renderer: PNGRenderer,
-    metrics: _NativeGeneralTextMetrics,
-    display_list: GeneralPrefabDisplayList,
-) -> _PreparedGeneralDisplayList | None:
-    resource_paths: dict[int, str | None] = {}
-    text_placements: dict[int, tuple[str, float]] = {}
-    for op in _walk_general_ops(display_list.ops):
-        if not _prepare_native_general_op(renderer, metrics, op, resource_paths, text_placements):
-            return None
-    return _PreparedGeneralDisplayList(display_list, resource_paths, text_placements)
-
-
-def _general_op_geometry(rect: tuple[float, float, float, float]) -> tuple[tuple[int, int], tuple[int, int]]:
-    left, top, right, bottom = rect
-    return (round(left), round(top)), (max(1, round(right - left)), max(1, round(bottom - top)))
-
-
-def _emit_native_general_rounded_rect(scene: _SceneAssembler, op: GeneralRoundedRectOp) -> None:
-    left, top, right, bottom = op.rect
-    if op.round_coordinates:
-        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
-    scene.builder.roundrect(
-        (left, top),
-        (max(0.0, right - left), max(0.0, bottom - top)),
-        op.radius,
-        fill=op.fill,
-        stroke=op.outline,
-        stroke_width=op.width,
-    )
-
-
-def _emit_native_general_text(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    op: GeneralTextOp,
-) -> None:
-    align, baseline = prepared.text_placements[id(op)]
-    scene.builder.text(
-        op.text,
-        (float(op.pos[0]), baseline),
-        "bold",
-        float(op.size),
-        align=align,
-        baseline="alphabetic",
-        fill=op.fill,
-        font_name=_GENERAL_FONT_IR_NAME,
-    )
-
-
-def _emit_native_general_sprite(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    op: GeneralSpriteOp,
-) -> None:
-    asset_path = prepared.resource_paths[id(op)]
-    if asset_path is None:
-        if op.fallback is not None:
-            _emit_native_general_rounded_rect(scene, op.fallback)
-        return
-    pos, size = _general_op_geometry(op.rect)
-    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
-    if op.sliced_border is not None:
-        scene.builder.sliced_image(path=asset_path, pos=pos, size=size, border=op.sliced_border, tint=tint)
-        return
-    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
-
-
-def _emit_native_general_sprite_choice(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    op: GeneralSpriteChoiceOp,
-) -> None:
-    asset_path = prepared.resource_paths[id(op)]
-    if asset_path is None:
-        if op.fallback_text is not None:
-            _emit_native_general_text(scene, prepared, op.fallback_text)
-        return
-    pos, size = _general_op_geometry(op.rect)
-    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
-    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
-
-
-def _emit_native_general_asset(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    op: GeneralAssetImageOp,
-) -> None:
-    asset_path = prepared.resource_paths[id(op)]
-    if asset_path is None:
-        if op.fallback is not None:
-            _emit_native_general_rounded_rect(scene, op.fallback)
-        return
-    pos, size = _general_op_geometry(op.rect)
-    sampling = "pillow_lanczos" if op.sampling == "lanczos" else _GENERAL_SAMPLING_MAP[op.sampling]
-    if op.clip_radius is None:
-        scene.builder.image(asset_path, pos, size, fit=op.fit, sampling=sampling)
-        return
-    # The legacy composer multiplies a discrete ImageDraw L mask into the resized alpha.
-    # ``pillow_rrect`` reproduces that contract without a request-local Pillow raster.
-    with scene.builder.group(offset=pos, size=size, clip=clip_pillow_rrect(op.clip_radius)):
-        scene.builder.image(asset_path, (0, 0), size, fit=op.fit, sampling=sampling)
-
-
-def _emit_native_general_op(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    op: GeneralPrefabOp,
-) -> None:
-    if isinstance(op, GeneralSpriteOp):
-        _emit_native_general_sprite(scene, prepared, op)
-        return
-    if isinstance(op, GeneralSpriteChoiceOp):
-        _emit_native_general_sprite_choice(scene, prepared, op)
-        return
-    if isinstance(op, GeneralRoundedRectOp):
-        _emit_native_general_rounded_rect(scene, op)
-        return
-    if isinstance(op, GeneralAssetImageOp):
-        _emit_native_general_asset(scene, prepared, op)
-        return
-    if isinstance(op, GeneralViewportOp):
-        with scene.builder.group(offset=op.offset, size=op.viewport_size, clip={"kind": "rect"}):
-            _emit_native_general_ops(scene, prepared, op.children)
-        return
-    if not isinstance(op, GeneralTextOp):
-        raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
-    _emit_native_general_text(scene, prepared, op)
-
-
-def _emit_native_general_ops(
-    scene: _SceneAssembler,
-    prepared: _PreparedGeneralDisplayList,
-    ops: tuple[GeneralPrefabOp, ...],
-) -> None:
-    for op in ops:
-        _emit_native_general_op(scene, prepared, op)
 
 
 def _emit_native_general(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
@@ -1482,61 +1092,6 @@ def _native_honor_candidates(
     return bonds_candidates()
 
 
-def _lower_native_honor_request(
-    renderer: PNGRenderer,
-    request: HonorRequest,
-) -> tuple[str, NativeSubtree | None]:
-    source_status, images = _native_honor_sources(renderer, request)
-    if source_status == "unrenderable":
-        return "unrenderable", None
-    if source_status != "ready" or images is None:
-        return "hybrid", None
-    canvas = build_honor_badge_canvas(request, images)
-    if canvas is None:
-        return "missing", None
-    try:
-        badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
-    except NativeSubtreeError:
-        return "hybrid", None
-    return "ready", badge
-
-
-def _honor_request_from_candidate(candidate: Any) -> HonorRequest | None:
-    if isinstance(candidate, HonorRequest):
-        return candidate
-    if isinstance(candidate, dict):
-        return HonorRequest.model_validate(candidate)
-    return None
-
-
-def _emit_native_honor_badge(
-    renderer: PNGRenderer,
-    content: Any,
-    scene: _SceneAssembler,
-    badge: NativeSubtree,
-) -> bool:
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x", 1.0))
-    sy = float(scale.get("y", sx))
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
-        return False
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-    with scene.builder.unity_subscene(
-        size=badge.size,
-        anchor=renderer.unity_point(content.object_data.get("position", {})),
-        object_scale=(sx, sy),
-        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
-        rotation=angle,
-    ):
-        badge.splice_into(
-            scene.builder,
-            scene.mem_images,
-            namespace="custom.honor.content",
-            require_asset_backed=True,
-        )
-    return True
-
-
 def _emit_native_honor(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
     """Lower normal, birthday, bonds, and empty badges through ``HonorBadgeBox``.
 
@@ -1604,95 +1159,6 @@ def _native_profile_honor_badge(
     return "missing", None
 
 
-def _native_profile_honor_payloads(renderer: PNGRenderer, candidates: Any) -> Iterator[dict[str, Any]]:
-    seen_payloads: set[int] = set()
-    request_maps = (
-        (renderer.profile_honor_requests, candidates.profile_keys),
-        (renderer.honor_requests, candidates.ordinary_keys),
-    )
-    for request_map, keys in request_maps:
-        for key in keys:
-            payload = request_map.get(key)
-            if not isinstance(payload, dict) or id(payload) in seen_payloads:
-                continue
-            seen_payloads.add(id(payload))
-            yield payload
-
-
-def _prepare_native_honor_deck_slots(
-    renderer: PNGRenderer,
-    plan: Any,
-) -> list[tuple[NativeSubtree, tuple[int, int, int, int], int]] | None:
-    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
-    for slot in plan.slots:
-        status, badge = _native_profile_honor_badge(
-            renderer,
-            dict(slot.profile_row),
-            full_size=slot.full_size,
-        )
-        if status != "ready" or badge is None:
-            return None
-        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
-        # size. Native custom-profile does not claim that filter yet; decline rather than
-        # silently substituting Catmull-Rom through a nested subscene.
-        if badge.size != slot.target_size:
-            return None
-        slots.append((badge, (*slot.target_xy, *slot.target_size), slot.index))
-    return slots
-
-
-def _native_honor_deck_background(renderer: PNGRenderer, plan: Any) -> tuple[bool, str | None]:
-    assert plan.panel is not None
-    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
-    if background_path is None:
-        return True, None
-    background_asset = _relative_asset_path(background_path)
-    return background_asset is not None, background_asset
-
-
-def _native_content_transform(renderer: PNGRenderer, content: Any) -> tuple[float, float, float] | None:
-    scale = content.object_data.get("scale") or {}
-    sx = float(scale.get("x") or 1.0)
-    sy = float(scale.get("y") or sx or 1.0)
-    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
-        return None
-    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
-    return sx, sy, angle
-
-
-def _emit_native_honor_deck_contents(
-    scene: _SceneAssembler,
-    plan: Any,
-    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]],
-    background_asset: str | None,
-) -> None:
-    if background_asset is not None:
-        scene.builder.sliced_image(
-            path=background_asset,
-            pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
-            size=(
-                round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
-                round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
-            ),
-            border=plan.panel.sliced_border,
-            tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
-        )
-    for badge, (left, top, width, height), slot_index in slots:
-        with scene.builder.unity_subscene(
-            size=badge.size,
-            anchor=(left + width / 2.0, top + height / 2.0),
-            object_scale=(1.0, 1.0),
-            post_scale=(1.0, 1.0),
-            rotation=0.0,
-        ):
-            badge.splice_into(
-                scene.builder,
-                scene.mem_images,
-                namespace=f"custom.honor.deck.{slot_index}",
-                require_asset_backed=True,
-            )
-
-
 def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> str | None:
     """Compose the profile HonorDeck prefab without a Pillow surface.
 
@@ -1713,17 +1179,40 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
     if plan is None:
         return None
 
-    slots = _prepare_native_honor_deck_slots(renderer, plan)
-    if slots is None:
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
+    for slot in plan.slots:
+        status, badge = _native_profile_honor_badge(
+            renderer,
+            dict(slot.profile_row),
+            full_size=slot.full_size,
+        )
+        if status != "ready":
+            return None
+        assert badge is not None
+        slots.append(
+            (
+                badge,
+                (
+                    *slot.target_xy,
+                    *slot.target_size,
+                ),
+                slot.index,
+            )
+        )
+
+    assert plan.panel is not None
+    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
+    background_asset = _relative_asset_path(background_path) if background_path is not None else None
+    if background_path is not None and background_asset is None:
         return None
-    background_ready, background_asset = _native_honor_deck_background(renderer, plan)
-    if not background_ready:
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
         return None
-    transform = _native_content_transform(renderer, content)
-    if transform is None:
-        return None
-    sx, sy, angle = transform
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
     size = plan.natural_size
+    scene.flush_direct_layer()
     with scene.builder.unity_subscene(
         size=size,
         anchor=renderer.unity_point(content.object_data.get("position", {})),
@@ -1731,163 +1220,36 @@ def _emit_native_honor_deck(renderer: PNGRenderer, content: Any, scene: _SceneAs
         post_scale=(renderer.position_scale_x, renderer.position_scale_y),
         rotation=angle,
     ):
-        _emit_native_honor_deck_contents(scene, plan, slots, background_asset)
+        if background_asset is not None:
+            scene.builder.sliced_image(
+                path=background_asset,
+                pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
+                size=(
+                    round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
+                    round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
+                ),
+                border=plan.panel.sliced_border,
+                tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
+            )
+        for badge, (left, top, width, height), slot_index in slots:
+            with scene.builder.unity_subscene(
+                size=badge.size,
+                anchor=(left + width / 2.0, top + height / 2.0),
+                # Keep paste_in_rect's compose-then-Lanczos resize separate from the outer
+                # panel's Unity scaling/rotation. The subtree retains lazy asset references;
+                # only Rust reads back and resizes the completed badge surface.
+                object_scale=(width / badge.size[0], height / badge.size[1]),
+                post_scale=(1.0, 1.0),
+                rotation=0.0,
+                sampling="pillow_lanczos" if badge.size != (width, height) else "catmull_rom",
+            ):
+                badge.splice_into(
+                    scene.builder,
+                    scene.mem_images,
+                    namespace=f"custom.honor.deck.{slot_index}",
+                    require_asset_backed=True,
+                )
     return "native"
-
-
-@dataclass(frozen=True)
-class _PreparedNativeOmikuji:
-    display_list: Any
-    font_path: Path
-    asset_paths: dict[int, str]
-    text_placements: dict[int, tuple[str, float]]
-
-
-def _prepare_native_omikuji(renderer: PNGRenderer, content: Any) -> _PreparedNativeOmikuji | None:
-    if content.kind != "collection" or not content.object_data.get("visible", False):
-        return None
-    resource = renderer.image_resource_for("collection", content.item)
-    if str(resource.get("customProfileResourceCollectionType", "none") or "none") != "omikuji":
-        return None
-    target_id = int(content.item.get("targetId", 0) or 0)
-    omikuji = renderer.omikujis.get(target_id)
-    if not isinstance(omikuji, dict):
-        return None
-    background_path = renderer.omikuji_background_asset_path(omikuji)
-    fortune_path = renderer.omikuji_asset_path(omikuji, "fortune")
-    if background_path is None or fortune_path is None:
-        return None
-    background_asset = _relative_asset_path(background_path)
-    fortune_asset = _relative_asset_path(fortune_path)
-    if background_asset is None or fortune_asset is None:
-        return None
-    background_info = _native_asset_info(background_asset)
-    fortune_info = _native_asset_info(fortune_asset)
-    if background_info is None or fortune_info is None:
-        return None
-    font_path = renderer.omikuji_font_path(decorative=False)
-    metrics = _NativeGeneralTextMetrics.create(font_path, expected_font_name="omikuji")
-    if metrics is None or font_path is None:
-        return None
-
-    display_list = build_omikuji_display_list(
-        omikuji,
-        background_path=background_path,
-        background_size=(int(background_info["width"]), int(background_info["height"])),
-        fortune_path=fortune_path,
-        fortune_size=(int(fortune_info["width"]), int(fortune_info["height"])),
-    )
-    prepared_ops = _prepare_native_omikuji_ops(display_list.ops, metrics)
-    if prepared_ops is None:
-        return None
-    asset_paths, text_placements = prepared_ops
-    return _PreparedNativeOmikuji(display_list, font_path, asset_paths, text_placements)
-
-
-def _prepare_native_omikuji_ops(
-    ops: list[Any],
-    metrics: _NativeGeneralTextMetrics,
-) -> tuple[dict[int, str], dict[int, tuple[str, float]]] | None:
-    asset_paths: dict[int, str] = {}
-    text_placements: dict[int, tuple[str, float]] = {}
-    font_ref = GeneralFontRef(name="omikuji")
-    for op in ops:
-        if isinstance(op, OmikujiAssetOp):
-            asset_path = _relative_asset_path(Path(op.path))
-            if asset_path is None:
-                return None
-            asset_paths[id(op)] = asset_path
-        elif isinstance(op, OmikujiTextOp):
-            if op.decorative:
-                return None
-            text_placements[id(op)] = metrics.anchor_placement(
-                text=op.text,
-                pos=op.pos if abs(op.rotation) < 1.0e-6 else (0.0, 0.0),
-                size=op.size,
-                anchor=op.anchor,
-                font=font_ref,
-            )
-    return asset_paths, text_placements
-
-
-def _emit_native_omikuji_text(
-    scene: _SceneAssembler,
-    op: OmikujiTextOp,
-    placement: tuple[str, float],
-) -> None:
-    align, baseline = placement
-    text_args = (
-        op.text,
-        "default",
-        op.size,
-    )
-    text_kwargs = {
-        "align": align,
-        "baseline": "alphabetic",
-        "fill": op.fill,
-        "font_name": _OMIKUJI_FONT_IR_NAME,
-    }
-    if abs(op.rotation) < 1.0e-6:
-        scene.builder.text(text_args[0], (op.pos[0], baseline), *text_args[1:], **text_kwargs)
-        return
-    theta = math.radians(op.rotation)
-    with scene.builder.transform(
-        (
-            math.cos(theta),
-            -math.sin(theta),
-            op.pos[0],
-            math.sin(theta),
-            math.cos(theta),
-            op.pos[1],
-        )
-    ):
-        scene.builder.text(text_args[0], (0.0, baseline), *text_args[1:], **text_kwargs)
-
-
-def _emit_native_omikuji_ops(scene: _SceneAssembler, prepared: _PreparedNativeOmikuji) -> None:
-    for op in prepared.display_list.ops:
-        if isinstance(op, OmikujiAssetOp):
-            left, top, right, bottom = op.rect
-            scene.builder.image(
-                prepared.asset_paths[id(op)],
-                (round(left), round(top)),
-                (max(1, round(right - left)), max(1, round(bottom - top))),
-                sampling={
-                    "nearest": "nearest",
-                    "bilinear": "linear",
-                    "bicubic": "catmull_rom",
-                    "lanczos": "pillow_lanczos",
-                }[op.sampling],
-                blend=op.blend,
-            )
-        elif isinstance(op, OmikujiRectOp):
-            left, top, right, bottom = op.rect
-            scene.builder.rect((left, top), (right - left, bottom - top), fill=op.fill)
-        else:
-            _emit_native_omikuji_text(scene, op, prepared.text_placements[id(op)])
-
-
-def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
-    """Replay the shared omikuji result-card display list without a Pillow surface."""
-
-    prepared = _prepare_native_omikuji(renderer, content)
-    if prepared is None:
-        return False
-    transform = _native_content_transform(renderer, content)
-    if transform is None:
-        return False
-    sx, sy, angle = transform
-
-    scene.builder.register_extra_font(_OMIKUJI_FONT_IR_NAME, prepared.font_path)
-    with scene.builder.unity_subscene(
-        size=prepared.display_list.size,
-        anchor=renderer.unity_point(content.object_data.get("position", {})),
-        object_scale=(sx, sy),
-        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
-        rotation=angle,
-    ):
-        _emit_native_omikuji_ops(scene, prepared)
-    return True
 
 
 def _emit_native_asset_image(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
@@ -1990,62 +1352,6 @@ def _emit_native_shape(renderer: PNGRenderer, content: Any, scene: _SceneAssembl
     return True
 
 
-def _native_content_result(
-    renderer: PNGRenderer,
-    content: Any,
-    scene: _SceneAssembler,
-) -> tuple[str, str] | None:
-    if not content.object_data.get("visible", False):
-        return "hidden", "hidden"
-
-    native_emitters = (
-        _emit_native_asset_image,
-        _emit_native_omikuji_collection,
-        _emit_native_shape,
-        _emit_native_card_member,
-    )
-    if any(emitter(renderer, content, scene) for emitter in native_emitters):
-        return "rendered-native", "native"
-
-    if _emit_native_card_general(renderer, content, scene) == "native":
-        return "rendered-native", "native"
-
-    for result in (
-        _emit_native_honor_deck(renderer, content, scene),
-        _emit_native_general(renderer, content, scene),
-    ):
-        if result in {"native", "noop"}:
-            return "rendered-native", result
-
-    if _emit_native_honor(renderer, content, scene):
-        return "rendered-native", "native"
-    if _is_empty_text_noop(renderer, content):
-        return "rendered-native", "noop"
-    if _emit_native_simple_tmp_text(renderer, content, scene):
-        return "rendered-native", "native"
-
-    quads = _direct_text_quads(renderer, content)
-    if quads is None:
-        return None
-    if not quads:
-        return "rendered-direct", "noop"
-    if scene.emit_sdf_quads(quads):
-        return "rendered-direct", "native"
-    return None
-
-
-def _record_native_content_result(
-    renderer: PNGRenderer,
-    card_ref: dict[str, Any],
-    content: Any,
-    report: CustomProfileSceneReport,
-    result: tuple[str, str] | None,
-) -> None:
-    audit_result, classification = result or ("unresolved", "unresolved")
-    renderer.record_native_audit(card_ref, content, audit_result, None)
-    report.observe(content, classification)
-
-
 def _build_scene(
     renderer: PNGRenderer,
     card: dict[str, Any],
@@ -2062,22 +1368,207 @@ def _build_scene(
     contents = renderer.build_native_contents(card)
     report = CustomProfileSceneReport(elements_total=len(contents))
 
-    # Walk the same z-ordered content list as render_card. Every successful element must lower to
-    # asset/font-backed IR. Unsupported content is classified before a Pillow layer is created;
-    # the strict coverage gate then declines the whole scene to the route-level Pillow fallback.
+    # Same walk as render_card's direct-raster loop: decorative TMP texts become native SdfQuads
+    # (Phase 2 — Python keeps layout + the PIL field warp, the node shades per pixel); if the
+    # element is not quad-eligible the accumulating full-canvas direct layer takes it, and
+    # everything else renders to a local layer placed by the shared layer_transform_inputs
+    # numbers. Audit records mirror the Pillow statuses.
     for content in contents:
-        _record_native_content_result(
-            renderer,
-            card_ref,
-            content,
-            report,
-            _native_content_result(renderer, content, scene),
-        )
+        if _is_empty_text_noop(renderer, content):
+            _record_native_content_result(renderer, card_ref, content, report, ("rendered-native", "noop"))
+            continue
+        if _emit_native_omikuji_collection(renderer, content, scene):
+            _record_native_content_result(renderer, card_ref, content, report, ("rendered-native", "native"))
+            continue
+        if _emit_native_asset_image(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_shape(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_card_member(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        card_general_result = _emit_native_card_general(renderer, content, scene)
+        if card_general_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        honor_deck_result = _emit_native_honor_deck(renderer, content, scene)
+        if honor_deck_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if honor_deck_result == "noop":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
+        general_result = _emit_native_general(renderer, content, scene)
+        if general_result == "native":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if general_result == "noop":
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "noop")
+            continue
+        if _emit_native_honor(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        if _emit_native_simple_tmp_text(renderer, content, scene):
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        quads = _direct_text_quads(renderer, content, scene.max_mem_bytes - scene.mem_bytes)
+        if quads is not None:
+            renderer.record_native_audit(card_ref, content, "rendered-direct", None)
+            if quads:
+                if not scene.emit_sdf_quads(quads):
+                    raise ValueError("native text requires neutral glyph fields")
+                report.observe(content, "native")
+            else:
+                report.observe(content, "noop")
+            continue
+        # Match Pillow's direct-decoration attempt before its local text fallback.
+        # A missing static glyph declines the whole direct field sequence.
+        try:
+            emitted_text = _emit_native_sdf_tmp_text(renderer, content, scene, direct_declined=True)
+        except ValueError:
+            if content.kind != "text":
+                raise
+            deferred = _deferred_text_quads(renderer, content, scene.max_mem_bytes - scene.mem_bytes)
+            if deferred is None or not scene.emit_sdf_quads(deferred):
+                raise
+            emitted_text = True
+        if emitted_text:
+            renderer.record_native_audit(card_ref, content, "rendered-native", None)
+            report.observe(content, "native")
+            continue
+        # Native service rendering never materializes a Pillow layer. Hidden objects need
+        # no pixels; an unsupported visible element makes the whole scene incomplete.
+        status = "unresolved" if content.object_data.get("visible", False) else "hidden"
+        renderer.record_native_audit(card_ref, content, status, None)
+        report.observe(content, status)
+    scene.flush_direct_layer()
     report.mem_images = len(scene.mem_images)
     report.mem_bytes = scene.mem_bytes
 
     ir_json = json.dumps(builder.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     return ir_json, scene.mem_images, report
+
+
+async def try_render_custom_profile_card_payload(
+    request: CustomProfileCardRenderRequest,
+    *,
+    raise_errors: bool = False,
+) -> EncodedImagePayload | None:
+    attempt = await try_render_custom_profile_card_attempt(request)
+    if raise_errors and attempt.error is not None:
+        if isinstance(attempt.error, ValueError):
+            attempt.reject()
+        else:
+            attempt.record(500)
+        raise attempt.error
+    attempt.record()
+    return attempt.payload
+
+
+async def try_render_custom_profile_card_attempt(
+    request: CustomProfileCardRenderRequest,
+) -> CustomProfileSkiaAttempt:
+    """Build a deferred Skia attempt for the Custom Profile route."""
+    if not skia_plot_enabled():
+        return CustomProfileSkiaAttempt(None, OUTCOME_DISABLED)
+    try:
+        native = load_native_renderer()
+    except ImportError as exc:
+        # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
+        logger.error("haruki_skia_renderer not importable; falling back to Pillow error_type=ImportError")
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_FALLBACK,
+            error_stage="renderer_load",
+            error_type="ImportError",
+            exception_diagnostic=capture_safe_exception(exc),
+            error=exc.__cause__ or exc,
+        )
+
+    started = time.perf_counter()
+    try:
+        result, report = await run_in_pool(
+            _render_custom_profile_native_scene,
+            native,
+            dict(request.card),
+            dict(request.profile_context),
+            dict(request.resources),
+            request.region,
+        )
+    except _CustomProfileSkiaStageError as exc:
+        # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
+        # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
+        cause = exc.__cause__ or exc
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            report=exc.report,
+            error_stage=exc.stage,
+            error_type=type(cause).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
+            error=exc.__cause__ or exc,
+        )
+    except Exception as exc:
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            error_stage="pool_dispatch",
+            error_type=type(exc).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
+            error=exc.__cause__ or exc,
+        )
+    scene_metrics = report.metrics()
+    if result is None:
+        from src.core.debug import current_request_context
+
+        context = current_request_context()
+        logger.warning(
+            "custom_profile.scene id=%s complete=false visible=%d native=%d hybrid=%d "
+            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues_by_kind=%s",
+            context["request_id"],
+            report.visible_elements,
+            report.native_elements,
+            report.hybrid_elements,
+            report.missing_elements,
+            report.unresolved_elements,
+            report.mem_images,
+            report.mem_bytes,
+            scene_metrics["issues_by_kind"],
+        )
+        return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK, report=report)
+    try:
+        payload = payload_from_native(result)
+    except Exception as exc:
+        return CustomProfileSkiaAttempt(
+            None,
+            OUTCOME_ERROR,
+            report=report,
+            error_stage="payload_decode",
+            error_type=type(exc).__name__,
+            exception_diagnostic=capture_safe_exception(exc),
+            error=exc.__cause__ or exc,
+        )
+    payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
+    logger.info(
+        "custom_profile_card backend=skia total=%.3fs bytes=%d image=%sx%s",
+        time.perf_counter() - started,
+        len(payload.image_bytes),
+        payload.image_width,
+        payload.image_height,
+    )
+    return CustomProfileSkiaAttempt(payload, OUTCOME_SKIA, report=report)
 
 
 def _render_custom_profile_native_scene(
@@ -2089,7 +1580,7 @@ def _render_custom_profile_native_scene(
 ):
     """Construct and rasterize one native scene inside the render-pool task."""
 
-    from src.sekai.profile.custom_profile import drawer as _drawer
+    from src.sekai.profile.custom_profile import resource_paths as _drawer
     from src.settings import (
         CUSTOM_PROFILE_ASSETS_DIR,
         CUSTOM_PROFILE_FONTS_DIR,
@@ -2141,101 +1632,1001 @@ def _render_custom_profile_native_scene(
         raise _CustomProfileSkiaStageError("native_render", report=report) from exc
 
 
-async def try_render_custom_profile_card_attempt(
-    request: CustomProfileCardRenderRequest,
-) -> CustomProfileSkiaAttempt:
-    """Build a deferred Skia attempt for the Custom Profile route."""
-    if not skia_plot_enabled():
-        return CustomProfileSkiaAttempt(None, OUTCOME_DISABLED)
-    try:
-        native = load_native_renderer()
-    except ImportError as exc:
-        # Also where any wheel older than REQUIRED_NATIVE_IR_CAPABILITY fails open.
-        logger.error("haruki_skia_renderer not importable; falling back to Pillow error_type=ImportError")
-        return CustomProfileSkiaAttempt(
-            None,
-            OUTCOME_FALLBACK,
-            error_stage="renderer_load",
-            error_type="ImportError",
-            exception_diagnostic=capture_safe_exception(exc),
-        )
+def _record_native_content_result(
+    renderer: PNGRenderer,
+    card_ref: dict[str, Any],
+    content: Any,
+    report: CustomProfileSceneReport,
+    result: tuple[str, str] | None,
+) -> None:
+    audit_result, classification = result or ("unresolved", "unresolved")
+    renderer.record_native_audit(card_ref, content, audit_result, None)
+    report.observe(content, classification)
 
-    started = time.perf_counter()
-    try:
-        result, report = await run_in_pool(
-            _render_custom_profile_native_scene,
-            native,
-            dict(request.card),
-            dict(request.profile_context),
-            dict(request.resources),
-            request.region,
-        )
-    except _CustomProfileSkiaStageError as exc:
-        # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
-        # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
-        cause = exc.__cause__ or exc
-        return CustomProfileSkiaAttempt(
-            None,
-            OUTCOME_ERROR,
-            report=exc.report,
-            error_stage=exc.stage,
-            error_type=type(cause).__name__,
-            exception_diagnostic=capture_safe_exception(exc),
-        )
-    except Exception as exc:
-        return CustomProfileSkiaAttempt(
-            None,
-            OUTCOME_ERROR,
-            error_stage="pool_dispatch",
-            error_type=type(exc).__name__,
-            exception_diagnostic=capture_safe_exception(exc),
-        )
-    scene_metrics = report.metrics()
-    if result is None:
-        from src.core.debug import current_request_context
 
-        context = current_request_context()
-        logger.warning(
-            "custom_profile.scene id=%s complete=false visible=%d native=%d hybrid=%d "
-            "missing=%d unresolved=%d mem_images=%d mem_bytes=%d issues_by_kind=%s",
-            context["request_id"],
-            report.visible_elements,
-            report.native_elements,
-            report.hybrid_elements,
-            report.missing_elements,
-            report.unresolved_elements,
-            report.mem_images,
-            report.mem_bytes,
-            scene_metrics["issues_by_kind"],
-        )
-        return CustomProfileSkiaAttempt(None, OUTCOME_FALLBACK, report=report)
-    try:
-        payload = payload_from_native(result)
-    except Exception as exc:
-        return CustomProfileSkiaAttempt(
-            None,
-            OUTCOME_ERROR,
-            report=report,
-            error_stage="payload_decode",
-            error_type=type(exc).__name__,
-            exception_diagnostic=capture_safe_exception(exc),
-        )
-    payload.native_metrics = {**(payload.native_metrics or {}), **report.native_metrics()}
-    logger.info(
-        "custom_profile_card backend=skia total=%.3fs bytes=%d image=%sx%s",
-        time.perf_counter() - started,
-        len(payload.image_bytes),
-        payload.image_width,
-        payload.image_height,
+def _native_content_result(
+    renderer: PNGRenderer,
+    content: Any,
+    scene: _SceneAssembler,
+) -> tuple[str, str] | None:
+    if not content.object_data.get("visible", False):
+        return "hidden", "hidden"
+
+    native_emitters = (
+        _emit_native_asset_image,
+        _emit_native_omikuji_collection,
+        _emit_native_shape,
+        _emit_native_card_member,
     )
-    return CustomProfileSkiaAttempt(payload, OUTCOME_SKIA, report=report)
+    if any(emitter(renderer, content, scene) for emitter in native_emitters):
+        return "rendered-native", "native"
+
+    if _emit_native_card_general(renderer, content, scene) == "native":
+        return "rendered-native", "native"
+
+    for result in (
+        _emit_native_honor_deck(renderer, content, scene),
+        _emit_native_general(renderer, content, scene),
+    ):
+        if result in {"native", "noop"}:
+            return "rendered-native", result
+
+    if _emit_native_honor(renderer, content, scene):
+        return "rendered-native", "native"
+    if _is_empty_text_noop(renderer, content):
+        return "rendered-native", "noop"
+    if _emit_native_simple_tmp_text(renderer, content, scene):
+        return "rendered-native", "native"
+
+    quads = _direct_text_quads(renderer, content, scene.max_mem_bytes - scene.mem_bytes)
+    if quads is None:
+        return None
+    if not quads:
+        return "rendered-direct", "noop"
+    if scene.emit_sdf_quads(quads):
+        return "rendered-direct", "native"
+    return None
 
 
-async def try_render_custom_profile_card_payload(
-    request: CustomProfileCardRenderRequest,
-) -> EncodedImagePayload | None:
-    """Skia path for direct/parity callers; ``None`` means "Pillow, please"."""
+def _emit_native_omikuji_collection(renderer: PNGRenderer, content: Any, scene: _SceneAssembler) -> bool:
+    """Replay the shared omikuji result-card display list without a Pillow surface."""
 
-    attempt = await try_render_custom_profile_card_attempt(request)
-    attempt.record()
-    return attempt.payload
+    prepared = _prepare_native_omikuji(renderer, content)
+    if prepared is None:
+        return False
+    transform = _native_content_transform(renderer, content)
+    if transform is None:
+        return False
+    sx, sy, angle = transform
+
+    scene.builder.register_extra_font(_OMIKUJI_FONT_IR_NAME, prepared.font_path)
+    with scene.builder.unity_subscene(
+        size=prepared.display_list.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        _emit_native_omikuji_ops(scene, prepared)
+    return True
+
+
+def _emit_native_omikuji_ops(scene: _SceneAssembler, prepared: _PreparedNativeOmikuji) -> None:
+    for op in prepared.display_list.ops:
+        if isinstance(op, OmikujiAssetOp):
+            left, top, right, bottom = op.rect
+            scene.builder.image(
+                prepared.asset_paths[id(op)],
+                (round(left), round(top)),
+                (max(1, round(right - left)), max(1, round(bottom - top))),
+                sampling={
+                    "nearest": "nearest",
+                    "bilinear": "linear",
+                    "bicubic": "catmull_rom",
+                    "lanczos": "pillow_lanczos",
+                }[op.sampling],
+                blend=op.blend,
+            )
+        elif isinstance(op, OmikujiRectOp):
+            left, top, right, bottom = op.rect
+            scene.builder.rect((left, top), (right - left, bottom - top), fill=op.fill)
+        else:
+            _emit_native_omikuji_text(scene, op, prepared.text_placements[id(op)])
+
+
+def _emit_native_omikuji_text(
+    scene: _SceneAssembler,
+    op: OmikujiTextOp,
+    placement: tuple[str, float],
+) -> None:
+    align, baseline = placement
+    text_args = (
+        op.text,
+        "default",
+        op.size,
+    )
+    text_kwargs = {
+        "align": align,
+        "baseline": "alphabetic",
+        "fill": op.fill,
+        "font_name": _OMIKUJI_FONT_IR_NAME,
+    }
+    if abs(op.rotation) < 1.0e-6:
+        scene.builder.text(text_args[0], (op.pos[0], baseline), *text_args[1:], **text_kwargs)
+        return
+    theta = math.radians(op.rotation)
+    with scene.builder.transform(
+        (
+            math.cos(theta),
+            -math.sin(theta),
+            op.pos[0],
+            math.sin(theta),
+            math.cos(theta),
+            op.pos[1],
+        )
+    ):
+        scene.builder.text(text_args[0], (0.0, baseline), *text_args[1:], **text_kwargs)
+
+
+def _prepare_native_omikuji_ops(
+    ops: list[Any],
+    metrics: _NativeGeneralTextMetrics,
+) -> tuple[dict[int, str], dict[int, tuple[str, float]]] | None:
+    asset_paths: dict[int, str] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+    font_ref = GeneralFontRef(name="omikuji")
+    for op in ops:
+        if isinstance(op, OmikujiAssetOp):
+            asset_path = _relative_asset_path(Path(op.path))
+            if asset_path is None:
+                return None
+            asset_paths[id(op)] = asset_path
+        elif isinstance(op, OmikujiTextOp):
+            if op.decorative:
+                return None
+            text_placements[id(op)] = metrics.anchor_placement(
+                text=op.text,
+                pos=op.pos if abs(op.rotation) < 1.0e-6 else (0.0, 0.0),
+                size=op.size,
+                anchor=op.anchor,
+                font=font_ref,
+            )
+    return asset_paths, text_placements
+
+
+def _prepare_native_omikuji(renderer: PNGRenderer, content: Any) -> _PreparedNativeOmikuji | None:
+    if content.kind != "collection" or not content.object_data.get("visible", False):
+        return None
+    resource = renderer.image_resource_for("collection", content.item)
+    if str(resource.get("customProfileResourceCollectionType", "none") or "none") != "omikuji":
+        return None
+    target_id = int(content.item.get("targetId", 0) or 0)
+    omikuji = renderer.omikujis.get(target_id)
+    if not isinstance(omikuji, dict):
+        return None
+    background_path = renderer.omikuji_background_asset_path(omikuji)
+    fortune_path = renderer.omikuji_asset_path(omikuji, "fortune")
+    if background_path is None or fortune_path is None:
+        return None
+    background_asset = _relative_asset_path(background_path)
+    fortune_asset = _relative_asset_path(fortune_path)
+    if background_asset is None or fortune_asset is None:
+        return None
+    background_info = _native_asset_info(background_asset)
+    fortune_info = _native_asset_info(fortune_asset)
+    if background_info is None or fortune_info is None:
+        return None
+    font_path = renderer.omikuji_font_path(decorative=False)
+    metrics = _NativeGeneralTextMetrics.create(font_path, expected_font_name="omikuji")
+    if metrics is None or font_path is None:
+        return None
+
+    display_list = build_omikuji_display_list(
+        omikuji,
+        background_path=background_path,
+        background_size=(int(background_info["width"]), int(background_info["height"])),
+        fortune_path=fortune_path,
+        fortune_size=(int(fortune_info["width"]), int(fortune_info["height"])),
+    )
+    prepared_ops = _prepare_native_omikuji_ops(display_list.ops, metrics)
+    if prepared_ops is None:
+        return None
+    asset_paths, text_placements = prepared_ops
+    return _PreparedNativeOmikuji(display_list, font_path, asset_paths, text_placements)
+
+
+@dataclass(frozen=True)
+class _PreparedNativeOmikuji:
+    display_list: Any
+    font_path: Path
+    asset_paths: dict[int, str]
+    text_placements: dict[int, tuple[str, float]]
+
+
+def _emit_native_honor_deck_contents(
+    scene: _SceneAssembler,
+    plan: Any,
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]],
+    background_asset: str | None,
+) -> None:
+    if background_asset is not None:
+        scene.builder.sliced_image(
+            path=background_asset,
+            pos=(round(plan.panel.target_rect[0]), round(plan.panel.target_rect[1])),
+            size=(
+                round(plan.panel.target_rect[2] - plan.panel.target_rect[0]),
+                round(plan.panel.target_rect[3] - plan.panel.target_rect[1]),
+            ),
+            border=plan.panel.sliced_border,
+            tint=image_tint(unity_tint_rgba(plan.panel.tint), "recolor"),
+        )
+    for badge, (left, top, width, height), slot_index in slots:
+        with scene.builder.unity_subscene(
+            size=badge.size,
+            anchor=(left + width / 2.0, top + height / 2.0),
+            object_scale=(1.0, 1.0),
+            post_scale=(1.0, 1.0),
+            rotation=0.0,
+        ):
+            badge.splice_into(
+                scene.builder,
+                scene.mem_images,
+                namespace=f"custom.honor.deck.{slot_index}",
+                require_asset_backed=True,
+            )
+
+
+def _native_content_transform(renderer: PNGRenderer, content: Any) -> tuple[float, float, float] | None:
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x") or 1.0)
+    sy = float(scale.get("y") or sx or 1.0)
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return None
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    return sx, sy, angle
+
+
+def _native_honor_deck_background(renderer: PNGRenderer, plan: Any) -> tuple[bool, str | None]:
+    assert plan.panel is not None
+    background_path = renderer.unity_ui_sprite_path(plan.panel.sprite_name)
+    if background_path is None:
+        return True, None
+    background_asset = _relative_asset_path(background_path)
+    return background_asset is not None, background_asset
+
+
+def _prepare_native_honor_deck_slots(
+    renderer: PNGRenderer,
+    plan: Any,
+) -> list[tuple[NativeSubtree, tuple[int, int, int, int], int]] | None:
+    slots: list[tuple[NativeSubtree, tuple[int, int, int, int], int]] = []
+    for slot in plan.slots:
+        status, badge = _native_profile_honor_badge(
+            renderer,
+            dict(slot.profile_row),
+            full_size=slot.full_size,
+        )
+        if status != "ready" or badge is None:
+            return None
+        # Legacy paste_in_rect uses Pillow LANCZOS when a supplied badge has the wrong natural
+        # size. Native custom-profile does not claim that filter yet; decline rather than
+        # silently substituting Catmull-Rom through a nested subscene.
+        if badge.size != slot.target_size:
+            return None
+        slots.append((badge, (*slot.target_xy, *slot.target_size), slot.index))
+    return slots
+
+
+def _native_profile_honor_payloads(renderer: PNGRenderer, candidates: Any) -> Iterator[dict[str, Any]]:
+    seen_payloads: set[int] = set()
+    request_maps = (
+        (renderer.profile_honor_requests, candidates.profile_keys),
+        (renderer.honor_requests, candidates.ordinary_keys),
+    )
+    for request_map, keys in request_maps:
+        for key in keys:
+            payload = request_map.get(key)
+            if not isinstance(payload, dict) or id(payload) in seen_payloads:
+                continue
+            seen_payloads.add(id(payload))
+            yield payload
+
+
+def _emit_native_honor_badge(
+    renderer: PNGRenderer,
+    content: Any,
+    scene: _SceneAssembler,
+    badge: NativeSubtree,
+) -> bool:
+    scale = content.object_data.get("scale") or {}
+    sx = float(scale.get("x", 1.0))
+    sy = float(scale.get("y", sx))
+    if not all(math.isfinite(value) and value > 0.0 for value in (sx, sy)):
+        return False
+    angle = renderer.rotation_sign * unity_rotation_degrees(content.object_data.get("rotation", {}))
+    with scene.builder.unity_subscene(
+        size=badge.size,
+        anchor=renderer.unity_point(content.object_data.get("position", {})),
+        object_scale=(sx, sy),
+        post_scale=(renderer.position_scale_x, renderer.position_scale_y),
+        rotation=angle,
+    ):
+        badge.splice_into(
+            scene.builder,
+            scene.mem_images,
+            namespace="custom.honor.content",
+            require_asset_backed=True,
+        )
+    return True
+
+
+def _honor_request_from_candidate(candidate: Any) -> HonorRequest | None:
+    if isinstance(candidate, HonorRequest):
+        return candidate
+    if isinstance(candidate, dict):
+        return HonorRequest.model_validate(candidate)
+    return None
+
+
+def _lower_native_honor_request(
+    renderer: PNGRenderer,
+    request: HonorRequest,
+) -> tuple[str, NativeSubtree | None]:
+    source_status, images = _native_honor_sources(renderer, request)
+    if source_status == "unrenderable":
+        return "unrenderable", None
+    if source_status != "ready" or images is None:
+        return "hybrid", None
+    canvas = build_honor_badge_canvas(request, images)
+    if canvas is None:
+        return "missing", None
+    try:
+        badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format="png")
+    except NativeSubtreeError:
+        return "hybrid", None
+    return "ready", badge
+
+
+def _emit_native_general_ops(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    ops: tuple[GeneralPrefabOp, ...],
+) -> None:
+    for op in ops:
+        _emit_native_general_op(scene, prepared, op)
+
+
+def _emit_native_general_op(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralPrefabOp,
+) -> None:
+    if isinstance(op, GeneralSpriteOp):
+        _emit_native_general_sprite(scene, prepared, op)
+        return
+    if isinstance(op, GeneralSpriteChoiceOp):
+        _emit_native_general_sprite_choice(scene, prepared, op)
+        return
+    if isinstance(op, GeneralRoundedRectOp):
+        _emit_native_general_rounded_rect(scene, op)
+        return
+    if isinstance(op, GeneralAssetImageOp):
+        _emit_native_general_asset(scene, prepared, op)
+        return
+    if isinstance(op, GeneralViewportOp):
+        with scene.builder.group(offset=op.offset, size=op.viewport_size, clip={"kind": "rect"}):
+            _emit_native_general_ops(scene, prepared, op.children)
+        return
+    if not isinstance(op, GeneralTextOp):
+        raise TypeError(f"unsupported GeneralContentView display-list op: {type(op).__name__}")
+    _emit_native_general_text(scene, prepared, op)
+
+
+def _emit_native_general_asset(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralAssetImageOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback is not None:
+            _emit_native_general_rounded_rect(scene, op.fallback)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    sampling = "pillow_lanczos" if op.sampling == "lanczos" else _GENERAL_SAMPLING_MAP[op.sampling]
+    if op.clip_radius is None:
+        scene.builder.image(asset_path, pos, size, fit=op.fit, sampling=sampling)
+        return
+    # The legacy composer multiplies a discrete ImageDraw L mask into the resized alpha.
+    # ``pillow_rrect`` reproduces that contract without a request-local Pillow raster.
+    with scene.builder.group(offset=pos, size=size, clip=clip_pillow_rrect(op.clip_radius)):
+        scene.builder.image(asset_path, (0, 0), size, fit=op.fit, sampling=sampling)
+
+
+def _emit_native_general_sprite_choice(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralSpriteChoiceOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback_text is not None:
+            _emit_native_general_text(scene, prepared, op.fallback_text)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
+    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
+
+
+def _emit_native_general_sprite(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralSpriteOp,
+) -> None:
+    asset_path = prepared.resource_paths[id(op)]
+    if asset_path is None:
+        if op.fallback is not None:
+            _emit_native_general_rounded_rect(scene, op.fallback)
+        return
+    pos, size = _general_op_geometry(op.rect)
+    tint = image_tint(unity_tint_rgba(op.tint), "recolor") if op.tint is not None else None
+    if op.sliced_border is not None:
+        scene.builder.sliced_image(path=asset_path, pos=pos, size=size, border=op.sliced_border, tint=tint)
+        return
+    scene.builder.image(asset_path, pos, size, sampling=_GENERAL_SAMPLING_MAP[op.sampling], tint=tint)
+
+
+def _emit_native_general_text(
+    scene: _SceneAssembler,
+    prepared: _PreparedGeneralDisplayList,
+    op: GeneralTextOp,
+) -> None:
+    align, baseline = prepared.text_placements[id(op)]
+    scene.builder.text(
+        op.text,
+        (float(op.pos[0]), baseline),
+        "bold",
+        float(op.size),
+        align=align,
+        baseline="alphabetic",
+        fill=op.fill,
+        font_name=_GENERAL_FONT_IR_NAME,
+    )
+
+
+def _emit_native_general_rounded_rect(scene: _SceneAssembler, op: GeneralRoundedRectOp) -> None:
+    left, top, right, bottom = op.rect
+    if op.round_coordinates:
+        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+    scene.builder.roundrect(
+        (left, top),
+        (max(0.0, right - left), max(0.0, bottom - top)),
+        op.radius,
+        fill=op.fill,
+        stroke=op.outline,
+        stroke_width=op.width,
+    )
+
+
+def _general_op_geometry(rect: tuple[float, float, float, float]) -> tuple[tuple[int, int], tuple[int, int]]:
+    left, top, right, bottom = rect
+    return (round(left), round(top)), (max(1, round(right - left)), max(1, round(bottom - top)))
+
+
+def _prepare_native_general_display_list(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics,
+    display_list: GeneralPrefabDisplayList,
+) -> _PreparedGeneralDisplayList | None:
+    resource_paths: dict[int, str | None] = {}
+    text_placements: dict[int, tuple[str, float]] = {}
+    for op in _walk_general_ops(display_list.ops):
+        if not _prepare_native_general_op(renderer, metrics, op, resource_paths, text_placements):
+            return None
+    return _PreparedGeneralDisplayList(display_list, resource_paths, text_placements)
+
+
+def _prepare_native_general_op(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics,
+    op: GeneralPrefabOp,
+    resource_paths: dict[int, str | None],
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    op_key = id(op)
+    if isinstance(op, GeneralSpriteOp):
+        ready, resource_paths[op_key] = _resolve_native_general_sprite(renderer, op)
+        return ready
+    if isinstance(op, GeneralSpriteChoiceOp):
+        ready, resource_paths[op_key] = _resolve_native_general_sprite_choice(renderer, op)
+        if ready and resource_paths[op_key] is None and op.fallback_text is not None:
+            text_placements[id(op.fallback_text)] = metrics.text_placement(op.fallback_text)
+        return ready
+    if isinstance(op, GeneralAssetImageOp):
+        ready, resource_paths[op_key] = _resolve_native_general_asset(op)
+        return ready
+    if isinstance(op, GeneralTextOp):
+        text_placements[op_key] = metrics.text_placement(op)
+        return True
+    return isinstance(op, (GeneralRoundedRectOp, GeneralViewportOp))
+
+
+def _resolve_native_general_asset(op: GeneralAssetImageOp) -> tuple[bool, str | None]:
+    if op.fit == "cover" and op.align != (0.5, 0.5):
+        # IR Image cover is deliberately centered. A future non-centered display-list
+        # operation must decline instead of silently changing its crop.
+        return False, None
+    status, asset_path = _existing_native_asset(op.path)
+    if status == "ready":
+        return True, asset_path
+    if status == "outside" or op.resource_policy == "required":
+        return False, None
+    return True, None
+
+
+def _resolve_native_general_sprite_choice(
+    renderer: PNGRenderer,
+    op: GeneralSpriteChoiceOp,
+) -> tuple[bool, str | None]:
+    for name in op.names:
+        path = renderer.unity_ui_sprite_path(name)
+        if path is None:
+            continue
+        asset_path = _relative_asset_path(path)
+        return asset_path is not None, asset_path
+    return True, None
+
+
+def _resolve_native_general_sprite(renderer: PNGRenderer, op: GeneralSpriteOp) -> tuple[bool, str | None]:
+    path = renderer.unity_ui_sprite_path(op.name)
+    if path is None:
+        return op.resource_policy != "required", None
+    asset_path = _relative_asset_path(path)
+    return asset_path is not None, asset_path
+
+
+def _walk_general_ops(ops: tuple[GeneralPrefabOp, ...]):
+    for op in ops:
+        yield op
+        if isinstance(op, GeneralViewportOp):
+            yield from _walk_general_ops(op.children)
+
+
+def _build_native_general_display_list(
+    renderer: PNGRenderer,
+    file_name: str,
+    metrics: _NativeGeneralTextMetrics,
+) -> GeneralPrefabDisplayList | None:
+    return build_general_prefab_display_list(
+        file_name,
+        size=GENERAL_NATIVE_SIZES[file_name],
+        profile_context=renderer.profile_context,
+        labels=_native_general_labels(renderer),
+        metrics=metrics,
+        palette=GENERAL_PREFAB_PALETTE,
+        asset_paths=_native_general_asset_paths(renderer, file_name),
+        music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
+        story_favorite_resources=renderer.story_favorite_resources,
+    )
+
+
+def _native_general_labels(renderer: PNGRenderer) -> dict[str, str]:
+    return {
+        "comment_title": renderer.general_text("comment_title"),
+        "total_power": renderer.general_text("total_power"),
+        "multi_live_title": renderer.general_text("multi_live_title"),
+        "multi_live_count_suffix": renderer.general_text("multi_live_count_suffix"),
+        "challenge_live_title": renderer.general_text("challenge_live_title"),
+        "challenge_live_solo": renderer.general_text("challenge_live_solo"),
+        "character_rank_tab": renderer.general_text("character_rank_tab"),
+        "challenge_stage_tab": renderer.general_text("challenge_stage_tab"),
+        "music_clear": renderer.general_text("music_clear"),
+        "music_full_combo": renderer.general_text("music_full_combo"),
+        "music_all_perfect": renderer.general_text("music_all_perfect"),
+        "story_favorite_title": renderer.general_text("story_favorite_title"),
+        "not_set": renderer.general_text("not_set"),
+    }
+
+
+def _native_general_asset_paths(renderer: PNGRenderer, file_name: str) -> dict[str, Path | None]:
+    if file_name == "ChallengeLive":
+        return _native_challenge_live_asset_paths(renderer)
+    if file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+        return _native_character_rank_asset_paths(renderer)
+    if file_name == "StoryFavorite":
+        return _native_story_favorite_asset_paths(renderer)
+    return {}
+
+
+def _native_story_favorite_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    stories = renderer.profile_context.get("userStoryFavorites") or []
+    if not isinstance(stories, list):
+        return {}
+    return {
+        story_favorite_asset_key(story): renderer.story_favorite_image_path(story)
+        for story in stories
+        if isinstance(story, dict)
+    }
+
+
+def _native_character_rank_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    return {
+        f"character_rank_icon:{character_id}": renderer.chara_icon_path(character_id)
+        for _nickname, character_id in CHARA_LIST
+        if character_id is not None
+    }
+
+
+def _native_challenge_live_asset_paths(renderer: PNGRenderer) -> dict[str, Path | None]:
+    data = renderer.profile_context.get("userChallengeLiveSoloResult") or {}
+    if not isinstance(data, dict):
+        return {}
+    character_id = int(data.get("characterId", 0) or 0)
+    return {"challenge_character_icon": renderer.chara_icon_path(character_id)}
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedGeneralDisplayList:
+    display_list: GeneralPrefabDisplayList
+    resource_paths: dict[int, str | None]
+    text_placements: dict[int, tuple[str, float]]
+
+
+def _emit_native_card_general_contents(
+    scene: _SceneAssembler,
+    outer_size: tuple[int, int],
+    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]],
+) -> None:
+    for prepared, (left, top) in prepared_cards:
+        display_list = prepared.display_list
+        render_size = display_list.render_size or display_list.size
+        if display_list.size == outer_size and (left, top) == (0, 0):
+            _emit_prepared_card_ops(scene, prepared)
+            continue
+        with scene.builder.unity_subscene(
+            size=display_list.size,
+            anchor=(left + render_size[0] / 2.0, top + render_size[1] / 2.0),
+            object_scale=(
+                render_size[0] / display_list.size[0],
+                render_size[1] / display_list.size[1],
+            ),
+            post_scale=(1.0, 1.0),
+            rotation=0.0,
+            sampling={
+                "nearest": "nearest",
+                "bilinear": "linear",
+                "bicubic": "catmull_rom",
+                "lanczos": "pillow_lanczos",
+            }[display_list.final_sampling],
+        ):
+            _emit_prepared_card_ops(scene, prepared)
+
+
+def _prepare_native_deck_cards(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics | None,
+) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
+    display_lists = _profile_deck_display_lists(renderer)
+    if display_lists is None:
+        return None
+    card_w, card_h = display_lists[0].render_size or display_lists[0].size
+    gap = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - card_w * 5) / 4.0)
+    start_x = max(0.0, (GENERAL_NATIVE_SIZES["Deck"][0] - (card_w * 5 + gap * 4)) / 2.0)
+    top = GENERAL_NATIVE_SIZES["Deck"][1] - card_h
+    prepared_cards: list[tuple[_PreparedCardDisplayList, tuple[int, int]]] = []
+    for index, display_list in enumerate(display_lists):
+        prepared = _prepare_native_card_display_list(display_list, metrics)
+        if prepared is None:
+            return None
+        prepared_cards.append((prepared, (round(start_x + index * (card_w + gap)), round(top))))
+    return prepared_cards
+
+
+def _profile_deck_display_lists(renderer: PNGRenderer) -> list[CardDisplayList] | None:
+    deck = renderer.profile_context.get("userDeck") or {}
+    if not isinstance(deck, dict):
+        return None
+    display_lists: list[CardDisplayList] = []
+    for index in range(5):
+        card_id = int(deck.get(f"member{index + 1}", 0) or 0)
+        display_list = renderer.build_profile_deck_card_display_list(card_id, leader=index == 0)
+        display_lists.append(
+            display_list or renderer.build_empty_profile_deck_card_display_list(GENERAL_DECK_CARD_RENDER_SIZE)
+        )
+    return display_lists
+
+
+def _prepare_native_leader_card(
+    renderer: PNGRenderer,
+    metrics: _NativeGeneralTextMetrics | None,
+) -> list[tuple[_PreparedCardDisplayList, tuple[int, int]]] | None:
+    deck = renderer.profile_context.get("userDeck") or {}
+    card_id = int(deck.get("leader", 0) or 0) if isinstance(deck, dict) else 0
+    if card_id <= 0:
+        return None
+    display_list = renderer.build_profile_leader_card_display_list(card_id)
+    prepared = _prepare_native_card_display_list(display_list, metrics) if display_list is not None else None
+    return [(prepared, (0, 0))] if prepared is not None else None
+
+
+def _native_card_general_name(renderer: PNGRenderer, content: Any) -> str | None:
+    if content.kind != "general" or not content.object_data.get("visible", False):
+        return None
+    resource_for = getattr(renderer, "image_resource_for", None)
+    if not callable(resource_for) or not callable(getattr(renderer, "general_font_path", None)):
+        return None
+    file_name = str(resource_for("general", content.item).get("fileName", "") or "")
+    return file_name if file_name in _NATIVE_CARD_GENERAL_PREFABS else None
+
+
+def _emit_prepared_card_sprite(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardSpriteOp,
+) -> None:
+    asset_path = prepared.asset_paths.get(id(op))
+    if asset_path is None:
+        return
+    left, top, right, bottom = op.rect
+    scene.builder.image(
+        asset_path,
+        (round(left), round(top)),
+        (max(1, round(right - left)), max(1, round(bottom - top))),
+        sampling=_CARD_SAMPLING_MAP[op.sampling],
+    )
+
+
+def _emit_prepared_card_text(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardTextOp,
+) -> None:
+    align, baseline = prepared.text_placements[id(op)]
+    scene.builder.text(
+        op.text,
+        (float(op.pos[0]), baseline),
+        "bold",
+        float(op.size),
+        align=align,
+        baseline="alphabetic",
+        fill=op.fill,
+        font_name=_GENERAL_FONT_IR_NAME,
+    )
+
+
+def _emit_prepared_card_rect(scene: _SceneAssembler, op: CardRectOp) -> None:
+    left, top, right, bottom = op.rect
+    if op.round_coordinates:
+        left, top, right, bottom = (round(value) for value in (left, top, right, bottom))
+    size = (max(0.0, right - left), max(0.0, bottom - top))
+    if op.radius > 0.0:
+        scene.builder.roundrect(
+            (left, top),
+            size,
+            op.radius,
+            fill=op.fill,
+            stroke=op.outline,
+            stroke_width=op.width,
+        )
+        return
+    scene.builder.rect(
+        (left, top),
+        size,
+        fill=op.fill,
+        stroke=op.outline,
+        stroke_width=op.width,
+        blend=op.blend,
+    )
+
+
+def _emit_prepared_card_cover_art(
+    scene: _SceneAssembler,
+    prepared: _PreparedCardDisplayList,
+    op: CardCoverArtOp,
+) -> None:
+    display_list = prepared.display_list
+    cover_w = max(1, round(op.cover_size[0]))
+    cover_h = max(1, round(op.cover_size[1]))
+    crop_left = max(0, round((cover_w - display_list.size[0]) * op.crop_align[0]))
+    crop_top = max(0, round((cover_h - display_list.size[1]) * op.crop_align[1]))
+    scene.builder.image(
+        prepared.asset_paths[id(op)],
+        (-crop_left, -crop_top),
+        (cover_w, cover_h),
+        fit="cover",
+        sampling=_CARD_SAMPLING_MAP[op.sampling],
+        blend=op.blend,
+    )
+
+
+def _prepare_native_card_op(
+    op: Any,
+    metrics: _NativeGeneralTextMetrics | None,
+    asset_paths: dict[int, str],
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    if isinstance(op, CardAlphaMaskOp):
+        # No active card path uses the legacy mask hook. Its rounded fallback and
+        # alpha-multiply contract need a dedicated shared native primitive.
+        return False
+    if isinstance(op, CardCoverArtOp):
+        return _prepare_native_card_cover(op, asset_paths)
+    if isinstance(op, CardSpriteOp):
+        return _prepare_native_card_sprite(op, asset_paths)
+    if isinstance(op, CardTextOp):
+        return _prepare_native_card_text(op, metrics, text_placements)
+    return _prepare_native_card_rect(op)
+
+
+def _prepare_native_card_rect(op: Any) -> bool:
+    if not isinstance(op, CardRectOp):
+        return False
+    if op.radius <= 0.0 or op.blend != "src":
+        return True
+    translucent = (op.fill is not None and op.fill[3] < 255) or (op.outline is not None and op.outline[3] < 255)
+    # RoundRect has no Porter-Duff Src switch yet.
+    return not translucent
+
+
+def _prepare_native_card_text(
+    op: CardTextOp,
+    metrics: _NativeGeneralTextMetrics | None,
+    text_placements: dict[int, tuple[str, float]],
+) -> bool:
+    if metrics is None or op.font.name != "general" or not op.font.bold:
+        return False
+    text_placements[id(op)] = metrics.anchor_placement(
+        text=op.text,
+        pos=op.pos,
+        size=op.size,
+        anchor=op.anchor,
+    )
+    return True
+
+
+def _prepare_native_card_sprite(op: CardSpriteOp, asset_paths: dict[int, str]) -> bool:
+    status, asset_path = _existing_native_asset(op.resource.path)
+    if status == "outside":
+        return False
+    if status != "ready":
+        fallback_status, asset_path = _existing_native_asset(op.resource.fallback_path)
+        if fallback_status == "outside":
+            return False
+        status = fallback_status
+    if status == "ready" and asset_path is not None:
+        asset_paths[id(op)] = asset_path
+        return True
+    return op.resource.resource_policy != "required"
+
+
+def _prepare_native_card_cover(op: CardCoverArtOp, asset_paths: dict[int, str]) -> bool:
+    status, asset_path = _existing_native_asset(op.path)
+    if status != "ready" or asset_path is None:
+        return False
+    if op.cover_align != (0.5, 0.5):
+        # Render IR Cover currently centers its source crop.
+        return False
+    asset_paths[id(op)] = asset_path
+    return True
+
+
+def _is_empty_text_noop(renderer: PNGRenderer, content: Any) -> bool:
+    """Return whether a visible text item has no drawable source characters.
+
+    The compatibility renderer returns ``None`` for an empty/whitespace-only item. Treating that
+    as a missing element made an otherwise complete native scene fall back to Pillow, which then
+    drew exactly nothing. Keep tagged whitespace out of this shortcut because underline/strike
+    tags can make spaces visible; the raw whitespace-only case is unambiguously a no-op.
+    """
+
+    if content.kind != "text" or not content.object_data.get("visible", False):
+        return False
+    text = str(content.item.get("text", ""))
+    return not text.strip() and "<" not in text and ">" not in text
+
+
+class _CustomProfileSkiaStageError(Exception):
+    """Internal carrier for a sanitized failure stage and any completed scene report."""
+
+    def __init__(self, stage: str, *, report: CustomProfileSceneReport | None = None) -> None:
+        super().__init__(stage)
+        self.stage = stage
+        self.report = report
+
+
+class CustomProfileSkiaAttempt:
+    """One deferred Custom Profile backend outcome.
+
+    The route commits this only after it knows the final HTTP result. A request rejected with
+    the canonical 400 is not production render traffic and must not poison the pure-Skia gate;
+    a Skia failure recovered by a successful Pillow response is still recorded as ``error``.
+    Direct render/parity callers use :func:`try_render_custom_profile_card_payload`, which
+    commits immediately and preserves the historical payload-or-None contract.
+    """
+
+    def __init__(
+        self,
+        payload: EncodedImagePayload | None,
+        outcome: str,
+        *,
+        report: CustomProfileSceneReport | None = None,
+        error_stage: str | None = None,
+        error_type: str | None = None,
+        exception_diagnostic: dict[str, Any] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.payload = payload
+        self.outcome = outcome
+        self.report = report
+        self.error_stage = error_stage
+        self.error_type = error_type
+        self.exception_diagnostic = exception_diagnostic
+        self.error = error
+        self._record_lock = threading.Lock()
+        self._recorded = False
+
+    def tag_backend(self) -> None:
+        """Make response/performance logs reflect this attempt before encoding starts."""
+
+        _tag_backend(self.outcome, self.payload)
+
+    def record(self, final_http_status: int | None = None) -> None:
+        """Commit aggregate metrics exactly once."""
+
+        with self._record_lock:
+            if self._recorded:
+                return
+            self._recorded = True
+        if self.outcome == OUTCOME_ERROR:
+            logger.error(
+                "custom_profile_card backend=skia committed_error stage=%s error_type=%s",
+                self.error_stage or "unknown",
+                self.error_type or "unknown",
+            )
+        if self.outcome == OUTCOME_ERROR or (
+            self.outcome == OUTCOME_FALLBACK
+            and (self.exception_diagnostic is not None or (self.report is not None and not self.report.complete))
+        ):
+            persist_custom_profile_diagnostic(
+                outcome=self.outcome,
+                stage=self.error_stage or ("scene_coverage" if self.report is not None else "unknown"),
+                error_type=self.error_type,
+                exception=self.exception_diagnostic,
+                scene_metrics=self.report.metrics() if self.report is not None else None,
+                final_http_status=final_http_status,
+            )
+        if self.report is not None:
+            record_scene_completeness(CUSTOM_PROFILE_ENDPOINT, self.report.metrics())
+        _record(
+            self.outcome,
+            self.payload,
+            error_stage=self.error_stage,
+        )
+
+    def reject(self) -> None:
+        """Finalize a rejected request without counting it as production render traffic."""
+
+        with self._record_lock:
+            if self._recorded:
+                return
+            self._recorded = True
+        if self.outcome == OUTCOME_ERROR:
+            logger.warning(
+                "custom_profile_card backend=skia rejected_request stage=%s error_type=%s",
+                self.error_stage or "unknown",
+                self.error_type or "unknown",
+            )
+
+
+def _tag_backend(outcome: str, payload: EncodedImagePayload | None = None) -> None:
+    """Set request/log backend metadata without committing aggregate counters."""
+    from src.core.debug import set_render_backend
+
+    backend = backend_for_outcome(outcome)
+    set_render_backend(backend)
+    if payload is not None:
+        payload.backend = backend
+
+
+class _NativeAssetInfoUnavailable(RuntimeError):
+    """The installed wheel cannot provide Pillow-free asset dimensions."""

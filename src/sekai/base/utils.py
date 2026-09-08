@@ -1,7 +1,8 @@
+from __future__ import annotations
+
 import asyncio
 from collections import OrderedDict
 import contextvars
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import lru_cache
 import hashlib
@@ -14,27 +15,37 @@ from pathlib import Path
 from stat import S_ISREG
 import threading
 import time
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
-from PIL import Image, ImageDraw, ImageFont
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.debug import current_request_context, snapshot_process_metrics
 from src.core.pillow_telemetry import (
     PILLOW_TOUCH_IMAGE_DECODE,
-    PILLOW_TOUCH_IMAGE_HEADER_PROBE,
     PILLOW_TOUCH_PLACEHOLDER,
     record_pillow_touch,
 )
+from src.sekai.base.image_info import probe_asset, probe_encoded
+from src.sekai.base.image_source import (
+    AssetImageRef,
+    EncodedImageRef,
+    ImageSource as ImageSource,
+    MissingImageRef,
+    _resolved_existing_cache as _resolved_existing_cache,
+    get_pristine_image_asset_path as get_pristine_image_asset_path,
+    missing_image_ref,
+    resolve_existing_asset_path as resolve_existing_asset_path,
+)
+from src.sekai.base.paint_types import RasterResample
+from src.sekai.base.placeholder import placeholder_variant as _guess_missing_placeholder_variant
 from src.settings import (
     ASSETS_BASE_DIR,
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
     COMPOSED_IMAGE_CACHE_SIZE,
     COMPOSED_IMAGE_CACHE_TTL_SECONDS,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_HEAVY_FONT,
     DEFAULT_THREAD_POOL_SIZE,
-    FONT_DIR,
     IMAGE_CACHE_MAX_BYTES,
     IMAGE_CACHE_SIZE,
     THUMB_CACHE_MAX_BYTES,
@@ -49,73 +60,17 @@ MissingImageMode = Literal["raise", "placeholder"]
 _PRISTINE_ASSET_PATH_ATTR = "_haruki_pristine_asset_path"
 
 
-@dataclass(frozen=True, slots=True)
-class AssetImageRef:
-    """Header-only image reference for renderers that can load assets themselves.
-
-    ``mtime_ns``/``file_size`` capture the file identity at probe time so cache keys
-    derived from the ref (e.g. ``deterministic_hash`` of painter ops) invalidate when
-    the asset is hot-reloaded with the same dimensions.
-    """
-
-    path: Path
-    size: tuple[int, int]
-    mode: str
-    mtime_ns: int = 0
-    file_size: int = 0
-
-    @property
-    def width(self) -> int:
-        return self.size[0]
-
-    @property
-    def height(self) -> int:
-        return self.size[1]
-
-    @property
-    def readonly(self) -> int:
-        return 1
-
-    @property
-    def _haruki_pristine_asset_path(self) -> str:
-        return str(self.path)
-
-
-@dataclass(frozen=True, slots=True)
-class EncodedImageRef:
-    """Encoded (PNG/JPEG/...) image bytes with header-probed dimensions.
-
-    The Skia path ships ``data`` straight to Rust as an encoded mem image; the Pillow
-    fallback decodes on demand in ``Painter._impl_paste*``. Use for images that arrive
-    already encoded (base64 payloads, downloads) to skip the Python-side decode."""
-
-    data: bytes
-    size: tuple[int, int]
-    mode: str
-
-    @property
-    def width(self) -> int:
-        return self.size[0]
-
-    @property
-    def height(self) -> int:
-        return self.size[1]
-
-
 def get_encoded_image_ref(data: bytes) -> EncodedImageRef:
     """Wrap encoded image bytes into an :class:`EncodedImageRef` (header probe only)."""
-    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
-    with Image.open(io.BytesIO(data)) as probe:
-        return EncodedImageRef(data=data, size=probe.size, mode=probe.mode)
+    size, mode = probe_encoded(data)
+    return EncodedImageRef(data=data, size=size, mode=mode)
 
-
-ImageSource = Image.Image | AssetImageRef | EncodedImageRef
 
 # Painter resizes a decoded PIL image with a bare ``Image.resize(size)``, whose Pillow
 # default is BICUBIC. A ref-backed paste must resample identically or the same widget
 # tree renders softer just because its source stayed lazy. The resize cache keys on the
 # filter too, so this never collides with ``get_img_resized``'s BILINEAR/LANCZOS entries.
-PASTE_RESAMPLE = Image.Resampling.BICUBIC
+PASTE_RESAMPLE = RasterResample.BICUBIC
 
 
 def _mark_pristine_asset_image(image: Image.Image, full_path: Path) -> Image.Image:
@@ -128,14 +83,6 @@ def _mark_pristine_asset_image(image: Image.Image, full_path: Path) -> Image.Ima
     setattr(image, _PRISTINE_ASSET_PATH_ATTR, str(full_path))
     image.readonly = 1
     return image
-
-
-def get_pristine_image_asset_path(image: Image.Image | AssetImageRef) -> Path | None:
-    """Return the backing file only when ``image`` still matches its loaded pixels."""
-    path = getattr(image, _PRISTINE_ASSET_PATH_ATTR, None)
-    if not isinstance(path, str) or not path or getattr(image, "readonly", 0) != 1:
-        return None
-    return Path(path)
 
 
 def _timedelta_precision_level(precision: str) -> int | str:
@@ -198,6 +145,8 @@ async def get_img_from_path(
 
 
 def _open_image_copy(path: Path) -> Image.Image:
+    from PIL import Image
+
     record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
     with Image.open(path) as img:
         img.load()
@@ -246,114 +195,18 @@ def _log_missing_image_once(path: str | None, reason: str | BaseException) -> No
     logger.warning("图片素材缺失，已使用问号占位图: %s (%s)", path or "<empty>", reason_text)
 
 
-def _guess_missing_placeholder_variant(path: str | None) -> str:
-    normalized = (path or "").replace("\\", "/").lower()
-
-    if (
-        "banner_event" in normalized
-        or "event_banner" in normalized
-        or ("/banner/" in normalized and "event" in normalized)
-    ):
-        return "event_banner"
-    if any(token in normalized for token in ("banner", "logo", "header", "title", "word_img", "word/")):
-        return "wide"
-    if any(token in normalized for token in ("background", "story_bg", "event_bg", "/bg/", "_bg", "bg_")):
-        return "landscape"
-    if any(token in normalized for token in ("portrait", "standing", "fullbody", "full_body")):
-        return "portrait"
-    return "square"
-
-
-def _load_placeholder_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
-    font_dir = Path(FONT_DIR)
-    for font_name in (DEFAULT_HEAVY_FONT, DEFAULT_BOLD_FONT):
-        for candidate in (font_dir / font_name, font_dir / f"{font_name}.ttf", font_dir / f"{font_name}.otf"):
-            if not candidate.is_file():
-                continue
-            try:
-                return ImageFont.truetype(str(candidate), size=size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
-
-
-def _draw_centered_text(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    center: tuple[float, float],
-    font: ImageFont.ImageFont | ImageFont.FreeTypeFont,
-    fill: tuple[int, int, int, int],
-) -> None:
-    bbox = draw.textbbox((0, 0), text, font=font)
-    text_w = bbox[2] - bbox[0]
-    text_h = bbox[3] - bbox[1]
-    x = center[0] - text_w / 2 - bbox[0]
-    y = center[1] - text_h / 2 - bbox[1]
-    draw.text((x, y), text, font=font, fill=fill)
-
-
 def _build_missing_placeholder_image(variant: str) -> Image.Image:
-    sizes = {
-        "square": (512, 512),
-        "portrait": (512, 768),
-        "landscape": (768, 432),
-        "event_banner": (900, 400),
-        "wide": (960, 320),
-    }
-    width, height = sizes.get(variant, sizes["square"])
-    short_side = min(width, height)
+    from .pillow_placeholder import build_placeholder
 
-    outer_pad = max(18, short_side // 20)
-    inner_pad = max(12, short_side // 14)
-    radius_outer = max(24, short_side // 10)
-    radius_inner = max(18, short_side // 14)
-    border_width = max(3, short_side // 96)
-    line_width = max(4, short_side // 72)
-
-    canvas = Image.new("RGBA", (width, height), (244, 247, 250, 255))
-    draw = ImageDraw.Draw(canvas)
-
-    draw.rounded_rectangle(
-        (0, 0, width - 1, height - 1),
-        radius=radius_outer,
-        fill=(236, 240, 245, 255),
-        outline=(210, 216, 224, 255),
-        width=border_width,
-    )
-    draw.rounded_rectangle(
-        (outer_pad, outer_pad, width - outer_pad - 1, height - outer_pad - 1),
-        radius=radius_inner,
-        fill=(251, 252, 253, 255),
-        outline=(190, 198, 208, 255),
-        width=border_width,
-    )
-
-    left = outer_pad + inner_pad
-    top = outer_pad + inner_pad
-    right = width - outer_pad - inner_pad
-    bottom = height - outer_pad - inner_pad
-    draw.line((left, top, right, bottom), fill=(228, 232, 238, 255), width=line_width)
-    draw.line((left, bottom, right, top), fill=(228, 232, 238, 255), width=line_width)
-
-    qmark_font = _load_placeholder_font(max(48, int(short_side * 0.56)))
-    qmark_center = (width / 2, height / 2 - short_side * 0.04)
-    _draw_centered_text(draw, "?", (qmark_center[0] + 4, qmark_center[1] + 6), qmark_font, (255, 255, 255, 220))
-    _draw_centered_text(draw, "?", qmark_center, qmark_font, (118, 128, 140, 255))
-
-    label_font = _load_placeholder_font(max(16, int(short_side * 0.08)))
-    _draw_centered_text(
-        draw,
-        "MISSING",
-        (width / 2, height - outer_pad - short_side * 0.1),
-        label_font,
-        (142, 150, 160, 255),
-    )
-    return canvas
+    return build_placeholder(variant)
 
 
 def _get_missing_placeholder_image(path: str | None) -> Image.Image:
+    return _get_missing_placeholder_variant_image(_guess_missing_placeholder_variant(path))
+
+
+def _get_missing_placeholder_variant_image(variant: str) -> Image.Image:
     record_pillow_touch(PILLOW_TOUCH_PLACEHOLDER)
-    variant = _guess_missing_placeholder_variant(path)
     with _missing_placeholder_lock:
         cached = _missing_placeholder_cache.get(variant)
         if cached is None:
@@ -846,19 +699,24 @@ def get_runtime_cache_stats() -> dict[str, Any]:
             evictions=_thumb_cache_evictions,
         )
 
+    from src.sekai.skia_renderer.fragment_cache import get_native_fragment_cache_stats
+
     composed_stats = _composed_image_cache.stats()
     composed_disk_stats = _composed_image_disk_cache.stats()
     # Imported lazily: the Skia payload cache lives under src.sekai.skia_renderer, which imports
     # this module transitively; the custom-profile pools live next to their renderer.
     from src.sekai.profile.custom_profile.cache import get_custom_profile_cache_stats
+    from src.sekai.skia_renderer.canvas import get_native_renderer_cache_stats
     from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
 
     return {
         "image_cache": image_stats,
         "thumbnail_cache": thumb_stats,
         "composed_image_cache": composed_stats,
+        "native_fragment_cache": get_native_fragment_cache_stats(),
         "composed_image_disk_cache": composed_disk_stats,
         "skia_payload_cache": get_skia_payload_cache_stats(),
+        "native_renderer_cache": get_native_renderer_cache_stats(),
         "custom_profile_caches": get_custom_profile_cache_stats(),
     }
 
@@ -1058,6 +916,8 @@ def resolve_image_source_sync(
     image passes through untouched. With ``target_size``, an ``AssetImageRef`` goes
     through the global resize cache (other source kinds ignore it — the caller
     resizes). Synchronous — call from pool threads, not the event loop."""
+    from PIL import Image
+
     if isinstance(source, Image.Image):
         return source
     if isinstance(source, AssetImageRef):
@@ -1068,6 +928,8 @@ def resolve_image_source_sync(
         except (FileNotFoundError, OSError) as exc:
             _log_missing_image_once(str(source.path), exc)
             return _get_missing_placeholder_image(str(source.path))
+    if isinstance(source, MissingImageRef):
+        return _get_missing_placeholder_variant_image(source.variant)
     if isinstance(source, EncodedImageRef):
         record_pillow_touch(PILLOW_TOUCH_IMAGE_DECODE)
         with Image.open(io.BytesIO(source.data)) as img:
@@ -1110,35 +972,6 @@ def _resolve_asset_path(base_path: Path, path: str) -> tuple[Path, Path, str]:
     return entry
 
 
-_resolved_existing_cache: dict[str, Path] = {}
-
-
-def resolve_existing_asset_path(path: Path) -> Path | None:
-    """``path.resolve(strict=True)`` memoized, or ``None`` if it does not exist.
-
-    For the IR builder, which must map an absolute asset path back to a path relative to the assets
-    root — once per image NODE, so a 696-jacket music list paid 13k lstat calls for it. The paths it
-    is handed are already resolved (they come from ``_resolve_and_stat``), so the walk is redundant
-    normalization; but it is kept on the first sighting rather than dropped, because symlink
-    normalization is what makes the caller's later ``relative_to`` escape check meaningful.
-
-    Only successes are cached. A missing file re-resolves every time — that is the rare path, and
-    caching a negative would keep an asset invisible after it lands on disk.
-    """
-    key = str(path)
-    cached = _resolved_existing_cache.get(key)
-    if cached is not None:
-        return cached
-    try:
-        resolved = path.resolve(strict=True)
-    except (OSError, ValueError):
-        return None
-    if len(_resolved_existing_cache) >= _PATH_RESOLVE_CACHE_MAX:
-        _resolved_existing_cache.clear()
-    _resolved_existing_cache[key] = resolved
-    return resolved
-
-
 def _stat_regular_file(full_path: Path) -> os.stat_result | None:
     """``stat`` of ``full_path``, or ``None`` if it is not an existing regular file.
 
@@ -1173,9 +1006,8 @@ def _load_asset_image_ref_cached(
     file_size: int,
 ) -> AssetImageRef:
     full_path = Path(full_path_str)
-    record_pillow_touch(PILLOW_TOUCH_IMAGE_HEADER_PROBE)
-    with Image.open(full_path) as image:
-        return AssetImageRef(path=full_path, size=image.size, mode=image.mode, mtime_ns=mtime_ns, file_size=file_size)
+    size, mode = probe_asset(full_path)
+    return AssetImageRef(path=full_path, size=size, mode=mode, mtime_ns=mtime_ns, file_size=file_size)
 
 
 def _load_asset_image_ref_sync(base_path: Path, path: str) -> AssetImageRef:
@@ -1187,26 +1019,48 @@ async def get_asset_image_ref(
     base_path: Path,
     path: str | None,
     on_missing: MissingImageMode = "placeholder",
-) -> AssetImageRef | Image.Image:
+) -> AssetImageRef | MissingImageRef:
     """Resolve an asset without decoding its pixels.
 
     This is intended for renderer-specific paths that emit the source path into an IR.
-    Missing assets still return the normal in-memory placeholder so callers preserve the
-    same behavior as :func:`get_img_from_path`.
+    Missing assets retain a lazy placeholder recipe; only the chosen renderer creates pixels.
     """
     if path is None or path.strip() == "":
         if on_missing == "placeholder":
             _log_missing_image_once(path, "empty-path")
-            return _get_missing_placeholder_image(path)
-        raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
+            return missing_image_ref(_guess_missing_placeholder_variant(path))
+        raise ValueError("图片路径不能为空(None)")
 
     try:
         return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
     except (FileNotFoundError, OSError) as exc:
         if on_missing == "placeholder":
             _log_missing_image_once(path, exc)
-            return _get_missing_placeholder_image(path)
+            return missing_image_ref(_guess_missing_placeholder_variant(path))
         raise
+
+
+async def get_asset_image_refs(base_path: Path, paths: list[str | None]) -> list[AssetImageRef | MissingImageRef]:
+    """Batch header-only probes, retaining the global signature-keyed metadata pool.
+
+    Tiny per-layer executor jobs cost more than a warm stat/header lookup. Independent
+    batches still overlap I/O; this never creates a per-request decoded-image cache.
+    """
+
+    def load_batch(batch):
+        result = []
+        for path in batch:
+            try:
+                if not path or not path.strip():
+                    raise FileNotFoundError("empty-path")
+                result.append(_load_asset_image_ref_sync(base_path, path))
+            except (FileNotFoundError, OSError) as exc:
+                _log_missing_image_once(path, exc)
+                result.append(missing_image_ref(_guess_missing_placeholder_variant(path)))
+        return result
+
+    batches = await asyncio.gather(*(run_in_pool(load_batch, paths[i : i + 16]) for i in range(0, len(paths), 16)))
+    return [ref for batch in batches for ref in batch]
 
 
 def _load_image_resized_sync(
@@ -1214,7 +1068,7 @@ def _load_image_resized_sync(
     path: str,
     target_w: int,
     target_h: int,
-    resample: int = Image.Resampling.BILINEAR,
+    resample: int = RasterResample.BILINEAR,
 ) -> Image.Image:
     """加载图片并 resize 到目标尺寸，结果缓存。"""
     full_path, _, stat = _resolve_and_stat(base_path, path)
@@ -1225,7 +1079,7 @@ def _load_image_resized_full_path_sync(
     full_path: Path,
     target_w: int,
     target_h: int,
-    resample: int = Image.Resampling.BILINEAR,
+    resample: int = RasterResample.BILINEAR,
     *,
     stat: os.stat_result | None = None,
 ) -> Image.Image:
@@ -1271,7 +1125,7 @@ async def get_img_resized(
     target_w: int,
     target_h: int,
     *,
-    resample: int = Image.Resampling.BILINEAR,
+    resample: int = RasterResample.BILINEAR,
     on_missing: MissingImageMode = "placeholder",
 ) -> Image.Image:
     """加载图片并 resize 到 (target_w, target_h)，利用缓存避免重复 resize。
@@ -1303,7 +1157,7 @@ async def get_img_resized_long_edge(
     path: str | None,
     long_edge: int,
     *,
-    resample: int = Image.Resampling.BILINEAR,
+    resample: int = RasterResample.BILINEAR,
     on_missing: MissingImageMode = "placeholder",
 ) -> Image.Image:
     """加载图片并按 long-edge 等比缩放，结果缓存在 _image_cache 中。
@@ -1447,6 +1301,8 @@ def get_float_str(value: float, precision: int = 2) -> str:
 
 async def concat_images(images, direction="h"):
     """水平或垂直拼接图片"""
+    from PIL import Image
+
     if not images:
         return None
 
@@ -1483,6 +1339,8 @@ def plt_fig_to_image(fig, transparent=True) -> Image.Image:
     """
     matplot图像转换为PIL.Image对象
     """
+    from PIL import Image
+
     with io.BytesIO() as buf:
         fig.savefig(buf, transparent=transparent, format="png")
         buf.seek(0)
@@ -1684,25 +1542,32 @@ async def run_in_pool(func, *args, pool=None):
             )
 
 
-def shutdown_utils() -> None:
-    """关闭 utils 模块持有的全局资源（线程池、图片缓存、临时文件）"""
-    global _image_cache_total_bytes, _thumb_cache_total_bytes
-
-    _default_pool_executor.shutdown(wait=False)
-
-    cleanup_expired_tmp_files()
+def clear_runtime_memory_caches() -> None:
+    """Clear every process-level in-memory drawing cache through one public entry point."""
+    global _image_cache_total_bytes, _image_cache_hits, _image_cache_misses, _image_cache_sets
+    global _image_cache_evictions
+    global _thumb_cache_total_bytes, _thumb_cache_hits, _thumb_cache_misses, _thumb_cache_sets
+    global _thumb_cache_evictions
 
     with _image_cache_lock:
         for img, _ in _image_cache.values():
             img.close()
         _image_cache.clear()
         _image_cache_total_bytes = 0
+        _image_cache_hits = 0
+        _image_cache_misses = 0
+        _image_cache_sets = 0
+        _image_cache_evictions = 0
 
     with _thumb_cache_lock:
         for img, _ in _thumb_cache.values():
             img.close()
         _thumb_cache.clear()
         _thumb_cache_total_bytes = 0
+        _thumb_cache_hits = 0
+        _thumb_cache_misses = 0
+        _thumb_cache_sets = 0
+        _thumb_cache_evictions = 0
 
     with _missing_placeholder_lock:
         for img in _missing_placeholder_cache.values():
@@ -1711,8 +1576,27 @@ def shutdown_utils() -> None:
         _missing_placeholder_logged.clear()
 
     _load_asset_image_ref_cached.cache_clear()
+    _resolved_path_cache.clear()
+    _resolved_existing_cache.clear()
     _composed_image_cache.clear()
 
+    from src.sekai.base.image_info import _asset_alpha_bounds
+
+    _asset_alpha_bounds.cache_clear()
+
+    from src.sekai.profile.custom_profile.cache import clear_custom_profile_caches
+    from src.sekai.skia_renderer.canvas import clear_native_renderer_caches
+    from src.sekai.skia_renderer.fragment_cache import clear_native_fragment_cache
     from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 
     clear_skia_payload_cache()
+    clear_native_fragment_cache()
+    clear_native_renderer_caches()
+    clear_custom_profile_caches()
+
+
+def shutdown_utils() -> None:
+    """关闭 utils 模块持有的全局资源（线程池、图片缓存、临时文件）"""
+    _default_pool_executor.shutdown(wait=False)
+    cleanup_expired_tmp_files()
+    clear_runtime_memory_caches()

@@ -1,12 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.score.drawer import (
-    compose_custom_room_score_control_image,
-    compose_music_board_image,
-    compose_music_meta_image,
-    compose_score_control_image,
     try_render_custom_room_score_control_payload,
     try_render_music_board_payload,
     try_render_music_meta_payload,
@@ -35,10 +32,8 @@ async def score_control(request: ScoreControlRequest):
     """
     try:
         payload = await try_render_score_control_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_score_control_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -56,10 +51,8 @@ async def custom_room_score_control(request: CustomRoomScoreRequest):
     """
     try:
         payload = await try_render_custom_room_score_control_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_custom_room_score_control_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -77,10 +70,8 @@ async def music_meta(request: list[MusicMetaRequest]):
     """
     try:
         payload = await try_render_music_meta_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_meta_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -98,9 +89,7 @@ async def music_board(request: MusicBoardRequest):
     """
     try:
         payload = await try_render_music_board_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_board_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

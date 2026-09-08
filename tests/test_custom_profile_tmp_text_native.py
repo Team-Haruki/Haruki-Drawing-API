@@ -28,6 +28,7 @@ from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY
 from src.sekai.skia_renderer.render_stats import get_render_stats, reset_render_stats
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PAYLOAD_FILE = REPO_ROOT / "out" / "parity-payloads" / "custom_profile_card.json"
 FONT_METADATA = REPO_ROOT / "data/custom_profile/tmp-font-assets/cn/metadata.json"
 
 
@@ -220,6 +221,463 @@ def test_real_plain_tmp_text_is_native_pixel_pure_and_matches_pillow(
     or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 1,
     reason="current native custom-profile renderer is required",
 )
+@pytest.mark.skipif(
+    not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(),
+    reason="custom-profile parity fixture and extracted TMP metadata are required",
+)
+@pytest.mark.parametrize(
+    ("rotation_degrees", "scale", "rich_text"),
+    [(0.0, (1.0, 1.0), False), (17.0, (1.25, 0.72), False), (0.0, (0.43, 1.31), True), (-11.0, (0.85, 1.13), True)],
+)
+def test_outlined_tmp_text_shades_and_composes_natively(monkeypatch, tmp_path, rotation_degrees, scale, rich_text):
+    from src.settings import settings
+
+    request = _text_only_request(rotation_degrees=rotation_degrees, scale=scale, outline_size=0.2)
+    if rich_text:
+        request.card["customProfileCard"]["texts"][0]["text"] = (
+            "<color=#F01020><b>Ag中</b></color>\n<alpha=#80>世界</alpha>"
+        )
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    for method in (
+        "render_content_for_card",
+        "prepare_direct_sdf_quads",
+        "render_content_direct_on_card",
+        "render_text",
+        "render_tmp_text_box",
+        "_shade_field_with_scalars",
+    ):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    monkeypatch.setattr(renderer_mod, "load_font", _unexpected_raster)
+    monkeypatch.setattr(renderer_mod, "get_render_font", _unexpected_raster)
+
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    stats = get_render_stats()["endpoints"][skia_mod.CUSTOM_PROFILE_ENDPOINT]
+    assert stats["native_pure"] == 1
+    assert stats["native_hybrid"] == 0
+    assert stats.get("pillow_touch_reasons", {}) == {}
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert proxy.mem_images
+    assert all(len(value) == 6 and value[3] == "a8" for value in proxy.mem_images.values())
+    scene = json.loads(proxy.ir_json)
+    assert any(node["type"] == "SdfQuad" for node in _walk_nodes(scene["root"]))
+    assert any(node["type"] == "RasterSubscene" for node in _walk_nodes(scene["root"]))
+    native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    mean, p99 = _rgb_diff_metrics(pillow, native)
+    assert mean <= 0.25, (mean, p99)
+    assert p99 <= 2, (mean, p99)
+    assert ImageChops.difference(pillow.getchannel("A"), native.getchannel("A")).getbbox() is None
+
+    ink_boxes = [
+        ImageChops.difference(im.convert("RGB"), Image.new("RGB", im.size, "white")).getbbox()
+        for im in (pillow, native)
+    ]
+    assert all(box is not None for box in ink_boxes), "text must actually be visible"
+    ink_bounds = (
+        min(box[0] for box in ink_boxes),
+        min(box[1] for box in ink_boxes),
+        max(box[2] for box in ink_boxes),
+        max(box[3] for box in ink_boxes),
+    )
+    glyph_mean, glyph_p99 = _rgb_diff_metrics(pillow.crop(ink_bounds), native.crop(ink_bounds))
+    assert glyph_mean <= 2.0, (glyph_mean, glyph_p99)
+    assert glyph_p99 <= 25, (glyph_mean, glyph_p99)
+    # Each variant must also succeed in a fresh interpreter which has never imported PIL.
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+
+    payload_path = tmp_path / "outlined-variant.json"
+    payload_path.write_text(request.model_dump_json(), encoding="utf-8")
+    case = next(case for case in CASES if case.name == "custom_profile_card")
+    result = run_clean_case(case, payload_path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(_native is None, reason="native extension is required")
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize(
+    ("angle", "static_font", "object_angle", "scale", "mixed"),
+    [
+        (20, False, 0, (1, 1), False),
+        (-37, False, -17, (0.7, 1.3), True),
+        (90, False, 0, (1, 1), False),
+        (180, False, 0, (1, 1), False),
+        (23, True, 0, (1, 1), False),
+        (89.999, False, 0, (1, 1), False),
+        (270, True, 0, (1, 1), True),
+    ],
+)
+def test_per_character_rotation_shades_before_native_rotation(
+    monkeypatch, tmp_path, angle, static_font, object_angle, scale, mixed
+):
+    from scripts.parity_payloads.gen_retirement_branches import (
+        build_rotated_characters_request,
+        build_static_text_request,
+    )
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.settings import settings
+
+    raw = json.loads(PAYLOAD_FILE.read_text())
+    raw = (build_static_text_request if static_font else build_rotated_characters_request)(raw)
+    item = raw["card"]["customProfileCard"]["texts"][0]
+    item["text"] = f"<color=#7030b0><rotate={angle}>日本語</rotate></color>"
+    if mixed:
+        item["text"] = f"<color=#7030b0><rotate={angle}>日本</rotate><alpha=#80><rotate=-15>語</rotate></alpha></color>"
+    half = math.radians(object_angle) / 2
+    item["objectData"]["rotation"] = {"x": 0.0, "y": 0.0, "z": math.sin(half), "w": math.cos(half)}
+    item["objectData"]["scale"] = {"x": scale[0], "y": scale[1], "z": 1.0}
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    for method in ("render_content_for_card", "render_text", "draw_tmp_native_character", "_shade_field_with_scalars"):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    monkeypatch.setattr(Image.Image, "rotate", _unexpected_raster)
+    monkeypatch.setattr(renderer_mod, "load_font", _unexpected_raster)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert proxy.mem_images
+    assert all(value[3] == "a8" for value in proxy.mem_images.values())
+    scene = json.loads(proxy.ir_json)
+    rotated = [n for n in _walk_nodes(scene["root"]) if n["type"] == "UnitySubscene" and n["rotation"]]
+    assert any(any(child["type"] == "SdfQuad" for child in n["children"]) for n in rotated)
+    actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    boxes = [
+        ImageChops.difference(im.convert("RGB"), Image.new("RGB", im.size, "white")).getbbox()
+        for im in (pillow, actual)
+    ]
+    assert all(boxes), "rotated glyphs must actually be visible"
+    bounds = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+    mean, p99 = _rgb_diff_metrics(pillow.crop(bounds), actual.crop(bounds))
+    assert mean <= 2, (mean, p99)
+    assert p99 <= 25, (mean, p99)
+    assert ImageChops.difference(pillow.getchannel("A"), actual.getchannel("A")).getbbox() is None
+    path = tmp_path / "rotated-characters.json"
+    path.write_text(request.model_dump_json())
+    result = run_clean_case(next(c for c in CASES if c.name == "custom_profile_card"), path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(_native is None or getattr(_native, "GRAY_FIELD_CAPABILITY", 0) < 2, reason="gray affine required")
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize(("angle", "scale"), [(0, (1, 1)), (23, (1.4, 0.7)), (-36, (0.55, 2))])
+def test_decorative_tmp_fields_warp_and_shade_without_pillow(monkeypatch, tmp_path, angle, scale):
+    from scripts.parity_payloads.gen_retirement_branches import build_decorative_text_request
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.settings import settings
+
+    raw = build_decorative_text_request(json.loads(PAYLOAD_FILE.read_text()))
+    item = raw["card"]["customProfileCard"]["texts"][0]
+    item["objectData"]["rotation"] = {
+        "x": 0.0,
+        "y": 0.0,
+        "z": math.sin(math.radians(angle) / 2),
+        "w": math.cos(math.radians(angle) / 2),
+    }
+    item["objectData"]["scale"] = {"x": scale[0], "y": scale[1], "z": 1.0}
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    for method in (
+        "render_content_for_card",
+        "render_content_direct_on_card",
+        "render_text",
+        "render_tmp_text_box",
+        "_shade_field_with_scalars",
+    ):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    counts = get_render_stats()["endpoints"][skia_mod.CUSTOM_PROFILE_ENDPOINT]
+    assert counts["native_pure"] == 1
+    assert counts["native_hybrid"] == 0
+    assert counts["pillow_touch_reasons"] == {}
+    assert proxy.mem_images
+    assert all(value[3] == "a8" for value in proxy.mem_images.values())
+    native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    assert ImageChops.difference(native.convert("RGB"), Image.new("RGB", native.size, "white")).getbbox()
+    mean, p99 = _rgb_diff_metrics(pillow, native)
+    assert mean <= 0.05, (mean, p99)
+    assert p99 <= 1, (mean, p99)
+    payload_path = tmp_path / "decorative-variant.json"
+    payload_path.write_text(request.model_dump_json(), encoding="utf-8")
+    case = next(case for case in CASES if case.name == "custom_profile_card")
+    result = run_clean_case(case, payload_path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "ALPHA_FIELD_CAPABILITY", 0) < 1, reason="native atlas API required"
+)
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize("font", ["DB", "EB"])
+def test_static_atlas_text_uses_gray_fields_and_native_shading(monkeypatch, tmp_path, font):
+    from scripts.parity_payloads.gen_retirement_branches import build_static_text_request
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.settings import settings
+
+    raw = build_static_text_request(json.loads(PAYLOAD_FILE.read_text()))
+    raw["resources"]["customProfileTextFonts"][0]["fontName"] = f"FOT-RodinNTLGPro-{font}-OnDemand"
+    # All these codepoints exist in both extracted static fonts.
+    raw["card"]["customProfileCard"]["texts"][0]["text"] = "日本語界"
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    for method in ("_decode_image_variant", "render_content_for_card", "render_text", "render_tmp_static_atlas_run"):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    monkeypatch.setattr(renderer_mod, "load_font", _unexpected_raster)
+    atlas_calls = []
+    load = PNGRenderer.tmp_atlas_alpha
+
+    def load_atlas(renderer, path):
+        field = load(renderer, path)
+        from src.sekai.profile.custom_profile.gray_field import GrayField
+
+        assert isinstance(field, GrayField)
+        atlas_calls.append(path)
+        return field
+
+    monkeypatch.setattr(PNGRenderer, "tmp_atlas_alpha", load_atlas)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    assert atlas_calls
+    assert all(f"-{font}-OnDemand" in path.name for path in atlas_calls)
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert any(node["type"] == "SdfQuad" for node in _walk_nodes(json.loads(proxy.ir_json)["root"]))
+    assert proxy.mem_images
+    assert all(value[3] == "a8" for value in proxy.mem_images.values())
+    actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    assert ImageChops.difference(pillow.getchannel("A"), actual.getchannel("A")).getbbox() is None
+    ink = ImageChops.difference(pillow.convert("RGB"), Image.new("RGB", pillow.size, "white")).getbbox()
+    assert ink is not None
+    mean, p99 = _rgb_diff_metrics(pillow.crop(ink), actual.crop(ink))
+    assert mean <= 2, (mean, p99)
+    assert p99 <= 25, (mean, p99)
+    path = tmp_path / "static-text.json"
+    path.write_text(request.model_dump_json())
+    result = run_clean_case(next(c for c in CASES if c.name == "custom_profile_card"), path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(_native is None or getattr(_native, "GRAY_FIELD_CAPABILITY", 0) < 2, reason="gray affine required")
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize("whitespace_only", [False, True])
+def test_decorative_character_rotation_selects_legacy_shading_order(monkeypatch, tmp_path, whitespace_only):
+    from scripts.parity_payloads.gen_retirement_branches import build_rotated_decorative_request
+    from scripts.parity_payloads.retirement_fixture_contract import DECORATIVE_TEXT
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.settings import settings
+
+    raw = build_rotated_decorative_request(json.loads(PAYLOAD_FILE.read_text()))
+    if whitespace_only:
+        raw["card"]["customProfileCard"]["texts"][0]["text"] = "<rotate=20> </rotate>" + DECORATIVE_TEXT
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    for method in ("render_content_for_card", "render_text", "_shade_field_with_scalars"):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    if not whitespace_only:
+        # The direct planner may decline the element; it must never warp a field
+        # before the local RGBA glyph rotation chosen by the legacy pipeline.
+        monkeypatch.setattr(PNGRenderer, "warp_tmp_sdf_field_direct", _unexpected_raster)
+    monkeypatch.setattr(Image.Image, "rotate", _unexpected_raster)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    nodes = list(_walk_nodes(json.loads(proxy.ir_json)["root"]))
+    # Whitespace does not rotate a visible glyph: keep direct field warp -> shading.
+    # A visible rotated glyph must be shaded locally before its RGBA subscene rotates.
+    assert any(n["type"] == "RasterSubscene" for n in nodes) is not whitespace_only
+    assert any(n["type"] == "SdfQuad" for n in nodes)
+    actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    boxes = [
+        ImageChops.difference(im.convert("RGB"), Image.new("RGB", im.size, "white")).getbbox()
+        for im in (pillow, actual)
+    ]
+    assert all(boxes)
+    bounds = (min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes))
+    mean, p99 = _rgb_diff_metrics(pillow.crop(bounds), actual.crop(bounds))
+    assert mean <= 2, (mean, p99)
+    assert p99 <= 25, (mean, p99)
+    path = tmp_path / "decorative-rotation.json"
+    path.write_text(request.model_dump_json())
+    result = run_clean_case(next(c for c in CASES if c.name == "custom_profile_card"), path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(
+    _native is None or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 2, reason="BASIC metrics required"
+)
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize(
+    "font",
+    [
+        "FOT-BabyPopStd-EB",
+        "FOT-GrecoStd-B",
+        "FOT-HummingPro-B",
+        "FOT-LyraStd-DB",
+        "FOT-PalRetronStd-B",
+        "FOT-PopHappinessStd-EB",
+        "FOT-RodinNTLGPro-DB",
+        "FOT-SkipProN-B",
+        "FOT-UDMinchoPro-B",
+        "FOT-YurukaStd-UB",
+        "FOT-RodinNTLGPro-DB-OnDemand",
+    ],
+)
+def test_missing_and_invisible_font_metrics_use_native_basic(monkeypatch, tmp_path, font):
+    from scripts.parity_payloads.gen_retirement_branches import build_font_fallback_request
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.sekai.profile.custom_profile.tmp_sdf_text import TMPFallbackMetrics
+    from src.settings import settings
+
+    raw = build_font_fallback_request(json.loads(PAYLOAD_FILE.read_text()))
+    raw["resources"]["customProfileTextFonts"][0]["fontName"] = font
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    # Explicitly evaluate the old fallback, so shared native metrics cannot hide layout drift.
+    method = TMPFallbackMetrics._font
+    monkeypatch.setattr(TMPFallbackMetrics, "_font", lambda self: self._legacy_font())
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    monkeypatch.setattr(TMPFallbackMetrics, "_font", method)
+    current_pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    assert current_pillow.tobytes() == pillow.tobytes()
+    observed = []
+    getbbox = TMPFallbackMetrics.getbbox
+
+    def trace(self, text):
+        observed.append(text)
+        return getbbox(self, text)
+
+    monkeypatch.setattr(TMPFallbackMetrics, "getbbox", trace)
+    monkeypatch.setattr(TMPFallbackMetrics, "_legacy_font", _unexpected_raster)
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    for method_name in ("render_content_for_card", "render_text", "_shade_field_with_scalars"):
+        monkeypatch.setattr(PNGRenderer, method_name, _unexpected_raster)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    assert "\u200b" in observed
+    assert payload.native_metrics["custom_profile_native_elements"] == 1
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    mean, p99 = _rgb_diff_metrics(pillow, actual)
+    assert mean <= 2, (mean, p99)
+    assert p99 <= 25, (mean, p99)
+    path = tmp_path / "font-fallback.json"
+    path.write_text(request.model_dump_json())
+    result = run_clean_case(next(c for c in CASES if c.name == "custom_profile_card"), path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(_native is None or getattr(_native, "IR_CAPABILITY", 0) < 28, reason="float32 SDF support required")
+@pytest.mark.skipif(not PAYLOAD_FILE.is_file() or not FONT_METADATA.is_file(), reason="TMP fixture required")
+@pytest.mark.parametrize(
+    ("angle", "scale", "text"),
+    [
+        (0, (1, 1), "Ag日\u200b本語🙂𠮷á\u200d\t"),
+        (0, (1.4, 0.7), "<color=#4080a0><alpha=#88>🙂𠮷á</alpha></color>"),
+        (23, (0.7, 1.4), "日<rotate=20>🙂𠮷á</rotate>語"),
+        (-17, (1.2, 0.9), "<rotate=90>🙂</rotate><rotate=-35>𠮷</rotate>á"),
+        (23, (1.4, 0.7), "<color=#7030b0>●▲⌒</color>"),
+    ],
+)
+def test_static_missing_glyphs_shade_float_fields_natively(monkeypatch, tmp_path, angle, scale, text):
+    import numpy as np
+
+    from scripts.parity_payloads.gen_retirement_branches import build_font_fallback_request
+    from scripts.skia_no_pillow import run_clean_case
+    from scripts.skia_parity_sweep import CASES
+    from src.settings import settings
+
+    raw = build_font_fallback_request(json.loads(PAYLOAD_FILE.read_text()), static_missing=True)
+    item = raw["card"]["customProfileCard"]["texts"][0]
+    item["text"] = text
+    item["objectData"]["scale"] = {"x": scale[0], "y": scale[1], "z": 1}
+    half = math.radians(angle) / 2
+    item["objectData"]["rotation"] = {"x": 0, "y": 0, "z": math.sin(half), "w": math.cos(half)}
+    request = CustomProfileCardRenderRequest.model_validate(raw)
+    pillow = asyncio.run(compose_custom_profile_card_image(request)).convert("RGBA")
+    proxy = _NativeProxy()
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: proxy)
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    for method in ("render_content_for_card", "render_text", "_shade_field_with_scalars", "draw_run_at_baseline"):
+        monkeypatch.setattr(PNGRenderer, method, _unexpected_raster)
+    token = begin_pillow_touch_scope()
+    try:
+        payload = asyncio.run(skia_mod.try_render_custom_profile_card_payload(request))
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    assert payload is not None
+    assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
+    assert any(len(value) == 6 and value[3] == "f32le" for value in proxy.mem_images.values())
+    actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    # A full white page would conceal a wrong small glyph. Compare the union of visible text bounds.
+    visible = np.any(np.asarray(pillow)[:, :, :3] != 255, axis=2) | np.any(np.asarray(actual)[:, :, :3] != 255, axis=2)
+    ys, xs = np.nonzero(visible)
+    bounds = (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
+    mean, p99 = _rgb_diff_metrics(pillow.crop(bounds), actual.crop(bounds))
+    assert mean <= 2, (mean, p99)
+    assert p99 <= 25, (mean, p99)
+    path = tmp_path / "static-fallback.json"
+    path.write_text(request.model_dump_json())
+    result = run_clean_case(next(c for c in CASES if c.name == "custom_profile_card"), path)
+    assert result["status"] == "ok", result
+
+
+@pytest.mark.skipif(
+    _native is None
+    or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY
+    or getattr(_native, "TEXT_METRICS_CAPABILITY", 0) < 1,
+    reason="current native custom-profile renderer is required",
+)
 @pytest.mark.skipif(not FONT_METADATA.is_file(), reason="extracted TMP metadata is required")
 @pytest.mark.parametrize(
     ("font_name", "text", "expected_node_type", "expected_font_fragment", "expected_codepoint"),
@@ -297,23 +755,23 @@ def test_sparse_tmp_text_categories_use_native_glyphs_without_mem_transport(
     assert payload.native_metrics["custom_profile_visible_elements"] == 1
     assert payload.native_metrics["custom_profile_native_elements"] == 1
     assert payload.native_metrics["custom_profile_hybrid_elements"] == 0
-    assert payload.native_metrics["custom_profile_mem_images"] == 0
-    assert payload.native_metrics["custom_profile_mem_bytes"] == 0
-    assert proxy.mem_images == {}
+    # IR29 permits bounded scalar fields as well as asset-backed sparse quads.
+    # Scalar transport is renderer-neutral; RGBA/Pillow glyph images are still forbidden.
     assert proxy.ir_json is not None
-    assert b"mem:" not in proxy.ir_json
-
+    for buffer in proxy.mem_images.values():
+        assert len(buffer) == 6
+        assert buffer[3] in {"a8", "f32le"}
     scene = json.loads(proxy.ir_json)
     assert not any(node["type"] == "Text" for node in _walk_nodes(scene["root"]))
-    sparse_nodes = [node for node in _walk_nodes(scene["root"]) if node["type"] == expected_node_type]
+    sparse_nodes = [node for node in _walk_nodes(scene["root"]) if node["type"] in {expected_node_type, "SdfQuad"}]
     assert sparse_nodes
     assert all(node["shading"]["underlay"] is not None for node in sparse_nodes)
-    if expected_font_fragment is not None:
+    asset_nodes = [node for node in sparse_nodes if node["type"] == expected_node_type]
+    if asset_nodes and expected_font_fragment is not None:
         registered_fonts = scene["fonts"].get("extra", {})
-        used_font_names = {node["font"]["name"] for node in sparse_nodes}
-        assert all(expected_font_fragment in registered_fonts[name] for name in used_font_names)
-    if expected_codepoint is not None:
-        assert {node["codepoint"] for node in sparse_nodes} == {expected_codepoint}
+        assert all(expected_font_fragment in registered_fonts[node["font"]["name"]] for node in asset_nodes)
+    if asset_nodes and expected_codepoint is not None:
+        assert {node["codepoint"] for node in asset_nodes} == {expected_codepoint}
     native = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
     mean, p99 = _rgb_diff_metrics(pillow, native)
     assert mean <= 0.7, mean

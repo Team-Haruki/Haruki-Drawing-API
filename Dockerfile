@@ -24,16 +24,12 @@ RUN --mount=type=cache,target=$UV_CACHE_DIR \
     && uv venv ${UV_PROJECT_ENVIRONMENT} --python ${UV_PYTHON} \
     && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python
 
-# 可选的 haruki_skia_renderer 原生渲染 wheel(D2:不发 index,CI 在 docker workflow 里
-# 预构建后放进 docker/skia-wheels/)。目录为空时跳过安装,镜像照常构建,运行时 fail-open 回退 Pillow。
+# The service requires its matching native wheel; an absent or incompatible wheel is a build failure.
 COPY docker/skia-wheels/ /tmp/skia-wheels/
 RUN --mount=type=cache,target=$UV_CACHE_DIR \
     set -eux; \
-    if ls /tmp/skia-wheels/*.whl >/dev/null 2>&1; then \
-        uv pip install --python ${UV_PROJECT_ENVIRONMENT}/bin/python /tmp/skia-wheels/*.whl; \
-    else \
-        echo "no haruki_skia_renderer wheel bundled; skipping native Skia renderer install"; \
-    fi; \
+    test "$(find /tmp/skia-wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1; \
+    uv pip install --python ${UV_PROJECT_ENVIRONMENT}/bin/python /tmp/skia-wheels/*.whl; \
     rm -rf /tmp/skia-wheels
 
 # 运行阶段
@@ -92,35 +88,21 @@ RUN set -eux; \
 # 复制项目代码
 COPY . .
 
-# haruki_skia_renderer 自检(仿上方 pjsekai_scores_rs 模式,但条件执行):
-# 装了 wheel 就必须能导入且通过 IR capability 握手,失败让镜像构建尽早报错;
-# 没装 wheel 仅提示,运行时 fail-open 回退 Pillow。
-#
-# 门槛值从 canvas.py 的 REQUIRED_NATIVE_IR_CAPABILITY 解析而来,而不是在这里再写一个数字——
-# 曾经这里写死 >= 3 而代码要求 5,于是一个 cap-3/4 的旧 wheel 能通过镜像自检、打印"self-check passed",
-# 再在运行时被 load_native_renderer() 拒掉,每个绘图端点静默回退 Pillow。自检必须跟着代码走。
-# (放在 COPY 之后,因为要读源码。)
-RUN /app/haruki_drawing_api/.venv/bin/python - <<'PY'
+# Validate the actual runtime dependency boundary and render with the installed extension.
+# The codec smoke reads the capability requirement from Python and exercises native image APIs.
+RUN /app/haruki_drawing_api/.venv/bin/python -X gil=0 - <<'PYTHON'
 import importlib.util
-import pathlib
-import re
+import sys
 
-source = pathlib.Path("src/sekai/skia_renderer/canvas.py").read_text(encoding="utf-8")
-match = re.search(r"^REQUIRED_NATIVE_IR_CAPABILITY\s*=\s*(\d+)", source, re.MULTILINE)
-assert match, "cannot find REQUIRED_NATIVE_IR_CAPABILITY in canvas.py"
-required = int(match.group(1))
-
-if importlib.util.find_spec("haruki_skia_renderer") is None:
-    print("haruki_skia_renderer not bundled; Skia IR rendering will fail-open to Pillow")
-else:
-    import haruki_skia_renderer as m
-
-    capability = getattr(m, "IR_CAPABILITY", 0)
-    assert capability >= required, (
-        f"stale haruki_skia_renderer wheel: IR_CAPABILITY={capability} < {required} required by canvas.py"
-    )
-    print(f"haruki_skia_renderer self-check passed (IR_CAPABILITY={capability} >= {required})")
-PY
+assert not sys._is_gil_enabled(), "the service requires CPython free-threading"
+for name in ("PIL", "matplotlib", "pilmoji"):
+    assert importlib.util.find_spec(name) is None, f"legacy renderer leaked into production: {name}"
+from fontTools.ttLib import TTFont  # TMP vector contours require this independently of Matplotlib.
+from src.sekai.skia_renderer.canvas import load_native_renderer
+native = load_native_renderer()
+print(f"native renderer self-check passed (IR_CAPABILITY={native.IR_CAPABILITY})")
+PYTHON
+RUN /app/haruki_drawing_api/.venv/bin/python -X gil=0 scripts/skia_codec_smoke.py
 
 # 构建溯源。放在自检之后:ARG 的值每次构建都变,写在上面会让它下面的每一层缓存全部失效。
 # .github/workflows/docker.yml 一直在传这三个 --build-arg,但 Dockerfile 里没有对应的 ARG,

@@ -5,7 +5,6 @@ from collections import deque
 from types import SimpleNamespace
 from typing import Any, Self
 
-from PIL import Image
 import pytest
 
 from src.core import debug, heavy_render_pool as pool_mod
@@ -410,14 +409,13 @@ def test_worker_main_handles_unknown_success_and_failure(monkeypatch: pytest.Mon
     assert "ValueError: render failed" in (result.traceback_text or "")
 
 
-def test_render_heavy_deck_uses_skia_or_pillow(
+def test_render_heavy_deck_requires_native(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.sekai.deck import drawer, model
 
     request = object()
     skia_payload = make_payload()
-    pillow_payload = make_payload(backend="pillow")
     monkeypatch.setattr(model.DeckRequest, "model_validate", classmethod(lambda _cls, _payload: request))
     monkeypatch.setattr(pool_mod, "_stamp_skia_backend", lambda payload: payload)
 
@@ -431,22 +429,21 @@ def test_render_heavy_deck_uses_skia_or_pillow(
         return None
 
     async def compose(_request: object) -> object:
-        return object()
+        pytest.fail("retired Pillow composer must not run")
 
     monkeypatch.setattr(drawer, "try_render_deck_recommend_payload", no_skia)
     monkeypatch.setattr(drawer, "compose_deck_recommend_image", compose)
-    monkeypatch.setattr(pool_mod, "_encode_image_payload", lambda _image: pillow_payload)
-    assert pool_mod._render_heavy_task("deck_recommend", {}) is pillow_payload
+    with pytest.raises(RuntimeError, match="Pillow fallback is no longer available"):
+        pool_mod._render_heavy_task("deck_recommend", {})
 
 
-def test_render_heavy_birthday_uses_skia_or_pillow_and_rejects_unknown(
+def test_render_heavy_birthday_requires_native_and_rejects_unknown(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from src.sekai.misc import drawer, model
 
     request = object()
     skia_payload = make_payload()
-    pillow_payload = make_payload(backend="pillow")
     monkeypatch.setattr(model.CharaBirthdayRequest, "model_validate", classmethod(lambda _cls, _payload: request))
     monkeypatch.setattr(pool_mod, "_stamp_skia_backend", lambda payload: payload)
 
@@ -460,12 +457,12 @@ def test_render_heavy_birthday_uses_skia_or_pillow_and_rejects_unknown(
         return None
 
     async def compose(_request: object) -> object:
-        return object()
+        pytest.fail("retired Pillow composer must not run")
 
     monkeypatch.setattr(drawer, "try_render_chara_birthday_payload", no_skia)
     monkeypatch.setattr(drawer, "compose_chara_birthday_image", compose)
-    monkeypatch.setattr(pool_mod, "_encode_image_payload", lambda _image: pillow_payload)
-    assert pool_mod._render_heavy_task("chara_birthday", {}) is pillow_payload
+    with pytest.raises(RuntimeError, match="Pillow fallback is no longer available"):
+        pool_mod._render_heavy_task("chara_birthday", {})
 
     with pytest.raises(ValueError, match="unsupported heavy render task kind"):
         pool_mod._render_heavy_task("unknown", {})  # type: ignore[arg-type]
@@ -557,27 +554,6 @@ def test_render_does_not_recycle_before_submission(monkeypatch: pytest.MonkeyPat
     with pytest.raises(RuntimeError, match="put failed"):
         asyncio.run(pool.render("deck_recommend", {}))
     assert spawned == []
-
-
-@pytest.mark.parametrize(
-    ("format_name", "mode", "media_type", "filename"),
-    [("png", "RGBA", "image/png", "image.png"), ("jpg", "RGBA", "image/jpeg", "image.jpg")],
-)
-def test_encode_image_payload(
-    format_name: str,
-    mode: str,
-    media_type: str,
-    filename: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(pool_mod, "EXPORT_IMAGE_FORMAT", format_name)
-    image = Image.new(mode, (2, 3), (255, 0, 0, 128))
-
-    payload = pool_mod._encode_image_payload(image)
-
-    assert payload.image_bytes
-    assert (payload.media_type, payload.filename) == (media_type, filename)
-    assert (payload.image_width, payload.image_height, payload.image_mode) == (2, 3, mode)
 
 
 def test_stamp_skia_backend_uses_scoped_pillow_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:

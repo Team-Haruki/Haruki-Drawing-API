@@ -1,31 +1,30 @@
+from __future__ import annotations
+
 import asyncio
 from datetime import datetime
 import logging
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
-from src.sekai.base.painter import DEFAULT_BOLD_FONT, DEFAULT_FONT
-from src.sekai.base.plot import Canvas, Flow, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
+from src.sekai.base.plot import Canvas, CanvasImageBox, Flow, Frame, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
+    collect_asset_signatures,
     get_asset_image_ref,
-    get_composed_image_cached,
-    get_composed_image_disk_cached,
     get_readable_timedelta,
-    put_composed_image_cache,
-    put_composed_image_disk_cache,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
-from src.settings import ASSETS_BASE_DIR
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
 from .model import VLiveBrief, VLiveListRequest
 
 _perf_logger = logging.getLogger("vlive.draw.perf")
 _VLIVE_LIST_ENDPOINT = "vlive_list"
-_VLIVE_LIST_ENTRY_CACHE_NAMESPACE = "vlive_list_entry"
 _VLIVE_ENTRY_CONTENT_W = 724
 
 
@@ -68,14 +67,24 @@ def _get_display_window(vlive: VLiveBrief) -> tuple[datetime | None, datetime | 
     return vlive.current_start_at or vlive.start_at, vlive.current_end_at or vlive.end_at
 
 
-def _build_vlive_entry_cache_key(vlive: VLiveBrief, now: datetime) -> str:
+def _vlive_entry_time_texts(vlive: VLiveBrief, now: datetime) -> tuple[str, str, str]:
+    start, end = _get_display_window(vlive)
+    return (
+        _build_vlive_time_text("开始于", start, now),
+        _build_vlive_time_text("结束于", end, now),
+        f"{_build_vlive_status_text(vlive, now)} | 剩余场次: {vlive.rest_count}",
+    )
+
+
+def _build_vlive_entry_cache_key(
+    vlive: VLiveBrief, now: datetime, *, time_texts: tuple[str, str, str] | None = None
+) -> str:
+    material = vlive.model_dump(mode="json")
     return build_rendered_image_cache_key(
         "vlive_list_entry",
-        vlive,
-        extra={
-            "state": "living" if vlive.living else "upcoming",
-            "bucket": now.strftime("%Y%m%d%H%M"),
-        },
+        material,
+        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, material),
+        extra={"time_texts": time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)},
     )
 
 
@@ -98,11 +107,13 @@ async def _preload_vlive_entry_assets(vlive: VLiveBrief) -> dict[str, object]:
     return dict(zip(keys, values))
 
 
-async def _compose_vlive_entry_image(
+def _build_vlive_entry_canvas(
     vlive: VLiveBrief,
     loaded: dict[str, object],
     now: datetime,
-) -> Image.Image:
+    *,
+    time_texts: tuple[str, str, str] | None = None,
+) -> Canvas:
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(20, 20, 20))
     info_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50))
     section_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(50, 50, 50))
@@ -111,7 +122,7 @@ async def _compose_vlive_entry_image(
     rewards = loaded.get("rewards", [])
     characters = loaded.get("characters", [])
     banner = loaded.get("banner")
-    display_start_at, display_end_at = _get_display_window(vlive)
+    start_text, end_text, status_text = time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)
 
     with Canvas().set_padding(0) as canvas:
         with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
@@ -127,10 +138,10 @@ async def _compose_vlive_entry_image(
                     ImageBox(banner, size=(320, None), use_alpha_blend=True)
 
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
-                    TextBox(_build_vlive_time_text("开始于", display_start_at, now), info_style).set_w(388)
-                    TextBox(_build_vlive_time_text("结束于", display_end_at, now), info_style).set_w(388)
+                    TextBox(start_text, info_style).set_w(388)
+                    TextBox(end_text, info_style).set_w(388)
                     TextBox(
-                        f"{_build_vlive_status_text(vlive, now)} | 剩余场次: {vlive.rest_count}",
+                        status_text,
                         info_style,
                     ).set_w(388)
 
@@ -159,29 +170,24 @@ async def _compose_vlive_entry_image(
                                 for character_image in characters:
                                     ImageBox(character_image, size=(30, 30), use_alpha_blend=True)
 
-    return await canvas.get_img()
+    return canvas
 
 
-async def _get_vlive_list_entry_image(vlive: VLiveBrief, now: datetime) -> Image.Image:
-    cache_key = _build_vlive_entry_cache_key(vlive, now)
+async def _compose_vlive_entry_image(vlive: VLiveBrief, loaded: dict[str, object], now: datetime) -> Image.Image:
+    return await _build_vlive_entry_canvas(vlive, loaded, now).get_img()
 
-    cached = get_composed_image_cached(cache_key)
-    if cached is not None:
-        _perf_logger.info("vlive/list entry memory hit: id=%s", vlive.id)
-        return cached
 
-    disk_cached = get_composed_image_disk_cached(_VLIVE_LIST_ENTRY_CACHE_NAMESPACE, cache_key)
-    if disk_cached is not None:
-        put_composed_image_cache(cache_key, disk_cached)
-        _perf_logger.info("vlive/list entry disk hit: id=%s", vlive.id)
-        return disk_cached
+async def _get_vlive_list_entry_canvas(vlive: VLiveBrief, now: datetime):
+    from src.sekai.base.canvas_cache import prepare_cached_canvas
 
-    loaded = await _preload_vlive_entry_assets(vlive)
-    image = await _compose_vlive_entry_image(vlive, loaded, now)
-    put_composed_image_cache(cache_key, image)
-    put_composed_image_disk_cache(_VLIVE_LIST_ENTRY_CACHE_NAMESPACE, cache_key, image)
-    _perf_logger.info("vlive/list entry miss: id=%s size=%dx%d", vlive.id, image.width, image.height)
-    return image
+    time_texts = _vlive_entry_time_texts(vlive, now)
+    cache_key = _build_vlive_entry_cache_key(vlive, now, time_texts=time_texts)
+
+    async def build():
+        loaded = await _preload_vlive_entry_assets(vlive)
+        return _build_vlive_entry_canvas(vlive, loaded, now, time_texts=time_texts)
+
+    return await prepare_cached_canvas(cache_key, build), cache_key
 
 
 async def _build_vlive_list_canvas(rqd: VLiveListRequest, now: datetime | None = None) -> Canvas:
@@ -189,13 +195,15 @@ async def _build_vlive_list_canvas(rqd: VLiveListRequest, now: datetime | None =
     if now is None:
         now = request_now(rqd.timezone)
 
-    entry_images = await asyncio.gather(*[_get_vlive_list_entry_image(vlive, now) for vlive in lives]) if lives else []
+    entry_canvases = (
+        await asyncio.gather(*[_get_vlive_list_entry_canvas(vlive, now) for vlive in lives]) if lives else []
+    )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_padding(0).set_sep(16).set_item_align("lt").set_content_align("lt"):
-            for entry_image in entry_images:
+            for entry_canvas, cache_key in entry_canvases:
                 with Frame().set_w(760).set_padding(18).set_bg(roundrect_bg(alpha=80, blur_glass_kwargs={"blur": 8})):
-                    ImageBox(entry_image)
+                    CanvasImageBox(entry_canvas, cache_key=cache_key)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -213,5 +221,4 @@ async def try_render_vlive_list_payload(rqd: VLiveListRequest) -> EncodedImagePa
     # One `now` for the whole layout: recomputing it inside the builder could cross a minute
     # boundary mid-render and put two different living/upcoming states in one image.
     now = request_now(rqd.timezone)
-    canvas = await _build_vlive_list_canvas(rqd, now=now)
-    return await render_canvas_payload(canvas, endpoint=_VLIVE_LIST_ENDPOINT)
+    return await render_canvas_payload(lambda: _build_vlive_list_canvas(rqd, now=now), endpoint=_VLIVE_LIST_ENDPOINT)

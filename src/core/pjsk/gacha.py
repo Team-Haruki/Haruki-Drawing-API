@@ -1,10 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.gacha.drawer import (
-    compose_gacha_detail_image,
-    compose_gacha_list_image,
     try_render_gacha_detail_payload,
     try_render_gacha_list_payload,
 )
@@ -29,10 +28,8 @@ async def gacha_list(request: GachaListRequest):
     """
     try:
         payload = await try_render_gacha_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_gacha_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -50,9 +47,7 @@ async def gacha_detail(request: GachaDetailRequest):
     """
     try:
         payload = await try_render_gacha_detail_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_gacha_detail_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

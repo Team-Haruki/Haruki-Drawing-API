@@ -18,10 +18,9 @@ import emoji
 import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 from PIL.ImageFont import ImageFont as Font
-from pilmoji import Pilmoji, getsize as getsize_emoji
+from pilmoji import Pilmoji
 from pilmoji.source import BaseSource, GoogleEmojiSource
 
-from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
 from src.settings import (
     DEFAULT_BOLD_FONT,  # noqa: F401
     DEFAULT_EMOJI_FONT,  # noqa: F401
@@ -31,6 +30,53 @@ from src.settings import (
 )
 
 from .img_utils import adjust_image_alpha_inplace, multiply_image_by_color
+from .paint_context import PaintContext
+from .paint_types import (
+    ADAPTIVE_SHADOW as ADAPTIVE_SHADOW,
+    ADAPTIVE_WB as ADAPTIVE_WB,
+    ALIGN_MAP as ALIGN_MAP,
+    ALIGN_TYPE as ALIGN_TYPE,
+    BLACK as BLACK,
+    BLUE as BLUE,
+    GREEN as GREEN,
+    ITEM_SIZE_MODE_TYPE as ITEM_SIZE_MODE_TYPE,
+    RED as RED,
+    ROUNDRECT_ANTIALIASING_TARGET_RADIUS as ROUNDRECT_ANTIALIASING_TARGET_RADIUS,
+    SHADOW as SHADOW,
+    TRANSPARENT as TRANSPARENT,
+    WHITE as WHITE,
+    AdaptiveTextColor as AdaptiveTextColor,
+    Color as Color,
+    FontDesc as FontDesc,
+    Gradient as Gradient,
+    ImagePasteBlend as ImagePasteBlend,
+    ImageSampling as ImageSampling,
+    ImageTint as ImageTint,
+    ImageTintMode as ImageTintMode,
+    LinearGradient as LinearGradient,
+    Position as Position,
+    RadialGradient as RadialGradient,
+    Size as Size,
+    adjust_color as adjust_color,
+    color_code_to_rgb as color_code_to_rgb,
+    crop_by_align as crop_by_align,
+    get_font_desc as get_font_desc,
+    image_resample_filter,
+    lerp_color as lerp_color,
+    rgb_to_color_code as rgb_to_color_code,
+)
+from .painter_cache import (
+    PAINTER_CACHE_DIR as PAINTER_CACHE_DIR,
+    cleanup_painter_disk_cache,
+    painter_disk_cache_lock as _painter_disk_cache_lock,
+)
+from .text_layout import (
+    _text_bbox_cache as _text_bbox_cache,
+    _text_emoji_size_cache as _text_emoji_size_cache,
+    ascender_top_to_painter_y as ascender_top_to_painter_y,
+    get_text_offset as get_text_offset,
+    get_text_size as get_text_size,
+)
 from .triangle_bg import background_hour, build_triangle_bg, gradient_points
 from .utils import (
     PASTE_RESAMPLE,
@@ -178,80 +224,11 @@ def deterministic_hash(obj: Any) -> str:
 
 # =========================== 基础定义 =========================== #
 
-PAINTER_CACHE_DIR = "data/utils/painter_cache/"
 PAINTER_EMOJI_CACHE_DIR = "data/utils/painter_emoji_cache/"
 PAINTER_EMOJI_CACHE_MAX_ENTRIES = 512
 PAINTER_EMOJI_SOURCE_TIMEOUT_SECONDS = 3
 _painter_emoji_cache_lock = threading.RLock()
 _painter_emoji_bytes_cache: OrderedDict[str, bytes] = OrderedDict()
-
-Color = tuple[int, int, int, int] | tuple[int, int, int] | list[int]
-Position = tuple[int, int]
-Size = tuple[int, int]
-ImageSampling = Literal["nearest", "linear", "catmull_rom"]
-ImageTintMode = Literal["multiply", "recolor"]
-ImagePasteBlend = Literal["paste_lerp", "src_over", "src"]
-
-
-@dataclass(frozen=True)
-class ImageTint:
-    """Backend-neutral color decoration for an image paste.
-
-    ``multiply`` performs component-wise RGBA multiplication. ``recolor`` treats the source
-    alpha as a stencil, replaces RGB with ``color``, and lets the color alpha scale that stencil.
-    Both map directly to the existing Render-IR Image tint modes.
-    """
-
-    color: Color
-    mode: ImageTintMode = "multiply"
-
-    def __post_init__(self) -> None:
-        if len(self.color) not in (3, 4):
-            raise ValueError("image tint color must have 3 or 4 channels")
-        if self.mode not in ("multiply", "recolor"):
-            raise ValueError(f"unsupported image tint mode: {self.mode}")
-
-
-BLACK = (0, 0, 0, 255)
-WHITE = (255, 255, 255, 255)
-RED = (255, 0, 0, 255)
-GREEN = (0, 255, 0, 255)
-BLUE = (0, 0, 255, 255)
-TRANSPARENT = (0, 0, 0, 0)
-SHADOW = (0, 0, 0, 150)
-
-ROUNDRECT_ANTIALIASING_TARGET_RADIUS = 16
-
-ALIGN_MAP = {
-    "c": ("c", "c"),
-    "l": ("l", "c"),
-    "r": ("r", "c"),
-    "t": ("c", "t"),
-    "b": ("c", "b"),
-    "tl": ("l", "t"),
-    "tr": ("r", "t"),
-    "bl": ("l", "b"),
-    "br": ("r", "b"),
-    "lt": ("l", "t"),
-    "lb": ("l", "b"),
-    "rt": ("r", "t"),
-    "rb": ("r", "b"),
-}
-ALIGN_TYPE = Literal[
-    "c",
-    "l",
-    "r",
-    "t",
-    "b",
-    "tl",
-    "tr",
-    "bl",
-    "br",
-    "lt",
-    "lb",
-    "rt",
-    "rb",
-]
 
 _ImageBgPlacement = tuple[Position, Size, tuple[float, float], bool]
 
@@ -298,15 +275,7 @@ def _iter_image_bg_placements(
     raise ValueError(f"unsupported image background mode: {mode}")
 
 
-ITEM_SIZE_MODE_TYPE = Literal["expand", "fixed"]
-
 # =========================== 工具函数 =========================== #
-
-
-@dataclass
-class FontDesc:
-    path: str
-    size: int
 
 
 @dataclass
@@ -317,7 +286,6 @@ class FontCacheEntry:
 
 FONT_CACHE_MAX_NUM = 32
 _font_cache_local = threading.local()
-_painter_disk_cache_lock = threading.RLock()
 
 
 def _get_thread_font_cache() -> dict[str, FontCacheEntry]:
@@ -326,75 +294,6 @@ def _get_thread_font_cache() -> dict[str, FontCacheEntry]:
         cache = {}
         _font_cache_local.font_cache = cache
     return cache
-
-
-def crop_by_align(original_size: int, crop_size: int, align: int) -> tuple[int, int, int, int]:
-    w, h = original_size
-    cw, ch = crop_size
-    assert cw <= w, "Crop width must be smaller than original width"
-    assert ch <= h, "Crop height must be smaller than original height"
-    x, y = 0, 0
-    xa, ya = ALIGN_MAP[align]
-    if xa == "l":
-        x = 0
-    elif xa == "r":
-        x = w - cw
-    elif xa == "c":
-        x = (w - cw) // 2
-    if ya == "t":
-        y = 0
-    elif ya == "b":
-        y = h - ch
-    elif ya == "c":
-        y = (h - ch) // 2
-    return x, y, x + cw, y + ch
-
-
-def color_code_to_rgb(code: str) -> Color:
-    if code.startswith("#"):
-        code = code[1:]
-    if len(code) == 3:
-        return int(code[0], 16) * 16, int(code[1], 16) * 16, int(code[2], 16) * 16, 255
-    elif len(code) == 6:
-        return int(code[0:2], 16), int(code[2:4], 16), int(code[4:6], 16), 255
-    raise ValueError("Invalid color code")
-
-
-def rgb_to_color_code(rgb: Color) -> str:
-    r, g, b = rgb[:3]
-    return f"#{r:02x}{g:02x}{b:02x}"
-
-
-def lerp_color(c1: list[int] | tuple[int, ...], c2: list[int] | tuple[int, ...], t: float) -> tuple[int, ...]:
-    ret = []
-    for i in range(len(c1)):
-        ret.append(max(0, min(255, int(c1[i] * (1 - t) + c2[i] * t))))
-    return tuple(ret)
-
-
-def adjust_color(
-    c: list[int] | tuple[int, ...],
-    r: int | None = None,
-    g: int | None = None,
-    b: int | None = None,
-    a: int | None = None,
-) -> tuple[int, int, int, int]:
-    c = list(c)
-    if len(c) == 3:
-        c.append(255)
-    if r is not None:
-        c[0] = r
-    if g is not None:
-        c[1] = g
-    if b is not None:
-        c[2] = b
-    if a is not None:
-        c[3] = a
-    return c[0], c[1], c[2], c[3]
-
-
-def get_font_desc(path: str, size: int) -> FontDesc:
-    return FontDesc(path=path, size=size)
 
 
 def get_font(path: str, size: int) -> Font:
@@ -425,78 +324,6 @@ def get_font(path: str, size: int) -> Font:
     else:
         entry.last_used = datetime.now()
     return entry.font
-
-
-# Text measurement dominates the render. Profiling one inventory/list request: Font.getsize was
-# 6816 calls / 0.97s — 84% of the 1.15s it takes to walk the widget tree, and 7x the entire native
-# Skia render (0.16s). 518 text nodes measured ~13 times each: every node re-measures the "哇"
-# standard box for its baseline, and layout measures a string again at draw time.
-#
-# Measuring is a PURE function of (face, size, string), so cache it. The cache is keyed by the font
-# FILE and size, not the font object, so all pool threads share the results while each keeps its own
-# FreeTypeFont (sharing the object would serialize every measurement — see ir_builder's font cache).
-_TEXT_BBOX_CACHE_MAX = 50_000
-_text_bbox_cache: dict[tuple, tuple[int, int, int, int]] = {}
-_text_emoji_size_cache: dict[tuple, Size] = {}
-
-
-def _font_key(font: Font) -> tuple:
-    """A cross-thread identity for a font: its file + size. Falls back to the object id for PIL's
-    in-memory default face, which has no path."""
-    path = getattr(font, "path", None)
-    size = getattr(font, "size", None)
-    return (path, size) if isinstance(path, str) else (id(font), size)
-
-
-def _measure_bbox(font: Font, text: str) -> tuple[int, int, int, int]:
-    key = (_font_key(font), text)
-    cached = _text_bbox_cache.get(key)
-    if cached is not None:
-        return cached
-    bbox = font.getbbox(text)
-    # A plain dict is enough: entries are immutable, a duplicate compute under a race is harmless,
-    # and a lock here would re-serialize the very thing this cache exists to parallelize. The bound
-    # matters because the keys carry request text; a wholesale clear is fine since a cold measure is
-    # cheap and correctness never depends on a hit.
-    if len(_text_bbox_cache) >= _TEXT_BBOX_CACHE_MAX:
-        _text_bbox_cache.clear()
-    _text_bbox_cache[key] = bbox
-    return bbox
-
-
-def get_text_size(font: Font, text: str) -> Size:
-    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
-    if emoji.emoji_count(text) > 0:
-        key = (_font_key(font), text)
-        cached = _text_emoji_size_cache.get(key)
-        if cached is None:
-            cached = getsize_emoji(text, font=font)
-            if len(_text_emoji_size_cache) >= _TEXT_BBOX_CACHE_MAX:
-                _text_emoji_size_cache.clear()
-            _text_emoji_size_cache[key] = cached
-        return cached
-    bbox = _measure_bbox(font, text)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
-
-
-def get_text_offset(font: Font, text: str) -> Position:
-    record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
-    bbox = _measure_bbox(font, text)
-    return bbox[0], bbox[1]
-
-
-def ascender_top_to_painter_y(font_path: str, font_size: int, ascender_top_y: int) -> int:
-    """Convert an ``ImageDraw.text`` y (its default ``"la"`` anchor = top of the ascender)
-    into the y ``Painter.text`` expects (it anchors the baseline at ``y + ink-height("哇")``).
-
-    The two differ by ``ascent - ink_height("哇")`` — 4px for the bold font at size 20 — so a
-    layout constant lifted straight from the old ImageDraw code lands the text that much too
-    high. The gap is font- and size-dependent, so derive it from the metrics rather than
-    folding a fudge factor into the constant. Both backends agree: the Skia path resolves
-    ``Painter.text``'s logical top through the same Pillow ink height (IRBuilder's
-    ``cjk_top`` baseline)."""
-    font = get_font(font_path, font_size)
-    return ascender_top_y + font.getmetrics()[0] - get_text_size(font, "哇")[1]
 
 
 def resize_keep_ratio(img: Image.Image, max_size: float, mode: str = "long", scale: int | None = None) -> Image.Image:
@@ -546,98 +373,6 @@ def resize_by_optional_size(img: Image.Image, size: tuple[int, int]) -> Image.Im
     return img.resize(size, Image.Resampling.BILINEAR)
 
 
-class Gradient:
-    def get_colors(self, size: Size) -> np.ndarray:
-        # [W, H, 4]
-        raise NotImplementedError()
-
-    def get_img(self, size: Size, mask: Image.Image = None) -> Image.Image:
-        colors = self.get_colors(size)
-        mode = "RGBA" if colors.shape[-1] == 4 else "RGB"
-        img = Image.fromarray(colors, mode)
-        if mode == "RGB":
-            img = img.convert("RGBA")
-        if mask:
-            assert mask.size == size, "Mask size must match image size"
-            if mask.mode == "RGBA":
-                mask = mask.split()[3]
-            else:
-                mask = mask.convert("L")
-            img.putalpha(mask)
-        return img
-
-
-class LinearGradient(Gradient):
-    def __init__(self, c1: Color, c2: Color, p1: Position, p2: Position, method: str = "combine") -> None:
-        self.c1 = c1
-        self.c2 = c2
-        self.p1 = p1
-        self.p2 = p2
-        self.method = method
-        assert p1 != p2, "p1 and p2 cannot be the same point"
-        assert method in ("combine", "separate")
-
-    def get_colors(self, size: Size) -> np.ndarray:
-        w, h = size
-        pixel_p1 = np.array((self.p1[1] * h, self.p1[0] * w))
-        pixel_p2 = np.array((self.p2[1] * h, self.p2[0] * w))
-        y_indices, x_indices = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
-        coords = np.stack((y_indices, x_indices), axis=-1)  # (H, W, 2)
-        t = None
-        if self.method == "combine":
-            gradient_vector = pixel_p2 - pixel_p1
-            length_sq = np.sum(gradient_vector**2)
-            vector_p1_to_pixel = coords - pixel_p1  # (H, W, 2)
-            dot_product = np.sum(vector_p1_to_pixel * gradient_vector, axis=-1)  # (H, W)
-            t = dot_product / length_sq
-        elif self.method == "separate":
-            vector_pixel_to_p1 = coords - pixel_p1
-            vector_p2_to_p1 = pixel_p2 - pixel_p1
-            # 避免除以0
-            denom = np.where(vector_p2_to_p1 == 0, 1e-9, vector_p2_to_p1)
-            t_dims = vector_pixel_to_p1 / denom
-            # 如果某维度位移为0，则该维度的比例不应参与平均（或者设为0）
-            t = np.sum(np.where(vector_p2_to_p1 == 0, 0, t_dims), axis=-1) / np.sum(vector_p2_to_p1 != 0)
-        assert t is not None
-        t_clamped = np.clip(t, 0, 1)
-        colors = (1 - t_clamped[:, :, np.newaxis]) * self.c1 + t_clamped[:, :, np.newaxis] * self.c2
-        colors = np.clip(colors, 0, 255).astype(np.uint8)
-        return colors
-
-
-class RadialGradient(Gradient):
-    def __init__(self, c1: Color, c2: Color, center: Position, radius: float) -> None:
-        self.c1 = c1
-        self.c2 = c2
-        self.center = center
-        self.radius = radius
-
-    def get_colors(self, size: Size) -> np.ndarray:
-        w, h = size
-        center = np.array(self.center) * np.array((w, h))
-        y_indices, x_indices = np.meshgrid(np.arange(h), np.arange(w), indexing="ij")
-        coords = np.stack((x_indices, y_indices), axis=-1)
-        dist = np.linalg.norm(coords - center, axis=-1) / self.radius
-        dist = np.clip(dist, 0, 1)
-        colors = dist[:, :, np.newaxis] * np.array(self.c1) + (1 - dist)[:, :, np.newaxis] * np.array(self.c2)
-        return colors.astype(np.uint8)
-
-
-@dataclass
-class AdaptiveTextColor:
-    pixelwise: bool = False
-    light: Color = WHITE
-    dark: Color = BLACK
-    threshold: float = 0.4
-
-
-ADAPTIVE_WB = AdaptiveTextColor()
-ADAPTIVE_SHADOW = AdaptiveTextColor(
-    light=(255, 255, 255, 100),
-    dark=(0, 0, 0, 100),
-)
-
-
 # =========================== 绘图类 =========================== #
 
 
@@ -650,15 +385,8 @@ class PainterOperation:
     exclude_on_hash: bool
 
 
-_PIL_RESAMPLE_BY_SAMPLING: dict[ImageSampling, Image.Resampling] = {
-    "nearest": Image.Resampling.NEAREST,
-    "linear": Image.Resampling.BILINEAR,
-    "catmull_rom": Image.Resampling.BICUBIC,
-}
-
-
 def pillow_resample_for_image_sampling(sampling: ImageSampling | None) -> Image.Resampling | int:
-    return PASTE_RESAMPLE if sampling is None else _PIL_RESAMPLE_BY_SAMPLING[sampling]
+    return image_resample_filter(sampling)
 
 
 def _apply_image_tint(image: Image.Image, tint: ImageTint | None) -> Image.Image:
@@ -810,7 +538,7 @@ class CachedGoogleEmojiSource(BaseSource):
         return self._get_cached_stream("discord", str(id), lambda source: source.get_discord_emoji(id))
 
 
-class Painter:
+class Painter(PaintContext):
     def __init__(self, img: Image.Image | None = None, size: tuple[int, int] | None = None) -> None:
         self.operations: list[PainterOperation] = []
         if img is not None:
@@ -821,10 +549,7 @@ class Painter:
             self.size = size
         else:
             raise ValueError("Either img or size must be provided")
-        self.offset = (0, 0)
-        self.w = self.size[0]
-        self.h = self.size[1]
-        self.region_stack = []
+        super().__init__(self.size)
         # Layer frames for push_clip_roundrect/push_mask: (kind, saved_img, pos_in_parent,
         # size, payload) where payload is (radius, corners) for a roundrect clip and the mask
         # ImageSource for a mask. While a layer is open, self.img is a layer-rect-sized buffer
@@ -976,46 +701,7 @@ class Painter:
     @staticmethod
     def cleanup_old_disk_cache(max_age_days: int = 7) -> int:
         """删除超过 max_age_days 天未修改的磁盘缓存文件，返回删除数量"""
-        import time
-
-        cutoff = time.time() - max_age_days * 86400
-        removed = 0
-        with _painter_disk_cache_lock:
-            for p in glob.glob(os.path.join(PAINTER_CACHE_DIR, "*.png")):
-                try:
-                    if os.path.getmtime(p) < cutoff:
-                        os.remove(p)
-                        removed += 1
-                except OSError:
-                    pass
-        return removed
-
-    def set_region(self, pos: Position, size: Size) -> Self:
-        assert isinstance(pos[0], int), "Position x must be integer"
-        assert isinstance(pos[1], int), "Position y must be integer"
-        assert isinstance(size[0], int), "Size width must be integer"
-        assert isinstance(size[1], int), "Size height must be integer"
-        self.region_stack.append((self.offset, self.size))
-        self.offset = pos
-        self.size = size
-        self.w = size[0]
-        self.h = size[1]
-        return self
-
-    def shrink_region(self, dlt: Position) -> Self:
-        pos = (self.offset[0] + dlt[0], self.offset[1] + dlt[1])
-        size = (self.size[0] - dlt[0] * 2, self.size[1] - dlt[1] * 2)
-        return self.set_region(pos, size)
-
-    def expand_region(self, dlt: Position) -> Self:
-        pos = (self.offset[0] - dlt[0], self.offset[1] - dlt[1])
-        size = (self.size[0] + dlt[0] * 2, self.size[1] + dlt[1] * 2)
-        return self.set_region(pos, size)
-
-    def move_region(self, dlt: Position, size: Size = None) -> Self:
-        offset = (self.offset[0] + dlt[0], self.offset[1] + dlt[1])
-        size = size or self.size
-        return self.set_region(offset, size)
+        return cleanup_painter_disk_cache(max_age_days, cache_dir=PAINTER_CACHE_DIR)
 
     def restore_region(self, depth=1) -> Self:
         if not self.region_stack:
@@ -1039,6 +725,8 @@ class Painter:
         fill: Color | LinearGradient | AdaptiveTextColor = BLACK,
         align: str = "left",
         exclude_on_hash: bool = False,
+        *,
+        mask_lerp: bool = False,
     ) -> Self:
         """
         绘制文本
@@ -1050,8 +738,11 @@ class Painter:
             fill: 填充颜色，可以是Color/LinearGradient/AdaptiveTextColor
             align: 对齐方式，'left', 'center', 'right'
             exclude_on_hash: 是否在哈希计算中排除此操作
+            mask_lerp: 使用 ImageDraw 的字形遮罩直接插值 RGBA，仅支持纯色；不启用 emoji 位图
         """
-        return self.add_operation("_impl_text", exclude_on_hash, (text, pos, font, fill, align))
+        return self.add_operation(
+            "_impl_text_mask_lerp" if mask_lerp else "_impl_text", exclude_on_hash, (text, pos, font, fill, align)
+        )
 
     def anchored_text(
         self,
@@ -1116,6 +807,7 @@ class Painter:
         cache_key: str | None = None,
         require_asset_backed: bool = False,
         skip_on_error: bool = False,
+        use_alpha_blend: bool = False,
     ) -> Self:
         """Render a nested ``plot.Canvas`` in isolation, then paste its completed raster.
 
@@ -1140,6 +832,7 @@ class Painter:
                 cache_key,
                 require_asset_backed,
                 skip_on_error,
+                use_alpha_blend,
             ),
         )
 
@@ -1243,6 +936,24 @@ class Painter:
             (sub_img, pos, size, src_rect, sampling, tint),
         )
 
+    def paste_alpha_crop(self, sub_img, pos, src_rect, alpha_floor, exclude_on_hash=False) -> Self:
+        if not 0 <= alpha_floor < 255:
+            raise ValueError("alpha_floor must be between 0 and 254")
+        return self.add_operation("_impl_paste_alpha_crop", exclude_on_hash, (sub_img, pos, src_rect, alpha_floor))
+
+    def _impl_paste_alpha_crop(self, sub_img, pos, src_rect, alpha_floor) -> Self:
+        image = self._resolve_sub_img(sub_img, None, src_rect, "nearest").convert("RGBA")
+        image.putalpha(
+            image.getchannel("A").point(
+                [
+                    0 if value <= alpha_floor else (value - alpha_floor) * 255 // (255 - alpha_floor)
+                    for value in range(256)
+                ]
+            )
+        )
+        self.img.paste(image, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+        return self
+
     def push_clip_roundrect(
         self,
         pos: Position,
@@ -1257,6 +968,9 @@ class Painter:
         backdrop-sampling ops (blurglass, adaptive text color) inside the clip see a
         transparent backdrop; the Skia path clips on the live surface."""
         return self.add_operation("_impl_push_clip_roundrect", exclude_on_hash, (pos, size, radius, corners))
+
+    def push_clip_ellipse(self, pos: Position, size: Size, exclude_on_hash=False) -> Self:
+        return self.add_operation("_impl_push_clip_ellipse", exclude_on_hash, (pos, size))
 
     def pop_clip(self, exclude_on_hash: bool = False) -> Self:
         return self.add_operation("_impl_pop_clip", exclude_on_hash, ())
@@ -1329,6 +1043,28 @@ class Painter:
             "_impl_roundrect", exclude_on_hash, (pos, size, fill, radius, stroke, stroke_width, corners)
         )
 
+    def roundrect_src(self, pos, size, fill, radius, stroke=None, stroke_width=1, exclude_on_hash=False) -> Self:
+        """Replace discrete covered pixels, with an inside outline and no antialiasing."""
+        return self.add_operation(
+            "_impl_roundrect_src", exclude_on_hash, (pos, size, fill, radius, stroke, stroke_width)
+        )
+
+    def drop_shadow_roundrect(self, pos, size, radius, color, sigma, offset=(0, 0), exclude_on_hash=False) -> Self:
+        return self.add_operation(
+            "_impl_drop_shadow_roundrect", exclude_on_hash, (pos, size, radius, color, sigma, offset)
+        )
+
+    def vector_path(self, path, pos=(0, 0), exclude_on_hash=False) -> Self:
+        """Replay an immutable floating-point path; widths and dashes are pixels."""
+        return self.add_operation("_impl_vector_path", exclude_on_hash, (path, pos))
+
+    def vector_text(self, text, pos, exclude_on_hash=False) -> Self:
+        """Replay baseline-anchored vector text, optionally rotated and outlined."""
+        return self.add_operation("_impl_vector_text", exclude_on_hash, (text, pos))
+
+    def arc(self, pos, size, start_angle, end_angle, color, width=1, exclude_on_hash=False) -> Self:
+        return self.add_operation("_impl_arc", exclude_on_hash, (pos, size, start_angle, end_angle, color, width))
+
     def pieslice(
         self,
         pos: Position,
@@ -1368,6 +1104,15 @@ class Painter:
         return self.add_operation(
             "_impl_draw_random_triangle_bg", exclude_on_hash, (time_color, main_hue, size_fixed_rate)
         )
+
+    def _impl_text_mask_lerp(self, text, pos, font, fill, align="left"):
+        if isinstance(font, FontDesc):
+            font = get_font(font.path, font.size)
+        y = pos[1] + self.offset[1] + get_text_size(font, "哇")[1]
+        ImageDraw.Draw(self.img).text(
+            (pos[0] + self.offset[0], y), text, font=font, fill=fill, align=align, anchor="ls"
+        )
+        return self
 
     @staticmethod
     def _adjust_text_overlay_alpha(overlay: Image.Image, color: Color) -> None:
@@ -1697,15 +1442,22 @@ class Painter:
     ) -> Self:
         return self._push_layer("clip", pos, size, (radius, tuple(corners)))
 
+    def _impl_push_clip_ellipse(self, pos: Position, size: Size) -> Self:
+        return self._push_layer("clip", pos, size, None)
+
     def _impl_pop_clip(self) -> Self:
-        overlay, pos_in_parent, size, (radius, corners) = self._pop_layer("clip")
+        overlay, pos_in_parent, size, clip = self._pop_layer("clip")
         mask = Image.new("L", size, 0)
-        ImageDraw.Draw(mask).rounded_rectangle(
-            (0, 0, size[0], size[1]),
-            radius=radius,
-            fill=255,
-            corners=corners,
-        )
+        if clip is None:
+            ImageDraw.Draw(mask).ellipse((0, 0, size[0] - 1, size[1] - 1), fill=255)
+        else:
+            radius, corners = clip
+            ImageDraw.Draw(mask).rounded_rectangle(
+                (0, 0, size[0], size[1]),
+                radius=radius,
+                fill=255,
+                corners=corners,
+            )
         overlay.putalpha(ImageChops.multiply(overlay.getchannel("A"), mask))
         self._composite_layer(overlay, pos_in_parent, size)
         return self
@@ -1849,6 +1601,7 @@ class Painter:
         cache_key: str | None = None,
         require_asset_backed: bool = False,
         skip_on_error: bool = False,
+        use_alpha_blend: bool = False,
     ) -> Self:
         del require_asset_backed  # Native-only purity constraint; Pillow already owns this path.
         try:
@@ -1857,6 +1610,16 @@ class Painter:
                 child = canvas.get_img_sync()
                 if cache_key:
                     put_composed_image_cache(cache_key, child)
+            if use_alpha_blend:
+                return self._impl_paste_with_alpha_blend(
+                    child,
+                    pos,
+                    size,
+                    use_shadow=use_shadow,
+                    shadow_width=shadow_width,
+                    shadow_alpha=shadow_alpha,
+                    sampling=sampling,
+                )
             return self._impl_paste(
                 child,
                 pos,
@@ -1914,6 +1677,52 @@ class Painter:
         overlay = overlay.resize((size[0] + 1, size[1] + 1), Image.Resampling.BICUBIC)
         self.img.alpha_composite(overlay, (pos[0], pos[1]))
 
+        return self
+
+    def _impl_roundrect_src(self, pos, size, fill, radius, stroke=None, stroke_width=1) -> Self:
+        x, y = pos[0] + self.offset[0], pos[1] + self.offset[1]
+        ImageDraw.Draw(self.img).rounded_rectangle(
+            (x, y, x + size[0] - 1, y + size[1] - 1),
+            radius=radius,
+            fill=fill,
+            outline=stroke,
+            width=stroke_width,
+        )
+        return self
+
+    def _impl_drop_shadow_roundrect(self, pos, size, radius, color, sigma, offset=(0, 0)) -> Self:
+        x, y = pos[0] + self.offset[0] + offset[0], pos[1] + self.offset[1] + offset[1]
+        layer = Image.new("RGBA", self.img.size, (255, 255, 255, 0))
+        ImageDraw.Draw(layer).rounded_rectangle(
+            (x, y, x + size[0] - 1, y + size[1] - 1),
+            radius=radius,
+            fill=color,
+        )
+        self.img.alpha_composite(layer.filter(ImageFilter.GaussianBlur(sigma)))
+        return self
+
+    def _impl_vector_path(self, path, pos):
+        from .pillow_vector import draw_path
+
+        draw_path(self.img, path, (pos[0] + self.offset[0], pos[1] + self.offset[1]))
+        return self
+
+    def _impl_vector_text(self, text, pos):
+        from dataclasses import replace
+
+        from .pillow_vector import draw_path
+
+        path = text.path(pos)
+        if text.stroke is not None and text.stroke_width:
+            draw_path(self.img, replace(path, fill=None, stroke=text.stroke, width=text.stroke_width), self.offset)
+        draw_path(self.img, path, self.offset)
+        return self
+
+    def _impl_arc(self, pos, size, start_angle, end_angle, color, width=1) -> Self:
+        x, y = pos[0] + self.offset[0], pos[1] + self.offset[1]
+        ImageDraw.Draw(self.img).arc(
+            (x, y, x + size[0] - 1, y + size[1] - 1), start=start_angle, end=end_angle, fill=color, width=width
+        )
         return self
 
     def _impl_pieslice(

@@ -5,7 +5,7 @@ from io import BytesIO
 from PIL import Image
 import pytest
 
-from src.sekai.base import painter
+from src.sekai.base import emoji_layout, painter, text_layout
 
 
 def _image(size=(8, 4), mode="RGBA") -> Image.Image:
@@ -150,17 +150,17 @@ def test_cached_google_emoji_source_covers_cache_fetch_none_error_and_session_cl
 
 def test_font_bbox_cache_and_text_metrics_cover_hits_clear_and_emoji(monkeypatch) -> None:
     font = painter.ImageFont.load_default()
-    painter._text_bbox_cache.clear()
-    first = painter._measure_bbox(font, "abc")
-    assert painter._measure_bbox(font, "abc") is first
-    monkeypatch.setattr(painter, "_TEXT_BBOX_CACHE_MAX", 1)
-    painter._measure_bbox(font, "def")
-    assert len(painter._text_bbox_cache) == 1
-    assert painter.get_text_offset(font, "abc") == painter._measure_bbox(font, "abc")[:2]
-    assert painter.get_text_size(font, "abc")[0] > 0
+    text_layout._text_bbox_cache.clear()
+    first = text_layout._measure_bbox(font, "abc")
+    assert text_layout._measure_bbox(font, "abc") is first
+    monkeypatch.setattr(text_layout, "_TEXT_BBOX_CACHE_MAX", 1)
+    text_layout._measure_bbox(font, "def")
+    assert len(text_layout._text_bbox_cache) == 1
+    assert text_layout.get_text_offset(font, "abc") == text_layout._measure_bbox(font, "abc")[:2]
+    assert text_layout.get_text_size(font, "abc")[0] > 0
 
     monkeypatch.setattr(painter.emoji, "emoji_count", lambda _text: 1)
-    monkeypatch.setattr(painter, "getsize_emoji", lambda _text, font: (12, 13))
-    painter._text_emoji_size_cache.clear()
-    assert painter.get_text_size(font, "🙂") == (12, 13)
-    assert painter.get_text_size(font, "🙂") == (12, 13)
+    monkeypatch.setattr(emoji_layout, "emoji_text_size", lambda font, _text: (12, 13))
+    text_layout._text_emoji_size_cache.clear()
+    assert text_layout.get_text_size(font, "🙂") == (12, 13)
+    assert text_layout.get_text_size(font, "🙂") == (12, 13)

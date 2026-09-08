@@ -2,6 +2,21 @@
 
 This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is mirrored as `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md`.
 
+## Native-only service (2026-09-07)
+
+Production dependencies exclude Pillow, Matplotlib and Pilmoji; they are in the development-only
+`legacy-renderer` group. Service routes and heavy workers require a native payload and never invoke
+legacy composers. Missing/stale native wheels or unresolved text fonts fail startup; setting
+`HARUKI_DRAWING__USE_SKIA_PLOT=false` also fails startup. Roll back the image to restore an older backend.
+Legacy compose functions remain for pixel-reference tools, not service recovery. References to fail-open
+below describe the earlier migration and must not be reintroduced into production routes.
+
+Release: `scripts/skia_release_gate.py` runs Linux cold/pure-service and strict warm parity; tag publishing
+requires `.github/workflows/renderer-release.yml` and uses its validated wheel. The configured fixture
+runner/paths are mandatory, never silently skipped. Private MySekai and uncaptured symbol/stamps are
+user-excluded diagnostic cases, not release blockers. The private real file was explicitly authorized
+for migration in this task and remains untracked; preserve it and its implementation.
+
 ## Project Overview
 
 Haruki Drawing API is a FastAPI-based image generation service for Project Sekai (プロセカ). It accepts JSON payloads and returns rendered PNG/JPG images (player profiles, cards, events, music, gacha, scores, charts, MySekai, etc.). It requires **CPython 3.14 free-threaded** (`-X gil=0`, a.k.a. 3.14t) and uses Granian as the ASGI server.
@@ -82,8 +97,9 @@ Skia chapter), and every other endpoint re-renders.
    `get_image_asset_signature()` calls (what `honor/drawer.py` does — fourteen paths by name, correct today and
    silently wrong the day someone adds a fifteenth; **prefer the collector**). Without them, an asset **replaced** at a
    path the request already names — or one that finally **arrives** after a `?` placeholder was cached in its place —
-   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` still keys on the
-   request alone; it gets away with it only because its key carries a minute bucket, so it self-heals within 60s.
+   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` keys on the JSON request, collected asset signatures, and the exact displayed
+   start/end/status strings. Its native preparation lookup reuses a fragment before asset loading/layout;
+   the footer remains outside the fragment, and countdown changes within a minute invalidate the entry.
 
 `tests/test_asset_signature_cache_key.py` pins both. A new page/fragment cache must satisfy it.
 
@@ -101,15 +117,141 @@ in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_imag
 `Painter`'s own disk cache (`PAINTER_CACHE_DIR`, swept via `Painter.cleanup_old_disk_cache()`).
 
 Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns exactly
-what `get_runtime_cache_stats()` builds, which is six keys: `image_cache`, `thumbnail_cache`,
-`composed_image_cache`, `composed_image_disk_cache`, `skia_payload_cache` (a *fourth* in-memory pool, owned by
-the Skia chapter below — the three caches in the table above are not the whole dump), and
+what `get_runtime_cache_stats()` builds, which is eight keys: `image_cache`, `thumbnail_cache`,
+`composed_image_cache`, `composed_image_disk_cache`, `native_fragment_cache` (bounded native sub-page rasters; see below), and
+`skia_payload_cache` (another in-memory pool, owned by
+the Skia chapter below — the three caches in the table above are not the whole dump), `native_renderer_cache`
+(the Rust Moka raster/dimension caches, or `available=false` when the extension is absent), and
 `custom_profile_caches` (the custom-profile renderer's process pools in
 `src/sekai/profile/custom_profile/cache.py`: parsed TMP metadata tables, glyph SDF/contours, sprite/atlas decodes —
 keyed with file signatures like everything else, sized by `custom_profile_glyph_cache_*` /
 `custom_profile_sprite_cache_*`, and unlike the other cache knobs **on by default**: the renderer's 1.5s+ cold path
 *was* these caches dying with each request). The `Painter` disk cache has no
 `stats()` and appears nowhere in `src/core/health.py`; to size it you have to look at the directory.
+
+### Native fragment cache
+
+`src/sekai/skia_renderer/fragment_cache.py` stores native-rendered **fragments**, never complete
+clock-bearing pages. Explicit `CanvasImageBox.cache_key` callers retain the same request/layout/time-key
+contract as Pillow's composed cache. Fast hits also check natural size, renderer/font configuration, drawing
+code and every recorded asset/font signature; TriangleBg fragments additionally check the actual background
+hour. A direct subtree (honor badge) uses its complete IR as key material. Asset-backed subtrees and
+native-generated placeholder bytes
+are eligible; arbitrary encoded inputs and Pillow rasters remain ineligible. Placeholder-bearing callers
+must include missing-asset signatures so arrival invalidates the key. Shared dependency stats are reused
+only within one IRPainter scene. Pillow-bicubic fragments cache their final resized raster (keyed by
+destination size and filter); other filters keep the natural raster to preserve blend rounding.
+On insertion, the optional native `decode_fragment_rgba` decoder materializes immutable premultiplied
+RGBA bytes once; the same bounded pool owns and charges those bytes. Old extensions and fragments over
+64 MiB keep PNG transport. Never unpremultiply these cached pixels: that can change alpha edges.
+Integer 1:1 cached placements draw directly; already-resized Pillow-bicubic fragments use nearest
+placement, matching RasterSubscene. Asset-backed PreResizedImageBox caches the two-stage result,
+including the intermediate size, final size, filter and live asset signature in the key.
+`require_asset_backed=True` placement still emits assets directly. Cache misses preserve native
+RasterSubscene sampling semantics; do not render an isolated fragment as a plain root and introduce another
+asset resampling pass. The honor watermark remains outside the cached badge and is redrawn per request.
+
+`base/canvas_cache.py::prepare_cached_canvas` can query this same pool before a child factory
+loads assets or builds its widget tree. Native callers pass an async page factory to
+`render_canvas_payload`; the request-scoped preparation context supplies renderer options and
+validates dependencies. A hit returns dimensions plus a strong immutable fragment reference,
+so concurrent eviction/clear/expiry cannot turn the in-flight child into an empty render. A miss
+builds the original shared tree. Reference builders have no native preparation context and always
+build that tree. Prepared children must be embedded through CanvasImageBox in the same native
+request; misuse fails explicitly. Keys include all request/layout/time inputs and missing-asset
+signatures, plus renderer context and code. Natural-size fragments support downstream resizing;
+page time/background/watermark stay outside the entry cache. No separate size/index pool exists.
+
+This is a separate process pool using `composed_image_cache_size`, `composed_image_cache_max_mb` and TTL;
+those knobs now size three independent pools (Pillow composed, honor response, native fragment). Weight is at
+least width × height × 4 plus dependency metadata. `/cache/stats` exposes `native_fragment_cache`, and
+`clear_runtime_memory_caches` clears it. Strict cold parity bypasses fragment lookups; warm parity must run
+on every change here. Benchmark **full responses**: `Case.route_watermark` must also be applied to Pillow,
+or honor's footer is charged only to Skia and makes the comparison invalid.
+
+### Native triangle background tiles
+
+Only a scene's top-level, full-size, untransformed `TriangleBg` may reuse immutable raster tiles.
+The tiles share the existing Rust raster pool with resized assets; there is no extra cache budget or
+response cache. `HARUKI_SKIA_RASTER_CACHE_MB` / `_MAX_ENTRY_MB` also govern these tiles, and zero disables
+reuse. Each tile is at most 512 rows and obeys the per-entry byte limit; admitting one background requires
+its pixels plus conservatively repeated key metadata to fit within one quarter of the shared pool.
+Cached tile references also count against the current scene's remaining memory budget. Oversized,
+scaled, nested or clipped backgrounds use the original drawing path.
+
+The key contains canvas dimensions, the resolved palette bytes and every caller-provided triangle field.
+It does not round the clock or assume the scatter is constant: fractional-hour color changes and hourly
+scatter changes invalidate whenever they change drawing inputs. Cache misses draw the original complete
+background, then capture tile snapshots from it; rendering translated tile gradients would change rounding.
+All tiles must be available before replay starts, and strong image references survive concurrent eviction.
+Foreground widgets, glass, countdowns and watermarks are drawn afterward on every request.
+`/cache/stats` → `native_renderer_cache` exposes `background_cache_hits/misses/bypasses`; tile entries and
+bytes are included in `raster_cache_entries/bytes`, and the existing runtime clear removes them.
+
+### Native text and fallback SDF caches
+
+Ordinary page text uses main's native Skia glyph rendering with shared BASIC layout metrics.
+Embedded NativeSubtree canvases retain native FreeType BASIC, matching the Pillow-composed
+fragments they replace; explicit mask-lerp text also retains BASIC. The event_list page keeps
+BASIC because its existing pixel budget is tighter than main's Skia glyph drift.
+This compatibility choice lives in the renderer, not duplicated drawer layout. Cache hits and
+misses must use the same text policy; do not globally change all fragments to Skia glyphs.
+
+FreeType BASIC text masks and their metrics are reused in a bounded Rust Moka pool. Color,
+position, baseline placement and mask-lerp blending remain outside the cache. Keys carry the
+resolved font path and live signature, exact font size and text; a hit still checks the current
+request's pixel budget. `HARUKI_SKIA_TEXT_MASK_CACHE_MB` defaults to 64 MiB; `0` disables it.
+This is an independent per-process budget, read once when the pool is initialized. Mutable
+FreeType faces remain thread-local. `/cache/stats` → `native_renderer_cache` exposes
+`text_mask_cache_max_bytes/entries/bytes/hits/misses/bypasses`; the normal runtime cache clear
+also clears masks. A pinned in-flight mask survives eviction. This is not a whole-page cache.
+
+Custom-profile source-font lookups can cache a **confirmed cmap absence** as immutable
+`SourceGlyphAbsent` metadata in the existing `GLYPH_CONTOUR_CACHE`, under a separate key namespace.
+The key carries the absolute resolved source path, live `(mtime_ns, size)` and codepoint; cmap membership
+is independent of font size. FreeType still runs first, so recovered native metrics take precedence.
+Only a successfully parsed FontTools cmap can publish the marker, after a second matching file signature;
+import/read/parse failures are never persisted. FontTools handles remain request-local and are reloaded
+when their signature changes. Marker weight includes the path/key metadata; glyph-cache limits, stats
+and clear/disable behavior are unchanged. This avoids rebuilding a large cmap on every request merely
+to rediscover that a font lacks a character such as `〜`; it never substitutes or removes the character.
+
+Source-font readers now come from `custom_profile/source_font.py`: lazy FontTools tables,
+index-based lookup labels for TrueType/CID CFF, and selected TrueType glyf/hmtx/vmtx entries.
+They preserve FontTools' composite handling, `lsb - xMin` correction, fractional CFF commands,
+and the original cmap choice. Named CFF fonts keep StandardEncoding names for seac; CFF2/VARC
+and variable TrueType retain the generic reader. These are drawing-only readers, not font editors.
+One reader is reused within the request's existing TMPFontLibrary; its context manager locks
+all table/cursor access because reference rendering can parallelize layers of a single card.
+It reads bytes into memory so lazy CFF reference cycles cannot retain OS file descriptors.
+
+`TMPGlyphTable` is a read-only Mapping inside the existing bounded TMP metadata entry. It captures
+raw rows when the asset signatures are recorded and materializes frozen TMPGlyphMetrics only
+when accessed. Keys never change; first-value publication is synchronized and failed conversions
+are not retained as successful metrics. Metadata invalidation/clear and the eight-entry limit
+are unchanged; do not add a second pool or defer asset file reads beyond signature capture.
+
+The optional native `source_outline_sdf` helper evaluates the original NumPy float32 distance/winding
+loop on already flattened FontTools contours. It does not substitute Skia/FreeType glyph geometry.
+It uses separate float32 operations, wrapping int16 winding and ties-to-even gray8 quantization.
+Inputs are bounded to 16,777,216 pixels, 262,144 points, 500,000,000 point-pixel operations and
+finite coordinates within 1e9; oversized/unsupported Python calls retain the original NumPy path.
+There is no new cache or IR node, so IR capability stays 28. Rebuild the wheel to get this helper;
+older extensions keep the NumPy calculation. Cold/warm parity AND before/after PNG checks are
+required: current Pillow and Skia share this arithmetic helper, so their agreement alone is insufficient.
+
+Custom-profile fallback glyphs now share `GLYPH_SDF_CACHE` with dynamic glyphs. Their values
+retain exact float32 samples in immutable `FloatField` bytes; charge four bytes per sample plus
+key metadata, never the dynamic gray8 estimate. Keys include mask dimensions/content digest,
+spread, threshold and algorithm version. They use the existing `custom_profile_glyph_cache_*`
+settings, stats and clear lifecycle; no additional glyph pool or dependency is introduced.
+Scene/layer memory checks still happen before lookup. New glyphs still execute the original
+EDT algorithm on a miss.
+
+The cold parity CLI and fresh no-Pillow checks explicitly disable these text/glyph caches before
+imports so a hit cannot hide broken computation. Warm parity keeps them enabled and clears them
+through the public runtime entry point for its cold reference. Run both after changes to either
+cache. Warm throughput must be measured separately from correctness gates.
 
 ## Configuration
 
@@ -154,7 +296,7 @@ For deployment:
 ## Skia Backend (`rust/haruki_skia_renderer` + `src/sekai/skia_renderer/`)
 
 Drawing endpoints render through a Rust + Skia extension (PyO3, built with maturin). Python builds a widget
-tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pillow remains as the fallback.
+tree, `IRPainter` lowers it to a JSON IR, and Rust rasterizes and encodes it. Pillow is retained only as a development pixel reference.
 
 **IR-first rule.** The widget tree (`src/sekai/base/plot.py`) is the *only* layout carrier for a drawing
 endpoint. Both backends draw the same tree. If a primitive is missing, add it to `Painter` **and** to
@@ -174,41 +316,50 @@ rule:
   stale warning cost real time.)
 - `src/sekai/profile/custom_profile/skia.py` — no plot.py tree exists to lower: the layout carrier is the Unity
   card JSON. `PNGRenderer.build_native_contents()` supplies the shared z-order and its asset/layout helpers feed
-  backend-neutral Card/General/Collection display lists plus Honor subtrees. A successful native scene is strictly
-  asset/font-backed: static images and shapes stay as paths, Card/General/omikuji widgets replay their display
-  lists, and Honor/HonorDeck splice shared subtrees. It contains no `mem:` image and never calls
-  `render_content_for_card()` or another Pillow pixel composer; an unresolved visible element declines the whole
-  scene before Rust runs. Also remember the canvas base is OPAQUE WHITE (`render_card` starts from white, not
-  transparent).
-  TMP text keeps Python's TMP parsing/layout oracle, using source-font/FontTools metrics rather than Pillow on the
-  native attempt. Strict plain text uses IR `Text`; static-atlas and dynamic/fallback glyphs use `SdfAtlasQuad`
-  (capability 18) and `SdfFontQuad` (capability 19). Rust owns field generation, Pillow-compatible L/BICUBIC
-  resize/warp, shading, and the source-font SDF cache. The legacy A8 `SdfQuad` path remains only for the Pillow
-  compatibility renderer and is rejected by the successful native scene. The scalar derivation exists once
-  (`tmp_sdf_shading_scalars`) and both shade implementations match bit-comparably (banker's rounding, f64 scalars
-  cast to f32 per-pixel; golden fixtures in `rust/.../tests/fixtures`, regenerated by
-  `scripts/gen_sdf_quad_golden.py` whenever the shading math changes). `pillow_rrect` (capability 20) generates
-  Pillow's discrete rounded-rectangle alpha mask in Rust for StoryFavorite banners.
+  backend-neutral Card/General/Collection display lists plus Honor subtrees. Static images and shapes stay as
+  paths; Card/General/omikuji widgets replay shared display lists, and Honor/HonorDeck splice shared subtrees.
+  Native text may transport immutable A8/float32 scalar glyph fields through `mem:`; these are TMP data, not
+  Pillow RGBA rasters. A successful native render must not call a Pillow pixel composer. An unresolved visible
+  element rejects the request. The canvas base is OPAQUE WHITE.
+  TMP parsing and logical geometry remain shared. Native FreeType metrics preserve the legacy BASIC layout.
+  `SdfQuad` shades neutral glyph fields with native bicubic resize/warp; optional `SdfAtlasQuad` and `SdfFontQuad`
+  descriptors defer field generation from assets/fonts. Keep the audited scalar path's shading and per-character
+  rotation order: replacing it with a different native primitive can still change pixels. The scalar derivation
+  exists once in `tmp_sdf_shading_scalars`; regenerate Rust golden fixtures with `scripts/gen_sdf_quad_golden.py`
+  when its math changes. Native cached fragments use raw premultiplied RGBA transport (capability 29), avoiding
+  lossy unpremultiply/premultiply round trips through PNG at translucent edges.
 
 Card List is **not** one of them any more — it and Card Box have no dedicated scene builder and draw the shared
 `plot.py` widget tree like everything else.
 
-**Fail-open.** A missing, stale, or broken extension must degrade to Pillow, never 500. `try_render_*_payload`
-returns `None` to mean "Pillow, please". Never let a Skia error escape.
+**Pillow retirement is a separate gate.** `IRPainter` and `Painter` now share the pure
+`base/paint_context.py` interface; colors, image refs, font metrics and text layout no longer
+import the Pillow renderer on the native path. `scripts/skia_no_pillow.py` exercises each real
+payload in a fresh process with all `PIL` imports rejected and requires a successful native
+render. `skia_parity_sweep.py --strict` requires this evidence as well as pixel parity.
+See `docs/pillow-retirement-status.md` for current blockers; a `skia` backend label alone does
+not authorize deleting the fallback. Event/vlive list entries now use nested Canvas trees;
+these entries no longer use the old composed-image disk tier (Pillow still has the bounded
+in-memory fragment cache, and native rendering uses native asset caches).
+
+**Native required.** Missing/stale extensions fail startup. `try_render_*_payload` may return `None`
+for a declined render; service routes and heavy workers reject it through `require_native_payload`.
+Never reintroduce a service call to a legacy composer. Reference tools may still use the Pillow implementations.
 
 **One switch, env-only** (`HARUKI_` prefix, `__` nesting): `HARUKI_DRAWING__USE_SKIA_PLOT` (default on). It is the
-only Skia gate — the older per-endpoint gates (`use_skia_card_list`, `use_skia_card_box`) are gone. Rollback =
-flip the env var and restart; the image itself is unchanged. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
+only Skia gate — the older per-endpoint gates (`use_skia_card_list`, `use_skia_card_box`) are gone.
+The service requires it to remain true; false refuses startup. Roll back to an earlier image to restore
+an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
 `HARUKI_SKIA_SDF_FONT_CACHE_MB`, `HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_TEXT_HINTING`,
 `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **20**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 20). A too-old
-extension raises `ImportError` and fails open. **When you add an IR node, bump BOTH sides and the two CI smoke
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **29**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 29). A too-old
+extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides and the two CI smoke
 assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
-self-check needs **no** edit: it greps `REQUIRED_NATIVE_IR_CAPABILITY` out of `canvas.py` and compares the installed
-wheel against that (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
+self-check needs **no** edit: it calls `load_native_renderer()`, which compares the installed
+wheel against `REQUIRED_NATIVE_IR_CAPABILITY` (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
 the image self-check and then silently fell back to Pillow at runtime). Four hardcoded copies of the
 number already exist (Rust, canvas.py, and the two CI assertions) — do not add a fifth.
 
@@ -279,8 +430,9 @@ collision between two *different* payloads (there is one payload per endpoint) �
 read the key material.
 
 Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
-an index) and installed conditionally by the Docker build. Wheels are Python-version-specific: **upgrading
-Python means rebuilding wheels first**, otherwise the image silently falls back to Pillow.
+an index). Docker requires exactly one matching wheel. Tag releases use the wheel produced by the full
+`renderer-release.yml` validation job. Wheels are Python-version-specific: **upgrading Python means
+rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 **Traps that have already cost real debugging time:**
 
@@ -297,8 +449,8 @@ Python means rebuilding wheels first**, otherwise the image silently falls back 
 - **Lazy image pixel operations belong on `ImageBox` / `Painter.paste*`.** Use `source_rect=(x0,y0,x1,y1)`,
   explicit `sampling` (`nearest|linear|catmull_rom`), and `ImageTint(..., "multiply"|"recolor")` to keep an
   `AssetImageRef` lazy through crop/resize/tint. Match the legacy pipeline, not just its last filter: misc alias
-  jackets and birthday calendar icons intentionally remain eager because padding makes them two-stage
-  BILINEAR→BICUBIC resizes (92→84 and 40→32); one lazy linear draw is not pixel-equivalent.
+  jackets and birthday calendar icons use `PreResizedImageBox` to preserve their two-stage
+  BILINEAR→BICUBIC resizes (92→84 and 40→32) lazily; one linear draw is not pixel-equivalent.
 - **`Painter.text` anchors the baseline** at `y + ink-height("哇")`; `ImageDraw.text` anchors the ascender top.
   A y-constant lifted from old ImageDraw code lands the text `ascent - ink_height` too high.
 - **There are THREE paste primitives, not two.** Pillow's `paste(im, pos, im)` lerps the destination alpha toward

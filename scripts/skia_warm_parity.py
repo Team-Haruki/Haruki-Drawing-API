@@ -1,8 +1,8 @@
 """Warm-cache parity: does a cache HIT return the same image a cold render would?
 
-`skia_parity_sweep.py` -- the only pixel-level gate this repo has -- calls `bypass_caches()` and
-**deliberately turns every composed / disk / Skia-payload cache off** so its timings are honest.
-So the 63/63 it reports says "re-rendering from scratch is correct". It says *nothing* about the
+`skia_parity_sweep.py` calls `bypass_caches()` and deliberately turns composed / disk /
+Skia-payload caches off for correctness isolation; it measures no timings. A passing cold
+sweep says "re-rendering from scratch is correct". It says *nothing* about the
 path production actually takes, which is a cache hit. A key that omits something the output depends
 on serves a different-but-perfectly-valid image, and nothing anywhere errors.
 
@@ -36,7 +36,7 @@ WHAT THIS DOES NOT COVER -- do not read a green run as more than it is:
     deliberate 70s wait: the content moves with the clock, the warm render moves with it, and a
     warm render equals a cold render taken at the same instant -- nothing is frozen. That was a
     one-off. Pinning `now` behind a test hook would let this harness cover them properly.
-  * One payload per endpoint means a KEY COLLISION between two different payloads cannot show up
+  * Most endpoints have one payload, so a KEY COLLISION between different payloads may not show up
     here. That has to come from reading the key material, not from this sweep.
   * Nothing on disk is mutated, so asset-staleness (an asset file edited under a live cache) is
     untested. Two separate one-off probes covered that: replacing a card thumbnail under a hot cache
@@ -57,6 +57,7 @@ os.environ.setdefault("HARUKI_BG_TEST_HOUR", "12.0")
 
 import argparse
 import asyncio
+from collections import Counter
 import hashlib
 import importlib
 from io import BytesIO
@@ -80,8 +81,8 @@ from scripts.skia_parity_sweep import (
     _load_payload,
     setup,
 )
+from src.core.path_safety import resolve_cli_path
 from src.sekai.base import utils as base_utils
-from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 
 OUT_DIR = REPO_ROOT / "out" / "warm-parity"
 
@@ -89,25 +90,7 @@ OUT_DIR = REPO_ROOT / "out" / "warm-parity"
 def clear_all_caches() -> None:
     """Empty every layer a render can hit -- WITHOUT tearing down the thread pool the way
     ``shutdown_utils()`` does, because we have to keep rendering afterwards."""
-    with base_utils._image_cache_lock:
-        base_utils._image_cache.clear()
-        base_utils._image_cache_total_bytes = 0
-    with base_utils._thumb_cache_lock:
-        base_utils._thumb_cache.clear()
-        base_utils._thumb_cache_total_bytes = 0
-    base_utils._composed_image_cache.clear()
-    base_utils._load_asset_image_ref_cached.cache_clear()
-    clear_skia_payload_cache()
-
-    # The native Moka raster cache lives in the Rust process, not in any Python dict.
-    try:
-        from src.sekai.skia_renderer.canvas import load_native_renderer
-
-        native = load_native_renderer()
-        if native is not None and hasattr(native, "clear_renderer_caches"):
-            native.clear_renderer_caches()
-    except Exception:
-        pass
+    base_utils.clear_runtime_memory_caches()
 
 
 def _hash_image(img: Image.Image) -> str:
@@ -174,6 +157,7 @@ async def _render_cold_reference(bound_case: tuple, backend: str, row: dict) -> 
         row["status"] = "no-path"
         return
     row["cold"] = first
+    row["cold_repeat"] = second
     row["status"] = "pending" if first == second else "nondeterministic"
 
 
@@ -252,15 +236,56 @@ async def run(cases: list[Case], backend: str, mysekai_real) -> list[dict]:
     return list(rows.values())
 
 
+# The captured planner intentionally renders a live countdown. Other nondeterminism is
+# unexpected and blocks release until investigated; never exempt an arbitrary drifting row.
+_RELEASE_LIVE_CLOCK_CASES = {"event_planner"}
+
+
+def strict_warm_issues(rows: list[dict], cases=CASES) -> list[str]:
+    registered = {case.name: case for case in cases}
+    required = {(case.name, backend) for case in cases if case.release_required for backend in ("skia", "pillow")}
+    seen = Counter((row.get("endpoint"), row.get("backend")) for row in rows)
+    issues = [f"missing warm result: {name}/{backend}" for name, backend in sorted(required - seen.keys())]
+    for (name, backend), count in seen.items():
+        if name not in registered or backend not in {"skia", "pillow"}:
+            issues.append(f"unexpected warm result: {name}/{backend}")
+        if count != 1:
+            issues.append(f"duplicate warm result: {name}/{backend}")
+    for row in rows:
+        name, backend = row.get("endpoint"), row.get("backend")
+        if (name, backend) not in required:
+            continue
+        hashes = [row.get(key) for key in ("cold", "warm_fwd", "warm_rev", "cold_after")]
+        if row.get("status") == "ok" and all(isinstance(value, str) and value for value in hashes):
+            if len(set(hashes)) == 1:
+                continue
+        if row.get("status") == "nondeterministic" and name in _RELEASE_LIVE_CLOCK_CASES:
+            first = row.get("cold")
+            other = row.get("cold_after", row.get("cold_repeat"))
+            if isinstance(first, str) and first and isinstance(other, str) and other and first != other:
+                continue
+        issues.append(f"failed warm result: {name}/{backend} ({row.get('status')})")
+    return issues
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
+    ap.add_argument("--strict", action="store_true", help="Require both backends for every public release case")
+    ap.add_argument("--out-dir", type=Path, default=OUT_DIR)
     ap.add_argument("--backend", default="both", choices=("skia", "pillow", "both"))
     args = ap.parse_args()
 
     setup()
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    mysekai_real = _load_mysekai_real()
+    args.out_dir = resolve_cli_path(args.out_dir)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        mysekai_real = _load_mysekai_real()
+    except Exception as exc:
+        if not args.strict:
+            raise
+        print(f"Private MySekai diagnostic unavailable: {exc}")  # noqa: T201
+        mysekai_real = None
 
     names = {n.strip() for n in args.only.split(",") if n.strip()}
     cases = [c for c in CASES if not names or c.name in names]
@@ -282,11 +307,18 @@ def main() -> int:
             if r["status"] == "error":
                 print(f"  ERROR {r['endpoint']}: {r.get('error')}")  # noqa: T201
 
-    results = OUT_DIR / "results.json"
-    results.write_text(json.dumps({"cases": all_rows}, ensure_ascii=False, indent=2), encoding="utf-8")
+    issues = strict_warm_issues(all_rows) if args.strict else []
+    if args.strict and (args.only or args.backend != "both"):
+        issues.append("strict warm release validation requires the full sweep and both backends")
+    results = resolve_cli_path(args.out_dir / "results.json")
+    results.write_text(json.dumps({"cases": all_rows, "strict_issues": issues}, ensure_ascii=False, indent=2))
     failures = sum(1 for r in all_rows if r["status"] in ("CACHE-DRIFT", "error"))
     print(f"\nresults: {results}")  # noqa: T201
     print(f"CACHE-DRIFT + errors: {failures}")  # noqa: T201
+    if args.strict:
+        for issue in issues:
+            print(issue)  # noqa: T201
+        return 1 if issues else 0
     return 1 if failures else 0
 
 

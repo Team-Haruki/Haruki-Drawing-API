@@ -118,7 +118,7 @@ async def test_event_list_entry_composition_covers_placeholder_and_full_layout(m
 
     monkeypatch.setattr(Canvas, "get_img", fake_get_img)
     style1, style2 = _styles()
-    assert await drawer._compose_event_list_entry_image(_event(), {}, "upcoming", style1, style2) is expected
+    assert await drawer._build_event_list_entry_canvas(_event(), {}, "upcoming", style1, style2).get_img() is expected
     full = _event(
         event_banner_path="banner",
         event_cards=[_card(1), _card(2), _card(3)],
@@ -133,38 +133,34 @@ async def test_event_list_entry_composition_covers_placeholder_and_full_layout(m
         "unit": _image(),
         "chara": _image(),
     }
-    assert await drawer._compose_event_list_entry_image(full, loaded, "current", style1, style2) is expected
+    assert await drawer._build_event_list_entry_canvas(full, loaded, "current", style1, style2).get_img() is expected
 
 
 @pytest.mark.anyio
-async def test_event_list_entry_cache_covers_memory_disk_and_render_miss(monkeypatch) -> None:
+async def test_event_list_entry_delegates_native_cache_and_preserves_key(monkeypatch) -> None:
+    from src.sekai.base import canvas_cache
+
     style1, style2 = _styles()
-    event = _event()
-    memory, disk, rendered = _image((1, 1)), _image((2, 2)), _image((3, 3))
-    monkeypatch.setattr(drawer, "_build_event_list_entry_cache_key", lambda *_args: "key")
-    monkeypatch.setattr(drawer, "get_composed_image_cached", lambda _key: memory)
-    assert await drawer._get_event_list_entry_image(event, NOW, style1, style2) is memory
+    canvas = Canvas(w=3, h=3)
+    observed = []
 
-    writes: list[tuple] = []
-    monkeypatch.setattr(drawer, "get_composed_image_cached", lambda _key: None)
-    monkeypatch.setattr(drawer, "get_composed_image_disk_cached", lambda *_args: disk)
-    monkeypatch.setattr(drawer, "put_composed_image_cache", lambda *args: writes.append(args))
-    assert await drawer._get_event_list_entry_image(event, NOW, style1, style2) is disk
+    async def prepare(key, factory):
+        observed.append(key)
+        return await factory()
 
-    monkeypatch.setattr(drawer, "get_composed_image_disk_cached", lambda *_args: None)
-    monkeypatch.setattr(drawer, "_preload_event_entry_assets", lambda _event: _async_value({}))
-    monkeypatch.setattr(drawer, "_compose_event_list_entry_image", lambda *_args: _async_value(rendered))
-    monkeypatch.setattr(drawer, "put_composed_image_disk_cache", lambda *args: writes.append(args))
-    assert await drawer._get_event_list_entry_image(event, NOW, style1, style2) is rendered
-    assert writes[-2] == ("key", rendered)
-    assert writes[-1] == (drawer._EVENT_LIST_ENTRY_CACHE_NAMESPACE, "key", rendered)
+    monkeypatch.setattr(canvas_cache, "prepare_cached_canvas", prepare)
+    monkeypatch.setattr(drawer, "_build_event_list_entry_cache_key", lambda *_: "key")
+    monkeypatch.setattr(drawer, "_preload_event_entry_assets", lambda *_: _async_value({}))
+    monkeypatch.setattr(drawer, "_build_event_list_entry_canvas", lambda *_: canvas)
+    assert await drawer._get_event_list_entry_canvas(_event(), NOW, style1, style2) == (canvas, "key")
+    assert observed == ["key"]
 
 
 @pytest.mark.anyio
 async def test_event_list_canvas_compose_and_native_routes_cover_empty_enabled_and_disabled(monkeypatch) -> None:
     request = EventListRequest(event_info=[_event()])
     monkeypatch.setattr(drawer, "request_now", lambda _timezone: NOW)
-    monkeypatch.setattr(drawer, "_get_event_list_entry_image", lambda *_args: _async_value(_image()))
+    monkeypatch.setattr(drawer, "_get_event_list_entry_canvas", lambda *_args: _async_value((Canvas(w=12, h=8), "key")))
     assert isinstance(await drawer._build_event_list_canvas(request), Canvas)
     assert isinstance(await drawer._build_event_list_canvas(request.model_copy(update={"event_info": []})), Canvas)
 

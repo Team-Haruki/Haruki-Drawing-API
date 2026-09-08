@@ -1,13 +1,17 @@
+from __future__ import annotations
+
 import re
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw
+if TYPE_CHECKING:
+    from PIL import Image
 
-from .painter import (
-    DEFAULT_FONT,
+from src.settings import DEFAULT_FONT
+
+from .font_metrics import get_layout_font
+from .paint_types import (
     Color,
     LinearGradient,
-    get_font,
-    get_text_size,
 )
 from .plot import (
     Canvas,
@@ -18,6 +22,7 @@ from .plot import (
     TextStyle,
     VSplit,
 )
+from .text_layout import get_text_size
 from .timezone import datetime_from_millis, request_now
 from .utils import run_in_pool
 
@@ -198,12 +203,12 @@ def build_watermark_layout(
     max_width = max(1, int(max_width))
     font_size = max(min_size, int(size))
     while font_size > min_size:
-        font = get_font(DEFAULT_FONT, font_size)
+        font = get_layout_font(DEFAULT_FONT, font_size)
         wrapped_lines = wrap_watermark_text(text, font, max_width)
         if len(wrapped_lines) <= max_lines:
             return font_size, "\n".join(wrapped_lines)
         font_size -= 1
-    font = get_font(DEFAULT_FONT, min_size)
+    font = get_layout_font(DEFAULT_FONT, min_size)
     return min_size, "\n".join(wrap_watermark_text(text, font, max_width))
 
 
@@ -212,7 +217,7 @@ def get_watermark_render_spec(text: str, max_width: int, size: int) -> tuple[int
     计算水印的字号、换行结果与实际占用尺寸。
     """
     font_size, wrapped_text = build_watermark_layout(text, max_width, size)
-    font = get_font(DEFAULT_FONT, font_size)
+    font = get_layout_font(DEFAULT_FONT, font_size)
     lines = wrapped_text.split("\n")
     text_w = max((get_text_size(font, line)[0] for line in lines), default=0)
     text_h = len(lines) * (font_size + WATERMARK_LINE_SEP) - WATERMARK_LINE_SEP
@@ -347,6 +352,10 @@ def add_watermark_to_image(image: Image.Image, text: str = DEFAULT_WATERMARK, si
     image = image.copy()
     max_text_width = image.width - WATERMARK_RIGHT_OFFSET
     font_size, lines, text_w, text_h = get_watermark_render_spec(text, max_text_width, size)
+    from PIL import Image, ImageDraw
+
+    from .painter import get_font
+
     font = get_font(DEFAULT_FONT, font_size)
     footer_height = WATERMARK_TOP_OFFSET + text_h + WATERMARK_BOTTOM_OFFSET + WATERMARK_SHADOW_OFFSET
     sample_height = max(1, min(image.height, max(1, footer_height)))

@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.chart.model import GenerateMusicChartRequest
 
 router = APIRouter(tags=["Chart"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
@@ -14,12 +15,10 @@ router = APIRouter(tags=["Chart"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 )
 async def music_chart(request: GenerateMusicChartRequest):
     try:
-        from src.sekai.chart.drawer import compose_music_chart_image, try_render_music_chart_payload
+        from src.sekai.chart.drawer import try_render_music_chart_payload
 
         payload = await try_render_music_chart_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_music_chart_image(request)
-        return await image_to_response(image, export_format="png")
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

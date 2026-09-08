@@ -6,7 +6,7 @@ from PIL import Image
 import pytest
 
 from src.sekai.base.plot import Canvas, TextBox
-from src.sekai.sk import drawer
+from src.sekai.sk import drawer, matplotlib_backend
 from src.sekai.sk.drawer import _collect_skl_display_ranks, _collect_speed_display_rows
 
 NOW = datetime(2026, 8, 30, 12, tzinfo=UTC)
@@ -67,8 +67,6 @@ def _patch_drawing_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
     monkeypatch.setattr(drawer, "request_now", lambda _timezone: NOW)
     monkeypatch.setattr(drawer, "add_request_watermark", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(drawer, "run_matplotlib_plot", inline_plot)
-    monkeypatch.setattr(drawer, "plt_fig_to_image", lambda _fig: DUMMY_IMAGE)
 
 
 def test_collect_skl_display_ranks_uses_payload_ranks_without_default_filter():
@@ -122,11 +120,11 @@ def test_draw_day_night_bg_emits_hour_spans_and_handles_empty_window() -> None:
             self.spans.append((args, kwargs))
 
     axis = Axis()
-    drawer.draw_day_night_bg(axis, NOW, NOW + timedelta(hours=2, minutes=1))
+    matplotlib_backend.draw_day_night_bg(axis, NOW, NOW + timedelta(hours=2, minutes=1))
     assert len(axis.spans) == 3
 
     empty_axis = Axis()
-    drawer.draw_day_night_bg(empty_axis, NOW, NOW)
+    matplotlib_backend.draw_day_night_bg(empty_axis, NOW, NOW)
     assert empty_axis.spans == []
 
 

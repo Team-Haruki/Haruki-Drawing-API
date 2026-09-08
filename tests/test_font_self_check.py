@@ -1,9 +1,4 @@
-"""Startup font self-check.
-
-A missing font is not a slow render — it is a WRONG one: Pillow degrades to a 10px bitmap face and
-Rust to sans-serif, silently, on every string of every image. The two layers need different answers,
-and that asymmetry is what these tests pin.
-"""
+"""Startup validates the active native renderer without importing legacy font services."""
 
 from __future__ import annotations
 
@@ -13,74 +8,74 @@ from src.core import main as main_mod
 from src.settings import settings
 
 
-def test_passes_when_every_font_resolves(real_fonts):
-    """The real configured fonts on this box resolve on both backends."""
-    assert main_mod._check_pillow_fonts() == ([], [])
-    main_mod._self_check_fonts()  # must not raise, must not disable Skia
+def test_passes_when_every_font_resolves(real_fonts, monkeypatch):
+    pytest.importorskip("haruki_skia_renderer")
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+
+    main_mod._self_check_fonts()
     assert settings.drawing.use_skia_plot is True
 
 
-def test_refuses_to_start_when_pillow_cannot_resolve_a_font(monkeypatch):
-    """If PILLOW cannot find the font, both backends are broken — Rust would render sans-serif and
-    Pillow a bitmap face — so disabling Skia would fix nothing. Fail the deploy instead of serving
-    thousands of wrong images."""
-    monkeypatch.setattr(main_mod, "_check_pillow_fonts", lambda: (["SourceHanSansSC-Bold"], []))
-
+def test_refuses_to_start_when_native_cannot_resolve_a_font(monkeypatch):
+    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda: ["SourceHanSansSC-Bold"])
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
     with pytest.raises(RuntimeError, match="text fonts cannot be resolved"):
         main_mod._self_check_fonts()
 
 
-def test_a_missing_emoji_font_is_loud_but_not_fatal(monkeypatch):
-    """Emoji degrade; the TEXT is still correct. Refusing to start over emoji would be a
-    self-inflicted outage — the service is still perfectly useful."""
-    monkeypatch.setattr(main_mod, "_check_pillow_fonts", lambda: ([], ["TwemojiMozilla"]))
-    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda: [])
+def test_a_missing_emoji_font_is_loud_but_not_fatal(monkeypatch, caplog):
+    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda *, emoji=False: ["MissingEmoji"] if emoji else [])
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    main_mod._self_check_fonts()
+    assert settings.drawing.use_skia_plot is True
+    assert "MissingEmoji" in caplog.text
 
-    main_mod._self_check_fonts()  # must not raise
 
-    assert settings.drawing.use_skia_plot is True  # and must not disable Skia
-
-
-def test_disables_skia_when_only_the_native_renderer_cannot_resolve_a_font(monkeypatch):
-    """Pillow renders correctly but Rust cannot see the face (different font dir in the image, a
-    wheel built against another layout). Rust does NOT fail on a miss — it renders sans-serif — so
-    the only way to keep the images correct is to serve them with Pillow."""
-    monkeypatch.setattr(main_mod, "_check_pillow_fonts", lambda: ([], []))
+def test_missing_native_font_cannot_activate_legacy_renderer(monkeypatch):
     monkeypatch.setattr(main_mod, "_check_native_fonts", lambda: ["SourceHanSansSC-Heavy"])
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-
-    main_mod._self_check_fonts()
-
-    assert settings.drawing.use_skia_plot is False  # degraded to Pillow, still serving
-
-
-def test_a_broken_native_probe_does_not_take_the_service_down(monkeypatch):
-    """The self-check must not itself be a new way to fail startup."""
-    monkeypatch.setattr(main_mod, "_check_pillow_fonts", lambda: ([], []))
-    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-
-    def _explode():
-        raise RuntimeError("native probe blew up")
-
-    monkeypatch.setattr(main_mod, "_check_native_fonts", _explode)
-
-    main_mod._self_check_fonts()  # swallowed
+    with pytest.raises(RuntimeError):
+        main_mod._self_check_fonts()
     assert settings.drawing.use_skia_plot is True
 
 
+def test_emoji_probe_error_does_not_disable_valid_native_text(monkeypatch, caplog):
+    def probe(*, emoji=False):
+        if emoji:
+            raise RuntimeError("unsupported emoji face")
+        return []
+
+    monkeypatch.setattr(main_mod, "_check_native_fonts", probe)
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    main_mod._self_check_fonts()
+    assert settings.drawing.use_skia_plot is True
+    assert "unsupported emoji face" in caplog.text
+
+
+@pytest.mark.parametrize("error", [ImportError("missing wheel"), RuntimeError("broken probe")])
+def test_a_broken_native_probe_prevents_startup(monkeypatch, error):
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+
+    def explode():
+        raise error
+
+    monkeypatch.setattr(main_mod, "_check_native_fonts", explode)
+    with pytest.raises(RuntimeError):
+        main_mod._self_check_fonts()
+    assert settings.drawing.use_skia_plot is True
+
+
+def test_disabled_native_renderer_prevents_startup(monkeypatch):
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", False)
+    with pytest.raises(RuntimeError, match="Native rendering is required"):
+        main_mod._self_check_fonts()
+
+
 def test_native_probe_detects_a_font_the_extension_cannot_resolve(monkeypatch):
-    """The probe itself must actually work: point the builder at a name that does not exist and the
-    native renderer must report a fallback. Guards against the probe silently always returning [].
-    """
     pytest.importorskip("haruki_skia_renderer")
     import src.settings as settings_mod
 
-    monkeypatch.setattr(settings_mod, "DEFAULT_FONT", "NoSuchFontAnywhere", raising=False)
-    monkeypatch.setattr(settings_mod, "DEFAULT_BOLD_FONT", "NoSuchFontAnywhere", raising=False)
-    monkeypatch.setattr(settings_mod, "DEFAULT_HEAVY_FONT", "NoSuchFontAnywhere", raising=False)
-    monkeypatch.setattr(settings_mod, "DEFAULT_EMOJI_FONT", "NoSuchFontAnywhere", raising=False)
-
-    # Three, not four: emoji are deliberately not probed here — losing the native renderer over a
-    # decorative face is a disproportionate trade, and Pillow degrades on it identically anyway.
+    for key in ("DEFAULT_FONT", "DEFAULT_BOLD_FONT", "DEFAULT_HEAVY_FONT", "DEFAULT_EMOJI_FONT"):
+        monkeypatch.setattr(settings_mod, key, "NoSuchFontAnywhere")
     assert main_mod._check_native_fonts() == ["NoSuchFontAnywhere"] * 3
+    assert main_mod._check_native_fonts(emoji=True) == ["NoSuchFontAnywhere"]

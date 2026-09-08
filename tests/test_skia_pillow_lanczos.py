@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover - quick-check's non-native job
 
 pytestmark = pytest.mark.skipif(
     _native is None or getattr(_native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
-    reason="capability-15 native renderer is required",
+    reason="the current native renderer capability is required",
 )
 
 
@@ -133,3 +133,81 @@ def test_native_pillow_lanczos_errors_instead_of_using_another_sampler(tmp_path)
         pass
     with pytest.raises(RuntimeError, match="requires zero rotation"):
         _render(rotated)
+
+
+@pytest.mark.parametrize(("pre_size", "final_size"), [((92, 92), (84, 84)), ((40, 40), (32, 32))])
+def test_native_two_stage_bilinear_bicubic_preserves_intermediate_raster(tmp_path, pre_size, final_size):
+    source = _opaque_pattern((137, 121))
+    source.save(tmp_path / "source.png")
+    builder = _builder(*final_size, tmp_path)
+    with builder.raster_subscene(natural_size=pre_size, pos=(0, 0), dst_size=final_size, sampling="pillow_bicubic"):
+        builder.image("source.png", (0, 0), pre_size, sampling="pillow_bilinear", blend="src")
+    expected = source.resize(pre_size, Image.Resampling.BILINEAR).resize(final_size, Image.Resampling.BICUBIC)
+    assert _render(builder).tobytes() == expected.tobytes()
+    assert expected.tobytes() != source.resize(final_size, Image.Resampling.BICUBIC).tobytes()
+
+
+def test_bicubic_subscene_checks_resize_memory_before_allocating(tmp_path):
+    builder = _builder(4, 4, tmp_path)
+    with builder.raster_subscene(natural_size=(4, 4), pos=(0, 0), dst_size=(128, 128), sampling="pillow_bicubic"):
+        builder.rect((0, 0), (4, 4), fill=(1, 2, 3, 255))
+    scene = builder.build()
+    scene["limits"] = {"max_scene_bytes": 4096}
+    with pytest.raises(RuntimeError, match=r"bicubic RasterSubscene.*bytes"):
+        _native.render_scene(json.dumps(scene).encode(), {})
+
+
+def test_two_stage_resize_preserves_translucent_edges(tmp_path):
+    import numpy as np
+
+    source = _opaque_pattern((73, 61))
+    alpha = Image.new("L", source.size)
+    alpha.putdata([(x * 19 + y * 31) % 256 for y in range(source.height) for x in range(source.width)])
+    source.putalpha(alpha)
+    source.save(tmp_path / "source.png")
+    builder = _builder(32, 32, tmp_path)
+    builder.rect((0, 0), (32, 32), fill=(255, 255, 255, 255))
+    with builder.raster_subscene(natural_size=(40, 40), pos=(0, 0), dst_size=(32, 32), sampling="pillow_bicubic"):
+        builder.image("source.png", (0, 0), (40, 40), sampling="pillow_bilinear", blend="src")
+    expected = Image.new("RGBA", (32, 32), "white")
+    expected.alpha_composite(
+        source.resize((40, 40), Image.Resampling.BILINEAR).resize((32, 32), Image.Resampling.BICUBIC)
+    )
+    diff = np.abs(np.asarray(_render(builder)).astype(int) - np.asarray(expected).astype(int))
+    assert diff.max() <= 2
+
+
+@pytest.mark.parametrize(("source_size", "target_size"), [((19, 13), (11, 7)), ((8, 5), (31, 19)), ((2, 301), (2, 7))])
+def test_native_bicubic_matches_pillow_for_shrink_enlarge_and_tall_inputs(tmp_path, source_size, target_size):
+    source = _opaque_pattern(source_size)
+    source.save(tmp_path / "source.png")
+    builder = _builder(*target_size, tmp_path)
+    builder.image("source.png", (0, 0), target_size, sampling="pillow_bicubic")
+    assert _render(builder).tobytes() == source.resize(target_size, Image.Resampling.BICUBIC).tobytes()
+
+
+def test_native_bicubic_transparent_pixels_match_pillow(tmp_path):
+    import numpy as np
+
+    rng = np.random.default_rng(947)
+    pixels = rng.integers(0, 256, (23, 37, 4), dtype=np.uint8)
+    source = Image.fromarray(pixels)
+    source.save(tmp_path / "source.png")
+    builder = _builder(13, 9, tmp_path)
+    builder.image("source.png", (0, 0), (13, 9), sampling="pillow_bicubic", blend="src")
+    actual = np.asarray(_render(builder)).astype(int)
+    expected = np.asarray(source.resize((13, 9), Image.Resampling.BICUBIC)).astype(int)
+    # Skia's premultiplied destination adds one quantization at final placement.
+    assert np.abs(actual[:, :, :3] - expected[:, :, :3]).max() <= 2
+    assert np.array_equal(actual[:, :, 3], expected[:, :, 3])
+
+
+def test_native_bicubic_keeps_strict_memory_limit(tmp_path):
+    source = _opaque_pattern((19, 13))
+    source.save(tmp_path / "source.png")
+    builder = _builder(11, 7, tmp_path)
+    builder.image("source.png", (0, 0), (11, 7), sampling="pillow_bicubic")
+    scene = builder.build()
+    scene["limits"] = {"max_node_pixels": 1000, "max_scene_bytes": 1500}
+    with pytest.raises(RuntimeError, match="limit"):
+        _native.render_scene(json.dumps(scene).encode(), {})

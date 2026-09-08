@@ -15,6 +15,7 @@
 //! future IR crop/resize node must add Pillow's float32 `box` semantics explicitly rather than
 //! pretending a source rectangle is equivalent.
 
+use rayon::prelude::*;
 use std::error::Error;
 use std::fmt;
 use std::mem;
@@ -89,7 +90,7 @@ impl fmt::Display for PillowResizeError {
             ),
             Self::SourceLength { expected, actual } => write!(
                 f,
-                "RGBA source length mismatch: expected {expected} bytes, got {actual}"
+                "raster source length mismatch: expected {expected} bytes, got {actual}"
             ),
             Self::OutputLimit { required, limit } => write!(
                 f,
@@ -118,6 +119,13 @@ struct AxisCoefficients {
     coefficients: Vec<i32>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum PillowFilter {
+    Lanczos,
+    Bicubic,
+    Bilinear,
+}
+
 /// Resize a tightly packed, straight-alpha RGBA8 raster with Pillow-compatible Lanczos-3.
 pub(crate) fn resize_rgba8_pillow_lanczos(
     source: &[u8],
@@ -127,17 +135,116 @@ pub(crate) fn resize_rgba8_pillow_lanczos(
     destination_height: usize,
     limits: PillowResizeLimits,
 ) -> Result<Vec<u8>, PillowResizeError> {
+    resize_rgba8_pillow_filtered(
+        source,
+        source_width,
+        source_height,
+        destination_width,
+        destination_height,
+        limits,
+        PillowFilter::Lanczos,
+    )
+}
+
+pub(crate) fn resize_rgba8_pillow_bicubic(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    destination_width: usize,
+    destination_height: usize,
+    limits: PillowResizeLimits,
+) -> Result<Vec<u8>, PillowResizeError> {
+    resize_rgba8_pillow_filtered(
+        source,
+        source_width,
+        source_height,
+        destination_width,
+        destination_height,
+        limits,
+        PillowFilter::Bicubic,
+    )
+}
+
+pub(crate) fn resize_rgba8_pillow_bilinear(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    destination_width: usize,
+    destination_height: usize,
+    limits: PillowResizeLimits,
+) -> Result<Vec<u8>, PillowResizeError> {
+    resize_rgba8_pillow_filtered(
+        source,
+        source_width,
+        source_height,
+        destination_width,
+        destination_height,
+        limits,
+        PillowFilter::Bilinear,
+    )
+}
+
+pub(crate) fn resize_rgba8_pillow_filtered(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    destination_width: usize,
+    destination_height: usize,
+    limits: PillowResizeLimits,
+    filter: PillowFilter,
+) -> Result<Vec<u8>, PillowResizeError> {
+    resize_u8_pillow_filtered::<4>(
+        source,
+        source_width,
+        source_height,
+        destination_width,
+        destination_height,
+        limits,
+        filter,
+    )
+}
+
+/// Single-channel SDF fields use the same coefficients and per-axis quantization as RGBA.
+/// They never pass through alpha conversion or an expanded four-channel allocation.
+pub(crate) fn resize_gray8_pillow_bicubic(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    destination_width: usize,
+    destination_height: usize,
+    limits: PillowResizeLimits,
+) -> Result<Vec<u8>, PillowResizeError> {
+    resize_u8_pillow_filtered::<1>(
+        source,
+        source_width,
+        source_height,
+        destination_width,
+        destination_height,
+        limits,
+        PillowFilter::Bicubic,
+    )
+}
+
+fn resize_u8_pillow_filtered<const N: usize>(
+    source: &[u8],
+    source_width: usize,
+    source_height: usize,
+    destination_width: usize,
+    destination_height: usize,
+    limits: PillowResizeLimits,
+    filter: PillowFilter,
+) -> Result<Vec<u8>, PillowResizeError> {
     validate_dimensions(source_width, source_height, limits)?;
     validate_dimensions(destination_width, destination_height, limits)?;
 
-    let source_bytes = rgba_byte_len(source_width, source_height)?;
+    let source_bytes = raster_byte_len::<N>(source_width, source_height)?;
     if source.len() != source_bytes {
         return Err(PillowResizeError::SourceLength {
             expected: source_bytes,
             actual: source.len(),
         });
     }
-    let destination_bytes = rgba_byte_len(destination_width, destination_height)?;
+    let destination_bytes = raster_byte_len::<N>(destination_width, destination_height)?;
     if destination_bytes > limits.max_output_bytes {
         return Err(PillowResizeError::OutputLimit {
             required: destination_bytes,
@@ -148,6 +255,12 @@ pub(crate) fn resize_rgba8_pillow_lanczos(
     // Pillow returns a copy before its RGBA -> RGBa conversion when neither axis changes. Apart
     // from being cheaper, this preserves hidden RGB values under fully transparent source pixels.
     if source_width == destination_width && source_height == destination_height {
+        if source_bytes > limits.max_working_bytes {
+            return Err(PillowResizeError::WorkingLimit {
+                required: source_bytes,
+                limit: limits.max_working_bytes,
+            });
+        }
         return Ok(source.to_vec());
     }
 
@@ -155,7 +268,7 @@ pub(crate) fn resize_rgba8_pillow_lanczos(
         .checked_mul(100)
         .is_some_and(|threshold| source_height > threshold)
         && destination_height < source_height;
-    enforce_working_limit(
+    enforce_working_limit::<N>(
         source_width,
         source_height,
         destination_width,
@@ -164,7 +277,11 @@ pub(crate) fn resize_rgba8_pillow_lanczos(
         limits.max_working_bytes,
     )?;
 
-    let mut current = premultiply_rgba(source);
+    let mut current = if N == 4 {
+        premultiply_rgba(source)
+    } else {
+        source.to_vec()
+    };
     let mut width = source_width;
     let mut height = source_height;
 
@@ -173,26 +290,28 @@ pub(crate) fn resize_rgba8_pillow_lanczos(
     // two orders observably different.
     if vertical_first {
         if height != destination_height {
-            current = resize_vertical(&current, width, height, destination_height)?;
+            current = resize_vertical::<N>(&current, width, height, destination_height, filter)?;
             height = destination_height;
         }
         if width != destination_width {
-            current = resize_horizontal(&current, width, height, destination_width)?;
+            current = resize_horizontal::<N>(&current, width, height, destination_width, filter)?;
             width = destination_width;
         }
     } else {
         if width != destination_width {
-            current = resize_horizontal(&current, width, height, destination_width)?;
+            current = resize_horizontal::<N>(&current, width, height, destination_width, filter)?;
             width = destination_width;
         }
         if height != destination_height {
-            current = resize_vertical(&current, width, height, destination_height)?;
+            current = resize_vertical::<N>(&current, width, height, destination_height, filter)?;
             height = destination_height;
         }
     }
 
     debug_assert_eq!((width, height), (destination_width, destination_height));
-    unpremultiply_rgba_in_place(&mut current);
+    if N == 4 {
+        unpremultiply_rgba_in_place(&mut current);
+    }
     Ok(current)
 }
 
@@ -217,10 +336,13 @@ fn validate_dimensions(
     Ok(())
 }
 
-fn rgba_byte_len(width: usize, height: usize) -> Result<usize, PillowResizeError> {
+fn raster_byte_len<const N: usize>(
+    width: usize,
+    height: usize,
+) -> Result<usize, PillowResizeError> {
     width
         .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(CHANNELS))
+        .and_then(|pixels| pixels.checked_mul(N))
         .ok_or(PillowResizeError::SizeOverflow)
 }
 
@@ -256,7 +378,7 @@ fn coefficient_storage_bytes(input: usize, output: usize) -> Result<usize, Pillo
         .ok_or(PillowResizeError::SizeOverflow)
 }
 
-fn enforce_working_limit(
+fn enforce_working_limit<const N: usize>(
     source_width: usize,
     source_height: usize,
     destination_width: usize,
@@ -264,7 +386,7 @@ fn enforce_working_limit(
     vertical_first: bool,
     limit: usize,
 ) -> Result<(), PillowResizeError> {
-    let source_bytes = rgba_byte_len(source_width, source_height)?;
+    let source_bytes = raster_byte_len::<N>(source_width, source_height)?;
     let mut peak = source_bytes;
 
     let (first_width, first_height, first_coefficients) = if vertical_first {
@@ -281,7 +403,7 @@ fn enforce_working_limit(
         )
     };
     let first_changes = first_coefficients.0 != first_coefficients.1;
-    let first_bytes = rgba_byte_len(first_width, first_height)?;
+    let first_bytes = raster_byte_len::<N>(first_width, first_height)?;
     if first_changes {
         let coeff_bytes = coefficient_storage_bytes(first_coefficients.0, first_coefficients.1)?;
         peak = peak.max(
@@ -304,7 +426,7 @@ fn enforce_working_limit(
             source_bytes
         };
         let coeff_bytes = coefficient_storage_bytes(second_coefficients.0, second_coefficients.1)?;
-        let destination_bytes = rgba_byte_len(destination_width, destination_height)?;
+        let destination_bytes = raster_byte_len::<N>(destination_width, destination_height)?;
         peak = peak.max(
             prior_bytes
                 .checked_add(destination_bytes)
@@ -325,10 +447,15 @@ fn enforce_working_limit(
 fn precompute_coefficients(
     input_size: usize,
     output_size: usize,
+    filter: PillowFilter,
 ) -> Result<AxisCoefficients, PillowResizeError> {
     let scale = input_size as f64 / output_size as f64;
     let filter_scale = scale.max(1.0);
-    let support = LANCZOS_SUPPORT * filter_scale;
+    let support = (match filter {
+        PillowFilter::Lanczos => LANCZOS_SUPPORT,
+        PillowFilter::Bicubic => 2.0,
+        PillowFilter::Bilinear => 1.0,
+    }) * filter_scale;
     let inverse_filter_scale = 1.0 / filter_scale;
     let (kernel_size, entries) = axis_table_sizes(input_size, output_size)?;
 
@@ -348,7 +475,11 @@ fn precompute_coefficients(
         let mut weight_sum = 0.0_f64;
         for (offset, weight) in row.iter_mut().take(count).enumerate() {
             let distance = (offset as f64 + first as f64 - center + 0.5) * inverse_filter_scale;
-            *weight = lanczos_filter(distance);
+            *weight = match filter {
+                PillowFilter::Bicubic => bicubic_filter(distance),
+                PillowFilter::Bilinear => (1.0 - distance.abs()).max(0.0),
+                PillowFilter::Lanczos => lanczos_filter(distance),
+            };
             weight_sum += *weight;
         }
         if weight_sum != 0.0 {
@@ -364,6 +495,18 @@ fn precompute_coefficients(
         bounds,
         coefficients,
     })
+}
+
+#[inline]
+fn bicubic_filter(value: f64) -> f64 {
+    let x = value.abs();
+    if x < 1.0 {
+        ((1.5 * x - 2.5) * x) * x + 1.0
+    } else if x < 2.0 {
+        (((x - 5.0) * x + 8.0) * x - 4.0) * -0.5
+    } else {
+        0.0
+    }
 }
 
 #[inline]
@@ -394,67 +537,91 @@ fn quantize_coefficient(value: f64) -> i32 {
     }
 }
 
-fn resize_horizontal(
+// Share Rayon's bounded process pool. Tiny icons stay serial to avoid scheduling overhead.
+// No coefficient or channel reduction is parallelized, preserving Pillow's exact rounding.
+fn resize_rows(
+    output: &mut [u8],
+    row_bytes: usize,
+    render: impl Fn(usize, &mut [u8]) + Sync + Send,
+) {
+    if output.len() >= 1024 * 1024 {
+        output
+            .par_chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| render(y, row));
+    } else {
+        output
+            .chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| render(y, row));
+    }
+}
+
+fn resize_horizontal<const N: usize>(
     source: &[u8],
     source_width: usize,
     source_height: usize,
     destination_width: usize,
+    filter: PillowFilter,
 ) -> Result<Vec<u8>, PillowResizeError> {
-    let axis = precompute_coefficients(source_width, destination_width)?;
-    let output_len = rgba_byte_len(destination_width, source_height)?;
+    let axis = precompute_coefficients(source_width, destination_width, filter)?;
+    let output_len = raster_byte_len::<N>(destination_width, source_height)?;
     let mut output = vec![0_u8; output_len];
 
-    for y in 0..source_height {
+    let render_row = |y: usize, row: &mut [u8]| {
         for destination_x in 0..destination_width {
             let bounds = axis.bounds[destination_x];
             let coefficients = &axis.coefficients
                 [destination_x * axis.kernel_size..(destination_x + 1) * axis.kernel_size];
-            let mut sums = [ROUNDING_BIAS; CHANNELS];
+            let mut sums = [ROUNDING_BIAS; N];
             for (offset, coefficient) in coefficients.iter().take(bounds.count).enumerate() {
-                let source_offset = (y * source_width + bounds.first + offset) * CHANNELS;
-                for channel in 0..CHANNELS {
+                let source_offset = (y * source_width + bounds.first + offset) * N;
+                for channel in 0..N {
                     sums[channel] +=
                         i64::from(source[source_offset + channel]) * i64::from(*coefficient);
                 }
             }
-            let destination_offset = (y * destination_width + destination_x) * CHANNELS;
-            for channel in 0..CHANNELS {
-                output[destination_offset + channel] = clip_fixed_8(sums[channel]);
+            let destination_offset = destination_x * N;
+            for channel in 0..N {
+                row[destination_offset + channel] = clip_fixed_8(sums[channel]);
             }
         }
-    }
+    };
+    resize_rows(&mut output, destination_width * N, render_row);
     Ok(output)
 }
 
-fn resize_vertical(
+fn resize_vertical<const N: usize>(
     source: &[u8],
     width: usize,
     source_height: usize,
     destination_height: usize,
+    filter: PillowFilter,
 ) -> Result<Vec<u8>, PillowResizeError> {
-    let axis = precompute_coefficients(source_height, destination_height)?;
-    let output_len = rgba_byte_len(width, destination_height)?;
+    let axis = precompute_coefficients(source_height, destination_height, filter)?;
+    let output_len = raster_byte_len::<N>(width, destination_height)?;
     let mut output = vec![0_u8; output_len];
 
-    for destination_y in 0..destination_height {
+    let render_row = |destination_y: usize, row: &mut [u8]| {
         let bounds = axis.bounds[destination_y];
         let coefficients = &axis.coefficients
             [destination_y * axis.kernel_size..(destination_y + 1) * axis.kernel_size];
         for x in 0..width {
-            let mut sums = [ROUNDING_BIAS; CHANNELS];
+            let mut sums = [ROUNDING_BIAS; N];
             for (offset, coefficient) in coefficients.iter().take(bounds.count).enumerate() {
-                let source_offset = ((bounds.first + offset) * width + x) * CHANNELS;
-                for channel in 0..CHANNELS {
+                let source_offset = ((bounds.first + offset) * width + x) * N;
+                for channel in 0..N {
                     sums[channel] +=
                         i64::from(source[source_offset + channel]) * i64::from(*coefficient);
                 }
             }
-            let destination_offset = (destination_y * width + x) * CHANNELS;
-            for channel in 0..CHANNELS {
-                output[destination_offset + channel] = clip_fixed_8(sums[channel]);
+            let destination_offset = x * N;
+            for channel in 0..N {
+                row[destination_offset + channel] = clip_fixed_8(sums[channel]);
             }
         }
-    }
+    };
+    resize_rows(&mut output, width * N, render_row);
     Ok(output)
 }
 
@@ -566,6 +733,43 @@ mod tests {
             112, 109, 145, 131, 122, 113, 126, 121, 132, 120, 104, 110,
         ];
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn gray_field_uses_single_channel_storage_and_exact_filter() {
+        assert_eq!(
+            resize_gray8_pillow_bicubic(&[0, 255], 2, 1, 3, 1, TEST_LIMITS).unwrap(),
+            [0, 128, 255],
+        );
+        // A three-byte output budget permits gray8; no RGBA expansion is charged or allocated.
+        let limits = PillowResizeLimits::new(3, 4096, 32);
+        assert_eq!(
+            resize_gray8_pillow_bicubic(&[0, 255], 2, 1, 3, 1, limits)
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(matches!(
+            resize_gray8_pillow_bicubic(&[0, 255], 2, 1, 4, 1, limits),
+            Err(PillowResizeError::OutputLimit { .. })
+        ));
+    }
+
+    #[test]
+    fn gray_field_bounds_include_coefficient_scratch_and_same_size_copy() {
+        let limits = PillowResizeLimits::new(1024, 1, 32);
+        assert!(matches!(
+            resize_gray8_pillow_bicubic(&[0, 255], 2, 1, 3, 1, limits),
+            Err(PillowResizeError::WorkingLimit { .. })
+        ));
+        assert!(matches!(
+            resize_gray8_pillow_bicubic(&[0, 255], 2, 1, 2, 1, limits),
+            Err(PillowResizeError::WorkingLimit { .. })
+        ));
+        assert!(matches!(
+            resize_gray8_pillow_bicubic(&[], 1, 1, 1, 1, TEST_LIMITS),
+            Err(PillowResizeError::SourceLength { .. })
+        ));
     }
 
     #[test]

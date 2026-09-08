@@ -2,8 +2,8 @@
 rasterizing with Pillow.
 
 The plot.py widget tree (and direct-Painter drawers) render by calling a small set of
-``Painter`` primitives. Subclassing ``Painter`` and overriding those primitives lets the
-SAME widget tree emit a declarative IR scene (built via :class:`IRBuilder`) that the Rust
+``Painter`` primitives. Implementing that API over the shared coordinate context lets the
+same widget tree emit a declarative IR scene (built via :class:`IRBuilder`) that the Rust
 ``render_scene`` interpreter draws — without touching any drawer. The widgets resolve their
 own layout to concrete coordinates before calling us, so we only translate each call.
 
@@ -21,30 +21,39 @@ to the Pillow path, so coverage can grow incrementally without breaking endpoint
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from PIL import Image
+import emoji
+
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.pillow_telemetry import (
     PILLOW_TOUCH_IRPAINTER_MEM_RASTER,
     PILLOW_TOUCH_IRPAINTER_PIL_IMAGE,
     record_pillow_touch,
 )
-from src.sekai.base.painter import (
+from src.sekai.base.image_source import (
+    AssetImageRef,
+    EncodedImageRef,
+    MissingImageRef,
+    NativeRasterImageRef,
+    get_pristine_image_asset_path,
+    is_pillow_image,
+    missing_image_ref,
+    native_image_memory,
+    resolve_existing_asset_path,
+)
+from src.sekai.base.paint_context import PaintContext
+from src.sekai.base.paint_types import (
     AdaptiveTextColor,
     FontDesc,
     LinearGradient,
-    Painter,
     RadialGradient,
     _iter_image_bg_placements,
 )
+from src.sekai.base.placeholder import placeholder_variant
 from src.sekai.base.triangle_bg import build_triangle_bg
-from src.sekai.base.utils import (
-    EncodedImageRef,
-    get_pristine_image_asset_path,
-    resolve_existing_asset_path,
-    resolve_image_source_sync,
-)
 from src.sekai.skia_renderer.ir_builder import (
     IRBuilder,
     adaptive_color,
@@ -78,7 +87,7 @@ def _image_bg_blur_sigma(blur: bool, source_scale: tuple[float, float]):
     return (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
 
 
-class IRPainter(Painter):
+class IRPainter(PaintContext):
     def __init__(
         self,
         size: tuple[int, int],
@@ -92,8 +101,12 @@ class IRPainter(Painter):
         bg_hour: float = 12.0,
         export_format: str = "png",
         jpg_quality: int = 90,
+        text_engine: str = "skia",
     ) -> None:
         super().__init__(size=size)
+        if text_engine not in {"skia", "freetype_basic"}:
+            raise ValueError(f"unsupported widget text engine: {text_engine}")
+        self._text_engine = text_engine
         self._assets_base_dir = Path(assets_base_dir).resolve()
         # The canvas size, captured once: Painter mutates ``self.size`` per queued op, and the
         # triangle background is a scene-level node that must be generated at canvas dimensions.
@@ -124,6 +137,8 @@ class IRPainter(Painter):
         self._group_origin: tuple[float, float] = (0.0, 0.0)
         self._group_origin_stack: list[tuple[str, tuple[float, float]]] = []
         self._canvas_subtree_index = 0
+        # Validate shared font/asset dependencies once per scene, never across requests.
+        self._fragment_dependency_signatures = {}
 
     # ---- output ----
 
@@ -176,9 +191,8 @@ class IRPainter(Painter):
             path, size = getattr(font, "path", None), getattr(font, "size", None)
             if path is None or size is None:
                 raise SkiaUnsupported("text font is not a FontDesc and lacks path/size")
-            import os
-
-            path = os.path.splitext(os.path.basename(path))[0]
+            # Keep the actual face path: stripping directories/extensions can
+            # silently substitute a different font with the same basename.
         if path == self._default_name:
             return "default", size, None
         if path == self._bold_name:
@@ -231,19 +245,49 @@ class IRPainter(Painter):
         return relative.as_posix()
 
     def _image_ref(self, img: Any) -> str:
-        if isinstance(img, Image.Image):
+        if is_pillow_image(img):
             # Count the boundary even when a pristine cached PIL image can be replaced with
             # its asset path. That request still depends on Pillow producing the source object.
             record_pillow_touch(PILLOW_TOUCH_IRPAINTER_PIL_IMAGE)
-        if isinstance(img, EncodedImageRef):
-            return self._encoded_image_ref(img)
-        asset_ref = self._asset_image_ref(img)
-        if asset_ref is not None:
-            return asset_ref
-        if not isinstance(img, Image.Image):
-            # AssetImageRef outside the assets root or vanished on disk: decode
-            # (placeholder on missing) so mem transport still renders something.
-            img = resolve_image_source_sync(img)
+        if isinstance(img, MissingImageRef):
+            entry = self._mem_by_id.get(id(img))
+            if entry is not None and entry[0] is img:
+                return f"mem:{entry[1]}"
+            from .placeholder import render_placeholder
+
+            encoded = render_placeholder(img)
+            ref = self._image_ref(encoded)
+            self._mem_by_id[id(img)] = (img, ref.removeprefix("mem:"))
+            return ref
+        if isinstance(img, (EncodedImageRef, NativeRasterImageRef)):
+            entry = self._mem_by_id.get(id(img))
+            if entry is not None and entry[0] is img:
+                return f"mem:{entry[1]}"
+            key = f"m{len(self._mem_images)}"
+            # Encoded inputs decode in Rust; cached immutable pixels use zero-copy raw transport.
+            self._mem_images[key] = native_image_memory(img)
+            self._mem_by_id[id(img)] = (img, key)
+            return f"mem:{key}"
+        source = get_pristine_image_asset_path(img)
+        if source is not None:
+            resolved = resolve_existing_asset_path(source)
+            if resolved is not None:
+                try:
+                    relative = resolved.relative_to(self._assets_base_dir)
+                except ValueError:
+                    pass
+                else:
+                    if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
+                        return relative.as_posix()
+        if isinstance(img, AssetImageRef):
+            if not img.path.is_file():
+                return self._image_ref(missing_image_ref(placeholder_variant(str(img.path))))
+            # Root confinement still applies to native file references. For an
+            # already authorized external source, transport encoded bytes lazily.
+            return self._image_ref(EncodedImageRef(img.path.read_bytes(), img.size, img.mode))
+        if not is_pillow_image(img):
+            # Unknown raster types cannot be lowered safely. The caller can fall back.
+            raise SkiaUnsupported(f"unsupported image source: {type(img)!r}")
         return self._mem_image(img)
 
     def _fill(self, fill, apos, size):
@@ -267,7 +311,7 @@ class IRPainter(Painter):
 
     # ---- drawing primitives (emit IR; ignore exclude_on_hash) ----
 
-    def text(self, text, pos, font, fill=(0, 0, 0, 255), align="left", exclude_on_hash=False):
+    def text(self, text, pos, font, fill=(0, 0, 0, 255), align="left", exclude_on_hash=False, *, mask_lerp=False):
         role, size, font_name = self._font(font)
         apos = self._abs(pos)
         adaptive = None
@@ -284,6 +328,12 @@ class IRPainter(Painter):
             fillval = self._gradient_text_fill(fill, text, role, size, font_name, apos)
         else:
             fillval = _rgba(fill)
+        # Keep ordinary widget text on main's native Skia glyph path. Layout
+        # still uses BASIC metrics, as it did on main. Only explicit mask-lerp
+        # operations require the native FreeType coverage/rounding contract.
+        basic = getattr(font, "layout_engine", 0) == 0
+        use_basic = mask_lerp or (self._text_engine == "freetype_basic" and not emoji.emoji_count(text))
+        engine = "freetype_basic" if basic and adaptive is None and use_basic else "skia"
         self._b.text(
             text,
             apos,
@@ -294,6 +344,8 @@ class IRPainter(Painter):
             fill=fillval,
             adaptive=adaptive,
             font_name=font_name,
+            engine=engine,
+            mask_lerp=mask_lerp,
         )
         return self
 
@@ -413,33 +465,88 @@ class IRPainter(Painter):
         cache_key=None,
         require_asset_backed=False,
         skip_on_error=False,
+        use_alpha_blend=False,
     ):
-        del exclude_on_hash, cache_key, skip_on_error
+        del exclude_on_hash, skip_on_error, use_alpha_blend
         # Local import avoids the canvas -> IRPainter -> subtree -> canvas module cycle.
         from src.sekai.skia_renderer.subtree import NativeSubtreeError, lower_canvas_subtree
 
         parent_scene = self._b.build()
         parent_fonts = parent_scene["fonts"]
-        try:
-            subtree = lower_canvas_subtree(
-                canvas,
-                require_asset_backed=require_asset_backed,
-                renderer_options={
-                    "assets_base_dir": parent_scene["assets_base_dir"],
-                    "font_dir": parent_fonts["dir"],
-                    "default_font": parent_fonts["default"],
-                    "bold_font": parent_fonts["bold"],
-                    "heavy_font": parent_fonts.get("heavy"),
-                    "emoji_font": parent_fonts.get("emoji"),
-                    "bg_hour": self._bg_hour,
-                    "export_format": parent_scene["export_format"],
-                    "jpg_quality": parent_scene["jpg_quality"],
+        options = {
+            "assets_base_dir": parent_scene["assets_base_dir"],
+            "font_dir": parent_fonts["dir"],
+            "default_font": parent_fonts["default"],
+            "bold_font": parent_fonts["bold"],
+            "heavy_font": parent_fonts.get("heavy"),
+            "emoji_font": parent_fonts.get("emoji"),
+            "bg_hour": self._bg_hour,
+            "export_format": parent_scene["export_format"],
+            "jpg_quality": parent_scene["jpg_quality"],
+        }
+        fragment = None
+        lookup_key = None
+        # Pillow-compatible bicubic already produces a discrete resized raster before
+        # placement. Skia's other filters blend while sampling: caching that resample
+        # against transparency would add a premultiplication rounding step.
+        raster_size = (
+            tuple(size or canvas._get_self_size()) if sampling == "pillow_bicubic" else canvas._get_self_size()
+        )
+        fragment_sampling = "pillow_bicubic" if sampling == "pillow_bicubic" else "nearest"
+        prepared = getattr(canvas, "_native_prepared_canvas", None)
+        if prepared is not None:
+            from src.sekai.base.canvas_cache import current_canvas_preparation
+
+            from . import fragment_cache
+
+            if (
+                prepared.context is not current_canvas_preparation()
+                or prepared.context.options != {k: v for k, v in options.items() if k != "bg_hour"}
+                or require_asset_backed
+            ):
+                raise SkiaUnsupported("prepared canvas used outside its native renderer context")
+            # The lease keeps pixels alive across concurrent eviction/clear. Cache
+            # natural-size rasters so the same prepared child can be placed at any size.
+            fragment = prepared.image
+            lookup_key = prepared.key
+            raster_size = canvas._get_self_size()
+            fragment_sampling = "nearest"
+        elif cache_key and not require_asset_backed:
+            from . import fragment_cache
+
+            lookup_key = fragment_cache.canvas_fragment_lookup_key(
+                cache_key,
+                canvas._get_self_size(),
+                {
+                    **{k: v for k, v in options.items() if k != "bg_hour"},
+                    "raster_size": raster_size,
+                    "sampling": fragment_sampling,
                 },
             )
-        except NativeSubtreeError as exc:
-            raise SkiaUnsupported(str(exc)) from exc
+            fragment = fragment_cache.get_native_fragment_cached(
+                lookup_key, bg_hour=self._bg_hour, signatures=self._fragment_dependency_signatures
+            )
+        subtree = None
+        if fragment is None:
+            try:
+                subtree = lower_canvas_subtree(
+                    canvas, require_asset_backed=require_asset_backed, renderer_options=options
+                )
+            except NativeSubtreeError as exc:
+                raise SkiaUnsupported(str(exc)) from exc
+            if lookup_key is not None:
+                fragment = fragment_cache.render_cached_native_fragment(
+                    subtree,
+                    cache_key or lookup_key,
+                    lookup_key=lookup_key,
+                    bg_hour=self._bg_hour,
+                    isolate=True,
+                    raster_size=raster_size,
+                    sampling=fragment_sampling,
+                )
+        natural_size = fragment.size if fragment is not None else subtree.size
 
-        destination_size = subtree.size if size is None else size
+        destination_size = natural_size if size is None else size
         shadow = (
             image_shadow(
                 alpha=shadow_alpha,
@@ -452,13 +559,19 @@ class IRPainter(Painter):
         )
         namespace = f"canvas_subtree.{self._canvas_subtree_index}"
         self._canvas_subtree_index += 1
+        # Recreate the N32 snapshot even for an integer 1:1 placement. On x86,
+        # drawing raw RGBA directly selects a different Skia blitter than drawing
+        # the BGRA subscene snapshot and changes premultiplied rounding.
         with self._b.raster_subscene(
-            natural_size=subtree.size,
+            natural_size=natural_size,
             pos=self._abs(pos),
             dst_size=destination_size,
             sampling=sampling or "linear_mipmap",
             shadow=shadow,
         ):
+            if fragment is not None:
+                self._b.image(self._image_ref(fragment), (0, 0), natural_size, blend="src", sampling="nearest")
+                return self
             try:
                 subtree.splice_into(
                     self._b,
@@ -601,9 +714,27 @@ class IRPainter(Painter):
             tint=tint,
         )
 
+    def paste_alpha_crop(self, sub_img, pos, src_rect, alpha_floor, exclude_on_hash=False):
+        self._b.image(
+            self._image_ref(sub_img),
+            self._abs(pos),
+            (src_rect[2] - src_rect[0], src_rect[3] - src_rect[1]),
+            source_rect=src_rect,
+            sampling="nearest",
+            blend="src",
+            alpha_floor=alpha_floor,
+        )
+        return self
+
     def push_clip_roundrect(self, pos, size, radius, corners=(True, True, True, True), exclude_on_hash=False):
         apos = self._abs(pos)
         self._b.push_group(apos, (float(size[0]), float(size[1])), clip=clip_rrect(radius, corners))
+        self._push_group("clip", apos)
+        return self
+
+    def push_clip_ellipse(self, pos, size, exclude_on_hash=False):
+        apos = self._abs(pos)
+        self._b.push_group(apos, size, clip={"kind": "ellipse"})
         self._push_group("clip", apos)
         return self
 
@@ -680,6 +811,42 @@ class IRPainter(Painter):
             stroke=None if stroke is None else _rgba(stroke),
             stroke_width=stroke_width,
         )
+        return self
+
+    def roundrect_src(self, pos, size, fill, radius, stroke=None, stroke_width=1, exclude_on_hash=False):
+        apos = self._abs(pos)
+        self._b.roundrect(
+            apos,
+            size,
+            radius,
+            fill=None if fill is None else _rgba(fill),
+            stroke=None if stroke is None else _rgba(stroke),
+            stroke_width=stroke_width,
+            replace_pixels=True,
+        )
+        return self
+
+    def drop_shadow_roundrect(self, pos, size, radius, color, sigma, offset=(0, 0), exclude_on_hash=False):
+        self._b.shadow(
+            self._abs(pos), size, radius, alpha=1.0, color=_rgba(color), sigma=sigma, offset=offset, straight_rgba=True
+        )
+        return self
+
+    def vector_path(self, path, pos=(0, 0), exclude_on_hash=False):
+        self._b.vector_path(path, self._abs(pos))
+        return self
+
+    def vector_text(self, text, pos, exclude_on_hash=False):
+        from dataclasses import replace
+
+        path = text.path(pos)
+        if text.stroke is not None and text.stroke_width:
+            self.vector_path(replace(path, fill=None, stroke=text.stroke, width=text.stroke_width))
+        self.vector_path(path)
+        return self
+
+    def arc(self, pos, size, start_angle, end_angle, color, width=1, exclude_on_hash=False):
+        self._b.arc(self._abs(pos), size, start_angle, end_angle, _rgba(color), width)
         return self
 
     def pieslice(self, pos, size, start_angle, end_angle, fill, stroke=None, stroke_width=1, exclude_on_hash=False):

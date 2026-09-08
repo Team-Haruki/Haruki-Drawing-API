@@ -9,8 +9,9 @@ from src.core.heavy_render_pool import (
     get_heavy_render_worker_pool,
 )
 from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
-from src.sekai.misc.drawer import compose_alias_list_image, try_render_alias_list_payload
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
+from src.sekai.misc.drawer import try_render_alias_list_payload
 from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
 
 router = APIRouter(tags=["Misc"])
@@ -56,11 +57,8 @@ async def alias_list(request: AliasListRequest):
     try:
         set_request_stage("misc:alias_list:compose_image")
         payload = await try_render_alias_list_payload(request)
-        if payload is not None:
-            set_request_stage("misc:alias_list:image_to_response")
-            return encoded_image_payload_to_response(payload)
-        image = await compose_alias_list_image(request)
+        payload = require_native_payload(payload)
         set_request_stage("misc:alias_list:image_to_response")
-        return await image_to_response(image)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

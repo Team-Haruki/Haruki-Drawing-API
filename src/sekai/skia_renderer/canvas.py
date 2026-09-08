@@ -3,7 +3,7 @@
 The drawer builds its widget tree as usual; instead of ``canvas.get_img()`` (Pillow), this
 draws the same tree into an :class:`IRPainter` to produce a Render IR scene + any runtime
 images, then calls the native ``render_scene``. Any unsupported op or error returns ``None``
-so the caller falls back to the Pillow composer. See ``docs/skia-pillow-coverage-gaps.md``.
+for a declined native render. The service rejects it; reference tools can separately run Pillow.
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import math
 from typing import Any
 
 from src.core.debug import set_render_backend
@@ -61,22 +62,28 @@ def skia_plot_enabled() -> bool:
 # custom-profile SdfShape rendering, 12 = UnityImage + UnitySubscene, 13 = SlicedImage,
 # 14 = Porter-Duff Src/SrcOver blending for Rect, 15 = explicit Pillow-compatible Lanczos
 # resize for Image and UnitySubscene, 16 = straight-RGBA Pillow paste-mask blending for Image,
-# 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow,
-# 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp,
-# 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching,
-# 20 = discrete Pillow-compatible rounded-rectangle Group mask.
+# 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
+# 18 = explicit native FreeType BASIC text layout and grayscale masks.
+# 19 = Pillow-compatible bicubic image sampling; 20 = Arc and binary ellipse clips.
+# 21 = Pillow-compatible bilinear Image sampling and bicubic RasterSubscene placement.
+# 22 = discrete Src roundrects, straight-RGBA shadows and explicit text mask lerp.
+# 23 = natural-size alpha crop LUT, isolated before downstream raster resizing.
+# 24 = WebP sources and native foreground metadata for lazy image layouts.
+# 25 = completed Canvas raster resize with native Pillow-compatible bilinear filtering.
+# 26 = bounded floating-point vector paths, including cubic curves and dashed strokes.
+# 27 = analytic ellipse path contours for subpixel markers; vector text geometry API.
 # An older wheel SILENTLY drops the fields it does not know (serde skips them) — a capability-6
 # wheel would render a triangle background with no triangles in it — so refuse it and fail open
 # to Pillow. The number is hardcoded in four places: here, rust lib.rs, and the two CI assertions
 # (quick-check.yml, skia-wheels.yml). Bump all four together.
-REQUIRED_NATIVE_IR_CAPABILITY = 20
+REQUIRED_NATIVE_IR_CAPABILITY = 29
 
 
 def load_native_renderer():
     """Import the native Skia renderer module (shared by the shim and card paths).
 
     Raises ImportError when the module is missing OR too old for the IR this code
-    builds — callers already treat ImportError as the fail-open path.
+    builds. Service startup refuses this runtime; reference helpers may report a declined render.
     """
     native = importlib.import_module("haruki_skia_renderer")
     capability = getattr(native, "IR_CAPABILITY", 0)
@@ -86,6 +93,39 @@ def load_native_renderer():
             f"{REQUIRED_NATIVE_IR_CAPABILITY}; rebuild/upgrade the wheel"
         )
     return native
+
+
+def get_native_renderer_cache_stats() -> dict[str, Any]:
+    """Return the process-wide Rust renderer cache state without breaking health checks.
+
+    Diagnostic callers can inspect an unavailable extension even before service startup.
+    Keep `/cache/stats` resilient when collecting these failure details.
+    """
+    try:
+        native = load_native_renderer()
+        stats = dict(native.renderer_cache_stats())
+    except Exception as exc:
+        return {
+            "available": False,
+            "enabled": False,
+            "error": type(exc).__name__,
+        }
+    enabled = any(int(stats.get(key) or 0) > 0 for key in ("raster_cache_max_bytes", "text_mask_cache_max_bytes"))
+    return {
+        "available": True,
+        "enabled": enabled,
+        **stats,
+    }
+
+
+def clear_native_renderer_caches() -> bool:
+    """Clear Rust raster, dimension and text-mask caches; False if native is unavailable."""
+    try:
+        native = load_native_renderer()
+        native.clear_renderer_caches()
+    except Exception:
+        return False
+    return True
 
 
 _REQUIRED = {
@@ -151,6 +191,7 @@ def build_canvas_ir(
     heavy_font: str | _UnsetFont | None = _UNSET_FONT,
     emoji_font: str | _UnsetFont | None = _UNSET_FONT,
     jpg_quality: int | None = None,
+    text_engine: str = "skia",
 ) -> tuple[IRBuilder, dict[str, Any]]:
     """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
 
@@ -177,6 +218,7 @@ def build_canvas_ir(
         bg_hour=background_hour() if bg_hour is None else bg_hour,
         export_format=EXPORT_IMAGE_FORMAT if export_format is None else export_format,
         jpg_quality=JPG_QUALITY if jpg_quality is None else jpg_quality,
+        text_engine=text_engine,
     )
     canvas.draw(painter)
     painter.assert_balanced()
@@ -191,9 +233,14 @@ async def render_canvas_payload(
     scale: float | None = None,
     export_format: str | None = None,
 ) -> EncodedImagePayload | None:
-    """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow.
+    """Render a Canvas or an async Canvas factory through IRPainter → Skia.
 
-    ``scale`` mirrors ``Canvas.get_img(scale)`` (render at 1x, resize the final raster).
+    A factory runs inside a native preparation context so shared child-canvas helpers
+    can reuse validated fragments before loading assets or building layout. Reference
+    builders use the same widget factory normally. A declined render returns None.
+
+    ``scale`` resizes the completed logical raster with native bilinear filtering, matching
+    ``Canvas.get_img(scale)`` including its ``int(size * scale)`` dimension truncation.
     ``export_format`` overrides the global export format for endpoints that pin one
     (mirrors ``image_to_response(..., export_format=...)``).
 
@@ -211,13 +258,19 @@ async def render_canvas_payload(
         _record(name, OUTCOME_DISABLED)
         return None
     try:
-        payload = await _render_canvas_uncounted(canvas, bg_hour=bg_hour, scale=scale, export_format=export_format)
+        # Event list's full-page Pillow reference has a tighter pixel contract
+        # than the old main Skia glyphs satisfy, including its heading/footer.
+        # Keep that page native BASIC; never weaken its existing parity budget.
+        text_engine = "freetype_basic" if name == "event_list" else "skia"
+        payload = await _render_canvas_uncounted(
+            canvas, bg_hour=bg_hour, scale=scale, export_format=export_format, text_engine=text_engine
+        )
     except SkiaUnsupported as exc:
-        logger.info("plot canvas not Skia-expressible (%s); falling back to Pillow", exc)
+        logger.info("plot canvas not Skia-expressible (%s); declining native render", exc)
         _record(name, OUTCOME_FALLBACK)
         return None
     except Exception:
-        logger.exception("Skia canvas render failed; falling back to Pillow")
+        logger.exception("Skia canvas render failed; declining native render")
         _record(name, OUTCOME_ERROR)
         return None
     if payload is None:  # native extension unavailable
@@ -228,19 +281,42 @@ async def render_canvas_payload(
 
 
 async def _render_canvas_uncounted(
-    canvas, *, bg_hour: float | None = None, scale: float | None = None, export_format: str | None = None
+    canvas,
+    *,
+    bg_hour: float | None = None,
+    scale: float | None = None,
+    export_format: str | None = None,
+    text_engine: str = "skia",
 ) -> EncodedImagePayload | None:
     """The actual render. Returns None when the native extension is unavailable, raises
     ``SkiaUnsupported`` when the tree (or its size) is not Skia-expressible. Counting and the
     fail-open catch-all live in :func:`render_canvas_payload`."""
     try:
         native = load_native_renderer()
-    except ImportError:
+    except ImportError as exc:
         # Fail-open: a missing/broken native extension must degrade to Pillow, not 500.
-        logger.exception("haruki_skia_renderer not importable; falling back to Pillow")
+        logger.error("haruki_skia_renderer not importable (%s); declining native render", exc)
         return None
     bg = background_hour() if bg_hour is None else bg_hour
-    eff_scale = float(scale) if (scale is not None and abs(scale - 1.0) > 1e-3) else None
+    if callable(canvas):
+        from src.sekai.base.canvas_cache import native_canvas_preparation
+
+        options = {
+            "assets_base_dir": str(ASSETS_BASE_DIR),
+            "font_dir": str(FONT_DIR),
+            "default_font": DEFAULT_FONT,
+            "bold_font": DEFAULT_BOLD_FONT,
+            "heavy_font": DEFAULT_HEAVY_FONT,
+            "emoji_font": DEFAULT_EMOJI_FONT,
+            "export_format": EXPORT_IMAGE_FORMAT if export_format is None else export_format,
+            "jpg_quality": JPG_QUALITY,
+        }
+        with native_canvas_preparation(options, bg):
+            built = await canvas()
+            return await _render_canvas_uncounted(
+                built, bg_hour=bg, scale=scale, export_format=export_format, text_engine=text_engine
+            )
+    eff_scale = float(scale) if scale and not math.isclose(scale, 1.0, rel_tol=0.0, abs_tol=0.0) else None
     eff_format = EXPORT_IMAGE_FORMAT if export_format is None else export_format
 
     def _render():
@@ -250,10 +326,16 @@ async def _render_canvas_uncounted(
         # would serialize it across requests and cap throughput — which is why the size guard
         # inside build_canvas_ir runs HERE and not before the offload: _get_self_size() walks
         # the whole tree.
-        builder, mem_images = build_canvas_ir(canvas, bg_hour=bg, export_format=eff_format)
+        builder, mem_images = build_canvas_ir(canvas, bg_hour=bg, export_format=eff_format, text_engine=text_engine)
         scene = builder.build()
         if eff_scale is not None:
-            scene["scale"] = eff_scale
+            target_size = (
+                int(scene["canvas"]["width"] * eff_scale),
+                int(scene["canvas"]["height"] * eff_scale),
+            )
+            if not canvas_size_within_limit(target_size):
+                raise SkiaUnsupported(f"scaled canvas {target_size[0]}x{target_size[1]} exceeds the Skia size guard")
+            scene["post_resize"] = {"width": target_size[0], "height": target_size[1]}
         ir_json = json.dumps(scene, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         return native.render_scene(ir_json, mem_images)
 

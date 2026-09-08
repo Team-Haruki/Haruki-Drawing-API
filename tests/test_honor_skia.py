@@ -118,6 +118,8 @@ def test_honor_skia_renders_shared_subtree_and_caches_payload(monkeypatch) -> No
     monkeypatch.setattr(honor_skia, "build_request_watermark_text", lambda _request: "watermark")
     monkeypatch.setattr(honor_skia, "get_skia_payload_cached", lambda _key: None)
     monkeypatch.setattr(honor_skia, "lower_canvas_subtree", lambda *_args, **_kwargs: Badge())
+    monkeypatch.setattr(honor_skia, "get_native_fragment_cached", lambda *args, **kwargs: None)
+    monkeypatch.setattr(honor_skia, "render_cached_native_fragment", lambda *args, **kwargs: None)
     monkeypatch.setattr(honor_skia, "get_watermark_render_spec", lambda *_args: (12, ["watermark"], 40, 14))
     monkeypatch.setattr(honor_skia, "get_font", lambda *_args: object())
     monkeypatch.setattr(honor_skia, "get_text_size", lambda _font, text: (len(text) * 4, 12))

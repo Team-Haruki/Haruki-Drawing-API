@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-import io
 import logging
 import multiprocessing
 from multiprocessing import get_context
@@ -11,22 +10,17 @@ import queue
 import threading
 import time
 import traceback
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 from uuid import uuid4
 
 # Compatibility re-export for callers that still import the payload from this module.
-from src.core.image_payload import EncodedImagePayload
+from src.core.image_payload import EncodedImagePayload, require_native_payload
 from src.settings import (
-    EXPORT_IMAGE_FORMAT,
     ISOLATED_WORKER_POOL_SIZE,
     ISOLATED_WORKER_QUEUE_LIMIT,
     ISOLATED_WORKER_QUEUE_TIMEOUT_SECONDS,
-    JPG_QUALITY,
     REQUEST_HARD_TIMEOUT_SECONDS,
 )
-
-if TYPE_CHECKING:
-    from PIL import Image
 
 logger = logging.getLogger("src.core.heavy_render_pool")
 
@@ -76,40 +70,6 @@ class HeavyRenderQueueTimeoutError(TimeoutError):
     pass
 
 
-def _encode_image_payload(image: Image.Image) -> EncodedImagePayload:
-    image_width = getattr(image, "width", None)
-    image_height = getattr(image, "height", None)
-    image_mode = getattr(image, "mode", None)
-    started = time.perf_counter()
-    buffer = io.BytesIO()
-    try:
-        if EXPORT_IMAGE_FORMAT == "jpg":
-            if image.mode in ("RGBA", "LA", "PA"):
-                rgb = image.convert("RGB")
-                image.close()
-                image = rgb
-            image.save(buffer, format="JPEG", quality=JPG_QUALITY)
-            media_type = "image/jpeg"
-            filename = "image.jpg"
-        else:
-            image.save(buffer, format="PNG")
-            media_type = "image/png"
-            filename = "image.png"
-    finally:
-        close = getattr(image, "close", None)
-        if callable(close):
-            close()
-    return EncodedImagePayload(
-        image_bytes=buffer.getvalue(),
-        media_type=media_type,
-        filename=filename,
-        image_width=image_width,
-        image_height=image_height,
-        image_mode=image_mode,
-        encode_elapsed=time.perf_counter() - started,
-    )
-
-
 def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
     """Tag a worker-rendered Skia payload so the parent can log/count the backend.
 
@@ -130,26 +90,20 @@ def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
 
 def _render_heavy_task(kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
     if kind == "deck_recommend":
-        from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
+        from src.sekai.deck.drawer import try_render_deck_recommend_payload
         from src.sekai.deck.model import DeckRequest
 
         request = DeckRequest.model_validate(payload)
         skia_payload = asyncio.run(try_render_deck_recommend_payload(request))
-        if skia_payload is not None:
-            return _stamp_skia_backend(skia_payload)
-        image = asyncio.run(compose_deck_recommend_image(request))
-        return _encode_image_payload(image)
+        return _stamp_skia_backend(require_native_payload(skia_payload))
 
     if kind == "chara_birthday":
-        from src.sekai.misc.drawer import compose_chara_birthday_image, try_render_chara_birthday_payload
+        from src.sekai.misc.drawer import try_render_chara_birthday_payload
         from src.sekai.misc.model import CharaBirthdayRequest
 
         request = CharaBirthdayRequest.model_validate(payload)
         skia_payload = asyncio.run(try_render_chara_birthday_payload(request))
-        if skia_payload is not None:
-            return _stamp_skia_backend(skia_payload)
-        image = asyncio.run(compose_chara_birthday_image(request))
-        return _encode_image_payload(image)
+        return _stamp_skia_backend(require_native_payload(skia_payload))
 
     raise ValueError(f"unsupported heavy render task kind: {kind}")
 

@@ -78,6 +78,11 @@ async def test_profile_asset_layer_loaders_and_thumbnail_drawing_cover_optional_
         return _image((40, 50))
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_asset(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
     monkeypatch.setattr(drawer, "ascender_top_to_painter_y", lambda *_args: 17)
 
     request = CardFullThumbnailRequest(
@@ -129,6 +134,11 @@ async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) ->
         return _image((24 if path == "base" else 10, 24 if path == "base" else 12))
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_asset(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
     paths = SimpleNamespace(
         base="base",
         centertop="ct",
@@ -196,6 +206,11 @@ async def test_profile_canvas_builds_horizontal_vertical_and_missing_backgrounds
         return _image(size)
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_asset(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
     monkeypatch.setattr(drawer, "_profile_stats_badge_width", lambda text, font_size=18: len(text) * 5 + font_size)
 
     horizontal = await drawer._build_profile_canvas(_request())
@@ -217,6 +232,11 @@ async def test_profile_growth_modules_cover_solo_multi_icons_and_empty_paths(mon
         return _image((96, 48), color=(len(path), 0, 0, 255))
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_asset(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
     monkeypatch.setattr(drawer, "_profile_stats_badge_width", lambda text, font_size=18: len(text) * 5 + font_size)
     request = _request()
     base_ctx = drawer._ProfileLayoutContext(
@@ -293,6 +313,11 @@ async def test_profile_card_modules_cover_absent_complete_and_error_cases(monkey
         return _image()
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_asset(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
     empty = ProfileCardRequest()
     assert await drawer._build_profile_card_modules(empty) == []
     assert drawer._build_profile_card_identity_module(empty, []) is None

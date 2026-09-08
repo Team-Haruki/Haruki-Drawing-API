@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from types import SimpleNamespace
 from typing import Any
 
 from fastapi import HTTPException
 import pytest
 
 from src.core.pjsk import mysekai
+from src.sekai.mysekai import drawer as private_drawer
 
 
 @dataclass(frozen=True)
@@ -70,8 +70,12 @@ def test_mysekai_routes_return_native_payloads(case: _RouteCase, monkeypatch: py
         pillow_called = True
         return object()
 
-    monkeypatch.setattr(mysekai, case.native_renderer, native_renderer)
-    monkeypatch.setattr(mysekai, case.pillow_renderer, pillow_renderer)
+    monkeypatch.setattr(
+        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        case.native_renderer,
+        native_renderer,
+    )
+    monkeypatch.setattr(mysekai, case.pillow_renderer, pillow_renderer, raising=False)
     monkeypatch.setattr(
         mysekai,
         "encoded_image_payload_to_response",
@@ -85,28 +89,21 @@ def test_mysekai_routes_return_native_payloads(case: _RouteCase, monkeypatch: py
 
 
 @pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda case: case.endpoint)
-def test_mysekai_routes_fall_back_to_pillow(case: _RouteCase, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mysekai_routes_reject_missing_native_without_pillow(case: _RouteCase, monkeypatch: pytest.MonkeyPatch) -> None:
     request = object()
-    image = SimpleNamespace(width=320, height=180)
-    response = object()
 
-    async def native_renderer(received: Any) -> None:
-        assert received is request
+    async def native_renderer(_request):
         return None
 
-    async def pillow_renderer(received: Any) -> object:
-        assert received is request
-        return image
-
-    async def image_response(received: Any) -> object:
-        assert received is image
-        return response
-
-    monkeypatch.setattr(mysekai, case.native_renderer, native_renderer)
-    monkeypatch.setattr(mysekai, case.pillow_renderer, pillow_renderer)
-    monkeypatch.setattr(mysekai, "image_to_response", image_response)
-
-    assert asyncio.run(getattr(mysekai, case.endpoint)(request)) is response
+    monkeypatch.setattr(
+        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        case.native_renderer,
+        native_renderer,
+    )
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(getattr(mysekai, case.endpoint)(request))
+    assert error.value.status_code == 500
+    assert "Pillow fallback is no longer available" in error.value.detail
 
 
 @pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda case: case.endpoint)
@@ -114,7 +111,11 @@ def test_mysekai_routes_convert_renderer_errors(case: _RouteCase, monkeypatch: p
     async def failed_renderer(_request: Any) -> None:
         raise RuntimeError("render failed")
 
-    monkeypatch.setattr(mysekai, case.native_renderer, failed_renderer)
+    monkeypatch.setattr(
+        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        case.native_renderer,
+        failed_renderer,
+    )
 
     with pytest.raises(HTTPException) as error:
         asyncio.run(getattr(mysekai, case.endpoint)(object()))

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from io import BytesIO
+
 from PIL import Image
 import pytest
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.image_source import EncodedImageRef
 from src.sekai.base.plot import Canvas, Frame, HSplit, TextStyle, VSplit
 from src.sekai.misc import drawer
 from src.sekai.misc.model import AliasListRequest
@@ -11,6 +14,12 @@ from src.sekai.misc.model import AliasListRequest
 
 def _image(size=(20, 30), color=(10, 20, 30, 255)) -> Image.Image:
     return Image.new("RGBA", size, color)
+
+
+def _encoded(image):
+    stream = BytesIO()
+    image.save(stream, format="PNG")
+    return EncodedImageRef(stream.getvalue(), image.size, image.mode)
 
 
 def _request(**updates) -> AliasListRequest:
@@ -57,15 +66,15 @@ def test_alias_accent_width_trim_path_and_image_preparation_cover_variants(monke
 
     transparent_border = Image.new("RGBA", (6, 6))
     transparent_border.putpixel((3, 3), (20, 30, 40, 255))
-    prepared = drawer._prepare_alias_trim_image(transparent_border)
-    assert prepared.size == (1, 1)
-    assert prepared.getpixel((0, 0))[3] == 255
-    assert drawer._prepare_alias_trim_image(Image.new("RGB", (2, 2), "white")).mode == "RGBA"
+    prepared = drawer._prepare_alias_trim_image(_encoded(transparent_border))
+    assert prepared.natural_size == (1, 1)
+    assert prepared.bounds == (3, 3, 4, 4)
+    assert drawer._prepare_alias_trim_image(_encoded(Image.new("RGB", (2, 2), "white"))).natural_size == (2, 2)
 
 
 def test_alias_trim_metrics_and_panels_cover_wide_tall_jacket_and_plain_layouts(monkeypatch) -> None:
-    tall = _image((100, 800))
-    wide = _image((1200, 200))
+    tall = drawer._prepare_alias_trim_image(_encoded(_image((100, 800))))
+    wide = drawer._prepare_alias_trim_image(_encoded(_image((1200, 200))))
     tall_metrics = drawer._resolve_alias_trim_metrics(tall, 700, 600)
     wide_metrics = drawer._resolve_alias_trim_metrics(wide, 700, 600)
     assert tall_metrics[1] == 600
@@ -111,18 +120,14 @@ def test_alias_trim_metrics_and_panels_cover_wide_tall_jacket_and_plain_layouts(
 
 @pytest.mark.anyio
 async def test_alias_canvas_builds_plain_jacket_trim_and_missing_trim_paths(monkeypatch) -> None:
-    async def fake_resized(*_args, **_kwargs):
-        return _image((92, 92))
-
     async def fake_full(_root, path, **_kwargs):
         if path == "missing.png":
             raise FileNotFoundError(path)
         image = Image.new("RGBA", (100, 200))
         image.paste((255, 255, 255, 255), (20, 10, 80, 190))
-        return image
+        return _encoded(image)
 
-    monkeypatch.setattr(drawer, "get_img_resized", fake_resized)
-    monkeypatch.setattr(drawer, "get_img_from_path", fake_full)
+    monkeypatch.setattr(drawer, "get_asset_image_ref", fake_full)
 
     plain = await drawer._build_alias_list_canvas(_request())
     assert isinstance(plain, Canvas)

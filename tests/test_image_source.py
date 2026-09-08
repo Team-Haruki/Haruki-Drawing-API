@@ -86,7 +86,6 @@ def test_imagebg_keeps_asset_ref_lazy_and_emits_region_relative_effects(tmp_path
     whole-canvas background. Blur sigma follows the source->destination scale because Pillow
     applies GaussianBlur(3) before resizing.
     """
-    from src.sekai.skia_renderer import ir_painter
     from src.sekai.skia_renderer.ir_painter import IRPainter
     from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
@@ -99,8 +98,8 @@ def test_imagebg_keeps_asset_ref_lazy_and_emits_region_relative_effects(tmp_path
     bg = plot.ImageBg(ref, align="br", mode="fit", blur=True, fade=0.1)
     assert bg.img is ref
     monkeypatch.setattr(
-        ir_painter,
-        "resolve_image_source_sync",
+        Image,
+        "open",
         lambda *_args, **_kwargs: pytest.fail("healthy ImageBg asset ref decoded in Python"),
     )
 
@@ -174,7 +173,6 @@ def test_imagebox_layout_uses_ref_size_without_decode():
 
 def test_imagebox_asset_ref_crop_sampling_and_tint_stay_lazy_in_ir(tmp_path, monkeypatch):
     """ImageBox decorations must lower to one path-backed Image node, not a mem raster."""
-    from src.sekai.skia_renderer import ir_painter
     from src.sekai.skia_renderer.ir_painter import IRPainter
     from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
 
@@ -198,8 +196,8 @@ def test_imagebox_asset_ref_crop_sampling_and_tint_stay_lazy_in_ir(tmp_path, mon
         tint=ImageTint((128, 64, 255, 255), mode="multiply"),
     )
     monkeypatch.setattr(
-        ir_painter,
-        "resolve_image_source_sync",
+        Image,
+        "open",
         lambda *_args, **_kwargs: pytest.fail("healthy decorated AssetImageRef decoded in Python"),
     )
     painter = IRPainter(

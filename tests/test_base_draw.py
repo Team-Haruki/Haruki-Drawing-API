@@ -42,7 +42,7 @@ def test_wrap_watermark_text_prefers_segments_then_characters(monkeypatch: pytes
 
 
 def test_watermark_layout_shrinks_only_when_line_limit_requires_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(draw, "get_font", lambda _name, size: size)
+    monkeypatch.setattr(draw, "get_layout_font", lambda _name, size: size)
     monkeypatch.setattr(draw, "get_text_size", text_length)
 
     assert draw.build_watermark_layout("short", 10, 12, min_size=8) == (12, "short")
@@ -88,7 +88,7 @@ def test_add_watermark_rebuilds_canvas_footer(
 ) -> None:
     monkeypatch.setattr(draw, "WATERMARK_TOP_OFFSET", top_offset)
     monkeypatch.setattr(draw, "WATERMARK_BOTTOM_OFFSET", bottom_offset)
-    monkeypatch.setattr(draw, "get_font", lambda _name, size: size)
+    monkeypatch.setattr(draw, "get_layout_font", lambda _name, size: size)
     monkeypatch.setattr(draw, "get_text_size", text_length)
     canvas = Canvas(w=100, h=60)
     canvas.set_padding((10, 5))
@@ -162,7 +162,7 @@ def test_add_watermark_to_image_extends_footer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     font = ImageFont.load_default()
-    monkeypatch.setattr(draw, "get_font", lambda _name, _size: font)
+    monkeypatch.setattr(draw, "get_layout_font", lambda _name, _size: font)
     monkeypatch.setattr(draw, "get_text_size", image_text_size)
     image = Image.new(mode, (80, height), "black")
 

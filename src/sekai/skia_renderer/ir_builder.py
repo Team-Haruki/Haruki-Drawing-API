@@ -23,6 +23,7 @@ import threading
 from typing import Any
 
 from src.core.pillow_telemetry import PILLOW_TOUCH_TEXT_METRIC, record_pillow_touch
+from src.sekai.base.font_metrics import get_native_font
 
 Color = Sequence[int]
 Vec2 = Sequence[float]
@@ -417,6 +418,7 @@ class IRBuilder:
         stroke: Color | Node | None = None,
         stroke_width: float = 1,
         corner_radii: Sequence[float] | None = None,
+        replace_pixels: bool = False,
     ) -> Node:
         node: Node = {
             "type": "RoundRect",
@@ -425,6 +427,8 @@ class IRBuilder:
             "radius": radius,
             "corners": [bool(c) for c in corners],
         }
+        if replace_pixels:
+            node["replace_pixels"] = True
         if corner_radii is not None:
             node["corner_radii"] = [float(r) for r in corner_radii]
         if fill is not None:
@@ -433,6 +437,37 @@ class IRBuilder:
             node["stroke"] = _fill_value(stroke)
             node["stroke_width"] = stroke_width
         return self._add(node)
+
+    def vector_path(self, path, pos=(0, 0)) -> Node:
+        return self._add(
+            {
+                "type": "VectorPath",
+                "pos": _vec(pos),
+                "commands": [
+                    {"op": op, **({"points": list(points)} if points else {})} for op, points in path.commands
+                ],
+                "fill": _color(path.fill) if path.fill is not None else None,
+                "stroke": _color(path.stroke) if path.stroke is not None else None,
+                "width": path.width,
+                "dashes": list(path.dashes),
+                "phase": path.phase,
+                "cap": path.cap,
+                "join": path.join,
+            }
+        )
+
+    def arc(self, pos, size, start_angle, end_angle, color, width=1) -> Node:
+        return self._add(
+            {
+                "type": "Arc",
+                "pos": _vec(pos),
+                "size": _vec(size),
+                "start_angle": start_angle,
+                "end_angle": end_angle,
+                "color": _color(color),
+                "width": width,
+            }
+        )
 
     def pieslice(
         self,
@@ -472,6 +507,7 @@ class IRBuilder:
         sampling: str = "linear_mipmap",
         blend: str = "src_over",
         blur_sigma: float | Vec2 | None = None,
+        alpha_floor: int | None = None,
     ) -> Node:
         """``blend="src"`` REPLACES the destination in the drawn rect (all four channels verbatim,
         the mask-less ``Image.paste``); the default composites over it.
@@ -480,8 +516,8 @@ class IRBuilder:
         interpolating all four *straight* RGBA channels with source alpha. It is intentionally
         restricted to a positive integral, axis-aligned ``stretch`` placement with ``alpha=1``
         and no source_rect/tint/shadow/blur; Rust preflights ancestor Group offsets and rejects
-        Transform or masked-Group nesting before drawing (ordinary Group clips and isolated
-        subscene local surfaces are supported). Skia surfaces are premultiplied, so RGB hidden beneath
+        Transform or masked-Group nesting before drawing (ordinary Group clips and UnitySubscene
+        local surfaces are supported). Skia surfaces are premultiplied, so RGB hidden beneath
         alpha=0 cannot survive a surface round-trip and is explicitly outside this contract.
 
         ``blur_sigma`` applies a destination-space Gaussian blur to the image only; a scalar uses
@@ -504,6 +540,10 @@ class IRBuilder:
             "sampling": sampling,
             "alpha": alpha,
         }
+        if alpha_floor is not None:
+            if not 0 <= alpha_floor < 255:
+                raise ValueError("alpha_floor must be between 0 and 254")
+            node["alpha_floor"] = alpha_floor
         if blend != "src_over":
             node["blend"] = blend
         if anchor[0] or anchor[1]:
@@ -660,10 +700,11 @@ class IRBuilder:
     ) -> Iterator[IRBuilder]:
         """Render children at ``natural_size`` on a transparent isolated raster.
 
-        The completed snapshot is sampled into logical ``pos``/``dst_size`` as one parent Image
-        draw. A Scene.scale remains the normal whole-page final resize and this node introduces
-        no hidden pre-resize. ``shadow`` uses :func:`image_shadow` semantics and is derived from
-        the completed snapshot's alpha silhouette.
+        The completed snapshot is sampled exactly once into logical ``pos``/``dst_size`` on the
+        parent canvas. A parent Scene.scale therefore scales that one draw directly, without a
+        pre-resize or second sampling pass. Explicit ``pillow_bicubic`` instead performs a
+        full-raster resize at integer logical destination dimensions before placement, preserving
+        sequential 8-bit filters. ``shadow`` uses the resized snapshot's alpha silhouette.
 
         The active builder stack points at this node's children inside the context, so
         ``NativeSubtree.splice_into(builder, mem_sink, ...)`` can be called directly here.
@@ -759,13 +800,13 @@ class IRBuilder:
         alpha: float,
         underlay: dict[str, Any] | None = None,
     ) -> Node:
-        """TMP-SDF text quad: shade an ALREADY display-warped A8 ``mem:`` field per pixel
+        """TMP-SDF text quad: shade prepared A8 or float32 ``mem:`` distance samples per pixel
         (``clip(f*face_scale - face_w, 0, 1)*alpha`` + optional integer-shift underlay pass,
         matching ``PNGRenderer._shade_field_with_scalars`` bit-comparably) and src-over the
         straight-alpha patch at integer ``pos``. The node does no geometric resampling — the
-        PIL bicubic warp semantics stay in Python. ``underlay`` (when present):
+        shared field preparation owns warp semantics. ``underlay`` (when present):
         ``{"color": [r,g,b], "scale": f, "w": f, "shift": [sx, sy]}``.
-        Requires IR_CAPABILITY >= 9."""
+        Requires IR_CAPABILITY >= 9 (>= 28 for float32 fields)."""
         node: Node = {
             "type": "SdfQuad",
             "pos": _vec(pos),
@@ -949,12 +990,14 @@ class IRBuilder:
         return self._fonts["default"]
 
     def _pil_font(self, role: str, size: float, font_name: str | None = None) -> Any:
-        """Load a PIL font for measurement, matching the role/name the renderer will use.
+        """Resolve native BASIC metrics, with a legacy adapter for fail-open deployments.
 
-        Backed by the process-wide cache above, so the font objects are shared across
-        IRBuilder instances (i.e. across requests) instead of being rebuilt per render.
+        The historical method name remains for compatibility. Native measurements
+        reuse Rust's thread-local FreeType faces without constructing Pillow fonts.
         """
-        return get_pil_font(self._font_dir, self._resolve_font_name(role, font_name), size)
+        name = self._resolve_font_name(role, font_name)
+        native_font = get_native_font(self._font_dir, name, size)
+        return native_font if native_font is not None else get_pil_font(self._font_dir, name, size)
 
     def measure_text(self, text: str, role: str, size: float, font_name: str | None = None) -> float:
         """Approximate rendered width (px) of ``text`` (PIL metrics; near-Skia, used for layout)."""
@@ -1127,10 +1170,14 @@ class IRBuilder:
         letter_spacing: float = 0.0,
         adaptive: Node | None = None,
         font_name: str | None = None,
+        engine: str = "skia",
+        mask_lerp: bool = False,
     ) -> Node:
+        if engine not in ("skia", "freetype_basic"):
+            raise ValueError(f"unsupported text engine: {engine}")
         resolved_pos = [float(pos[0]), float(pos[1])]
         resolved_baseline = baseline
-        if baseline == "cjk_top":
+        if baseline == "cjk_top" and engine == "skia":
             resolved_pos[1] = self.painter_baseline_y(resolved_pos[1], role, size, font_name)
             resolved_baseline = "alphabetic"
         font: Node = {"role": role, "size": size}
@@ -1151,6 +1198,10 @@ class IRBuilder:
             node["letter_spacing"] = float(letter_spacing)
         if adaptive is not None:
             node["adaptive"] = adaptive
+        if mask_lerp:
+            node["mask_lerp"] = True
+        if engine != "skia":
+            node["engine"] = engine
         return self._add(node)
 
     def watermark(
@@ -1183,6 +1234,7 @@ class IRBuilder:
         offset: Vec2 = (2, 4),
         sigma: float = 2.5,
         color: Color = (0, 0, 0, 255),
+        straight_rgba: bool = False,
     ) -> Node:
         return self._add(
             {
@@ -1194,6 +1246,7 @@ class IRBuilder:
                 "offset": _vec(offset),
                 "sigma": sigma,
                 "color": _color(color),
+                "straight_rgba": bool(straight_rgba),
             }
         )
 

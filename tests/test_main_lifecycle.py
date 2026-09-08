@@ -9,9 +9,8 @@ from typing import Any
 import pytest
 
 from src.core import heavy_render_pool, main as main_mod
-from src.sekai.base import painter, utils
+from src.sekai.base import painter_cache, utils
 from src.sekai.profile.custom_profile import diagnostics
-from src.sekai.sk import drawer as sk_drawer
 from src.sekai.skia_renderer import canvas, ir_builder
 import src.settings as settings_mod
 from src.settings import settings
@@ -30,33 +29,20 @@ def test_nogil_runtime_guard_rejects_unknown_or_enabled_runtime(monkeypatch: pyt
     main_mod._ensure_nogil_runtime()
 
 
-@pytest.mark.parametrize(
-    ("path", "name", "expected"),
-    [
-        ("/fonts/Example.otf", "Example.ttf", True),
-        ("/fonts/Other.otf", "Example.ttf", False),
-        (object(), "Example.ttf", False),
-    ],
-)
-def test_font_resolution_uses_the_loaded_face_path(
-    path: object,
-    name: str,
-    expected: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(painter, "get_font", lambda _name, _size: SimpleNamespace(path=path))
-
-    assert main_mod._font_resolves(name) is expected
+@pytest.mark.parametrize("name", ["regular", "bold", "heavy"])
+def test_startup_rejects_each_missing_text_face(monkeypatch, name):
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda **_: [name])
+    with pytest.raises(RuntimeError, match="configured text fonts cannot be resolved"):
+        main_mod._self_check_fonts()
 
 
-def test_pillow_font_check_separates_text_and_emoji(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings_mod, "DEFAULT_FONT", "regular")
-    monkeypatch.setattr(settings_mod, "DEFAULT_BOLD_FONT", "bold")
-    monkeypatch.setattr(settings_mod, "DEFAULT_HEAVY_FONT", "heavy")
-    monkeypatch.setattr(settings_mod, "DEFAULT_EMOJI_FONT", "emoji")
-    monkeypatch.setattr(main_mod, "_font_resolves", lambda name: name in {"regular", "heavy"})
-
-    assert main_mod._check_pillow_fonts() == (["bold"], ["emoji"])
+def test_missing_emoji_is_reported_without_blocking_native_text(monkeypatch, caplog):
+    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
+    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda *, emoji=False: ["emoji"] if emoji else [])
+    with caplog.at_level(logging.ERROR, logger=main_mod.__name__):
+        main_mod._self_check_fonts()
+    assert "native emoji font cannot be resolved" in caplog.text
 
 
 def test_native_font_check_reports_only_fallback_faces(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,19 +72,18 @@ def test_native_font_check_reports_only_fallback_faces(monkeypatch: pytest.Monke
     assert main_mod._check_native_fonts() == ["regular", "heavy"]
 
 
-def test_font_self_check_skips_native_probe_when_disabled_or_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "_check_pillow_fonts", lambda: ([], []))
+def test_font_self_check_rejects_disabled_or_unavailable_native(monkeypatch):
     monkeypatch.setattr(settings.drawing, "use_skia_plot", False)
-    monkeypatch.setattr(main_mod, "_check_native_fonts", lambda: pytest.fail("native probe should be skipped"))
-    main_mod._self_check_fonts()
-
+    with pytest.raises(RuntimeError, match="Native rendering is required"):
+        main_mod._self_check_fonts()
     monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
 
-    def unavailable() -> list[str]:
+    def unavailable():
         raise ImportError("extension missing")
 
     monkeypatch.setattr(main_mod, "_check_native_fonts", unavailable)
-    main_mod._self_check_fonts()
+    with pytest.raises(RuntimeError, match="Native renderer startup check failed"):
+        main_mod._self_check_fonts()
 
 
 def test_disk_cache_cleanup_reports_only_nonempty_sweeps(
@@ -107,7 +92,7 @@ def test_disk_cache_cleanup_reports_only_nonempty_sweeps(
 ) -> None:
     counts = {"composed": 0, "painter": 0, "diagnostic": 0}
     monkeypatch.setattr(utils, "cleanup_expired_composed_image_disk_cache", lambda: counts["composed"])
-    monkeypatch.setattr(painter.Painter, "cleanup_old_disk_cache", lambda: counts["painter"])
+    monkeypatch.setattr(painter_cache, "cleanup_painter_disk_cache", lambda: counts["painter"])
     monkeypatch.setattr(diagnostics, "cleanup_custom_profile_diagnostics", lambda: counts["diagnostic"])
 
     with caplog.at_level(logging.INFO, logger=main_mod.__name__):
@@ -176,24 +161,17 @@ def test_initial_disk_cleanup_is_fail_open(
     assert caplog.records[-1].message == "Failed to cleanup drawing disk caches"
 
 
-def test_skia_import_probe_honors_the_gate(
-    caplog: pytest.LogCaptureFixture,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(settings.drawing, "use_skia_plot", False)
-    monkeypatch.setitem(main_mod.sys.modules, "haruki_skia_renderer", None)
-    main_mod._report_missing_skia_extension()
-    assert not caplog.records
+def test_failed_native_startup_allocates_no_cleanup_tasks(monkeypatch):
+    monkeypatch.setattr(main_mod, "_ensure_nogil_runtime", lambda: None)
+    monkeypatch.setattr(main_mod, "configure_runtime_diagnostics", lambda: None)
 
-    monkeypatch.setattr(settings.drawing, "use_skia_plot", True)
-    with caplog.at_level(logging.ERROR, logger=main_mod.__name__):
-        main_mod._report_missing_skia_extension()
-    assert "not importable" in caplog.records[-1].message
+    def unavailable():
+        raise RuntimeError("native unavailable")
 
-    caplog.clear()
-    monkeypatch.setitem(main_mod.sys.modules, "haruki_skia_renderer", SimpleNamespace())
-    main_mod._report_missing_skia_extension()
-    assert not caplog.records
+    monkeypatch.setattr(main_mod, "_self_check_fonts", unavailable)
+    monkeypatch.setattr(main_mod, "_create_cleanup_tasks", lambda: pytest.fail("startup allocated tasks before checks"))
+    with pytest.raises(RuntimeError, match="native unavailable"):
+        asyncio.run(main_mod._startup_runtime())
 
 
 def test_runtime_startup_runs_each_stage(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -205,7 +183,6 @@ def test_runtime_startup_runs_each_stage(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(main_mod, "configure_runtime_diagnostics", lambda: calls.append("diagnostics"))
     monkeypatch.setattr(main_mod, "_create_cleanup_tasks", lambda: calls.append("tasks") or cleanup_tasks)
     monkeypatch.setattr(main_mod, "_run_initial_disk_cleanup", lambda: calls.append("disk"))
-    monkeypatch.setattr(main_mod, "_report_missing_skia_extension", lambda: calls.append("skia"))
     monkeypatch.setattr(main_mod, "_self_check_fonts", lambda: calls.append("fonts"))
 
     async def start_pool() -> None:
@@ -214,7 +191,7 @@ def test_runtime_startup_runs_each_stage(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(heavy_render_pool, "startup_heavy_render_worker_pool", start_pool)
 
     assert asyncio.run(main_mod._startup_runtime()) is cleanup_tasks
-    assert calls == ["nogil", "logging", "diagnostics", "tasks", "disk", "skia", "fonts", "pool"]
+    assert calls == ["nogil", "logging", "diagnostics", "fonts", "tasks", "disk", "pool"]
 
 
 def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -225,8 +202,7 @@ def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pyte
         calls.append("pool")
 
     monkeypatch.setattr(heavy_render_pool, "shutdown_heavy_render_worker_pool", stop_pool)
-    monkeypatch.setattr(painter, "shutdown_painter", lambda: calls.append("painter"))
-    monkeypatch.setattr(sk_drawer, "shutdown_sk_drawer", lambda: calls.append("sk"))
+    monkeypatch.setattr(painter_cache, "cleanup_painter_disk_cache", lambda: calls.append("painter"))
     monkeypatch.setattr(utils, "shutdown_utils", lambda: calls.append("utils"))
 
     async def exercise() -> None:
@@ -235,7 +211,7 @@ def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pyte
         assert task.cancelled()
 
     asyncio.run(exercise())
-    assert calls == ["lifespan_shutdown", "pool", "painter", "sk", "utils"]
+    assert calls == ["lifespan_shutdown", "pool", "painter", "utils"]
 
 
 def test_lifespan_delegates_startup_and_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:

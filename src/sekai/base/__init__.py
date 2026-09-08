@@ -1,25 +1,29 @@
 # Base module exports
 
-from src.settings import (
-    ASSETS_BASE_DIR,
-    DEFAULT_BOLD_FONT,
-    DEFAULT_EMOJI_FONT,
-    DEFAULT_FONT,
-    DEFAULT_HEAVY_FONT,
-)
+from importlib import import_module
 
-# From draw.py
-from .draw import (
-    BG_PADDING,
-    SEKAI_BLUE_BG,
-    add_request_watermark,
-    add_watermark,
-    roundrect_bg,
-)
-from .painter import color_code_to_rgb
+# Keep metadata/reference imports usable without importing either renderer. Existing
+# package-level names resolve lazily for backwards compatibility.
+_LAZY_EXPORTS = {
+    **dict.fromkeys(
+        ("ASSETS_BASE_DIR", "DEFAULT_BOLD_FONT", "DEFAULT_EMOJI_FONT", "DEFAULT_FONT", "DEFAULT_HEAVY_FONT"),
+        "src.settings",
+    ),
+    **dict.fromkeys(
+        ("BG_PADDING", "SEKAI_BLUE_BG", "add_request_watermark", "add_watermark", "roundrect_bg"),
+        "src.sekai.base.draw",
+    ),
+    "color_code_to_rgb": "src.sekai.base.paint_types",
+    "get_img_from_path": "src.sekai.base.utils",
+}
 
-# From utils.py
-from .utils import get_img_from_path
+
+def __getattr__(name):
+    module = _LAZY_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return getattr(import_module(module), name)
+
 
 # Character color codes
 CHARACTER_COLOR_CODE = {

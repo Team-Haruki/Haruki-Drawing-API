@@ -53,6 +53,11 @@ def test_music_brief_canvas_renders_profile_results_and_all_difficulty_shapes(mo
         received_profiles.append(received)
 
     monkeypatch.setattr(music_drawer, "get_asset_image_ref", fake_image_loader)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_image_loader(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(music_drawer, "get_asset_image_refs", fake_assets)
     monkeypatch.setattr(music_drawer, "get_profile_card", fake_profile_card)
     request = MusicBriefListRequest(
         region="JP",
@@ -118,6 +123,11 @@ def test_music_list_canvas_groups_entries_and_resolves_result_icons(monkeypatch)
         return Image.new("RGBA", (64, 64), (20, 80, 160, 255))
 
     monkeypatch.setattr(music_drawer, "get_asset_image_ref", fake_image_loader)
+
+    async def fake_assets(root, paths, **kwargs):
+        return [await fake_image_loader(root, path, **kwargs) for path in paths]
+
+    monkeypatch.setattr(music_drawer, "get_asset_image_refs", fake_assets)
     request = MusicListRequest(
         user_results={1: "fc", 2: "ap"},
         music_list=[

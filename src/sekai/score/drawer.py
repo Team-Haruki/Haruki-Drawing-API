@@ -1,8 +1,12 @@
+from __future__ import annotations
+
 import asyncio
 import logging
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -14,7 +18,8 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import BLACK, WHITE, get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.paint_types import BLACK, WHITE
 from src.sekai.base.plot import (
     FillBg,
     HSplit,
@@ -24,6 +29,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
+from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT

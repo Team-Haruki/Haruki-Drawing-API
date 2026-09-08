@@ -1,10 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
-from src.core.utils import encoded_image_payload_to_response, image_to_response
+from src.core.image_payload import require_native_payload
+from src.core.utils import encoded_image_payload_to_response
 from src.sekai.costume.drawer import (
-    compose_costume_detail_image,
-    compose_costume_list_image,
     try_render_costume_detail_payload,
     try_render_costume_list_payload,
 )
@@ -21,10 +20,8 @@ router = APIRouter(tags=["Costume"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 async def costume_list(request: CostumeListRequest):
     try:
         payload = await try_render_costume_list_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_costume_list_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -37,9 +34,7 @@ async def costume_list(request: CostumeListRequest):
 async def costume_detail(request: CostumeDetailRequest):
     try:
         payload = await try_render_costume_detail_payload(request)
-        if payload is not None:
-            return encoded_image_payload_to_response(payload)
-        image = await compose_costume_detail_image(request)
-        return await image_to_response(image)
+        payload = require_native_payload(payload)
+        return encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

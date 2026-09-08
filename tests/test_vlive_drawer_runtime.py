@@ -54,7 +54,7 @@ def test_vlive_time_status_window_and_cache_key_helpers_cover_all_states(monkeyp
     monkeypatch.setattr(drawer, "build_rendered_image_cache_key", lambda *args, **kwargs: (args, kwargs))
     args, kwargs = drawer._build_vlive_entry_cache_key(_live(living=True), NOW)
     assert args[0] == "vlive_list_entry"
-    assert kwargs["extra"] == {"state": "living", "bucket": "202601021200"}
+    assert kwargs["extra"] == {"time_texts": drawer._vlive_entry_time_texts(_live(living=True), NOW)}
 
 
 @pytest.mark.anyio
@@ -84,35 +84,29 @@ async def test_vlive_asset_preload_and_entry_composition_cover_empty_and_full_se
 
 
 @pytest.mark.anyio
-async def test_vlive_entry_cache_covers_memory_disk_and_render_miss(monkeypatch) -> None:
-    live = _live()
-    memory = _image((1, 1))
-    disk = _image((2, 2))
-    rendered = _image((3, 3))
-    monkeypatch.setattr(drawer, "_build_vlive_entry_cache_key", lambda *_args: "key")
-    monkeypatch.setattr(drawer, "get_composed_image_cached", lambda _key: memory)
-    assert await drawer._get_vlive_list_entry_image(live, NOW) is memory
+async def test_vlive_entry_delegates_native_cache_and_preserves_key(monkeypatch) -> None:
+    from src.sekai.base import canvas_cache
 
-    writes: list[tuple] = []
-    monkeypatch.setattr(drawer, "get_composed_image_cached", lambda _key: None)
-    monkeypatch.setattr(drawer, "get_composed_image_disk_cached", lambda *_args: disk)
-    monkeypatch.setattr(drawer, "put_composed_image_cache", lambda *args: writes.append(args))
-    assert await drawer._get_vlive_list_entry_image(live, NOW) is disk
+    canvas = Canvas(w=3, h=3)
+    observed = []
 
-    monkeypatch.setattr(drawer, "get_composed_image_disk_cached", lambda *_args: None)
-    monkeypatch.setattr(drawer, "_preload_vlive_entry_assets", lambda _live: _async_value({}))
-    monkeypatch.setattr(drawer, "_compose_vlive_entry_image", lambda *_args: _async_value(rendered))
-    monkeypatch.setattr(drawer, "put_composed_image_disk_cache", lambda *args: writes.append(args))
-    assert await drawer._get_vlive_list_entry_image(live, NOW) is rendered
-    assert writes[-2] == ("key", rendered)
-    assert writes[-1] == (drawer._VLIVE_LIST_ENTRY_CACHE_NAMESPACE, "key", rendered)
+    async def prepare(key, factory):
+        observed.append(key)
+        return await factory()
+
+    monkeypatch.setattr(canvas_cache, "prepare_cached_canvas", prepare)
+    monkeypatch.setattr(drawer, "_build_vlive_entry_cache_key", lambda *_, **kwargs: "key")
+    monkeypatch.setattr(drawer, "_preload_vlive_entry_assets", lambda *_: _async_value({}))
+    monkeypatch.setattr(drawer, "_build_vlive_entry_canvas", lambda *_, **kwargs: canvas)
+    assert await drawer._get_vlive_list_entry_canvas(_live(), NOW) == (canvas, "key")
+    assert observed == ["key"]
 
 
 @pytest.mark.anyio
 async def test_vlive_list_canvas_compose_and_native_routes_cover_empty_enabled_and_disabled(monkeypatch) -> None:
     request = VLiveListRequest(region="jp", timezone="UTC", lives=[_live()])
-    entry = _image((10, 10))
-    monkeypatch.setattr(drawer, "_get_vlive_list_entry_image", lambda *_args: _async_value(entry))
+    entry = Canvas(w=10, h=10)
+    monkeypatch.setattr(drawer, "_get_vlive_list_entry_canvas", lambda *_args: _async_value((entry, "key")))
     canvas = await drawer._build_vlive_list_canvas(request, NOW)
     assert isinstance(canvas, Canvas)
     assert isinstance(await drawer._build_vlive_list_canvas(request.model_copy(update={"lives": []}), NOW), Canvas)

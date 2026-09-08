@@ -21,3 +21,13 @@ class EncodedImagePayload:
     # ``None`` means telemetry was unavailable, ``{}`` proves native-pure, and a non-empty
     # mapping classifies the render as native-hybrid in the parent process.
     pillow_touch_counts: dict[str, int] | None = None
+
+
+class NativeRenderRequiredError(RuntimeError):
+    """The service cannot recover by running the retired Pillow backend."""
+
+
+def require_native_payload(payload: EncodedImagePayload | None) -> EncodedImagePayload:
+    if payload is None:
+        raise NativeRenderRequiredError("Native rendering failed; Pillow fallback is no longer available")
+    return payload

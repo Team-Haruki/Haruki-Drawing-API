@@ -3,30 +3,39 @@
 from __future__ import annotations
 
 import argparse
+from collections import OrderedDict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import ctypes
 import ctypes.util
+import hashlib
 import json
 import math
 import sys
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
-
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
-
+from typing import TYPE_CHECKING, Any, Callable
 from src.core.path_safety import resolve_cli_path
 
-Image.MAX_IMAGE_PIXELS = None
+from src.sekai.base.paint_types import RasterResample
+from src.sekai.profile.custom_profile.gray_field import MAX_FIELD_PIXELS, GrayField, field_size
+from src.sekai.profile.custom_profile.float_field import FloatField
+
+if TYPE_CHECKING:
+    from PIL import Image, ImageDraw, ImageFont
+    from src.sekai.profile.custom_profile.pillow_card_prefab import PillowCardAdapter
 
 from src.sekai.honor.drawer import compose_full_honor_image_from_loaded_assets, honor_group_uses_scroll_level
 from src.sekai.honor.model import HonorRequest
 from src.sekai.profile.custom_profile.cache import (
     GLYPH_CONTOUR_CACHE,
     GLYPH_SDF_CACHE,
+    FLOAT_SDF_CACHE_ENTRY_OVERHEAD,
     MISSING,
     SPRITE_ATLAS_CACHE,
+    SourceGlyphAbsent,
     file_signature,
     get_render_font,
     get_tmp_font_tables,
@@ -38,7 +47,6 @@ from src.sekai.profile.custom_profile.card_prefab import (
     CardFontRef,
     CardPrefabResources,
     CardSpriteRef,
-    PillowCardAdapter,
     build_card_rarity_ops,
     build_deck_card_display_list as build_deck_card_prefab_display_list,
     build_deck_card_level_ops,
@@ -48,16 +56,10 @@ from src.sekai.profile.custom_profile.card_prefab import (
     build_full_card_display_list as build_full_card_prefab_display_list,
     build_full_card_overlay_ops,
 )
-from src.sekai.profile.custom_profile.collection_prefab import (
-    OMIKUJI_RESULT_NATIVE_SIZE,
-    PillowOmikujiAdapter,
-    build_omikuji_display_list,
-)
 from src.sekai.profile.custom_profile.general_prefab import (
     CHARA_LIST,
     CHARACTER_RANK_CELL_SIZE,
     GeneralPrefabPalette,
-    PillowGeneralPrefabAdapter,
     build_general_prefab_display_list,
     ordered_story_favorites as order_story_favorites,
     story_favorite_asset_key,
@@ -66,6 +68,13 @@ from src.sekai.profile.custom_profile.general_prefab import (
 )
 from src.sekai.profile.custom_profile.honor_deck_prefab import build_honor_deck_plan
 from src.sekai.profile.custom_profile.limits import RasterSizeLimitError, ensure_raster_size
+from src.sekai.profile.custom_profile.tmp_sdf_text import (
+    TMPTextBoxLayout,
+    TMPFallbackMetrics,
+    TMPLocalSdfGlyph,
+    TMPSdfTextLayer,
+    text_layer_crop,
+)
 from src.sekai.profile.custom_profile.svg import (
     CANVAS_H,
     CANVAS_W,
@@ -98,13 +107,6 @@ from src.sekai.profile.custom_profile.split import (
 )
 
 
-TMP_EM_BLOCK_CHARS = {"■", "█"}
-TMP_SPACE_EQUIVALENT_CHARS = {" ", "\u00a0"}
-TMP_MISSING_GLYPH_CHAR = "□"
-TMP_DECORATIVE_TEXT_CHARS = frozenset("●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 ")
-DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
-DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
-DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
 DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024
 _CARD_ASSET_STATE_KEYS = {
     ("deck", False): ("deckNormalPath", "deck_normal_path"),
@@ -121,6 +123,30 @@ _CARD_ASSET_STATE_KEYS = {
     ("full", False): ("normalPath", "normal_path"),
     ("full", True): ("afterTrainingPath", "after_training_path"),
 }
+_CARDS_FILENAME = "cards.json"
+_BUILD_IMAGE_CONTENT_METHOD = "CustomProfileUtility.BuildImageContentViewInternal"
+_INSTANTIATE_IMAGE_CONTENT_METHOD = "CustomProfileUtility.InstantiateImageContent"
+_IMAGE_CONTENT_REFRESH_METHOD = "ImageContentView.Refresh"
+_ALT_OTF_SUFFIX = "-alt.otf"
+_DEFAULT_FONT_FILENAME = "FOT-RodinNTLGPro-DB.otf"
+_DEFAULT_ALT_FONT_FILENAME = "FOT-RodinNTLGPro-DB" + _ALT_OTF_SUFFIX
+_OMIKUJI_FILENAME = "omikujis.json"
+_DECK_IMAGE_FILENAME = "deck.png"
+_OMIKUJI_FONT_FILENAME = "FOT-Omikuji_4956192661917990345.otf"
+_TMP_TEXT_LABEL = "custom profile TMP text"
+_NATIVE_IMAGE_CONTENT_METHODS = (
+    _BUILD_IMAGE_CONTENT_METHOD,
+    _INSTANTIATE_IMAGE_CONTENT_METHOD,
+    _IMAGE_CONTENT_REFRESH_METHOD,
+)
+
+TMP_EM_BLOCK_CHARS = {"■", "█"}
+TMP_SPACE_EQUIVALENT_CHARS = {" ", "\u00a0"}
+TMP_MISSING_GLYPH_CHAR = "□"
+TMP_DECORATIVE_TEXT_CHARS = frozenset("●○■█▲△▼▽◣◢◤◥⌒～〜∽︵︶︿()（）【】、，,.-·|^*/\\I丶>〇 ")
+DEFAULT_TMP_DECORATIVE_FACE_ONLY = True
+DEFAULT_TMP_DECORATIVE_DIRECT_RASTER = True
+DEFAULT_PREMULTIPLY_ALPHA_TRANSFORMS = False
 TMP_DEFAULT_TEXT_BOX_W = 108.0
 TMP_TEXT_BOX_W_SIZE_FACTOR = 1.6
 TMP_LINE_HEIGHT_FACTOR = 1.0
@@ -274,9 +300,6 @@ CONTENT_TYPES: dict[str, tuple[int, str]] = {
     "stamp": (11, "Stamp"),
     "mini_chara": (12, "DynamicMiniChara"),
     "screen_filter": (12, "DynamicScreenFilter"),
-    "character_icon": (13, "CharacterIcon"),
-    "material": (14, "Material"),
-    "user_interface_icon": (15, "UserInterfaceIcon"),
 }
 STATIC_IMAGE_CONTENT_KINDS = {
     "general_background",
@@ -327,6 +350,23 @@ PREFAB_NATIVE_SIZES: dict[str, tuple[float, float]] = {
     "CollectionCustomPrefabContentView": (178.0, 154.0),
     "DynamicProfileContentView": (178.0, 154.0),
 }
+OMIKUJI_UNIT_LABELS = {
+    "piapro": "VIRTUAL SINGER",
+    "light_sound": "Leo/need",
+    "idol": "MORE MORE JUMP!",
+    "street": "Vivid BAD SQUAD",
+    "theme_park": "Wonderlands x Showtime",
+    "school_refusal": "25ji, Nightcord de.",
+}
+OMIKUJI_UNIT_COLORS = {
+    "piapro": (51, 204, 187, 255),
+    "light_sound": (68, 85, 221, 255),
+    "idol": (136, 221, 68, 255),
+    "street": (238, 17, 102, 255),
+    "theme_park": (255, 153, 0, 255),
+    "school_refusal": (136, 68, 153, 255),
+}
+OMIKUJI_RESULT_NATIVE_SIZE = (1480.0, 490.0)
 CLIP_CARD_MEMBER_ART_SIZE = (328.0, 538.2559814453125)
 CLIP_CARD_MEMBER_NATIVE_SIZE = (
     round(PREFAB_NATIVE_SIZES["ClipSizeCardContentView"][0]),
@@ -431,29 +471,13 @@ GENERAL_DECK_CARD_RENDER_SIZE = (
     round(GENERAL_DECK_CARD_NATIVE_SIZE[0] * GENERAL_DECK_CARD_SCALE),
     round(GENERAL_DECK_CARD_NATIVE_SIZE[1] * GENERAL_DECK_CARD_SCALE),
 )
-_CARDS_FILENAME = "cards.json"
-_BUILD_IMAGE_CONTENT_METHOD = "CustomProfileUtility.BuildImageContentViewInternal"
-_INSTANTIATE_IMAGE_CONTENT_METHOD = "CustomProfileUtility.InstantiateImageContent"
-_IMAGE_CONTENT_REFRESH_METHOD = "ImageContentView.Refresh"
-_ALT_OTF_SUFFIX = "-alt.otf"
-_DEFAULT_FONT_FILENAME = "FOT-RodinNTLGPro-DB.otf"
-_DEFAULT_ALT_FONT_FILENAME = "FOT-RodinNTLGPro-DB" + _ALT_OTF_SUFFIX
-_OMIKUJI_FILENAME = "omikujis.json"
-_DECK_IMAGE_FILENAME = "deck.png"
-_OMIKUJI_FONT_FILENAME = "FOT-Omikuji_4956192661917990345.otf"
-_TMP_TEXT_LABEL = "custom profile TMP text"
-_NATIVE_IMAGE_CONTENT_METHODS = (
-    _BUILD_IMAGE_CONTENT_METHOD,
-    _INSTANTIATE_IMAGE_CONTENT_METHOD,
-    _IMAGE_CONTENT_REFRESH_METHOD,
-)
 GENERAL_VIEW_REQUIRED_INPUTS: dict[str, tuple[str, ...]] = {
     "X": ("userProfile.twitterId",),
     "EditUserName": ("user.name",),
     "TotalPower": ("totalPower",),
-    "Deck": ("userDeck", "userCards", _CARDS_FILENAME, "card thumbnail assets"),
+    "Deck": ("userDeck", "userCards", "cards.json", "card thumbnail assets"),
     "Comment": ("userProfile.word",),
-    "LeaderCard": ("userDeck.leader", "userCards", _CARDS_FILENAME, "card thumbnail assets"),
+    "LeaderCard": ("userDeck.leader", "userCards", "cards.json", "card thumbnail assets"),
     "HonorDeck": ("userProfileHonors", "userHonors", "honor assets"),
     "MultiLive": ("userMultiLiveTopScoreCount",),
     "ChallengeLive": ("userChallengeLiveSoloResult",),
@@ -468,12 +492,21 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
         "CustomProfileUtility.InstantiateGeneralContent",
         "GeneralContentViewBase.Setup",
     ),
-    "general_background": _NATIVE_IMAGE_CONTENT_METHODS,
-    "story_background": _NATIVE_IMAGE_CONTENT_METHODS,
-    "character_icon": _NATIVE_IMAGE_CONTENT_METHODS,
-    "material": _NATIVE_IMAGE_CONTENT_METHODS,
-    "user_interface_icon": _NATIVE_IMAGE_CONTENT_METHODS,
-    "stand_member": _NATIVE_IMAGE_CONTENT_METHODS,
+    "general_background": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
+    "story_background": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
+    "stand_member": (
+        "CustomProfileUtility.BuildImageContentViewInternal",
+        "CustomProfileUtility.InstantiateImageContent",
+        "ImageContentView.Refresh",
+    ),
     "card_member": (
         "CustomProfileUtility.InstantiateCardMemberContent",
         "CardMemberContentViewBase.Refresh",
@@ -497,7 +530,7 @@ NATIVE_METHODS_BY_KIND: dict[str, tuple[str, ...]] = {
     ),
     "stamp": (
         "CustomProfileUtility.InstantiateStampContent",
-        _IMAGE_CONTENT_REFRESH_METHOD,
+        "ImageContentView.Refresh",
     ),
     "shape": (
         "CustomProfileUtility.InstantiateShapeContent",
@@ -689,46 +722,6 @@ class TMPNativeTextLayout:
 
 
 @dataclass(frozen=True)
-class _TMPNativeLayoutConfig:
-    font_name: str
-    font_path: Path
-    layout_mode: str
-    base_scale: float
-    current_em_scale: float
-    raw_line_gap: float
-    line_spacing: float
-    line_spacing_delta: float
-    paragraph_spacing: float
-    outline_dilate: float
-    margin_width: float
-    source_metrics_only: bool
-
-
-@dataclass
-class _TMPNativeLayoutState:
-    dominant_size: float
-    line_offset: float = 0.0
-    start_of_line_ascender: float = 0.0
-    element_descender: float = 0.0
-    is_driven_line_spacing: bool = False
-    max_text_ascender: float | None = None
-    rendered_width: float = 0.0
-    accumulated_line_height: float = 0.0
-    lines: list[TMPNativeLineInfo] = field(default_factory=list)
-    characters: list[TMPNativeCharacterInfo] = field(default_factory=list)
-
-
-@dataclass
-class _TMPNativeLineState:
-    x_advance: float
-    max_ascender: float = TMP_LARGE_NEGATIVE_FLOAT
-    max_descender: float = TMP_LARGE_POSITIVE_FLOAT
-    visible_character_count: int = 0
-    has_character: bool = False
-    line_break_adjusted_ascender: float | None = None
-
-
-@dataclass(frozen=True)
 class TMPRunMeasure:
     advance: float
     visual_left: float
@@ -743,33 +736,6 @@ class TMPRunMeasure:
     @property
     def visual_height(self) -> float:
         return max(0.0, self.visual_bottom - self.visual_top)
-
-
-@dataclass
-class TMPVisualBounds:
-    left: float | None = None
-    right: float | None = None
-    top: float | None = None
-    bottom: float | None = None
-
-    def include(self, left: float, right: float, top: float, bottom: float) -> None:
-        self.left = left if self.left is None else min(self.left, left)
-        self.right = right if self.right is None else max(self.right, right)
-        self.top = top if self.top is None else min(self.top, top)
-        self.bottom = bottom if self.bottom is None else max(self.bottom, bottom)
-
-    def include_horizontal(self, left: float, right: float) -> None:
-        self.left = left if self.left is None else min(self.left, left)
-        self.right = right if self.right is None else max(self.right, right)
-
-    def resolved(self, fallback: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
-        fallback_left, fallback_right, fallback_top, fallback_bottom = fallback
-        return (
-            fallback_left if self.left is None else self.left,
-            fallback_right if self.right is None else self.right,
-            fallback_top if self.top is None else self.top,
-            fallback_bottom if self.bottom is None else self.bottom,
-        )
 
 
 @dataclass(frozen=True)
@@ -815,185 +781,11 @@ class TMPGlyphMetrics:
 
 
 @dataclass(frozen=True)
-class TMPShaderMaterial:
-    gradient_scale: float
-    face_dilate: float
-    outline_width: float
-    outline_softness: float
-    weight_normal: float
-    weight_bold: float
-    underlay_offset_x: float
-    underlay_offset_y: float
-    underlay_softness: float
-    glow_offset: float
-    glow_outer: float
-    sharpness: float
-    scale_ratio_a: float
-    scale_ratio_b: float
-    scale_ratio_c: float
-
-
-@dataclass(frozen=True)
-class PILTextLineMetrics:
-    runs: list[tuple[TextRun, float, float]]
-    y: float
-    height: float
-
-
-@dataclass(frozen=True)
-class PILTextLayoutMetrics:
-    lines: list[PILTextLineMetrics]
-    min_x: float
-    max_x: float
-    total_height: float
-
-
-@dataclass(frozen=True)
-class TMPRunVisualMetrics:
-    advance: float
-    left: float
-    right: float
-    top: float
-    bottom: float
-
-
-@dataclass(frozen=True)
-class TMPDynamicRunGlyph:
-    image: Image.Image
-    bbox: tuple[int, int, int, int]
-    pad: int
-    origin_x: float
-
-
-@dataclass(frozen=True)
 class TMPDynamicGlyphSDF:
-    field: Image.Image
+    field: GrayField
     bbox: tuple[int, int, int, int]
     pad: int
     sample_size: float
-
-
-@dataclass
-class _TMPGlyphContourBuilder:
-    scale: float
-    contours: list[list[tuple[float, float]]] = field(default_factory=list)
-    contour: list[tuple[float, float]] = field(default_factory=list)
-    pos: tuple[float, float] | None = None
-    start: tuple[float, float] | None = None
-
-    def _append_point(self, point: tuple[float, float]) -> None:
-        self.contour.append((float(point[0]) * self.scale, float(point[1]) * self.scale))
-
-    def _close_contour(self) -> None:
-        if len(self.contour) >= 2:
-            self.contours.append(self.contour)
-        self.contour = []
-
-    def _flatten_quadratic(
-        self,
-        p0: tuple[float, float],
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-    ) -> None:
-        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
-            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
-            u = 1.0 - t
-            self._append_point(
-                (
-                    u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
-                    u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
-                )
-            )
-
-    def _flatten_cubic(
-        self,
-        p0: tuple[float, float],
-        p1: tuple[float, float],
-        p2: tuple[float, float],
-        p3: tuple[float, float],
-    ) -> None:
-        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
-            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
-            u = 1.0 - t
-            self._append_point(
-                (
-                    u * u * u * p0[0] + 3.0 * u * u * t * p1[0] + 3.0 * u * t * t * p2[0] + t * t * t * p3[0],
-                    u * u * u * p0[1] + 3.0 * u * u * t * p1[1] + 3.0 * u * t * t * p2[1] + t * t * t * p3[1],
-                )
-            )
-
-    def _consume_cubic(self, args: tuple[Any, ...]) -> None:
-        assert self.pos is not None
-        curve_points = [tuple(point) for point in args]
-        for index in range(0, len(curve_points), 3):
-            if index + 2 >= len(curve_points):
-                break
-            p1, p2, p3 = curve_points[index : index + 3]
-            self._flatten_cubic(self.pos, p1, p2, p3)
-            self.pos = p3
-
-    @staticmethod
-    def _quadratic_points(args: tuple[Any, ...]) -> tuple[list[tuple[float, float]], tuple[float, float]] | None:
-        points = [None if point is None else tuple(point) for point in args]
-        if not points:
-            return None
-        if points[-1] is None:
-            off_curves = [point for point in points[:-1] if point is not None]
-            if not off_curves:
-                return None
-            final = (
-                (off_curves[0][0] + off_curves[-1][0]) * 0.5,
-                (off_curves[0][1] + off_curves[-1][1]) * 0.5,
-            )
-            points = [*off_curves, final]
-        final_point = points[-1]
-        if final_point is None:
-            return None
-        return [point for point in points[:-1] if point is not None], final_point
-
-    def _consume_quadratic(self, args: tuple[Any, ...]) -> None:
-        assert self.pos is not None
-        resolved = self._quadratic_points(args)
-        if resolved is None:
-            return
-        off_curves, final_point = resolved
-        if not off_curves:
-            self.pos = final_point
-            self._append_point(self.pos)
-            return
-        current = self.pos
-        for index, control in enumerate(off_curves):
-            end = final_point if index == len(off_curves) - 1 else self._midpoint(control, off_curves[index + 1])
-            self._flatten_quadratic(current, control, end)
-            current = end
-        self.pos = final_point
-
-    @staticmethod
-    def _midpoint(first: tuple[float, float], second: tuple[float, float]) -> tuple[float, float]:
-        return (first[0] + second[0]) * 0.5, (first[1] + second[1]) * 0.5
-
-    def consume(self, op: str, args: tuple[Any, ...]) -> None:
-        if op == "moveTo":
-            self._close_contour()
-            self.pos = tuple(args[0])
-            self.start = self.pos
-            self._append_point(self.pos)
-        elif op == "lineTo" and self.pos is not None:
-            self.pos = tuple(args[0])
-            self._append_point(self.pos)
-        elif op == "curveTo" and self.pos is not None:
-            self._consume_cubic(args)
-        elif op == "qCurveTo" and self.pos is not None:
-            self._consume_quadratic(args)
-        elif op == "closePath":
-            self._close_contour()
-            self.pos = self.start
-        elif op == "endPath":
-            self._close_contour()
-
-    def finish(self) -> list[list[tuple[float, float]]]:
-        self._close_contour()
-        return self.contours
 
 
 @dataclass(frozen=True)
@@ -1029,116 +821,66 @@ class DirectSdfQuad:
     integer paste position, ``scalars`` the frozen shading scalars. This is the renderer half of
     the Skia ``SdfQuad`` IR node — the node does zero geometric resampling."""
 
-    field: Image.Image
+    field: GrayField
     left: int
     top: int
     scalars: TMPSdfShadingScalars
 
 
-@dataclass(frozen=True)
-class TMPStaticAtlasField:
-    """Static TMP atlas glyph before pixel work.
+def _glyph_metrics_from_rows(char: dict[str, Any], glyph: dict[str, Any]) -> TMPGlyphMetrics:
+    metrics = glyph.get("m_Metrics", {}) or {}
+    rect = glyph.get("m_GlyphRect", {}) or {}
+    return TMPGlyphMetrics(
+        width=float(metrics.get("m_Width") or 0.0),
+        height=float(metrics.get("m_Height") or 0.0),
+        bearing_x=float(metrics.get("m_HorizontalBearingX") or 0.0),
+        bearing_y=float(metrics.get("m_HorizontalBearingY") or 0.0),
+        advance=float(metrics.get("m_HorizontalAdvance") or 0.0),
+        rect_x=int(rect.get("m_X") or 0),
+        rect_y=int(rect.get("m_Y") or 0),
+        rect_w=int(rect.get("m_Width") or 0),
+        rect_h=int(rect.get("m_Height") or 0),
+        glyph_scale=float(char.get("m_Scale") or glyph.get("m_Scale") or 1.0),
+        atlas_index=int(glyph.get("m_AtlasIndex") or 0),
+    )
 
-    ``crop`` uses Pillow's possibly out-of-bounds crop coordinates and ``field_size`` is the
-    BICUBIC-resized native glyph quad. The Skia path can carry this descriptor to Rust instead
-    of decoding, cropping, and resizing the atlas through Pillow.
+
+class TMPGlyphTable(Mapping[int, TMPGlyphMetrics]):
+    """Lazily decode immutable metrics inside the existing shared metadata entry.
+
+    Keys and source rows are captured when the asset signatures are recorded.
+    Only values change internally, once, under a lock; readers see frozen metrics.
+    This is part of the bounded metadata cache, not another process-level pool.
     """
 
-    atlas_path: Path
-    atlas_size: tuple[int, int]
-    crop: tuple[int, int, int, int]
-    field_size: tuple[int, int]
+    def __init__(self, rows: dict[int, tuple[dict[str, Any], dict[str, Any]]]) -> None:
+        self._entries = rows
+        self._lock = threading.Lock()
 
+    def __len__(self) -> int:
+        return len(self._entries)
 
-@dataclass(frozen=True)
-class TMPDynamicFontField:
-    """Dynamic TMP glyph before pixel work.
+    def __iter__(self):
+        return iter(self._entries)
 
-    Python selects the source font/asset and preserves the existing TMP layout geometry. Rust
-    resolves ``codepoint`` from the registered font, flattens its outline, builds the signed
-    distance field, crops it to ``crop_padding``, and resizes it to ``field_size``. No glyph
-    bitmap, NumPy contour grid, Pillow L image, or A8 ``mem:`` payload is created in Python.
-    """
+    def __contains__(self, key: object) -> bool:
+        return key in self._entries
 
-    font_path: Path
-    codepoint: int
-    sample_size: float
-    bbox: tuple[int, int, int, int]
-    padding: int
-    crop_padding: int
-    field_size: tuple[int, int]
-    spread: float
-
-
-@dataclass(frozen=True)
-class _TMPPreparedCharacterField:
-    field: Image.Image | TMPStaticAtlasField | TMPDynamicFontField
-    glyph_asset: TMPFontAsset | None
-    bbox: tuple[int, int, int, int]
-    pad_x: int
-    pad_y: int
-    native_quad_sized: bool
-
-    def result(
-        self,
-    ) -> tuple[
-        Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-        TMPFontAsset | None,
-        tuple[int, int, int, int],
-        int,
-        int,
-    ]:
-        return self.field, self.glyph_asset, self.bbox, self.pad_x, self.pad_y
-
-
-@dataclass(frozen=True)
-class TMPFieldWarpPlan:
-    """Pillow AFFINE inverse matrix plus its clipped destination rectangle."""
-
-    affine: tuple[float, float, float, float, float, float]
-    size: tuple[int, int]
-    left: int
-    top: int
-
-
-@dataclass(frozen=True)
-class DirectSdfAtlasQuad:
-    """Static-atlas decorative glyph whose complete pixel pipeline runs in Rust."""
-
-    atlas_path: Path
-    atlas_size: tuple[int, int]
-    crop: tuple[int, int, int, int]
-    field_size: tuple[int, int]
-    size: tuple[int, int]
-    affine: tuple[float, float, float, float, float, float]
-    left: int
-    top: int
-    scalars: TMPSdfShadingScalars
-
-
-@dataclass(frozen=True)
-class DirectSdfFontQuad:
-    """Dynamic source-font decorative glyph whose complete pixel pipeline runs in Rust."""
-
-    font_path: Path
-    codepoint: int
-    sample_size: float
-    bbox: tuple[int, int, int, int]
-    padding: int
-    crop_padding: int
-    field_size: tuple[int, int]
-    spread: float
-    size: tuple[int, int]
-    affine: tuple[float, float, float, float, float, float]
-    left: int
-    top: int
-    scalars: TMPSdfShadingScalars
+    def __getitem__(self, key: int) -> TMPGlyphMetrics:
+        value = self._entries[key]
+        if isinstance(value, tuple):
+            with self._lock:
+                value = self._entries[key]
+                if isinstance(value, tuple):
+                    value = _glyph_metrics_from_rows(*value)
+                    self._entries[key] = value
+        return value
 
 
 # frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
 # cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
-# atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
-# after construction.
+# atlas_paths/fallback_names containers must never mutate after construction. Glyph tables
+# expose a read-only Mapping; internal one-time metric decoding is synchronized.
 @dataclass(frozen=True)
 class TMPFontAsset:
     name: str
@@ -1173,7 +915,7 @@ class TMPFontAsset:
     underlay_offset_x: float
     underlay_offset_y: float
     fallback_names: list[str]
-    glyphs: dict[int, TMPGlyphMetrics]
+    glyphs: Mapping[int, TMPGlyphMetrics]
 
     @property
     def has_static_glyphs(self) -> bool:
@@ -1281,6 +1023,7 @@ class FTFaceRec(ctypes.Structure):
 class FreeTypeMetrics:
     FT_LOAD_NO_HINTING = 2
     FT_RENDER_MODE_NORMAL = 0
+    MAX_CACHED_FACES = 16
 
     def __init__(self) -> None:
         lib_path = ctypes.util.find_library("freetype")
@@ -1322,25 +1065,50 @@ class FreeTypeMetrics:
         self.lib.FT_Load_Glyph.restype = ctypes.c_int
         self.lib.FT_Render_Glyph.argtypes = [ctypes.POINTER(FTGlyphSlotRec), ctypes.c_int]
         self.lib.FT_Render_Glyph.restype = ctypes.c_int
-        self._faces: dict[Path, ctypes.POINTER(FTFaceRec)] = {}
+        self._faces: OrderedDict[Path, tuple[tuple[int, int], ctypes.POINTER(FTFaceRec)]] = OrderedDict()
         # The singleton is shared process-wide and FT_Set_Char_Size/FT_Load_Glyph mutate shared
         # FT_Face state, so concurrent requests must serialize. Cheap in practice: with the
         # process-level glyph caches, this path only runs on a cold glyph.
         self._lock = threading.Lock()
 
     def close(self) -> None:
-        for face in self._faces.values():
-            self.lib.FT_Done_Face(face)
-        self._faces.clear()
+        # A face must not be freed while another thread uses its mutable glyph slot.
+        with self._lock:
+            for _, face in self._faces.values():
+                self.lib.FT_Done_Face(face)
+            self._faces.clear()
+
+    def _discard_face(self, path: Path) -> None:
+        cached = self._faces.pop(path, None)
+        if cached is not None:
+            self.lib.FT_Done_Face(cached[1])
 
     def _face(self, path: Path) -> ctypes.POINTER(FTFaceRec):
-        face = self._faces.get(path)
-        if face is not None:
-            return face
+        # Called only while holding _lock. Font assets outlive requests but may be
+        # replaced by the updater; a process-global path-only FT_Face stays stale.
+        try:
+            signature = file_signature(path)
+        except OSError:
+            self._discard_face(path)
+            raise
+        cached = self._faces.get(path)
+        if cached is not None and cached[0] == signature:
+            self._faces.move_to_end(path)
+            return cached[1]
+        self._discard_face(path)
         face = ctypes.POINTER(FTFaceRec)()
         if self.lib.FT_New_Face(self.handle, str(path).encode("utf-8"), 0, ctypes.byref(face)) != 0:
             raise OSError(f"FT_New_Face failed: {path}")
-        self._faces[path] = face
+        try:
+            if file_signature(path) != signature:
+                raise OSError(f"Font changed while opening FreeType face: {path}")
+        except OSError:
+            self.lib.FT_Done_Face(face)
+            raise
+        self._faces[path] = (signature, face)
+        while len(self._faces) > self.MAX_CACHED_FACES:
+            _, (_, evicted) = self._faces.popitem(last=False)
+            self.lib.FT_Done_Face(evicted)
         return face
 
     def glyph_metrics(self, path: Path, ch: str, font_size: float) -> TMPGlyphMetrics | None:
@@ -1377,7 +1145,7 @@ class FreeTypeMetrics:
         path: Path,
         ch: str,
         font_size: float,
-    ) -> tuple[Image.Image, int, int, TMPGlyphMetrics] | None:
+    ) -> tuple[GrayField, int, int, TMPGlyphMetrics] | None:
         with self._lock:
             return self._glyph_bitmap_locked(path, ch, font_size)
 
@@ -1386,7 +1154,7 @@ class FreeTypeMetrics:
         path: Path,
         ch: str,
         font_size: float,
-    ) -> tuple[Image.Image, int, int, TMPGlyphMetrics] | None:
+    ) -> tuple[GrayField, int, int, TMPGlyphMetrics] | None:
         face = self._face(path)
         if self.lib.FT_Set_Char_Size(face, 0, int(round(font_size * 64.0)), 72, 72) != 0:
             return None
@@ -1418,17 +1186,18 @@ class FreeTypeMetrics:
         width = int(bitmap.width)
         rows = int(bitmap.rows)
         if width <= 0 or rows <= 0 or not bitmap.buffer:
-            return Image.new("L", (1, 1), 0), int(slot.bitmap_left), int(slot.bitmap_top), layout_metrics
+            return GrayField(1, 1, b"\x00"), int(slot.bitmap_left), int(slot.bitmap_top), layout_metrics
 
         import numpy as np
 
+        field_size((width, rows))
         pitch = int(bitmap.pitch)
         stride = abs(pitch)
         raw = ctypes.string_at(bitmap.buffer, stride * rows)
         arr = np.frombuffer(raw, dtype=np.uint8).reshape(rows, stride)[:, :width]
         if pitch < 0:
             arr = arr[::-1]
-        return Image.fromarray(arr.copy(), "L"), int(slot.bitmap_left), int(slot.bitmap_top), layout_metrics
+        return GrayField(width, rows, arr.tobytes()), int(slot.bitmap_left), int(slot.bitmap_top), layout_metrics
 
 
 _FREETYPE_METRICS: FreeTypeMetrics | None = None
@@ -1451,57 +1220,6 @@ def freetype_metrics() -> FreeTypeMetrics | None:
     return _FREETYPE_METRICS
 
 
-def _mapping_or_empty(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _optional_dict(value: dict[str, Any] | None) -> dict[str, Any]:
-    return value or {}
-
-
-def _default_if_none(value: Any, default: Any) -> Any:
-    return default if value is None else value
-
-
-def _choice_or_default(value: str, choices: set[str] | frozenset[str], default: str) -> str:
-    return value if value in choices else default
-
-
-def _positive_int(value: Any, default: int = 1) -> int:
-    return max(1, int(value or default))
-
-
-def _positive_float(value: Any, default: float = 1.0) -> float:
-    return max(1.0, float(value or default))
-
-
-def _game_assets_root(assets: Path) -> Path:
-    return assets.parent if assets.name == "custom_profile" else assets
-
-
-def _record_or_noop(record):
-    return (lambda path: None) if record is None else record
-
-
-def _first_truthy(*values: Any, default: Any = None) -> Any:
-    for value in values:
-        if value:
-            return value
-    return default
-
-
-def _float_first(*values: Any, default: float = 0.0) -> float:
-    return float(_first_truthy(*values, default=default))
-
-
-def _int_first(*values: Any, default: int = 0) -> int:
-    return int(_first_truthy(*values, default=default))
-
-
-def _nonempty_strings(values: Any) -> list[str]:
-    return [text for value in values or [] if (text := str(value))]
-
-
 class TMPFontLibrary:
     def __init__(
         self,
@@ -1513,6 +1231,8 @@ class TMPFontLibrary:
         self.source_assets = source_assets or assets
         self.runtime_fonts_dir = runtime_fonts_dir
         self._source_fonts: dict[Path, Any] = {}
+        self._source_font_signatures: dict[Path, tuple[int, int]] = {}
+        self._source_font_lock = threading.RLock()
         self._source_metrics: dict[tuple[Path, int, float], TMPGlyphMetrics | None] = {}
 
     @classmethod
@@ -1560,68 +1280,6 @@ class TMPFontLibrary:
         return assets
 
     @staticmethod
-    def _materials_by_path_id(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
-        return {
-            str(row.get("path_id")): row
-            for row in metadata.get("materials", [])
-            if isinstance(row, dict) and row.get("path_id") is not None
-        }
-
-    @classmethod
-    def _asset_from_metadata_row(
-        cls,
-        base: Path,
-        row: dict[str, Any],
-        materials: dict[str, dict[str, Any]],
-        record,
-    ) -> TMPFontAsset:
-        face = _mapping_or_empty(row.get("face_info"))
-        creation = _mapping_or_empty(row.get("creation_settings"))
-        material = _mapping_or_empty(materials.get(str(row.get("material"))))
-        floats = _mapping_or_empty(material.get("floats"))
-        atlas_padding = _float_first(row.get("atlas_padding"), default=5.0)
-        return TMPFontAsset(
-            name=str(row.get("name", "")),
-            bundle=str(row.get("bundle", "")),
-            source_font_path=cls._source_font_path(base, row, record),
-            atlas_paths=cls._atlas_paths(base, row, record),
-            atlas_population_mode=_int_first(row.get("atlas_population_mode")),
-            atlas_width=_float_first(row.get("atlas_width"), floats.get("_TextureWidth")),
-            atlas_height=_float_first(row.get("atlas_height"), floats.get("_TextureHeight")),
-            atlas_padding=atlas_padding,
-            point_size=_float_first(face.get("m_PointSize"), creation.get("pointSize"), default=1.0),
-            face_scale=_float_first(face.get("m_Scale"), default=1.0),
-            line_height=_float_first(face.get("m_LineHeight")),
-            ascent_line=_float_first(face.get("m_AscentLine")),
-            descent_line=_float_first(face.get("m_DescentLine")),
-            tab_width=_float_first(face.get("m_TabWidth")),
-            gradient_scale=_float_first(floats.get("_GradientScale"), default=atlas_padding + 1.0),
-            weight_normal=_float_first(floats.get("_WeightNormal")),
-            weight_bold=_float_first(floats.get("_WeightBold"), default=0.75),
-            face_dilate=_float_first(floats.get("_FaceDilate")),
-            outline_width=_float_first(floats.get("_OutlineWidth")),
-            outline_softness=_float_first(floats.get("_OutlineSoftness")),
-            sharpness=_float_first(floats.get("_Sharpness")),
-            normal_spacing_offset=_float_first(row.get("normal_spacing_offset")),
-            bold_spacing=_float_first(row.get("bold_spacing")),
-            scale_ratio_a=_float_first(floats.get("_ScaleRatioA"), default=1.0),
-            scale_ratio_b=_float_first(floats.get("_ScaleRatioB"), default=1.0),
-            scale_ratio_c=_float_first(floats.get("_ScaleRatioC"), default=1.0),
-            glow_offset=_float_first(floats.get("_GlowOffset")),
-            glow_outer=_float_first(floats.get("_GlowOuter")),
-            underlay_softness=_float_first(floats.get("_UnderlaySoftness")),
-            underlay_offset_x=_float_first(floats.get("_UnderlayOffsetX")),
-            underlay_offset_y=_float_first(floats.get("_UnderlayOffsetY")),
-            fallback_names=_nonempty_strings(row.get("fallback_font_asset_names")),
-            glyphs=cls._load_character_table(base, row, record),
-        )
-
-    @staticmethod
-    def _sort_assets(assets: dict[str, list[TMPFontAsset]]) -> None:
-        for rows in assets.values():
-            rows.sort(key=lambda asset: (asset.bundle != "custom_profile_font.bundle", asset.name))
-
-    @staticmethod
     def _source_font_path(base: Path, row: dict[str, Any], record=None) -> Path | None:
         rel = row.get("source_font_data_path")
         if not rel:
@@ -1647,54 +1305,29 @@ class TMPFontLibrary:
                 paths.append(matches[0])
         return paths
 
-    @classmethod
-    def _load_character_table(cls, base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
-        tables = cls._character_table_rows(base, row, record)
-        if tables is None:
-            return {}
-        chars, glyphs = tables
-        glyph_by_index = {_int_first(glyph.get("m_Index")): glyph for glyph in glyphs}
-        out: dict[int, TMPGlyphMetrics] = {}
-        for char in chars:
-            glyph = glyph_by_index.get(_int_first(char.get("m_GlyphIndex")))
-            if glyph:
-                out[_int_first(char.get("m_Unicode"))] = cls._glyph_metrics_from_rows(char, glyph)
-        return out
-
     @staticmethod
-    def _character_table_rows(
-        base: Path, row: dict[str, Any], record=None
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> Mapping[int, TMPGlyphMetrics]:
         char_rel = row.get("character_table_path")
         glyph_rel = row.get("glyph_table_path")
         if not char_rel or not glyph_rel:
-            return None
+            return {}
         char_path = base / str(char_rel)
         glyph_path = base / str(glyph_rel)
         if record is not None:
             record(char_path)
             record(glyph_path)
         if not char_path.exists() or not glyph_path.exists():
-            return None
-        return json.loads(char_path.read_text(encoding="utf-8")), json.loads(glyph_path.read_text(encoding="utf-8"))
-
-    @staticmethod
-    def _glyph_metrics_from_rows(char: dict[str, Any], glyph: dict[str, Any]) -> TMPGlyphMetrics:
-        metrics = _mapping_or_empty(glyph.get("m_Metrics"))
-        rect = _mapping_or_empty(glyph.get("m_GlyphRect"))
-        return TMPGlyphMetrics(
-            width=_float_first(metrics.get("m_Width")),
-            height=_float_first(metrics.get("m_Height")),
-            bearing_x=_float_first(metrics.get("m_HorizontalBearingX")),
-            bearing_y=_float_first(metrics.get("m_HorizontalBearingY")),
-            advance=_float_first(metrics.get("m_HorizontalAdvance")),
-            rect_x=_int_first(rect.get("m_X")),
-            rect_y=_int_first(rect.get("m_Y")),
-            rect_w=_int_first(rect.get("m_Width")),
-            rect_h=_int_first(rect.get("m_Height")),
-            glyph_scale=_float_first(char.get("m_Scale"), glyph.get("m_Scale"), default=1.0),
-            atlas_index=_int_first(glyph.get("m_AtlasIndex")),
-        )
+            return {}
+        chars = json.loads(char_path.read_text(encoding="utf-8"))
+        glyphs = json.loads(glyph_path.read_text(encoding="utf-8"))
+        glyph_by_index = {int(glyph.get("m_Index", 0)): glyph for glyph in glyphs}
+        out: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for char in chars:
+            glyph = glyph_by_index.get(int(char.get("m_GlyphIndex", 0)))
+            if not glyph:
+                continue
+            out[int(char.get("m_Unicode", 0))] = (char, glyph)
+        return TMPGlyphTable(out)
 
     def active_asset(self, font_name: str) -> TMPFontAsset | None:
         rows = self.assets.get(font_name, [])
@@ -1882,43 +1515,68 @@ class TMPFontLibrary:
             if metrics is not None:
                 return metrics
 
+        # FreeType still gets first refusal on every request. Only a successful
+        # FontTools cmap lookup can establish a reusable absence; an FT/import/read
+        # failure must never poison the process pool or hide a recovered glyph.
+        signature = file_signature(path)
+        path_key = str(path.resolve())
+        missing_key = ("source-cmap-absent-v1", path_key, *signature, ord(ch))
+        if isinstance(GLYPH_CONTOUR_CACHE.get(missing_key), SourceGlyphAbsent):
+            return None
+
         try:
             from fontTools.pens.boundsPen import BoundsPen
-            from fontTools.ttLib import TTFont
         except ImportError:
             return None
 
-        font = self._source_fonts.get(path)
-        if font is None:
-            font = TTFont(str(path))
-            self._source_fonts[path] = font
-        cmap = font.getBestCmap() or {}
-        glyph_name = cmap.get(ord(ch))
-        if not glyph_name:
-            return None
-        units_per_em = float(font["head"].unitsPerEm or 1000)
-        advance_width, _ = font["hmtx"][glyph_name]
-        glyph_set = font.getGlyphSet()
-        pen = BoundsPen(glyph_set)
-        glyph_set[glyph_name].draw(pen)
-        if pen.bounds is None:
-            x_min = y_min = x_max = y_max = 0.0
-        else:
-            x_min, y_min, x_max, y_max = (float(v) for v in pen.bounds)
-        scale = font_size / max(1.0, units_per_em)
-        return TMPGlyphMetrics(
-            width=max(0.0, (x_max - x_min) * scale),
-            height=max(0.0, (y_max - y_min) * scale),
-            bearing_x=x_min * scale,
-            bearing_y=y_max * scale,
-            advance=max(0.0, float(advance_width) * scale),
-            rect_x=0,
-            rect_y=0,
-            rect_w=0,
-            rect_h=0,
-            glyph_scale=1.0,
-            atlas_index=0,
-        )
+        with self.source_font(path, signature) as font:
+            cmap = font.getBestCmap() or {}
+            glyph_name = cmap.get(ord(ch))
+            if not glyph_name:
+                if file_signature(path) == signature:
+                    GLYPH_CONTOUR_CACHE.set(missing_key, SourceGlyphAbsent(512 + 4 * len(path_key)))
+                return None
+            units_per_em = float(font["head"].unitsPerEm or 1000)
+            advance_width, _ = font["hmtx"][glyph_name]
+            glyph_set = font.getGlyphSet()
+            pen = BoundsPen(glyph_set)
+            glyph_set[glyph_name].draw(pen)
+            if pen.bounds is None:
+                x_min = y_min = x_max = y_max = 0.0
+            else:
+                x_min, y_min, x_max, y_max = (float(v) for v in pen.bounds)
+            scale = font_size / max(1.0, units_per_em)
+            return TMPGlyphMetrics(
+                width=max(0.0, (x_max - x_min) * scale),
+                height=max(0.0, (y_max - y_min) * scale),
+                bearing_x=x_min * scale,
+                bearing_y=y_max * scale,
+                advance=max(0.0, float(advance_width) * scale),
+                rect_x=0,
+                rect_y=0,
+                rect_w=0,
+                rect_h=0,
+                glyph_scale=1.0,
+                atlas_index=0,
+            )
+
+    @contextmanager
+    def source_font(self, path: Path, signature: tuple[int, int] | None = None):
+        """Pin a request-local reader while using its mutable tables/file cursor.
+
+        Reference rendering can parallelize layers of the same card. Those layers
+        share this library, so a request-local reader still needs synchronization.
+        """
+        from .source_font import open_source_font
+
+        with self._source_font_lock:
+            signature = file_signature(path) if signature is None else signature
+            font = self._source_fonts.get(path)
+            if font is None or self._source_font_signatures.get(path) != signature:
+                font = open_source_font(path)
+                self._source_fonts[path] = font
+                self._source_font_signatures[path] = signature
+            yield font
 
     def line_height(
         self, font_name: str, style_size: float, font_scale: float, divide_face_scale: bool
@@ -1960,6 +1618,103 @@ class TMPFontLibrary:
             return 0.0
         return asset.normal_spacing_offset * font_size / asset.point_size
 
+    @staticmethod
+    def _glyph_metrics_from_rows(char: dict[str, Any], glyph: dict[str, Any]) -> TMPGlyphMetrics:
+        metrics = _mapping_or_empty(glyph.get("m_Metrics"))
+        rect = _mapping_or_empty(glyph.get("m_GlyphRect"))
+        return TMPGlyphMetrics(
+            width=_float_first(metrics.get("m_Width")),
+            height=_float_first(metrics.get("m_Height")),
+            bearing_x=_float_first(metrics.get("m_HorizontalBearingX")),
+            bearing_y=_float_first(metrics.get("m_HorizontalBearingY")),
+            advance=_float_first(metrics.get("m_HorizontalAdvance")),
+            rect_x=_int_first(rect.get("m_X")),
+            rect_y=_int_first(rect.get("m_Y")),
+            rect_w=_int_first(rect.get("m_Width")),
+            rect_h=_int_first(rect.get("m_Height")),
+            glyph_scale=_float_first(char.get("m_Scale"), glyph.get("m_Scale"), default=1.0),
+            atlas_index=_int_first(glyph.get("m_AtlasIndex")),
+        )
+
+    @staticmethod
+    def _character_table_rows(
+        base: Path, row: dict[str, Any], record=None
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | None:
+        char_rel = row.get("character_table_path")
+        glyph_rel = row.get("glyph_table_path")
+        if not char_rel or not glyph_rel:
+            return None
+        char_path = base / str(char_rel)
+        glyph_path = base / str(glyph_rel)
+        if record is not None:
+            record(char_path)
+            record(glyph_path)
+        if not char_path.exists() or not glyph_path.exists():
+            return None
+        return json.loads(char_path.read_text(encoding="utf-8")), json.loads(glyph_path.read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _sort_assets(assets: dict[str, list[TMPFontAsset]]) -> None:
+        for rows in assets.values():
+            rows.sort(key=lambda asset: (asset.bundle != "custom_profile_font.bundle", asset.name))
+
+    @classmethod
+    def _asset_from_metadata_row(
+        cls,
+        base: Path,
+        row: dict[str, Any],
+        materials: dict[str, dict[str, Any]],
+        record,
+    ) -> TMPFontAsset:
+        face = _mapping_or_empty(row.get("face_info"))
+        creation = _mapping_or_empty(row.get("creation_settings"))
+        material = _mapping_or_empty(materials.get(str(row.get("material"))))
+        floats = _mapping_or_empty(material.get("floats"))
+        atlas_padding = _float_first(row.get("atlas_padding"), default=5.0)
+        return TMPFontAsset(
+            name=str(row.get("name", "")),
+            bundle=str(row.get("bundle", "")),
+            source_font_path=cls._source_font_path(base, row, record),
+            atlas_paths=cls._atlas_paths(base, row, record),
+            atlas_population_mode=_int_first(row.get("atlas_population_mode")),
+            atlas_width=_float_first(row.get("atlas_width"), floats.get("_TextureWidth")),
+            atlas_height=_float_first(row.get("atlas_height"), floats.get("_TextureHeight")),
+            atlas_padding=atlas_padding,
+            point_size=_float_first(face.get("m_PointSize"), creation.get("pointSize"), default=1.0),
+            face_scale=_float_first(face.get("m_Scale"), default=1.0),
+            line_height=_float_first(face.get("m_LineHeight")),
+            ascent_line=_float_first(face.get("m_AscentLine")),
+            descent_line=_float_first(face.get("m_DescentLine")),
+            tab_width=_float_first(face.get("m_TabWidth")),
+            gradient_scale=_float_first(floats.get("_GradientScale"), default=atlas_padding + 1.0),
+            weight_normal=_float_first(floats.get("_WeightNormal")),
+            weight_bold=_float_first(floats.get("_WeightBold"), default=0.75),
+            face_dilate=_float_first(floats.get("_FaceDilate")),
+            outline_width=_float_first(floats.get("_OutlineWidth")),
+            outline_softness=_float_first(floats.get("_OutlineSoftness")),
+            sharpness=_float_first(floats.get("_Sharpness")),
+            normal_spacing_offset=_float_first(row.get("normal_spacing_offset")),
+            bold_spacing=_float_first(row.get("bold_spacing")),
+            scale_ratio_a=_float_first(floats.get("_ScaleRatioA"), default=1.0),
+            scale_ratio_b=_float_first(floats.get("_ScaleRatioB"), default=1.0),
+            scale_ratio_c=_float_first(floats.get("_ScaleRatioC"), default=1.0),
+            glow_offset=_float_first(floats.get("_GlowOffset")),
+            glow_outer=_float_first(floats.get("_GlowOuter")),
+            underlay_softness=_float_first(floats.get("_UnderlaySoftness")),
+            underlay_offset_x=_float_first(floats.get("_UnderlayOffsetX")),
+            underlay_offset_y=_float_first(floats.get("_UnderlayOffsetY")),
+            fallback_names=_nonempty_strings(row.get("fallback_font_asset_names")),
+            glyphs=cls._load_character_table(base, row, record),
+        )
+
+    @staticmethod
+    def _materials_by_path_id(metadata: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            str(row.get("path_id")): row
+            for row in metadata.get("materials", [])
+            if isinstance(row, dict) and row.get("path_id") is not None
+        }
+
 
 def hex_to_rgba(color: str, alpha: float = 1.0) -> tuple[int, int, int, int]:
     color = color_or("#ffffff", color).lstrip("#")
@@ -1998,79 +1753,6 @@ def int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _resource_entries(value: Any) -> list[tuple[Any, Any]]:
-    if isinstance(value, dict):
-        wrapped_items = value.get("items")
-        if isinstance(wrapped_items, list):
-            return [(None, item) for item in wrapped_items]
-        return list(value.items())
-    if isinstance(value, list):
-        return [(None, item) for item in value]
-    return []
-
-
-def _coerced_resource_entry(key: Any, item: Any) -> tuple[int, dict[str, Any]] | None:
-    if not isinstance(item, dict):
-        return None
-    item_id = int_or_none(item.get("id"))
-    if item_id is None:
-        item_id = int_or_none(key)
-    return None if item_id is None else (item_id, item)
-
-
-def _dedupe_paths(paths: list[Path]) -> list[Path]:
-    seen: set[Path] = set()
-    result: list[Path] = []
-    for path in paths:
-        if path not in seen:
-            seen.add(path)
-            result.append(path)
-    return result
-
-
-def _png_resource_filename(resource: dict[str, Any]) -> str | None:
-    file_name = str(resource.get("fileName", "")).strip("/")
-    if not file_name:
-        return None
-    return file_name if file_name.lower().endswith(".png") else f"{file_name}.png"
-
-
-def _general_text_tokens(raw_line: str) -> list[str]:
-    tokens: list[str] = []
-    ascii_token = ""
-    for char in raw_line:
-        if char.isascii() and (char.isalnum() or char in "._-@:/#"):
-            ascii_token += char
-        else:
-            if ascii_token:
-                tokens.append(ascii_token)
-                ascii_token = ""
-            tokens.append(char)
-    if ascii_token:
-        tokens.append(ascii_token)
-    return tokens
-
-
-def _append_oversized_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
-    for char in token:
-        trial = line + char
-        if line and text_width(trial) > max_width:
-            lines.append(line)
-            line = char
-        else:
-            line = trial
-    return line
-
-
-def _append_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
-    if line and text_width(line + token) > max_width:
-        lines.append(line)
-        line = ""
-    if text_width(token) > max_width:
-        return _append_oversized_general_token(token, line, max_width, text_width, lines)
-    return line + token
 
 
 def summarize_resource(resource: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2191,11 +1873,11 @@ def edt_to_features(features: Any) -> Any:
 
 
 def alpha_mask_to_sdf_field(
-    mask: Image.Image, spread: float, alpha_threshold: int = TMP_DYNAMIC_SDF_ALPHA_THRESHOLD
+    mask: GrayField | Image.Image, spread: float, alpha_threshold: int = TMP_DYNAMIC_SDF_ALPHA_THRESHOLD
 ) -> Any:
     import numpy as np
 
-    alpha = np.asarray(mask.convert("L"), dtype=np.uint8)
+    alpha = np.asarray(mask if isinstance(mask, GrayField) else mask.convert("L"), dtype=np.uint8)
     binary = alpha >= alpha_threshold
     try:
         import cv2
@@ -2211,6 +1893,46 @@ def alpha_mask_to_sdf_field(
     return np.clip(0.5 + (signed + aa) / max(1.0, 2.0 * spread), 0.0, 1.0)
 
 
+def cached_fallback_sdf_field(mask: GrayField, spread: float, alpha_threshold: int) -> Any:
+    """Reuse exact fallback samples in the existing bounded process glyph pool.
+
+    The mask is already generated under the caller's scene/layer limits. Its
+    content digest captures changed source fonts and all upstream raster math;
+    spread and threshold affect the distance-field conversion separately.
+    """
+    weight = mask.width * mask.height * 4 + FLOAT_SDF_CACHE_ENTRY_OVERHEAD
+    if not GLYPH_SDF_CACHE.enabled or weight > GLYPH_SDF_CACHE.max_bytes:
+        return alpha_mask_to_sdf_field(mask, spread, alpha_threshold)
+
+    # Preserve the existing optional algorithm choice, without installing cv2 or
+    # conflating its approximate 5x5 L2 transform with the exact Python EDT.
+    try:
+        import cv2
+    except ImportError:
+        algorithm = ("exact-edt-f32-v1",)
+    else:
+        algorithm = ("opencv-l2", cv2.__version__, TMP_DYNAMIC_SDF_DISTANCE_MASK_SIZE)
+    key = (
+        "fallback-alpha-sdf-f32-v1",
+        algorithm,
+        mask.width,
+        mask.height,
+        hashlib.sha256(mask.pixels).digest(),
+        float(spread),
+        alpha_threshold,
+    )
+    cached = GLYPH_SDF_CACHE.get(key)
+    if cached is MISSING:
+        field = alpha_mask_to_sdf_field(mask, spread, alpha_threshold)
+        # Immutable bytes prevent a caller from re-enabling ndarray writes, and
+        # each np.asarray below creates a separate view/shape around those bytes.
+        cached = FloatField.from_array(field)
+        GLYPH_SDF_CACHE.set(key, cached)
+    import numpy as np
+
+    return np.asarray(cached)
+
+
 def rgba_from_premul(rgb_premul: Any, alpha: Any) -> Any:
     import numpy as np
 
@@ -2224,6 +1946,8 @@ def rgba_from_premul(rgb_premul: Any, alpha: Any) -> Any:
 
 
 def premultiply_rgba_image(image: Image.Image) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     import numpy as np
 
     rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
@@ -2233,6 +1957,8 @@ def premultiply_rgba_image(image: Image.Image) -> Image.Image:
 
 
 def unpremultiply_rgba_image(image: Image.Image) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     import numpy as np
 
     rgba = np.asarray(image.convert("RGBA"), dtype=np.float32)
@@ -2242,6 +1968,8 @@ def unpremultiply_rgba_image(image: Image.Image) -> Image.Image:
 
 
 def harden_rgba_alpha(image: Image.Image, strength: float) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     if strength <= 1.0 or image.mode != "RGBA":
         return image
 
@@ -2301,6 +2029,8 @@ def font_file(fonts: Path, font_name: str, rodin_font: str = "ttf") -> Path:
 
 
 def sharp_triangle_alpha(size: tuple[int, int]) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
     scale = 4
     hi_size = (size[0] * scale, size[1] * scale)
     img = Image.new("L", hi_size, 0)
@@ -2314,6 +2044,8 @@ def sharp_triangle_alpha(size: tuple[int, int]) -> Image.Image:
 
 
 def sharp_triangle_distance(size: tuple[int, int]) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     try:
         import cv2
         import numpy as np
@@ -2340,6 +2072,8 @@ def sharp_triangle_distance(size: tuple[int, int]) -> Image.Image:
 
 
 def largest_component_mask(source: Image.Image, threshold: int = 16) -> Image.Image:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     try:
         import cv2
         import numpy as np
@@ -2658,14 +2392,6 @@ class PNGRenderer:
         self.tmp_layout_audit: list[dict[str, Any]] = []
         self._current_card_ref: dict[str, int] = {}
 
-    def _reserve_retained_raster_bytes(self, current: int, additional: int, *, label: str) -> int:
-        """Reserve bytes for a list of live user-derived rasters before creating the next one."""
-
-        total = max(0, int(current)) + max(0, int(additional))
-        if total > self.max_scene_bytes:
-            raise ValueError(f"{label} would retain {total} bytes; limit is {self.max_scene_bytes}")
-        return total
-
     def load_resource_index(self, *names: str, filename: str | None = None) -> dict[int, dict[str, Any]]:
         for name in names:
             value = self.resources.get(name)
@@ -2820,6 +2546,7 @@ class PNGRenderer:
 
     def open_checked_image(self, path: Path, mode: str) -> Image.Image:
         """Decode one custom-profile asset only after its header passes the layer budget."""
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
 
         with Image.open(path) as image:
             ensure_raster_size(
@@ -2857,30 +2584,6 @@ class PNGRenderer:
             return [path]
         clean = raw.strip("/")
         return _dedupe_paths(self._relative_request_asset_candidates(clean))
-
-    def _relative_request_asset_candidates(self, clean: str) -> list[Path]:
-        rel = Path(clean)
-        candidates: list[Path] = []
-        if clean.startswith("asset/"):
-            without_asset = Path(clean.removeprefix("asset/"))
-            for root in self.data_root_candidates():
-                candidates.append(root / clean)
-                candidates.append(root / without_asset)
-        elif clean.startswith(f"{self.region_asset_package_name()}/"):
-            for root in self.data_root_candidates():
-                candidates.append(root / "asset" / rel)
-                candidates.append(root / rel)
-        elif clean.startswith("static_images/"):
-            inner = Path(clean.removeprefix("static_images/"))
-            candidates.append(self.static_images.parent / rel)
-            candidates.append(self.static_images / inner)
-            for root in self.data_root_candidates():
-                candidates.append(root / rel)
-        else:
-            candidates.append(Path(clean))
-            for root in (self.assets, self.game_assets, self.static_images.parent, *self.data_root_candidates()):
-                candidates.append(root / rel)
-        return candidates
 
     def resolve_request_asset_path(self, raw_path: str | None) -> Path | None:
         raw = str(raw_path or "").strip()
@@ -2931,32 +2634,6 @@ class PNGRenderer:
         rels = self._resource_relative_dirs(resource, fallback_dir)
         return self._existing_resource_path(rels, file_name)
 
-    def _explicit_resource_path(self, resource: dict[str, Any]) -> Path | None:
-        for key in ("imagePath", "image_path", "resourcePath", "resource_path", "filePath", "file_path"):
-            if path := self.resolve_request_asset_path(str(resource.get(key, "") or "")):
-                return path
-        return None
-
-    @staticmethod
-    def _resource_relative_dirs(resource: dict[str, Any], fallback_dir: str | None) -> list[Path]:
-        load_val = str(resource.get("resourceLoadVal", "")).strip("/")
-        if load_val.startswith("custom_profile/"):
-            return [Path(load_val.removeprefix("custom_profile/")), Path(load_val)]
-        if load_val == "custom_profile":
-            return [Path("."), Path("custom_profile")]
-        return [Path(fallback_dir)] if fallback_dir else [Path(load_val)]
-
-    def _existing_resource_path(self, rels: list[Path], file_name: str) -> Path | None:
-        roots = [self.assets]
-        if self.game_assets != self.assets:
-            roots.append(self.game_assets)
-        for root in roots:
-            for rel in rels:
-                path = root / rel / file_name
-                if path.exists():
-                    return path
-        return None
-
     def stamp_resource_path(self, resource: dict[str, Any]) -> Path | None:
         if self.masterdata is None:
             return None
@@ -2990,6 +2667,8 @@ class PNGRenderer:
         return self.resource_path(resource, "shape")
 
     def render_card(self, card: dict[str, Any]) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         img = Image.new("RGBA", (self.canvas_w, self.canvas_h), (255, 255, 255, 255))
         card_ref = self.native_card_ref(card)
         previous_card_ref = self._current_card_ref
@@ -2999,67 +2678,6 @@ class PNGRenderer:
         finally:
             self._current_card_ref = previous_card_ref
         return img
-
-    def _render_card_contents(self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]) -> None:
-        if self.tmp_decorative_direct_raster:
-            self._render_decorative_card_contents(img, card_ref, contents)
-            return
-        if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
-            self._render_parallel_card_contents(img, card_ref, contents)
-            return
-        self._render_serial_card_contents(img, card_ref, contents)
-
-    def _render_decorative_card_contents(
-        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
-    ) -> None:
-        for content in contents:
-            self._render_decorative_card_content(img, card_ref, content)
-
-    def _render_decorative_card_content(
-        self, img: Image.Image, card_ref: dict[str, int], content: NativeContent
-    ) -> None:
-        if self.render_content_direct_on_card(img, content):
-            self.record_native_audit(card_ref, content, "rendered-direct", None)
-            return
-        try:
-            rendered = self.render_and_prepare_content_for_card(content)
-        except RasterSizeLimitError as exc:
-            if self.render_oversized_tmp_text_direct(img, content, exc):
-                self.record_native_audit(card_ref, content, "rendered-direct", None)
-                return
-            raise
-        self._record_and_composite_prepared(img, card_ref, rendered)
-
-    def _render_parallel_card_contents(
-        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
-    ) -> None:
-        for rendered in self.render_contents_for_card_parallel(contents):
-            self._record_and_composite_prepared(img, card_ref, rendered)
-
-    def _record_and_composite_prepared(
-        self, img: Image.Image, card_ref: dict[str, int], rendered: RenderedLayer
-    ) -> None:
-        self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
-        if rendered.prepared is not None:
-            img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
-
-    def _render_serial_card_contents(
-        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
-    ) -> None:
-        rendered_layers: list[
-            tuple[
-                NativeContent,
-                tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
-            ]
-        ] = []
-        for content in contents:
-            rendered = self.render_content_for_card(content)
-            self.record_native_audit(card_ref, content, rendered.status, rendered.result)
-            if isinstance(rendered.result, tuple):
-                rendered_layers.append((content, rendered.result))
-        for prepared in self.prepare_layers_for_card(rendered_layers):
-            if prepared is not None:
-                img.alpha_composite(prepared.image, prepared.xy)
 
     def render_content_direct_on_card(self, canvas: Image.Image, content: NativeContent) -> bool:
         if not self.tmp_decorative_direct_raster:
@@ -3071,24 +2689,6 @@ class PNGRenderer:
         if not self.is_decorative_text_item(content.item):
             return False
         return self.render_tmp_decorative_text_direct(canvas, content.item, content.object_data)
-
-    def render_oversized_tmp_text_direct(
-        self,
-        canvas: Image.Image,
-        content: NativeContent,
-        exc: RasterSizeLimitError,
-    ) -> bool:
-        """Render a sparse TMP layer by glyph after its full local surface exceeds the budget."""
-
-        if exc.label != "custom profile TMP text layer":
-            return False
-        if not self.tmp_decorative_direct_raster:
-            return False
-        if content.kind != "text" or not content.object_data.get("visible", False):
-            return False
-        if self.text_layout != "tmp" or self.tmp_text_render_mode != "sdf":
-            return False
-        return self.render_tmp_text_direct(canvas, content.item, content.object_data)
 
     def render_content_for_card(self, content: NativeContent) -> RenderedLayer:
         if not content.object_data.get("visible", False):
@@ -3242,6 +2842,8 @@ class PNGRenderer:
         return self.native_unresolved(content.kind, content.item, "no native route is registered for this content kind")
 
     def render_general_template_shell(self) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         image = Image.new("RGBA", (CANVAS_W, CANVAS_H), GENERAL_TEMPLATE_BG_COLOR)
         draw = ImageDraw.Draw(image)
         # The screenshot crop already removes most of the outer game chrome.
@@ -3448,6 +3050,8 @@ class PNGRenderer:
         return None
 
     def general_font(self, size: int, bold: bool = True) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageFont
+
         for path in self.general_font_candidates():
             try:
                 if path.exists():
@@ -3459,69 +3063,51 @@ class PNGRenderer:
     def render_shared_general_prefab(self, file_name: str) -> Image.Image | None:
         """Replay one migrated GeneralContentView from its renderer-neutral display list."""
 
+        asset_paths = {}
+        if file_name == "ChallengeLive":
+            data = self.profile_context.get("userChallengeLiveSoloResult") or {}
+            if isinstance(data, dict):
+                character_id = int(data.get("characterId", 0) or 0)
+                asset_paths["challenge_character_icon"] = self.chara_icon_path(character_id)
+        elif file_name in {"CharacterRankAndChallengeStage", "CharacterRankAndChallengeStageScroll"}:
+            for _nickname, character_id in CHARA_LIST:
+                if character_id is not None:
+                    asset_paths[f"character_rank_icon:{character_id}"] = self.chara_icon_path(character_id)
+        elif file_name == "StoryFavorite":
+            stories = self.profile_context.get("userStoryFavorites") or []
+            if isinstance(stories, list):
+                for story in stories:
+                    if isinstance(story, dict):
+                        asset_paths[story_favorite_asset_key(story)] = self.story_favorite_image_path(story)
+        from src.sekai.profile.custom_profile.pillow_general_prefab import PillowGeneralPrefabAdapter
+
         adapter = PillowGeneralPrefabAdapter(self.general_font, self.paste_unity_sprite, self.open_rgba)
         display_list = build_general_prefab_display_list(
             file_name,
             size=GENERAL_NATIVE_SIZES[file_name],
             profile_context=self.profile_context,
-            labels=self._general_prefab_labels(),
+            labels={
+                "comment_title": self.general_text("comment_title"),
+                "total_power": self.general_text("total_power"),
+                "multi_live_title": self.general_text("multi_live_title"),
+                "multi_live_count_suffix": self.general_text("multi_live_count_suffix"),
+                "challenge_live_title": self.general_text("challenge_live_title"),
+                "challenge_live_solo": self.general_text("challenge_live_solo"),
+                "character_rank_tab": self.general_text("character_rank_tab"),
+                "challenge_stage_tab": self.general_text("challenge_stage_tab"),
+                "music_clear": self.general_text("music_clear"),
+                "music_full_combo": self.general_text("music_full_combo"),
+                "music_all_perfect": self.general_text("music_all_perfect"),
+                "story_favorite_title": self.general_text("story_favorite_title"),
+                "not_set": self.general_text("not_set"),
+            },
             metrics=adapter,
             palette=GENERAL_PREFAB_PALETTE,
-            asset_paths=self._general_prefab_asset_paths(file_name),
+            asset_paths=asset_paths,
             music_difficulties=GENERAL_MUSIC_DIFFICULTIES,
             story_favorite_resources=self.story_favorite_resources,
         )
         return adapter.render(display_list) if display_list is not None else None
-
-    def _general_prefab_asset_paths(self, file_name: str) -> dict[str, Path | None]:
-        builders = {
-            "ChallengeLive": self._challenge_live_prefab_assets,
-            "CharacterRankAndChallengeStage": self._character_rank_prefab_assets,
-            "CharacterRankAndChallengeStageScroll": self._character_rank_prefab_assets,
-            "StoryFavorite": self._story_favorite_prefab_assets,
-        }
-        builder = builders.get(file_name)
-        return builder() if builder is not None else {}
-
-    def _challenge_live_prefab_assets(self) -> dict[str, Path | None]:
-        data = _mapping_or_empty(self.profile_context.get("userChallengeLiveSoloResult") or {})
-        character_id = _int_first(data.get("characterId"))
-        return {"challenge_character_icon": self.chara_icon_path(character_id)}
-
-    def _character_rank_prefab_assets(self) -> dict[str, Path | None]:
-        return {
-            f"character_rank_icon:{character_id}": self.chara_icon_path(character_id)
-            for _nickname, character_id in CHARA_LIST
-            if character_id is not None
-        }
-
-    def _story_favorite_prefab_assets(self) -> dict[str, Path | None]:
-        stories = self.profile_context.get("userStoryFavorites")
-        if not isinstance(stories, list):
-            return {}
-        return {
-            story_favorite_asset_key(story): self.story_favorite_image_path(story)
-            for story in stories
-            if isinstance(story, dict)
-        }
-
-    def _general_prefab_labels(self) -> dict[str, str]:
-        keys = (
-            "comment_title",
-            "total_power",
-            "multi_live_title",
-            "multi_live_count_suffix",
-            "challenge_live_title",
-            "challenge_live_solo",
-            "character_rank_tab",
-            "challenge_stage_tab",
-            "music_clear",
-            "music_full_combo",
-            "music_all_perfect",
-            "story_favorite_title",
-            "not_set",
-        )
-        return {key: self.general_text(key) for key in keys}
 
     def rect_transform_box(
         self,
@@ -3567,7 +3153,7 @@ class PNGRenderer:
         child: Image.Image,
         rect: tuple[float, float, float, float],
         *,
-        resample: Image.Resampling = Image.Resampling.LANCZOS,
+        resample: Image.Resampling = RasterResample.LANCZOS,
     ) -> None:
         left, top, right, bottom = rect
         w = max(1, round(right - left))
@@ -3699,6 +3285,8 @@ class PNGRenderer:
         image: Image.Image,
         tint: tuple[float, float, float, float] | tuple[int, int, int, int],
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops
+
         rgba = image.convert("RGBA")
         r, g, b, a = unity_tint_rgba(tint)
         alpha = ImageChops.multiply(rgba.getchannel("A"), Image.new("L", rgba.size, a))
@@ -3712,6 +3300,8 @@ class PNGRenderer:
         target_size: tuple[int, int],
         border: tuple[int, int, int, int],
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         target_w, target_h = target_size
         left, bottom, right, top = border
         src_w, src_h = sprite.size
@@ -3735,6 +3325,8 @@ class PNGRenderer:
         mid_dst_h = max(0, target_h - top - bottom)
 
         def paste_region(src_box: tuple[int, int, int, int], dst_box: tuple[int, int, int, int]) -> None:
+            from src.sekai.profile.custom_profile.pillow_runtime import Image
+
             dst_w = dst_box[2] - dst_box[0]
             dst_h = dst_box[3] - dst_box[1]
             if dst_w <= 0 or dst_h <= 0:
@@ -3769,7 +3361,7 @@ class PNGRenderer:
         *,
         tint: tuple[float, float, float, float] | tuple[int, int, int, int] | None = None,
         sliced_border: tuple[int, int, int, int] | None = None,
-        resample: Image.Resampling = Image.Resampling.LANCZOS,
+        resample: Image.Resampling = RasterResample.LANCZOS,
     ) -> bool:
         sprite = self.unity_ui_sprite(name)
         if sprite is None:
@@ -3801,12 +3393,16 @@ class PNGRenderer:
     def draw_template_chip(
         self, size: tuple[int, int], fill: tuple[int, int, int, int], outline: tuple[int, int, int, int], radius: int
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle((0, 0, size[0] - 1, size[1] - 1), radius=radius, fill=fill, outline=outline, width=2)
         return image
 
     def draw_template_panel(self, size: tuple[int, int], radius: int = GENERAL_TEMPLATE_PANEL_RADIUS) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         draw.rounded_rectangle(
@@ -3819,6 +3415,8 @@ class PNGRenderer:
         return image
 
     def draw_general_panel(self, size: tuple[int, int], title: str | None = None) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         image = Image.new("RGBA", size, (0, 0, 0, 0))
         draw = ImageDraw.Draw(image)
         w, h = size
@@ -3834,6 +3432,8 @@ class PNGRenderer:
         return self.draw_template_chip(size, GENERAL_TEMPLATE_FIELD_FILL, GENERAL_TEMPLATE_FIELD_OUTLINE, 8)
 
     def draw_template_title(self, image: Image.Image, text: str, x: int, y: int, w: int | None = None) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         font = self.general_font(26)
         if w is None:
@@ -3935,6 +3535,8 @@ class PNGRenderer:
         draw.text(((left + right) / 2.0, (top + bottom) / 2.0), text, font=font, fill=fill, anchor="mm")
 
     def wrap_general_text(self, text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         text = text or ""
         draw = ImageDraw.Draw(Image.new("RGBA", (1, 1)))
 
@@ -3942,11 +3544,39 @@ class PNGRenderer:
             bbox = draw.textbbox((0, 0), value, font=font)
             return bbox[2] - bbox[0]
 
+        def tokens_for(raw_line: str) -> list[str]:
+            tokens: list[str] = []
+            token = ""
+            for ch in raw_line:
+                if ch.isascii() and (ch.isalnum() or ch in "._-@:/#"):
+                    token += ch
+                    continue
+                if token:
+                    tokens.append(token)
+                    token = ""
+                tokens.append(ch)
+            if token:
+                tokens.append(token)
+            return tokens
+
         lines: list[str] = []
         for raw_line in text.splitlines() or [""]:
             line = ""
-            for token in _general_text_tokens(raw_line):
-                line = _append_general_token(token, line, max_width, text_width, lines)
+            for token in tokens_for(raw_line):
+                trial = line + token
+                if line and text_width(trial) > max_width:
+                    lines.append(line)
+                    line = ""
+                if text_width(token) > max_width:
+                    for ch in token:
+                        trial = line + ch
+                        if line and text_width(trial) > max_width:
+                            lines.append(line)
+                            line = ch
+                        else:
+                            line = trial
+                else:
+                    line += token
             lines.append(line)
         return lines
 
@@ -3955,6 +3585,18 @@ class PNGRenderer:
 
     def draw_total_power_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "icon_deckPower_wh", rect, tint=UNITY_UI_DARK_TINT)
+
+    def draw_x_icon(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
+        if self.paste_unity_sprite(image, "x_icon", rect, tint=UNITY_UI_DARK_TINT):
+            return
+        if self.paste_unity_sprite(image, "icon_twitter_wh", rect, tint=UNITY_UI_DARK_TINT):
+            return
+        draw = ImageDraw.Draw(image)
+        self.draw_center_text_rect(
+            draw, rect, "X", size=max(18, round(rect[3] - rect[1]) - 8), fill=GENERAL_TEMPLATE_TEXT
+        )
 
     def draw_info_button(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
         self.paste_unity_sprite(image, "btn_circle_h56_wh", rect)
@@ -3975,9 +3617,21 @@ class PNGRenderer:
         self.paste_unity_sprite(image, "icon_infomation_wh", icon_rect, tint=UNITY_UI_DARK_TINT)
 
     def render_general_x(self) -> Image.Image:
-        image = self.render_shared_general_prefab("X")
-        if image is None:  # pragma: no cover - X has no missing-data no-op contract
-            raise RuntimeError("shared X GeneralContentView unexpectedly produced no display list")
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        size = GENERAL_NATIVE_SIZES["X"]
+        image = Image.new("RGBA", size, (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        base_rect = self.rect_transform_box(size, (0.0, 0.0), (1.0, 1.0), (0.0, 0.0), (0.0, 0.0), (0.5, 0.5))
+        self.paste_unity_sprite(
+            image, "bg_base_r16_wh", base_rect, tint=UNITY_UI_INPUT_TINT, sliced_border=(21, 21, 21, 21)
+        )
+        icon_rect = self.rect_transform_box(size, (0.0, 0.5), (0.0, 0.5), (26.0, 0.0), (38.0, 38.0), (0.5, 0.5))
+        self.draw_x_icon(image, icon_rect)
+        twitter_id = str((self.profile_context.get("userProfile") or {}).get("twitterId", "") or "").strip()
+        text = f"@{twitter_id.removeprefix('@')}" if twitter_id else ""
+        text_rect = self.rect_transform_box(size, (0.5, 0.5), (0.5, 0.5), (26.0, 0.0), (430.0, 32.0), (0.5, 0.5))
+        self.draw_fit_text_rect(draw, text_rect, text, max_size=30, fill=GENERAL_TEMPLATE_TEXT)
         return image
 
     def render_general_user_name(self) -> Image.Image:
@@ -3997,6 +3651,8 @@ class PNGRenderer:
         return self.compose_profile_leader_card(card_id)
 
     def render_general_deck(self) -> Image.Image | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         deck = self.profile_context.get("userDeck") or {}
         if not isinstance(deck, dict):
             return None
@@ -4015,6 +3671,8 @@ class PNGRenderer:
         return image
 
     def render_general_honor_deck(self) -> Image.Image | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         plan = build_honor_deck_plan(self.profile_context.get("userProfileHonors", []) or [])
         if plan is None:
             return None
@@ -4059,6 +3717,8 @@ class PNGRenderer:
         return self.render_shared_general_prefab("StoryFavorite")
 
     def draw_character_rank_tabs(self, image: Image.Image, *, scroll: bool) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         tab_w = 828.0 if scroll else 760.0
         left = (image.width - tab_w) / 2.0
@@ -4101,6 +3761,8 @@ class PNGRenderer:
         character_id: int,
         rank: int,
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         x, y = top_left
         cell_w, cell_h = CHARACTER_RANK_CELL_SIZE
@@ -4140,6 +3802,8 @@ class PNGRenderer:
         self.draw_center_text_rect(draw, rank_rect, str(rank), size=31, fill=GENERAL_TEMPLATE_TEXT)
 
     def draw_story_favorite_header(self, image: Image.Image) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         title_rect = (47, 10, 547, 66)
         self.draw_fit_text_rect(
@@ -4163,6 +3827,8 @@ class PNGRenderer:
         story: dict[str, Any],
         rect: tuple[float, float, float, float],
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops, ImageDraw
+
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
         width = max(1, round(right - left))
@@ -4238,6 +3904,8 @@ class PNGRenderer:
         return None
 
     def draw_general_panel(self, image: Image.Image, rect: tuple[float, float, float, float]) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         if not self.paste_unity_sprite(
             image,
             "bg_base_r16_wh",
@@ -4278,6 +3946,8 @@ class PNGRenderer:
         value_inset_x: float = 15.0,
         value_top_gap: float = 9.0,
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
         header_rect = (left, top, right, top + header_h)
@@ -4332,6 +4002,8 @@ class PNGRenderer:
         *,
         tag_h: float = 34.0,
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageDraw
+
         draw = ImageDraw.Draw(image)
         left, top, right, bottom = rect
         draw.rounded_rectangle((left, top, right, top + tag_h), radius=6, fill=color)
@@ -4495,6 +4167,8 @@ class PNGRenderer:
         align_x: float = 0.5,
         align_y: float = 0.5,
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         target_w = max(1, round(target_size[0]))
         target_h = max(1, round(target_size[1]))
         scale = max(target_w / source.width, target_h / source.height)
@@ -4586,6 +4260,8 @@ class PNGRenderer:
         )
 
     def card_pillow_adapter(self) -> PillowCardAdapter:
+        from src.sekai.profile.custom_profile.pillow_card_prefab import PillowCardAdapter
+
         return PillowCardAdapter(
             self.general_font,
             self.paste_unity_sprite,
@@ -5012,41 +4688,6 @@ class PNGRenderer:
         )
         return request
 
-    @staticmethod
-    def _honor_asset_details(
-        honor: dict[str, Any], visual: dict[str, Any] | None, requested_level: int
-    ) -> tuple[str, str, int]:
-        asset_name = str(honor.get("assetbundleName", "") or "")
-        rarity = str(honor.get("honorRarity", "") or "")
-        if visual is None:
-            return asset_name, rarity, requested_level
-        asset_name = str(_first_truthy(asset_name, visual.get("assetbundleName"), default=""))
-        rarity = str(_first_truthy(rarity, visual.get("honorRarity"), default=""))
-        level = _int_first(visual.get("level")) if requested_level <= 0 else requested_level
-        return asset_name, rarity, level
-
-    @staticmethod
-    def _honor_background_asset_name(group: dict[str, Any], asset_name: str) -> str:
-        configured = group.get("backgroundAssetbundleName", group.get("backgroundAssetBundleName", ""))
-        return str(_first_truthy(configured, asset_name, default=""))
-
-    def _resolved_honor_group_type(self, group: dict[str, Any], bg_asset_name: str, asset_name: str) -> str:
-        group_type = str(group.get("honorType", "") or "")
-        return "wl_event" if self.is_world_link_honor_group(group_type, bg_asset_name, asset_name) else group_type
-
-    def _honor_scroll_path(self, asset_name: str) -> Path | None:
-        if not asset_name:
-            return None
-        return self.first_region_asset([Path("honor") / asset_name / "scroll.png"])
-
-    def _honor_level_icon_paths(self, request_group_type: str, group_type: str) -> tuple[Path | None, Path | None]:
-        if request_group_type != "fc_ap" and group_type not in {"character", "achievement"}:
-            return None, None
-        return (
-            self.static_image_path("honor", "icon_degreeLv.png"),
-            self.static_image_path("honor", "icon_degreeLv6.png"),
-        )
-
     def honor_group_for(self, honor: dict[str, Any]) -> dict[str, Any] | None:
         return self.honor_groups.get(int(honor.get("groupId", 0) or 0))
 
@@ -5062,18 +4703,6 @@ class PNGRenderer:
             if eligible:
                 return max(eligible, key=self._honor_visual_level)
         return levels[0]
-
-    @staticmethod
-    def _usable_honor_level_visuals(honor: dict[str, Any]) -> list[dict[str, Any]]:
-        return [
-            level
-            for level in honor.get("levels", []) or []
-            if isinstance(level, dict) and (level.get("assetbundleName") or level.get("honorRarity"))
-        ]
-
-    @staticmethod
-    def _honor_visual_level(visual: dict[str, Any]) -> int:
-        return _int_first(visual.get("level"))
 
     def honor_background_path(self, group_type: str, bg_asset_name: str, asset_name: str, mode: str) -> Path | None:
         rels: list[Path] = []
@@ -5147,27 +4776,6 @@ class PNGRenderer:
         if region_path is not None:
             return region_path
         return static_path if static_path.exists() else None
-
-    @staticmethod
-    def _resolved_honor_frame_name(frame_name: str, honor_type: str, bg_asset_name: str, asset_name: str) -> str:
-        if honor_type != "birthday" or frame_name:
-            return frame_name
-        if bg_asset_name.startswith("honor_bg_birthday_"):
-            return "honor_frame_birthday_" + bg_asset_name.removeprefix("honor_bg_birthday_")
-        if asset_name.startswith("honor_bg_birthday_"):
-            return "honor_frame_birthday_" + asset_name.removeprefix("honor_bg_birthday_")
-        return ""
-
-    def _eligible_honor_frame_path(
-        self, frame_name: str, honor_type: str, mode_short: str, rarity_rank: int
-    ) -> Path | None:
-        if not frame_name:
-            return None
-        start_rare = 3 if frame_name.startswith("event") else 2
-        if honor_type != "birthday" and rarity_rank < start_rare:
-            return None
-        rel = Path("honor_frame") / frame_name / f"frame_degree_{mode_short}_{rarity_rank}.png"
-        return self.first_region_asset([rel])
 
     def honor_frame_degree_level_path(
         self,
@@ -5299,33 +4907,6 @@ class PNGRenderer:
             },
         )
         return compose_full_honor_image_from_loaded_assets(request, images)
-
-    def _bonds_honor_request_keys(
-        self,
-        honor_id: int,
-        level: int,
-        full_size: bool,
-        word_id: int,
-        inverse: bool,
-        use_unit_virtual_singer: bool,
-    ) -> list[str]:
-        keys = [self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer)]
-        if use_unit_virtual_singer:
-            keys.append(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
-        return keys
-
-    def _configured_bonds_honor_image(self, honor_id: int, request_keys: list[str]) -> Image.Image | None:
-        for key in request_keys:
-            if image := self.honor_request_image(self.bonds_honor_requests.get(key)):
-                return image
-        return self.honor_request_image(self.bonds_honor_requests.get(str(honor_id)))
-
-    def _loaded_request_images(self, request: HonorRequest, fields: dict[str, str]) -> dict[str, Image.Image | None]:
-        images: dict[str, Image.Image | None] = {}
-        for image_key, path_field in fields.items():
-            raw_path = getattr(request, path_field)
-            images[image_key] = self.open_rgba(Path(raw_path)) if raw_path else None
-        return images
 
     def build_masterdata_bonds_honor_request(
         self,
@@ -5567,7 +5148,9 @@ class PNGRenderer:
         file_name = file_path if file_path.lower().endswith(".png") else f"{file_path}.png"
         return self.first_region_asset((Path(bundle) / file_name,))
 
-    def omikuji_font_candidates(self, *, decorative: bool = False) -> list[Path]:
+    def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageFont
+
         names = (
             ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
             if decorative
@@ -5586,51 +5169,216 @@ class PNGRenderer:
         for base in self.data_root_candidates():
             candidates.extend(
                 (
-                    base / "custom_profile" / "tmp-font-assets" / self.region / "source-fonts" / _OMIKUJI_FONT_FILENAME,
-                    base / "custom_profile" / "tmp-font-assets" / "cn" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
-                    base / "custom_profile" / "tmp-font-assets" / "kr" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / self.region
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / "cn"
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
+                    base
+                    / "custom_profile"
+                    / "tmp-font-assets"
+                    / "kr"
+                    / "source-fonts"
+                    / "FOT-Omikuji_4956192661917990345.otf",
                 )
             )
-        return candidates
-
-    def omikuji_font_path(self, *, decorative: bool = False) -> Path | None:
-        for path in self.omikuji_font_candidates(decorative=decorative):
+        for path in candidates:
             try:
-                if path.is_file():
-                    return path
+                if path.exists():
+                    return ImageFont.truetype(str(path), size)
             except OSError:
                 continue
-        return self.general_font_path()
-
-    def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-        path = self.omikuji_font_path(decorative=decorative)
-        if path is not None:
-            try:
-                return ImageFont.truetype(str(path), size)
-            except OSError:
-                pass
         return self.general_font(size, bold=not decorative)
 
+    def draw_omikuji_vertical_line(
+        self,
+        image: Image.Image,
+        x: float,
+        y: float,
+        text: str,
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        fill: tuple[int, int, int, int],
+        *,
+        step: float,
+    ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        draw = ImageDraw.Draw(image)
+        cursor_y = y
+        rotate_chars = {"、", "。", "，", "．", "・", "：", "；", "！", "？", "ー"}
+        small_kana = set("ぁぃぅぇぉっゃゅょァィゥェォッャュョ")
+        for ch in str(text or ""):
+            if ch in {" ", "\u3000"}:
+                cursor_y += step * 0.5
+                continue
+            if ch in rotate_chars:
+                bbox = draw.textbbox((0, 0), ch, font=font)
+                glyph = Image.new("RGBA", (max(1, bbox[2] - bbox[0] + 8), max(1, bbox[3] - bbox[1] + 8)), (0, 0, 0, 0))
+                glyph_draw = ImageDraw.Draw(glyph)
+                glyph_draw.text((4 - bbox[0], 4 - bbox[1]), ch, font=font, fill=fill)
+                glyph = glyph.rotate(90, expand=True)
+                image.alpha_composite(
+                    glyph, (round(x - glyph.width / 2), round(cursor_y - glyph.height / 2 + step * 0.28))
+                )
+            else:
+                offset_x = -step * 0.08 if ch in small_kana else 0.0
+                offset_y = step * 0.16 if ch in small_kana else 0.0
+                draw.text((x + offset_x, cursor_y + offset_y), ch, font=font, fill=fill, anchor="mm")
+            cursor_y += step
+
+    def draw_omikuji_vertical_columns(
+        self,
+        image: Image.Image,
+        right_x: float,
+        y: float,
+        lines: list[str] | tuple[str, ...],
+        font: ImageFont.FreeTypeFont | ImageFont.ImageFont,
+        fill: tuple[int, int, int, int],
+        *,
+        column_step: float,
+        char_step: float,
+    ) -> None:
+        for index, line in enumerate(lines):
+            if line:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    right_x - index * column_step,
+                    y,
+                    line,
+                    font,
+                    fill,
+                    step=char_step,
+                )
+
+    def draw_omikuji_centered_lines(
+        self,
+        draw: ImageDraw.ImageDraw,
+        rect: tuple[int, int, int, int],
+        text: str,
+        *,
+        max_size: int,
+        min_size: int,
+        fill: tuple[int, int, int, int],
+        spacing: int = 1,
+    ) -> None:
+        lines = [line for line in str(text or "").splitlines() if line]
+        if not lines:
+            return
+        left, top, right, bottom = rect
+        for size in range(max_size, min_size - 1, -1):
+            font = self.omikuji_font(size)
+            boxes = [draw.textbbox((0, 0), line, font=font) for line in lines]
+            widths = [box[2] - box[0] for box in boxes]
+            heights = [box[3] - box[1] for box in boxes]
+            total_h = sum(heights) + spacing * max(0, len(lines) - 1)
+            if max(widths, default=0) <= right - left and total_h <= bottom - top:
+                y = top + (bottom - top - total_h) / 2.0
+                for line, box, line_h in zip(lines, boxes, heights, strict=True):
+                    draw.text(
+                        ((left + right) / 2.0, y - box[1]),
+                        line,
+                        font=font,
+                        fill=fill,
+                        anchor="ma",
+                    )
+                    y += line_h + spacing
+                return
+
+        font = self.omikuji_font(min_size)
+        y = top + 2
+        for line in lines:
+            draw.text(((left + right) / 2.0, y), line, font=font, fill=fill, anchor="ma")
+            y += min_size + spacing
+
     def draw_omikuji_result_view(self, omikuji: dict[str, Any], asset_paths: dict[str, Path]) -> Image.Image:
-        background_path = asset_paths["background"]
-        fortune_path = asset_paths["fortune"]
-        background = self.open_rgba(background_path)
-        fortune = self.open_rgba(fortune_path)
-        if background is None or fortune is None:
-            raise FileNotFoundError("required omikuji result-view assets are missing")
-        display_list = build_omikuji_display_list(
-            omikuji,
-            background_path=background_path,
-            background_size=background.size,
-            fortune_path=fortune_path,
-            fortune_size=fortune.size,
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        background = self.open_rgba(asset_paths.get("background"))
+        if background is None:
+            width, height = tuple(round(v) for v in OMIKUJI_RESULT_NATIVE_SIZE)
+            image = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        else:
+            image = background.copy()
+            width, height = image.size
+        draw = ImageDraw.Draw(image)
+
+        unit = str(omikuji.get("unit", "") or "")
+        accent = OMIKUJI_UNIT_COLORS.get(unit, (76, 181, 210, 255))
+        text_fill = (79, 79, 79, 255)
+
+        fortune_image = self.open_rgba(asset_paths.get("fortune"))
+        if fortune_image is not None:
+            target_h = max(1, round(height * 300.0 / 490.0))
+            if fortune_image.height != target_h:
+                fortune_image = fortune_image.resize(
+                    (max(1, round(fortune_image.width * target_h / fortune_image.height)), target_h),
+                    Image.Resampling.LANCZOS,
+                )
+            image.alpha_composite(fortune_image, (round(width * 1309.0 / 1480.0), round(height * 89.0 / 490.0)))
+
+        summary = str(omikuji.get("summary", "") or "")
+        summary_font = self.omikuji_font(round(height * 36.0 / 490.0))
+        self.draw_omikuji_vertical_columns(
+            image,
+            width * 1251.0 / 1480.0,
+            height * 49.0 / 490.0,
+            [line for line in summary.splitlines() if line],
+            summary_font,
+            text_fill,
+            column_step=width * 44.0 / 1480.0,
+            char_step=height * 29.5 / 490.0,
         )
-        loaded = {background_path.resolve(): background, fortune_path.resolve(): fortune}
-        adapter = PillowOmikujiAdapter(
-            lambda size, decorative: self.omikuji_font(size, decorative=decorative),
-            lambda path: loaded.get(path.resolve()) or self.open_rgba(path),
-        )
-        return adapter.render(display_list)
+
+        rows = [
+            (str(omikuji.get("title3", "") or ""), str(omikuji.get("description3", "") or "")),
+            (str(omikuji.get("title2", "") or ""), str(omikuji.get("description2", "") or "")),
+            (str(omikuji.get("title1", "") or ""), str(omikuji.get("description1", "") or "")),
+        ]
+        title_font = self.omikuji_font(round(height * 40.0 / 490.0))
+        value_font = self.omikuji_font(round(height * 30.0 / 490.0))
+        title_lefts = (width * 430.0 / 1480.0, width * 584.0 / 1480.0, width * 736.0 / 1480.0)
+        title_top = height * 31.0 / 490.0
+        title_w = width * 44.0 / 1480.0
+        title_h = height * 94.0 / 490.0
+        for (title, value), title_left in zip(rows, title_lefts, strict=True):
+            if not title and not value:
+                continue
+            title_rect = (
+                round(title_left),
+                round(title_top),
+                round(title_left + title_w),
+                round(title_top + title_h),
+            )
+            draw.rectangle(title_rect, fill=accent)
+            clean_title = title.replace(" ", "")
+            if clean_title:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    title_left + title_w / 2.0,
+                    title_top + height * 27.0 / 490.0,
+                    clean_title,
+                    title_font,
+                    (255, 255, 255, 255),
+                    step=height * 39.0 / 490.0,
+                )
+            if value:
+                self.draw_omikuji_vertical_line(
+                    image,
+                    title_left - width * 40.0 / 1480.0,
+                    height * 55.0 / 490.0,
+                    value,
+                    value_font,
+                    text_fill,
+                    step=height * 25.0 / 490.0,
+                )
+        return image
 
     def render_stamp_content(
         self,
@@ -5885,6 +5633,8 @@ class PNGRenderer:
     def compose_card_member_image(
         self, path: Path, target_size: tuple[float, float], contain: bool = False
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops, ImageDraw
+
         target_w = max(1, round(target_size[0]))
         target_h = max(1, round(target_size[1]))
         src = self.open_checked_image(path, "RGBA")
@@ -5969,41 +5719,11 @@ class PNGRenderer:
                 return level
         return 0
 
-    @staticmethod
-    def _list_profile_level(row: Any, honor_id: int) -> int | None:
-        if not isinstance(row, list) or not row or _int_first(row[0]) != honor_id:
-            return None
-        return _int_first(row[1]) if len(row) > 1 else 0
-
-    @classmethod
-    def _user_honor_row_level(cls, row: Any, honor_id: int) -> int | None:
-        if (level := cls._list_profile_level(row, honor_id)) is not None:
-            return level
-        if not isinstance(row, dict):
-            return None
-        row_id = _int_first(row.get("honorId", row.get("id", 0)))
-        return _int_first(row.get("honorLevel", row.get("level", 0))) if row_id == honor_id else None
-
-    @staticmethod
-    def _profile_honor_row_level(row: Any, honor_id: int) -> int | None:
-        if not isinstance(row, dict) or _int_first(row.get("honorId")) != honor_id:
-            return None
-        return _int_first(row.get("honorLevel"))
-
     def user_bonds_honor_level_for(self, bonds_honor_id: int) -> int:
         for row in self.profile_context.get("userBondsHonors", []) or []:
             if (level := self._bonds_honor_row_level(row, bonds_honor_id)) is not None:
                 return level
         return 0
-
-    @classmethod
-    def _bonds_honor_row_level(cls, row: Any, bonds_honor_id: int) -> int | None:
-        if (level := cls._list_profile_level(row, bonds_honor_id)) is not None:
-            return level
-        if not isinstance(row, dict):
-            return None
-        row_id = _int_first(row.get("bondsHonorId", row.get("honorId", row.get("id", 0))))
-        return _int_first(row.get("bondsHonorLevel", row.get("level", 0))) if row_id == bonds_honor_id else None
 
     def user_honor_mission_progress_for(self, honor_id: int) -> int:
         for row in self.profile_context.get("userHonorMissions", []) or []:
@@ -6011,13 +5731,9 @@ class PNGRenderer:
                 return progress
         return 0
 
-    @staticmethod
-    def _honor_mission_row_progress(row: Any, honor_id: int) -> int | None:
-        if not isinstance(row, dict) or _int_first(row.get("honorId", row.get("id", 0))) != honor_id:
-            return None
-        return _int_first(row.get("missionProgress", row.get("progress", 0)))
-
     def shape_alpha_mask(self, path: Path, resource_file: str) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageChops
+
         key = (path, self.triangle_mode if resource_file == "triangle" else "asset")
         cached = self._shape_alpha_cache.get(key)
         if cached is not None:
@@ -6037,6 +5753,8 @@ class PNGRenderer:
         return alpha
 
     def shape_distance_field(self, path: Path, resource_file: str) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import ImageChops
+
         mode = self.triangle_mode if resource_file == "triangle" else "asset"
         key = (path, mode, self.shape_sdf_source)
         cached = self._shape_field_cache.get(key)
@@ -6098,6 +5816,8 @@ class PNGRenderer:
         output_size: tuple[int, int] | None,
         output_bounds: tuple[int, int, int, int] | None = None,
     ) -> tuple[Any, Any, Any]:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         source_size = self.shape_alpha_mask(path, resource_file).size
         if output_bounds is None and (output_size is None or output_size == source_size):
             return self.shape_shader_basis(path, resource_file)
@@ -6132,58 +5852,6 @@ class PNGRenderer:
         fwidth = np.abs(grad_x) + np.abs(grad_y)
         return field, alpha, fwidth
 
-    def visible_scaled_shape_bounds(
-        self,
-        output_size: tuple[int, int],
-        object_data: dict[str, Any],
-        *,
-        padding: int = 3,
-    ) -> tuple[int, int, int, int] | None:
-        """Return the local SDF pixels which can affect the final canvas."""
-
-        width, height = output_size
-        post_sx = float(self.position_scale_x)
-        post_sy = float(self.position_scale_y)
-        if not all(math.isfinite(value) and value > 0.0 for value in (post_sx, post_sy)):
-            return None
-
-        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
-        theta = math.radians(angle % 360.0)
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        anchor_x, anchor_y = self.unity_point(object_data.get("position", {}))
-        pivot_x = width / 2.0
-        pivot_y = height / 2.0
-
-        local_corners: list[tuple[float, float]] = []
-        for canvas_x, canvas_y in (
-            (0.0, 0.0),
-            (float(self.canvas_w), 0.0),
-            (float(self.canvas_w), float(self.canvas_h)),
-            (0.0, float(self.canvas_h)),
-        ):
-            dx = canvas_x - anchor_x
-            dy = canvas_y - anchor_y
-            local_corners.append(
-                (
-                    pivot_x + (cos_t * dx + sin_t * dy) / post_sx,
-                    pivot_y + (-sin_t * dx + cos_t * dy) / post_sy,
-                )
-            )
-
-        left = max(0, math.floor(min(x for x, _ in local_corners)) - padding)
-        top = max(0, math.floor(min(y for _, y in local_corners)) - padding)
-        right = min(width, math.ceil(max(x for x, _ in local_corners)) + padding)
-        bottom = min(height, math.ceil(max(y for _, y in local_corners)) + padding)
-        if left >= right or top >= bottom:
-            return None
-        ensure_raster_size(
-            (right - left, bottom - top),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile visible scaled shape",
-        )
-        return (left, top, right, bottom)
-
     def render_distance_field_shape(
         self,
         path: Path,
@@ -6196,6 +5864,7 @@ class PNGRenderer:
         output_size: tuple[int, int] | None = None,
         output_bounds: tuple[int, int, int, int] | None = None,
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
         import numpy as np
 
         field, texture_alpha, fwidth = self.shape_shader_arrays(
@@ -6270,6 +5939,8 @@ class PNGRenderer:
         data: tuple[float, float, float, float, float, float],
         resample: Image.Resampling,
     ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         size = ensure_raster_size(size, max_pixels=self.max_layer_pixels, label="custom profile affine layer")
         if self.premultiply_alpha_transforms:
             return transform_rgba_premul(layer, size, Image.Transform.AFFINE, data, resample)
@@ -6314,6 +5985,8 @@ class PNGRenderer:
         content_kind: str | None = None,
         allow_rotation_supersample: bool = False,
     ) -> PreparedLayer | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         inputs = self.layer_transform_inputs(local, object_data, content_kind)
         layer, pivot = inputs.layer, inputs.pivot
         sx, sy = inputs.object_scale
@@ -6350,6 +6023,8 @@ class PNGRenderer:
         y: float,
         allow_rotation_supersample: bool,
     ) -> PreparedLayer:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         rotation_supersample = max(1.0, LAYER_ROTATION_SUPERSAMPLE)
         if allow_rotation_supersample and rotation_supersample > 1.0 and abs(angle % 360.0) >= 1.0e-6:
             hi_w = max(1, round(layer.width * rotation_supersample))
@@ -6376,6 +6051,8 @@ class PNGRenderer:
         y: float,
         allow_rotation_supersample: bool,
     ) -> PreparedLayer | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         angle = angle % 360.0
         if abs(angle) < 1.0e-9:
             paste_x = round(x - pivot[0])
@@ -6463,6 +6140,8 @@ class PNGRenderer:
         )
 
     def render_shape(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float], bool] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops, ImageFilter
+
         resource = self.shapes.get(int(item.get("id", 0)), {})
         path = self.shape_resource_path(resource)
         if not path:
@@ -6554,54 +6233,7 @@ class PNGRenderer:
             return base, (base.width / 2, base.height / 2), False
         return fill, (fill.width / 2, fill.height / 2), False
 
-    def render_text(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float]] | None:
-        data = self.generate_text_data(item)
-        raw_text = data.text
-        if not raw_text.strip():
-            return None
-        font_name = self.text_fonts.get(data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
-        mesh_state = self.update_text_mesh_state(data, font_name)
-        font_path = self.font_path_for(font_name)
-        base_size = mesh_state.font_size
-        base_style = self.base_text_style(mesh_state)
-        tokens = parse_tmp_text(raw_text, base_style)
-        lines = split_runs_by_line(tokens)
-        styled_lines = split_runs_by_line_with_style(tokens, base_style)
-        if not lines:
-            return None
-        if self.text_layout == "tmp":
-            return self.render_tmp_text_box(item, font_name, font_path, base_style, styled_lines)
-        outline_color = mesh_state.underlay_color
-        outline_dilate = self.decorative_outline_dilate(item, mesh_state.underlay_dilate)
-        outline_width = max(0, round(outline_dilate * base_size * self.tmp_pillow_stroke_factor))
-        metrics = self.measure_pil_text_layout(
-            lines,
-            font_name,
-            font_path,
-            base_size,
-            mesh_state.tmp_line_spacing,
-        )
-        pad = self.text_pad(base_size, outline_width)
-        content_w = max(1.0, metrics.max_x - metrics.min_x)
-        image_size = ensure_raster_size(
-            (math.ceil(content_w + pad * 2), math.ceil(max(1.0, metrics.total_height) + pad * 2)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile text layer",
-        )
-        img = Image.new("RGBA", image_size, (0, 0, 0, 0))
-        self.draw_pil_text_layout(
-            img,
-            metrics,
-            font_name,
-            font_path,
-            pad,
-            outline_color,
-            outline_width,
-            outline_dilate,
-        )
-        return img, self.pil_text_pivot(img, pad, metrics.min_x)
-
-    def base_text_style(self, mesh_state: TMPUpdateMeshState) -> TextStyle:
+    def tmp_base_text_style(self, mesh_state) -> TextStyle:
         return TextStyle(
             color=mesh_state.font_color,
             alpha=1.0,
@@ -6621,119 +6253,104 @@ class PNGRenderer:
             strike=False,
         )
 
-    def measure_pil_text_layout(
-        self,
-        lines: list[list[TextRun]],
-        font_name: str,
-        font_path: Path,
-        base_size: float,
-        line_spacing: float,
-    ) -> PILTextLayoutMetrics:
-        metrics: list[PILTextLineMetrics] = []
+    def render_text(self, item: dict[str, Any]) -> tuple[Image.Image, tuple[float, float]] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        data = self.generate_text_data(item)
+        raw_text = data.text
+        if not raw_text.strip():
+            return None
+        font_name = self.text_fonts.get(data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
+        mesh_state = self.update_text_mesh_state(data, font_name)
+        font_path = self.font_path_for(font_name)
+        base_size = mesh_state.font_size
+        base_style = self.tmp_base_text_style(mesh_state)
+        tokens = parse_tmp_text(raw_text, base_style)
+        lines = split_runs_by_line(tokens)
+        styled_lines = split_runs_by_line_with_style(tokens, base_style)
+        if not lines:
+            return None
+        if self.text_layout == "tmp":
+            return self.render_tmp_text_box(item, font_name, font_path, base_style, styled_lines)
+        line_spacing = mesh_state.tmp_line_spacing
+        outline_color = mesh_state.underlay_color
+        outline_dilate = self.decorative_outline_dilate(item, mesh_state.underlay_dilate)
+        outline_width = max(0, round(outline_dilate * base_size * self.tmp_pillow_stroke_factor))
+
+        metrics: list[tuple[list[tuple[TextRun, float, float]], float, float]] = []
         min_x = 0.0
         max_x = 1.0
         total_h = 0.0
         for line in lines:
-            line_metrics, line_h, line_min_x, line_max_x = self.measure_pil_text_line(
-                line,
-                font_name,
-                font_path,
-                base_size,
-            )
-            min_x = min(min_x, line_min_x)
-            max_x = max(max_x, line_max_x)
-            metrics.append(PILTextLineMetrics(line_metrics, total_h, line_h))
+            line_metrics: list[tuple[TextRun, float, float]] = []
+            x = 0.0
+            line_h = base_size * self.tmp_font_scale
+            for run in line:
+                scaled_size = run.style.size * self.tmp_font_scale
+                font = load_font(font_path, scaled_size)
+                if self.use_em_block(run):
+                    source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
+                    raw_w = source_metrics.advance if source_metrics is not None else scaled_size
+                    raw_h = scaled_size
+                    raw_advance = raw_w
+                else:
+                    measure = self.measure_tmp_run(font, run, font_name, scaled_size)
+                    raw_w = max(1.0, measure.advance)
+                    raw_h = max(1.0, measure.visual_height)
+                    raw_advance = measure.advance
+                scale_x = self.tmp_mesh_layout_scale_x(run.style)
+                scale_y = self.tmp_layout_scale_y(run.style)
+                run_w = raw_w * scale_x
+                run_h = raw_h * scale_y
+                if run.style.line_height is not None:
+                    line_h = self.tmp_explicit_line_height(run.style.line_height)
+                else:
+                    line_h = max(line_h, run_h)
+                line_metrics.append((run, x, run_w))
+                min_x = min(min_x, x)
+                max_x = max(max_x, x + run_w)
+                spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size)
+                x += raw_advance * scale_x + len(run.text) * spacing
+                min_x = min(min_x, x)
+                max_x = max(max_x, x)
+            line_h = max(1.0, line_h)
+            metrics.append((line_metrics, total_h, line_h))
             line_style_size = max((run.style.size for run in line), default=base_size)
             total_h += self.apply_tmp_line_spacing(line_h, line_spacing, font_name, line_style_size)
-        return PILTextLayoutMetrics(metrics, min_x, max_x, total_h)
 
-    def measure_pil_text_line(
-        self,
-        line: list[TextRun],
-        font_name: str,
-        font_path: Path,
-        base_size: float,
-    ) -> tuple[list[tuple[TextRun, float, float]], float, float, float]:
-        line_metrics: list[tuple[TextRun, float, float]] = []
-        line_h = base_size * self.tmp_font_scale
-        min_x = 0.0
-        max_x = 1.0
-        x = 0.0
-        for run in line:
-            scaled_size = run.style.size * self.tmp_font_scale
-            raw_w, raw_h, raw_advance = self.measure_pil_text_run(run, font_name, font_path, scaled_size)
-            scale_x = self.tmp_mesh_layout_scale_x(run.style)
-            run_w = raw_w * scale_x
-            run_h = raw_h * self.tmp_layout_scale_y(run.style)
-            line_h = self.pil_text_line_height(line_h, run_h, run.style)
-            line_metrics.append((run, x, run_w))
-            min_x = min(min_x, x)
-            max_x = max(max_x, x + run_w)
-            spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size)
-            x += raw_advance * scale_x + len(run.text) * spacing
-            min_x = min(min_x, x)
-            max_x = max(max_x, x)
-        return line_metrics, max(1.0, line_h), min_x, max_x
+        pad = self.text_pad(base_size, outline_width)
+        content_w = max(1.0, max_x - min_x)
+        img = Image.new("RGBA", (math.ceil(content_w + pad * 2), math.ceil(max(1.0, total_h) + pad * 2)), (0, 0, 0, 0))
 
-    def measure_pil_text_run(
-        self,
-        run: TextRun,
-        font_name: str,
-        font_path: Path,
-        scaled_size: float,
-    ) -> tuple[float, float, float]:
-        font = load_font(font_path, scaled_size)
-        if self.use_em_block(run):
-            source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
-            raw_width = source_metrics.advance if source_metrics is not None else scaled_size
-            return raw_width, scaled_size, raw_width
-        measure = self.measure_tmp_run(font, run, font_name, scaled_size)
-        return max(1.0, measure.advance), max(1.0, measure.visual_height), measure.advance
-
-    def pil_text_line_height(self, line_height: float, run_height: float, style: TextStyle) -> float:
-        if style.line_height is not None:
-            return self.tmp_explicit_line_height(style.line_height)
-        return max(line_height, run_height)
-
-    def draw_pil_text_layout(
-        self,
-        image: Image.Image,
-        metrics: PILTextLayoutMetrics,
-        font_name: str,
-        font_path: Path,
-        pad: int,
-        outline_color: str,
-        outline_width: int,
-        outline_dilate: float,
-    ) -> None:
-        for line in metrics.lines:
-            for run, x, _ in line.runs:
+        for line_metrics, line_y, line_h in metrics:
+            for run, x, _ in line_metrics:
                 self.draw_run(
-                    image,
+                    img,
                     font_name,
                     font_path,
                     run,
-                    pad + x - metrics.min_x,
-                    pad + line.y,
-                    line.height,
+                    pad + x - min_x,
+                    pad + line_y,
+                    line_h,
                     outline_color,
                     outline_width,
                     outline_dilate,
                 )
 
-    def pil_text_pivot(self, image: Image.Image, pad: int, min_x: float) -> tuple[float, float]:
         if self.text_pivot == "center":
-            return image.width / 2, image.height / 2
-        return pad - min_x, image.height / 2
+            pivot = (img.width / 2, img.height / 2)
+        else:
+            pivot = (pad - min_x, img.height / 2)
+        return img, pivot
 
-    def render_tmp_text_box(
+    def build_tmp_text_box_layout(
         self,
         item: dict[str, Any],
         font_name: str,
         font_path: Path,
         base_style: TextStyle,
         lines: list[StyledLine],
-    ) -> tuple[Image.Image, tuple[float, float]] | None:
+    ) -> TMPTextBoxLayout | None:
         text_data = self.generate_text_data(item)
         mesh_state = self.update_text_mesh_state(text_data, font_name)
         base_size = mesh_state.font_size
@@ -6808,11 +6425,8 @@ class PNGRenderer:
         img_w = math.ceil(mesh_right - mesh_left + pad * 2)
         img_h = math.ceil(mesh_bottom - mesh_top + pad * 2)
         image_size = ensure_raster_size(
-            (max(1, img_w), max(1, img_h)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP text layer",
+            (max(1, img_w), max(1, img_h)), max_pixels=self.max_layer_pixels, label="TMP text layer"
         )
-        img = Image.new("RGBA", image_size, (0, 0, 0, 0))
         self.record_tmp_layout_audit(
             item,
             text_data,
@@ -6832,112 +6446,163 @@ class PNGRenderer:
             mesh_text_layout,
             mesh_bounds,
             (rect_origin_x, rect_origin_y),
-            (img.width, img.height),
+            image_size,
         )
 
-        self.draw_tmp_text_box_content(
-            img,
-            font_name,
-            font_path,
+        return TMPTextBoxLayout(
+            image_size,
+            (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2),
             mesh_text_layout,
             native_baselines,
             horizontal_align,
             box_w,
-            rect_origin_x,
-            rect_origin_y,
+            (rect_origin_x, rect_origin_y),
             content_y,
             outline_color,
             outline_width,
             outline_dilate,
         )
 
-        return img, (rect_origin_x + box_w / 2, rect_origin_y + box_h / 2)
+    def prepare_tmp_sdf_text_layer(
+        self, item: dict[str, Any], *, max_field_bytes: int, direct_declined: bool = False
+    ) -> TMPSdfTextLayer | None:
+        if self.text_layout != "tmp" or self.tmp_text_render_mode != "sdf":
+            return None
+        if self.premultiply_alpha_transforms:
+            return None
+        data = self.generate_text_data(item)
+        if not data.text.strip():
+            return None
+        font_name = self.text_fonts.get(data.font_id, "FOT-RodinNTLGPro-DB") or "FOT-RodinNTLGPro-DB"
+        font_path = self.font_path_for(font_name)
+        mesh_state = self.update_text_mesh_state(data, font_name)
+        base_style = self.tmp_base_text_style(mesh_state)
+        lines = split_runs_by_line_with_style(parse_tmp_text(data.text, base_style), base_style)
+        direct_decorative = self.tmp_decorative_direct_raster and self.is_decorative_text_item(item)
+        if (
+            direct_decorative
+            and not direct_declined
+            and not any(run.style.rotate for line in lines for run in line.runs)
+        ):
+            return None
+        for line in lines:
+            for run in line.runs:
+                if self.use_em_block(run):
+                    return None
+        layout = self.build_tmp_text_box_layout(item, font_name, font_path, base_style, lines)
+        if layout is None or layout.baselines is None:
+            return None
+        # Direct decorative rendering declines visible per-character rotations and the
+        # legacy caller then uses this local shaded-text path. Whitespace-only rotations
+        # do not decline the direct path, so they must keep its field-before-shading order.
+        if (
+            direct_decorative
+            and not direct_declined
+            and not any(char.visible and char.style.rotate for char in layout.mesh.characters)
+        ):
+            return None
+        fields = self.prepare_tmp_direct_sdf_glyphs(
+            font_name,
+            font_path,
+            layout.mesh,
+            layout.baselines,
+            layout.horizontal_align,
+            layout.box_width,
+            *layout.rect_origin,
+            layout.outline_color,
+            layout.outline_dilate,
+            max_field_bytes=max_field_bytes,
+            allow_rotation=True,
+            allow_fallback=True,
+        )
+        if fields is None:
+            return None
+        import numpy as np
 
-    def resolve_tmp_text_box_layouts(
-        self,
-        layout_lines: list[StyledLine],
-        font_name: str,
-        font_path: Path,
-        base_size: float,
-        line_spacing: float,
-        dominant_size: float,
-        outline_dilate: float,
-        *,
-        source_metrics_only: bool = False,
-    ) -> tuple[TMPNativeTextLayout, TMPNativeTextLayout] | None:
-        native_text_layout = self.tmp_native_text_layout(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            "preferred",
-            outline_dilate,
-            None,
-            source_metrics_only=source_metrics_only,
-        )
-        percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            outline_dilate,
-            native_text_layout,
-            source_metrics_only=source_metrics_only,
-        )
-        if percent_margin_width is not None:
-            native_text_layout = self.tmp_native_text_layout(
-                layout_lines,
-                font_name,
-                font_path,
-                base_size,
-                line_spacing,
-                dominant_size,
-                "preferred",
-                outline_dilate,
-                percent_margin_width,
-                source_metrics_only=source_metrics_only,
+        from src.sekai.profile.custom_profile.rotation_geometry import expanded_rotation
+
+        retained_bytes = sum(len(field.pixels) for field, *_ in fields)
+        glyphs = []
+        bounds = None
+        for field, asset, style, x, y in fields:
+            scalars = self.tmp_sdf_shading_scalars(asset, style, layout.outline_color, layout.outline_dilate, None)
+            left, top = round(x), round(y)
+
+            samples = np.asarray(field, dtype=np.float32)
+            if isinstance(field, GrayField):
+                samples = samples / 255.0
+            _, _, alpha = self.tmp_sdf_coverage(samples, scalars)
+            # The old image's alpha is rounded to uint8 before getbbox. Values which round
+            # to zero must not enlarge the trimmed layer and change subsequent resize ratios.
+            alpha_pixels = np.clip(np.rint(alpha * 255.0), 0, 255).astype(np.uint8)
+            output_size = field.size
+            rotation = None
+            # Legacy atlas quads rotate by +style.rotate, but draw_run_at_baseline
+            # rotates its fallback run by the opposite sign. Preserve both paths.
+            glyph_rotation = -style.rotate if isinstance(field, FloatField) else style.rotate
+            if glyph_rotation:
+                rotation = expanded_rotation(field.size, glyph_rotation)
+                output_size = ensure_raster_size(
+                    rotation.size,
+                    max_pixels=min(self.max_layer_pixels, max_field_bytes - retained_bytes),
+                    label="rotated TMP alpha bounds",
+                )
+                alpha_field = GrayField(*field.size, alpha_pixels.tobytes()).transform_bicubic(
+                    rotation.size, rotation.inverse
+                )
+                alpha_pixels = np.asarray(alpha_field)
+            glyphs.append(
+                TMPLocalSdfGlyph(field, left, top, scalars, glyph_rotation, output_size if rotation else None)
             )
-        if native_text_layout is None:
-            return None
-        mesh_text_layout = self.tmp_native_text_layout(
-            layout_lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            "mesh",
-            outline_dilate,
-            percent_margin_width,
-            source_metrics_only=source_metrics_only,
-        )
-        if mesh_text_layout is None:
-            return None
-        return native_text_layout, mesh_text_layout
+            visible = alpha_pixels != 0
+            x0, y0 = max(0, -left), max(0, -top)
+            x1, y1 = min(output_size[0], layout.size[0] - left), min(output_size[1], layout.size[1] - top)
+            if x0 >= x1 or y0 >= y1:
+                continue
+            ys, xs = np.nonzero(visible[y0:y1, x0:x1])
+            if xs.size == 0:
+                continue
+            current = (
+                left + x0 + int(xs.min()),
+                top + y0 + int(ys.min()),
+                left + x0 + int(xs.max()) + 1,
+                top + y0 + int(ys.max()) + 1,
+            )
+            bounds = (
+                current
+                if bounds is None
+                else (
+                    min(bounds[0], current[0]),
+                    min(bounds[1], current[1]),
+                    max(bounds[2], current[2]),
+                    max(bounds[3], current[3]),
+                )
+            )
+        return TMPSdfTextLayer(layout, tuple(glyphs), text_layer_crop(layout.size, layout.pivot, bounds))
 
-    def draw_tmp_text_box_content(
+    def render_tmp_text_box(
         self,
-        image: Image.Image,
+        item: dict[str, Any],
         font_name: str,
         font_path: Path,
-        mesh_text_layout: TMPNativeTextLayout,
-        native_baselines: list[float] | None,
-        horizontal_align: str,
-        box_w: float,
-        rect_origin_x: float,
-        rect_origin_y: float,
-        content_y: float,
-        outline_color: str,
-        outline_width: int,
-        outline_dilate: float,
-    ) -> None:
-        if native_baselines is not None and self.tmp_text_render_mode == "sdf":
+        base_style: TextStyle,
+        lines: list[StyledLine],
+    ) -> tuple[Image.Image, tuple[float, float]] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        layout = self.build_tmp_text_box_layout(item, font_name, font_path, base_style, lines)
+        if layout is None:
+            return None
+        img = Image.new("RGBA", layout.size, (0, 0, 0, 0))
+        mesh_text_layout, native_baselines = layout.mesh, layout.baselines
+        horizontal_align, box_w = layout.horizontal_align, layout.box_width
+        rect_origin_x, rect_origin_y = layout.rect_origin
+        outline_color, outline_width, outline_dilate = layout.outline_color, layout.outline_width, layout.outline_dilate
+        content_y = layout.content_y
+        use_native_character_draw = native_baselines is not None and self.tmp_text_render_mode == "sdf"
+        if use_native_character_draw:
             self.draw_tmp_native_characters(
-                image,
+                img,
                 font_name,
                 font_path,
                 mesh_text_layout,
@@ -6950,302 +6615,38 @@ class PNGRenderer:
                 outline_width,
                 outline_dilate,
             )
-            return
-        self.draw_tmp_text_box_runs(
-            image,
-            font_name,
-            font_path,
-            mesh_text_layout,
-            native_baselines,
-            horizontal_align,
-            box_w,
-            rect_origin_x,
-            rect_origin_y,
-            content_y,
-            outline_color,
-            outline_width,
-            outline_dilate,
-        )
+        else:
+            for line_index, line_info in enumerate(mesh_text_layout.lines):
+                line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
+                for run, x, _ in line_info.run_metrics:
+                    draw_x = rect_origin_x + line_x + x
+                    if native_baselines is not None:
+                        self.draw_run_at_baseline(
+                            img,
+                            font_name,
+                            font_path,
+                            run,
+                            draw_x,
+                            rect_origin_y + native_baselines[line_index],
+                            outline_color,
+                            outline_width,
+                            outline_dilate,
+                        )
+                    else:
+                        self.draw_run(
+                            img,
+                            font_name,
+                            font_path,
+                            run,
+                            draw_x,
+                            rect_origin_y + content_y + line_info.y_down,
+                            line_info.line_height,
+                            outline_color,
+                            outline_width,
+                            outline_dilate,
+                        )
 
-    def draw_tmp_text_box_runs(
-        self,
-        image: Image.Image,
-        font_name: str,
-        font_path: Path,
-        mesh_text_layout: TMPNativeTextLayout,
-        native_baselines: list[float] | None,
-        horizontal_align: str,
-        box_w: float,
-        rect_origin_x: float,
-        rect_origin_y: float,
-        content_y: float,
-        outline_color: str,
-        outline_width: int,
-        outline_dilate: float,
-    ) -> None:
-        for line_index, line_info in enumerate(mesh_text_layout.lines):
-            line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
-            for run, x, _ in line_info.run_metrics:
-                draw_x = rect_origin_x + line_x + x
-                if native_baselines is not None:
-                    self.draw_run_at_baseline(
-                        image,
-                        font_name,
-                        font_path,
-                        run,
-                        draw_x,
-                        rect_origin_y + native_baselines[line_index],
-                        outline_color,
-                        outline_width,
-                        outline_dilate,
-                    )
-                    continue
-                self.draw_run(
-                    image,
-                    font_name,
-                    font_path,
-                    run,
-                    draw_x,
-                    rect_origin_y + content_y + line_info.y_down,
-                    line_info.line_height,
-                    outline_color,
-                    outline_width,
-                    outline_dilate,
-                )
-
-    def _tmp_append_native_layout_character(
-        self,
-        char: str,
-        style: TextStyle,
-        line_index: int,
-        first_character_index: int,
-        line_state: _TMPNativeLineState,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> TMPNativeCharacterInfo:
-        (
-            char_info,
-            line_state.x_advance,
-            line_state.max_ascender,
-            line_state.max_descender,
-            line_state.visible_character_count,
-        ) = self.tmp_native_layout_character(
-            char,
-            style,
-            config.font_name,
-            config.font_path,
-            line_index,
-            len(state.characters),
-            line_state.x_advance,
-            state.line_offset,
-            first_character_index,
-            line_state.max_ascender,
-            line_state.max_descender,
-            line_state.visible_character_count,
-            config.layout_mode,
-            config.current_em_scale,
-            config.outline_dilate,
-            source_metrics_only=config.source_metrics_only,
-        )
-        state.characters.append(char_info)
-        return char_info
-
-    def _tmp_native_layout_runs(
-        self,
-        line: StyledLine,
-        line_index: int,
-        first_character_index: int,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> _TMPNativeLineState:
-        line_state = _TMPNativeLineState(self.tmp_native_line_initial_x(line, config.margin_width))
-        for run_index, run in enumerate(line.runs):
-            for char in run.text:
-                if char in {"\r", "\n"}:
-                    continue
-                line_state.has_character = True
-                self._tmp_append_native_layout_character(
-                    char,
-                    run.style,
-                    line_index,
-                    first_character_index,
-                    line_state,
-                    state,
-                    config,
-                )
-            next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
-            next_style = next_run.style if next_run is not None else line.style
-            if self.tmp_closes_cspace_before_next_run(run.style, next_style):
-                line_state.x_advance -= self.tmp_cspace_advance(run.style.cspace)
-                if state.characters:
-                    state.characters[-1] = replace(state.characters[-1], x_advance=line_state.x_advance)
-        return line_state
-
-    def _tmp_native_layout_line_breaks(
-        self,
-        line: StyledLine,
-        line_index: int,
-        first_character_index: int,
-        line_state: _TMPNativeLineState,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> None:
-        for break_index in range(line.trailing_newline_count):
-            line_state.has_character = True
-            char_info = self._tmp_append_native_layout_character(
-                "\n",
-                line.style,
-                line_index,
-                first_character_index,
-                line_state,
-                state,
-                config,
-            )
-            line_state.line_break_adjusted_ascender = char_info.adjusted_ascender
-            if break_index + 1 < line.trailing_newline_count:
-                line_state.x_advance = self.tmp_native_line_initial_x(line, config.margin_width)
-
-    def _tmp_resolve_native_line_extents(
-        self,
-        line: StyledLine,
-        line_state: _TMPNativeLineState,
-        config: _TMPNativeLayoutConfig,
-    ) -> None:
-        if not line_state.has_character:
-            line_state.max_ascender, line_state.max_descender = self.tmp_native_style_extents(
-                config.font_name,
-                line.style,
-            )
-        if line_state.max_ascender <= TMP_LARGE_NEGATIVE_FLOAT:
-            line_state.max_ascender = 0.0
-        if line_state.max_descender >= TMP_LARGE_POSITIVE_FLOAT:
-            line_state.max_descender = 0.0
-
-    @staticmethod
-    def _tmp_adjust_native_line_offset(
-        state: _TMPNativeLayoutState,
-        line_state: _TMPNativeLineState,
-    ) -> None:
-        if state.line_offset <= 0.0 or state.is_driven_line_spacing:
-            return
-        baseline_adjustment_delta = line_state.max_ascender - state.start_of_line_ascender
-        if abs(baseline_adjustment_delta) > 0.01:
-            state.element_descender -= baseline_adjustment_delta
-            state.line_offset += baseline_adjustment_delta
-
-    @staticmethod
-    def _tmp_record_native_line(
-        line: StyledLine,
-        line_index: int,
-        first_character_index: int,
-        run_metrics: list[tuple[TextRun, float, float]],
-        line_width: float,
-        line_min_x: float,
-        line_max_x: float,
-        line_state: _TMPNativeLineState,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> None:
-        baseline = -state.line_offset
-        line_ascender = line_state.max_ascender - state.line_offset
-        line_descender = line_state.max_descender - state.line_offset
-        # TMP keeps m_ElementDescender as the current generated line's descender,
-        # not the union minimum. Later lines can move upward with negative spacing.
-        state.element_descender = line_descender
-        if state.max_text_ascender is None:
-            state.max_text_ascender = line_ascender
-        line_height = line_ascender - line_descender + config.raw_line_gap * config.base_scale
-        line_width = max(1.0, line_width)
-        state.rendered_width = max(state.rendered_width, line_width)
-        state.accumulated_line_height = max(state.accumulated_line_height, -baseline + line_height)
-        state.lines.append(
-            TMPNativeLineInfo(
-                index=line_index,
-                styled_line=line,
-                run_metrics=run_metrics,
-                first_character_index=first_character_index,
-                last_character_index=max(first_character_index, len(state.characters) - 1),
-                visible_character_count=line_state.visible_character_count,
-                baseline=baseline,
-                ascender=line_ascender,
-                descender=line_descender,
-                line_height=line_height,
-                width=line_width,
-                max_advance=line_width,
-                line_extents_min_x=line_min_x,
-                line_extents_max_x=line_max_x,
-                y_down=-baseline,
-            )
-        )
-
-    def _tmp_advance_native_line(
-        self,
-        line: StyledLine,
-        line_state: _TMPNativeLineState,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> None:
-        if line.style.line_height is None:
-            line_break_ascender = (
-                line_state.line_break_adjusted_ascender
-                if line_state.line_break_adjusted_ascender is not None
-                else line_state.max_ascender
-            )
-            state.line_offset += (
-                0.0
-                - line_state.max_descender
-                + line_break_ascender
-                + (config.raw_line_gap + config.line_spacing_delta) * config.base_scale
-                + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
-            )
-            state.start_of_line_ascender = line_break_ascender
-            state.is_driven_line_spacing = False
-            return
-        state.line_offset += (
-            self.tmp_explicit_line_height(line.style.line_height)
-            + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
-        )
-        state.is_driven_line_spacing = True
-
-    def _tmp_native_layout_line(
-        self,
-        line: StyledLine,
-        line_index: int,
-        line_count: int,
-        state: _TMPNativeLayoutState,
-        config: _TMPNativeLayoutConfig,
-    ) -> None:
-        run_metrics, line_width, line_min_x, line_max_x, line_dominant_size = self.tmp_native_measure_line_runs(
-            line,
-            config.font_name,
-            config.font_path,
-            line_index,
-            config.layout_mode,
-            config.current_em_scale,
-            config.outline_dilate,
-            config.margin_width,
-            source_metrics_only=config.source_metrics_only,
-        )
-        state.dominant_size = max(state.dominant_size, line_dominant_size)
-        first_character_index = len(state.characters)
-        line_state = self._tmp_native_layout_runs(line, line_index, first_character_index, state, config)
-        self._tmp_native_layout_line_breaks(line, line_index, first_character_index, line_state, state, config)
-        self._tmp_resolve_native_line_extents(line, line_state, config)
-        self._tmp_adjust_native_line_offset(state, line_state)
-        self._tmp_record_native_line(
-            line,
-            line_index,
-            first_character_index,
-            run_metrics,
-            line_width,
-            line_min_x,
-            line_max_x,
-            line_state,
-            state,
-            config,
-        )
-        if line_index + 1 < line_count:
-            self._tmp_advance_native_line(line, line_state, state, config)
+        return img, layout.pivot
 
     def tmp_native_text_layout(
         self,
@@ -7266,30 +6667,219 @@ class PNGRenderer:
 
         base_scale = self.tmp_native_element_scale(font_name, base_size)
         current_em_scale = self.tmp_native_current_em_scale(base_size)
-        config = _TMPNativeLayoutConfig(
-            font_name=font_name,
-            font_path=font_path,
-            layout_mode=layout_mode,
-            base_scale=base_scale,
-            current_em_scale=current_em_scale,
-            raw_line_gap=self.tmp_native_raw_line_gap(font_name) if self.tmp_native_line_gap else 0.0,
-            line_spacing=line_spacing,
-            line_spacing_delta=TMP_PREFAB_LINE_SPACING_DELTA,
-            paragraph_spacing=TMP_PREFAB_PARAGRAPH_SPACING if layout_mode == "preferred" else 0.0,
-            outline_dilate=outline_dilate,
-            margin_width=max(0.0, float(margin_width or 0.0)),
-            source_metrics_only=source_metrics_only,
-        )
-        state = _TMPNativeLayoutState(dominant_size)
+        line_spacing_delta = TMP_PREFAB_LINE_SPACING_DELTA
+        paragraph_spacing = TMP_PREFAB_PARAGRAPH_SPACING if layout_mode == "preferred" else 0.0
+        raw_line_gap = self.tmp_native_raw_line_gap(font_name) if self.tmp_native_line_gap else 0.0
+        line_offset = 0.0
+        start_of_line_ascender = 0.0
+        element_descender = 0.0
+        is_driven_line_spacing = False
+        max_text_ascender: float | None = None
+        rendered_width = 0.0
+        accumulated_line_height = 0.0
+        native_lines: list[TMPNativeLineInfo] = []
+        characters: list[TMPNativeCharacterInfo] = []
+        native_margin_width = max(0.0, float(margin_width or 0.0))
 
         for line_index, line in enumerate(lines):
-            self._tmp_native_layout_line(line, line_index, len(lines), state, config)
+            run_metrics, line_width, line_min_x, line_max_x, line_dominant_size = self.tmp_native_measure_line_runs(
+                line,
+                font_name,
+                font_path,
+                line_index,
+                layout_mode,
+                current_em_scale,
+                outline_dilate,
+                native_margin_width,
+                source_metrics_only=source_metrics_only,
+            )
+            dominant_size = max(dominant_size, line_dominant_size)
+            first_character_index = len(characters)
+            max_line_ascender = TMP_LARGE_NEGATIVE_FLOAT
+            max_line_descender = TMP_LARGE_POSITIVE_FLOAT
+            visible_character_count = 0
+            x_advance = self.tmp_native_line_initial_x(line, native_margin_width)
+            has_line_character = False
+            line_break_adjusted_ascender: float | None = None
 
-        if not state.lines:
+            for run_index, run in enumerate(line.runs):
+                for char in run.text:
+                    if char in {"\r", "\n"}:
+                        continue
+                    has_line_character = True
+                    (
+                        char_info,
+                        x_advance,
+                        max_line_ascender,
+                        max_line_descender,
+                        visible_character_count,
+                    ) = self.tmp_native_layout_character(
+                        char,
+                        run.style,
+                        font_name,
+                        font_path,
+                        line_index,
+                        len(characters),
+                        x_advance,
+                        line_offset,
+                        first_character_index,
+                        max_line_ascender,
+                        max_line_descender,
+                        visible_character_count,
+                        layout_mode,
+                        current_em_scale,
+                        outline_dilate,
+                        source_metrics_only=source_metrics_only,
+                    )
+                    characters.append(char_info)
+                next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
+                next_style = next_run.style if next_run is not None else line.style
+                if self.tmp_closes_cspace_before_next_run(run.style, next_style):
+                    x_advance -= self.tmp_cspace_advance(run.style.cspace)
+                    if characters:
+                        previous = characters[-1]
+                        characters[-1] = TMPNativeCharacterInfo(
+                            index=previous.index,
+                            char=previous.char,
+                            line_index=previous.line_index,
+                            x_origin=previous.x_origin,
+                            x_advance=x_advance,
+                            glyph_origin_x=previous.glyph_origin_x,
+                            bottom_left_x=previous.bottom_left_x,
+                            bottom_left_y=previous.bottom_left_y,
+                            top_left_x=previous.top_left_x,
+                            top_left_y=previous.top_left_y,
+                            top_right_x=previous.top_right_x,
+                            top_right_y=previous.top_right_y,
+                            bottom_right_x=previous.bottom_right_x,
+                            bottom_right_y=previous.bottom_right_y,
+                            vertex_padding=previous.vertex_padding,
+                            raw_left_x=previous.raw_left_x,
+                            raw_right_x=previous.raw_right_x,
+                            raw_top_y=previous.raw_top_y,
+                            raw_bottom_y=previous.raw_bottom_y,
+                            baseline=previous.baseline,
+                            ascender=previous.ascender,
+                            descender=previous.descender,
+                            adjusted_ascender=previous.adjusted_ascender,
+                            adjusted_descender=previous.adjusted_descender,
+                            visible=previous.visible,
+                            style=previous.style,
+                            metrics=previous.metrics,
+                            sdf_scale=previous.sdf_scale,
+                        )
+
+            line_break_count = line.trailing_newline_count
+            line_break_adjusted_ascender: float | None = None
+            for break_index in range(line_break_count):
+                has_line_character = True
+                (
+                    char_info,
+                    x_advance,
+                    max_line_ascender,
+                    max_line_descender,
+                    visible_character_count,
+                ) = self.tmp_native_layout_character(
+                    "\n",
+                    line.style,
+                    font_name,
+                    font_path,
+                    line_index,
+                    len(characters),
+                    x_advance,
+                    line_offset,
+                    first_character_index,
+                    max_line_ascender,
+                    max_line_descender,
+                    visible_character_count,
+                    layout_mode,
+                    current_em_scale,
+                    outline_dilate,
+                    source_metrics_only=source_metrics_only,
+                )
+                characters.append(char_info)
+                line_break_adjusted_ascender = char_info.adjusted_ascender
+                if break_index + 1 < line_break_count:
+                    x_advance = self.tmp_native_line_initial_x(line, native_margin_width)
+
+            if not has_line_character:
+                max_line_ascender, max_line_descender = self.tmp_native_style_extents(font_name, line.style)
+
+            if max_line_ascender <= TMP_LARGE_NEGATIVE_FLOAT:
+                max_line_ascender = 0.0
+            if max_line_descender >= TMP_LARGE_POSITIVE_FLOAT:
+                max_line_descender = 0.0
+
+            if line_offset > 0.0 and not is_driven_line_spacing:
+                baseline_adjustment_delta = max_line_ascender - start_of_line_ascender
+                if abs(baseline_adjustment_delta) > 0.01:
+                    element_descender -= baseline_adjustment_delta
+                    line_offset += baseline_adjustment_delta
+
+            baseline = -line_offset
+            line_ascender = max_line_ascender - line_offset
+            line_descender = max_line_descender - line_offset
+            # TMP keeps m_ElementDescender as the current generated line's
+            # descender, not the union minimum. With negative line spacing or
+            # explicit <line-height=0>, later lines can move upward; preferred
+            # height then shrinks to match the native RectTransform instead of
+            # expanding to the visual union of every line.
+            element_descender = line_descender
+            if max_text_ascender is None:
+                max_text_ascender = line_ascender
+
+            line_height = line_ascender - line_descender + raw_line_gap * base_scale
+            line_width = max(1.0, line_width)
+            rendered_width = max(rendered_width, line_width)
+            accumulated_line_height = max(accumulated_line_height, -baseline + line_height)
+            native_lines.append(
+                TMPNativeLineInfo(
+                    index=line_index,
+                    styled_line=line,
+                    run_metrics=run_metrics,
+                    first_character_index=first_character_index,
+                    last_character_index=max(first_character_index, len(characters) - 1),
+                    visible_character_count=visible_character_count,
+                    baseline=baseline,
+                    ascender=line_ascender,
+                    descender=line_descender,
+                    line_height=line_height,
+                    width=line_width,
+                    max_advance=line_width,
+                    line_extents_min_x=line_min_x,
+                    line_extents_max_x=line_max_x,
+                    y_down=-baseline,
+                )
+            )
+
+            if line_index + 1 >= len(lines):
+                continue
+            if line.style.line_height is None:
+                line_break_ascender = (
+                    line_break_adjusted_ascender if line_break_adjusted_ascender is not None else max_line_ascender
+                )
+                line_offset += (
+                    0.0
+                    - max_line_descender
+                    + line_break_ascender
+                    + (raw_line_gap + line_spacing_delta) * base_scale
+                    + (line_spacing + paragraph_spacing) * current_em_scale
+                )
+                start_of_line_ascender = line_break_ascender
+                is_driven_line_spacing = False
+            else:
+                line_offset += (
+                    self.tmp_explicit_line_height(line.style.line_height)
+                    + (line_spacing + paragraph_spacing) * current_em_scale
+                )
+                is_driven_line_spacing = True
+
+        if not native_lines:
             return None
-        max_text_ascender = state.max_text_ascender or 0.0
-        content_height = max(1.0, max_text_ascender - state.element_descender)
-        preferred_width = self.tmp_preferred_width(max(1.0, state.rendered_width))
+        if max_text_ascender is None:
+            max_text_ascender = 0.0
+        content_height = max(1.0, max_text_ascender - element_descender)
+        preferred_width = self.tmp_preferred_width(max(1.0, rendered_width))
         preferred_height = self.tmp_preferred_height(
             content_height,
             (asset.ascent_line - asset.descent_line) * base_scale
@@ -7298,20 +6888,20 @@ class PNGRenderer:
         )
         return TMPNativeTextLayout(
             layout_mode=layout_mode,
-            lines=state.lines,
-            characters=state.characters,
+            lines=native_lines,
+            characters=characters,
             preferred_width=preferred_width,
             preferred_height=preferred_height,
             content_height=preferred_height,
             max_ascender=max_text_ascender,
-            max_descender=state.element_descender,
-            accumulated_line_height=max(1.0, state.accumulated_line_height),
-            dominant_size=state.dominant_size,
+            max_descender=element_descender,
+            accumulated_line_height=max(1.0, accumulated_line_height),
+            dominant_size=dominant_size,
             base_scale=base_scale,
             current_em_scale=current_em_scale,
-            raw_line_gap=config.raw_line_gap,
-            line_spacing_delta=config.line_spacing_delta,
-            paragraph_spacing=config.paragraph_spacing,
+            raw_line_gap=raw_line_gap,
+            line_spacing_delta=line_spacing_delta,
+            paragraph_spacing=paragraph_spacing,
         )
 
     def tmp_native_measure_line_runs(
@@ -7344,6 +6934,9 @@ class PNGRenderer:
                 current_em_scale,
                 source_metrics_only=source_metrics_only,
             )
+            raw_advance = visual.advance
+            raw_bbox_left, raw_bbox_right = visual.left, visual.right
+            raw_bbox_top, raw_bbox_bottom = visual.top, visual.bottom
             advance_scale_x = self.tmp_native_layout_advance_scale_x(run.style, layout_mode)
             vertex_scale_x = self.tmp_native_vertex_scale_x(run.style)
             run_w = self.tmp_native_run_advance(
@@ -7354,12 +6947,23 @@ class PNGRenderer:
                 advance_scale_x,
                 source_metrics_only=source_metrics_only,
             )
-            raw_bbox_left, raw_bbox_right = self.tmp_native_padded_horizontal_bounds(
-                visual,
-                run.style,
-                vertex_padding,
-                vertex_scale_x,
-            )
+            if self.tmp_scale_mode in {"fx-native"}:
+                quad = self.tmp_native_fx_quad(
+                    raw_bbox_left - vertex_padding,
+                    raw_bbox_right + vertex_padding,
+                    -raw_bbox_top + vertex_padding,
+                    -raw_bbox_bottom - vertex_padding,
+                    run.style,
+                    vertex_scale_x,
+                )
+                xs = (quad[0], quad[2], quad[4], quad[6])
+                raw_bbox_left, raw_bbox_right = min(xs), max(xs)
+            else:
+                raw_bbox_left, raw_bbox_right = self.tmp_scale_x_bounds(
+                    raw_bbox_left - vertex_padding,
+                    raw_bbox_right + vertex_padding,
+                    vertex_scale_x,
+                )
             run_metrics.append((run, x, run_w))
             line_min_x = x + raw_bbox_left if line_min_x is None else min(line_min_x, x + raw_bbox_left)
             line_max_x = x + raw_bbox_right if line_max_x is None else max(line_max_x, x + raw_bbox_right)
@@ -7384,60 +6988,6 @@ class PNGRenderer:
             line_min_x = min(0.0, x)
             line_max_x = max(0.0, x)
         return run_metrics, line_width, line_min_x, line_max_x, dominant_size
-
-    def tmp_native_run_visual_metrics(
-        self,
-        run: TextRun,
-        font_name: str,
-        font_path: Path,
-        scaled_size: float,
-        current_em_scale: float,
-        *,
-        source_metrics_only: bool = False,
-    ) -> TMPRunVisualMetrics:
-        if self.use_em_block(run):
-            source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
-            raw_advance = source_metrics.advance if source_metrics is not None else scaled_size
-            raw_left = source_metrics.bearing_x if source_metrics is not None else 0.0
-            raw_right = raw_left + (source_metrics.width if source_metrics is not None else raw_advance)
-            raw_top, raw_bottom = self.tmp_native_style_extents(font_name, run.style)
-            return TMPRunVisualMetrics(raw_advance, raw_left, raw_right, -raw_top, -raw_bottom)
-        if source_metrics_only:
-            measure = self.measure_tmp_source_run(run, font_name, scaled_size, current_em_scale)
-        else:
-            font = load_font(font_path, scaled_size)
-            measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
-        return TMPRunVisualMetrics(
-            measure.advance,
-            measure.visual_left,
-            measure.visual_right,
-            measure.visual_top,
-            measure.visual_bottom,
-        )
-
-    def tmp_native_padded_horizontal_bounds(
-        self,
-        visual: TMPRunVisualMetrics,
-        style: TextStyle,
-        vertex_padding: float,
-        vertex_scale_x: float,
-    ) -> tuple[float, float]:
-        if self.tmp_scale_mode == "fx-native":
-            quad = self.tmp_native_fx_quad(
-                visual.left - vertex_padding,
-                visual.right + vertex_padding,
-                -visual.top + vertex_padding,
-                -visual.bottom - vertex_padding,
-                style,
-                vertex_scale_x,
-            )
-            xs = (quad[0], quad[2], quad[4], quad[6])
-            return min(xs), max(xs)
-        return self.tmp_scale_x_bounds(
-            visual.left - vertex_padding,
-            visual.right + vertex_padding,
-            vertex_scale_x,
-        )
 
     def tmp_native_layout_character(
         self,
@@ -7686,18 +7236,16 @@ class PNGRenderer:
         font_size = style.size * self.tmp_font_scale
         if source_metrics_only:
             metric_char = self.tmp_render_glyph_char(font_name, char, font_size)
-            # Keep strict native layout on the same glyph candidate as SdfFontQuad generation.
-            # A base font can legitimately delegate one character to its TMP fallback chain.
             metrics = self.tmp_font_library.source_glyph_metrics(
                 font_name,
                 metric_char,
                 font_size,
-                include_fallback=True,
+                include_fallback=False,
             )
             if metrics is None:
                 raise ValueError(f"source font metrics are unavailable for U+{ord(char):04X}")
             return metrics
-        font = load_font(font_path, font_size)
+        font = TMPFallbackMetrics(font_path, font_size)
         return self.glyph_layout_metrics(font, char, font_name, font_size)
 
     def tmp_zero_glyph_metrics(self) -> TMPGlyphMetrics:
@@ -7747,46 +7295,19 @@ class PNGRenderer:
         if not self.tmp_lines_have_percent_indent(lines) or zero_margin_layout is None:
             return None
         if self.tmp_box_mode == "preferred":
-            return self.tmp_preferred_percent_indent_margin_width(zero_margin_layout)
-        return self.tmp_iterative_percent_indent_margin_width(
-            lines,
-            font_name,
-            font_path,
-            base_size,
-            line_spacing,
-            dominant_size,
-            outline_dilate,
-            zero_margin_layout,
-            source_metrics_only=source_metrics_only,
-        )
+            padding_x = max(0.0, self.tmp_preferred_padding_x)
+            margin_width = zero_margin_layout.preferred_width + padding_x
+            for line in zero_margin_layout.lines:
+                percent = self.tmp_line_indent_percent(line.styled_line)
+                if abs(percent) < 1.0e-8:
+                    margin_width = max(margin_width, line.width + padding_x)
+                    continue
+                if percent >= 1.0:
+                    margin_width = TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
+                    continue
+                margin_width = max(margin_width, (line.width + padding_x) / max(1.0e-6, 1.0 - percent))
+            return min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, margin_width))
 
-    def tmp_preferred_percent_indent_margin_width(self, layout: TMPNativeTextLayout) -> float:
-        padding_x = max(0.0, self.tmp_preferred_padding_x)
-        margin_width = layout.preferred_width + padding_x
-        for line in layout.lines:
-            percent = self.tmp_line_indent_percent(line.styled_line)
-            if abs(percent) < 1.0e-8:
-                margin_width = max(margin_width, line.width + padding_x)
-                continue
-            if percent >= 1.0:
-                margin_width = TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
-                continue
-            margin_width = max(margin_width, (line.width + padding_x) / max(1.0e-6, 1.0 - percent))
-        return min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, margin_width))
-
-    def tmp_iterative_percent_indent_margin_width(
-        self,
-        lines: list[StyledLine],
-        font_name: str,
-        font_path: Path,
-        base_size: float,
-        line_spacing: float,
-        dominant_size: float,
-        outline_dilate: float,
-        zero_margin_layout: TMPNativeTextLayout,
-        *,
-        source_metrics_only: bool = False,
-    ) -> float:
         margin_width = self.tmp_text_box_size(
             zero_margin_layout.dominant_size,
             zero_margin_layout.preferred_width,
@@ -7803,7 +7324,7 @@ class PNGRenderer:
                 "preferred",
                 outline_dilate,
                 margin_width,
-                source_metrics_only=source_metrics_only,
+                **({"source_metrics_only": True} if source_metrics_only else {}),
             )
             if layout is None:
                 return margin_width
@@ -8049,17 +7570,44 @@ class PNGRenderer:
         local_image_size: tuple[int, int] | None = None,
     ) -> None:
         object_data = item.get("objectData", {}) or {}
-        line_entries = [
-            self.tmp_line_layout_audit_entry(
-                line_index,
-                line_metric,
-                font_name,
-                font_path,
-                native_text_layout,
-                native_baselines,
+        line_entries: list[dict[str, Any]] = []
+        for line_index, (line, line_metrics, line_y, line_h, line_w) in enumerate(metrics):
+            run_entries: list[dict[str, Any]] = []
+            for run, x, run_w in line_metrics:
+                scaled_size = run.style.size * self.tmp_font_scale
+                font = TMPFallbackMetrics(font_path, scaled_size)
+                current_em_scale = native_text_layout.current_em_scale if native_text_layout is not None else None
+                measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
+                spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size, current_em_scale)
+                run_entries.append(
+                    {
+                        "text": run.text,
+                        "style": self.tmp_style_audit_dict(run.style),
+                        "x": x,
+                        "meshWidth": run_w,
+                        "advance": measure.advance,
+                        "visualBounds": {
+                            "left": measure.visual_left,
+                            "right": measure.visual_right,
+                            "top": measure.visual_top,
+                            "bottom": measure.visual_bottom,
+                        },
+                        "characterSpacingAdvance": spacing,
+                        "fontSizeAfterFaceScale": scaled_size,
+                        "glyphs": self.tmp_run_glyph_audit(font, run, font_name, scaled_size, current_em_scale),
+                    }
+                )
+            line_entries.append(
+                {
+                    "index": line_index,
+                    "style": self.tmp_style_audit_dict(line.style),
+                    "lineY": line_y,
+                    "lineHeight": line_h,
+                    "lineWidth": line_w,
+                    "nativeBaselineDown": native_baselines[line_index] if native_baselines is not None else None,
+                    "runs": run_entries,
+                }
             )
-            for line_index, line_metric in enumerate(metrics)
-        ]
         self.tmp_layout_audit.append(
             {
                 **self._current_card_ref,
@@ -8074,140 +7622,64 @@ class PNGRenderer:
                     "horizontal": tmp_horizontal_alignment(mesh_state.align),
                     "vertical": tmp_vertical_alignment(mesh_state.align),
                 },
-                "layout": self.tmp_layout_audit_metadata(
-                    preferred_width,
-                    preferred_height,
-                    content_height,
-                    total_height,
-                    box_w,
-                    box_h,
-                    native_layout,
-                    native_baselines,
-                    native_text_layout,
-                    mesh_text_layout,
-                    mesh_bounds,
-                    rect_origin,
-                    local_image_size,
-                ),
+                "layout": {
+                    "preferredWidth": preferred_width,
+                    "preferredHeight": preferred_height,
+                    "contentHeight": content_height,
+                    "accumulatedLineHeight": total_height,
+                    "lateUpdateSizeDelta": {
+                        "x": box_w,
+                        "y": box_h,
+                    },
+                    "meshPixelBounds": (
+                        {
+                            "left": mesh_bounds[0],
+                            "top": mesh_bounds[1],
+                            "right": mesh_bounds[2],
+                            "bottom": mesh_bounds[3],
+                        }
+                        if mesh_bounds is not None
+                        else None
+                    ),
+                    "localImage": (
+                        {
+                            "width": local_image_size[0],
+                            "height": local_image_size[1],
+                            "rectOriginX": rect_origin[0],
+                            "rectOriginY": rect_origin[1],
+                        }
+                        if rect_origin is not None and local_image_size is not None
+                        else None
+                    ),
+                    "nativeLineLayout": (
+                        {
+                            "baselines": native_layout.baselines,
+                            "maxAscender": native_layout.max_ascender,
+                            "maxDescender": native_layout.max_descender,
+                            "contentHeight": native_layout.content_height,
+                        }
+                        if native_layout is not None
+                        else None
+                    ),
+                    "nativeTextInfo": (
+                        self.tmp_native_text_layout_audit_dict(native_text_layout)
+                        if native_text_layout is not None
+                        else None
+                    ),
+                    "meshNativeTextInfo": (
+                        self.tmp_native_text_layout_audit_dict(
+                            mesh_text_layout,
+                            rect_box_w=box_w,
+                            rect_box_h=box_h,
+                            native_baselines=native_baselines,
+                        )
+                        if mesh_text_layout is not None
+                        else None
+                    ),
+                },
                 "lines": line_entries,
             }
         )
-
-    def tmp_run_layout_audit_entry(
-        self,
-        run: TextRun,
-        x: float,
-        run_w: float,
-        font_name: str,
-        font_path: Path,
-        native_text_layout: TMPNativeTextLayout | None,
-    ) -> dict[str, Any]:
-        scaled_size = run.style.size * self.tmp_font_scale
-        font = load_font(font_path, scaled_size)
-        current_em_scale = native_text_layout.current_em_scale if native_text_layout is not None else None
-        measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
-        spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size, current_em_scale)
-        return {
-            "text": run.text,
-            "style": self.tmp_style_audit_dict(run.style),
-            "x": x,
-            "meshWidth": run_w,
-            "advance": measure.advance,
-            "visualBounds": {
-                "left": measure.visual_left,
-                "right": measure.visual_right,
-                "top": measure.visual_top,
-                "bottom": measure.visual_bottom,
-            },
-            "characterSpacingAdvance": spacing,
-            "fontSizeAfterFaceScale": scaled_size,
-            "glyphs": self.tmp_run_glyph_audit(font, run, font_name, scaled_size, current_em_scale),
-        }
-
-    def tmp_line_layout_audit_entry(
-        self,
-        line_index: int,
-        line_metric: tuple[StyledLine, list[tuple[TextRun, float, float]], float, float, float],
-        font_name: str,
-        font_path: Path,
-        native_text_layout: TMPNativeTextLayout | None,
-        native_baselines: list[float] | None,
-    ) -> dict[str, Any]:
-        line, line_metrics, line_y, line_h, line_w = line_metric
-        runs = [
-            self.tmp_run_layout_audit_entry(run, x, run_w, font_name, font_path, native_text_layout)
-            for run, x, run_w in line_metrics
-        ]
-        native_baseline = native_baselines[line_index] if native_baselines is not None else None
-        return {
-            "index": line_index,
-            "style": self.tmp_style_audit_dict(line.style),
-            "lineY": line_y,
-            "lineHeight": line_h,
-            "lineWidth": line_w,
-            "nativeBaselineDown": native_baseline,
-            "runs": runs,
-        }
-
-    def tmp_layout_audit_metadata(
-        self,
-        preferred_width: float,
-        preferred_height: float,
-        content_height: float,
-        total_height: float,
-        box_w: float,
-        box_h: float,
-        native_layout: TMPNativeLineLayout | None,
-        native_baselines: list[float] | None,
-        native_text_layout: TMPNativeTextLayout | None,
-        mesh_text_layout: TMPNativeTextLayout | None,
-        mesh_bounds: tuple[float, float, float, float] | None,
-        rect_origin: tuple[float, float] | None,
-        local_image_size: tuple[int, int] | None,
-    ) -> dict[str, Any]:
-        metadata: dict[str, Any] = {
-            "preferredWidth": preferred_width,
-            "preferredHeight": preferred_height,
-            "contentHeight": content_height,
-            "accumulatedLineHeight": total_height,
-            "lateUpdateSizeDelta": {"x": box_w, "y": box_h},
-            "meshPixelBounds": None,
-            "localImage": None,
-            "nativeLineLayout": None,
-            "nativeTextInfo": None,
-            "meshNativeTextInfo": None,
-        }
-        if mesh_bounds is not None:
-            metadata["meshPixelBounds"] = {
-                "left": mesh_bounds[0],
-                "top": mesh_bounds[1],
-                "right": mesh_bounds[2],
-                "bottom": mesh_bounds[3],
-            }
-        if rect_origin is not None and local_image_size is not None:
-            metadata["localImage"] = {
-                "width": local_image_size[0],
-                "height": local_image_size[1],
-                "rectOriginX": rect_origin[0],
-                "rectOriginY": rect_origin[1],
-            }
-        if native_layout is not None:
-            metadata["nativeLineLayout"] = {
-                "baselines": native_layout.baselines,
-                "maxAscender": native_layout.max_ascender,
-                "maxDescender": native_layout.max_descender,
-                "contentHeight": native_layout.content_height,
-            }
-        if native_text_layout is not None:
-            metadata["nativeTextInfo"] = self.tmp_native_text_layout_audit_dict(native_text_layout)
-        if mesh_text_layout is not None:
-            metadata["meshNativeTextInfo"] = self.tmp_native_text_layout_audit_dict(
-                mesh_text_layout,
-                rect_box_w=box_w,
-                rect_box_h=box_h,
-                native_baselines=native_baselines,
-            )
-        return metadata
 
     def tmp_native_text_layout_audit_dict(
         self,
@@ -8527,37 +7999,6 @@ class PNGRenderer:
         height = max(1.0, top - bottom)
         return max(1, round(width)), max(1, round(height))
 
-    def tmp_direct_sdf_field_size(self, geometry_size: tuple[int, int]) -> tuple[int, int]:
-        """Bound a direct glyph's raster while preserving its separate logical geometry.
-
-        A TMP ``<scale>`` tag can make the logical quad much wider than the canvas.  Rasterizing
-        that entire off-screen quad is wasteful: the following affine pass clips it back to the
-        canvas.  One canvas diagonal per source axis retains enough samples for any rotation;
-        the warp plan still uses ``geometry_size`` for the destination corners.
-        """
-
-        geometry_w, geometry_h = geometry_size
-        if geometry_w <= 0 or geometry_h <= 0:
-            raise ValueError("custom profile TMP direct glyph geometry must be positive")
-
-        axis_limit = max(1, math.ceil(math.hypot(self.canvas_w, self.canvas_h)))
-        field_w = min(geometry_w, axis_limit)
-        field_h = min(geometry_h, axis_limit)
-        if field_w * field_h > self.max_layer_pixels:
-            scale = math.sqrt(self.max_layer_pixels / (field_w * field_h))
-            field_w = max(1, math.floor(field_w * scale))
-            field_h = max(1, math.floor(field_h * scale))
-            if field_w * field_h > self.max_layer_pixels:
-                if field_w >= field_h:
-                    field_w = max(1, self.max_layer_pixels // field_h)
-                else:
-                    field_h = max(1, self.max_layer_pixels // field_w)
-        return ensure_raster_size(
-            (field_w, field_h),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP direct glyph field",
-        )
-
     def tmp_layout_scale_y(self, style: TextStyle) -> float:
         return 1.0 if self.tmp_scale_mode in {"x", "fx-center", "fx-native"} else style.scale_x
 
@@ -8631,6 +8072,8 @@ class PNGRenderer:
         outline_color: str,
         outline_width: int,
     ) -> tuple[Image.Image, float, TMPGlyphMetrics | None]:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         style = run.style
         scale_x = self.tmp_fx_scale_x(style)
         scale_y = self.tmp_layout_scale_y(style)
@@ -8683,44 +8126,6 @@ class PNGRenderer:
         fallback_bbox = font.getbbox(text or " ")
         left, right, top, bottom = bounds.resolved((0.0, cursor, float(fallback_bbox[1]), float(fallback_bbox[3])))
         return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
-
-    def tmp_adjusted_space_advance(self, font: ImageFont.FreeTypeFont, metric_char: str) -> float:
-        advance = float(font.getlength(metric_char))
-        return advance * self.tmp_space_width_factor if metric_char == " " else advance
-
-    def tmp_asset_layout_metrics(
-        self,
-        font_name: str,
-        metric_char: str,
-        font_size: float,
-    ) -> tuple[TMPGlyphMetrics, str] | None:
-        if self.tmp_metrics_mode == "pil" or not font_name or font_size <= 0:
-            return None
-        include_fallback = self.tmp_metrics_mode == "asset-fallback"
-        active = self.tmp_font_library.active_asset(font_name)
-        if active is not None and active.atlas_population_mode == 1 and self.tmp_dynamic_sdf:
-            source_metrics = self.tmp_font_library.source_glyph_metrics(
-                font_name,
-                metric_char,
-                font_size,
-                include_fallback=include_fallback,
-            )
-            return (source_metrics, "source-font-dynamic") if source_metrics is not None else None
-        metrics = self.tmp_font_library.glyph_metrics(
-            font_name,
-            metric_char,
-            font_size,
-            include_fallback=include_fallback,
-        )
-        if metrics is not None:
-            return metrics, "tmp-character-table"
-        source_metrics = self.tmp_font_library.source_glyph_metrics(
-            font_name,
-            metric_char,
-            font_size,
-            include_fallback=include_fallback,
-        )
-        return (source_metrics, "source-font-fallback") if source_metrics is not None else None
 
     def glyph_advance(
         self,
@@ -8870,41 +8275,6 @@ class PNGRenderer:
             lambda ch: self.glyph_layout_metrics(font, ch, font_name, font_size),
         )
 
-    def measure_tmp_run_from_metrics(
-        self,
-        run: TextRun,
-        font_name: str,
-        font_size: float,
-        current_em_scale: float | None,
-        metrics_for_char: Callable[[str], TMPGlyphMetrics | None],
-    ) -> TMPRunMeasure:
-        metric_text = run.text or " "
-        cursor = 0.0
-        bounds = TMPVisualBounds()
-        last_index = len(metric_text) - 1
-        for idx, ch in enumerate(metric_text):
-            metrics = metrics_for_char(ch)
-            if metrics is None:
-                raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
-            glyph_origin_x, advance = cursor, metrics.advance
-            if run.style.mspace is not None:
-                mono_advance = self.tmp_mspace_advance(run.style.mspace)
-                glyph_origin_x += (mono_advance - advance) * 0.5
-                advance = mono_advance
-            if run.text and self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
-                raw_left = glyph_origin_x + metrics.bearing_x
-                raw_right = raw_left + metrics.width
-                top = -metrics.bearing_y
-                bottom = top + metrics.height
-                bounds.include(raw_left, raw_right, top, bottom)
-            cursor += advance
-            if idx != last_index:
-                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
-        if not run.text:
-            return TMPRunMeasure(cursor, 0.0, cursor, 0.0, 0.0)
-        visual_left, visual_right, visual_top, visual_bottom = bounds.resolved((0.0, 0.0, 0.0, 0.0))
-        return TMPRunMeasure(cursor, visual_left, visual_right, visual_top, visual_bottom)
-
     def tmp_run_glyph_audit(
         self,
         font: ImageFont.FreeTypeFont,
@@ -8988,68 +8358,6 @@ class PNGRenderer:
     ) -> tuple[int, int, int, int]:
         return self.tmp_run_bbox(font, run, font_name, font_size, fx_scale=True)
 
-    def tmp_run_bbox(
-        self,
-        font: ImageFont.FreeTypeFont,
-        run: TextRun,
-        font_name: str,
-        font_size: float,
-        *,
-        fx_scale: bool,
-    ) -> tuple[int, int, int, int]:
-        if not run.text:
-            return self.text_bbox(font, " ")
-        cursor = 0.0
-        bounds = TMPVisualBounds(left=0.0, right=0.0)
-        last_index = len(run.text) - 1
-        for idx, ch in enumerate(run.text):
-            metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
-            bbox = font.getbbox(metric_char)
-            if self.tmp_native_visible_character(ch):
-                left, right = self.tmp_run_glyph_horizontal_bounds(cursor, bbox, run.style, fx_scale)
-                bounds.include(left, right, float(bbox[1]), float(bbox[3]))
-            cursor += self.tmp_run_character_advance(font, run, ch, font_name, font_size, fx_scale)
-            if idx != last_index:
-                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size)
-        bounds.include_horizontal(0.0, cursor)
-        fallback_bbox = self.text_bbox(font, " ")
-        left, right, top, bottom = bounds.resolved((0.0, cursor, float(fallback_bbox[1]), float(fallback_bbox[3])))
-        return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
-
-    def tmp_run_glyph_horizontal_bounds(
-        self,
-        cursor: float,
-        bbox: tuple[int, int, int, int],
-        style: TextStyle,
-        fx_scale: bool,
-    ) -> tuple[float, float]:
-        raw_left = cursor + bbox[0]
-        raw_right = cursor + bbox[2]
-        if not fx_scale:
-            return raw_left, raw_right
-        center_x = (raw_left + raw_right) * 0.5
-        scale_x = self.tmp_fx_scale_x(style)
-        return (
-            center_x + (raw_left - center_x) * scale_x,
-            center_x + (raw_right - center_x) * scale_x,
-        )
-
-    def tmp_run_character_advance(
-        self,
-        font: ImageFont.FreeTypeFont,
-        run: TextRun,
-        ch: str,
-        font_name: str,
-        font_size: float,
-        fx_scale: bool,
-    ) -> float:
-        advance = (
-            self.tmp_mspace_advance(run.style.mspace)
-            if run.style.mspace is not None
-            else self.glyph_advance(font, ch, font_name, font_size)
-        )
-        return advance * self.tmp_fx_advance_scale_x(run.style) if fx_scale else advance
-
     def draw_text_run(
         self,
         draw: ImageDraw.ImageDraw,
@@ -9117,6 +8425,8 @@ class PNGRenderer:
         font_name: str,
         font_size: float,
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops, ImageDraw
+
         scale_x = self.tmp_fx_scale_x(run.style)
         if abs(scale_x - 1.0) < 1.0e-6:
             self.draw_text_mask_run(ImageDraw.Draw(target), xy, run, font, font_name, font_size)
@@ -9165,13 +8475,14 @@ class PNGRenderer:
                 return asset
         return None
 
-    def tmp_atlas_alpha(self, path: Path) -> Image.Image:
-        cached = self._tmp_atlas_cache.get(path)
-        if cached is not None:
-            return cached
-        atlas = self._decode_shared_image(path, "atlas_alpha")
-        self._tmp_atlas_cache[path] = atlas
-        return atlas
+    def tmp_atlas_alpha(self, path: Path) -> GrayField:
+        from src.sekai.profile.custom_profile.atlas_field import load_atlas_alpha
+
+        return load_atlas_alpha(
+            path,
+            max_pixels=self.max_layer_pixels,
+            legacy_decode=lambda source: self._decode_shared_image(source, "atlas_alpha"),
+        )
 
     def tmp_sdf_spread(self, asset: TMPFontAsset | None, font_size: float, scale_x: float) -> float:
         if asset is None:
@@ -9183,43 +8494,6 @@ class PNGRenderer:
         value = DEFAULT_TMP_TEXCOORD1_Y * max(1.0, rich_scale)
         return -value if style.bold else value
 
-    def tmp_shader_material(self, asset: TMPFontAsset | None) -> TMPShaderMaterial:
-        if asset is None:
-            return TMPShaderMaterial(
-                gradient_scale=6.0,
-                face_dilate=0.0,
-                outline_width=0.0,
-                outline_softness=0.0,
-                weight_normal=0.0,
-                weight_bold=0.75,
-                underlay_offset_x=0.0,
-                underlay_offset_y=0.0,
-                underlay_softness=0.0,
-                glow_offset=0.0,
-                glow_outer=0.0,
-                sharpness=0.0,
-                scale_ratio_a=1.0,
-                scale_ratio_b=1.0,
-                scale_ratio_c=1.0,
-            )
-        return TMPShaderMaterial(
-            gradient_scale=asset.gradient_scale,
-            face_dilate=asset.face_dilate,
-            outline_width=asset.outline_width,
-            outline_softness=asset.outline_softness,
-            weight_normal=asset.weight_normal,
-            weight_bold=asset.weight_bold,
-            underlay_offset_x=asset.underlay_offset_x,
-            underlay_offset_y=asset.underlay_offset_y,
-            underlay_softness=asset.underlay_softness,
-            glow_offset=asset.glow_offset,
-            glow_outer=asset.glow_outer,
-            sharpness=asset.sharpness,
-            scale_ratio_a=asset.scale_ratio_a,
-            scale_ratio_b=asset.scale_ratio_b,
-            scale_ratio_c=asset.scale_ratio_c,
-        )
-
     def tmp_shader_ratios(
         self,
         asset: TMPFontAsset | None,
@@ -9228,28 +8502,40 @@ class PNGRenderer:
         has_glow: bool = False,
         has_ratios_keyword: bool = False,
     ) -> tuple[float, float, float]:
-        material = self.tmp_shader_material(asset)
-        gradient_scale = max(1.0e-6, material.gradient_scale)
+        gradient_scale = asset.gradient_scale if asset is not None else 6.0
+        gradient_scale = max(1.0e-6, gradient_scale)
+        face_dilate = asset.face_dilate if asset is not None else 0.0
+        outline_width = asset.outline_width if asset is not None else 0.0
+        outline_softness = asset.outline_softness if asset is not None else 0.0
+        weight_normal = asset.weight_normal if asset is not None else 0.0
+        weight_bold = asset.weight_bold if asset is not None else 0.75
+        underlay_offset_x = asset.underlay_offset_x if asset is not None else 0.0
+        underlay_offset_y = asset.underlay_offset_y if asset is not None else 0.0
+        underlay_softness = asset.underlay_softness if asset is not None else 0.0
+        glow_offset = asset.glow_offset if asset is not None else 0.0
+        glow_outer = asset.glow_outer if asset is not None else 0.0
 
         if has_ratios_keyword:
-            return material.scale_ratio_a, material.scale_ratio_b, material.scale_ratio_c
+            return (
+                asset.scale_ratio_a if asset is not None else 1.0,
+                asset.scale_ratio_b if asset is not None else 1.0,
+                asset.scale_ratio_c if asset is not None else 1.0,
+            )
 
         available = max(0.0, gradient_scale - TMP_SHADER_RATIO_CLAMP)
-        weight_extent = max(material.weight_normal, material.weight_bold) * 0.25
-        face_extent = material.face_dilate + weight_extent
-        base_extent = max(1.0, face_extent + material.outline_width + material.outline_softness)
+        weight_extent = max(weight_normal, weight_bold) * 0.25
+        face_extent = face_dilate + weight_extent
+        base_extent = max(1.0, face_extent + outline_width + outline_softness)
         ratio_a = available / (gradient_scale * base_extent)
 
-        glow_extent = max(1.0, material.glow_offset + material.glow_outer)
+        glow_extent = max(1.0, glow_offset + glow_outer)
         ratio_b = max(0.0, available - face_extent * available) / (gradient_scale * glow_extent)
 
-        ratio_c = material.scale_ratio_c
+        ratio_c = asset.scale_ratio_c if asset is not None else 1.0
         if has_underlay:
             underlay_extent = max(
                 1.0,
-                max(abs(material.underlay_offset_x), abs(material.underlay_offset_y))
-                + outline_dilate
-                + material.underlay_softness,
+                max(abs(underlay_offset_x), abs(underlay_offset_y)) + outline_dilate + underlay_softness,
             )
             ratio_c = max(0.0, available - face_extent * available) / (gradient_scale * underlay_extent)
 
@@ -9351,24 +8637,45 @@ class PNGRenderer:
         (Phase 2): the fragile TMP material semantics live here once; both backends are dumb
         ``clip(field*scale - w)`` evaluators of these numbers.
         """
-        material = self.tmp_shader_material(asset)
+        gradient_scale = asset.gradient_scale if asset is not None else 6.0
+        weight_normal = asset.weight_normal if asset is not None else 0.0
+        weight_bold = asset.weight_bold if asset is not None else 0.75
+        face_dilate = asset.face_dilate if asset is not None else 0.0
+        outline_softness = asset.outline_softness if asset is not None else 0.0
+        sharpness = asset.sharpness if asset is not None else 0.0
         scale_ratio_a, _, scale_ratio_c = self.tmp_shader_ratios(asset, outline_dilate)
+        underlay_softness = asset.underlay_softness if asset is not None else 0.0
+        underlay_offset_x = asset.underlay_offset_x if asset is not None else 0.0
+        underlay_offset_y = asset.underlay_offset_y if asset is not None else 0.0
 
         texcoord_scale = abs(sdf_scale) if sdf_scale is not None else abs(self.tmp_mesh_texcoord1_y(style))
-        raw_scale = texcoord_scale * material.gradient_scale * (material.sharpness + 1.0)
-        face_scale = raw_scale / (material.outline_softness * scale_ratio_a * raw_scale + 1.0)
-        weight = material.weight_bold if style.bold else material.weight_normal
-        bias = 0.5 - 0.5 * (weight * 0.25 + material.face_dilate) * scale_ratio_a
+        raw_scale = texcoord_scale * gradient_scale * (sharpness + 1.0)
+        face_scale = raw_scale / (outline_softness * scale_ratio_a * raw_scale + 1.0)
+        weight = weight_bold if style.bold else weight_normal
+        bias = 0.5 - 0.5 * (weight * 0.25 + face_dilate) * scale_ratio_a
         face_w = bias * face_scale - 0.5
 
-        underlay = self.tmp_sdf_underlay_scalars(
-            material,
-            outline_color,
-            outline_dilate,
-            scale_ratio_c,
-            raw_scale,
-            bias,
-        )
+        underlay: TMPSdfUnderlayScalars | None = None
+        if abs(outline_dilate) > 1.0e-6:
+            underlay_scale = raw_scale / (underlay_softness * scale_ratio_c * raw_scale + 1.0)
+            underlay_width = outline_dilate * scale_ratio_c * underlay_scale
+            underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
+            offset_x = -underlay_offset_x * scale_ratio_c * gradient_scale
+            offset_y = -underlay_offset_y * scale_ratio_c * gradient_scale
+            # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
+            # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
+            if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
+                shift_x = shift_y = 0
+            else:
+                shift_x = int(round(offset_x))
+                shift_y = int(round(offset_y))
+            underlay = TMPSdfUnderlayScalars(
+                scale=underlay_scale,
+                w=underlay_w,
+                shift_x=shift_x,
+                shift_y=shift_y,
+                color=hex_to_rgba(outline_color, 1.0)[:3],
+            )
         return TMPSdfShadingScalars(
             face_scale=face_scale,
             face_w=face_w,
@@ -9376,38 +8683,6 @@ class PNGRenderer:
             face_color=hex_to_rgba(style.color, 1.0)[:3],
             underlay=underlay,
         )
-
-    def tmp_sdf_underlay_scalars(
-        self,
-        material: TMPShaderMaterial,
-        outline_color: str,
-        outline_dilate: float,
-        scale_ratio_c: float,
-        raw_scale: float,
-        bias: float,
-    ) -> TMPSdfUnderlayScalars | None:
-        if abs(outline_dilate) <= 1.0e-6:
-            return None
-        underlay_scale = raw_scale / (material.underlay_softness * scale_ratio_c * raw_scale + 1.0)
-        underlay_width = outline_dilate * scale_ratio_c * underlay_scale
-        underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
-        offset_x = -material.underlay_offset_x * scale_ratio_c * material.gradient_scale
-        offset_y = -material.underlay_offset_y * scale_ratio_c * material.gradient_scale
-        shift_x, shift_y = self.tmp_sdf_field_shift(offset_x, offset_y)
-        return TMPSdfUnderlayScalars(
-            scale=underlay_scale,
-            w=underlay_w,
-            shift_x=shift_x,
-            shift_y=shift_y,
-            color=hex_to_rgba(outline_color, 1.0)[:3],
-        )
-
-    def tmp_sdf_field_shift(self, offset_x: float, offset_y: float) -> tuple[int, int]:
-        # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
-        # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
-        if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
-            return 0, 0
-        return int(round(offset_x)), int(round(offset_y))
 
     def shade_tmp_sdf_field(
         self,
@@ -9421,10 +8696,7 @@ class PNGRenderer:
         scalars = self.tmp_sdf_shading_scalars(asset, style, outline_color, outline_dilate, sdf_scale)
         return self._shade_field_with_scalars(field, scalars)
 
-    def _shade_field_with_scalars(self, field: Any, scalars: TMPSdfShadingScalars) -> Image.Image:
-        """Array half of shade_tmp_sdf_field: per-pixel evaluation of the frozen scalars over a
-        float32 [0, 1] field. Single source for the Pillow shader AND the byte-identity reference
-        for the Skia SdfQuad node — the direct decorative path calls this with DirectSdfQuad."""
+    def tmp_sdf_coverage(self, field: Any, scalars: TMPSdfShadingScalars):
         import numpy as np
 
         face_alpha = np.clip(field * scalars.face_scale - scalars.face_w, 0.0, 1.0) * scalars.alpha
@@ -9438,6 +8710,18 @@ class PNGRenderer:
         else:
             underlay_alpha = np.zeros_like(face_alpha)
 
+        return face_alpha, underlay_alpha, face_alpha + underlay_alpha * (1.0 - face_alpha)
+
+    def _shade_field_with_scalars(self, field: Any, scalars: TMPSdfShadingScalars) -> Image.Image:
+        """Array half of shade_tmp_sdf_field: per-pixel evaluation of the frozen scalars over a
+        float32 [0, 1] field. Single source for the Pillow shader AND the byte-identity reference
+        for the Skia SdfQuad node — the direct decorative path calls this with DirectSdfQuad."""
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        import numpy as np
+
+        face_alpha, underlay_alpha, out_a = self.tmp_sdf_coverage(field, scalars)
+
         face_rgba = np.array([*scalars.face_color, 255], dtype=np.float32) / 255.0
         # When underlay is None, underlay_alpha is all zeros, so the color term is multiplied out;
         # (0, 0, 0) keeps the math bit-identical to the pre-split code's unused outline color.
@@ -9445,7 +8729,6 @@ class PNGRenderer:
         underlay_rgba = np.array([*underlay_color, 255], dtype=np.float32) / 255.0
         face_a = face_alpha * face_rgba[3]
         underlay_a = underlay_alpha * underlay_rgba[3]
-        out_a = face_a + underlay_a * (1.0 - face_a)
         rgb_premul = face_rgba[:3] * face_a[:, :, None] + underlay_rgba[:3] * underlay_a[:, :, None] * (
             1.0 - face_a[:, :, None]
         )
@@ -9459,37 +8742,11 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
     ) -> tuple[Image.Image, tuple[int, int, int, int], int] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops
+
         asset = self.tmp_static_sdf_asset(font_name, run)
         if asset is None:
             return None
-        style = run.style
-        prepared = self.tmp_static_atlas_placements(font_name, run, font_size, asset)
-        if prepared is None:
-            return None
-        placements, bbox = prepared
-        pad = self.tmp_display_padding(asset, outline_dilate, font_size)
-        field_img = self.tmp_static_atlas_field(asset, placements, bbox, pad)
-
-        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
-            scaled_size = ensure_raster_size(
-                (max(1, round(field_img.width * style.scale_x)), field_img.height),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile scaled TMP static SDF field",
-            )
-            field_img = field_img.resize(scaled_size, Image.Resampling.BICUBIC)
-
-        import numpy as np
-
-        field = np.asarray(field_img, dtype=np.float32) / 255.0
-        return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
-
-    def tmp_static_atlas_placements(
-        self,
-        font_name: str,
-        run: TextRun,
-        font_size: float,
-        asset: TMPFontAsset,
-    ) -> tuple[list[tuple[TMPGlyphMetrics, float, float, float, float]], tuple[int, int, int, int]] | None:
         style = run.style
         placements: list[tuple[TMPGlyphMetrics, float, float, float, float]] = []
         font_scale = font_size / max(1.0, asset.point_size)
@@ -9529,34 +8786,33 @@ class PNGRenderer:
         max_x = max(max_x, cursor)
         if not placements:
             return None
-        bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
-        return placements, bbox
 
-    def tmp_static_atlas_field(
-        self,
-        asset: TMPFontAsset,
-        placements: list[tuple[TMPGlyphMetrics, float, float, float, float]],
-        bbox: tuple[int, int, int, int],
-        pad: int,
-    ) -> Image.Image:
-        field_size = ensure_raster_size(
-            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP static SDF field",
-        )
-        field_img = Image.new("L", field_size, 0)
+        bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
+        pad = self.tmp_display_padding(asset, outline_dilate, font_size)
+        field_img = Image.new("L", (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)), 0)
         for metrics, x, y, w, h in placements:
             atlas_path = asset.atlas_paths[min(metrics.atlas_index, len(asset.atlas_paths) - 1)]
+            from src.sekai.profile.custom_profile.pillow_fields import to_pillow
+
             atlas = self.tmp_atlas_alpha(atlas_path)
             top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
             left = max(0, metrics.rect_x)
             crop = atlas.crop((left, top, left + metrics.rect_w, top + metrics.rect_h))
-            glyph = crop.resize((max(1, round(w)), max(1, round(h))), Image.Resampling.BICUBIC)
+            glyph = to_pillow(crop).resize((max(1, round(w)), max(1, round(h))), Image.Resampling.BICUBIC)
             px = round(pad + x - bbox[0])
             py = round(pad + y - bbox[1])
             region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
             field_img.paste(ImageChops.lighter(region, glyph), (px, py))
-        return field_img
+
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
+            field_img = field_img.resize(
+                (max(1, round(field_img.width * style.scale_x)), field_img.height), Image.Resampling.BICUBIC
+            )
+
+        import numpy as np
+
+        field = np.asarray(field_img, dtype=np.float32) / 255.0
+        return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
 
     def render_tmp_dynamic_sdf_run(
         self,
@@ -9567,6 +8823,8 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
     ) -> tuple[Image.Image, tuple[int, int, int, int], int] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         asset = self.tmp_sdf_asset(font_name)
         if asset is None:
             return None
@@ -9590,11 +8848,6 @@ class PNGRenderer:
         )
         w = max(1, sample_bbox[2] - sample_bbox[0] + sample_pad * 2)
         h = max(1, sample_bbox[3] - sample_bbox[1] + sample_pad * 2)
-        w, h = ensure_raster_size(
-            (w, h),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP dynamic SDF mask",
-        )
         mask = Image.new("L", (w, h), 0)
         if self.tmp_scale_mode in {"fx-center", "fx-native"}:
             self.draw_text_mask_run_fx(
@@ -9628,15 +8881,13 @@ class PNGRenderer:
         display_scale = font_size / raster_size
         scale_x = style.scale_x if self.tmp_scale_mode == "x" else 1.0
         field_img = Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
-        display_size = ensure_raster_size(
+        field_img = field_img.resize(
             (
                 max(1, round(field_img.width * display_scale * scale_x)),
                 max(1, round(field_img.height * display_scale)),
             ),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile displayed TMP dynamic SDF field",
+            Image.Resampling.BICUBIC,
         )
-        field_img = field_img.resize(display_size, Image.Resampling.BICUBIC)
         field = np.asarray(field_img, dtype=np.float32) / 255.0
         bbox = (
             math.floor(sample_bbox[0] * display_scale * scale_x),
@@ -9691,29 +8942,133 @@ class PNGRenderer:
         try:
             import numpy as np
             from fontTools.pens.recordingPen import DecomposingRecordingPen
-            from fontTools.ttLib import TTFont
+
+            from .source_font import outline_glyph_set
         except ImportError:
             self._store_vector_glyph(key, l2_key, None)
             return None
 
         try:
-            font = TTFont(source_path)
-            glyph_set = font.getGlyphSet()
-            glyph_name = font.getBestCmap().get(ord(ch[0]))
-            if not glyph_name:
-                self._store_vector_glyph(key, l2_key, None)
-                return None
-            pen = DecomposingRecordingPen(glyph_set)
-            glyph_set[glyph_name].draw(pen)
-            units_per_em = float(font["head"].unitsPerEm or 1000)
+            with self.tmp_font_library.source_font(source_path) as font:
+                glyph_name = font.getBestCmap().get(ord(ch[0]))
+                if not glyph_name:
+                    self._store_vector_glyph(key, l2_key, None)
+                    return None
+                glyph_set = outline_glyph_set(font)
+                pen = DecomposingRecordingPen(glyph_set)
+                glyph_set[glyph_name].draw(pen)
+                units_per_em = float(font["head"].unitsPerEm or 1000)
         except Exception:
             self._store_vector_glyph(key, l2_key, None)
             return None
 
-        builder = _TMPGlyphContourBuilder(sample_size / max(1.0, units_per_em))
+        scale = sample_size / max(1.0, units_per_em)
+        contours: list[list[tuple[float, float]]] = []
+        contour: list[tuple[float, float]] = []
+        pos: tuple[float, float] | None = None
+        start: tuple[float, float] | None = None
+
+        def scaled(point: tuple[float, float]) -> tuple[float, float]:
+            return float(point[0]) * scale, float(point[1]) * scale
+
+        def append_point(point: tuple[float, float]) -> None:
+            contour.append(scaled(point))
+
+        def close_contour() -> None:
+            nonlocal contour
+            if len(contour) >= 2:
+                contours.append(contour)
+            contour = []
+
+        def flatten_quadratic(
+            p0: tuple[float, float],
+            p1: tuple[float, float],
+            p2: tuple[float, float],
+        ) -> None:
+            for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+                t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+                u = 1.0 - t
+                append_point(
+                    (
+                        u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
+                        u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
+                    )
+                )
+
+        def flatten_cubic(
+            p0: tuple[float, float],
+            p1: tuple[float, float],
+            p2: tuple[float, float],
+            p3: tuple[float, float],
+        ) -> None:
+            for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+                t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+                u = 1.0 - t
+                append_point(
+                    (
+                        u * u * u * p0[0] + 3.0 * u * u * t * p1[0] + 3.0 * u * t * t * p2[0] + t * t * t * p3[0],
+                        u * u * u * p0[1] + 3.0 * u * u * t * p1[1] + 3.0 * u * t * t * p2[1] + t * t * t * p3[1],
+                    )
+                )
+
         for op, args in pen.value:
-            builder.consume(op, args)
-        contours = builder.finish()
+            if op == "moveTo":
+                close_contour()
+                pos = tuple(args[0])
+                start = pos
+                append_point(pos)
+            elif op == "lineTo" and pos is not None:
+                pos = tuple(args[0])
+                append_point(pos)
+            elif op == "curveTo" and pos is not None:
+                curve_points = [tuple(point) for point in args]
+                for idx in range(0, len(curve_points), 3):
+                    if idx + 2 >= len(curve_points):
+                        break
+                    p1, p2, p3 = curve_points[idx : idx + 3]
+                    flatten_cubic(pos, p1, p2, p3)
+                    pos = p3
+            elif op == "qCurveTo" and pos is not None:
+                points = [None if point is None else tuple(point) for point in args]
+                if not points:
+                    continue
+                if points[-1] is None:
+                    off_curves = [point for point in points[:-1] if point is not None]
+                    if not off_curves:
+                        continue
+                    final = (
+                        (off_curves[0][0] + off_curves[-1][0]) * 0.5,
+                        (off_curves[0][1] + off_curves[-1][1]) * 0.5,
+                    )
+                    points = [*off_curves, final]
+                final_point = points[-1]
+                if final_point is None:
+                    continue
+                off_curves = [point for point in points[:-1] if point is not None]
+                if not off_curves:
+                    pos = final_point
+                    append_point(pos)
+                    continue
+                current = pos
+                for idx, control in enumerate(off_curves):
+                    if idx == len(off_curves) - 1:
+                        end = final_point
+                    else:
+                        next_control = off_curves[idx + 1]
+                        end = (
+                            (control[0] + next_control[0]) * 0.5,
+                            (control[1] + next_control[1]) * 0.5,
+                        )
+                    flatten_quadratic(current, control, end)
+                    current = end
+                pos = final_point
+            elif op == "closePath":
+                close_contour()
+                pos = start
+            elif op == "endPath":
+                close_contour()
+
+        close_contour()
         if not contours:
             self._store_vector_glyph(key, l2_key, None)
             return None
@@ -9735,16 +9090,28 @@ class PNGRenderer:
         bbox: tuple[int, int, int, int],
         pad: int,
         asset: TMPFontAsset,
-    ) -> Image.Image | None:
+    ) -> GrayField | None:
         outlines = self.tmp_vector_glyph_contours(source_path, ch, sample_size)
         if outlines is None:
             return None
         contours, np = outlines
-        width, height = ensure_raster_size(
-            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP vector glyph field",
+        width = max(1, bbox[2] - bbox[0] + pad * 2)
+        height = max(1, bbox[3] - bbox[1] + pad * 2)
+        field_size((width, height))
+        ensure_raster_size((width, height), max_pixels=self.max_layer_pixels, label="TMP SDF field")
+        # Optional arithmetic-only native helper; geometry and curve flattening above
+        # still come from the same exact FontTools pen used by the reference path.
+        from .source_font import native_outline_sdf
+
+        native_field = native_outline_sdf(
+            contours,
+            width,
+            height,
+            (bbox[0] - pad, bbox[1] - pad),
+            2.0 * max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS),
         )
+        if native_field is not None:
+            return GrayField(width, height, native_field)
         xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
         px = float(bbox[0] - pad) + xs + 0.5
         py = -(float(bbox[1] - pad) + ys + 0.5)
@@ -9775,75 +9142,7 @@ class PNGRenderer:
         signed_distance = np.where(winding != 0, min_distance, -min_distance)
         spread = max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS)
         field = np.clip(0.5 + signed_distance / (2.0 * spread), 0.0, 1.0)
-        return Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
-
-    def tmp_dynamic_font_field(
-        self,
-        font_name: str,
-        ch: str,
-        style: TextStyle,
-        outline_dilate: float,
-        char_info: TMPNativeCharacterInfo,
-        native_field_size: tuple[int, int] | None = None,
-    ) -> tuple[TMPDynamicFontField, TMPFontAsset] | None:
-        """Build the pixel-free native descriptor for one dynamic/fallback TMP glyph."""
-
-        if self.use_em_block(TextRun(ch, style)):
-            return None
-        active = self.tmp_sdf_asset(font_name)
-        if active is None or not ch or ch == " ":
-            return None
-
-        glyph_char = ch[0]
-        selected: tuple[TMPFontAsset, Path, float, TMPGlyphMetrics] | None = None
-        for candidate in self.tmp_font_library.metric_asset_candidates(font_name, include_fallback=True):
-            source_path = self.tmp_font_library.runtime_source_font_path(candidate)
-            if source_path is None:
-                continue
-            sample_size = max(1.0, candidate.point_size)
-            metrics = self.tmp_font_library._source_glyph_metrics_for_asset(candidate, glyph_char, sample_size)
-            if metrics is not None:
-                selected = candidate, source_path, sample_size, metrics
-                break
-        if selected is None:
-            return None
-
-        asset, source_path, sample_size, metrics = selected
-        bbox = (
-            math.floor(metrics.bearing_x),
-            math.floor(-metrics.bearing_y),
-            math.ceil(metrics.bearing_x + metrics.width),
-            math.ceil(-metrics.bearing_y + metrics.height),
-        )
-        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
-            return None
-        padding = max(1, math.ceil(asset.atlas_padding + 1.0))
-        active_point_size = max(1.0, active.point_size)
-        atlas_pad = self.tmp_native_atlas_padding(asset, style, outline_dilate)
-        crop_padding = min(padding, max(0, round(atlas_pad * sample_size / active_point_size)))
-        field_size = ensure_raster_size(
-            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP native dynamic glyph quad",
-        )
-        ensure_raster_size(
-            (bbox[2] - bbox[0] + padding * 2, bbox[3] - bbox[1] + padding * 2),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP native dynamic glyph source",
-        )
-        return (
-            TMPDynamicFontField(
-                font_path=source_path,
-                codepoint=ord(glyph_char),
-                sample_size=sample_size,
-                bbox=bbox,
-                padding=padding,
-                crop_padding=crop_padding,
-                field_size=field_size,
-                spread=max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS),
-            ),
-            asset,
-        )
+        return GrayField(width, height, np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8).tobytes())
 
     def tmp_dynamic_glyph_sdf(
         self,
@@ -9859,186 +9158,11 @@ class PNGRenderer:
             return None
         asset, source_path, sample_size, glyph_char = source
         key, l2_key = self.tmp_dynamic_glyph_cache_keys(source_path, asset, glyph_char, sample_size)
-        cache_hit, cached = self.tmp_cached_dynamic_glyph(key, l2_key)
-        if cache_hit:
-            return (cached, asset) if cached is not None else None
-
-        cached = self.build_tmp_dynamic_glyph_sdf(source_path, glyph_char, sample_size, asset)
-        self._store_dynamic_glyph(key, l2_key, cached)
+        hit, cached = self.tmp_cached_dynamic_glyph(key, l2_key)
+        if not hit:
+            cached = self.build_tmp_dynamic_glyph_sdf(source_path, glyph_char, sample_size, asset)
+            self._store_dynamic_glyph(key, l2_key, cached)
         return (cached, asset) if cached is not None else None
-
-    def tmp_dynamic_glyph_source(
-        self,
-        font_name: str,
-        ch: str,
-    ) -> tuple[TMPFontAsset, Path, float, str] | None:
-        active = self.tmp_sdf_asset(font_name)
-        if active is None or not ch or ch == " ":
-            return None
-        asset = active
-        sample_size = max(1.0, active.point_size)
-        for candidate in self.tmp_font_library.metric_asset_candidates(font_name, include_fallback=True):
-            if self.tmp_font_library.runtime_source_font_path(candidate) is None:
-                continue
-            if self.tmp_font_library._source_glyph_metrics_for_asset(candidate, ch[0], sample_size) is not None:
-                asset = candidate
-                sample_size = max(1.0, candidate.point_size)
-                break
-        source_path = self.tmp_font_library.runtime_source_font_path(asset)
-        if source_path is None:
-            return None
-        return asset, source_path, sample_size, ch[0]
-
-    def tmp_dynamic_glyph_cache_keys(
-        self,
-        source_path: Path,
-        asset: TMPFontAsset,
-        glyph_char: str,
-        sample_size: float,
-    ) -> tuple[tuple[str, str, str, float], tuple[Any, ...]]:
-        key = (str(source_path), asset.name, glyph_char, round(sample_size, 4))
-        l2_key = (
-            key[0],
-            *self._font_signature(source_path),
-            key[1],
-            key[2],
-            key[3],
-            round(asset.gradient_scale, 4),
-            round(asset.atlas_padding, 4),
-        )
-        return key, l2_key
-
-    def tmp_cached_dynamic_glyph(
-        self,
-        key: tuple[str, str, str, float],
-        l2_key: tuple[Any, ...],
-    ) -> tuple[bool, TMPDynamicGlyphSDF | None]:
-        if key in self._tmp_dynamic_glyph_cache:
-            return True, self._tmp_dynamic_glyph_cache[key]
-        # L2 adds what the instance key pins implicitly: the font file's signature plus the
-        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
-        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
-        l2_cached = GLYPH_SDF_CACHE.get(l2_key)
-        if l2_cached is MISSING:
-            return False, None
-        self._tmp_dynamic_glyph_cache[key] = l2_cached
-        return True, l2_cached
-
-    def tmp_dynamic_glyph_bounds(
-        self,
-        ft: Any,
-        source_path: Path,
-        glyph_char: str,
-        size: float,
-    ) -> tuple[tuple[int, int, int, int], Image.Image | None, int, int] | None:
-        rendered = ft.glyph_bitmap(source_path, glyph_char, size) if ft is not None else None
-        if rendered is not None:
-            glyph_mask, bitmap_left, bitmap_top, metrics = rendered
-            bbox_left = math.floor(min(metrics.bearing_x, float(bitmap_left)))
-            bbox_top = math.floor(min(-metrics.bearing_y, float(-bitmap_top)))
-            bbox_right = math.ceil(max(metrics.bearing_x + metrics.width, float(bitmap_left + glyph_mask.width)))
-            bbox_bottom = math.ceil(max(-metrics.bearing_y + metrics.height, float(-bitmap_top + glyph_mask.height)))
-            return (bbox_left, bbox_top, bbox_right, bbox_bottom), glyph_mask, bitmap_left, bitmap_top
-
-        sample_font = load_font(source_path, size)
-        bbox = sample_font.getbbox(glyph_char)
-        if bbox is None:
-            return None
-        return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])), None, 0, 0
-
-    def build_tmp_dynamic_glyph_sdf(
-        self,
-        source_path: Path,
-        glyph_char: str,
-        sample_size: float,
-        asset: TMPFontAsset,
-    ) -> TMPDynamicGlyphSDF | None:
-        ft = freetype_metrics()
-        native_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, sample_size)
-        if native_bounds is None:
-            return None
-        native_bbox, _, _, _ = native_bounds
-        # Runtime TMP atlas rects behave like atlas_padding + 1 around the
-        # cropped glyph field.
-        native_pad = max(1, math.ceil(asset.atlas_padding + 1.0))
-        vector_field = self.tmp_vector_glyph_sdf_field(
-            source_path,
-            glyph_char,
-            sample_size,
-            native_bbox,
-            native_pad,
-            asset,
-        )
-        if vector_field is not None:
-            return TMPDynamicGlyphSDF(
-                field=vector_field,
-                bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
-                pad=native_pad,
-                sample_size=sample_size,
-            )
-
-        supersample = max(1.0, TMP_DYNAMIC_SDF_SUPERSAMPLE)
-        raster_size = sample_size * supersample
-        raster_pad = max(1, math.ceil(asset.atlas_padding * supersample))
-        raster_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, raster_size)
-        if raster_bounds is None:
-            return None
-        mask = self.tmp_dynamic_glyph_mask(source_path, glyph_char, raster_size, raster_pad, raster_bounds)
-        try:
-            field = alpha_mask_to_sdf_field(
-                mask,
-                asset.gradient_scale * supersample,
-                tmp_dynamic_sdf_alpha_threshold(asset),
-            )
-        except ImportError:
-            return None
-
-        import numpy as np
-
-        field_img = Image.fromarray(np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8), "L")
-        native_field_size = ensure_raster_size(
-            (
-                max(1, native_bbox[2] - native_bbox[0] + native_pad * 2),
-                max(1, native_bbox[3] - native_bbox[1] + native_pad * 2),
-            ),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP native glyph field",
-        )
-        if field_img.size != native_field_size:
-            field_img = field_img.resize(native_field_size, Image.Resampling.BICUBIC)
-        return TMPDynamicGlyphSDF(
-            field=field_img,
-            bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
-            pad=native_pad,
-            sample_size=sample_size,
-        )
-
-    def tmp_dynamic_glyph_mask(
-        self,
-        source_path: Path,
-        glyph_char: str,
-        raster_size: float,
-        raster_pad: int,
-        raster_bounds: tuple[tuple[int, int, int, int], Image.Image | None, int, int],
-    ) -> Image.Image:
-        raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
-        bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
-        size = ensure_raster_size(
-            (
-                max(1, bbox_right - bbox_left + raster_pad * 2),
-                max(1, bbox_bottom - bbox_top + raster_pad * 2),
-            ),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP dynamic glyph mask",
-        )
-        mask = Image.new("L", size, 0)
-        if raster_glyph_mask is not None:
-            mask.paste(raster_glyph_mask, (raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top))
-            return mask
-        sample_font = load_font(source_path, raster_size)
-        draw = ImageDraw.Draw(mask)
-        draw.text((raster_pad - bbox_left, raster_pad - bbox_top), glyph_char, font=sample_font, fill=255)
-        return mask
 
     def render_tmp_dynamic_sdf_run_from_glyphs(
         self,
@@ -10108,116 +9232,79 @@ class PNGRenderer:
         bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
         return self.compose_tmp_dynamic_run_glyphs(glyphs, bbox, max_pad, style)
 
-    def tmp_dynamic_run_glyph_advance(
-        self,
-        display_font: ImageFont.FreeTypeFont,
-        char: str,
-        font_name: str,
-        font_size: float,
-        style: TextStyle,
-        cursor: float,
-    ) -> tuple[float, float]:
-        glyph_origin_x = cursor
-        advance = self.glyph_advance(display_font, char, font_name, font_size)
-        if style.mspace is not None:
-            mono_advance = self.tmp_mspace_advance(style.mspace)
-            glyph_origin_x += (mono_advance - advance) * 0.5
-            advance = mono_advance
-        return glyph_origin_x, advance
-
-    def prepare_tmp_dynamic_run_glyph(
+    def prepare_tmp_fallback_sdf_character(
         self,
         font_name: str,
         font_path: Path,
-        glyph_char: str,
+        char: str,
         style: TextStyle,
         font_size: float,
-        glyph_origin_x: float,
-        fx_scale_x: float,
-        outline_color: str,
         outline_dilate: float,
-    ) -> TMPDynamicRunGlyph | None:
-        dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
-        if dynamic is None:
-            return None
-        cached, glyph_asset = dynamic
-        display_scale = font_size / max(1.0, cached.sample_size)
+        *,
+        max_field_bytes: int | None = None,
+    ):
+        """Legacy last-resort glyph mask -> float SDF, without an image object.
+
+        The ordinary TMP mesh falls back one character at a time. Keep the
+        float32 distance field here: rounding it to an atlas A8 changes shading.
+        Multi-character legacy runs retain their separate fractional-position path.
+        """
+        from src.sekai.profile.custom_profile.font_field import basic_text_field
+
+        if len(char) != 1:
+            raise ValueError("fallback SDF character requires one Unicode scalar")
+        font = TMPFallbackMetrics(font_path, font_size)
+        run = TextRun(char, style)
+        fx = self.tmp_scale_mode in {"fx-center", "fx-native"}
         bbox = (
-            math.floor(cached.bbox[0] * display_scale),
-            math.floor(cached.bbox[1] * display_scale),
-            math.ceil(cached.bbox[2] * display_scale),
-            math.ceil(cached.bbox[3] * display_scale),
+            self.run_fx_bbox(font, run, font_name, font_size) if fx else self.run_bbox(font, run, font_name, font_size)
         )
-        pad = max(1, round(cached.pad * display_scale))
-        field_size = ensure_raster_size(
-            (
-                max(1, round(cached.field.width * display_scale)),
-                max(1, round(cached.field.height * display_scale)),
-            ),
+        asset = self.tmp_sdf_asset(font_name)
+        scale_x = self.tmp_fx_scale_x(style)
+        spread = self.tmp_sdf_spread(asset, font_size, scale_x)
+        pad = self.tmp_display_padding(asset, outline_dilate, font_size)
+        width, height = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
             max_pixels=self.max_layer_pixels,
-            label="custom profile displayed TMP glyph field",
+            label="fallback TMP glyph mask",
         )
-        field_img = cached.field.resize(field_size, Image.Resampling.BICUBIC)
-        if abs(fx_scale_x - 1.0) >= 1.0e-6:
-            bbox, field_img = self.scale_tmp_dynamic_run_field(bbox, field_img, fx_scale_x)
-
-        import numpy as np
-
-        field = np.asarray(field_img, dtype=np.float32) / 255.0
-        glyph = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate)
-        return TMPDynamicRunGlyph(glyph, bbox, pad, glyph_origin_x)
-
-    def scale_tmp_dynamic_run_field(
-        self,
-        bbox: tuple[int, int, int, int],
-        field_img: Image.Image,
-        scale_x: float,
-    ) -> tuple[tuple[int, int, int, int], Image.Image]:
-        scaled_left, scaled_right = self.tmp_scale_x_bounds(float(bbox[0]), float(bbox[2]), scale_x)
-        scaled_bbox = (math.floor(scaled_left), bbox[1], math.ceil(scaled_right), bbox[3])
-        scaled_size = ensure_raster_size(
-            (max(1, round(field_img.width * scale_x)), field_img.height),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile scaled TMP glyph field",
-        )
-        return scaled_bbox, field_img.resize(scaled_size, Image.Resampling.BICUBIC)
-
-    def compose_tmp_dynamic_run_glyphs(
-        self,
-        glyphs: list[TMPDynamicRunGlyph],
-        bbox: tuple[int, int, int, int],
-        max_pad: int,
-        style: TextStyle,
-    ) -> tuple[Image.Image, tuple[int, int, int, int], int]:
-        image_size = ensure_raster_size(
-            (max(1, bbox[2] - bbox[0] + max_pad * 2), max(1, bbox[3] - bbox[1] + max_pad * 2)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP dynamic glyph run",
-        )
-        image = Image.new(
-            "RGBA",
-            image_size,
-            (0, 0, 0, 0),
-        )
-        for glyph in glyphs:
-            px = round(max_pad + glyph.origin_x + glyph.bbox[0] - glyph.pad - bbox[0])
-            py = round(max_pad + glyph.bbox[1] - glyph.pad - bbox[1])
-            image.alpha_composite(glyph.image, (px, py))
-
-        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
-            scaled_size = ensure_raster_size(
-                (max(1, round(image.width * style.scale_x)), image.height),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile scaled TMP dynamic glyph run",
+        field_size((width, height))
+        # Reserve both the float32 distance array and immutable transport copy
+        # before producing any glyph pixels. Existing fields remain live here.
+        if max_field_bytes is not None and width * height * 8 > max_field_bytes:
+            raise ValueError("fallback TMP field exceeds remaining native scene memory")
+        if self.tmp_native_visible_character(char):
+            glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
+            glyph, glyph_bbox = basic_text_field(
+                font_path,
+                glyph_char,
+                font_size,
+                max_pixels=min(self.max_layer_pixels, MAX_FIELD_PIXELS),
             )
-            image = image.resize(scaled_size, Image.Resampling.BICUBIC)
-            bbox = (
-                math.floor(bbox[0] * style.scale_x),
-                bbox[1],
-                math.ceil(bbox[2] * style.scale_x),
-                bbox[3],
-            )
-        return image, bbox, max_pad
+            if fx and abs(scale_x - 1.0) >= 1.0e-6:
+                raw_w = max(1, glyph_bbox[2] - glyph_bbox[0])
+                raw_h = max(1, glyph_bbox[3] - glyph_bbox[1])
+                scaled_w = max(1, round(raw_w * scale_x))
+                ensure_raster_size(
+                    (scaled_w, raw_h), max_pixels=self.max_layer_pixels, label="fallback TMP scaled glyph"
+                )
+                glyph = glyph.crop((0, 0, raw_w, raw_h)).resize_bicubic((scaled_w, raw_h))
+                center_x = pad - bbox[0] + (glyph_bbox[0] + glyph_bbox[2]) * 0.5
+                px = round(center_x - glyph.width * 0.5)
+            else:
+                px = pad - bbox[0] + glyph_bbox[0]
+            py = pad - bbox[1] + glyph_bbox[1]
+            mask = glyph.crop((-px, -py, width - px, height - py))
+        else:
+            mask = GrayField(width, height, bytes(width * height))
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
+            scaled_size = (max(1, round(mask.width * style.scale_x)), mask.height)
+            if max_field_bytes is not None and scaled_size[0] * scaled_size[1] * 8 > max_field_bytes:
+                raise ValueError("fallback TMP scaled field exceeds remaining native scene memory")
+            ensure_raster_size(scaled_size, max_pixels=self.max_layer_pixels, label="fallback TMP scaled mask")
+            mask = mask.resize_bicubic(scaled_size)
+        field = cached_fallback_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
+        return field, asset, bbox, pad
 
     def render_tmp_sdf_run(
         self,
@@ -10228,6 +9315,8 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
     ) -> tuple[Image.Image, tuple[int, int, int, int], int] | None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
         style = run.style
         static_atlas = self.render_tmp_static_atlas_run(font_name, run, font_size, outline_color, outline_dilate)
         if static_atlas is not None:
@@ -10250,6 +9339,15 @@ class PNGRenderer:
             if dynamic_atlas is not None:
                 return dynamic_atlas
 
+        if len(run.text) == 1:
+            try:
+                field, asset, bbox, pad = self.prepare_tmp_fallback_sdf_character(
+                    font_name, font_path, run.text, style, font_size, outline_dilate
+                )
+            except ImportError:
+                return None
+            return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
+
         font = load_font(font_path, font_size)
         bbox = (
             self.run_fx_bbox(font, run, font_name, font_size)
@@ -10262,11 +9360,6 @@ class PNGRenderer:
         pad = self.tmp_display_padding(asset, outline_dilate, font_size)
         w = max(1, bbox[2] - bbox[0] + pad * 2)
         h = max(1, bbox[3] - bbox[1] + pad * 2)
-        w, h = ensure_raster_size(
-            (w, h),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP SDF run mask",
-        )
         mask = Image.new("L", (w, h), 0)
         if self.tmp_scale_mode in {"fx-center", "fx-native"}:
             self.draw_text_mask_run_fx(mask, (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size)
@@ -10274,14 +9367,9 @@ class PNGRenderer:
             self.draw_text_mask_run(
                 ImageDraw.Draw(mask), (pad - bbox[0], pad - bbox[1]), run, font, font_name, font_size
             )
-            if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
+            if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
                 new_w = max(1, round(mask.width * style.scale_x))
-                scaled_size = ensure_raster_size(
-                    (new_w, mask.height),
-                    max_pixels=self.max_layer_pixels,
-                    label="custom profile scaled TMP SDF run mask",
-                )
-                mask = mask.resize(scaled_size, Image.Resampling.BICUBIC)
+                mask = mask.resize((new_w, mask.height), Image.Resampling.BICUBIC)
 
         try:
             field = alpha_mask_to_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
@@ -10289,251 +9377,6 @@ class PNGRenderer:
             return None
 
         return self.shade_tmp_sdf_field(field, asset, style, outline_color, outline_dilate), bbox, pad
-
-    def _tmp_native_static_character_field(
-        self,
-        glyph_asset: TMPFontAsset,
-        metrics: TMPGlyphMetrics,
-        atlas_path: Path,
-        style: TextStyle,
-        outline_dilate: float,
-        char_info: TMPNativeCharacterInfo,
-        defer_static_atlas: bool,
-        native_field_size: tuple[int, int] | None,
-    ) -> _TMPPreparedCharacterField | None:
-        quad_w, quad_h = ensure_raster_size(
-            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP native glyph quad",
-        )
-        atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
-        atlas_left = metrics.rect_x - atlas_pad
-        atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
-        atlas_bottom_unity = metrics.rect_y - atlas_pad
-        atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
-        if defer_static_atlas:
-            atlas_width = round(glyph_asset.atlas_width)
-            atlas_height = round(glyph_asset.atlas_height)
-            if atlas_width <= 0 or atlas_height <= 0:
-                return None
-            atlas = None
-        else:
-            atlas = self.tmp_atlas_alpha(atlas_path)
-            atlas_width = atlas.width
-            atlas_height = atlas.height
-        crop_box = (
-            atlas_left,
-            atlas_height - atlas_top_unity,
-            atlas_right,
-            atlas_height - atlas_bottom_unity,
-        )
-        ensure_raster_size(
-            (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP atlas glyph crop",
-        )
-        if defer_static_atlas:
-            field_image: Image.Image | TMPStaticAtlasField = TMPStaticAtlasField(
-                atlas_path,
-                (atlas_width, atlas_height),
-                crop_box,
-                (quad_w, quad_h),
-            )
-        else:
-            assert atlas is not None
-            field_image = atlas.crop(crop_box)
-            if field_image.size != (quad_w, quad_h):
-                field_image = field_image.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-        return _TMPPreparedCharacterField(field_image, glyph_asset, (0, 0, quad_w, quad_h), 0, 0, True)
-
-    def _tmp_raster_static_character_field(
-        self,
-        glyph_asset: TMPFontAsset,
-        metrics: TMPGlyphMetrics,
-        atlas_path: Path,
-        font_size: float,
-        outline_dilate: float,
-    ) -> _TMPPreparedCharacterField:
-        atlas = self.tmp_atlas_alpha(atlas_path)
-        atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
-        atlas_left = max(0, metrics.rect_x)
-        crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
-        font_scale = font_size / max(1.0, glyph_asset.point_size)
-        glyph_scale = font_scale * metrics.glyph_scale
-        left = metrics.bearing_x * font_scale
-        top = -metrics.bearing_y * font_scale
-        width = max(1, round(metrics.rect_w * glyph_scale))
-        height = max(1, round(metrics.rect_h * glyph_scale))
-        bbox = (
-            math.floor(left),
-            math.floor(top),
-            math.ceil(left + width),
-            math.ceil(top + height),
-        )
-        pad = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
-        field_size = ensure_raster_size(
-            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP atlas glyph field",
-        )
-        field_image = Image.new("L", field_size, 0)
-        glyph_size = ensure_raster_size(
-            (width, height),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile TMP atlas glyph",
-        )
-        glyph = crop.resize(glyph_size, Image.Resampling.BICUBIC)
-        field_image.paste(glyph, (pad + math.floor(left) - bbox[0], pad + math.floor(top) - bbox[1]))
-        return _TMPPreparedCharacterField(field_image, glyph_asset, bbox, pad, pad, False)
-
-    def _tmp_raster_dynamic_character_field(
-        self,
-        font_name: str,
-        style: TextStyle,
-        outline_dilate: float,
-        cached: TMPDynamicGlyphSDF,
-        glyph_asset: TMPFontAsset,
-        char_info: TMPNativeCharacterInfo | None,
-        native_field_size: tuple[int, int] | None,
-    ) -> _TMPPreparedCharacterField:
-        active = self.tmp_sdf_asset(font_name)
-        asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
-        native_element_scale = self.tmp_native_element_scale(font_name, style.size)
-        display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
-        display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
-        sample_crop_pad = cached.pad
-        if char_info is not None:
-            atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
-            sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
-        sample_crop_pad = min(sample_crop_pad, cached.pad)
-        crop_box = (
-            max(0, cached.pad - sample_crop_pad),
-            max(0, cached.pad - sample_crop_pad),
-            min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
-            min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
-        )
-        field_source = cached.field.crop(crop_box)
-        if char_info is not None:
-            quad_w, quad_h = ensure_raster_size(
-                native_field_size or self.tmp_native_unrotated_quad_size(char_info),
-                max_pixels=self.max_layer_pixels,
-                label="custom profile TMP native glyph quad",
-            )
-            field_image = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
-            return _TMPPreparedCharacterField(
-                field_image,
-                glyph_asset,
-                (0, 0, field_image.width, field_image.height),
-                0,
-                0,
-                True,
-            )
-        bbox = (
-            math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
-            math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
-            math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
-            math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
-        )
-        pad = max(0, round(sample_crop_pad * display_scale))
-        field_size = ensure_raster_size(
-            (
-                max(1, round(field_source.width * display_scale)),
-                max(1, round(field_source.height * display_scale)),
-            ),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile displayed TMP glyph field",
-        )
-        return _TMPPreparedCharacterField(
-            field_source.resize(field_size, Image.Resampling.BICUBIC),
-            glyph_asset,
-            bbox,
-            pad,
-            pad,
-            False,
-        )
-
-    def _tmp_dynamic_character_field(
-        self,
-        font_name: str,
-        font_path: Path,
-        glyph_char: str,
-        style: TextStyle,
-        outline_dilate: float,
-        char_info: TMPNativeCharacterInfo | None,
-        defer_dynamic_font: bool,
-        native_field_size: tuple[int, int] | None,
-    ) -> _TMPPreparedCharacterField | None:
-        if defer_dynamic_font and char_info is not None:
-            native_field = self.tmp_dynamic_font_field(
-                font_name,
-                glyph_char,
-                style,
-                outline_dilate,
-                char_info,
-                native_field_size,
-            )
-            if native_field is None:
-                return None
-            field_image, glyph_asset = native_field
-            return _TMPPreparedCharacterField(
-                field_image,
-                glyph_asset,
-                (0, 0, field_image.field_size[0], field_image.field_size[1]),
-                0,
-                0,
-                True,
-            )
-        dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
-        if dynamic is None:
-            return None
-        cached, glyph_asset = dynamic
-        return self._tmp_raster_dynamic_character_field(
-            font_name,
-            style,
-            outline_dilate,
-            cached,
-            glyph_asset,
-            char_info,
-            native_field_size,
-        )
-
-    def _tmp_scaled_character_field(
-        self,
-        prepared: _TMPPreparedCharacterField,
-        style: TextStyle,
-    ) -> _TMPPreparedCharacterField:
-        scale_x = self.tmp_native_vertex_scale_x(style)
-        if prepared.native_quad_sized or abs(scale_x - 1.0) < 1.0e-6:
-            return prepared
-        assert isinstance(prepared.field, Image.Image)
-        scaled_left, scaled_right = self.tmp_scale_x_bounds(
-            float(prepared.bbox[0]),
-            float(prepared.bbox[2]),
-            scale_x,
-        )
-        bbox = (
-            math.floor(scaled_left),
-            prepared.bbox[1],
-            math.ceil(scaled_right),
-            prepared.bbox[3],
-        )
-        pad_x = max(1, round(prepared.pad_x * abs(scale_x)))
-        scaled_size = ensure_raster_size(
-            (
-                max(1, round(prepared.field.width * abs(scale_x))),
-                prepared.field.height,
-            ),
-            max_pixels=self.max_layer_pixels,
-            label="custom profile scaled TMP glyph field",
-        )
-        return _TMPPreparedCharacterField(
-            prepared.field.resize(scaled_size, Image.Resampling.BICUBIC),
-            prepared.glyph_asset,
-            bbox,
-            pad_x,
-            prepared.pad_y,
-            False,
-        )
 
     def render_tmp_sdf_character_field(
         self,
@@ -10549,33 +9392,19 @@ class PNGRenderer:
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
         native_field_size: tuple[int, int] | None = None,
-    ) -> (
-        tuple[
-            Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-            TMPFontAsset | None,
-            tuple[int, int, int, int],
-            int,
-            int,
-        ]
-        | None
-    ):
+    ) -> tuple[GrayField, TMPFontAsset | None, tuple[int, int, int, int], int, int] | None:
         run = TextRun(char, style)
-        glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
-        glyph_asset = self.tmp_static_sdf_asset(font_name, run)
-        has_static_glyph = bool(
-            glyph_asset is not None and glyph_asset.atlas_paths and glyph_char and glyph_char != " "
-        )
-        if has_static_glyph:
-            assert glyph_asset is not None
-            metrics = glyph_asset.glyphs.get(ord(glyph_char[0]))
-            if metrics is None or metrics.rect_w <= 0 or metrics.rect_h <= 0:
-                return None
-            atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
-            if char_info is not None:
+        if char_info is not None and (defer_static_atlas or defer_dynamic_font):
+            glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
+            asset = self.tmp_static_sdf_asset(font_name, run)
+            if asset is not None and asset.atlas_paths and glyph_char and glyph_char != " ":
+                metrics = asset.glyphs.get(ord(glyph_char[0]))
+                if metrics is None or metrics.rect_w <= 0 or metrics.rect_h <= 0:
+                    return None
                 prepared = self._tmp_native_static_character_field(
-                    glyph_asset,
+                    asset,
                     metrics,
-                    atlas_path,
+                    asset.atlas_paths[min(metrics.atlas_index, len(asset.atlas_paths) - 1)],
                     style,
                     outline_dilate,
                     char_info,
@@ -10583,27 +9412,129 @@ class PNGRenderer:
                     native_field_size,
                 )
             else:
-                prepared = self._tmp_raster_static_character_field(
-                    glyph_asset,
-                    metrics,
-                    atlas_path,
-                    font_size,
+                prepared = self._tmp_dynamic_character_field(
+                    font_name,
+                    font_path,
+                    glyph_char,
+                    style,
                     outline_dilate,
+                    char_info,
+                    defer_dynamic_font,
+                    native_field_size,
                 )
+            return None if prepared is None else self._tmp_scaled_character_field(prepared, style).result()
+        native_quad_sized = False
+        glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
+        glyph_asset = self.tmp_static_sdf_asset(font_name, run)
+        if glyph_asset is not None and glyph_asset.atlas_paths and glyph_char and glyph_char != " ":
+            metrics = glyph_asset.glyphs.get(ord(glyph_char[0]))
+            if metrics is not None and metrics.rect_w > 0 and metrics.rect_h > 0:
+                atlas_path = glyph_asset.atlas_paths[min(metrics.atlas_index, len(glyph_asset.atlas_paths) - 1)]
+                atlas = self.tmp_atlas_alpha(atlas_path)
+                if char_info is not None:
+                    quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                    atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+                    atlas_left = metrics.rect_x - atlas_pad
+                    atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
+                    atlas_bottom_unity = metrics.rect_y - atlas_pad
+                    atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
+                    crop_box = (
+                        atlas_left,
+                        atlas.height - atlas_top_unity,
+                        atlas_right,
+                        atlas.height - atlas_bottom_unity,
+                    )
+                    field_img = atlas.crop(crop_box)
+                    if field_img.size != (quad_w, quad_h):
+                        field_img = field_img.resize_bicubic((quad_w, quad_h))
+                    bbox = (0, 0, field_img.width, field_img.height)
+                    pad_x = pad_y = 0
+                    native_quad_sized = True
+                else:
+                    atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
+                    atlas_left = max(0, metrics.rect_x)
+                    crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
+                    font_scale = font_size / max(1.0, glyph_asset.point_size)
+                    glyph_scale = font_scale * metrics.glyph_scale
+                    left = metrics.bearing_x * font_scale
+                    top = -metrics.bearing_y * font_scale
+                    width = max(1, round(metrics.rect_w * glyph_scale))
+                    height = max(1, round(metrics.rect_h * glyph_scale))
+                    bbox = (
+                        math.floor(left),
+                        math.floor(top),
+                        math.ceil(left + width),
+                        math.ceil(top + height),
+                    )
+                    pad_x = pad_y = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
+                    field_w = max(1, bbox[2] - bbox[0] + pad_x * 2)
+                    field_h = max(1, bbox[3] - bbox[1] + pad_y * 2)
+                    glyph = crop.resize_bicubic((width, height))
+                    px, py = pad_x + math.floor(left) - bbox[0], pad_y + math.floor(top) - bbox[1]
+                    field_img = glyph.crop((-px, -py, field_w - px, field_h - py))
+            else:
+                return None
         else:
-            prepared = self._tmp_dynamic_character_field(
-                font_name,
-                font_path,
-                glyph_char,
-                style,
-                outline_dilate,
-                char_info,
-                defer_dynamic_font,
-                native_field_size,
+            dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
+            if dynamic is None:
+                return None
+            cached, glyph_asset = dynamic
+            active = self.tmp_sdf_asset(font_name)
+            asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
+            native_element_scale = self.tmp_native_element_scale(font_name, style.size)
+            display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
+            display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
+            sample_crop_pad = cached.pad
+            if char_info is not None:
+                atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+                sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
+            sample_crop_pad = min(sample_crop_pad, cached.pad)
+            crop_box = (
+                max(0, cached.pad - sample_crop_pad),
+                max(0, cached.pad - sample_crop_pad),
+                min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
+                min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
             )
-        if prepared is None:
-            return None
-        return self._tmp_scaled_character_field(prepared, style).result()
+            field_source = cached.field.crop(crop_box)
+            if char_info is not None:
+                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                field_img = field_source.resize_bicubic((quad_w, quad_h))
+                bbox = (0, 0, field_img.width, field_img.height)
+                pad_x = pad_y = 0
+                native_quad_sized = True
+            else:
+                bbox = (
+                    math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
+                    math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
+                    math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
+                    math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
+                )
+                pad_x = pad_y = max(0, round(sample_crop_pad * display_scale))
+                field_img = field_source.resize_bicubic(
+                    (
+                        max(1, round(field_source.width * display_scale)),
+                        max(1, round(field_source.height * display_scale)),
+                    ),
+                )
+
+        scale_x = self.tmp_native_vertex_scale_x(style)
+        if not native_quad_sized and abs(scale_x - 1.0) >= 1.0e-6:
+            scaled_left, scaled_right = self.tmp_scale_x_bounds(float(bbox[0]), float(bbox[2]), scale_x)
+            bbox = (
+                math.floor(scaled_left),
+                bbox[1],
+                math.ceil(scaled_right),
+                bbox[3],
+            )
+            pad_x = max(1, round(pad_x * abs(scale_x)))
+            field_img = field_img.resize_bicubic(
+                (
+                    max(1, round(field_img.width * abs(scale_x))),
+                    field_img.height,
+                ),
+            )
+
+        return field_img, glyph_asset, bbox, pad_x, pad_y
 
     def render_tmp_sdf_character_image(
         self,
@@ -10629,7 +9560,6 @@ class PNGRenderer:
         if character_field is None:
             return None
         field_img, glyph_asset, bbox, pad_x, pad_y = character_field
-        assert isinstance(field_img, Image.Image)
         import numpy as np
 
         field = np.asarray(field_img, dtype=np.float32) / 255.0
@@ -10683,6 +9613,20 @@ class PNGRenderer:
                     outline_dilate,
                 )
 
+    @staticmethod
+    def tmp_native_glyph_position(char_info, x_origin, baseline_y, size):
+        """Shared legacy/native placement after shading and optional center rotation."""
+        xs = (char_info.bottom_left_x, char_info.top_left_x, char_info.top_right_x, char_info.bottom_right_x)
+        ys = (char_info.bottom_left_y, char_info.top_left_y, char_info.top_right_y, char_info.bottom_right_y)
+        if char_info.style.rotate:
+            from src.sekai.profile.custom_profile.rotation_geometry import expanded_rotation
+
+            width, height = expanded_rotation(size, char_info.style.rotate).size
+            center_x = x_origin + (xs[0] + xs[1] + xs[2] + xs[3]) * 0.25
+            center_y = baseline_y - (ys[0] + ys[1] + ys[2] + ys[3]) * 0.25
+            return center_x - width * 0.5, center_y - height * 0.5
+        return x_origin + min(xs), baseline_y - max(ys)
+
     def draw_tmp_native_character(
         self,
         target: Image.Image,
@@ -10695,6 +9639,8 @@ class PNGRenderer:
         outline_width: int,
         outline_dilate: float,
     ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
         if not char_info.visible:
             return
         style = char_info.style
@@ -10749,42 +9695,12 @@ class PNGRenderer:
         quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
         if glyph_image.size != (quad_w, quad_h):
             glyph_image = glyph_image.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+        left, top = self.tmp_native_glyph_position(char_info, x_origin, baseline_y, glyph_image.size)
         if style.rotate:
-            center_local_x = (
-                char_info.bottom_left_x + char_info.top_left_x + char_info.top_right_x + char_info.bottom_right_x
-            ) * 0.25
-            center_local_y = (
-                char_info.bottom_left_y + char_info.top_left_y + char_info.top_right_y + char_info.bottom_right_y
-            ) * 0.25
-            center_x = x_origin + center_local_x
-            center_y = baseline_y - center_local_y
             glyph_image = glyph_image.rotate(style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
-            left = center_x - glyph_image.width * 0.5
-            top = center_y - glyph_image.height * 0.5
-        else:
-            left = x_origin + min(
-                char_info.bottom_left_x,
-                char_info.top_left_x,
-                char_info.top_right_x,
-                char_info.bottom_right_x,
-            )
-            top = baseline_y - max(
-                char_info.bottom_left_y,
-                char_info.top_left_y,
-                char_info.top_right_y,
-                char_info.bottom_right_y,
-            )
         target.alpha_composite(glyph_image, (round(left), round(top)))
 
     def render_tmp_decorative_text_direct(
-        self,
-        canvas: Image.Image,
-        item: dict[str, Any],
-        object_data: dict[str, Any],
-    ) -> bool:
-        return self.render_tmp_text_direct(canvas, item, object_data)
-
-    def render_tmp_text_direct(
         self,
         canvas: Image.Image,
         item: dict[str, Any],
@@ -10805,15 +9721,16 @@ class PNGRenderer:
         item: dict[str, Any],
         object_data: dict[str, Any],
         *,
+        max_field_bytes: int | None = None,
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
         source_metrics_only: bool = False,
-    ) -> list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] | None:
-        """Layout + per-glyph warp half of the sparse/direct TMP path. Returns None when the
+    ) -> list[DirectSdfQuad] | None:
+        """Layout + per-glyph warp half of the direct decorative path. Returns None when the
         element is not eligible for the direct path (caller falls back to the raster path);
         degenerate/fully clipped glyphs are skipped exactly as the composite path skips them.
-        Shading/compositing stays out: Pillow feeds each raster quad to _shade_field_with_scalars;
-        the Skia emitter ships static descriptors as SdfAtlasQuad and dynamic fields as SdfQuad."""
+        The warp operates on neutral gray8 fields. Shading/compositing stays out: Pillow feeds
+        each quad to _shade_field_with_scalars; Skia ships the same quads as SdfQuad IR nodes."""
         text_data = self.generate_text_data(item)
         if not text_data.text.strip():
             return None
@@ -10836,6 +9753,7 @@ class PNGRenderer:
         horizontal_align = tmp_horizontal_alignment(align_type)
         vertical_align = tmp_vertical_alignment(align_type)
         layout_lines = [line for line in lines if self.include_empty_lines or line.runs]
+
         layouts = self.resolve_tmp_text_box_layouts(
             layout_lines,
             font_name,
@@ -10922,155 +9840,49 @@ class PNGRenderer:
             rect_origin_y,
             outline_color,
             outline_dilate,
+            max_field_bytes=max_field_bytes,
             defer_static_atlas=defer_static_atlas,
             defer_dynamic_font=defer_dynamic_font,
         )
         if direct_glyphs is None:
             return None
-        quads: list[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad] = []
-        retained_field_bytes = sum(
-            (
+        quads: list[DirectSdfQuad] = []
+        retained_bytes = 0
+        if direct_glyphs and len(direct_glyphs[0]) == 7:
+            retained_bytes = sum(
                 field.field_size[0] * field.field_size[1]
                 if isinstance(field, (TMPStaticAtlasField, TMPDynamicFontField))
                 else field.width * field.height
+                for field, *_ in direct_glyphs
             )
-            for field, *_ in direct_glyphs
-        )
-        for direct_glyph in direct_glyphs:
-            quad, retained_field_bytes = self.prepare_direct_sdf_quad(
-                direct_glyph,
-                pivot,
-                object_data,
-                outline_color,
-                outline_dilate,
-                retained_field_bytes,
-            )
-            if quad is not None:
-                quads.append(quad)
-        return quads
-
-    def prepare_direct_sdf_quad(
-        self,
-        direct_glyph: tuple[
-            Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-            TMPFontAsset | None,
-            TextStyle,
-            float,
-            float,
-            tuple[int, int],
-            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
-        ],
-        pivot: tuple[float, float],
-        object_data: dict[str, Any],
-        outline_color: str,
-        outline_dilate: float,
-        retained_field_bytes: int,
-    ) -> tuple[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
-        field, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners = direct_glyph
-        if isinstance(field, (TMPStaticAtlasField, TMPDynamicFontField)):
-            return self.prepare_deferred_direct_sdf_quad(
-                field,
-                glyph_asset,
-                style,
+            for glyph in direct_glyphs:
+                quad, retained_bytes = self.prepare_direct_sdf_quad(
+                    glyph,
+                    pivot,
+                    object_data,
+                    outline_color,
+                    outline_dilate,
+                    retained_bytes,
+                )
+                if quad is not None:
+                    quads.append(quad)
+            return quads
+        for field_img, glyph_asset, style, local_left, local_top in direct_glyphs:
+            warped = self.warp_tmp_sdf_field_direct(
+                field_img,
                 local_left,
                 local_top,
-                geometry_size,
-                geometry_corners,
                 pivot,
                 object_data,
-                outline_color,
-                outline_dilate,
-                retained_field_bytes,
+                max_output_pixels=None if max_field_bytes is None else max_field_bytes - retained_bytes,
             )
-        warped = self.warp_tmp_sdf_field_direct(
-            field,
-            local_left,
-            local_top,
-            pivot,
-            object_data,
-            geometry_size=geometry_size,
-            geometry_corners=geometry_corners,
-            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
-        )
-        if warped is None:
-            return None, retained_field_bytes
-        warped_field, left, top = warped
-        retained_field_bytes = self._reserve_retained_raster_bytes(
-            retained_field_bytes,
-            warped_field.width * warped_field.height,
-            label=_TMP_TEXT_LABEL,
-        )
-        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
-        return DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars), retained_field_bytes
-
-    def prepare_deferred_direct_sdf_quad(
-        self,
-        field: TMPStaticAtlasField | TMPDynamicFontField,
-        glyph_asset: TMPFontAsset | None,
-        style: TextStyle,
-        local_left: float,
-        local_top: float,
-        geometry_size: tuple[int, int],
-        geometry_corners: (
-            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None
-        ),
-        pivot: tuple[float, float],
-        object_data: dict[str, Any],
-        outline_color: str,
-        outline_dilate: float,
-        retained_field_bytes: int,
-    ) -> tuple[DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
-        plan = self.tmp_sdf_field_warp_plan(
-            field.field_size,
-            local_left,
-            local_top,
-            pivot,
-            object_data,
-            geometry_size=geometry_size,
-            geometry_corners=geometry_corners,
-            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
-        )
-        if plan is None:
-            return None, retained_field_bytes
-        retained_field_bytes = self._reserve_retained_raster_bytes(
-            retained_field_bytes,
-            plan.size[0] * plan.size[1],
-            label=_TMP_TEXT_LABEL,
-        )
-        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
-        if isinstance(field, TMPDynamicFontField):
-            return (
-                DirectSdfFontQuad(
-                    font_path=field.font_path,
-                    codepoint=field.codepoint,
-                    sample_size=field.sample_size,
-                    bbox=field.bbox,
-                    padding=field.padding,
-                    crop_padding=field.crop_padding,
-                    field_size=field.field_size,
-                    spread=field.spread,
-                    size=plan.size,
-                    affine=plan.affine,
-                    left=plan.left,
-                    top=plan.top,
-                    scalars=scalars,
-                ),
-                retained_field_bytes,
-            )
-        return (
-            DirectSdfAtlasQuad(
-                atlas_path=field.atlas_path,
-                atlas_size=field.atlas_size,
-                crop=field.crop,
-                field_size=field.field_size,
-                size=plan.size,
-                affine=plan.affine,
-                left=plan.left,
-                top=plan.top,
-                scalars=scalars,
-            ),
-            retained_field_bytes,
-        )
+            if warped is None:
+                continue
+            warped_field, left, top = warped
+            retained_bytes += warped_field.width * warped_field.height
+            scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+            quads.append(DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars))
+        return quads
 
     def prepare_tmp_direct_sdf_glyphs(
         self,
@@ -11085,35 +9897,18 @@ class PNGRenderer:
         outline_color: str,
         outline_dilate: float,
         *,
+        max_field_bytes: int | None = None,
+        allow_rotation: bool = False,
+        allow_fallback: bool = False,
         defer_static_atlas: bool = False,
         defer_dynamic_font: bool = False,
-    ) -> (
-        list[
-            tuple[
-                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-                TMPFontAsset | None,
-                TextStyle,
-                float,
-                float,
-                tuple[int, int],
-                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
-            ]
-        ]
-        | None
-    ):
-        characters_by_line = self.tmp_characters_by_line(layout.characters)
-        direct_glyphs: list[
-            tuple[
-                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-                TMPFontAsset | None,
-                TextStyle,
-                float,
-                float,
-                tuple[int, int],
-                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
-            ]
-        ] = []
+    ) -> list[tuple[GrayField | FloatField, TMPFontAsset | None, TextStyle, float, float]] | None:
         retained_field_bytes = 0
+        characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
+        for char_info in layout.characters:
+            characters_by_line.setdefault(char_info.line_index, []).append(char_info)
+
+        direct_glyphs: list[tuple[GrayField | FloatField, TMPFontAsset | None, TextStyle, float, float]] = []
         for line_info in layout.lines:
             line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
             x_origin = rect_origin_x + line_x
@@ -11121,118 +9916,78 @@ class PNGRenderer:
             for char_info in characters_by_line.get(line_info.index, []):
                 if not char_info.visible:
                     continue
-                prepared = self.prepare_tmp_direct_sdf_glyph(
+                if defer_static_atlas or defer_dynamic_font:
+                    prepared = self.prepare_tmp_direct_sdf_glyph(
+                        font_name,
+                        font_path,
+                        char_info,
+                        x_origin,
+                        baseline_y,
+                        outline_color,
+                        outline_dilate,
+                        retained_field_bytes,
+                        defer_static_atlas,
+                        defer_dynamic_font,
+                    )
+                    if prepared is None:
+                        return None
+                    glyph, retained_field_bytes = prepared
+                    if max_field_bytes is not None and retained_field_bytes > max_field_bytes:
+                        raise ValueError("TMP glyph fields exceed remaining native scene memory")
+                    direct_glyphs.append(glyph)
+                    continue
+                style = char_info.style
+                if style.rotate and not allow_rotation:
+                    return None
+                run = TextRun(char_info.char, style)
+                if self.use_em_block(run):
+                    return None
+                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                retained_field_bytes += quad_w * quad_h
+                if max_field_bytes is not None and retained_field_bytes > max_field_bytes:
+                    raise ValueError("TMP glyph fields exceed remaining native scene memory")
+                character_field = self.render_tmp_sdf_character_field(
                     font_name,
                     font_path,
-                    char_info,
-                    x_origin,
-                    baseline_y,
+                    char_info.char,
+                    style,
+                    self.tmp_run_font_size(style),
                     outline_color,
                     outline_dilate,
-                    retained_field_bytes,
-                    defer_static_atlas,
-                    defer_dynamic_font,
+                    char_info,
                 )
-                if prepared is None:
+                if character_field is None:
+                    if allow_fallback:
+                        # The legacy mesh painter falls back at the pen baseline,
+                        # retaining the run's own box and padding. It does NOT
+                        # stretch this raster into the normal atlas mesh quad.
+                        retained_field_bytes -= quad_w * quad_h
+                        remaining = None if max_field_bytes is None else max_field_bytes - retained_field_bytes
+                        raw, asset, bbox, pad = self.prepare_tmp_fallback_sdf_character(
+                            font_name,
+                            font_path,
+                            char_info.char,
+                            style,
+                            self.tmp_run_font_size(style),
+                            outline_dilate,
+                            max_field_bytes=remaining,
+                        )
+                        field_img = FloatField.from_array(raw)
+                        del raw
+                        retained_field_bytes += len(field_img.pixels)
+                        font = TMPFallbackMetrics(font_path, self.tmp_run_font_size(style))
+                        left = x_origin + char_info.x_origin
+                        top = self.run_y_from_baseline(baseline_y, style, font, bbox[1], pad)
+                        direct_glyphs.append((field_img, asset, style, left, top))
+                        continue
                     return None
-                direct_glyph, retained_field_bytes = prepared
-                direct_glyphs.append(direct_glyph)
+                field_img, glyph_asset, _, _, _ = character_field
+                quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
+                if field_img.size != (quad_w, quad_h):
+                    field_img = field_img.resize_bicubic((quad_w, quad_h))
+                local_left, local_top = self.tmp_native_glyph_position(char_info, x_origin, baseline_y, field_img.size)
+                direct_glyphs.append((field_img, glyph_asset, style, local_left, local_top))
         return direct_glyphs
-
-    def tmp_characters_by_line(
-        self,
-        characters: list[TMPNativeCharacterInfo],
-    ) -> dict[int, list[TMPNativeCharacterInfo]]:
-        characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
-        for char_info in characters:
-            characters_by_line.setdefault(char_info.line_index, []).append(char_info)
-        return characters_by_line
-
-    def prepare_tmp_direct_sdf_glyph(
-        self,
-        font_name: str,
-        font_path: Path,
-        char_info: TMPNativeCharacterInfo,
-        x_origin: float,
-        baseline_y: float,
-        outline_color: str,
-        outline_dilate: float,
-        retained_field_bytes: int,
-        defer_static_atlas: bool,
-        defer_dynamic_font: bool,
-    ) -> (
-        tuple[
-            tuple[
-                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
-                TMPFontAsset | None,
-                TextStyle,
-                float,
-                float,
-                tuple[int, int],
-                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
-            ],
-            int,
-        ]
-        | None
-    ):
-        style = char_info.style
-        if self.use_em_block(TextRun(char_info.char, style)):
-            return None
-        geometry_size = self.tmp_native_unrotated_quad_size(char_info)
-        field_size = self.tmp_direct_sdf_field_size(geometry_size)
-        retained_field_bytes = self._reserve_retained_raster_bytes(
-            retained_field_bytes,
-            field_size[0] * field_size[1],
-            label=_TMP_TEXT_LABEL,
-        )
-        character_field = self.render_tmp_sdf_character_field(
-            font_name,
-            font_path,
-            char_info.char,
-            style,
-            self.tmp_run_font_size(style),
-            outline_color,
-            outline_dilate,
-            char_info,
-            defer_static_atlas=defer_static_atlas,
-            defer_dynamic_font=defer_dynamic_font,
-            native_field_size=field_size,
-        )
-        if character_field is None:
-            return None
-        field_img, glyph_asset, _, _, _ = character_field
-        if isinstance(field_img, Image.Image) and field_img.size != field_size:
-            field_img = field_img.resize(field_size, Image.Resampling.BICUBIC)
-        local_left = x_origin + min(
-            char_info.bottom_left_x,
-            char_info.top_left_x,
-            char_info.top_right_x,
-            char_info.bottom_right_x,
-        )
-        local_top = baseline_y - max(
-            char_info.bottom_left_y,
-            char_info.top_left_y,
-            char_info.top_right_y,
-            char_info.bottom_right_y,
-        )
-        geometry_corners = self.tmp_direct_sdf_geometry_corners(char_info, x_origin, baseline_y)
-        direct_glyph = (field_img, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners)
-        return direct_glyph, retained_field_bytes
-
-    def tmp_direct_sdf_geometry_corners(
-        self,
-        char_info: TMPNativeCharacterInfo,
-        x_origin: float,
-        baseline_y: float,
-    ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None:
-        if abs(char_info.style.rotate) < 1.0e-6:
-            return None
-        return (
-            (x_origin + char_info.top_left_x, baseline_y - char_info.top_left_y),
-            (x_origin + char_info.top_right_x, baseline_y - char_info.top_right_y),
-            (x_origin + char_info.bottom_right_x, baseline_y - char_info.bottom_right_y),
-            (x_origin + char_info.bottom_left_x, baseline_y - char_info.bottom_left_y),
-        )
 
     def transformed_local_point(
         self,
@@ -11252,6 +10007,290 @@ class PNGRenderer:
         dx = (local_x - pivot[0]) * sx
         dy = (local_y - pivot[1]) * sy
         return x + dx * cos_t - dy * sin_t, y + dx * sin_t + dy * cos_t
+
+    def warp_tmp_sdf_field_direct(
+        self,
+        field_img: GrayField,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+        *,
+        max_output_pixels: int | None = None,
+        max_output_bytes: int | None = None,
+        geometry_size: tuple[int, int] | None = None,
+        geometry_corners=None,
+    ) -> tuple[GrayField, int, int] | None:
+        """Apply native gray8 bicubic sampling to the shared, bounded geometry plan."""
+        plan = self.tmp_sdf_field_warp_plan(
+            field_img.size,
+            local_left,
+            local_top,
+            pivot,
+            object_data,
+            geometry_size=geometry_size,
+            geometry_corners=geometry_corners,
+            max_output_bytes=max_output_bytes,
+        )
+        if plan is None:
+            return None
+        ensure_raster_size(
+            plan.size,
+            max_pixels=min(self.max_layer_pixels, max_output_pixels)
+            if max_output_pixels is not None
+            else self.max_layer_pixels,
+            label="decorative TMP warped field",
+        )
+        transformed = field_img.transform_bicubic(plan.size, plan.affine)
+        return transformed, plan.left, plan.top
+
+    def composite_tmp_sdf_field_direct(
+        self,
+        canvas: Image.Image,
+        field_img: Image.Image,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
+        outline_color: str,
+        outline_dilate: float,
+        local_left: float,
+        local_top: float,
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+    ) -> None:
+        warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+        if warped is None:
+            return
+        transformed_field, left, top = warped
+
+        import numpy as np
+
+        field = np.asarray(transformed_field, dtype=np.float32) / 255.0
+        patch = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate, None)
+        canvas.alpha_composite(patch, (left, top))
+
+    def draw_run(
+        self,
+        target: Image.Image,
+        font_name: str,
+        font_path: Path,
+        run: TextRun,
+        x: float,
+        line_top: float,
+        line_h: float,
+        outline_color: str,
+        outline_width: int,
+        outline_dilate: float,
+    ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        style = run.style
+        base_font_size = style.size * self.tmp_font_scale
+        font_size = self.tmp_run_font_size(style)
+        if self.use_em_block(run):
+            glyph, x_offset, source_metrics = self.render_em_block_glyph(
+                font_name,
+                run,
+                base_font_size,
+                outline_color,
+                outline_width,
+            )
+            if source_metrics is not None:
+                baseline_y = line_top + self.tmp_face_baseline_offset(font_name, style.size, line_h)
+                y = (
+                    baseline_y
+                    - source_metrics.bearing_y * self.tmp_layout_scale_y(style)
+                    - outline_width
+                    - self.tmp_native_baseline_offset(style)
+                )
+            else:
+                y = self.run_y(line_top, line_h, glyph.height, style, None, 0, 0)
+            target.alpha_composite(
+                glyph,
+                (
+                    round(x + x_offset),
+                    round(y),
+                ),
+            )
+            return
+
+        font = load_font(font_path, font_size)
+        bbox = self.run_bbox(font, run, font_name, font_size)
+        if self.tmp_text_render_mode == "sdf":
+            sdf = self.render_tmp_sdf_run(font_name, font_path, run, font_size, outline_color, outline_dilate)
+            if sdf is not None:
+                glyph, bbox, glyph_pad = sdf
+                if style.rotate:
+                    glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
+                target.alpha_composite(
+                    glyph,
+                    (
+                        round(x),
+                        round(self.run_y(line_top, line_h, glyph.height, style, font, bbox[1], glyph_pad)),
+                    ),
+                )
+                return
+
+        glyph_pad = outline_width * 2 + 4
+        w = max(1, bbox[2] - bbox[0] + glyph_pad * 2)
+        h = max(1, bbox[3] - bbox[1] + glyph_pad * 2)
+        glyph = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(glyph)
+        self.draw_text_run(
+            draw,
+            (glyph_pad - bbox[0], glyph_pad - bbox[1]),
+            run,
+            font,
+            hex_to_rgba(style.color, style.alpha),
+            outline_width,
+            hex_to_rgba(outline_color, style.alpha),
+            font_name,
+            font_size,
+        )
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
+            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
+        if style.rotate:
+            glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
+        target.alpha_composite(
+            glyph,
+            (
+                round(x),
+                round(self.run_y(line_top, line_h, glyph.height, style, font, bbox[1], glyph_pad)),
+            ),
+        )
+
+    def draw_run_at_baseline(
+        self,
+        target: Image.Image,
+        font_name: str,
+        font_path: Path,
+        run: TextRun,
+        x: float,
+        baseline_y: float,
+        outline_color: str,
+        outline_width: int,
+        outline_dilate: float,
+    ) -> None:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        style = run.style
+        base_font_size = style.size * self.tmp_font_scale
+        font_size = self.tmp_run_font_size(style)
+        if self.use_em_block(run):
+            glyph, x_offset, source_metrics = self.render_em_block_glyph(
+                font_name,
+                run,
+                base_font_size,
+                outline_color,
+                outline_width,
+            )
+            if source_metrics is not None:
+                y = (
+                    baseline_y
+                    - source_metrics.bearing_y * self.tmp_layout_scale_y(style)
+                    - outline_width
+                    - self.tmp_native_baseline_offset(style)
+                )
+            else:
+                y = baseline_y - glyph.height - self.tmp_native_baseline_offset(style)
+            target.alpha_composite(
+                glyph,
+                (
+                    round(x + x_offset),
+                    round(y),
+                ),
+            )
+            return
+
+        font = load_font(font_path, font_size)
+        bbox = self.run_bbox(font, run, font_name, font_size)
+        if self.tmp_text_render_mode == "sdf":
+            sdf = self.render_tmp_sdf_run(font_name, font_path, run, font_size, outline_color, outline_dilate)
+            if sdf is not None:
+                glyph, bbox, glyph_pad = sdf
+                if style.rotate:
+                    glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
+                target.alpha_composite(
+                    glyph,
+                    (
+                        round(x),
+                        round(self.run_y_from_baseline(baseline_y, style, font, bbox[1], glyph_pad)),
+                    ),
+                )
+                return
+
+        glyph_pad = outline_width * 2 + 4
+        w = max(1, bbox[2] - bbox[0] + glyph_pad * 2)
+        h = max(1, bbox[3] - bbox[1] + glyph_pad * 2)
+        glyph = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(glyph)
+        self.draw_text_run(
+            draw,
+            (glyph_pad - bbox[0], glyph_pad - bbox[1]),
+            run,
+            font,
+            hex_to_rgba(style.color, style.alpha),
+            outline_width,
+            hex_to_rgba(outline_color, style.alpha),
+            font_name,
+            font_size,
+        )
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
+            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
+        if style.rotate:
+            glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
+        target.alpha_composite(
+            glyph,
+            (
+                round(x),
+                round(self.run_y_from_baseline(baseline_y, style, font, bbox[1], glyph_pad)),
+            ),
+        )
+
+    def run_y_from_baseline(
+        self,
+        baseline_y: float,
+        style: TextStyle,
+        font: ImageFont.FreeTypeFont,
+        bbox_top: int,
+        glyph_pad_top: int,
+    ) -> float:
+        ascent, _ = font.getmetrics()
+        voffset = self.tmp_native_baseline_offset(style)
+        return baseline_y - float(ascent) + bbox_top - glyph_pad_top - voffset
+
+    def run_y(
+        self,
+        line_top: float,
+        line_h: float,
+        glyph_h: float,
+        style: TextStyle,
+        font: ImageFont.FreeTypeFont | None,
+        bbox_top: int,
+        glyph_pad_top: int,
+    ) -> float:
+        voffset = self.tmp_native_baseline_offset(style)
+        if self.text_vertical_mode == "font-metrics" and font is not None:
+            ascent, descent = font.getmetrics()
+            line_center = line_top + line_h / 2
+            metrics_h = max(1.0, float(ascent + descent))
+            ascender_anchor = line_center - metrics_h / 2
+            return ascender_anchor + bbox_top - glyph_pad_top - voffset
+        if self.text_vertical_mode == "pil-mm" and font is not None:
+            anchor_bbox = font.getbbox("Hg", anchor="mm")
+            line_center = line_top + line_h / 2
+            anchor_offset = (anchor_bbox[1] + anchor_bbox[3]) / 2
+            return line_center + anchor_offset - glyph_h / 2 - voffset
+        if self.text_vertical_mode == "font-ascent" and font is not None:
+            ascent, _ = font.getmetrics()
+            line_center = line_top + line_h / 2
+            ascender_anchor = line_center - float(ascent) / 2
+            return ascender_anchor + bbox_top - glyph_pad_top - voffset
+        if self.text_vertical_mode == "anchor-middle" and font is not None:
+            anchor_bbox = font.getbbox("H", anchor="mm")
+            line_center = line_top + line_h / 2
+            anchor_offset = (anchor_bbox[1] + anchor_bbox[3]) / 2
+            return line_center + anchor_offset - glyph_h / 2 - voffset
+        return line_top + line_h / 2 - glyph_h / 2 - voffset
 
     def tmp_sdf_field_warp_plan(
         self,
@@ -11326,285 +10365,2310 @@ class PNGRenderer:
             top=top,
         )
 
-    def warp_tmp_sdf_field_direct(
+    def tmp_direct_sdf_geometry_corners(
         self,
-        field_img: Image.Image,
+        char_info: TMPNativeCharacterInfo,
+        x_origin: float,
+        baseline_y: float,
+    ) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None:
+        if abs(char_info.style.rotate) < 1.0e-6:
+            return None
+        return (
+            (x_origin + char_info.top_left_x, baseline_y - char_info.top_left_y),
+            (x_origin + char_info.top_right_x, baseline_y - char_info.top_right_y),
+            (x_origin + char_info.bottom_right_x, baseline_y - char_info.bottom_right_y),
+            (x_origin + char_info.bottom_left_x, baseline_y - char_info.bottom_left_y),
+        )
+
+    def prepare_tmp_direct_sdf_glyph(
+        self,
+        font_name: str,
+        font_path: Path,
+        char_info: TMPNativeCharacterInfo,
+        x_origin: float,
+        baseline_y: float,
+        outline_color: str,
+        outline_dilate: float,
+        retained_field_bytes: int,
+        defer_static_atlas: bool,
+        defer_dynamic_font: bool,
+    ) -> (
+        tuple[
+            tuple[
+                Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+                TMPFontAsset | None,
+                TextStyle,
+                float,
+                float,
+                tuple[int, int],
+                tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
+            ],
+            int,
+        ]
+        | None
+    ):
+        style = char_info.style
+        if self.use_em_block(TextRun(char_info.char, style)):
+            return None
+        geometry_size = self.tmp_native_unrotated_quad_size(char_info)
+        field_size = self.tmp_direct_sdf_field_size(geometry_size)
+        retained_field_bytes = self._reserve_retained_raster_bytes(
+            retained_field_bytes,
+            field_size[0] * field_size[1],
+            label=_TMP_TEXT_LABEL,
+        )
+        character_field = self.render_tmp_sdf_character_field(
+            font_name,
+            font_path,
+            char_info.char,
+            style,
+            self.tmp_run_font_size(style),
+            outline_color,
+            outline_dilate,
+            char_info,
+            defer_static_atlas=defer_static_atlas,
+            defer_dynamic_font=defer_dynamic_font,
+            native_field_size=field_size,
+        )
+        if character_field is None:
+            return None
+        field_img, glyph_asset, _, _, _ = character_field
+        if isinstance(field_img, (GrayField, FloatField)) and field_img.size != field_size:
+            field_img = field_img.resize_bicubic(field_size)
+        local_left = x_origin + min(
+            char_info.bottom_left_x,
+            char_info.top_left_x,
+            char_info.top_right_x,
+            char_info.bottom_right_x,
+        )
+        local_top = baseline_y - max(
+            char_info.bottom_left_y,
+            char_info.top_left_y,
+            char_info.top_right_y,
+            char_info.bottom_right_y,
+        )
+        geometry_corners = self.tmp_direct_sdf_geometry_corners(char_info, x_origin, baseline_y)
+        direct_glyph = (field_img, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners)
+        return direct_glyph, retained_field_bytes
+
+    def tmp_characters_by_line(
+        self,
+        characters: list[TMPNativeCharacterInfo],
+    ) -> dict[int, list[TMPNativeCharacterInfo]]:
+        characters_by_line: dict[int, list[TMPNativeCharacterInfo]] = {}
+        for char_info in characters:
+            characters_by_line.setdefault(char_info.line_index, []).append(char_info)
+        return characters_by_line
+
+    def prepare_deferred_direct_sdf_quad(
+        self,
+        field: TMPStaticAtlasField | TMPDynamicFontField,
+        glyph_asset: TMPFontAsset | None,
+        style: TextStyle,
         local_left: float,
         local_top: float,
-        pivot: tuple[float, float],
-        object_data: dict[str, Any],
-        *,
-        geometry_size: tuple[int, int] | None = None,
+        geometry_size: tuple[int, int],
         geometry_corners: (
             tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None
-        ) = None,
-        max_output_bytes: int | None = None,
-    ) -> tuple[Image.Image, int, int] | None:
-        """Warp an L field with Pillow's BICUBIC affine path using the shared geometry plan."""
+        ),
+        pivot: tuple[float, float],
+        object_data: dict[str, Any],
+        outline_color: str,
+        outline_dilate: float,
+        retained_field_bytes: int,
+    ) -> tuple[DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
         plan = self.tmp_sdf_field_warp_plan(
-            field_img.size,
+            field.field_size,
             local_left,
             local_top,
             pivot,
             object_data,
             geometry_size=geometry_size,
             geometry_corners=geometry_corners,
-            max_output_bytes=max_output_bytes,
+            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
         )
         if plan is None:
-            return None
-        transformed_field = field_img.transform(
-            plan.size,
-            Image.Transform.AFFINE,
-            plan.affine,
-            Image.Resampling.BICUBIC,
-            fillcolor=0,
+            return None, retained_field_bytes
+        retained_field_bytes = self._reserve_retained_raster_bytes(
+            retained_field_bytes,
+            plan.size[0] * plan.size[1],
+            label=_TMP_TEXT_LABEL,
         )
-        return transformed_field, plan.left, plan.top
+        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+        if isinstance(field, TMPDynamicFontField):
+            return (
+                DirectSdfFontQuad(
+                    font_path=field.font_path,
+                    codepoint=field.codepoint,
+                    sample_size=field.sample_size,
+                    bbox=field.bbox,
+                    padding=field.padding,
+                    crop_padding=field.crop_padding,
+                    field_size=field.field_size,
+                    spread=field.spread,
+                    size=plan.size,
+                    affine=plan.affine,
+                    left=plan.left,
+                    top=plan.top,
+                    scalars=scalars,
+                ),
+                retained_field_bytes,
+            )
+        return (
+            DirectSdfAtlasQuad(
+                atlas_path=field.atlas_path,
+                atlas_size=field.atlas_size,
+                crop=field.crop,
+                field_size=field.field_size,
+                size=plan.size,
+                affine=plan.affine,
+                left=plan.left,
+                top=plan.top,
+                scalars=scalars,
+            ),
+            retained_field_bytes,
+        )
 
-    def composite_tmp_sdf_field_direct(
+    def prepare_direct_sdf_quad(
         self,
-        canvas: Image.Image,
-        field_img: Image.Image,
-        glyph_asset: TMPFontAsset | None,
-        style: TextStyle,
-        outline_color: str,
-        outline_dilate: float,
-        local_left: float,
-        local_top: float,
+        direct_glyph: tuple[
+            Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+            TMPFontAsset | None,
+            TextStyle,
+            float,
+            float,
+            tuple[int, int],
+            tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None,
+        ],
         pivot: tuple[float, float],
         object_data: dict[str, Any],
-    ) -> None:
-        warped = self.warp_tmp_sdf_field_direct(field_img, local_left, local_top, pivot, object_data)
+        outline_color: str,
+        outline_dilate: float,
+        retained_field_bytes: int,
+    ) -> tuple[DirectSdfQuad | DirectSdfAtlasQuad | DirectSdfFontQuad | None, int]:
+        field, glyph_asset, style, local_left, local_top, geometry_size, geometry_corners = direct_glyph
+        if isinstance(field, (TMPStaticAtlasField, TMPDynamicFontField)):
+            return self.prepare_deferred_direct_sdf_quad(
+                field,
+                glyph_asset,
+                style,
+                local_left,
+                local_top,
+                geometry_size,
+                geometry_corners,
+                pivot,
+                object_data,
+                outline_color,
+                outline_dilate,
+                retained_field_bytes,
+            )
+        warped = self.warp_tmp_sdf_field_direct(
+            field,
+            local_left,
+            local_top,
+            pivot,
+            object_data,
+            geometry_size=geometry_size,
+            geometry_corners=geometry_corners,
+            max_output_bytes=self.max_scene_bytes - retained_field_bytes,
+        )
         if warped is None:
-            return
-        transformed_field, left, top = warped
+            return None, retained_field_bytes
+        warped_field, left, top = warped
+        retained_field_bytes = self._reserve_retained_raster_bytes(
+            retained_field_bytes,
+            warped_field.width * warped_field.height,
+            label=_TMP_TEXT_LABEL,
+        )
+        scalars = self.tmp_sdf_shading_scalars(glyph_asset, style, outline_color, outline_dilate, None)
+        return DirectSdfQuad(field=warped_field, left=left, top=top, scalars=scalars), retained_field_bytes
+
+    def render_tmp_text_direct(
+        self,
+        canvas: Image.Image,
+        item: dict[str, Any],
+        object_data: dict[str, Any],
+    ) -> bool:
+        import numpy as np
+
+        quads = self.prepare_direct_sdf_quads(item, object_data)
+        if quads is None:
+            return False
+        for quad in quads:
+            field = np.asarray(quad.field, dtype=np.float32) / 255.0
+            canvas.alpha_composite(self._shade_field_with_scalars(field, quad.scalars), (quad.left, quad.top))
+        return True
+
+    def _tmp_scaled_character_field(
+        self,
+        prepared: _TMPPreparedCharacterField,
+        style: TextStyle,
+    ) -> _TMPPreparedCharacterField:
+        scale_x = self.tmp_native_vertex_scale_x(style)
+        if prepared.native_quad_sized or abs(scale_x - 1.0) < 1.0e-6:
+            return prepared
+        assert isinstance(prepared.field, (GrayField, FloatField))
+        scaled_left, scaled_right = self.tmp_scale_x_bounds(
+            float(prepared.bbox[0]),
+            float(prepared.bbox[2]),
+            scale_x,
+        )
+        bbox = (
+            math.floor(scaled_left),
+            prepared.bbox[1],
+            math.ceil(scaled_right),
+            prepared.bbox[3],
+        )
+        pad_x = max(1, round(prepared.pad_x * abs(scale_x)))
+        scaled_size = ensure_raster_size(
+            (
+                max(1, round(prepared.field.width * abs(scale_x))),
+                prepared.field.height,
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile scaled TMP glyph field",
+        )
+        return _TMPPreparedCharacterField(
+            prepared.field.resize_bicubic(scaled_size),
+            prepared.glyph_asset,
+            bbox,
+            pad_x,
+            prepared.pad_y,
+            False,
+        )
+
+    def _tmp_dynamic_character_field(
+        self,
+        font_name: str,
+        font_path: Path,
+        glyph_char: str,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo | None,
+        defer_dynamic_font: bool,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField | None:
+        if defer_dynamic_font and char_info is not None:
+            native_field = self.tmp_dynamic_font_field(
+                font_name,
+                glyph_char,
+                style,
+                outline_dilate,
+                char_info,
+                native_field_size,
+            )
+            if native_field is None:
+                return None
+            field_image, glyph_asset = native_field
+            return _TMPPreparedCharacterField(
+                field_image,
+                glyph_asset,
+                (0, 0, field_image.field_size[0], field_image.field_size[1]),
+                0,
+                0,
+                True,
+            )
+        dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
+        if dynamic is None:
+            return None
+        cached, glyph_asset = dynamic
+        return self._tmp_raster_dynamic_character_field(
+            font_name,
+            style,
+            outline_dilate,
+            cached,
+            glyph_asset,
+            char_info,
+            native_field_size,
+        )
+
+    def _tmp_raster_dynamic_character_field(
+        self,
+        font_name: str,
+        style: TextStyle,
+        outline_dilate: float,
+        cached: TMPDynamicGlyphSDF,
+        glyph_asset: TMPFontAsset,
+        char_info: TMPNativeCharacterInfo | None,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        active = self.tmp_sdf_asset(font_name)
+        asset_point_size = max(1.0, active.point_size if active is not None else glyph_asset.point_size)
+        native_element_scale = self.tmp_native_element_scale(font_name, style.size)
+        display_scale = native_element_scale * asset_point_size / max(1.0, cached.sample_size)
+        display_scale = min(display_scale, TMP_DYNAMIC_SDF_MAX_CHARACTER_SCALE)
+        sample_crop_pad = cached.pad
+        if char_info is not None:
+            atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+            sample_crop_pad = max(0, round(atlas_pad * cached.sample_size / asset_point_size))
+        sample_crop_pad = min(sample_crop_pad, cached.pad)
+        crop_box = (
+            max(0, cached.pad - sample_crop_pad),
+            max(0, cached.pad - sample_crop_pad),
+            min(cached.field.width, cached.field.width - cached.pad + sample_crop_pad),
+            min(cached.field.height, cached.field.height - cached.pad + sample_crop_pad),
+        )
+        field_source = cached.field.crop(crop_box)
+        if char_info is not None:
+            quad_w, quad_h = ensure_raster_size(
+                native_field_size or self.tmp_native_unrotated_quad_size(char_info),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile TMP native glyph quad",
+            )
+            field_image = field_source.resize((quad_w, quad_h), Image.Resampling.BICUBIC)
+            return _TMPPreparedCharacterField(
+                field_image,
+                glyph_asset,
+                (0, 0, field_image.width, field_image.height),
+                0,
+                0,
+                True,
+            )
+        bbox = (
+            math.floor((cached.bbox[0] - sample_crop_pad) * display_scale),
+            math.floor((cached.bbox[1] - sample_crop_pad) * display_scale),
+            math.ceil((cached.bbox[2] + sample_crop_pad) * display_scale),
+            math.ceil((cached.bbox[3] + sample_crop_pad) * display_scale),
+        )
+        pad = max(0, round(sample_crop_pad * display_scale))
+        field_size = ensure_raster_size(
+            (
+                max(1, round(field_source.width * display_scale)),
+                max(1, round(field_source.height * display_scale)),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile displayed TMP glyph field",
+        )
+        return _TMPPreparedCharacterField(
+            field_source.resize(field_size, Image.Resampling.BICUBIC),
+            glyph_asset,
+            bbox,
+            pad,
+            pad,
+            False,
+        )
+
+    def _tmp_raster_static_character_field(
+        self,
+        glyph_asset: TMPFontAsset,
+        metrics: TMPGlyphMetrics,
+        atlas_path: Path,
+        font_size: float,
+        outline_dilate: float,
+    ) -> _TMPPreparedCharacterField:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        atlas = self.tmp_atlas_alpha(atlas_path)
+        atlas_top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
+        atlas_left = max(0, metrics.rect_x)
+        crop = atlas.crop((atlas_left, atlas_top, atlas_left + metrics.rect_w, atlas_top + metrics.rect_h))
+        font_scale = font_size / max(1.0, glyph_asset.point_size)
+        glyph_scale = font_scale * metrics.glyph_scale
+        left = metrics.bearing_x * font_scale
+        top = -metrics.bearing_y * font_scale
+        width = max(1, round(metrics.rect_w * glyph_scale))
+        height = max(1, round(metrics.rect_h * glyph_scale))
+        bbox = (
+            math.floor(left),
+            math.floor(top),
+            math.ceil(left + width),
+            math.ceil(top + height),
+        )
+        pad = self.tmp_display_padding(glyph_asset, outline_dilate, font_size)
+        field_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph field",
+        )
+        field_image = Image.new("L", field_size, 0)
+        glyph_size = ensure_raster_size(
+            (width, height),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph",
+        )
+        glyph = crop.resize(glyph_size, Image.Resampling.BICUBIC)
+        field_image.paste(glyph, (pad + math.floor(left) - bbox[0], pad + math.floor(top) - bbox[1]))
+        return _TMPPreparedCharacterField(field_image, glyph_asset, bbox, pad, pad, False)
+
+    def _tmp_native_static_character_field(
+        self,
+        glyph_asset: TMPFontAsset,
+        metrics: TMPGlyphMetrics,
+        atlas_path: Path,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo,
+        defer_static_atlas: bool,
+        native_field_size: tuple[int, int] | None,
+    ) -> _TMPPreparedCharacterField | None:
+        quad_w, quad_h = ensure_raster_size(
+            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native glyph quad",
+        )
+        atlas_pad = self.tmp_native_atlas_padding(glyph_asset, style, outline_dilate)
+        atlas_left = metrics.rect_x - atlas_pad
+        atlas_right = metrics.rect_x + metrics.rect_w + atlas_pad
+        atlas_bottom_unity = metrics.rect_y - atlas_pad
+        atlas_top_unity = metrics.rect_y + metrics.rect_h + atlas_pad
+        if defer_static_atlas:
+            atlas_width = round(glyph_asset.atlas_width)
+            atlas_height = round(glyph_asset.atlas_height)
+            if atlas_width <= 0 or atlas_height <= 0:
+                return None
+            atlas = None
+        else:
+            atlas = self.tmp_atlas_alpha(atlas_path)
+            atlas_width = atlas.width
+            atlas_height = atlas.height
+        crop_box = (
+            atlas_left,
+            atlas_height - atlas_top_unity,
+            atlas_right,
+            atlas_height - atlas_bottom_unity,
+        )
+        ensure_raster_size(
+            (atlas_right - atlas_left, atlas_top_unity - atlas_bottom_unity),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP atlas glyph crop",
+        )
+        if defer_static_atlas:
+            field_image: Image.Image | TMPStaticAtlasField = TMPStaticAtlasField(
+                atlas_path,
+                (atlas_width, atlas_height),
+                crop_box,
+                (quad_w, quad_h),
+            )
+        else:
+            assert atlas is not None
+            field_image = atlas.crop(crop_box)
+            if field_image.size != (quad_w, quad_h):
+                field_image = field_image.resize_bicubic((quad_w, quad_h))
+        return _TMPPreparedCharacterField(field_image, glyph_asset, (0, 0, quad_w, quad_h), 0, 0, True)
+
+    def compose_tmp_dynamic_run_glyphs(
+        self,
+        glyphs: list[TMPDynamicRunGlyph],
+        bbox: tuple[int, int, int, int],
+        max_pad: int,
+        style: TextStyle,
+    ) -> tuple[Image.Image, tuple[int, int, int, int], int]:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image
+
+        image_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + max_pad * 2), max(1, bbox[3] - bbox[1] + max_pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP dynamic glyph run",
+        )
+        image = Image.new(
+            "RGBA",
+            image_size,
+            (0, 0, 0, 0),
+        )
+        for glyph in glyphs:
+            px = round(max_pad + glyph.origin_x + glyph.bbox[0] - glyph.pad - bbox[0])
+            py = round(max_pad + glyph.bbox[1] - glyph.pad - bbox[1])
+            image.alpha_composite(glyph.image, (px, py))
+
+        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
+            scaled_size = ensure_raster_size(
+                (max(1, round(image.width * style.scale_x)), image.height),
+                max_pixels=self.max_layer_pixels,
+                label="custom profile scaled TMP dynamic glyph run",
+            )
+            image = image.resize(scaled_size, Image.Resampling.BICUBIC)
+            bbox = (
+                math.floor(bbox[0] * style.scale_x),
+                bbox[1],
+                math.ceil(bbox[2] * style.scale_x),
+                bbox[3],
+            )
+        return image, bbox, max_pad
+
+    def scale_tmp_dynamic_run_field(
+        self,
+        bbox: tuple[int, int, int, int],
+        field_img: Image.Image,
+        scale_x: float,
+    ) -> tuple[tuple[int, int, int, int], Image.Image]:
+        scaled_left, scaled_right = self.tmp_scale_x_bounds(float(bbox[0]), float(bbox[2]), scale_x)
+        scaled_bbox = (math.floor(scaled_left), bbox[1], math.ceil(scaled_right), bbox[3])
+        scaled_size = ensure_raster_size(
+            (max(1, round(field_img.width * scale_x)), field_img.height),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile scaled TMP glyph field",
+        )
+        return scaled_bbox, field_img.resize_bicubic(scaled_size)
+
+    def prepare_tmp_dynamic_run_glyph(
+        self,
+        font_name: str,
+        font_path: Path,
+        glyph_char: str,
+        style: TextStyle,
+        font_size: float,
+        glyph_origin_x: float,
+        fx_scale_x: float,
+        outline_color: str,
+        outline_dilate: float,
+    ) -> TMPDynamicRunGlyph | None:
+        dynamic = self.tmp_dynamic_glyph_sdf(font_name, font_path, glyph_char, style)
+        if dynamic is None:
+            return None
+        cached, glyph_asset = dynamic
+        display_scale = font_size / max(1.0, cached.sample_size)
+        bbox = (
+            math.floor(cached.bbox[0] * display_scale),
+            math.floor(cached.bbox[1] * display_scale),
+            math.ceil(cached.bbox[2] * display_scale),
+            math.ceil(cached.bbox[3] * display_scale),
+        )
+        pad = max(1, round(cached.pad * display_scale))
+        field_size = ensure_raster_size(
+            (
+                max(1, round(cached.field.width * display_scale)),
+                max(1, round(cached.field.height * display_scale)),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile displayed TMP glyph field",
+        )
+        field_img = cached.field.resize_bicubic(field_size)
+        if abs(fx_scale_x - 1.0) >= 1.0e-6:
+            bbox, field_img = self.scale_tmp_dynamic_run_field(bbox, field_img, fx_scale_x)
 
         import numpy as np
 
-        field = np.asarray(transformed_field, dtype=np.float32) / 255.0
-        patch = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate, None)
-        canvas.alpha_composite(patch, (left, top))
+        field = np.asarray(field_img, dtype=np.float32) / 255.0
+        glyph = self.shade_tmp_sdf_field(field, glyph_asset, style, outline_color, outline_dilate)
+        return TMPDynamicRunGlyph(glyph, bbox, pad, glyph_origin_x)
 
-    def draw_run(
+    def tmp_dynamic_run_glyph_advance(
         self,
-        target: Image.Image,
+        display_font: ImageFont.FreeTypeFont,
+        char: str,
         font_name: str,
-        font_path: Path,
-        run: TextRun,
-        x: float,
-        line_top: float,
-        line_h: float,
-        outline_color: str,
-        outline_width: int,
-        outline_dilate: float,
-    ) -> None:
-        style = run.style
-        base_font_size = style.size * self.tmp_font_scale
-        font_size = self.tmp_run_font_size(style)
-        if self.use_em_block(run):
-            glyph, x_offset, source_metrics = self.render_em_block_glyph(
-                font_name,
-                run,
-                base_font_size,
-                outline_color,
-                outline_width,
-            )
-            if source_metrics is not None:
-                baseline_y = line_top + self.tmp_face_baseline_offset(font_name, style.size, line_h)
-                y = (
-                    baseline_y
-                    - source_metrics.bearing_y * self.tmp_layout_scale_y(style)
-                    - outline_width
-                    - self.tmp_native_baseline_offset(style)
-                )
-            else:
-                y = self.run_y(line_top, line_h, glyph.height, style, None, 0, 0)
-            target.alpha_composite(
-                glyph,
-                (
-                    round(x + x_offset),
-                    round(y),
-                ),
-            )
-            return
-
-        font = load_font(font_path, font_size)
-        bbox = self.run_bbox(font, run, font_name, font_size)
-        if self.tmp_text_render_mode == "sdf":
-            sdf = self.render_tmp_sdf_run(font_name, font_path, run, font_size, outline_color, outline_dilate)
-            if sdf is not None:
-                glyph, bbox, glyph_pad = sdf
-                if style.rotate:
-                    glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
-                target.alpha_composite(
-                    glyph,
-                    (
-                        round(x),
-                        round(self.run_y(line_top, line_h, glyph.height, style, font, bbox[1], glyph_pad)),
-                    ),
-                )
-                return
-
-        glyph_pad = outline_width * 2 + 4
-        w = max(1, bbox[2] - bbox[0] + glyph_pad * 2)
-        h = max(1, bbox[3] - bbox[1] + glyph_pad * 2)
-        glyph = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(glyph)
-        self.draw_text_run(
-            draw,
-            (glyph_pad - bbox[0], glyph_pad - bbox[1]),
-            run,
-            font,
-            hex_to_rgba(style.color, style.alpha),
-            outline_width,
-            hex_to_rgba(outline_color, style.alpha),
-            font_name,
-            font_size,
-        )
-        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
-            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
-        if style.rotate:
-            glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
-        target.alpha_composite(
-            glyph,
-            (
-                round(x),
-                round(self.run_y(line_top, line_h, glyph.height, style, font, bbox[1], glyph_pad)),
-            ),
-        )
-
-    def draw_run_at_baseline(
-        self,
-        target: Image.Image,
-        font_name: str,
-        font_path: Path,
-        run: TextRun,
-        x: float,
-        baseline_y: float,
-        outline_color: str,
-        outline_width: int,
-        outline_dilate: float,
-    ) -> None:
-        style = run.style
-        base_font_size = style.size * self.tmp_font_scale
-        font_size = self.tmp_run_font_size(style)
-        if self.use_em_block(run):
-            glyph, x_offset, source_metrics = self.render_em_block_glyph(
-                font_name,
-                run,
-                base_font_size,
-                outline_color,
-                outline_width,
-            )
-            if source_metrics is not None:
-                y = (
-                    baseline_y
-                    - source_metrics.bearing_y * self.tmp_layout_scale_y(style)
-                    - outline_width
-                    - self.tmp_native_baseline_offset(style)
-                )
-            else:
-                y = baseline_y - glyph.height - self.tmp_native_baseline_offset(style)
-            target.alpha_composite(
-                glyph,
-                (
-                    round(x + x_offset),
-                    round(y),
-                ),
-            )
-            return
-
-        font = load_font(font_path, font_size)
-        bbox = self.run_bbox(font, run, font_name, font_size)
-        if self.tmp_text_render_mode == "sdf":
-            sdf = self.render_tmp_sdf_run(font_name, font_path, run, font_size, outline_color, outline_dilate)
-            if sdf is not None:
-                glyph, bbox, glyph_pad = sdf
-                if style.rotate:
-                    glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
-                target.alpha_composite(
-                    glyph,
-                    (
-                        round(x),
-                        round(self.run_y_from_baseline(baseline_y, style, font, bbox[1], glyph_pad)),
-                    ),
-                )
-                return
-
-        glyph_pad = outline_width * 2 + 4
-        w = max(1, bbox[2] - bbox[0] + glyph_pad * 2)
-        h = max(1, bbox[3] - bbox[1] + glyph_pad * 2)
-        glyph = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(glyph)
-        self.draw_text_run(
-            draw,
-            (glyph_pad - bbox[0], glyph_pad - bbox[1]),
-            run,
-            font,
-            hex_to_rgba(style.color, style.alpha),
-            outline_width,
-            hex_to_rgba(outline_color, style.alpha),
-            font_name,
-            font_size,
-        )
-        if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, abs_tol=1.0e-9):
-            glyph = glyph.resize((max(1, round(glyph.width * style.scale_x)), glyph.height), Image.Resampling.BICUBIC)
-        if style.rotate:
-            glyph = glyph.rotate(-style.rotate, resample=Image.Resampling.BICUBIC, expand=True)
-        target.alpha_composite(
-            glyph,
-            (
-                round(x),
-                round(self.run_y_from_baseline(baseline_y, style, font, bbox[1], glyph_pad)),
-            ),
-        )
-
-    def run_y_from_baseline(
-        self,
-        baseline_y: float,
+        font_size: float,
         style: TextStyle,
+        cursor: float,
+    ) -> tuple[float, float]:
+        glyph_origin_x = cursor
+        advance = self.glyph_advance(display_font, char, font_name, font_size)
+        if style.mspace is not None:
+            mono_advance = self.tmp_mspace_advance(style.mspace)
+            glyph_origin_x += (mono_advance - advance) * 0.5
+            advance = mono_advance
+        return glyph_origin_x, advance
+
+    def tmp_dynamic_glyph_mask(
+        self,
+        source_path: Path,
+        glyph_char: str,
+        raster_size: float,
+        raster_pad: int,
+        raster_bounds: tuple[tuple[int, int, int, int], Image.Image | None, int, int],
+    ) -> Image.Image:
+        raster_bbox, raster_glyph_mask, bitmap_left, bitmap_top = raster_bounds
+        bbox_left, bbox_top, bbox_right, bbox_bottom = raster_bbox
+        size = ensure_raster_size(
+            (
+                max(1, bbox_right - bbox_left + raster_pad * 2),
+                max(1, bbox_bottom - bbox_top + raster_pad * 2),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP dynamic glyph mask",
+        )
+        if isinstance(raster_glyph_mask, GrayField):
+            px, py = raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top
+            return raster_glyph_mask.crop((-px, -py, size[0] - px, size[1] - py))
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageDraw
+
+        mask = Image.new("L", size, 0)
+        if raster_glyph_mask is not None:
+            mask.paste(raster_glyph_mask, (raster_pad + bitmap_left - bbox_left, raster_pad - bitmap_top - bbox_top))
+            return mask
+        sample_font = load_font(source_path, raster_size)
+        draw = ImageDraw.Draw(mask)
+        draw.text((raster_pad - bbox_left, raster_pad - bbox_top), glyph_char, font=sample_font, fill=255)
+        return mask
+
+    def build_tmp_dynamic_glyph_sdf(
+        self,
+        source_path: Path,
+        glyph_char: str,
+        sample_size: float,
+        asset: TMPFontAsset,
+    ) -> TMPDynamicGlyphSDF | None:
+        ft = freetype_metrics()
+        native_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, sample_size)
+        if native_bounds is None:
+            return None
+        native_bbox, _, _, _ = native_bounds
+        # Runtime TMP atlas rects behave like atlas_padding + 1 around the
+        # cropped glyph field.
+        native_pad = max(1, math.ceil(asset.atlas_padding + 1.0))
+        vector_field = self.tmp_vector_glyph_sdf_field(
+            source_path,
+            glyph_char,
+            sample_size,
+            native_bbox,
+            native_pad,
+            asset,
+        )
+        if vector_field is not None:
+            return TMPDynamicGlyphSDF(
+                field=vector_field,
+                bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
+                pad=native_pad,
+                sample_size=sample_size,
+            )
+
+        supersample = max(1.0, TMP_DYNAMIC_SDF_SUPERSAMPLE)
+        raster_size = sample_size * supersample
+        raster_pad = max(1, math.ceil(asset.atlas_padding * supersample))
+        raster_bounds = self.tmp_dynamic_glyph_bounds(ft, source_path, glyph_char, raster_size)
+        if raster_bounds is None:
+            return None
+        mask = self.tmp_dynamic_glyph_mask(source_path, glyph_char, raster_size, raster_pad, raster_bounds)
+        try:
+            field = alpha_mask_to_sdf_field(
+                mask,
+                asset.gradient_scale * supersample,
+                tmp_dynamic_sdf_alpha_threshold(asset),
+            )
+        except ImportError:
+            return None
+
+        import numpy as np
+
+        field_img = GrayField(
+            mask.width, mask.height, np.clip(np.rint(field * 255.0), 0, 255).astype(np.uint8).tobytes()
+        )
+        native_field_size = ensure_raster_size(
+            (
+                max(1, native_bbox[2] - native_bbox[0] + native_pad * 2),
+                max(1, native_bbox[3] - native_bbox[1] + native_pad * 2),
+            ),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native glyph field",
+        )
+        if field_img.size != native_field_size:
+            field_img = field_img.resize_bicubic(native_field_size)
+        return TMPDynamicGlyphSDF(
+            field=field_img,
+            bbox=(int(native_bbox[0]), int(native_bbox[1]), int(native_bbox[2]), int(native_bbox[3])),
+            pad=native_pad,
+            sample_size=sample_size,
+        )
+
+    def tmp_dynamic_glyph_bounds(
+        self,
+        ft: Any,
+        source_path: Path,
+        glyph_char: str,
+        size: float,
+    ) -> tuple[tuple[int, int, int, int], Image.Image | None, int, int] | None:
+        rendered = ft.glyph_bitmap(source_path, glyph_char, size) if ft is not None else None
+        if rendered is not None:
+            glyph_mask, bitmap_left, bitmap_top, metrics = rendered
+            bbox_left = math.floor(min(metrics.bearing_x, float(bitmap_left)))
+            bbox_top = math.floor(min(-metrics.bearing_y, float(-bitmap_top)))
+            bbox_right = math.ceil(max(metrics.bearing_x + metrics.width, float(bitmap_left + glyph_mask.width)))
+            bbox_bottom = math.ceil(max(-metrics.bearing_y + metrics.height, float(-bitmap_top + glyph_mask.height)))
+            return (bbox_left, bbox_top, bbox_right, bbox_bottom), glyph_mask, bitmap_left, bitmap_top
+
+        sample_font = load_font(source_path, size)
+        bbox = sample_font.getbbox(glyph_char)
+        if bbox is None:
+            return None
+        return (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])), None, 0, 0
+
+    def tmp_cached_dynamic_glyph(
+        self,
+        key: tuple[str, str, str, float],
+        l2_key: tuple[Any, ...],
+    ) -> tuple[bool, TMPDynamicGlyphSDF | None]:
+        if key in self._tmp_dynamic_glyph_cache:
+            return True, self._tmp_dynamic_glyph_cache[key]
+        # L2 adds what the instance key pins implicitly: the font file's signature plus the
+        # metadata floats that enter the SDF math (gradient_scale) and padding (atlas_padding);
+        # asset.name stays because tmp_dynamic_sdf_alpha_threshold maps name -> threshold.
+        l2_cached = GLYPH_SDF_CACHE.get(l2_key)
+        if l2_cached is MISSING:
+            return False, None
+        self._tmp_dynamic_glyph_cache[key] = l2_cached
+        return True, l2_cached
+
+    def tmp_dynamic_glyph_cache_keys(
+        self,
+        source_path: Path,
+        asset: TMPFontAsset,
+        glyph_char: str,
+        sample_size: float,
+    ) -> tuple[tuple[str, str, str, float], tuple[Any, ...]]:
+        key = (str(source_path), asset.name, glyph_char, round(sample_size, 4))
+        l2_key = (
+            key[0],
+            *self._font_signature(source_path),
+            key[1],
+            key[2],
+            key[3],
+            round(asset.gradient_scale, 4),
+            round(asset.atlas_padding, 4),
+        )
+        return key, l2_key
+
+    def tmp_dynamic_glyph_source(
+        self,
+        font_name: str,
+        ch: str,
+    ) -> tuple[TMPFontAsset, Path, float, str] | None:
+        active = self.tmp_sdf_asset(font_name)
+        if active is None or not ch or ch == " ":
+            return None
+        asset = active
+        sample_size = max(1.0, active.point_size)
+        for candidate in self.tmp_font_library.metric_asset_candidates(font_name, include_fallback=True):
+            if self.tmp_font_library.runtime_source_font_path(candidate) is None:
+                continue
+            if self.tmp_font_library._source_glyph_metrics_for_asset(candidate, ch[0], sample_size) is not None:
+                asset = candidate
+                sample_size = max(1.0, candidate.point_size)
+                break
+        source_path = self.tmp_font_library.runtime_source_font_path(asset)
+        if source_path is None:
+            return None
+        return asset, source_path, sample_size, ch[0]
+
+    def tmp_dynamic_font_field(
+        self,
+        font_name: str,
+        ch: str,
+        style: TextStyle,
+        outline_dilate: float,
+        char_info: TMPNativeCharacterInfo,
+        native_field_size: tuple[int, int] | None = None,
+    ) -> tuple[TMPDynamicFontField, TMPFontAsset] | None:
+        """Build the pixel-free native descriptor for one dynamic/fallback TMP glyph."""
+
+        if self.use_em_block(TextRun(ch, style)):
+            return None
+        active = self.tmp_sdf_asset(font_name)
+        if active is None or not ch or ch == " ":
+            return None
+
+        glyph_char = ch[0]
+        selected: tuple[TMPFontAsset, Path, float, TMPGlyphMetrics] | None = None
+        for candidate in self.tmp_font_library.metric_asset_candidates(font_name, include_fallback=True):
+            source_path = self.tmp_font_library.runtime_source_font_path(candidate)
+            if source_path is None:
+                continue
+            sample_size = max(1.0, candidate.point_size)
+            metrics = self.tmp_font_library._source_glyph_metrics_for_asset(candidate, glyph_char, sample_size)
+            if metrics is not None:
+                selected = candidate, source_path, sample_size, metrics
+                break
+        if selected is None:
+            return None
+
+        asset, source_path, sample_size, metrics = selected
+        bbox = (
+            math.floor(metrics.bearing_x),
+            math.floor(-metrics.bearing_y),
+            math.ceil(metrics.bearing_x + metrics.width),
+            math.ceil(-metrics.bearing_y + metrics.height),
+        )
+        if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+            return None
+        padding = max(1, math.ceil(asset.atlas_padding + 1.0))
+        active_point_size = max(1.0, active.point_size)
+        atlas_pad = self.tmp_native_atlas_padding(asset, style, outline_dilate)
+        crop_padding = min(padding, max(0, round(atlas_pad * sample_size / active_point_size)))
+        field_size = ensure_raster_size(
+            native_field_size or self.tmp_native_unrotated_quad_size(char_info),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native dynamic glyph quad",
+        )
+        ensure_raster_size(
+            (bbox[2] - bbox[0] + padding * 2, bbox[3] - bbox[1] + padding * 2),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP native dynamic glyph source",
+        )
+        return (
+            TMPDynamicFontField(
+                font_path=source_path,
+                codepoint=ord(glyph_char),
+                sample_size=sample_size,
+                bbox=bbox,
+                padding=padding,
+                crop_padding=crop_padding,
+                field_size=field_size,
+                spread=max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS),
+            ),
+            asset,
+        )
+
+    def tmp_static_atlas_field(
+        self,
+        asset: TMPFontAsset,
+        placements: list[tuple[TMPGlyphMetrics, float, float, float, float]],
+        bbox: tuple[int, int, int, int],
+        pad: int,
+    ) -> Image.Image:
+        from src.sekai.profile.custom_profile.pillow_runtime import Image, ImageChops
+
+        field_size = ensure_raster_size(
+            (max(1, bbox[2] - bbox[0] + pad * 2), max(1, bbox[3] - bbox[1] + pad * 2)),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP static SDF field",
+        )
+        field_img = Image.new("L", field_size, 0)
+        for metrics, x, y, w, h in placements:
+            atlas_path = asset.atlas_paths[min(metrics.atlas_index, len(asset.atlas_paths) - 1)]
+            atlas = self.tmp_atlas_alpha(atlas_path)
+            top = max(0, round(atlas.height - metrics.rect_y - metrics.rect_h))
+            left = max(0, metrics.rect_x)
+            crop = atlas.crop((left, top, left + metrics.rect_w, top + metrics.rect_h))
+            gray = crop.resize_bicubic((max(1, round(w)), max(1, round(h))))
+            glyph = Image.frombytes("L", gray.size, gray.pixels)
+            px = round(pad + x - bbox[0])
+            py = round(pad + y - bbox[1])
+            region = field_img.crop((px, py, px + glyph.width, py + glyph.height))
+            field_img.paste(ImageChops.lighter(region, glyph), (px, py))
+        return field_img
+
+    def tmp_static_atlas_placements(
+        self,
+        font_name: str,
+        run: TextRun,
+        font_size: float,
+        asset: TMPFontAsset,
+    ) -> tuple[list[tuple[TMPGlyphMetrics, float, float, float, float]], tuple[int, int, int, int]] | None:
+        style = run.style
+        placements: list[tuple[TMPGlyphMetrics, float, float, float, float]] = []
+        font_scale = font_size / max(1.0, asset.point_size)
+        cursor = 0.0
+        min_x = 0.0
+        min_y = 0.0
+        max_x = 1.0
+        max_y = max(1.0, (asset.ascent_line - asset.descent_line) * font_scale)
+        fx_scale_x = self.tmp_fx_scale_x(style) if self.tmp_scale_mode in {"fx-center", "fx-native"} else 1.0
+        last_index = len(run.text) - 1
+        for idx, ch in enumerate(run.text):
+            glyph_char = self.tmp_render_glyph_char(font_name, ch, font_size)
+            metrics = asset.glyphs.get(ord(glyph_char))
+            if metrics is None:
+                return None
+            scale = font_scale * metrics.glyph_scale
+            if self.tmp_native_visible_character(ch) and metrics.rect_w > 0 and metrics.rect_h > 0:
+                x = cursor + metrics.bearing_x * font_scale
+                y = (asset.ascent_line - metrics.bearing_y) * font_scale
+                w = metrics.rect_w * scale
+                h = metrics.rect_h * scale
+                center_x = x + w * 0.5
+                x = center_x - w * fx_scale_x * 0.5
+                w *= fx_scale_x
+                placements.append((metrics, x, y, w, h))
+                min_x = min(min_x, x)
+                min_y = min(min_y, y)
+                max_x = max(max_x, x + w)
+                max_y = max(max_y, y + h)
+            if style.mspace is not None:
+                advance = self.tmp_mspace_advance(style.mspace)
+            else:
+                advance = metrics.advance * font_scale
+            cursor += advance * self.tmp_fx_advance_scale_x(style)
+            if idx != last_index:
+                cursor += self.tmp_character_spacing_advance(style, font_name, font_size)
+        max_x = max(max_x, cursor)
+        if not placements:
+            return None
+        bbox = (math.floor(min_x), math.floor(min_y), math.ceil(max_x), math.ceil(max_y))
+        return placements, bbox
+
+    def tmp_sdf_field_shift(self, offset_x: float, offset_y: float) -> tuple[int, int]:
+        # shifted_sdf_field semantics, pre-resolved: |both| < 0.5 short-circuits to no shift,
+        # otherwise banker's-rounded integer pixel translation (zero fill happens per-pixel).
+        if abs(offset_x) < 0.5 and abs(offset_y) < 0.5:
+            return 0, 0
+        return int(round(offset_x)), int(round(offset_y))
+
+    def tmp_sdf_underlay_scalars(
+        self,
+        material: TMPShaderMaterial,
+        outline_color: str,
+        outline_dilate: float,
+        scale_ratio_c: float,
+        raw_scale: float,
+        bias: float,
+    ) -> TMPSdfUnderlayScalars | None:
+        if abs(outline_dilate) <= 1.0e-6:
+            return None
+        underlay_scale = raw_scale / (material.underlay_softness * scale_ratio_c * raw_scale + 1.0)
+        underlay_width = outline_dilate * scale_ratio_c * underlay_scale
+        underlay_w = bias * underlay_scale - 0.5 - underlay_width * 0.5
+        offset_x = -material.underlay_offset_x * scale_ratio_c * material.gradient_scale
+        offset_y = -material.underlay_offset_y * scale_ratio_c * material.gradient_scale
+        shift_x, shift_y = self.tmp_sdf_field_shift(offset_x, offset_y)
+        return TMPSdfUnderlayScalars(
+            scale=underlay_scale,
+            w=underlay_w,
+            shift_x=shift_x,
+            shift_y=shift_y,
+            color=hex_to_rgba(outline_color, 1.0)[:3],
+        )
+
+    def tmp_shader_material(self, asset: TMPFontAsset | None) -> TMPShaderMaterial:
+        if asset is None:
+            return TMPShaderMaterial(
+                gradient_scale=6.0,
+                face_dilate=0.0,
+                outline_width=0.0,
+                outline_softness=0.0,
+                weight_normal=0.0,
+                weight_bold=0.75,
+                underlay_offset_x=0.0,
+                underlay_offset_y=0.0,
+                underlay_softness=0.0,
+                glow_offset=0.0,
+                glow_outer=0.0,
+                sharpness=0.0,
+                scale_ratio_a=1.0,
+                scale_ratio_b=1.0,
+                scale_ratio_c=1.0,
+            )
+        return TMPShaderMaterial(
+            gradient_scale=asset.gradient_scale,
+            face_dilate=asset.face_dilate,
+            outline_width=asset.outline_width,
+            outline_softness=asset.outline_softness,
+            weight_normal=asset.weight_normal,
+            weight_bold=asset.weight_bold,
+            underlay_offset_x=asset.underlay_offset_x,
+            underlay_offset_y=asset.underlay_offset_y,
+            underlay_softness=asset.underlay_softness,
+            glow_offset=asset.glow_offset,
+            glow_outer=asset.glow_outer,
+            sharpness=asset.sharpness,
+            scale_ratio_a=asset.scale_ratio_a,
+            scale_ratio_b=asset.scale_ratio_b,
+            scale_ratio_c=asset.scale_ratio_c,
+        )
+
+    def tmp_run_character_advance(
+        self,
         font: ImageFont.FreeTypeFont,
-        bbox_top: int,
-        glyph_pad_top: int,
+        run: TextRun,
+        ch: str,
+        font_name: str,
+        font_size: float,
+        fx_scale: bool,
     ) -> float:
-        ascent, _ = font.getmetrics()
-        voffset = self.tmp_native_baseline_offset(style)
-        return baseline_y - float(ascent) + bbox_top - glyph_pad_top - voffset
+        advance = (
+            self.tmp_mspace_advance(run.style.mspace)
+            if run.style.mspace is not None
+            else self.glyph_advance(font, ch, font_name, font_size)
+        )
+        return advance * self.tmp_fx_advance_scale_x(run.style) if fx_scale else advance
 
-    def run_y(
+    def tmp_run_glyph_horizontal_bounds(
         self,
-        line_top: float,
-        line_h: float,
-        glyph_h: float,
+        cursor: float,
+        bbox: tuple[int, int, int, int],
         style: TextStyle,
-        font: ImageFont.FreeTypeFont | None,
-        bbox_top: int,
-        glyph_pad_top: int,
+        fx_scale: bool,
+    ) -> tuple[float, float]:
+        raw_left = cursor + bbox[0]
+        raw_right = cursor + bbox[2]
+        if not fx_scale:
+            return raw_left, raw_right
+        center_x = (raw_left + raw_right) * 0.5
+        scale_x = self.tmp_fx_scale_x(style)
+        return (
+            center_x + (raw_left - center_x) * scale_x,
+            center_x + (raw_right - center_x) * scale_x,
+        )
+
+    def tmp_run_bbox(
+        self,
+        font: ImageFont.FreeTypeFont,
+        run: TextRun,
+        font_name: str,
+        font_size: float,
+        *,
+        fx_scale: bool,
+    ) -> tuple[int, int, int, int]:
+        if not run.text:
+            return self.text_bbox(font, " ")
+        cursor = 0.0
+        bounds = TMPVisualBounds(left=0.0, right=0.0)
+        last_index = len(run.text) - 1
+        for idx, ch in enumerate(run.text):
+            metric_char = self.tmp_render_glyph_char(font_name, ch, font_size)
+            bbox = font.getbbox(metric_char)
+            if self.tmp_native_visible_character(ch):
+                left, right = self.tmp_run_glyph_horizontal_bounds(cursor, bbox, run.style, fx_scale)
+                bounds.include(left, right, float(bbox[1]), float(bbox[3]))
+            cursor += self.tmp_run_character_advance(font, run, ch, font_name, font_size, fx_scale)
+            if idx != last_index:
+                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size)
+        bounds.include_horizontal(0.0, cursor)
+        fallback_bbox = self.text_bbox(font, " ")
+        left, right, top, bottom = bounds.resolved((0.0, cursor, float(fallback_bbox[1]), float(fallback_bbox[3])))
+        return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
+
+    def measure_tmp_run_from_metrics(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_size: float,
+        current_em_scale: float | None,
+        metrics_for_char: Callable[[str], TMPGlyphMetrics | None],
+    ) -> TMPRunMeasure:
+        metric_text = run.text or " "
+        cursor = 0.0
+        bounds = TMPVisualBounds()
+        last_index = len(metric_text) - 1
+        for idx, ch in enumerate(metric_text):
+            metrics = metrics_for_char(ch)
+            if metrics is None:
+                raise ValueError(f"source font metrics are unavailable for U+{ord(ch):04X}")
+            glyph_origin_x, advance = cursor, metrics.advance
+            if run.style.mspace is not None:
+                mono_advance = self.tmp_mspace_advance(run.style.mspace)
+                glyph_origin_x += (mono_advance - advance) * 0.5
+                advance = mono_advance
+            if run.text and self.tmp_native_visible_character(ch) and metrics.width > 0 and metrics.height > 0:
+                raw_left = glyph_origin_x + metrics.bearing_x
+                raw_right = raw_left + metrics.width
+                top = -metrics.bearing_y
+                bottom = top + metrics.height
+                bounds.include(raw_left, raw_right, top, bottom)
+            cursor += advance
+            if idx != last_index:
+                cursor += self.tmp_character_spacing_advance(run.style, font_name, font_size, current_em_scale)
+        if not run.text:
+            return TMPRunMeasure(cursor, 0.0, cursor, 0.0, 0.0)
+        visual_left, visual_right, visual_top, visual_bottom = bounds.resolved((0.0, 0.0, 0.0, 0.0))
+        return TMPRunMeasure(cursor, visual_left, visual_right, visual_top, visual_bottom)
+
+    def tmp_asset_layout_metrics(
+        self,
+        font_name: str,
+        metric_char: str,
+        font_size: float,
+    ) -> tuple[TMPGlyphMetrics, str] | None:
+        if self.tmp_metrics_mode == "pil" or not font_name or font_size <= 0:
+            return None
+        include_fallback = self.tmp_metrics_mode == "asset-fallback"
+        active = self.tmp_font_library.active_asset(font_name)
+        if active is not None and active.atlas_population_mode == 1 and self.tmp_dynamic_sdf:
+            source_metrics = self.tmp_font_library.source_glyph_metrics(
+                font_name,
+                metric_char,
+                font_size,
+                include_fallback=include_fallback,
+            )
+            return (source_metrics, "source-font-dynamic") if source_metrics is not None else None
+        metrics = self.tmp_font_library.glyph_metrics(
+            font_name,
+            metric_char,
+            font_size,
+            include_fallback=include_fallback,
+        )
+        if metrics is not None:
+            return metrics, "tmp-character-table"
+        source_metrics = self.tmp_font_library.source_glyph_metrics(
+            font_name,
+            metric_char,
+            font_size,
+            include_fallback=include_fallback,
+        )
+        return (source_metrics, "source-font-fallback") if source_metrics is not None else None
+
+    def tmp_adjusted_space_advance(self, font: ImageFont.FreeTypeFont, metric_char: str) -> float:
+        advance = float(font.getlength(metric_char))
+        return advance * self.tmp_space_width_factor if metric_char == " " else advance
+
+    def tmp_direct_sdf_field_size(self, geometry_size: tuple[int, int]) -> tuple[int, int]:
+        """Bound a direct glyph's raster while preserving its separate logical geometry.
+
+        A TMP ``<scale>`` tag can make the logical quad much wider than the canvas.  Rasterizing
+        that entire off-screen quad is wasteful: the following affine pass clips it back to the
+        canvas.  One canvas diagonal per source axis retains enough samples for any rotation;
+        the warp plan still uses ``geometry_size`` for the destination corners.
+        """
+
+        geometry_w, geometry_h = geometry_size
+        if geometry_w <= 0 or geometry_h <= 0:
+            raise ValueError("custom profile TMP direct glyph geometry must be positive")
+
+        axis_limit = max(1, math.ceil(math.hypot(self.canvas_w, self.canvas_h)))
+        field_w = min(geometry_w, axis_limit)
+        field_h = min(geometry_h, axis_limit)
+        if field_w * field_h > self.max_layer_pixels:
+            scale = math.sqrt(self.max_layer_pixels / (field_w * field_h))
+            field_w = max(1, math.floor(field_w * scale))
+            field_h = max(1, math.floor(field_h * scale))
+            if field_w * field_h > self.max_layer_pixels:
+                if field_w >= field_h:
+                    field_w = max(1, self.max_layer_pixels // field_h)
+                else:
+                    field_h = max(1, self.max_layer_pixels // field_w)
+        return ensure_raster_size(
+            (field_w, field_h),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile TMP direct glyph field",
+        )
+
+    def tmp_layout_audit_metadata(
+        self,
+        preferred_width: float,
+        preferred_height: float,
+        content_height: float,
+        total_height: float,
+        box_w: float,
+        box_h: float,
+        native_layout: TMPNativeLineLayout | None,
+        native_baselines: list[float] | None,
+        native_text_layout: TMPNativeTextLayout | None,
+        mesh_text_layout: TMPNativeTextLayout | None,
+        mesh_bounds: tuple[float, float, float, float] | None,
+        rect_origin: tuple[float, float] | None,
+        local_image_size: tuple[int, int] | None,
+    ) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "preferredWidth": preferred_width,
+            "preferredHeight": preferred_height,
+            "contentHeight": content_height,
+            "accumulatedLineHeight": total_height,
+            "lateUpdateSizeDelta": {"x": box_w, "y": box_h},
+            "meshPixelBounds": None,
+            "localImage": None,
+            "nativeLineLayout": None,
+            "nativeTextInfo": None,
+            "meshNativeTextInfo": None,
+        }
+        if mesh_bounds is not None:
+            metadata["meshPixelBounds"] = {
+                "left": mesh_bounds[0],
+                "top": mesh_bounds[1],
+                "right": mesh_bounds[2],
+                "bottom": mesh_bounds[3],
+            }
+        if rect_origin is not None and local_image_size is not None:
+            metadata["localImage"] = {
+                "width": local_image_size[0],
+                "height": local_image_size[1],
+                "rectOriginX": rect_origin[0],
+                "rectOriginY": rect_origin[1],
+            }
+        if native_layout is not None:
+            metadata["nativeLineLayout"] = {
+                "baselines": native_layout.baselines,
+                "maxAscender": native_layout.max_ascender,
+                "maxDescender": native_layout.max_descender,
+                "contentHeight": native_layout.content_height,
+            }
+        if native_text_layout is not None:
+            metadata["nativeTextInfo"] = self.tmp_native_text_layout_audit_dict(native_text_layout)
+        if mesh_text_layout is not None:
+            metadata["meshNativeTextInfo"] = self.tmp_native_text_layout_audit_dict(
+                mesh_text_layout,
+                rect_box_w=box_w,
+                rect_box_h=box_h,
+                native_baselines=native_baselines,
+            )
+        return metadata
+
+    def tmp_line_layout_audit_entry(
+        self,
+        line_index: int,
+        line_metric: tuple[StyledLine, list[tuple[TextRun, float, float]], float, float, float],
+        font_name: str,
+        font_path: Path,
+        native_text_layout: TMPNativeTextLayout | None,
+        native_baselines: list[float] | None,
+    ) -> dict[str, Any]:
+        line, line_metrics, line_y, line_h, line_w = line_metric
+        runs = [
+            self.tmp_run_layout_audit_entry(run, x, run_w, font_name, font_path, native_text_layout)
+            for run, x, run_w in line_metrics
+        ]
+        native_baseline = native_baselines[line_index] if native_baselines is not None else None
+        return {
+            "index": line_index,
+            "style": self.tmp_style_audit_dict(line.style),
+            "lineY": line_y,
+            "lineHeight": line_h,
+            "lineWidth": line_w,
+            "nativeBaselineDown": native_baseline,
+            "runs": runs,
+        }
+
+    def tmp_run_layout_audit_entry(
+        self,
+        run: TextRun,
+        x: float,
+        run_w: float,
+        font_name: str,
+        font_path: Path,
+        native_text_layout: TMPNativeTextLayout | None,
+    ) -> dict[str, Any]:
+        scaled_size = run.style.size * self.tmp_font_scale
+        font = load_font(font_path, scaled_size)
+        current_em_scale = native_text_layout.current_em_scale if native_text_layout is not None else None
+        measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
+        spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size, current_em_scale)
+        return {
+            "text": run.text,
+            "style": self.tmp_style_audit_dict(run.style),
+            "x": x,
+            "meshWidth": run_w,
+            "advance": measure.advance,
+            "visualBounds": {
+                "left": measure.visual_left,
+                "right": measure.visual_right,
+                "top": measure.visual_top,
+                "bottom": measure.visual_bottom,
+            },
+            "characterSpacingAdvance": spacing,
+            "fontSizeAfterFaceScale": scaled_size,
+            "glyphs": self.tmp_run_glyph_audit(font, run, font_name, scaled_size, current_em_scale),
+        }
+
+    def tmp_iterative_percent_indent_margin_width(
+        self,
+        lines: list[StyledLine],
+        font_name: str,
+        font_path: Path,
+        base_size: float,
+        line_spacing: float,
+        dominant_size: float,
+        outline_dilate: float,
+        zero_margin_layout: TMPNativeTextLayout,
+        *,
+        source_metrics_only: bool = False,
     ) -> float:
-        voffset = self.tmp_native_baseline_offset(style)
-        if self.text_vertical_mode == "font-metrics" and font is not None:
-            ascent, descent = font.getmetrics()
-            line_center = line_top + line_h / 2
-            metrics_h = max(1.0, float(ascent + descent))
-            ascender_anchor = line_center - metrics_h / 2
-            return ascender_anchor + bbox_top - glyph_pad_top - voffset
-        if self.text_vertical_mode == "pil-mm" and font is not None:
-            anchor_bbox = font.getbbox("Hg", anchor="mm")
-            line_center = line_top + line_h / 2
-            anchor_offset = (anchor_bbox[1] + anchor_bbox[3]) / 2
-            return line_center + anchor_offset - glyph_h / 2 - voffset
-        if self.text_vertical_mode == "font-ascent" and font is not None:
-            ascent, _ = font.getmetrics()
-            line_center = line_top + line_h / 2
-            ascender_anchor = line_center - float(ascent) / 2
-            return ascender_anchor + bbox_top - glyph_pad_top - voffset
-        if self.text_vertical_mode == "anchor-middle" and font is not None:
-            anchor_bbox = font.getbbox("H", anchor="mm")
-            line_center = line_top + line_h / 2
-            anchor_offset = (anchor_bbox[1] + anchor_bbox[3]) / 2
-            return line_center + anchor_offset - glyph_h / 2 - voffset
-        return line_top + line_h / 2 - glyph_h / 2 - voffset
+        margin_width = self.tmp_text_box_size(
+            zero_margin_layout.dominant_size,
+            zero_margin_layout.preferred_width,
+            zero_margin_layout.content_height,
+        )[0]
+        for _ in range(64):
+            layout = self.tmp_native_text_layout(
+                lines,
+                font_name,
+                font_path,
+                base_size,
+                line_spacing,
+                dominant_size,
+                "preferred",
+                outline_dilate,
+                margin_width,
+                source_metrics_only=source_metrics_only,
+            )
+            if layout is None:
+                return margin_width
+            next_width = self.tmp_text_box_size(layout.dominant_size, layout.preferred_width, layout.content_height)[0]
+            next_width = min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, next_width))
+            if abs(next_width - margin_width) < 0.01:
+                return next_width
+            margin_width = next_width
+        return margin_width
+
+    def tmp_preferred_percent_indent_margin_width(self, layout: TMPNativeTextLayout) -> float:
+        padding_x = max(0.0, self.tmp_preferred_padding_x)
+        margin_width = layout.preferred_width + padding_x
+        for line in layout.lines:
+            percent = self.tmp_line_indent_percent(line.styled_line)
+            if abs(percent) < 1.0e-8:
+                margin_width = max(margin_width, line.width + padding_x)
+                continue
+            if percent >= 1.0:
+                margin_width = TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH
+                continue
+            margin_width = max(margin_width, (line.width + padding_x) / max(1.0e-6, 1.0 - percent))
+        return min(TMP_PERCENT_INDENT_MAX_MARGIN_WIDTH, max(1.0, margin_width))
+
+    def tmp_native_padded_horizontal_bounds(
+        self,
+        visual: TMPRunVisualMetrics,
+        style: TextStyle,
+        vertex_padding: float,
+        vertex_scale_x: float,
+    ) -> tuple[float, float]:
+        if self.tmp_scale_mode == "fx-native":
+            quad = self.tmp_native_fx_quad(
+                visual.left - vertex_padding,
+                visual.right + vertex_padding,
+                -visual.top + vertex_padding,
+                -visual.bottom - vertex_padding,
+                style,
+                vertex_scale_x,
+            )
+            xs = (quad[0], quad[2], quad[4], quad[6])
+            return min(xs), max(xs)
+        return self.tmp_scale_x_bounds(
+            visual.left - vertex_padding,
+            visual.right + vertex_padding,
+            vertex_scale_x,
+        )
+
+    def tmp_native_run_visual_metrics(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_path: Path,
+        scaled_size: float,
+        current_em_scale: float,
+        *,
+        source_metrics_only: bool = False,
+    ) -> TMPRunVisualMetrics:
+        if self.use_em_block(run):
+            source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
+            raw_advance = source_metrics.advance if source_metrics is not None else scaled_size
+            raw_left = source_metrics.bearing_x if source_metrics is not None else 0.0
+            raw_right = raw_left + (source_metrics.width if source_metrics is not None else raw_advance)
+            raw_top, raw_bottom = self.tmp_native_style_extents(font_name, run.style)
+            return TMPRunVisualMetrics(raw_advance, raw_left, raw_right, -raw_top, -raw_bottom)
+        if source_metrics_only:
+            measure = self.measure_tmp_source_run(run, font_name, scaled_size, current_em_scale)
+        else:
+            font = TMPFallbackMetrics(font_path, scaled_size)
+            measure = self.measure_tmp_run(font, run, font_name, scaled_size, current_em_scale)
+        return TMPRunVisualMetrics(
+            measure.advance,
+            measure.visual_left,
+            measure.visual_right,
+            measure.visual_top,
+            measure.visual_bottom,
+        )
+
+    def _tmp_native_layout_line(
+        self,
+        line: StyledLine,
+        line_index: int,
+        line_count: int,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        run_metrics, line_width, line_min_x, line_max_x, line_dominant_size = self.tmp_native_measure_line_runs(
+            line,
+            config.font_name,
+            config.font_path,
+            line_index,
+            config.layout_mode,
+            config.current_em_scale,
+            config.outline_dilate,
+            config.margin_width,
+            source_metrics_only=config.source_metrics_only,
+        )
+        state.dominant_size = max(state.dominant_size, line_dominant_size)
+        first_character_index = len(state.characters)
+        line_state = self._tmp_native_layout_runs(line, line_index, first_character_index, state, config)
+        self._tmp_native_layout_line_breaks(line, line_index, first_character_index, line_state, state, config)
+        self._tmp_resolve_native_line_extents(line, line_state, config)
+        self._tmp_adjust_native_line_offset(state, line_state)
+        self._tmp_record_native_line(
+            line,
+            line_index,
+            first_character_index,
+            run_metrics,
+            line_width,
+            line_min_x,
+            line_max_x,
+            line_state,
+            state,
+            config,
+        )
+        if line_index + 1 < line_count:
+            self._tmp_advance_native_line(line, line_state, state, config)
+
+    def _tmp_advance_native_line(
+        self,
+        line: StyledLine,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        if line.style.line_height is None:
+            line_break_ascender = (
+                line_state.line_break_adjusted_ascender
+                if line_state.line_break_adjusted_ascender is not None
+                else line_state.max_ascender
+            )
+            state.line_offset += (
+                0.0
+                - line_state.max_descender
+                + line_break_ascender
+                + (config.raw_line_gap + config.line_spacing_delta) * config.base_scale
+                + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
+            )
+            state.start_of_line_ascender = line_break_ascender
+            state.is_driven_line_spacing = False
+            return
+        state.line_offset += (
+            self.tmp_explicit_line_height(line.style.line_height)
+            + (config.line_spacing + config.paragraph_spacing) * config.current_em_scale
+        )
+        state.is_driven_line_spacing = True
+
+    @staticmethod
+    def _tmp_record_native_line(
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        run_metrics: list[tuple[TextRun, float, float]],
+        line_width: float,
+        line_min_x: float,
+        line_max_x: float,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        baseline = -state.line_offset
+        line_ascender = line_state.max_ascender - state.line_offset
+        line_descender = line_state.max_descender - state.line_offset
+        # TMP keeps m_ElementDescender as the current generated line's descender,
+        # not the union minimum. Later lines can move upward with negative spacing.
+        state.element_descender = line_descender
+        if state.max_text_ascender is None:
+            state.max_text_ascender = line_ascender
+        line_height = line_ascender - line_descender + config.raw_line_gap * config.base_scale
+        line_width = max(1.0, line_width)
+        state.rendered_width = max(state.rendered_width, line_width)
+        state.accumulated_line_height = max(state.accumulated_line_height, -baseline + line_height)
+        state.lines.append(
+            TMPNativeLineInfo(
+                index=line_index,
+                styled_line=line,
+                run_metrics=run_metrics,
+                first_character_index=first_character_index,
+                last_character_index=max(first_character_index, len(state.characters) - 1),
+                visible_character_count=line_state.visible_character_count,
+                baseline=baseline,
+                ascender=line_ascender,
+                descender=line_descender,
+                line_height=line_height,
+                width=line_width,
+                max_advance=line_width,
+                line_extents_min_x=line_min_x,
+                line_extents_max_x=line_max_x,
+                y_down=-baseline,
+            )
+        )
+
+    @staticmethod
+    def _tmp_adjust_native_line_offset(
+        state: _TMPNativeLayoutState,
+        line_state: _TMPNativeLineState,
+    ) -> None:
+        if state.line_offset <= 0.0 or state.is_driven_line_spacing:
+            return
+        baseline_adjustment_delta = line_state.max_ascender - state.start_of_line_ascender
+        if abs(baseline_adjustment_delta) > 0.01:
+            state.element_descender -= baseline_adjustment_delta
+            state.line_offset += baseline_adjustment_delta
+
+    def _tmp_resolve_native_line_extents(
+        self,
+        line: StyledLine,
+        line_state: _TMPNativeLineState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        if not line_state.has_character:
+            line_state.max_ascender, line_state.max_descender = self.tmp_native_style_extents(
+                config.font_name,
+                line.style,
+            )
+        if line_state.max_ascender <= TMP_LARGE_NEGATIVE_FLOAT:
+            line_state.max_ascender = 0.0
+        if line_state.max_descender >= TMP_LARGE_POSITIVE_FLOAT:
+            line_state.max_descender = 0.0
+
+    def _tmp_native_layout_line_breaks(
+        self,
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> None:
+        for break_index in range(line.trailing_newline_count):
+            line_state.has_character = True
+            char_info = self._tmp_append_native_layout_character(
+                "\n",
+                line.style,
+                line_index,
+                first_character_index,
+                line_state,
+                state,
+                config,
+            )
+            line_state.line_break_adjusted_ascender = char_info.adjusted_ascender
+            if break_index + 1 < line.trailing_newline_count:
+                line_state.x_advance = self.tmp_native_line_initial_x(line, config.margin_width)
+
+    def _tmp_native_layout_runs(
+        self,
+        line: StyledLine,
+        line_index: int,
+        first_character_index: int,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> _TMPNativeLineState:
+        line_state = _TMPNativeLineState(self.tmp_native_line_initial_x(line, config.margin_width))
+        for run_index, run in enumerate(line.runs):
+            for char in run.text:
+                if char in {"\r", "\n"}:
+                    continue
+                line_state.has_character = True
+                self._tmp_append_native_layout_character(
+                    char,
+                    run.style,
+                    line_index,
+                    first_character_index,
+                    line_state,
+                    state,
+                    config,
+                )
+            next_run = line.runs[run_index + 1] if run_index + 1 < len(line.runs) else None
+            next_style = next_run.style if next_run is not None else line.style
+            if self.tmp_closes_cspace_before_next_run(run.style, next_style):
+                line_state.x_advance -= self.tmp_cspace_advance(run.style.cspace)
+                if state.characters:
+                    state.characters[-1] = replace(state.characters[-1], x_advance=line_state.x_advance)
+        return line_state
+
+    def _tmp_append_native_layout_character(
+        self,
+        char: str,
+        style: TextStyle,
+        line_index: int,
+        first_character_index: int,
+        line_state: _TMPNativeLineState,
+        state: _TMPNativeLayoutState,
+        config: _TMPNativeLayoutConfig,
+    ) -> TMPNativeCharacterInfo:
+        (
+            char_info,
+            line_state.x_advance,
+            line_state.max_ascender,
+            line_state.max_descender,
+            line_state.visible_character_count,
+        ) = self.tmp_native_layout_character(
+            char,
+            style,
+            config.font_name,
+            config.font_path,
+            line_index,
+            len(state.characters),
+            line_state.x_advance,
+            state.line_offset,
+            first_character_index,
+            line_state.max_ascender,
+            line_state.max_descender,
+            line_state.visible_character_count,
+            config.layout_mode,
+            config.current_em_scale,
+            config.outline_dilate,
+            source_metrics_only=config.source_metrics_only,
+        )
+        state.characters.append(char_info)
+        return char_info
+
+    def draw_tmp_text_box_runs(
+        self,
+        image: Image.Image,
+        font_name: str,
+        font_path: Path,
+        mesh_text_layout: TMPNativeTextLayout,
+        native_baselines: list[float] | None,
+        horizontal_align: str,
+        box_w: float,
+        rect_origin_x: float,
+        rect_origin_y: float,
+        content_y: float,
+        outline_color: str,
+        outline_width: int,
+        outline_dilate: float,
+    ) -> None:
+        for line_index, line_info in enumerate(mesh_text_layout.lines):
+            line_x = tmp_line_offset_x(horizontal_align, box_w, line_info.width)
+            for run, x, _ in line_info.run_metrics:
+                draw_x = rect_origin_x + line_x + x
+                if native_baselines is not None:
+                    self.draw_run_at_baseline(
+                        image,
+                        font_name,
+                        font_path,
+                        run,
+                        draw_x,
+                        rect_origin_y + native_baselines[line_index],
+                        outline_color,
+                        outline_width,
+                        outline_dilate,
+                    )
+                    continue
+                self.draw_run(
+                    image,
+                    font_name,
+                    font_path,
+                    run,
+                    draw_x,
+                    rect_origin_y + content_y + line_info.y_down,
+                    line_info.line_height,
+                    outline_color,
+                    outline_width,
+                    outline_dilate,
+                )
+
+    def draw_tmp_text_box_content(
+        self,
+        image: Image.Image,
+        font_name: str,
+        font_path: Path,
+        mesh_text_layout: TMPNativeTextLayout,
+        native_baselines: list[float] | None,
+        horizontal_align: str,
+        box_w: float,
+        rect_origin_x: float,
+        rect_origin_y: float,
+        content_y: float,
+        outline_color: str,
+        outline_width: int,
+        outline_dilate: float,
+    ) -> None:
+        if native_baselines is not None and self.tmp_text_render_mode == "sdf":
+            self.draw_tmp_native_characters(
+                image,
+                font_name,
+                font_path,
+                mesh_text_layout,
+                native_baselines,
+                horizontal_align,
+                box_w,
+                rect_origin_x,
+                rect_origin_y,
+                outline_color,
+                outline_width,
+                outline_dilate,
+            )
+            return
+        self.draw_tmp_text_box_runs(
+            image,
+            font_name,
+            font_path,
+            mesh_text_layout,
+            native_baselines,
+            horizontal_align,
+            box_w,
+            rect_origin_x,
+            rect_origin_y,
+            content_y,
+            outline_color,
+            outline_width,
+            outline_dilate,
+        )
+
+    def resolve_tmp_text_box_layouts(
+        self,
+        layout_lines: list[StyledLine],
+        font_name: str,
+        font_path: Path,
+        base_size: float,
+        line_spacing: float,
+        dominant_size: float,
+        outline_dilate: float,
+        *,
+        source_metrics_only: bool = False,
+    ) -> tuple[TMPNativeTextLayout, TMPNativeTextLayout] | None:
+        native_text_layout = self.tmp_native_text_layout(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            "preferred",
+            outline_dilate,
+            None,
+            source_metrics_only=source_metrics_only,
+        )
+        percent_margin_width = self.tmp_resolve_percent_indent_margin_width(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            outline_dilate,
+            native_text_layout,
+            source_metrics_only=source_metrics_only,
+        )
+        if percent_margin_width is not None:
+            native_text_layout = self.tmp_native_text_layout(
+                layout_lines,
+                font_name,
+                font_path,
+                base_size,
+                line_spacing,
+                dominant_size,
+                "preferred",
+                outline_dilate,
+                percent_margin_width,
+                source_metrics_only=source_metrics_only,
+            )
+        if native_text_layout is None:
+            return None
+        mesh_text_layout = self.tmp_native_text_layout(
+            layout_lines,
+            font_name,
+            font_path,
+            base_size,
+            line_spacing,
+            dominant_size,
+            "mesh",
+            outline_dilate,
+            percent_margin_width,
+            source_metrics_only=source_metrics_only,
+        )
+        if mesh_text_layout is None:
+            return None
+        return native_text_layout, mesh_text_layout
+
+    def pil_text_pivot(self, image: Image.Image, pad: int, min_x: float) -> tuple[float, float]:
+        if self.text_pivot == "center":
+            return image.width / 2, image.height / 2
+        return pad - min_x, image.height / 2
+
+    def draw_pil_text_layout(
+        self,
+        image: Image.Image,
+        metrics: PILTextLayoutMetrics,
+        font_name: str,
+        font_path: Path,
+        pad: int,
+        outline_color: str,
+        outline_width: int,
+        outline_dilate: float,
+    ) -> None:
+        for line in metrics.lines:
+            for run, x, _ in line.runs:
+                self.draw_run(
+                    image,
+                    font_name,
+                    font_path,
+                    run,
+                    pad + x - metrics.min_x,
+                    pad + line.y,
+                    line.height,
+                    outline_color,
+                    outline_width,
+                    outline_dilate,
+                )
+
+    def pil_text_line_height(self, line_height: float, run_height: float, style: TextStyle) -> float:
+        if style.line_height is not None:
+            return self.tmp_explicit_line_height(style.line_height)
+        return max(line_height, run_height)
+
+    def measure_pil_text_run(
+        self,
+        run: TextRun,
+        font_name: str,
+        font_path: Path,
+        scaled_size: float,
+    ) -> tuple[float, float, float]:
+        font = load_font(font_path, scaled_size)
+        if self.use_em_block(run):
+            source_metrics = self.tmp_source_block_metrics(font_name, run, scaled_size)
+            raw_width = source_metrics.advance if source_metrics is not None else scaled_size
+            return raw_width, scaled_size, raw_width
+        measure = self.measure_tmp_run(font, run, font_name, scaled_size)
+        return max(1.0, measure.advance), max(1.0, measure.visual_height), measure.advance
+
+    def measure_pil_text_line(
+        self,
+        line: list[TextRun],
+        font_name: str,
+        font_path: Path,
+        base_size: float,
+    ) -> tuple[list[tuple[TextRun, float, float]], float, float, float]:
+        line_metrics: list[tuple[TextRun, float, float]] = []
+        line_h = base_size * self.tmp_font_scale
+        min_x = 0.0
+        max_x = 1.0
+        x = 0.0
+        for run in line:
+            scaled_size = run.style.size * self.tmp_font_scale
+            raw_w, raw_h, raw_advance = self.measure_pil_text_run(run, font_name, font_path, scaled_size)
+            scale_x = self.tmp_mesh_layout_scale_x(run.style)
+            run_w = raw_w * scale_x
+            run_h = raw_h * self.tmp_layout_scale_y(run.style)
+            line_h = self.pil_text_line_height(line_h, run_h, run.style)
+            line_metrics.append((run, x, run_w))
+            min_x = min(min_x, x)
+            max_x = max(max_x, x + run_w)
+            spacing = self.tmp_character_spacing_advance(run.style, font_name, scaled_size)
+            x += raw_advance * scale_x + len(run.text) * spacing
+            min_x = min(min_x, x)
+            max_x = max(max_x, x)
+        return line_metrics, max(1.0, line_h), min_x, max_x
+
+    def measure_pil_text_layout(
+        self,
+        lines: list[list[TextRun]],
+        font_name: str,
+        font_path: Path,
+        base_size: float,
+        line_spacing: float,
+    ) -> PILTextLayoutMetrics:
+        metrics: list[PILTextLineMetrics] = []
+        min_x = 0.0
+        max_x = 1.0
+        total_h = 0.0
+        for line in lines:
+            line_metrics, line_h, line_min_x, line_max_x = self.measure_pil_text_line(
+                line,
+                font_name,
+                font_path,
+                base_size,
+            )
+            min_x = min(min_x, line_min_x)
+            max_x = max(max_x, line_max_x)
+            metrics.append(PILTextLineMetrics(line_metrics, total_h, line_h))
+            line_style_size = max((run.style.size for run in line), default=base_size)
+            total_h += self.apply_tmp_line_spacing(line_h, line_spacing, font_name, line_style_size)
+        return PILTextLayoutMetrics(metrics, min_x, max_x, total_h)
+
+    def base_text_style(self, mesh_state: TMPUpdateMeshState) -> TextStyle:
+        return TextStyle(
+            color=mesh_state.font_color,
+            alpha=1.0,
+            size=mesh_state.font_size,
+            scale_x=1.0,
+            cspace=0.0,
+            mspace=None,
+            indent=0.0,
+            line_indent=0.0,
+            line_height=None,
+            rotate=0.0,
+            voffset=0.0,
+            mark_color=None,
+            bold=False,
+            italic=False,
+            underline=False,
+            strike=False,
+        )
+
+    def visible_scaled_shape_bounds(
+        self,
+        output_size: tuple[int, int],
+        object_data: dict[str, Any],
+        *,
+        padding: int = 3,
+    ) -> tuple[int, int, int, int] | None:
+        """Return the local SDF pixels which can affect the final canvas."""
+
+        width, height = output_size
+        post_sx = float(self.position_scale_x)
+        post_sy = float(self.position_scale_y)
+        if not all(math.isfinite(value) and value > 0.0 for value in (post_sx, post_sy)):
+            return None
+
+        angle = self.rotation_sign * unity_rotation_degrees(object_data.get("rotation", {}))
+        theta = math.radians(angle % 360.0)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        anchor_x, anchor_y = self.unity_point(object_data.get("position", {}))
+        pivot_x = width / 2.0
+        pivot_y = height / 2.0
+
+        local_corners: list[tuple[float, float]] = []
+        for canvas_x, canvas_y in (
+            (0.0, 0.0),
+            (float(self.canvas_w), 0.0),
+            (float(self.canvas_w), float(self.canvas_h)),
+            (0.0, float(self.canvas_h)),
+        ):
+            dx = canvas_x - anchor_x
+            dy = canvas_y - anchor_y
+            local_corners.append(
+                (
+                    pivot_x + (cos_t * dx + sin_t * dy) / post_sx,
+                    pivot_y + (-sin_t * dx + cos_t * dy) / post_sy,
+                )
+            )
+
+        left = max(0, math.floor(min(x for x, _ in local_corners)) - padding)
+        top = max(0, math.floor(min(y for _, y in local_corners)) - padding)
+        right = min(width, math.ceil(max(x for x, _ in local_corners)) + padding)
+        bottom = min(height, math.ceil(max(y for _, y in local_corners)) + padding)
+        if left >= right or top >= bottom:
+            return None
+        ensure_raster_size(
+            (right - left, bottom - top),
+            max_pixels=self.max_layer_pixels,
+            label="custom profile visible scaled shape",
+        )
+        return (left, top, right, bottom)
+
+    @staticmethod
+    def _honor_mission_row_progress(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, dict) or _int_first(row.get("honorId", row.get("id", 0))) != honor_id:
+            return None
+        return _int_first(row.get("missionProgress", row.get("progress", 0)))
+
+    @classmethod
+    def _bonds_honor_row_level(cls, row: Any, bonds_honor_id: int) -> int | None:
+        if (level := cls._list_profile_level(row, bonds_honor_id)) is not None:
+            return level
+        if not isinstance(row, dict):
+            return None
+        row_id = _int_first(row.get("bondsHonorId", row.get("honorId", row.get("id", 0))))
+        return _int_first(row.get("bondsHonorLevel", row.get("level", 0))) if row_id == bonds_honor_id else None
+
+    @staticmethod
+    def _profile_honor_row_level(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, dict) or _int_first(row.get("honorId")) != honor_id:
+            return None
+        return _int_first(row.get("honorLevel"))
+
+    @classmethod
+    def _user_honor_row_level(cls, row: Any, honor_id: int) -> int | None:
+        if (level := cls._list_profile_level(row, honor_id)) is not None:
+            return level
+        if not isinstance(row, dict):
+            return None
+        row_id = _int_first(row.get("honorId", row.get("id", 0)))
+        return _int_first(row.get("honorLevel", row.get("level", 0))) if row_id == honor_id else None
+
+    @staticmethod
+    def _list_profile_level(row: Any, honor_id: int) -> int | None:
+        if not isinstance(row, list) or not row or _int_first(row[0]) != honor_id:
+            return None
+        return _int_first(row[1]) if len(row) > 1 else 0
+
+    def omikuji_font_path(self, *, decorative: bool = False) -> Path | None:
+        for path in self.omikuji_font_candidates(decorative=decorative):
+            try:
+                if path.is_file():
+                    return path
+            except OSError:
+                continue
+        return self.general_font_path()
+
+    def omikuji_font_candidates(self, *, decorative: bool = False) -> list[Path]:
+        names = (
+            ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
+            if decorative
+            else [
+                "FOT-UDMinchoPro-B",
+                "FOT-RodinNTLGPro-DB",
+            ]
+        )
+        candidates: list[Path] = []
+        for name in names:
+            path = self.tmp_font_library.source_font_path(name)
+            if path is not None:
+                candidates.append(path)
+            candidates.append(self.fonts / f"{name}.otf")
+            candidates.append(self.fonts / f"{name}.ttf")
+        for base in self.data_root_candidates():
+            candidates.extend(
+                (
+                    base / "custom_profile" / "tmp-font-assets" / self.region / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                    base / "custom_profile" / "tmp-font-assets" / "cn" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                    base / "custom_profile" / "tmp-font-assets" / "kr" / "source-fonts" / _OMIKUJI_FONT_FILENAME,
+                )
+            )
+        return candidates
+
+    def _loaded_request_images(self, request: HonorRequest, fields: dict[str, str]) -> dict[str, Image.Image | None]:
+        images: dict[str, Image.Image | None] = {}
+        for image_key, path_field in fields.items():
+            raw_path = getattr(request, path_field)
+            images[image_key] = self.open_rgba(Path(raw_path)) if raw_path else None
+        return images
+
+    def _configured_bonds_honor_image(self, honor_id: int, request_keys: list[str]) -> Image.Image | None:
+        for key in request_keys:
+            if image := self.honor_request_image(self.bonds_honor_requests.get(key)):
+                return image
+        return self.honor_request_image(self.bonds_honor_requests.get(str(honor_id)))
+
+    def _bonds_honor_request_keys(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+        word_id: int,
+        inverse: bool,
+        use_unit_virtual_singer: bool,
+    ) -> list[str]:
+        keys = [self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse, use_unit_virtual_singer)]
+        if use_unit_virtual_singer:
+            keys.append(self.bonds_honor_slot_key(honor_id, level, full_size, word_id, inverse))
+        return keys
+
+    def _eligible_honor_frame_path(
+        self, frame_name: str, honor_type: str, mode_short: str, rarity_rank: int
+    ) -> Path | None:
+        if not frame_name:
+            return None
+        start_rare = 3 if frame_name.startswith("event") else 2
+        if honor_type != "birthday" and rarity_rank < start_rare:
+            return None
+        rel = Path("honor_frame") / frame_name / f"frame_degree_{mode_short}_{rarity_rank}.png"
+        return self.first_region_asset([rel])
+
+    @staticmethod
+    def _resolved_honor_frame_name(frame_name: str, honor_type: str, bg_asset_name: str, asset_name: str) -> str:
+        if honor_type != "birthday" or frame_name:
+            return frame_name
+        if bg_asset_name.startswith("honor_bg_birthday_"):
+            return "honor_frame_birthday_" + bg_asset_name.removeprefix("honor_bg_birthday_")
+        if asset_name.startswith("honor_bg_birthday_"):
+            return "honor_frame_birthday_" + asset_name.removeprefix("honor_bg_birthday_")
+        return ""
+
+    @staticmethod
+    def _honor_visual_level(visual: dict[str, Any]) -> int:
+        return _int_first(visual.get("level"))
+
+    @staticmethod
+    def _usable_honor_level_visuals(honor: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            level
+            for level in honor.get("levels", []) or []
+            if isinstance(level, dict) and (level.get("assetbundleName") or level.get("honorRarity"))
+        ]
+
+    def _honor_level_icon_paths(self, request_group_type: str, group_type: str) -> tuple[Path | None, Path | None]:
+        if request_group_type != "fc_ap" and group_type not in {"character", "achievement"}:
+            return None, None
+        return (
+            self.static_image_path("honor", "icon_degreeLv.png"),
+            self.static_image_path("honor", "icon_degreeLv6.png"),
+        )
+
+    def _honor_scroll_path(self, asset_name: str) -> Path | None:
+        if not asset_name:
+            return None
+        return self.first_region_asset([Path("honor") / asset_name / "scroll.png"])
+
+    def _resolved_honor_group_type(self, group: dict[str, Any], bg_asset_name: str, asset_name: str) -> str:
+        group_type = str(group.get("honorType", "") or "")
+        return "wl_event" if self.is_world_link_honor_group(group_type, bg_asset_name, asset_name) else group_type
+
+    @staticmethod
+    def _honor_background_asset_name(group: dict[str, Any], asset_name: str) -> str:
+        configured = group.get("backgroundAssetbundleName", group.get("backgroundAssetBundleName", ""))
+        return str(_first_truthy(configured, asset_name, default=""))
+
+    @staticmethod
+    def _honor_asset_details(
+        honor: dict[str, Any], visual: dict[str, Any] | None, requested_level: int
+    ) -> tuple[str, str, int]:
+        asset_name = str(honor.get("assetbundleName", "") or "")
+        rarity = str(honor.get("honorRarity", "") or "")
+        if visual is None:
+            return asset_name, rarity, requested_level
+        asset_name = str(_first_truthy(asset_name, visual.get("assetbundleName"), default=""))
+        rarity = str(_first_truthy(rarity, visual.get("honorRarity"), default=""))
+        level = _int_first(visual.get("level")) if requested_level <= 0 else requested_level
+        return asset_name, rarity, level
+
+    def _general_prefab_labels(self) -> dict[str, str]:
+        keys = (
+            "comment_title",
+            "total_power",
+            "multi_live_title",
+            "multi_live_count_suffix",
+            "challenge_live_title",
+            "challenge_live_solo",
+            "character_rank_tab",
+            "challenge_stage_tab",
+            "music_clear",
+            "music_full_combo",
+            "music_all_perfect",
+            "story_favorite_title",
+            "not_set",
+        )
+        return {key: self.general_text(key) for key in keys}
+
+    def _story_favorite_prefab_assets(self) -> dict[str, Path | None]:
+        stories = self.profile_context.get("userStoryFavorites")
+        if not isinstance(stories, list):
+            return {}
+        return {
+            story_favorite_asset_key(story): self.story_favorite_image_path(story)
+            for story in stories
+            if isinstance(story, dict)
+        }
+
+    def _character_rank_prefab_assets(self) -> dict[str, Path | None]:
+        return {
+            f"character_rank_icon:{character_id}": self.chara_icon_path(character_id)
+            for _nickname, character_id in CHARA_LIST
+            if character_id is not None
+        }
+
+    def _challenge_live_prefab_assets(self) -> dict[str, Path | None]:
+        data = _mapping_or_empty(self.profile_context.get("userChallengeLiveSoloResult") or {})
+        character_id = _int_first(data.get("characterId"))
+        return {"challenge_character_icon": self.chara_icon_path(character_id)}
+
+    def _general_prefab_asset_paths(self, file_name: str) -> dict[str, Path | None]:
+        builders = {
+            "ChallengeLive": self._challenge_live_prefab_assets,
+            "CharacterRankAndChallengeStage": self._character_rank_prefab_assets,
+            "CharacterRankAndChallengeStageScroll": self._character_rank_prefab_assets,
+            "StoryFavorite": self._story_favorite_prefab_assets,
+        }
+        builder = builders.get(file_name)
+        return builder() if builder is not None else {}
+
+    def render_oversized_tmp_text_direct(
+        self,
+        canvas: Image.Image,
+        content: NativeContent,
+        exc: RasterSizeLimitError,
+    ) -> bool:
+        """Render a sparse TMP layer by glyph after its full local surface exceeds the budget."""
+
+        if exc.label != "custom profile TMP text layer":
+            return False
+        if not self.tmp_decorative_direct_raster:
+            return False
+        if content.kind != "text" or not content.object_data.get("visible", False):
+            return False
+        if self.text_layout != "tmp" or self.tmp_text_render_mode != "sdf":
+            return False
+        return self.render_tmp_text_direct(canvas, content.item, content.object_data)
+
+    def _render_serial_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        rendered_layers: list[
+            tuple[
+                NativeContent,
+                tuple[Image.Image, tuple[float, float]] | tuple[Image.Image, tuple[float, float], bool],
+            ]
+        ] = []
+        for content in contents:
+            rendered = self.render_content_for_card(content)
+            self.record_native_audit(card_ref, content, rendered.status, rendered.result)
+            if isinstance(rendered.result, tuple):
+                rendered_layers.append((content, rendered.result))
+        for prepared in self.prepare_layers_for_card(rendered_layers):
+            if prepared is not None:
+                img.alpha_composite(prepared.image, prepared.xy)
+
+    def _record_and_composite_prepared(
+        self, img: Image.Image, card_ref: dict[str, int], rendered: RenderedLayer
+    ) -> None:
+        self.record_native_audit(card_ref, rendered.content, rendered.status, rendered.result)
+        if rendered.prepared is not None:
+            img.alpha_composite(rendered.prepared.image, rendered.prepared.xy)
+
+    def _render_parallel_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        for rendered in self.render_contents_for_card_parallel(contents):
+            self._record_and_composite_prepared(img, card_ref, rendered)
+
+    def _render_decorative_card_content(
+        self, img: Image.Image, card_ref: dict[str, int], content: NativeContent
+    ) -> None:
+        if self.render_content_direct_on_card(img, content):
+            self.record_native_audit(card_ref, content, "rendered-direct", None)
+            return
+        try:
+            rendered = self.render_and_prepare_content_for_card(content)
+        except RasterSizeLimitError as exc:
+            if self.render_oversized_tmp_text_direct(img, content, exc):
+                self.record_native_audit(card_ref, content, "rendered-direct", None)
+                return
+            raise
+        self._record_and_composite_prepared(img, card_ref, rendered)
+
+    def _render_decorative_card_contents(
+        self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]
+    ) -> None:
+        for content in contents:
+            self._render_decorative_card_content(img, card_ref, content)
+
+    def _render_card_contents(self, img: Image.Image, card_ref: dict[str, int], contents: list[NativeContent]) -> None:
+        if self.tmp_decorative_direct_raster:
+            self._render_decorative_card_contents(img, card_ref, contents)
+            return
+        if self.parallel_stage == "full" and self.parallel_workers > 1 and len(contents) > 1:
+            self._render_parallel_card_contents(img, card_ref, contents)
+            return
+        self._render_serial_card_contents(img, card_ref, contents)
+
+    def _existing_resource_path(self, rels: list[Path], file_name: str) -> Path | None:
+        roots = [self.assets]
+        if self.game_assets != self.assets:
+            roots.append(self.game_assets)
+        for root in roots:
+            for rel in rels:
+                path = root / rel / file_name
+                if path.exists():
+                    return path
+        return None
+
+    @staticmethod
+    def _resource_relative_dirs(resource: dict[str, Any], fallback_dir: str | None) -> list[Path]:
+        load_val = str(resource.get("resourceLoadVal", "")).strip("/")
+        if load_val.startswith("custom_profile/"):
+            return [Path(load_val.removeprefix("custom_profile/")), Path(load_val)]
+        if load_val == "custom_profile":
+            return [Path("."), Path("custom_profile")]
+        return [Path(fallback_dir)] if fallback_dir else [Path(load_val)]
+
+    def _explicit_resource_path(self, resource: dict[str, Any]) -> Path | None:
+        for key in ("imagePath", "image_path", "resourcePath", "resource_path", "filePath", "file_path"):
+            if path := self.resolve_request_asset_path(str(resource.get(key, "") or "")):
+                return path
+        return None
+
+    def _relative_request_asset_candidates(self, clean: str) -> list[Path]:
+        rel = Path(clean)
+        candidates: list[Path] = []
+        if clean.startswith("asset/"):
+            without_asset = Path(clean.removeprefix("asset/"))
+            for root in self.data_root_candidates():
+                candidates.append(root / clean)
+                candidates.append(root / without_asset)
+        elif clean.startswith(f"{self.region_asset_package_name()}/"):
+            for root in self.data_root_candidates():
+                candidates.append(root / "asset" / rel)
+                candidates.append(root / rel)
+        elif clean.startswith("static_images/"):
+            inner = Path(clean.removeprefix("static_images/"))
+            candidates.append(self.static_images.parent / rel)
+            candidates.append(self.static_images / inner)
+            for root in self.data_root_candidates():
+                candidates.append(root / rel)
+        else:
+            candidates.append(Path(clean))
+            for root in (self.assets, self.game_assets, self.static_images.parent, *self.data_root_candidates()):
+                candidates.append(root / rel)
+        return candidates
+
+    def _reserve_retained_raster_bytes(self, current: int, additional: int, *, label: str) -> int:
+        """Reserve bytes for a list of live user-derived rasters before creating the next one."""
+
+        total = max(0, int(current)) + max(0, int(additional))
+        if total > self.max_scene_bytes:
+            raise ValueError(f"{label} would retain {total} bytes; limit is {self.max_scene_bytes}")
+        return total
 
 
 def is_tmp_em_block(run: TextRun) -> bool:
@@ -11718,6 +12782,8 @@ def rotate_layer_about_pivot(
     angle: float,
     premultiply_alpha: bool = False,
 ) -> tuple[Image.Image, tuple[float, float]]:
+    from src.sekai.profile.custom_profile.pillow_runtime import Image
+
     angle = angle % 360.0
     if abs(angle) < 1.0e-9:
         return layer, pivot
@@ -11775,17 +12841,7 @@ def trim_layer_to_content(
     layer: Image.Image, pivot: tuple[float, float], pad: int = 4
 ) -> tuple[Image.Image, tuple[float, float]]:
     bbox = layer.getchannel("A").getbbox()
-    if bbox is None:
-        return layer, pivot
-    left, top, right, bottom = bbox
-    left = math.floor(min(left, pivot[0])) - pad
-    top = math.floor(min(top, pivot[1])) - pad
-    right = math.ceil(max(right, pivot[0])) + pad
-    bottom = math.ceil(max(bottom, pivot[1])) + pad
-    left = max(0, left)
-    top = max(0, top)
-    right = min(layer.width, right)
-    bottom = min(layer.height, bottom)
+    left, top, right, bottom = text_layer_crop(layer.size, pivot, bbox, pad)
     if left <= 0 and top <= 0 and right >= layer.width and bottom >= layer.height:
         return layer, pivot
     return layer.crop((left, top, right, bottom)), (pivot[0] - left, pivot[1] - top)
@@ -11801,55 +12857,6 @@ def dict_int_set(obj: dict[str, Any], keys: set[int]) -> set[int]:
         if value in keys:
             present.add(value)
     return present
-
-
-def deprecated_probe_args(args: argparse.Namespace) -> list[str]:
-    checks = (
-        (args.text_pivot != DEFAULT_TEXT_PIVOT, f"--text-pivot={args.text_pivot}"),
-        (args.tmp_scale_mode != DEFAULT_TMP_SCALE_MODE, f"--tmp-scale-mode={args.tmp_scale_mode}"),
-        (args.rotation_sign != DEFAULT_ROTATION_SIGN, f"--rotation-sign={args.rotation_sign}"),
-        (args.text_layout != "tmp", f"--text-layout={args.text_layout}"),
-        (args.position_scale is not None, "--position-scale"),
-        (args.position_scale_x is not None, "--position-scale-x"),
-        (args.position_scale_y is not None, "--position-scale-y"),
-        (args.tmp_font_scale != DEFAULT_TMP_FONT_SCALE, "--tmp-font-scale"),
-        (args.tmp_line_mode != DEFAULT_TMP_LINE_MODE, f"--tmp-line-mode={args.tmp_line_mode}"),
-        (args.tmp_box_mode != "preferred", f"--tmp-box-mode={args.tmp_box_mode}"),
-        (args.tmp_box_width != TMP_DEFAULT_TEXT_BOX_W, "--tmp-box-width"),
-        (args.tmp_box_width_factor != TMP_TEXT_BOX_W_SIZE_FACTOR, "--tmp-box-width-factor"),
-        (args.tmp_line_height_factor != TMP_LINE_HEIGHT_FACTOR, "--tmp-line-height-factor"),
-        (args.tmp_line_spacing_factor != TMP_LINE_SPACING_FACTOR, "--tmp-line-spacing-factor"),
-        (args.tmp_preferred_padding_x != TMP_PREFERRED_PADDING_X, "--tmp-preferred-padding-x"),
-        (args.tmp_preferred_padding_y != TMP_PREFERRED_PADDING_Y, "--tmp-preferred-padding-y"),
-        (args.rodin_font != "auto", f"--rodin-font={args.rodin_font}"),
-        (args.tmp_block_mode != DEFAULT_TMP_BLOCK_MODE, f"--tmp-block-mode={args.tmp_block_mode}"),
-        (args.draw_order != "global", f"--draw-order={args.draw_order}"),
-        (args.shape_outline_mode != "sdf", f"--shape-outline-mode={args.shape_outline_mode}"),
-        (args.triangle_mode != DEFAULT_TRIANGLE_MODE, f"--triangle-mode={args.triangle_mode}"),
-        (args.text_vertical_mode != DEFAULT_TEXT_VERTICAL_MODE, f"--text-vertical-mode={args.text_vertical_mode}"),
-        (args.tmp_space_width_factor != DEFAULT_TMP_SPACE_WIDTH_FACTOR, "--tmp-space-width-factor"),
-        (
-            args.tmp_text_render_mode != DEFAULT_TMP_TEXT_RENDER_MODE,
-            f"--tmp-text-render-mode={args.tmp_text_render_mode}",
-        ),
-        (args.tmp_dynamic_sdf != DEFAULT_TMP_DYNAMIC_SDF, "--tmp-dynamic-sdf"),
-        (args.premultiply_alpha_transforms, "--premultiply-alpha-transforms"),
-        (args.tmp_pillow_stroke_factor != DEFAULT_TMP_PILLOW_STROKE_FACTOR, "--tmp-pillow-stroke-factor"),
-        (args.shape_sdf_ratio_scale != SHAPE_SDF_RATIO_SCALE, "--shape-sdf-ratio-scale"),
-        (args.shape_sdf_outer_factor != SHAPE_SDF_OUTER_FACTOR, "--shape-sdf-outer-factor"),
-        (args.shape_sdf_face_factor != SHAPE_SDF_FACE_FACTOR, "--shape-sdf-face-factor"),
-        (args.shape_sdf_softness != SHAPE_SDF_SOFTNESS, "--shape-sdf-softness"),
-        (args.shape_sdf_source != "rgb", f"--shape-sdf-source={args.shape_sdf_source}"),
-        (args.shape_sdf_screen_fwidth != SHAPE_SDF_SCREEN_FWIDTH, "--no-shape-sdf-screen-fwidth"),
-        (args.tmp_metrics_mode != DEFAULT_TMP_METRICS_MODE, f"--tmp-metrics-mode={args.tmp_metrics_mode}"),
-        (
-            args.tmp_native_line_gap != DEFAULT_TMP_NATIVE_LINE_GAP,
-            "--tmp-native-line-gap" if args.tmp_native_line_gap else "--no-tmp-native-line-gap",
-        ),
-        (args.no_shape_sprites, "--no-shape-sprites"),
-        (args.skip_empty_lines, "--skip-empty-lines"),
-    )
-    return [probe for enabled, probe in checks if enabled]
 
 
 def warn_deprecated_probe_args(args: argparse.Namespace) -> None:
@@ -12108,20 +13115,45 @@ def build_renderer(
     )
 
 
-def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    if args.full_canvas and args.viewer_viewport:
-        parser.error("--full-canvas and --viewer-viewport are mutually exclusive")
-    if args.request is not None and args.export_request is not None:
-        parser.error("--request and --export-request are mutually exclusive")
-    if args.request is not None and (
-        args.seq is not None or args.card_id is not None or args.custom_profile_id is not None or args.all
-    ):
-        parser.error("--request already contains the selected card; do not pass selectors")
-    if args.parallel_stage == "full":
-        print(
-            "warning: --parallel-stage full is experimental and may be non-deterministic with TMP/SDF caches; use transform for production",
-            file=sys.stderr,
-        )
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    validate_cli_args(parser, args)
+    warn_deprecated_probe_args(args)
+
+    args.out = resolve_cli_path(args.out)
+    args.out.mkdir(parents=True, exist_ok=True)
+    render_job = load_cli_render_job(parser, args)
+    if render_job is None:
+        return
+    profile_context, cards, resources = render_job
+    renderer = build_renderer(args, profile_context, resolve_render_target(args), resources)
+    render_cli_cards(renderer, cards, args.out)
+    if args.dump_tmp_layout is not None:
+        write_cli_audit(args.dump_tmp_layout, renderer.tmp_layout_audit)
+    if args.dump_native_audit is not None:
+        write_cli_audit(args.dump_native_audit, renderer.native_audit)
+
+
+def write_cli_audit(path: Path, entries: list[dict[str, Any]]) -> None:
+    safe_path = resolve_cli_path(path)
+    safe_path.parent.mkdir(parents=True, exist_ok=True)
+    with safe_path.open("w", encoding="utf-8") as f:
+        for entry in entries:
+            f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
+    print(safe_path, flush=True)
+
+
+def render_cli_cards(renderer: PNGRenderer, cards: list[dict[str, Any]], out_dir: Path) -> None:
+    output_root = out_dir.resolve()
+    for card in cards:
+        img = renderer.render_card(card)
+        filename = custom_profile_output_name(card)
+        path = resolve_cli_path(output_root / filename)
+        if path.parent != output_root or Path(filename).name != filename:
+            raise ValueError(f"unsafe custom profile output filename: {filename!r}")
+        img.save(path)
+        print(path, flush=True)
 
 
 def load_cli_render_job(
@@ -12148,45 +13180,534 @@ def load_cli_render_job(
     return build_profile_context(profile), cards, {}
 
 
-def render_cli_cards(renderer: PNGRenderer, cards: list[dict[str, Any]], out_dir: Path) -> None:
-    output_root = out_dir.resolve()
-    for card in cards:
-        img = renderer.render_card(card)
-        filename = custom_profile_output_name(card)
-        path = resolve_cli_path(output_root / filename)
-        if path.parent != output_root or Path(filename).name != filename:
-            raise ValueError(f"unsafe custom profile output filename: {filename!r}")
-        img.save(path)
-        print(path, flush=True)
+def validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.full_canvas and args.viewer_viewport:
+        parser.error("--full-canvas and --viewer-viewport are mutually exclusive")
+    if args.request is not None and args.export_request is not None:
+        parser.error("--request and --export-request are mutually exclusive")
+    if args.request is not None and (
+        args.seq is not None or args.card_id is not None or args.custom_profile_id is not None or args.all
+    ):
+        parser.error("--request already contains the selected card; do not pass selectors")
+    if args.parallel_stage == "full":
+        print(
+            "warning: --parallel-stage full is experimental and may be non-deterministic with TMP/SDF caches; use transform for production",
+            file=sys.stderr,
+        )
 
 
-def write_cli_audit(path: Path, entries: list[dict[str, Any]]) -> None:
-    safe_path = resolve_cli_path(path)
-    safe_path.parent.mkdir(parents=True, exist_ok=True)
-    with safe_path.open("w", encoding="utf-8") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
-    print(safe_path, flush=True)
+def deprecated_probe_args(args: argparse.Namespace) -> list[str]:
+    checks = (
+        (args.text_pivot != DEFAULT_TEXT_PIVOT, f"--text-pivot={args.text_pivot}"),
+        (args.tmp_scale_mode != DEFAULT_TMP_SCALE_MODE, f"--tmp-scale-mode={args.tmp_scale_mode}"),
+        (args.rotation_sign != DEFAULT_ROTATION_SIGN, f"--rotation-sign={args.rotation_sign}"),
+        (args.text_layout != "tmp", f"--text-layout={args.text_layout}"),
+        (args.position_scale is not None, "--position-scale"),
+        (args.position_scale_x is not None, "--position-scale-x"),
+        (args.position_scale_y is not None, "--position-scale-y"),
+        (args.tmp_font_scale != DEFAULT_TMP_FONT_SCALE, "--tmp-font-scale"),
+        (args.tmp_line_mode != DEFAULT_TMP_LINE_MODE, f"--tmp-line-mode={args.tmp_line_mode}"),
+        (args.tmp_box_mode != "preferred", f"--tmp-box-mode={args.tmp_box_mode}"),
+        (args.tmp_box_width != TMP_DEFAULT_TEXT_BOX_W, "--tmp-box-width"),
+        (args.tmp_box_width_factor != TMP_TEXT_BOX_W_SIZE_FACTOR, "--tmp-box-width-factor"),
+        (args.tmp_line_height_factor != TMP_LINE_HEIGHT_FACTOR, "--tmp-line-height-factor"),
+        (args.tmp_line_spacing_factor != TMP_LINE_SPACING_FACTOR, "--tmp-line-spacing-factor"),
+        (args.tmp_preferred_padding_x != TMP_PREFERRED_PADDING_X, "--tmp-preferred-padding-x"),
+        (args.tmp_preferred_padding_y != TMP_PREFERRED_PADDING_Y, "--tmp-preferred-padding-y"),
+        (args.rodin_font != "auto", f"--rodin-font={args.rodin_font}"),
+        (args.tmp_block_mode != DEFAULT_TMP_BLOCK_MODE, f"--tmp-block-mode={args.tmp_block_mode}"),
+        (args.draw_order != "global", f"--draw-order={args.draw_order}"),
+        (args.shape_outline_mode != "sdf", f"--shape-outline-mode={args.shape_outline_mode}"),
+        (args.triangle_mode != DEFAULT_TRIANGLE_MODE, f"--triangle-mode={args.triangle_mode}"),
+        (args.text_vertical_mode != DEFAULT_TEXT_VERTICAL_MODE, f"--text-vertical-mode={args.text_vertical_mode}"),
+        (args.tmp_space_width_factor != DEFAULT_TMP_SPACE_WIDTH_FACTOR, "--tmp-space-width-factor"),
+        (
+            args.tmp_text_render_mode != DEFAULT_TMP_TEXT_RENDER_MODE,
+            f"--tmp-text-render-mode={args.tmp_text_render_mode}",
+        ),
+        (args.tmp_dynamic_sdf != DEFAULT_TMP_DYNAMIC_SDF, "--tmp-dynamic-sdf"),
+        (args.premultiply_alpha_transforms, "--premultiply-alpha-transforms"),
+        (args.tmp_pillow_stroke_factor != DEFAULT_TMP_PILLOW_STROKE_FACTOR, "--tmp-pillow-stroke-factor"),
+        (args.shape_sdf_ratio_scale != SHAPE_SDF_RATIO_SCALE, "--shape-sdf-ratio-scale"),
+        (args.shape_sdf_outer_factor != SHAPE_SDF_OUTER_FACTOR, "--shape-sdf-outer-factor"),
+        (args.shape_sdf_face_factor != SHAPE_SDF_FACE_FACTOR, "--shape-sdf-face-factor"),
+        (args.shape_sdf_softness != SHAPE_SDF_SOFTNESS, "--shape-sdf-softness"),
+        (args.shape_sdf_source != "rgb", f"--shape-sdf-source={args.shape_sdf_source}"),
+        (args.shape_sdf_screen_fwidth != SHAPE_SDF_SCREEN_FWIDTH, "--no-shape-sdf-screen-fwidth"),
+        (args.tmp_metrics_mode != DEFAULT_TMP_METRICS_MODE, f"--tmp-metrics-mode={args.tmp_metrics_mode}"),
+        (
+            args.tmp_native_line_gap != DEFAULT_TMP_NATIVE_LINE_GAP,
+            "--tmp-native-line-gap" if args.tmp_native_line_gap else "--no-tmp-native-line-gap",
+        ),
+        (args.no_shape_sprites, "--no-shape-sprites"),
+        (args.skip_empty_lines, "--skip-empty-lines"),
+    )
+    return [probe for enabled, probe in checks if enabled]
 
 
-def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
-    validate_cli_args(parser, args)
-    warn_deprecated_probe_args(args)
+def _append_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
+    if line and text_width(line + token) > max_width:
+        lines.append(line)
+        line = ""
+    if text_width(token) > max_width:
+        return _append_oversized_general_token(token, line, max_width, text_width, lines)
+    return line + token
 
-    args.out = resolve_cli_path(args.out)
-    args.out.mkdir(parents=True, exist_ok=True)
-    render_job = load_cli_render_job(parser, args)
-    if render_job is None:
-        return
-    profile_context, cards, resources = render_job
-    renderer = build_renderer(args, profile_context, resolve_render_target(args), resources)
-    render_cli_cards(renderer, cards, args.out)
-    if args.dump_tmp_layout is not None:
-        write_cli_audit(args.dump_tmp_layout, renderer.tmp_layout_audit)
-    if args.dump_native_audit is not None:
-        write_cli_audit(args.dump_native_audit, renderer.native_audit)
+
+def _append_oversized_general_token(token: str, line: str, max_width: int, text_width, lines: list[str]) -> str:
+    for char in token:
+        trial = line + char
+        if line and text_width(trial) > max_width:
+            lines.append(line)
+            line = char
+        else:
+            line = trial
+    return line
+
+
+def _general_text_tokens(raw_line: str) -> list[str]:
+    tokens: list[str] = []
+    ascii_token = ""
+    for char in raw_line:
+        if char.isascii() and (char.isalnum() or char in "._-@:/#"):
+            ascii_token += char
+        else:
+            if ascii_token:
+                tokens.append(ascii_token)
+                ascii_token = ""
+            tokens.append(char)
+    if ascii_token:
+        tokens.append(ascii_token)
+    return tokens
+
+
+def _png_resource_filename(resource: dict[str, Any]) -> str | None:
+    file_name = str(resource.get("fileName", "")).strip("/")
+    if not file_name:
+        return None
+    return file_name if file_name.lower().endswith(".png") else f"{file_name}.png"
+
+
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            result.append(path)
+    return result
+
+
+def _coerced_resource_entry(key: Any, item: Any) -> tuple[int, dict[str, Any]] | None:
+    if not isinstance(item, dict):
+        return None
+    item_id = int_or_none(item.get("id"))
+    if item_id is None:
+        item_id = int_or_none(key)
+    return None if item_id is None else (item_id, item)
+
+
+def _resource_entries(value: Any) -> list[tuple[Any, Any]]:
+    if isinstance(value, dict):
+        wrapped_items = value.get("items")
+        if isinstance(wrapped_items, list):
+            return [(None, item) for item in wrapped_items]
+        return list(value.items())
+    if isinstance(value, list):
+        return [(None, item) for item in value]
+    return []
+
+
+def _nonempty_strings(values: Any) -> list[str]:
+    return [text for value in values or [] if (text := str(value))]
+
+
+def _int_first(*values: Any, default: int = 0) -> int:
+    return int(_first_truthy(*values, default=default))
+
+
+def _float_first(*values: Any, default: float = 0.0) -> float:
+    return float(_first_truthy(*values, default=default))
+
+
+def _first_truthy(*values: Any, default: Any = None) -> Any:
+    for value in values:
+        if value:
+            return value
+    return default
+
+
+def _record_or_noop(record):
+    return (lambda path: None) if record is None else record
+
+
+def _game_assets_root(assets: Path) -> Path:
+    return assets.parent if assets.name == "custom_profile" else assets
+
+
+def _positive_float(value: Any, default: float = 1.0) -> float:
+    return max(1.0, float(value or default))
+
+
+def _positive_int(value: Any, default: int = 1) -> int:
+    return max(1, int(value or default))
+
+
+def _choice_or_default(value: str, choices: set[str] | frozenset[str], default: str) -> str:
+    return value if value in choices else default
+
+
+def _default_if_none(value: Any, default: Any) -> Any:
+    return default if value is None else value
+
+
+def _optional_dict(value: dict[str, Any] | None) -> dict[str, Any]:
+    return value or {}
+
+
+def _mapping_or_empty(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+@dataclass(frozen=True)
+class DirectSdfFontQuad:
+    """Dynamic source-font decorative glyph whose complete pixel pipeline runs in Rust."""
+
+    font_path: Path
+    codepoint: int
+    sample_size: float
+    bbox: tuple[int, int, int, int]
+    padding: int
+    crop_padding: int
+    field_size: tuple[int, int]
+    spread: float
+    size: tuple[int, int]
+    affine: tuple[float, float, float, float, float, float]
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
+@dataclass(frozen=True)
+class DirectSdfAtlasQuad:
+    """Static-atlas decorative glyph whose complete pixel pipeline runs in Rust."""
+
+    atlas_path: Path
+    atlas_size: tuple[int, int]
+    crop: tuple[int, int, int, int]
+    field_size: tuple[int, int]
+    size: tuple[int, int]
+    affine: tuple[float, float, float, float, float, float]
+    left: int
+    top: int
+    scalars: TMPSdfShadingScalars
+
+
+@dataclass(frozen=True)
+class TMPFieldWarpPlan:
+    """Pillow AFFINE inverse matrix plus its clipped destination rectangle."""
+
+    affine: tuple[float, float, float, float, float, float]
+    size: tuple[int, int]
+    left: int
+    top: int
+
+
+@dataclass(frozen=True)
+class _TMPPreparedCharacterField:
+    field: Image.Image | TMPStaticAtlasField | TMPDynamicFontField
+    glyph_asset: TMPFontAsset | None
+    bbox: tuple[int, int, int, int]
+    pad_x: int
+    pad_y: int
+    native_quad_sized: bool
+
+    def result(
+        self,
+    ) -> tuple[
+        Image.Image | TMPStaticAtlasField | TMPDynamicFontField,
+        TMPFontAsset | None,
+        tuple[int, int, int, int],
+        int,
+        int,
+    ]:
+        return self.field, self.glyph_asset, self.bbox, self.pad_x, self.pad_y
+
+
+@dataclass(frozen=True)
+class TMPDynamicFontField:
+    """Dynamic TMP glyph before pixel work.
+
+    Python selects the source font/asset and preserves the existing TMP layout geometry. Rust
+    resolves ``codepoint`` from the registered font, flattens its outline, builds the signed
+    distance field, crops it to ``crop_padding``, and resizes it to ``field_size``. No glyph
+    bitmap, NumPy contour grid, Pillow L image, or A8 ``mem:`` payload is created in Python.
+    """
+
+    font_path: Path
+    codepoint: int
+    sample_size: float
+    bbox: tuple[int, int, int, int]
+    padding: int
+    crop_padding: int
+    field_size: tuple[int, int]
+    spread: float
+
+
+@dataclass(frozen=True)
+class TMPStaticAtlasField:
+    """Static TMP atlas glyph before pixel work.
+
+    ``crop`` uses Pillow's possibly out-of-bounds crop coordinates and ``field_size`` is the
+    BICUBIC-resized native glyph quad. The Skia path can carry this descriptor to Rust instead
+    of decoding, cropping, and resizing the atlas through Pillow.
+    """
+
+    atlas_path: Path
+    atlas_size: tuple[int, int]
+    crop: tuple[int, int, int, int]
+    field_size: tuple[int, int]
+
+
+@dataclass
+class _TMPGlyphContourBuilder:
+    scale: float
+    contours: list[list[tuple[float, float]]] = field(default_factory=list)
+    contour: list[tuple[float, float]] = field(default_factory=list)
+    pos: tuple[float, float] | None = None
+    start: tuple[float, float] | None = None
+
+    def _append_point(self, point: tuple[float, float]) -> None:
+        self.contour.append((float(point[0]) * self.scale, float(point[1]) * self.scale))
+
+    def _close_contour(self) -> None:
+        if len(self.contour) >= 2:
+            self.contours.append(self.contour)
+        self.contour = []
+
+    def _flatten_quadratic(
+        self,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+    ) -> None:
+        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+            u = 1.0 - t
+            self._append_point(
+                (
+                    u * u * p0[0] + 2.0 * u * t * p1[0] + t * t * p2[0],
+                    u * u * p0[1] + 2.0 * u * t * p1[1] + t * t * p2[1],
+                )
+            )
+
+    def _flatten_cubic(
+        self,
+        p0: tuple[float, float],
+        p1: tuple[float, float],
+        p2: tuple[float, float],
+        p3: tuple[float, float],
+    ) -> None:
+        for step in range(1, TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS + 1):
+            t = step / TMP_DYNAMIC_SDF_VECTOR_CURVE_STEPS
+            u = 1.0 - t
+            self._append_point(
+                (
+                    u * u * u * p0[0] + 3.0 * u * u * t * p1[0] + 3.0 * u * t * t * p2[0] + t * t * t * p3[0],
+                    u * u * u * p0[1] + 3.0 * u * u * t * p1[1] + 3.0 * u * t * t * p2[1] + t * t * t * p3[1],
+                )
+            )
+
+    def _consume_cubic(self, args: tuple[Any, ...]) -> None:
+        assert self.pos is not None
+        curve_points = [tuple(point) for point in args]
+        for index in range(0, len(curve_points), 3):
+            if index + 2 >= len(curve_points):
+                break
+            p1, p2, p3 = curve_points[index : index + 3]
+            self._flatten_cubic(self.pos, p1, p2, p3)
+            self.pos = p3
+
+    @staticmethod
+    def _quadratic_points(args: tuple[Any, ...]) -> tuple[list[tuple[float, float]], tuple[float, float]] | None:
+        points = [None if point is None else tuple(point) for point in args]
+        if not points:
+            return None
+        if points[-1] is None:
+            off_curves = [point for point in points[:-1] if point is not None]
+            if not off_curves:
+                return None
+            final = (
+                (off_curves[0][0] + off_curves[-1][0]) * 0.5,
+                (off_curves[0][1] + off_curves[-1][1]) * 0.5,
+            )
+            points = [*off_curves, final]
+        final_point = points[-1]
+        if final_point is None:
+            return None
+        return [point for point in points[:-1] if point is not None], final_point
+
+    def _consume_quadratic(self, args: tuple[Any, ...]) -> None:
+        assert self.pos is not None
+        resolved = self._quadratic_points(args)
+        if resolved is None:
+            return
+        off_curves, final_point = resolved
+        if not off_curves:
+            self.pos = final_point
+            self._append_point(self.pos)
+            return
+        current = self.pos
+        for index, control in enumerate(off_curves):
+            end = final_point if index == len(off_curves) - 1 else self._midpoint(control, off_curves[index + 1])
+            self._flatten_quadratic(current, control, end)
+            current = end
+        self.pos = final_point
+
+    @staticmethod
+    def _midpoint(first: tuple[float, float], second: tuple[float, float]) -> tuple[float, float]:
+        return (first[0] + second[0]) * 0.5, (first[1] + second[1]) * 0.5
+
+    def consume(self, op: str, args: tuple[Any, ...]) -> None:
+        if op == "moveTo":
+            self._close_contour()
+            self.pos = tuple(args[0])
+            self.start = self.pos
+            self._append_point(self.pos)
+        elif op == "lineTo" and self.pos is not None:
+            self.pos = tuple(args[0])
+            self._append_point(self.pos)
+        elif op == "curveTo" and self.pos is not None:
+            self._consume_cubic(args)
+        elif op == "qCurveTo" and self.pos is not None:
+            self._consume_quadratic(args)
+        elif op == "closePath":
+            self._close_contour()
+            self.pos = self.start
+        elif op == "endPath":
+            self._close_contour()
+
+    def finish(self) -> list[list[tuple[float, float]]]:
+        self._close_contour()
+        return self.contours
+
+
+@dataclass(frozen=True)
+class TMPDynamicRunGlyph:
+    image: Image.Image
+    bbox: tuple[int, int, int, int]
+    pad: int
+    origin_x: float
+
+
+@dataclass(frozen=True)
+class TMPRunVisualMetrics:
+    advance: float
+    left: float
+    right: float
+    top: float
+    bottom: float
+
+
+@dataclass(frozen=True)
+class PILTextLayoutMetrics:
+    lines: list[PILTextLineMetrics]
+    min_x: float
+    max_x: float
+    total_height: float
+
+
+@dataclass(frozen=True)
+class PILTextLineMetrics:
+    runs: list[tuple[TextRun, float, float]]
+    y: float
+    height: float
+
+
+@dataclass(frozen=True)
+class TMPShaderMaterial:
+    gradient_scale: float
+    face_dilate: float
+    outline_width: float
+    outline_softness: float
+    weight_normal: float
+    weight_bold: float
+    underlay_offset_x: float
+    underlay_offset_y: float
+    underlay_softness: float
+    glow_offset: float
+    glow_outer: float
+    sharpness: float
+    scale_ratio_a: float
+    scale_ratio_b: float
+    scale_ratio_c: float
+
+
+@dataclass
+class TMPVisualBounds:
+    left: float | None = None
+    right: float | None = None
+    top: float | None = None
+    bottom: float | None = None
+
+    def include(self, left: float, right: float, top: float, bottom: float) -> None:
+        self.left = left if self.left is None else min(self.left, left)
+        self.right = right if self.right is None else max(self.right, right)
+        self.top = top if self.top is None else min(self.top, top)
+        self.bottom = bottom if self.bottom is None else max(self.bottom, bottom)
+
+    def include_horizontal(self, left: float, right: float) -> None:
+        self.left = left if self.left is None else min(self.left, left)
+        self.right = right if self.right is None else max(self.right, right)
+
+    def resolved(self, fallback: tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+        fallback_left, fallback_right, fallback_top, fallback_bottom = fallback
+        return (
+            fallback_left if self.left is None else self.left,
+            fallback_right if self.right is None else self.right,
+            fallback_top if self.top is None else self.top,
+            fallback_bottom if self.bottom is None else self.bottom,
+        )
+
+
+@dataclass
+class _TMPNativeLineState:
+    x_advance: float
+    max_ascender: float = TMP_LARGE_NEGATIVE_FLOAT
+    max_descender: float = TMP_LARGE_POSITIVE_FLOAT
+    visible_character_count: int = 0
+    has_character: bool = False
+    line_break_adjusted_ascender: float | None = None
+
+
+@dataclass
+class _TMPNativeLayoutState:
+    dominant_size: float
+    line_offset: float = 0.0
+    start_of_line_ascender: float = 0.0
+    element_descender: float = 0.0
+    is_driven_line_spacing: bool = False
+    max_text_ascender: float | None = None
+    rendered_width: float = 0.0
+    accumulated_line_height: float = 0.0
+    lines: list[TMPNativeLineInfo] = field(default_factory=list)
+    characters: list[TMPNativeCharacterInfo] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _TMPNativeLayoutConfig:
+    font_name: str
+    font_path: Path
+    layout_mode: str
+    base_scale: float
+    current_em_scale: float
+    raw_line_gap: float
+    line_spacing: float
+    line_spacing_delta: float
+    paragraph_spacing: float
+    outline_dilate: float
+    margin_width: float
+    source_metrics_only: bool
 
 
 if __name__ == "__main__":

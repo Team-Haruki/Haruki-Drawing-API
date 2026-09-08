@@ -6,46 +6,29 @@ on:
       - "v*"
 
 jobs:
+  renderer-validation:
+    uses: ./.github/workflows/renderer-release.yml
+    permissions:
+      contents: read
+
   docker:
+    needs: renderer-validation
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read
       packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Install skia-safe link dependencies
+      - name: Download the wheel that passed full renderer validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
-
-      - name: Setup free-threaded Python
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.14t"
-
-      - name: Setup Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust build cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: rust/haruki_skia_renderer
-          shared-key: skia-renderer
-          # tag builds cannot save branch-scoped caches usefully; they restore
-          # the shared cache saved by skia-wheels.yml runs on main
-          save-if: ${{ false }}
-
-      # D2: the wheel is never published to an index; it is built here and placed
-      # into the build context so the Dockerfile installs it into the app venv.
-      # If this step were removed the image build would still succeed (fail-open,
-      # the runtime would fall back to Pillow rendering).
-      - name: Build haruki_skia_renderer wheel into build context
-        run: |
-          pip install maturin
-          maturin build --release --manifest-path rust/haruki_skia_renderer/Cargo.toml -o docker/skia-wheels
-          ls -l docker/skia-wheels
+          gh run download "$RELEASE_RUN_ID" --name validated-native-wheel --dir docker/skia-wheels
+          test "$(find docker/skia-wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4

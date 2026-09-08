@@ -1,0 +1,117 @@
+name: Native Renderer Release Validation
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    # Configure a trusted Linux x86_64 runner with the fixture volume. An unset
+    # configuration fails preflight on ubuntu-latest; it never skips validation.
+    runs-on: ${{ vars.RENDER_VALIDATION_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 180
+    env:
+      UV_PROJECT_ENVIRONMENT: .venv314t
+      RENDER_ASSETS_DIR: ${{ vars.RENDER_ASSETS_DIR }}
+      HARUKI_ASSETS__BASE_DIR: ${{ vars.RENDER_ASSETS_DIR }}
+      RENDER_PAYLOAD_DIR: ${{ vars.RENDER_PAYLOAD_DIR }}
+      RENDER_CONFIG_PATH: ${{ vars.RENDER_CONFIG_PATH }}
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v7
+
+      - name: Require external Linux fixture inputs
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = x86_64
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          workspace = Path.cwd().resolve()
+          for key in ("RENDER_ASSETS_DIR", "RENDER_PAYLOAD_DIR", "RENDER_CONFIG_PATH"):
+              value = os.environ.get(key, "")
+              path = Path(value)
+              if not value or not path.is_absolute() or not path.exists():
+                  raise SystemExit(f"Configure repository variable {key} with an existing absolute runner path")
+              if path.resolve().is_relative_to(workspace):
+                  raise SystemExit(f"{key} must be outside the checkout so checkout cleanup cannot delete fixtures")
+          PY
+          test -d "$RENDER_ASSETS_DIR"
+          test -d "$RENDER_PAYLOAD_DIR"
+          test -f "$RENDER_CONFIG_PATH"
+          mkdir -p out
+          ln -s "$RENDER_PAYLOAD_DIR" out/parity-payloads
+          cp "$RENDER_CONFIG_PATH" configs.yaml
+
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install reference dependencies with CPython free-threading
+        run: |
+          uv python install cpython-3.14.3+freethreaded
+          uv venv .venv314t --python cpython-3.14.3+freethreaded
+          uv sync --frozen --all-groups --python .venv314t/bin/python
+
+      - name: Repair chart extension FreeType linkage
+        run: |
+          set -euo pipefail
+          system_freetype="$(ldconfig -p | awk '/libfreetype\.so\.6 / { print $NF; exit }')"
+          bundled_freetype="$(find .venv314t/lib -path '*/pjsekai_scores_rs_skia_image.libs/libfreetype-*.so.6' -print -quit)"
+          if [ -n "$bundled_freetype" ]; then
+            test -n "$system_freetype"
+            rm "$bundled_freetype"
+            ln -s "$system_freetype" "$bundled_freetype"
+          fi
+          .venv314t/bin/python -X gil=0 -c 'import pjsekai_scores_rs'
+
+      - name: Setup Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/haruki_skia_renderer
+          shared-key: skia-renderer
+
+      - name: Build and install the exact release wheel
+        run: |
+          uv pip install --python .venv314t/bin/python patchelf
+          uv run maturin build --release --manifest-path rust/haruki_skia_renderer/Cargo.toml -o dist
+          test "$(find dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
+          uv pip install --python .venv314t/bin/python dist/*.whl
+          .venv314t/bin/python -X gil=0 scripts/skia_codec_smoke.py
+
+      - name: Require native drawers, service requests, pixel parity and warm caches
+        run: .venv314t/bin/python -X gil=0 scripts/skia_release_gate.py --out-dir out/release-gate
+
+      - name: Upload validated release wheel
+        uses: actions/upload-artifact@v7
+        with:
+          name: validated-native-wheel
+          path: dist/*.whl
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve release diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-release-diagnostics
+          path: |
+            out/release-gate/release.json
+            out/release-gate/*.log
+            out/release-gate/*/results.json
+            out/release-gate/*/SUMMARY.md
+          if-no-files-found: ignore
+          retention-days: 7

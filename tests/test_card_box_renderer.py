@@ -128,10 +128,21 @@ def test_card_box_bar_helpers_execute_empty_and_filled_draw_paths() -> None:
     assert _draw_frame(card._vertical_stat_bar(8, 40, 0, color)).operations == []
     assert len(_draw_frame(card._vertical_stat_bar(8, 40, 0.5, color)).operations) == 1
 
-    placeholder = _draw_frame(card._circular_progress_avatar(None, 48, 0, color))
-    rendered = _draw_frame(card._circular_progress_avatar(Image.new("RGB", (8, 8), "red"), 48, 0.5, color))
-    assert [operation[0] for operation in placeholder.operations] == ["paste"]
-    assert [operation[0] for operation in rendered.operations] == ["paste"]
+    for source, ratio, expected in (
+        (None, 0, ["push_clip_ellipse", "rect", "pop_clip", "arc"]),
+        (Image.new("RGB", (8, 8), "red"), 0.5, ["push_clip_ellipse", "paste_src", "pop_clip", "arc", "arc"]),
+    ):
+        calls = []
+
+        class Recorder:
+            def __getattr__(self, name):
+                return lambda *args, **kwargs: calls.append(name)
+
+        frame = card._circular_progress_avatar(source, 48, ratio, color)
+        badge = frame.items[0].canvas
+        for draw in badge.draw_funcs:
+            draw(badge, Recorder())
+        assert calls == expected
 
 
 def test_card_box_distribution_bars_cover_empty_zero_and_segmented_stats() -> None:
@@ -246,11 +257,7 @@ async def test_load_card_box_assets_filters_failures_and_keeps_categories(monkey
             raise OSError("missing")
         return path
 
-    async def fake_image(_base_dir, path, **_kwargs):
-        return Image.new("RGBA", (8, 8), "white") if "chara" in path else path
-
     monkeypatch.setattr(card, "get_asset_image_ref", fake_asset)
-    monkeypatch.setattr(card, "get_img_from_path", fake_image)
 
     assets, _elapsed = await card._load_card_box_assets(request, layout)
 

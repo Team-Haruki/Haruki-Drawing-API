@@ -56,7 +56,7 @@ def test_small_routes_return_native_payloads(case: _RouteCase, monkeypatch: pyte
 
     _patch_side_effects(case, monkeypatch)
     monkeypatch.setattr(case.module, case.native_renderer, native_renderer)
-    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer)
+    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer, raising=False)
     monkeypatch.setattr(
         case.module,
         "encoded_image_payload_to_response",
@@ -68,33 +68,17 @@ def test_small_routes_return_native_payloads(case: _RouteCase, monkeypatch: pyte
 
 
 @pytest.mark.parametrize("case", _STANDARD_CASES, ids=lambda case: case.endpoint)
-def test_small_routes_fall_back_to_pillow(case: _RouteCase, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_small_routes_reject_missing_native_without_pillow(case: _RouteCase, monkeypatch: pytest.MonkeyPatch) -> None:
     request = object()
-    image = object()
-    response = object()
 
-    async def native_renderer(received: Any) -> None:
-        assert received is request
+    async def native_renderer(_request):
         return None
 
-    async def pillow_renderer(received: Any) -> object:
-        assert received is request
-        return image
-
-    async def image_response(received: Any, **kwargs: Any) -> object:
-        assert received is image
-        if case.module is command_help:
-            assert kwargs == {"export_format": "png"}
-        else:
-            assert not kwargs
-        return response
-
-    _patch_side_effects(case, monkeypatch)
     monkeypatch.setattr(case.module, case.native_renderer, native_renderer)
-    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer)
-    monkeypatch.setattr(case.module, "image_to_response", image_response)
-
-    assert asyncio.run(getattr(case.module, case.endpoint)(request)) is response
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(getattr(case.module, case.endpoint)(request))
+    assert error.value.status_code == 500
+    assert "Pillow fallback is no longer available" in error.value.detail
 
 
 @pytest.mark.parametrize("case", _STANDARD_CASES, ids=lambda case: case.endpoint)
@@ -131,35 +115,17 @@ def test_honor_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert asyncio.run(honor.honor(request)) is response
 
 
-def test_honor_falls_back_to_pillow(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_honor_rejects_missing_native_without_pillow(monkeypatch: pytest.MonkeyPatch) -> None:
     request = object()
-    image = object()
-    watermarked = object()
-    response = object()
 
-    async def native_renderer(received: Any) -> None:
-        assert received is request
+    async def native_renderer(_request):
         return None
 
-    async def pillow_renderer(received: Any) -> object:
-        assert received is request
-        return image
-
-    async def watermark(received_image: Any, received_request: Any) -> object:
-        assert received_image is image
-        assert received_request is request
-        return watermarked
-
-    async def image_response(received: Any) -> object:
-        assert received is watermarked
-        return response
-
     monkeypatch.setattr(honor, "try_render_full_honor_payload", native_renderer)
-    monkeypatch.setattr(honor, "compose_full_honor_image", pillow_renderer)
-    monkeypatch.setattr(honor, "add_request_watermark_to_image", watermark)
-    monkeypatch.setattr(honor, "image_to_response", image_response)
-
-    assert asyncio.run(honor.honor(request)) is response
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(honor.honor(request))
+    assert error.value.status_code == 500
+    assert "Pillow fallback is no longer available" in error.value.detail
 
 
 def test_honor_converts_renderer_errors(monkeypatch: pytest.MonkeyPatch) -> None:

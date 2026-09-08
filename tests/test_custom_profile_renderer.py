@@ -16,6 +16,7 @@ from src.sekai.profile.custom_profile.general_prefab import (
     PillowGeneralPrefabAdapter,
     build_general_prefab_display_list,
 )
+from src.sekai.profile.custom_profile.gray_field import GrayField
 from src.sekai.profile.custom_profile.limits import RasterSizeLimitError
 from src.sekai.profile.custom_profile.renderer import (
     CHARA_LIST,
@@ -1422,7 +1423,7 @@ def test_custom_profile_dynamic_tmp_field_can_defer_all_glyph_pixels(tmp_path: P
     assert (pad_x, pad_y) == (0, 0)
 
 
-def test_custom_profile_static_tmp_field_builds_the_pillow_raster(tmp_path: Path, monkeypatch) -> None:
+def test_custom_profile_static_tmp_field_builds_neutral_field(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path)
     style = _base_tmp_style()
     atlas_path = tmp_path / "atlas.png"
@@ -1439,7 +1440,7 @@ def test_custom_profile_static_tmp_field_builds_the_pillow_raster(tmp_path: Path
     asset = SimpleNamespace(atlas_paths=[atlas_path], point_size=24.0, glyphs={ord("A"): metrics})
     monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
     monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: asset)
-    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: Image.new("L", (32, 32), 255))
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: GrayField(32, 32, bytes([255]) * (32 * 32)))
     monkeypatch.setattr(renderer, "tmp_display_padding", lambda *_: 2)
     monkeypatch.setattr(renderer, "tmp_native_vertex_scale_x", lambda *_: 1.0)
 
@@ -1455,18 +1456,18 @@ def test_custom_profile_static_tmp_field_builds_the_pillow_raster(tmp_path: Path
 
     assert prepared is not None
     field, prepared_asset, bbox, pad_x, pad_y = prepared
-    assert isinstance(field, Image.Image)
+    assert isinstance(field, GrayField)
     assert field.size == (8, 10)
     assert prepared_asset is asset
     assert bbox == (1, -5, 5, 1)
     assert (pad_x, pad_y) == (2, 2)
 
 
-def test_custom_profile_dynamic_tmp_field_scales_the_pillow_raster(tmp_path: Path, monkeypatch) -> None:
+def test_custom_profile_dynamic_tmp_field_scales_neutral_field(tmp_path: Path, monkeypatch) -> None:
     renderer = _make_renderer(tmp_path)
     style = replace(_base_tmp_style(), scale_x=2.0)
     asset = SimpleNamespace(point_size=24.0)
-    cached = TMPDynamicGlyphSDF(Image.new("L", (10, 8), 255), (0, 0, 6, 4), 2, 24.0)
+    cached = TMPDynamicGlyphSDF(GrayField(10, 8, bytes([255]) * (10 * 8)), (0, 0, 6, 4), 2, 24.0)
     monkeypatch.setattr(renderer, "tmp_render_glyph_char", lambda *_: "A")
     monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: None)
     monkeypatch.setattr(renderer, "tmp_dynamic_glyph_sdf", lambda *_: (cached, asset))
@@ -1487,7 +1488,7 @@ def test_custom_profile_dynamic_tmp_field_scales_the_pillow_raster(tmp_path: Pat
 
     assert prepared is not None
     field, prepared_asset, bbox, pad_x, pad_y = prepared
-    assert isinstance(field, Image.Image)
+    assert isinstance(field, GrayField)
     assert field.size == (20, 8)
     assert prepared_asset is asset
     assert bbox == (-4, -2, 16, 6)
@@ -3173,7 +3174,7 @@ def test_custom_profile_static_atlas_run_reuses_placement_and_field_helpers(tmp_
     monkeypatch.setattr(renderer, "tmp_static_sdf_asset", lambda *_: asset)
     monkeypatch.setattr(renderer, "tmp_character_spacing_advance", lambda *_: 0.0)
     monkeypatch.setattr(renderer, "tmp_display_padding", lambda *_: 1)
-    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: Image.new("L", (8, 8), 255))
+    monkeypatch.setattr(renderer, "tmp_atlas_alpha", lambda *_: GrayField(8, 8, bytes([255]) * (8 * 8)))
     monkeypatch.setattr(
         renderer,
         "shade_tmp_sdf_field",
@@ -3260,7 +3261,7 @@ def test_custom_profile_tmp_text_box_delegates_layout_and_drawing(tmp_path: Path
     monkeypatch.setattr(renderer, "record_tmp_layout_audit", lambda *args: audits.append(args))
     monkeypatch.setattr(
         renderer,
-        "draw_tmp_text_box_content",
+        "draw_tmp_native_characters",
         lambda _image, _font_name, _font_path, _layout, _baselines, _align, _box_w, x, y, *_rest: draw_calls.append(
             (x, y)
         ),
@@ -3460,7 +3461,7 @@ def test_custom_profile_dynamic_sdf_run_composes_scaled_glyphs(tmp_path: Path, m
     renderer = _make_renderer(tmp_path, tmp_scale_mode="x")
     style = replace(_base_tmp_style(), scale_x=2.0, mspace=6.0)
     gate_asset = SimpleNamespace(atlas_population_mode=1)
-    cached = renderer_mod.TMPDynamicGlyphSDF(Image.new("L", (2, 2), 255), (0, 0, 2, 2), 1, 10.0)
+    cached = renderer_mod.TMPDynamicGlyphSDF(GrayField(2, 2, bytes([255]) * (2 * 2)), (0, 0, 2, 2), 1, 10.0)
     monkeypatch.setattr(renderer, "tmp_sdf_asset", lambda *_: gate_asset)
     monkeypatch.setattr(renderer_mod, "load_font", lambda *_: object())
     monkeypatch.setattr(renderer, "glyph_advance", lambda *_: 4.0)

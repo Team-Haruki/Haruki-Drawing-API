@@ -26,17 +26,59 @@ fn linear_sampling() -> SamplingOptions {
     SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
 }
 
+mod basic_text;
+mod gray_affine;
+mod image_analysis;
 mod interp;
 mod ir;
 mod pillow_gray;
 mod pillow_resize;
+mod source_sdf;
 mod text_metrics;
+mod triangle_cache;
+mod vector;
+mod vector_text;
 
 /// Distinguishes an IR that failed to parse (caller error → ValueError) from one that failed
 /// to render (RuntimeError), now that both happen inside the same detached region.
 enum SceneError {
     Parse(String),
     Render(String),
+}
+
+/// Materialize a fragment once for the Python-owned, byte-bounded fragment pool.
+/// No native global cache: immutable bytes retain their owner through raw transport.
+#[pyfunction]
+fn decode_fragment_rgba(py: Python<'_>, encoded: &[u8]) -> PyResult<Option<Py<PyBytes>>> {
+    let pixels = py.detach(|| {
+        let image = Image::from_encoded(Data::new_copy(encoded))?;
+        let (width, height) = (image.width(), image.height());
+        let length = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        // Oversized fragments retain the existing encoded path rather than allocating
+        // an unbounded decoded entry before the pool can reject it.
+        if width <= 0 || height <= 0 || length > 64 * 1024 * 1024 {
+            return None;
+        }
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let mut pixels = vec![0; length];
+        image
+            .read_pixels(
+                &info,
+                &mut pixels,
+                width as usize * 4,
+                (0, 0),
+                skia_safe::image::CachingHint::Disallow,
+            )
+            .then_some(pixels)
+    });
+    Ok(pixels.map(|data| PyBytes::new(py, &data).unbind()))
 }
 
 #[pyfunction]
@@ -208,6 +250,40 @@ fn extract_mem_image(
     if let Ok((width, height, row_bytes, color_type, alpha_type, owner)) =
         value.extract::<(i32, i32, usize, String, String, Py<PyAny>)>()
     {
+        if color_type == "f32le" {
+            // Scalar samples are not images. Accept immutable bytes only, and retain
+            // their owner while detached Rust reads explicitly little-endian floats.
+            let exporter = owner.bind(_py);
+            let bytes = exporter.extract::<&[u8]>()?;
+            gray_affine::validate_sizes(
+                (width as usize, height as usize),
+                (width as usize, height as usize),
+            )
+            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+            if row_bytes != width as usize * 4
+                || bytes.len() != row_bytes * height as usize
+                || alpha_type != "unpremul"
+            {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "f32le fields require tight rows, exact bytes and unpremul semantics",
+                ));
+            }
+            if bytes.chunks_exact(4).any(|b| {
+                let v = f32::from_le_bytes(b.try_into().unwrap());
+                !v.is_finite() || !(0.0..=1.0).contains(&v)
+            }) {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "f32le field samples must be finite and within 0..=1",
+                ));
+            }
+            let (data, owner) = borrowed_data(bytes, exporter);
+            return Ok(Some(interp::MemImage::FloatField {
+                width,
+                height,
+                data,
+                _owner: owner,
+            }));
+        }
         let (color_type, bytes_per_pixel) = match color_type.as_str() {
             "rgba8888" => (ColorType::RGBA8888, 4_usize),
             "bgra8888" => (ColorType::BGRA8888, 4),
@@ -344,31 +420,174 @@ fn validate_raw_image(
 /// 15 = explicit Pillow-compatible Lanczos raster resize for Image and UnitySubscene.
 /// 16 = explicit straight-RGBA Pillow `paste(source, pos, source)` Image blending.
 /// 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
-/// 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp.
-/// 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching.
-/// 20 = discrete Pillow-compatible rounded-rectangle Group mask.
-pub const IR_CAPABILITY: u32 = 20;
+/// 18 = Text.engine="freetype_basic" for native Pillow BASIC-compatible masks.
+/// 19 = explicit Pillow-compatible bicubic full-raster Image sampling.
+/// 20 = Arc strokes and binary ellipse clips for shared circular widgets.
+/// 21 = full-raster bilinear Image sampling and bicubic RasterSubscene sampling.
+/// 22 = discrete Src roundrects, straight-RGBA shadows and explicit text mask lerp.
+/// 23 = natural-size alpha crop LUT, isolated before downstream raster resizing.
+/// 24 = WebP image sources and native foreground metadata are required by lazy layouts.
+// 28 = unquantized float32 SdfQuad fields and bounded fail-closed shading.
+pub const IR_CAPABILITY: u32 = 29;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
-/// SdfQuad glyph fields.
-pub const RAW_BUFFER_CAPABILITY: u32 = 2;
+/// SdfQuad glyph fields. 3 = immutable tight little-endian float32 samples ("f32le").
+pub const RAW_BUFFER_CAPABILITY: u32 = 3;
 
 /// Capability of the standalone, root-confined asset metadata API.
 /// 1 = `asset_image_info(base, relative_path)` returns dimensions + file identity without
 /// involving Pillow.
 pub const ASSET_INFO_CAPABILITY: u32 = 1;
 
+/// Header-only metadata for both encoded memory images and asset files.
+// 2 = the accepted image formats include WebP, also supported during raster replay.
+pub const IMAGE_INFO_CAPABILITY: u32 = 2;
+
 /// Capability of the standalone, strict native text-measurement API.
 /// 1 = `measure_text_batch(font_dir, font_name, [(text, size), ...])` returns advance,
 /// alphabetic-baseline ink bounds, Pillow-default-anchor bounds, and font metrics.
-pub const TEXT_METRICS_CAPABILITY: u32 = 1;
+// 2 = explicit engine="freetype_basic" with Pillow BASIC-compatible metrics.
+// 3 = bounded hinted glyph outlines and typographic metrics for shared vector text.
+pub const TEXT_METRICS_CAPABILITY: u32 = 3;
+
+/// A bounded BASIC text mask with Pillow-default-anchor placement metadata.
+/// Reuses the same hinted FreeType scaler as native text replay; never returns RGBA.
+#[pyfunction]
+fn basic_text_mask(
+    py: Python<'_>,
+    font_dir: &str,
+    font_name: &str,
+    text: &str,
+    size: f32,
+    max_pixels: u64,
+) -> PyResult<Py<PyDict>> {
+    if max_pixels == 0 || max_pixels > gray_affine::MAX_GRAY_PIXELS as u64 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "BASIC text mask pixel limit must be 1..=16777216",
+        ));
+    }
+    if text.len() > text_metrics::MAX_TEXT_METRICS_CHARS * 4 {
+        return Err(pyo3::exceptions::PyValueError::new_err(
+            "text mask character limit",
+        ));
+    }
+    text_metrics::validate_text_metrics_requests(
+        font_dir,
+        font_name,
+        &[text_metrics::TextMetricsRequest {
+            text: text.to_owned(),
+            size,
+        }],
+    )
+    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let mask = py
+        .detach(|| basic_text::raster_bounded(font_dir, font_name, text, size, max_pixels, 32767))
+        .map_err(|error| {
+            if error.contains("pixel limit")
+                || error.contains("dimension limit")
+                || error.contains("cannot allocate")
+            {
+                pyo3::exceptions::PyValueError::new_err(error)
+            } else {
+                pyo3::exceptions::PyRuntimeError::new_err(error)
+            }
+        })?;
+    let result = PyDict::new(py);
+    result.set_item("size", (mask.width, mask.height))?;
+    result.set_item("bbox", mask.metrics.pillow_bbox)?;
+    result.set_item("ascent", mask.metrics.ascent)?;
+    result.set_item("advance", mask.metrics.advance)?;
+    result.set_item("pixels", PyBytes::new(py, &mask.pixels))?;
+    Ok(result.unbind())
+}
+
+/// NumPy-compatible source glyph distance field; immutable little-endian float32 points.
+#[pyfunction]
+fn source_outline_sdf(
+    py: Python<'_>,
+    data: &[u8],
+    ends: Vec<usize>,
+    width: usize,
+    height: usize,
+    origin: (f32, f32),
+    denominator: f32,
+) -> PyResult<Py<PyBytes>> {
+    let result = py
+        .detach(|| source_sdf::field(data, &ends, width, height, origin, denominator))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &result).unbind())
+}
+
+/// Bounded gray8 SDF resizing. The borrowed input is immutable Python bytes; no
+/// Python image object, encoded intermediate, or four-channel expansion is involved.
+#[pyfunction]
+fn resize_gray8_bicubic(
+    py: Python<'_>,
+    data: &[u8],
+    source_size: (usize, usize),
+    output_size: (usize, usize),
+) -> PyResult<Py<PyBytes>> {
+    const MAX_PIXELS: usize = gray_affine::MAX_GRAY_PIXELS;
+    const MAX_WORKING: usize = 128 * 1024 * 1024;
+    gray_affine::validate_sizes(source_size, output_size)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    // Reserve both the returned Vec and the Python bytes copy in addition to filter scratch.
+    let output_bytes = output_size.0 * output_size.1;
+    let limits =
+        pillow_resize::PillowResizeLimits::new(MAX_PIXELS, MAX_WORKING - 2 * output_bytes, 32767);
+    let resized = py
+        .detach(|| {
+            pillow_resize::resize_gray8_pillow_bicubic(
+                data,
+                source_size.0,
+                source_size.1,
+                output_size.0,
+                output_size.1,
+                limits,
+            )
+        })
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    Ok(PyBytes::new(py, &resized).unbind())
+}
+
+#[pyfunction]
+fn transform_gray8_bicubic(
+    py: Python<'_>,
+    data: &[u8],
+    source_size: (usize, usize),
+    output_size: (usize, usize),
+    inverse: [f64; 6],
+) -> PyResult<Py<PyBytes>> {
+    let transformed = py
+        .detach(|| gray_affine::transform(data, source_size, output_size, inverse))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &transformed).unbind())
+}
 
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_scene, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_fragment_rgba, m)?)?;
+    m.add_function(wrap_pyfunction!(source_outline_sdf, m)?)?;
+    m.add_function(wrap_pyfunction!(resize_gray8_bicubic, m)?)?;
+    m.add_function(wrap_pyfunction!(transform_gray8_bicubic, m)?)?;
+    m.add_function(wrap_pyfunction!(basic_text_mask, m)?)?;
+    m.add("TEXT_MASK_CAPABILITY", 1)?;
+    m.add("GRAY_FIELD_CAPABILITY", 2)?;
+    m.add("ALPHA_FIELD_CAPABILITY", 1)?;
+    m.add_function(wrap_pyfunction!(asset_alpha_field, m)?)?;
     m.add_function(wrap_pyfunction!(asset_image_info, m)?)?;
+    m.add_function(wrap_pyfunction!(encoded_image_info, m)?)?;
+    m.add_function(wrap_pyfunction!(asset_alpha_bounds, m)?)?;
+    m.add_function(wrap_pyfunction!(encoded_alpha_bounds, m)?)?;
+    m.add("ALPHA_BOUNDS_CAPABILITY", 1)?;
+    m.add_function(wrap_pyfunction!(asset_foreground_bounds, m)?)?;
+    m.add_function(wrap_pyfunction!(encoded_foreground_bounds, m)?)?;
+    m.add("FOREGROUND_BOUNDS_CAPABILITY", 1)?;
+    m.add("IMAGE_INFO_CAPABILITY", IMAGE_INFO_CAPABILITY)?;
     m.add_function(wrap_pyfunction!(measure_text_batch, m)?)?;
+    m.add_function(wrap_pyfunction!(vector_text_geometry, m)?)?;
     m.add_function(wrap_pyfunction!(renderer_cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(clear_renderer_caches, m)?)?;
     m.add("IR_CAPABILITY", IR_CAPABILITY)?;
@@ -469,22 +688,8 @@ type GradientPoints = (NormPoint, NormPoint, NormPoint, NormPoint);
 /// derived here too; they now arrive baked into `TriangleBgNode::tris`.
 type TrianglePalette = ([u8; 3], [u8; 3], Rgba, Rgba, u8);
 
-fn draw_sekai_triangle_background(
-    canvas: &Canvas,
-    width: f32,
-    height: f32,
-    hour: f32,
-    time_color: bool,
-    main_hue: f32,
-    tris: &[[f32; 9]],
-) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
-
-    // The gradient palette is still resolved here: it is a pure function of `hour`, both backends
-    // interpolate the same table, and it was never what diverged.
-    let (grad1, grad2, overlay1, overlay2, white_alpha): TrianglePalette = if time_color {
+fn triangle_palette(hour: f32, time_color: bool, main_hue: f32) -> TrianglePalette {
+    if time_color {
         let palette = pink_palette(hour);
         (
             palette.grad1,
@@ -506,7 +711,26 @@ fn draw_sekai_triangle_background(
             Rgba(ov2[0], ov2[1], ov2[2], 100),
             100,
         )
-    };
+    }
+}
+
+fn draw_sekai_triangle_background(
+    canvas: &Canvas,
+    width: f32,
+    height: f32,
+    hour: f32,
+    time_color: bool,
+    main_hue: f32,
+    tris: &[[f32; 9]],
+) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
+
+    // The gradient palette is still resolved here: it is a pure function of `hour`, both backends
+    // interpolate the same table, and it was never what diverged.
+    let (grad1, grad2, overlay1, overlay2, white_alpha) =
+        triangle_palette(hour, time_color, main_hue);
 
     draw_linear_gradient(
         canvas,
@@ -770,49 +994,91 @@ fn draw_blur_glass_rect(
     blur: f32,
     corners: [bool; 4],
     shadow_width: f32,
+    device_scale: (f32, f32),
 ) {
     draw_glass_shadow(canvas, rect, radius, shadow_alpha, corners, shadow_width);
+
+    // Painter replaces the sampled/tinted background's alpha with its rounded
+    // rectangle mask. This matters on transparent fragment canvases: multiplying
+    // by the tint alpha instead leaves the entire fragment translucent.
+    canvas.save();
+    canvas.clip_rrect(
+        RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
+        ClipOp::Intersect,
+        true,
+    );
+    let matrix = skia_safe::ColorMatrix::new(
+        1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        0.0, 1.0,
+    );
+    let mut opaque = Paint::default();
+    opaque.set_color_filter(skia_safe::color_filters::matrix(&matrix, None));
+    let layer = skia_safe::canvas::SaveLayerRec::default()
+        .bounds(&rect)
+        .paint(&opaque);
+    canvas.save_layer(&layer);
 
     // `backdrop` is a snapshot of just the panel's region; `origin` is its top-left in canvas
     // space, so absolute sample coordinates map to the sub-image by subtracting it.
     if let Some((backdrop, origin)) = backdrop {
         let full_rect = Rect::from_xywh(
-            origin.0,
-            origin.1,
-            backdrop.width() as f32,
-            backdrop.height() as f32,
+            origin.0 / device_scale.0,
+            origin.1 / device_scale.1,
+            backdrop.width() as f32 / device_scale.0,
+            backdrop.height() as f32 / device_scale.1,
         );
-        let mut sample_rect = rect.with_outset((10.0, 10.0));
-        if sample_rect.intersect(full_rect) {
-            let src_local = Rect::from_xywh(
-                sample_rect.left - origin.0,
-                sample_rect.top - origin.1,
-                sample_rect.width(),
-                sample_rect.height(),
+        if blur <= 0.01 {
+            let src = Rect::from_xywh(
+                rect.left * device_scale.0 - origin.0,
+                rect.top * device_scale.1 - origin.1,
+                rect.width() * device_scale.0,
+                rect.height() * device_scale.1,
             );
-            // Mirror Painter's blur math (painter.py:1355-1363): downsample by
-            // max(1, floor(blur/2)) then blur with sigma = blur / downsample.
-            let downsample = (blur / 2.0).floor().max(1.0);
-            let temp_w = (sample_rect.width() / downsample).ceil().max(1.0) as i32;
-            let temp_h = (sample_rect.height() / downsample).ceil().max(1.0) as i32;
-            if let Some(mut temp_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
-                let temp_dst = Rect::from_xywh(0.0, 0.0, temp_w as f32, temp_h as f32);
-                let mut copy_paint = Paint::default();
-                copy_paint.set_anti_alias(true);
-                temp_surface.canvas().draw_image_rect_with_sampling_options(
-                    backdrop,
-                    Some((&src_local, skia_safe::canvas::SrcRectConstraint::Strict)),
-                    temp_dst,
-                    linear_sampling(),
-                    &copy_paint,
+            canvas.draw_image_rect_with_sampling_options(
+                backdrop,
+                Some((&src, skia_safe::canvas::SrcRectConstraint::Strict)),
+                rect,
+                SamplingOptions::default(),
+                &Paint::default(),
+            );
+        } else {
+            let mut sample_rect = rect.with_outset((10.0, 10.0));
+            if sample_rect.intersect(full_rect) {
+                let src_local = Rect::from_xywh(
+                    sample_rect.left * device_scale.0 - origin.0,
+                    sample_rect.top * device_scale.1 - origin.1,
+                    sample_rect.width() * device_scale.0,
+                    sample_rect.height() * device_scale.1,
                 );
+                // Mirror Painter's blur math (painter.py:1355-1363): downsample by
+                // max(1, floor(blur/2)) then blur with sigma = blur / downsample.
+                let downsample = (blur / 2.0).floor().max(1.0);
+                let temp_w = (sample_rect.width() * device_scale.0 / downsample)
+                    .ceil()
+                    .max(1.0) as i32;
+                let temp_h = (sample_rect.height() * device_scale.1 / downsample)
+                    .ceil()
+                    .max(1.0) as i32;
+                if let Some(mut temp_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
+                    let temp_dst = Rect::from_xywh(0.0, 0.0, temp_w as f32, temp_h as f32);
+                    let mut copy_paint = Paint::default();
+                    copy_paint.set_anti_alias(true);
+                    temp_surface.canvas().draw_image_rect_with_sampling_options(
+                        backdrop,
+                        Some((&src_local, skia_safe::canvas::SrcRectConstraint::Strict)),
+                        temp_dst,
+                        linear_sampling(),
+                        &copy_paint,
+                    );
 
-                let blurred =
-                    if let Some(mut blur_surface) = surfaces::raster_n32_premul((temp_w, temp_h)) {
+                    let blurred = if let Some(mut blur_surface) =
+                        surfaces::raster_n32_premul((temp_w, temp_h))
+                    {
                         let temp_image = temp_surface.image_snapshot();
                         let mut blur_paint = Paint::default();
                         blur_paint.set_anti_alias(true);
-                        let sigma = (blur / downsample).max(0.01);
+                        let device_blur = blur * ((device_scale.0 + device_scale.1) * 0.5);
+                        let sigma = (device_blur / downsample).max(0.01);
                         blur_paint.set_image_filter(image_filters::blur(
                             (sigma, sigma),
                             TileMode::Clamp,
@@ -831,27 +1097,29 @@ fn draw_blur_glass_rect(
                         temp_surface.image_snapshot()
                     };
 
-                canvas.save();
-                canvas.clip_rrect(
-                    RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
-                    ClipOp::Intersect,
-                    true,
-                );
-                let mut paste_paint = Paint::default();
-                paste_paint.set_anti_alias(true);
-                canvas.draw_image_rect_with_sampling_options(
-                    &blurred,
-                    None,
-                    sample_rect,
-                    linear_sampling(),
-                    &paste_paint,
-                );
-                canvas.restore();
+                    canvas.save();
+                    canvas.clip_rrect(
+                        RRect::new_rect_radii(rect, &glass_corner_radii(radius, corners)),
+                        ClipOp::Intersect,
+                        true,
+                    );
+                    let mut paste_paint = Paint::default();
+                    paste_paint.set_anti_alias(true);
+                    canvas.draw_image_rect_with_sampling_options(
+                        &blurred,
+                        None,
+                        sample_rect,
+                        linear_sampling(),
+                        &paste_paint,
+                    );
+                    canvas.restore();
+                }
             }
         }
     }
-
     draw_glass_overlay(canvas, rect, radius, panel_paint, corners, 0.6);
+    canvas.restore();
+    canvas.restore();
 }
 
 fn draw_glass_shadow(
@@ -913,10 +1181,13 @@ fn draw_glass_overlay(
     // the middle — no shadow-colored layer — so the transition reads as natural light.
     let edge_w = (radius * 0.5)
         .min(4.0)
-        .min(rect.width().min(rect.height()) / 16.0)
-        .max(1.0);
+        .min((rect.width().min(rect.height()) + 12.0) / 16.0)
+        .floor();
+    if edge_w <= 0.0 {
+        return;
+    }
     let a1 = (255.0 * edge_strength).clamp(0.0, 255.0) as u8;
-    let a2 = (255.0 * edge_strength * 0.85).clamp(0.0, 255.0) as u8;
+    let a2 = (255.0 * edge_strength * 0.75).clamp(0.0, 255.0) as u8;
     // Evenly spaced at 0, .25, .5, .75, 1: bright corner -> half-bright shoulder ->
     // transparent middle -> half-bright shoulder -> bright corner. The shoulders are kept
     // at half strength (not faint) so the gloss reaches well along the edges before fading,
@@ -976,7 +1247,25 @@ fn encode_surface(
     let started = Instant::now();
     let width = surface.width();
     let height = surface.height();
-    let data = if export_format == "jpg" {
+    let data = if export_format == "raw_rgba_premul" {
+        // Internal fragment transport: preserve the exact surface bytes. Encoding to PNG
+        // unpremultiplies and decoding premultiplies again, losing alpha-edge precision.
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let length = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|value| value.checked_mul(4))
+            .ok_or("fragment byte count overflow")?;
+        let mut pixels = vec![0; length];
+        if !surface.read_pixels(&info, &mut pixels, width as usize * 4, (0, 0)) {
+            return Err("fragment pixel readback failed".into());
+        }
+        EncodedBytes::Owned(pixels)
+    } else if export_format == "jpg" {
         let image = surface.image_snapshot();
         let quality = jpg_quality.clamp(1, 100) as u32;
         EncodedBytes::Skia(
@@ -1001,7 +1290,9 @@ fn encode_surface(
                 .ok_or_else(|| "failed to encode image".to_string())?,
         )
     };
-    let (media_type, filename) = if export_format == "jpg" {
+    let (media_type, filename) = if export_format == "raw_rgba_premul" {
+        ("application/octet-stream", "fragment.rgba")
+    } else if export_format == "jpg" {
         ("image/jpeg", "image.jpg")
     } else {
         ("image/png", "image.png")
@@ -1032,6 +1323,10 @@ fn encode_surface_mtpng(surface: &mut Surface) -> Result<Vec<u8>, String> {
         return Err("failed to read RGBA pixels for mtpng".to_string());
     }
 
+    encode_rgba8_mtpng(&pixels, width, height)
+}
+
+fn encode_rgba8_mtpng(pixels: &[u8], width: i32, height: i32) -> Result<Vec<u8>, String> {
     let mut header = MtpngHeader::new();
     header
         .set_size(width as u32, height as u32)
@@ -1048,11 +1343,60 @@ fn encode_surface_mtpng(surface: &mut Surface) -> Result<Vec<u8>, String> {
         .write_header(&header)
         .map_err(|err| format!("mtpng header encode failed: {err}"))?;
     encoder
-        .write_image_rows(&pixels)
+        .write_image_rows(pixels)
         .map_err(|err| format!("mtpng pixel encode failed: {err}"))?;
     encoder
         .finish()
         .map_err(|err| format!("mtpng finish failed: {err}"))
+}
+
+/// Encode an already straight-alpha raster without another premul/unpremul round trip.
+fn encode_rgba8(
+    pixels: Vec<u8>,
+    width: i32,
+    height: i32,
+    export_format: &str,
+    jpg_quality: i32,
+) -> Result<RenderedImage, String> {
+    let started = Instant::now();
+    let jpeg = export_format == "jpg";
+    let bytes = if !jpeg && std::env::var("HARUKI_SKIA_PNG_ENCODER").as_deref() != Ok("skia") {
+        EncodedBytes::Owned(encode_rgba8_mtpng(&pixels, width, height)?)
+    } else {
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let image =
+            skia_safe::images::raster_from_data(&info, Data::new_copy(&pixels), width as usize * 4)
+                .ok_or_else(|| "failed to create resized output image".to_string())?;
+        drop(pixels);
+        let data = if jpeg {
+            image.encode(
+                None,
+                EncodedImageFormat::JPEG,
+                Some(jpg_quality.clamp(1, 100) as u32),
+            )
+        } else {
+            let mut options = png_encoder::Options::default();
+            options.z_lib_level = 3;
+            options.filter_flags = png_encoder::FilterFlag::SUB | png_encoder::FilterFlag::UP;
+            png_encoder::encode_image(None, &image, &options)
+        }
+        .ok_or_else(|| "failed to encode resized output image".to_string())?;
+        EncodedBytes::Skia(data)
+    };
+    Ok(RenderedImage {
+        bytes,
+        media_type: if jpeg { "image/jpeg" } else { "image/png" },
+        filename: if jpeg { "image.jpg" } else { "image.png" },
+        width,
+        height,
+        encode_elapsed: started.elapsed().as_secs_f64(),
+        metrics: NativeMetrics::default(),
+    })
 }
 
 fn decode_image_file(full_path: &Path) -> Result<Image, String> {
@@ -1090,12 +1434,19 @@ pub(crate) struct LoadedAssetDescriptor {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct RasterCacheKey {
-    asset: AssetIdentity,
-    src_bits: [u32; 4],
-    width: i32,
-    height: i32,
-    sampling: u8,
+enum RasterCacheKey {
+    Asset {
+        asset: AssetIdentity,
+        src_bits: [u32; 4],
+        width: i32,
+        height: i32,
+        sampling: u8,
+    },
+    TriangleTile {
+        background: std::sync::Arc<triangle_cache::BackgroundKey>,
+        top: i32,
+        height: i32,
+    },
 }
 
 #[derive(Clone)]
@@ -1244,7 +1595,10 @@ struct AssetImageInfo {
 
 /// Inspect an asset through the same descriptor/dimension cache as scene rendering, while
 /// canonicalizing both sides first so a symlink cannot escape the caller-supplied asset root.
-fn load_confined_asset_image_info(base: &Path, path: &str) -> Result<AssetImageInfo, String> {
+fn load_confined_asset_descriptor(
+    base: &Path,
+    path: &str,
+) -> Result<LoadedAssetDescriptor, String> {
     let candidate = resolve_asset_path(base, path)?;
     let canonical_base = fs::canonicalize(base)
         .map_err(|err| format!("failed to resolve asset root {}: {err}", base.display()))?;
@@ -1265,7 +1619,11 @@ fn load_confined_asset_image_info(base: &Path, path: &str) -> Result<AssetImageI
                 canonical_candidate.display()
             )
         })?;
-    let loaded = load_asset_descriptor(&canonical_base, canonical_relative)?;
+    load_asset_descriptor(&canonical_base, canonical_relative)
+}
+
+fn load_confined_asset_image_info(base: &Path, path: &str) -> Result<AssetImageInfo, String> {
+    let loaded = load_confined_asset_descriptor(base, path)?;
     Ok(AssetImageInfo {
         width: loaded.descriptor.width,
         height: loaded.descriptor.height,
@@ -1292,17 +1650,145 @@ fn asset_image_info(py: Python<'_>, assets_base_dir: &str, path: &str) -> PyResu
     Ok(dict.unbind())
 }
 
+/// Probe encoded image dimensions without allocating decoded pixels.
+#[pyfunction]
+fn encoded_image_info(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyDict>> {
+    let (width, height) = py.detach(|| {
+        // A codec reads metadata here; no image surface or decoded pixel buffer is allocated.
+        let codec = skia_safe::Codec::from_data(Data::new_copy(data))
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("invalid encoded image"))?;
+        let size = codec.dimensions();
+        if size.width <= 0 || size.height <= 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "invalid image dimensions",
+            ));
+        }
+        Ok((size.width, size.height))
+    })?;
+    let result = PyDict::new(py);
+    result.set_item("width", width)?;
+    result.set_item("height", height)?;
+    result.set_item("mode", "RGBA")?;
+    Ok(result.unbind())
+}
+
+/// Unsupported native resource requirements remain eligible for the legacy adapter;
+/// corrupt input and invalid paths keep ValueError, which the service maps to OSError.
+fn image_analysis_error(error: image_analysis::AnalysisError) -> PyErr {
+    match error {
+        image_analysis::AnalysisError::Invalid(message) => {
+            pyo3::exceptions::PyValueError::new_err(message)
+        }
+        image_analysis::AnalysisError::Unsupported(message)
+        | image_analysis::AnalysisError::Limit(message) => {
+            pyo3::exceptions::PyRuntimeError::new_err(message)
+        }
+    }
+}
+
+#[pyfunction]
+fn asset_alpha_field(
+    py: Python<'_>,
+    assets_base_dir: &str,
+    path: &str,
+    max_pixels: u64,
+) -> PyResult<(i32, i32, Py<PyBytes>)> {
+    let (pixels, width, height) = py
+        .detach(|| {
+            let loaded = load_confined_asset_descriptor(Path::new(assets_base_dir), path)?;
+            let data = Data::from_filename(&loaded.descriptor.identity.full_path)
+                .ok_or_else(|| "failed to read alpha field asset".to_string())?;
+            image_analysis::alpha_field(data, max_pixels)
+        })
+        .map_err(|error| match error {
+            image_analysis::AnalysisError::Limit(message) => {
+                pyo3::exceptions::PyValueError::new_err(message)
+            }
+            other => image_analysis_error(other),
+        })?;
+    Ok((width, height, PyBytes::new(py, &pixels).unbind()))
+}
+
+#[pyfunction]
+fn asset_alpha_bounds(
+    py: Python<'_>,
+    assets_base_dir: &str,
+    path: &str,
+) -> PyResult<Option<[i32; 4]>> {
+    py.detach(|| {
+        let loaded = load_confined_asset_descriptor(Path::new(assets_base_dir), path)?;
+        let data = Data::from_filename(&loaded.descriptor.identity.full_path)
+            .ok_or_else(|| "failed to read alpha bounds asset".to_string())?;
+        image_analysis::alpha_bounds(data)
+    })
+    .map_err(image_analysis_error)
+}
+
+#[pyfunction]
+fn encoded_alpha_bounds(py: Python<'_>, data: &[u8]) -> PyResult<Option<[i32; 4]>> {
+    py.detach(|| image_analysis::alpha_bounds(Data::new_copy(data)))
+        .map_err(image_analysis_error)
+}
+
+#[pyfunction]
+fn asset_foreground_bounds(
+    py: Python<'_>,
+    assets_base_dir: &str,
+    path: &str,
+    detect_width: u32,
+) -> PyResult<Option<[i32; 4]>> {
+    py.detach(|| {
+        let loaded = load_confined_asset_descriptor(Path::new(assets_base_dir), path)?;
+        let data = Data::from_filename(&loaded.descriptor.identity.full_path)
+            .ok_or_else(|| "failed to read foreground bounds asset".to_string())?;
+        image_analysis::foreground_bounds(data, detect_width)
+    })
+    .map_err(image_analysis_error)
+}
+
+#[pyfunction]
+fn encoded_foreground_bounds(
+    py: Python<'_>,
+    data: &[u8],
+    detect_width: u32,
+) -> PyResult<Option<[i32; 4]>> {
+    py.detach(|| image_analysis::foreground_bounds(Data::new_copy(data), detect_width))
+        .map_err(image_analysis_error)
+}
+
 /// Measure several strings with one strictly resolved typeface.
 ///
 /// `requests` is a bounded list/tuple of `(text, size)` pairs.  Python strings are borrowed
 /// long enough to enforce the limits before they are copied; font loading and all Skia calls
 /// then run with the GIL detached.
 #[pyfunction]
+fn vector_text_geometry(
+    py: Python<'_>,
+    font_dir: &str,
+    font_name: &str,
+    text: &str,
+    size: f64,
+) -> PyResult<Py<PyDict>> {
+    let result = py
+        .detach(|| vector_text::geometry(font_dir, font_name, text, size))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    let output = PyDict::new(py);
+    output.set_item("commands", result.commands)?;
+    output.set_item("advance", result.advance)?;
+    output.set_item("ascent", result.ascent)?;
+    output.set_item("descent", result.descent)?;
+    output.set_item("ink_bbox", result.ink_bbox)?;
+    Ok(output.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (font_dir, font_name, requests, *, engine = "skia"))]
 fn measure_text_batch(
     py: Python<'_>,
     font_dir: &str,
     font_name: &str,
     requests: &Bound<'_, PyAny>,
+    engine: &str,
 ) -> PyResult<Py<PyList>> {
     use text_metrics::{
         MAX_TEXT_METRICS_BATCH, MAX_TEXT_METRICS_CHARS, MAX_TEXT_METRICS_FONT_PATH_BYTES,
@@ -1373,7 +1859,11 @@ fn measure_text_batch(
     let font_dir = font_dir.to_owned();
     let font_name = font_name.to_owned();
     let measured = py
-        .detach(|| measure_text_metrics_batch(&font_dir, &font_name, &owned_requests))
+        .detach(|| match engine {
+            "skia" => measure_text_metrics_batch(&font_dir, &font_name, &owned_requests),
+            "freetype_basic" => basic_text::measure_batch(&font_dir, &font_name, &owned_requests),
+            _ => Err(format!("unsupported text engine: {engine}")),
+        })
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
 
     let results = PyList::empty(py);
@@ -1567,7 +2057,7 @@ pub(crate) fn rasterize_asset_cached(
         return Ok(None);
     }
 
-    let key = RasterCacheKey {
+    let key = RasterCacheKey::Asset {
         asset: descriptor.identity.clone(),
         src_bits: [
             normalized_float_bits(source_rect.left),
@@ -1651,15 +2141,28 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
         "dimension_cache_entries",
         image_dimension_cache().entry_count(),
     )?;
+    let backgrounds = triangle_cache::stats();
+    dict.set_item("background_cache_hits", backgrounds.0)?;
+    dict.set_item("background_cache_misses", backgrounds.1)?;
+    dict.set_item("background_cache_bypasses", backgrounds.2)?;
     // Font health: any non-zero count means some text rendered with sans-serif instead of the
     // configured face. `font_fallback_fonts` names them so a misconfigured deploy is actionable.
     dict.set_item("font_fallback_count", font_fallback_count())?;
     dict.set_item("font_fallback_fonts", missing_font_names())?;
+    let text_masks = basic_text::text_mask_cache_snapshot();
+    dict.set_item("text_mask_cache_max_bytes", text_masks.max_bytes)?;
+    dict.set_item("text_mask_cache_entries", text_masks.entries)?;
+    dict.set_item("text_mask_cache_bytes", text_masks.bytes)?;
+    dict.set_item("text_mask_cache_hits", text_masks.hits)?;
+    dict.set_item("text_mask_cache_misses", text_masks.misses)?;
+    dict.set_item("text_mask_cache_bypasses", text_masks.bypasses)?;
     Ok(dict.unbind())
 }
 
 #[pyfunction]
 fn clear_renderer_caches() {
+    triangle_cache::clear_stats();
+    basic_text::clear_text_mask_cache();
     if let Some(cache) = raster_image_cache() {
         cache.invalidate_all();
         cache.run_pending_tasks();
@@ -1827,6 +2330,29 @@ mod tests {
         surface.canvas().clear(Color::BLUE);
         let encoded = encode_surface_mtpng(&mut surface).expect("png encode");
         fs::write(path, encoded).expect("png write");
+    }
+
+    #[test]
+    fn raw_fragment_preserves_premultiplied_surface_bytes() {
+        let mut surface = surfaces::raster_n32_premul((17, 13)).expect("surface");
+        surface.canvas().clear(Color::TRANSPARENT);
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(Color::from_argb(97, 183, 39, 218));
+        surface.canvas().draw_circle((8.3, 6.2), 5.7, &paint);
+        let info = ImageInfo::new((17, 13), ColorType::RGBA8888, AlphaType::Premul, None);
+        let mut expected = vec![0u8; 17 * 13 * 4];
+        assert!(surface.read_pixels(&info, &mut expected, 17 * 4, (0, 0)));
+        assert!(
+            expected
+                .chunks_exact(4)
+                .any(|pixel| pixel[3] > 0 && pixel[3] < 97)
+        );
+        let result = encode_surface(surface, "raw_rgba_premul", 90).expect("raw fragment");
+        assert_eq!(result.bytes.as_bytes(), expected.as_slice());
+        assert_eq!((result.width, result.height), (17, 13));
+        assert_eq!(result.media_type, "application/octet-stream");
+        assert_eq!(result.filename, "fragment.rgba");
     }
 
     #[test]

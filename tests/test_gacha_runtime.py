@@ -55,7 +55,7 @@ def test_unknown_fallback_prefers_requested_placeholder_then_builtin(monkeypatch
             return requested
         return builtin
 
-    monkeypatch.setattr(gacha_drawer, "get_img_from_path", fake_load)
+    monkeypatch.setattr(gacha_drawer, "get_asset_image_ref", fake_load)
     assert asyncio.run(gacha_drawer.get_unknown_fallback_image("requested.png")) is requested
     assert calls == [("requested.png", "placeholder")]
 
@@ -67,7 +67,7 @@ def test_unknown_fallback_prefers_requested_placeholder_then_builtin(monkeypatch
             raise OSError("missing")
         return builtin
 
-    monkeypatch.setattr(gacha_drawer, "get_img_from_path", fail_requested)
+    monkeypatch.setattr(gacha_drawer, "get_asset_image_ref", fail_requested)
     assert asyncio.run(gacha_drawer.get_unknown_fallback_image("requested.png")) is builtin
     assert calls[0] == ("requested.png", "placeholder")
 
@@ -76,21 +76,13 @@ def test_unknown_fallback_synthesizes_image_when_both_loads_fail(monkeypatch):
     async def fail(*_args, **_kwargs):
         raise FileNotFoundError("missing")
 
-    monkeypatch.setattr(gacha_drawer, "get_img_from_path", fail)
+    monkeypatch.setattr(gacha_drawer, "get_asset_image_ref", fail)
     result = asyncio.run(gacha_drawer.get_unknown_fallback_image("requested.png"))
-    assert result.mode == "RGBA"
-    assert result.size == (256, 256)
-    assert result.getpixel((0, 0)) == (220, 220, 220, 255)
+    assert result == gacha_drawer.missing_image_ref("gacha_unknown")
 
 
-def test_eager_and_lazy_image_helpers_cover_success_failure_and_empty(monkeypatch):
-    image = Image.new("RGBA", (3, 4), "green")
+def test_lazy_image_helpers_cover_success_failure_and_empty(monkeypatch):
     fallback = Image.new("RGBA", (5, 6), "gray")
-
-    async def eager(_base, path):
-        if path == "broken.png":
-            raise ValueError("broken")
-        return image
 
     async def lazy(_base, path, **_kwargs):
         if path == "broken.png":
@@ -100,14 +92,8 @@ def test_eager_and_lazy_image_helpers_cover_success_failure_and_empty(monkeypatc
     async def unknown(path=None):
         return (fallback, path)
 
-    monkeypatch.setattr(gacha_drawer, "get_img_from_path", eager)
     monkeypatch.setattr(gacha_drawer, "get_asset_image_ref", lazy)
     monkeypatch.setattr(gacha_drawer, "get_unknown_fallback_image", unknown)
-
-    assert asyncio.run(gacha_drawer.get_gacha_image_or_unknown("ok.png")) is image
-    assert asyncio.run(gacha_drawer.get_gacha_image_or_unknown("broken.png")) == (fallback, "broken.png")
-    assert asyncio.run(gacha_drawer.get_gacha_image_or_unknown(None, allow_empty=True)) is None
-    assert asyncio.run(gacha_drawer.get_gacha_image_or_unknown(None)) == (fallback, None)
 
     assert asyncio.run(gacha_drawer.get_gacha_image_ref_or_unknown("ok.png")) == "ref:ok.png"
     assert asyncio.run(gacha_drawer.get_gacha_image_ref_or_unknown("broken.png")) == (fallback, "broken.png")
@@ -154,21 +140,15 @@ def test_rarity_image_repeats_star_and_handles_missing(monkeypatch):
         calls.append(path)
         return star
 
-    async def fake_concat(images, direction):
-        assert direction == "h"
-        return len(images)
-
-    monkeypatch.setattr(gacha_drawer, "get_gacha_image_or_unknown", fake_image)
-    monkeypatch.setattr(gacha_drawer, "concat_images", fake_concat)
-    assert asyncio.run(gacha_drawer.get_rarity_img("rarity_3", "star.png")) == 3
-    assert asyncio.run(gacha_drawer.get_rarity_img("rarity_birthday", birthday_img_path="birthday.png")) == 1
+    monkeypatch.setattr(gacha_drawer, "get_gacha_image_ref_or_unknown", fake_image)
+    normal = asyncio.run(gacha_drawer.get_rarity_img("rarity_3", "star.png"))
+    birthday = asyncio.run(gacha_drawer.get_rarity_img("rarity_birthday", birthday_img_path="birthday.png"))
+    assert normal._get_self_size() == (6, 3)
+    assert birthday._get_self_size() == (2, 3)
     assert calls == ["star.png", "birthday.png"]
-
-    async def missing(*_args, **_kwargs):
-        return None
-
-    monkeypatch.setattr(gacha_drawer, "get_gacha_image_or_unknown", missing)
-    assert asyncio.run(gacha_drawer.get_rarity_img("rarity_2")) is None
+    calls.clear()
+    monkeypatch.setattr(gacha_drawer, "get_gacha_image_ref_or_unknown", lambda *a, **k: fake_image("missing"))
+    assert asyncio.run(gacha_drawer.get_rarity_img("rarity_2"))._get_self_size() == (4, 3)
 
 
 def test_list_preloader_handles_empty_and_preserves_ids(monkeypatch):

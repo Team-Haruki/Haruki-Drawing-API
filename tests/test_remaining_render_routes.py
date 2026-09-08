@@ -57,7 +57,7 @@ def test_remaining_routes_return_native_payloads(case: _RouteCase, monkeypatch: 
 
     _patch_side_effects(case, monkeypatch)
     monkeypatch.setattr(case.module, case.native_renderer, native_renderer)
-    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer)
+    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer, raising=False)
     monkeypatch.setattr(
         case.module,
         "encoded_image_payload_to_response",
@@ -69,29 +69,20 @@ def test_remaining_routes_return_native_payloads(case: _RouteCase, monkeypatch: 
 
 
 @pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda case: case.endpoint)
-def test_remaining_routes_fall_back_to_pillow(case: _RouteCase, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_remaining_routes_reject_missing_native_without_pillow(
+    case: _RouteCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
     request = _request(case)
-    image = SimpleNamespace(width=10, height=20)
-    response = object()
 
-    async def native_renderer(received: Any) -> None:
-        assert received is request
+    async def native_renderer(_request):
         return None
-
-    async def pillow_renderer(received: Any) -> object:
-        assert received is request
-        return image
-
-    async def image_response(received: Any) -> object:
-        assert received is image
-        return response
 
     _patch_side_effects(case, monkeypatch)
     monkeypatch.setattr(case.module, case.native_renderer, native_renderer)
-    monkeypatch.setattr(case.module, case.pillow_renderer, pillow_renderer)
-    monkeypatch.setattr(case.module, "image_to_response", image_response)
-
-    assert asyncio.run(getattr(case.module, case.endpoint)(request)) is response
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(getattr(case.module, case.endpoint)(request))
+    assert error.value.status_code == 500
+    assert "Pillow fallback is no longer available" in error.value.detail
 
 
 @pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda case: case.endpoint)
@@ -128,7 +119,7 @@ def test_chart_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     assert asyncio.run(chart.music_chart(request)) is response
 
 
-def test_chart_falls_back_to_png(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_chart_rejects_missing_native(monkeypatch: pytest.MonkeyPatch) -> None:
     request = object()
     image = object()
     response = object()
@@ -146,10 +137,11 @@ def test_chart_falls_back_to_png(monkeypatch: pytest.MonkeyPatch) -> None:
         return response
 
     monkeypatch.setattr(chart_drawer, "try_render_music_chart_payload", native_renderer)
-    monkeypatch.setattr(chart_drawer, "compose_music_chart_image", pillow_renderer)
-    monkeypatch.setattr(chart, "image_to_response", image_response)
+    monkeypatch.setattr(chart_drawer, "compose_music_chart_image", pillow_renderer, raising=False)
+    monkeypatch.setattr(chart, "image_to_response", image_response, raising=False)
 
-    assert asyncio.run(chart.music_chart(request)) is response
+    with pytest.raises(HTTPException, match="Pillow fallback is no longer available"):
+        asyncio.run(chart.music_chart(request))
 
 
 def test_chart_converts_renderer_errors(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -123,6 +123,20 @@ def test_image_and_thumbnail_caches_record_hits(monkeypatch):
     assert stats["thumbnail_cache"]["misses"] == 1
 
 
+def test_clear_runtime_memory_caches_includes_native_renderer(monkeypatch):
+    from src.sekai.profile.custom_profile import cache as custom_cache
+    from src.sekai.skia_renderer import canvas, payload_cache
+
+    calls = []
+    monkeypatch.setattr(canvas, "clear_native_renderer_caches", lambda: calls.append("native"))
+    monkeypatch.setattr(payload_cache, "clear_skia_payload_cache", lambda: calls.append("payload"))
+    monkeypatch.setattr(custom_cache, "clear_custom_profile_caches", lambda: calls.append("custom"))
+
+    utils.clear_runtime_memory_caches()
+
+    assert calls == ["payload", "native", "custom"]
+
+
 @pytest.mark.parametrize("path", ["regular.png", "thumbnail/icon.png"])
 def test_image_cache_replacement_and_entry_limit_eviction(monkeypatch, path: str) -> None:
     monkeypatch.setattr(utils, "IMAGE_CACHE_SIZE", 1)
@@ -199,8 +213,9 @@ def test_asset_image_ref_blocks_path_traversal_and_preserves_missing_placeholder
 
     placeholder = asyncio.run(utils.get_asset_image_ref(tmp_path, "missing/icon.png"))
     regular_placeholder = asyncio.run(utils.get_img_from_path(tmp_path, "missing/icon.png"))
-    assert isinstance(placeholder, Image.Image)
+    assert isinstance(placeholder, utils.MissingImageRef)
     assert placeholder.size == regular_placeholder.size
+    assert utils.resolve_image_source_sync(placeholder).tobytes() == regular_placeholder.tobytes()
 
 
 def test_a_replaced_asset_is_picked_up_despite_the_cached_path_resolution(tmp_path):
@@ -258,6 +273,8 @@ def test_resolve_existing_asset_path_reports_a_vanished_file(tmp_path):
 
     _save_image(path)
     assert utils.resolve_existing_asset_path(path) == path.resolve()
+    path.unlink()
+    assert utils.resolve_existing_asset_path(path) is None
 
 
 def test_birthday_fallback_prefers_latest_same_or_older_year(tmp_path) -> None:

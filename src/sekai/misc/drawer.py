@@ -1,11 +1,14 @@
+from __future__ import annotations
+
 import asyncio
 from dataclasses import dataclass
-from functools import partial
 import logging
 import re
 import time
+from typing import TYPE_CHECKING
 
-from PIL import Image, ImageDraw, ImageFilter
+if TYPE_CHECKING:
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -17,26 +20,30 @@ from src.sekai.base.draw import (
     add_request_watermark,
     roundrect_bg,
 )
-from src.sekai.base.painter import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font, get_text_size
+from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.image_info import probe_alpha_bounds
+from src.sekai.base.paint_types import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font_desc
 from src.sekai.base.plot import (
+    AlphaTrimImageBox,
+    CanvasImageBox,
     Flow,
     Frame,
     Grid,
     HSplit,
     ImageBg,
     ImageBox,
+    PreResizedImageBox,
     RoundRectBg,
     Spacer,
     TextStyle,
     VSplit,
     Widget,
 )
+from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
     ImageSource,
     get_asset_image_ref,
-    get_img_from_path,
-    get_img_resized,
     get_str_display_length,
     run_in_pool,
 )
@@ -261,108 +268,6 @@ def _strip_command_help_output_section(markdown: str) -> str:
     return "\n".join(kept)
 
 
-def _flush_command_help_section(
-    sections: list[_CommandHelpSection],
-    section_title: str,
-    lines: list[_CommandHelpLine],
-) -> None:
-    while lines and not lines[0].text:
-        lines.pop(0)
-    while lines and not lines[-1].text:
-        lines.pop()
-    if lines:
-        sections.append(_CommandHelpSection(section_title, list(lines)))
-    lines.clear()
-
-
-def _append_command_help_body_line(
-    lines: list[_CommandHelpLine],
-    trimmed_right: str,
-    trimmed: str,
-    *,
-    in_code: bool,
-) -> None:
-    if in_code:
-        _append_command_help_wrapped_line(
-            lines,
-            trimmed_right,
-            font_name=DEFAULT_FONT,
-            size=20,
-            indent=26,
-            fill=(42, 52, 68, 255),
-            bg=(255, 255, 255, 116),
-            gap_before=2,
-        )
-        return
-    if not trimmed:
-        lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
-        return
-    if trimmed.startswith(("import ", "const ", "<")):
-        return
-
-    bullet = _command_help_bullet(trimmed)
-    if bullet is not None:
-        cleaned = _clean_command_help_inline(bullet)
-        if "：" in cleaned or ":" in cleaned:
-            _append_command_help_definition_line(lines, cleaned)
-        else:
-            _append_command_help_wrapped_line(
-                lines,
-                cleaned,
-                font_name=DEFAULT_FONT,
-                size=21,
-                indent=34,
-                fill=(50, 61, 78, 255),
-                gap_before=7,
-            )
-        return
-
-    numbered = _command_help_numbered(trimmed)
-    if numbered is not None:
-        _append_command_help_wrapped_line(
-            lines,
-            _clean_command_help_inline(numbered),
-            font_name=DEFAULT_FONT,
-            size=21,
-            indent=36,
-            fill=(50, 61, 78, 255),
-            gap_before=7,
-        )
-        return
-    if trimmed.startswith(">"):
-        _append_command_help_wrapped_line(
-            lines,
-            _clean_command_help_inline(trimmed.lstrip(">").strip()),
-            font_name=DEFAULT_FONT,
-            size=20,
-            indent=28,
-            fill=(87, 103, 126, 255),
-            bg=(255, 255, 255, 104),
-            gap_before=10,
-        )
-        return
-    if trimmed.startswith("|") and "|" in trimmed[1:]:
-        _append_command_help_wrapped_line(
-            lines,
-            _clean_command_help_inline(trimmed),
-            font_name=DEFAULT_FONT,
-            size=18,
-            indent=24,
-            fill=(42, 52, 68, 255),
-            bg=(255, 255, 255, 112),
-            gap_before=6,
-        )
-        return
-    _append_command_help_wrapped_line(
-        lines,
-        _clean_command_help_inline(trimmed),
-        font_name=DEFAULT_FONT,
-        size=21,
-        fill=(50, 61, 78, 255),
-        gap_before=7,
-    )
-
-
 def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelpSection]]:
     markdown = _strip_command_help_output_section(_strip_command_help_frontmatter(markdown or ""))
     title = "指令帮助"
@@ -403,149 +308,131 @@ def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelp
     return title, sections
 
 
-def _command_help_section_layout(
-    sections: list[_CommandHelpSection],
-    content_width: int,
-    section_padding_y: int,
-    section_gap: int,
-    title_height: int,
-) -> tuple[list[tuple[int, int]], int]:
-    height = _HELP_CARD_MARGIN + title_height + section_gap
-    section_sizes: list[tuple[int, int]] = []
-    for section in sections:
-        section_h = section_padding_y * 2 + 42
-        for line in section.lines:
-            section_h += line.gap_before + _command_help_line_height(line.size)
-        section_h = max(92, section_h)
-        section_sizes.append((content_width, section_h))
-        height += section_h + section_gap
-    return section_sizes, max(360, height + _HELP_CARD_MARGIN - section_gap)
-
-
-def _draw_command_help_glass_box(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    radius: int,
-    fill_alpha: int = 112,
-) -> None:
-    shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
-    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-    shadow_draw.rounded_rectangle(
-        (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
-        radius=radius,
-        fill=(72, 96, 128, 30),
-    )
-    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
-    draw.rounded_rectangle(
-        box,
-        radius=radius,
-        fill=(255, 255, 255, fill_alpha),
-        outline=(255, 255, 255, 150),
-        width=2,
-    )
-
-
-def _draw_command_help_section(
-    draw: ImageDraw.ImageDraw,
-    section: _CommandHelpSection,
-    section_box: tuple[int, int, int, int],
-    section_padding_x: int,
-    section_padding_y: int,
-) -> None:
-    header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
-    draw.text(
-        (header_box[0], header_box[1]),
-        section.title,
-        font=get_font(DEFAULT_BOLD_FONT, 24),
-        fill=(24, 38, 58, 255),
-    )
-    draw.line(
-        (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
-        fill=(255, 255, 255, 86),
-        width=2,
-    )
-
-    text_y = section_box[1] + section_padding_y + 48
-    text_x = section_box[0] + section_padding_x
-    text_right = section_box[2] - section_padding_x
-    for line in section.lines:
-        text_y += line.gap_before
-        line_height = _command_help_line_height(line.size)
-        if line.bg is not None:
-            bg_box = (
-                text_x + line.indent - 14,
-                text_y - 4,
-                text_right + 8,
-                text_y + line_height - 1,
-            )
-            draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
-        if line.text:
-            font = get_font(line.font_name, line.size)
-            if line.label:
-                draw.text(
-                    (text_x + line.indent, text_y),
-                    line.label,
-                    font=get_font(DEFAULT_BOLD_FONT, line.size),
-                    fill=(30, 45, 66, 255),
-                )
-            text_offset = line.label_width if line.label_width > 0 else 0
-            draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
-        text_y += line_height
-
-
-def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
+def _build_command_help_panel(rqd: CommandHelpRenderRequest) -> Canvas:
     title, sections = _layout_command_help_markdown(rqd.markdown)
     title = (rqd.title or title or "指令帮助").strip()
     if not sections:
         sections = [_CommandHelpSection("说明", [])]
 
-    content_width = _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN * 2
+    content_w = _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN * 2
     section_gap = 22
-    section_padding_x = 26
-    section_padding_y = 20
-    title_height = 88
-    section_sizes, height = _command_help_section_layout(
-        sections,
-        content_width,
-        section_padding_y,
-        section_gap,
-        title_height,
-    )
+    section_pad_x = 26
+    section_pad_y = 20
+    title_h = 88
+    height = _HELP_CARD_MARGIN + title_h + section_gap
+    section_sizes: list[tuple[int, int]] = []
+    for section in sections:
+        section_h = section_pad_y * 2 + 42
+        for line in section.lines:
+            section_h += line.gap_before + _command_help_line_height(line.size)
+        section_h = max(92, section_h)
+        section_sizes.append((content_w, section_h))
+        height += section_h + section_gap
+    height = max(360, height + _HELP_CARD_MARGIN - section_gap)
 
-    img = Image.new("RGBA", (_HELP_IMAGE_WIDTH, height), (255, 255, 255, 0))
-    draw = ImageDraw.Draw(img, "RGBA")
+    panel = Canvas(w=_HELP_IMAGE_WIDTH, h=height).set_padding(0)
 
-    title_box = (
-        _HELP_CARD_MARGIN,
-        _HELP_CARD_MARGIN,
-        _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN,
-        _HELP_CARD_MARGIN + title_height,
-    )
-    _draw_command_help_glass_box(img, draw, title_box, 22, 118)
-    draw.text(
-        (_HELP_CARD_MARGIN + 30, _HELP_CARD_MARGIN + 24),
-        title,
-        font=get_font(DEFAULT_HEAVY_FONT, 34),
-        fill=(24, 38, 58, 255),
-    )
+    def draw(_widget, painter):
+        def draw_roundrect(box, radius, fill, outline=None, width=1):
+            painter.roundrect_src(
+                (box[0], box[1]),
+                (box[2] - box[0] + 1, box[3] - box[1] + 1),
+                fill,
+                radius,
+                stroke=outline,
+                stroke_width=width,
+            )
 
-    y = title_box[3] + section_gap
-    for section, (_, section_h) in zip(sections, section_sizes, strict=True):
-        section_box = (_HELP_CARD_MARGIN, y, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, y + section_h)
-        _draw_command_help_glass_box(img, draw, section_box, 18, 102)
-        _draw_command_help_section(draw, section, section_box, section_padding_x, section_padding_y)
-        y += section_h + section_gap
+        def draw_glass_box(box, radius, fill_alpha=112):
+            painter.drop_shadow_roundrect(
+                (box[0], box[1]),
+                (box[2] - box[0] + 1, box[3] - box[1] + 1),
+                radius,
+                (72, 96, 128, 30),
+                sigma=10,
+                offset=(4, 6),
+            )
+            draw_roundrect(box, radius, (255, 255, 255, fill_alpha), (255, 255, 255, 150), 2)
 
-    return img
+        def draw_text(pos, text, font, fill):
+            painter.text(
+                text, (pos[0], ascender_top_to_painter_y(font.path, font.size, pos[1])), font, fill, mask_lerp=True
+            )
+
+        def draw_line(box, fill, width):
+            painter.roundrect_src((box[0], box[1]), (box[2] - box[0] + 1, width), fill, 0)
+
+        title_box = (
+            _HELP_CARD_MARGIN,
+            _HELP_CARD_MARGIN,
+            _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN,
+            _HELP_CARD_MARGIN + title_h,
+        )
+        draw_glass_box(title_box, 22, 118)
+        draw_text(
+            (_HELP_CARD_MARGIN + 30, _HELP_CARD_MARGIN + 24),
+            title,
+            font=get_font_desc(DEFAULT_HEAVY_FONT, 34),
+            fill=(24, 38, 58, 255),
+        )
+
+        y = title_box[3] + section_gap
+        for section, (_, section_h) in zip(sections, section_sizes, strict=True):
+            section_box = (_HELP_CARD_MARGIN, y, _HELP_IMAGE_WIDTH - _HELP_CARD_MARGIN, y + section_h)
+            draw_glass_box(section_box, 18, 102)
+            header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
+            draw_text(
+                (header_box[0], header_box[1]),
+                section.title,
+                font=get_font_desc(DEFAULT_BOLD_FONT, 24),
+                fill=(24, 38, 58, 255),
+            )
+            draw_line(
+                (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
+                fill=(255, 255, 255, 86),
+                width=2,
+            )
+
+            text_y = section_box[1] + section_pad_y + 48
+            text_x = section_box[0] + section_pad_x
+            text_right = section_box[2] - section_pad_x
+            for line in section.lines:
+                text_y += line.gap_before
+                line_height = _command_help_line_height(line.size)
+                if line.bg is not None:
+                    bg_box = (
+                        text_x + line.indent - 14,
+                        text_y - 4,
+                        text_right + 8,
+                        text_y + line_height - 1,
+                    )
+                    draw_roundrect(bg_box, radius=10, fill=line.bg)
+                if line.text:
+                    font = get_font_desc(line.font_name, line.size)
+                    if line.label:
+                        draw_text(
+                            (text_x + line.indent, text_y),
+                            line.label,
+                            font=get_font_desc(DEFAULT_BOLD_FONT, line.size),
+                            fill=(30, 45, 66, 255),
+                        )
+                    text_offset = line.label_width if line.label_width > 0 else 0
+                    draw_text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
+                text_y += line_height
+            y += section_h + section_gap
+
+    panel.add_draw_func(draw)
+    return panel
+
+
+def _compose_command_help_image_sync(rqd: CommandHelpRenderRequest) -> Image.Image:
+    return _build_command_help_panel(rqd).get_img_sync()
 
 
 async def _build_command_help_canvas(rqd: CommandHelpRenderRequest) -> Canvas:
-    panel = await run_in_pool(partial(_compose_command_help_image_sync, rqd))
+    panel = await run_in_pool(_build_command_help_panel, rqd)
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        Frame().set_size(panel.size).add_draw_func(
-            lambda _widget, painter: painter.paste_with_alpha_blend(panel, (0, 0), exclude_on_hash=True)
-        )
+        CanvasImageBox(panel, use_alpha_blend=True)
     add_request_watermark(canvas, rqd)
     return canvas
 
@@ -556,7 +443,7 @@ async def compose_command_help_image(rqd: CommandHelpRenderRequest) -> Image.Ima
 
 
 async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> EncodedImagePayload | None:
-    """Skia 路径：帮助面板位图经 mem 图传输,外壳走 IRPainter;不可用时返回 None 回退 Pillow。"""
+    """Render the shared help panel subtree natively; retain the normal fail-open path."""
     if not skia_plot_enabled():
         return None
     canvas = await _build_command_help_canvas(rqd)
@@ -602,37 +489,21 @@ def _resolve_alias_trim_path(rqd: AliasListRequest) -> str | None:
     return None
 
 
-def _prepare_alias_trim_image(img: Image.Image) -> Image.Image:
-    img = img.convert("RGBA")
-    bbox = img.getbbox()
-    if bbox:
-        img = img.crop(bbox)
-    alpha_floor = _ALIAS_TRIM_ALPHA_FLOOR
-    alpha = img.getchannel("A").point(
-        lambda v: 0 if v <= alpha_floor else min(255, int((v - alpha_floor) * 255 / (255 - alpha_floor)))
-    )
-    img.putalpha(alpha)
-    return img
+def _prepare_alias_trim_image(img: ImageSource) -> AlphaTrimImageBox:
+    bounds = probe_alpha_bounds(img) or (0, 0, img.width, img.height)
+    return AlphaTrimImageBox(img, bounds, _ALIAS_TRIM_ALPHA_FLOOR, use_alpha_blend=True)
 
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
-) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, Image.Image], float]:
+) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, ImageSource], float]:
     tasks = [
         # ImageBg keeps this lazy through the Skia path; Pillow resolves it during replay.
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
         *[get_asset_image_ref(ASSETS_BASE_DIR, card.thumbnail_path) for card in rqd.cards],
-        *[
-            get_img_resized(
-                ASSETS_BASE_DIR,
-                chara.icon_path,
-                _BIRTHDAY_CALENDAR_ICON_SIZE,
-                _BIRTHDAY_CALENDAR_ICON_SIZE,
-            )
-            for chara in rqd.all_characters
-        ],
+        *[get_asset_image_ref(ASSETS_BASE_DIR, chara.icon_path) for chara in rqd.all_characters],
     ]
     started = time.perf_counter()
     results = await asyncio.gather(*tasks)
@@ -653,10 +524,11 @@ async def _load_chara_birthday_assets(
 
 
 def _resolve_alias_trim_metrics(
-    trim_img: Image.Image, left_panel_w: int, left_panel_h: int
+    trim_img: AlphaTrimImageBox, left_panel_w: int, left_panel_h: int
 ) -> tuple[int, int, int, tuple[int, int]]:
     trim_display_h = max(500, min(920, left_panel_h + _ALIAS_TRIM_BOTTOM_OVERFLOW))
-    aspect_ratio = trim_img.width / max(1, trim_img.height)
+    width, height = trim_img.natural_size
+    aspect_ratio = width / max(1, height)
     max_allowed_overlap = max(_ALIAS_TRIM_MIN_OVERLAP, min(_ALIAS_TRIM_MAX_OVERLAP, int(left_panel_w * 0.18)))
     max_rendered_w = _ALIAS_TRIM_MAX_FRAME_W + max_allowed_overlap
     rendered_w = max(1, int(trim_display_h * aspect_ratio))
@@ -682,7 +554,7 @@ def _resolve_alias_trim_metrics(
 def _build_alias_info_panel(
     rqd: AliasListRequest,
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     aliases_count: int,
     panel_w: int,
     name_box_w: int,
@@ -745,7 +617,7 @@ def _build_alias_info_panel(
 
     if jacket_img is not None:
         detail_row.add_item(
-            ImageBox(jacket_img, size=(92, 92), use_alpha_blend=True, shadow=True)
+            PreResizedImageBox(jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True)
             .set_bg(
                 RoundRectBg(
                     fill=(255, 255, 255, 128),
@@ -818,7 +690,7 @@ def _build_alias_left_panel(
     rqd: AliasListRequest,
     aliases: list[str],
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     panel_w: int,
     flow_w: int,
     name_box_w: int,
@@ -862,7 +734,7 @@ def _build_alias_left_panel(
         Widget._thread_local.reset(token)
 
 
-def _build_alias_trim_panel(trim_img: Image.Image, left_panel_size: tuple[int, int]) -> Frame:
+def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, left_panel_size: tuple[int, int]) -> Frame:
     token = Widget._thread_local.set(None)
     try:
         left_panel_w, left_panel_h = left_panel_size
@@ -870,9 +742,8 @@ def _build_alias_trim_panel(trim_img: Image.Image, left_panel_size: tuple[int, i
             trim_img, left_panel_w, left_panel_h
         )
         trim_panel = Frame().set_size((trim_frame_w, trim_frame_h)).set_content_align("rb").set_allow_draw_outside(True)
-        trim_panel.add_item(
-            ImageBox(trim_img, size=(None, trim_display_h), use_alpha_blend=True).set_offset(trim_offset)
-        )
+        trim_img.image_size_mode = "fit"
+        trim_panel.add_item(trim_img.set_size((None, trim_display_h)).set_offset(trim_offset))
         return trim_panel
     finally:
         Widget._thread_local.reset(token)
@@ -882,7 +753,7 @@ def _resolve_alias_panel_widths(
     rqd: AliasListRequest,
     aliases: list[str],
     accent: tuple[int, int, int],
-    jacket_img: Image.Image | None,
+    jacket_img: ImageSource | None,
     target_h: int,
     style_name: TextStyle,
     style_meta: TextStyle,
@@ -927,86 +798,6 @@ def _resolve_alias_panel_widths(
     return best_overflow[1], best_overflow[2], best_overflow[3]
 
 
-def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
-    timezone_label = timezone or ""
-    if not timezone_label and start_at and start_at.tzinfo:
-        timezone_label = start_at.tzname() or ""
-    if not timezone_label and end_at and end_at.tzinfo:
-        timezone_label = end_at.tzname() or ""
-    return f" ({timezone_label})" if timezone_label else ""
-
-
-def _draw_birthday_time_range(
-    rqd: CharaBirthdayRequest,
-    label: str,
-    time_range: BirthdayEventTime,
-    label_style: TextStyle,
-    value_style: TextStyle,
-) -> None:
-    start_at = datetime_from_millis(time_range.start_at, rqd.timezone)
-    end_at = datetime_from_millis(time_range.end_at, rqd.timezone)
-    timezone_label = _birthday_timezone_label(start_at, end_at, rqd.timezone)
-    with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
-        TextBox(f"{label} ", label_style)
-        TextBox(
-            f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}",
-            value_style,
-        )
-
-
-def _draw_birthday_optional_times(
-    rqd: CharaBirthdayRequest,
-    label_style: TextStyle,
-    value_style: TextStyle,
-) -> None:
-    if not rqd.is_fifth_anniv:
-        return
-    with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-        if rqd.drop_time:
-            _draw_birthday_time_range(rqd, "💧露滴掉落时间", rqd.drop_time, label_style, value_style)
-        if rqd.flower_time:
-            _draw_birthday_time_range(rqd, "🌱浇水开放时间", rqd.flower_time, label_style, value_style)
-        if rqd.party_time:
-            _draw_birthday_time_range(rqd, "🎂派对开放时间", rqd.party_time, label_style, value_style)
-
-
-def _draw_birthday_cards(cards, card_thumbs: list[ImageSource], label_style: TextStyle) -> None:
-    with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-        TextBox("卡牌", label_style)
-        Spacer(w=8)
-        with Grid(col_count=6).set_sep(4, 4):
-            for index, thumb in enumerate(card_thumbs):
-                with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
-                    ImageBox(
-                        thumb,
-                        image_size_mode="fill",
-                        size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
-                        shadow=True,
-                        sampling="linear",
-                    )
-                    TextBox(f"{cards[index].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
-
-
-def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
-    for index, item in enumerate(all_characters):
-        if item.cid == start_cid:
-            return index
-    return 0
-
-
-def _draw_birthday_calendar(all_characters, calendar_icons: dict[int, ImageSource], selected_cid: int) -> None:
-    with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
-        index = _birthday_calendar_start_index(all_characters)
-        for _ in range(len(all_characters)):
-            character = all_characters[index % len(all_characters)]
-            index += 1
-            with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
-                icon_box = ImageBox(calendar_icons[character.cid], size=(40, 40)).set_padding(4)
-                if character.cid == selected_cid:
-                    icon_box.set_bg(roundrect_bg(radius=8, alpha=80))
-                TextBox(f"{character.month}/{character.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
-
-
 async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     r"""_build_chara_birthday_canvas
 
@@ -1021,10 +812,39 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     -------
     Canvas
     """
+    cid = rqd.cid
+    month = rqd.month
+    day = rqd.day
+    region_name = rqd.region_name
+    days_until_birthday = rqd.days_until_birthday
+    color_code = rqd.color_code
+    cards = rqd.cards
+    all_characters = rqd.all_characters
+
+    is_fifth_anniv = rqd.is_fifth_anniv
+
     style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
     style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
 
     card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
+
+    # 绘制时间范围的辅助函数
+    def draw_time_range(label: str, tr: BirthdayEventTime):
+        start_at = datetime_from_millis(tr.start_at, rqd.timezone)
+        end_at = datetime_from_millis(tr.end_at, rqd.timezone)
+        timezone_label = rqd.timezone or ""
+        if timezone_label == "" and (start_at and start_at.tzinfo):
+            timezone_label = start_at.tzname() or ""
+        if timezone_label == "" and (end_at and end_at.tzinfo):
+            timezone_label = end_at.tzname() or ""
+        if timezone_label:
+            timezone_label = f" ({timezone_label})"
+        with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
+            TextBox(f"{label} ", style1)
+            TextBox(
+                (f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}"),
+                style2,
+            )
 
     with Canvas(bg=ImageBg(card_image)).set_padding(BG_PADDING) as canvas:
         with (
@@ -1041,39 +861,83 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
                 ImageBox(sd_image, size=(None, 80), shadow=True)
                 ImageBox(title_image, size=(None, 60))
                 TextBox(
-                    f"{rqd.month}月{rqd.day}日",
+                    f"{month}月{day}日",
                     TextStyle(
                         DEFAULT_HEAVY_FONT,
                         32,
                         (100, 100, 100),
                         use_shadow=True,
                         shadow_offset=2,
-                        shadow_color=tuple(color_code_to_rgb(rqd.color_code)),
+                        shadow_color=tuple(color_code_to_rgb(color_code)),
                     ),
                 )
 
             # 基本信息
             with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
                 with HSplit().set_sep(8).set_padding(0).set_content_align("l").set_item_align("l"):
-                    TextBox(f"({rqd.region_name}) 距离下次生日还有{rqd.days_until_birthday}天", style1)
+                    TextBox(f"({region_name}) 距离下次生日还有{days_until_birthday}天", style1)
                     Spacer(w=16)
                     TextBox("应援色", style1)
-                    TextBox(rqd.color_code, TextStyle(DEFAULT_FONT, 20, ADAPTIVE_WB)).set_bg(
-                        RoundRectBg(tuple(color_code_to_rgb(rqd.color_code)), radius=4)
+                    TextBox(color_code, TextStyle(DEFAULT_FONT, 20, ADAPTIVE_WB)).set_bg(
+                        RoundRectBg(tuple(color_code_to_rgb(color_code)), radius=4)
                     ).set_padding(8)
 
                 # 时间范围 - 固定绘制
-                _draw_birthday_time_range(rqd, "🎰卡池开放时间", rqd.gacha_time, style1, style2)
-                _draw_birthday_time_range(rqd, "🎤虚拟LIVE时间", rqd.live_time, style1, style2)
+                draw_time_range("🎰卡池开放时间", rqd.gacha_time)
+                draw_time_range("🎤虚拟LIVE时间", rqd.live_time)
 
             # 五周年特殊时间范围
-            _draw_birthday_optional_times(rqd, style1, style2)
+            if is_fifth_anniv:
+                with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+                    if rqd.drop_time:
+                        draw_time_range("💧露滴掉落时间", rqd.drop_time)
+                    if rqd.flower_time:
+                        draw_time_range("🌱浇水开放时间", rqd.flower_time)
+                    if rqd.party_time:
+                        draw_time_range("🎂派对开放时间", rqd.party_time)
 
             # 卡牌列表
-            _draw_birthday_cards(rqd.cards, card_thumbs, style1)
+            with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
+                TextBox("卡牌", style1)
+                Spacer(w=8)
+                with Grid(col_count=6).set_sep(4, 4):
+                    for i, thumb in enumerate(card_thumbs):
+                        with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
+                            ImageBox(
+                                thumb,
+                                image_size_mode="fill",
+                                size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
+                                shadow=True,
+                                sampling="linear",
+                            )
+                            TextBox(f"{cards[i].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
 
             # 底部角色生日日历
-            _draw_birthday_calendar(rqd.all_characters, calendar_icons, rqd.cid)
+            with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
+                # 找到起始角色（从小豆沙开始，ID=6）
+                idx = 0
+                start_cid = 6
+                for i, item in enumerate(all_characters):
+                    if item.cid == start_cid:
+                        idx = i
+                        break
+
+                for _ in range(len(all_characters)):
+                    chara = all_characters[idx % len(all_characters)]
+                    idx += 1
+
+                    with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
+                        # 使用model中传入的icon_path
+                        chara_icon = calendar_icons[chara.cid]
+
+                        b = PreResizedImageBox(
+                            chara_icon,
+                            pre_size=(_BIRTHDAY_CALENDAR_ICON_SIZE, _BIRTHDAY_CALENDAR_ICON_SIZE),
+                            size=(40, 40),
+                        ).set_padding(4)
+                        if chara.cid == cid:
+                            b.set_bg(roundrect_bg(radius=8, alpha=80))
+                        TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -1096,14 +960,13 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
     jacket_img = None
     if rqd.music_jacket_path:
-        jacket_img = await get_img_resized(ASSETS_BASE_DIR, rqd.music_jacket_path, 92, 92)
+        jacket_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)
     trim_img = None
     trim_path = _resolve_alias_trim_path(rqd)
     if trim_path:
         try:
-            trim_img = _prepare_alias_trim_image(
-                await get_img_from_path(ASSETS_BASE_DIR, trim_path, on_missing="raise")
-            )
+            trim_source = await get_asset_image_ref(ASSETS_BASE_DIR, trim_path, on_missing="raise")
+            trim_img = await run_in_pool(_prepare_alias_trim_image, trim_source)
         except (FileNotFoundError, OSError, ValueError):
             trim_img = None
 
@@ -1204,7 +1067,9 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
                                     )
                                 )
                         if jacket_img is not None:
-                            ImageBox(jacket_img, size=(92, 92), use_alpha_blend=True, shadow=True).set_bg(
+                            PreResizedImageBox(
+                                jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True
+                            ).set_bg(
                                 RoundRectBg(
                                     fill=(255, 255, 255, 128),
                                     radius=12,
@@ -1268,3 +1133,121 @@ async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePa
         return None
     canvas = await _build_alias_list_canvas(rqd)
     return await render_canvas_payload(canvas, endpoint="alias_list")
+
+
+def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
+    for index, item in enumerate(all_characters):
+        if item.cid == start_cid:
+            return index
+    return 0
+
+
+def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
+    timezone_label = timezone or ""
+    if not timezone_label and start_at and start_at.tzinfo:
+        timezone_label = start_at.tzname() or ""
+    if not timezone_label and end_at and end_at.tzinfo:
+        timezone_label = end_at.tzname() or ""
+    return f" ({timezone_label})" if timezone_label else ""
+
+
+def _append_command_help_body_line(
+    lines: list[_CommandHelpLine],
+    trimmed_right: str,
+    trimmed: str,
+    *,
+    in_code: bool,
+) -> None:
+    if in_code:
+        _append_command_help_wrapped_line(
+            lines,
+            trimmed_right,
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=26,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 116),
+            gap_before=2,
+        )
+        return
+    if not trimmed:
+        lines.append(_CommandHelpLine("", DEFAULT_FONT, 10, gap_before=10))
+        return
+    if trimmed.startswith(("import ", "const ", "<")):
+        return
+
+    bullet = _command_help_bullet(trimmed)
+    if bullet is not None:
+        cleaned = _clean_command_help_inline(bullet)
+        if "：" in cleaned or ":" in cleaned:
+            _append_command_help_definition_line(lines, cleaned)
+        else:
+            _append_command_help_wrapped_line(
+                lines,
+                cleaned,
+                font_name=DEFAULT_FONT,
+                size=21,
+                indent=34,
+                fill=(50, 61, 78, 255),
+                gap_before=7,
+            )
+        return
+
+    numbered = _command_help_numbered(trimmed)
+    if numbered is not None:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(numbered),
+            font_name=DEFAULT_FONT,
+            size=21,
+            indent=36,
+            fill=(50, 61, 78, 255),
+            gap_before=7,
+        )
+        return
+    if trimmed.startswith(">"):
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed.lstrip(">").strip()),
+            font_name=DEFAULT_FONT,
+            size=20,
+            indent=28,
+            fill=(87, 103, 126, 255),
+            bg=(255, 255, 255, 104),
+            gap_before=10,
+        )
+        return
+    if trimmed.startswith("|") and "|" in trimmed[1:]:
+        _append_command_help_wrapped_line(
+            lines,
+            _clean_command_help_inline(trimmed),
+            font_name=DEFAULT_FONT,
+            size=18,
+            indent=24,
+            fill=(42, 52, 68, 255),
+            bg=(255, 255, 255, 112),
+            gap_before=6,
+        )
+        return
+    _append_command_help_wrapped_line(
+        lines,
+        _clean_command_help_inline(trimmed),
+        font_name=DEFAULT_FONT,
+        size=21,
+        fill=(50, 61, 78, 255),
+        gap_before=7,
+    )
+
+
+def _flush_command_help_section(
+    sections: list[_CommandHelpSection],
+    section_title: str,
+    lines: list[_CommandHelpLine],
+) -> None:
+    while lines and not lines[0].text:
+        lines.pop(0)
+    while lines and not lines[-1].text:
+        lines.pop()
+    if lines:
+        sections.append(_CommandHelpSection(section_title, list(lines)))
+    lines.clear()

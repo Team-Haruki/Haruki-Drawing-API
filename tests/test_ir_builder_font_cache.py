@@ -12,9 +12,18 @@ from __future__ import annotations
 
 import threading
 
+import pytest
+
 from src.sekai.skia_renderer import ir_builder as irb
 from src.sekai.skia_renderer.ir_builder import IRBuilder, pil_font_cache_info
 from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR
+
+
+@pytest.fixture(autouse=True)
+def _legacy_adapter(monkeypatch):
+    # These tests protect the fallback cache; native metrics have their own
+    # thread-local FreeType faces and do not construct Pillow font objects.
+    monkeypatch.setattr(irb, "get_native_font", lambda *_args: None)
 
 
 def _builder(default_font: str = DEFAULT_FONT, bold_font: str = DEFAULT_BOLD_FONT) -> IRBuilder:

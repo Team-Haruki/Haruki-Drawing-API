@@ -112,7 +112,7 @@ def test_card_box_endpoint_uses_shadow_payload(monkeypatch):
         raise AssertionError("pillow composer should not be called")
 
     monkeypatch.setattr(card_router, "try_render_box_payload", fake_try_render)
-    monkeypatch.setattr(card_router, "compose_box_image", fake_compose)
+    monkeypatch.setattr("src.sekai.card.drawer.compose_box_image", fake_compose)
 
     response = asyncio.run(card_router.card_box(_request()))
     assert response.media_type == "image/png"

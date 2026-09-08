@@ -147,7 +147,7 @@ def test_frame_split_and_grid_items_cover_reparent_expand_ratios_and_empty_draws
 
 def test_text_and_colored_text_setters_draw_alignment_shadow_and_offsets(monkeypatch) -> None:
     font = ImageFont.load_default()
-    monkeypatch.setattr(plot, "get_font", lambda *_args: font)
+    monkeypatch.setattr(plot, "get_layout_font", lambda *_args: font)
     monkeypatch.setattr(plot, "get_text_size", lambda _font, text: (len(text) * 5, 8))
     style = plot.TextStyle(font="font", size=10, color=(1, 2, 3, 255), use_shadow=True, shadow_offset=(1, 2))
     text = plot.TextBox("ab\ncd", style, line_count=2).set_content_align("br")

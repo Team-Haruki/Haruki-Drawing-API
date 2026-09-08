@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 import ctypes
 from pathlib import Path
 import threading
@@ -37,7 +38,7 @@ def _metrics_with_face() -> tuple[renderer.FreeTypeMetrics, renderer.FTFaceRec, 
     metrics = object.__new__(renderer.FreeTypeMetrics)
     metrics.lib = _InitLibrary()
     metrics.handle = ctypes.c_void_p()
-    metrics._faces = {}
+    metrics._faces = OrderedDict()
     metrics._lock = threading.Lock()
     slot = renderer.FTGlyphSlotRec()
     slot.metrics.width = 128
@@ -71,7 +72,7 @@ def test_freetype_initialization_configures_api_and_closes_cached_faces(monkeypa
     monkeypatch.setattr(renderer.ctypes.util, "find_library", lambda _name: "libfreetype")
     monkeypatch.setattr(renderer.ctypes, "CDLL", lambda _path: library)
     metrics = renderer.FreeTypeMetrics()
-    metrics._faces[Path("font.ttf")] = ctypes.POINTER(renderer.FTFaceRec)()
+    metrics._faces[Path("font.ttf")] = ((0, 0), ctypes.POINTER(renderer.FTFaceRec)())
 
     metrics.close()
 
@@ -80,9 +81,10 @@ def test_freetype_initialization_configures_api_and_closes_cached_faces(monkeypa
     assert library.FT_Render_Glyph.restype is ctypes.c_int
 
 
-def test_freetype_face_cache_handles_success_and_failure() -> None:
+def test_freetype_face_cache_handles_success_and_failure(monkeypatch) -> None:
     metrics, _face, _slot = _metrics_with_face()
     metrics._face = renderer.FreeTypeMetrics._face.__get__(metrics)
+    monkeypatch.setattr(renderer, "file_signature", lambda _path: (1, 10))
     created = renderer.FTFaceRec()
 
     def create_face(_handle, _path, _index, output):
@@ -125,17 +127,17 @@ def test_freetype_glyph_bitmap_covers_pixels_empty_bitmap_negative_pitch_and_fai
     slot.bitmap.buffer = ctypes.cast(buffer, ctypes.c_void_p)
 
     image, left, top, layout = metrics.glyph_bitmap(Path("font.ttf"), "A", 16)
-    assert [image.getpixel((x, y)) for y in range(2) for x in range(2)] == [1, 2, 3, 4]
+    assert list(image.pixels) == [1, 2, 3, 4]
     assert (left, top, layout.advance) == (-1, 3, 4)
 
     slot.bitmap.pitch = -2
     image, *_ = metrics.glyph_bitmap(Path("font.ttf"), "A", 16)
-    assert [image.getpixel((x, y)) for y in range(2) for x in range(2)] == [3, 4, 1, 2]
+    assert list(image.pixels) == [3, 4, 1, 2]
 
     slot.bitmap.width = 0
     image, *_ = metrics.glyph_bitmap(Path("font.ttf"), "A", 16)
     assert image.size == (1, 1)
-    assert image.getpixel((0, 0)) == 0
+    assert image.pixels[0] == 0
 
     metrics.lib.FT_Render_Glyph.result = 1
     assert metrics.glyph_bitmap(Path("font.ttf"), "A", 16) is None
