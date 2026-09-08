@@ -37,9 +37,11 @@ from src.sekai.base.image_source import (
     AssetImageRef,
     EncodedImageRef,
     MissingImageRef,
+    NativeRasterImageRef,
     get_pristine_image_asset_path,
     is_pillow_image,
     missing_image_ref,
+    native_image_memory,
     resolve_existing_asset_path,
 )
 from src.sekai.base.paint_context import PaintContext
@@ -88,8 +90,12 @@ class IRPainter(PaintContext):
         bg_hour: float = 12.0,
         export_format: str = "png",
         jpg_quality: int = 90,
+        text_engine: str = "skia",
     ) -> None:
         super().__init__(size=size)
+        if text_engine not in {"skia", "freetype_basic"}:
+            raise ValueError(f"unsupported widget text engine: {text_engine}")
+        self._text_engine = text_engine
         self._assets_base_dir = Path(assets_base_dir).resolve()
         # The canvas size, captured once: Painter mutates ``self.size`` per queued op, and the
         # triangle background is a scene-level node that must be generated at canvas dimensions.
@@ -120,6 +126,8 @@ class IRPainter(PaintContext):
         self._group_origin: tuple[float, float] = (0.0, 0.0)
         self._group_origin_stack: list[tuple[str, tuple[float, float]]] = []
         self._canvas_subtree_index = 0
+        # Validate shared font/asset dependencies once per scene, never across requests.
+        self._fragment_dependency_signatures = {}
 
     # ---- output ----
 
@@ -215,13 +223,13 @@ class IRPainter(PaintContext):
             ref = self._image_ref(encoded)
             self._mem_by_id[id(img)] = (img, ref.removeprefix("mem:"))
             return ref
-        if isinstance(img, EncodedImageRef):
+        if isinstance(img, (EncodedImageRef, NativeRasterImageRef)):
             entry = self._mem_by_id.get(id(img))
             if entry is not None and entry[0] is img:
                 return f"mem:{entry[1]}"
             key = f"m{len(self._mem_images)}"
-            # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
-            self._mem_images[key] = img.data
+            # Encoded inputs decode in Rust; cached immutable pixels use zero-copy raw transport.
+            self._mem_images[key] = native_image_memory(img)
             self._mem_by_id[id(img)] = (img, key)
             return f"mem:{key}"
         source = get_pristine_image_asset_path(img)
@@ -284,14 +292,12 @@ class IRPainter(PaintContext):
             fillval = self._gradient_text_fill(fill, text, role, size, font_name, apos)
         else:
             fillval = _rgba(fill)
-        # Shared FontDesc values use the explicit BASIC contract. Caller-owned
-        # legacy RAQM fonts retain the platform-shaped path, as do emoji runs.
-        # Renderer-independent descriptors must not import Pillow just to choose
-        # a text engine. Full baseline/parity gates cover platform differences.
+        # Keep ordinary widget text on main's native Skia glyph path. Layout
+        # still uses BASIC metrics, as it did on main. Only explicit mask-lerp
+        # operations require the native FreeType coverage/rounding contract.
         basic = getattr(font, "layout_engine", 0) == 0
-        engine = (
-            "freetype_basic" if basic and adaptive is None and (mask_lerp or not emoji.emoji_count(text)) else "skia"
-        )
+        use_basic = mask_lerp or (self._text_engine == "freetype_basic" and not emoji.emoji_count(text))
+        engine = "freetype_basic" if basic and adaptive is None and use_basic else "skia"
         self._b.text(
             text,
             apos,
@@ -399,32 +405,86 @@ class IRPainter(PaintContext):
         skip_on_error=False,
         use_alpha_blend=False,
     ):
-        del exclude_on_hash, cache_key, skip_on_error, use_alpha_blend
+        del exclude_on_hash, skip_on_error, use_alpha_blend
         # Local import avoids the canvas -> IRPainter -> subtree -> canvas module cycle.
         from src.sekai.skia_renderer.subtree import NativeSubtreeError, lower_canvas_subtree
 
         parent_scene = self._b.build()
         parent_fonts = parent_scene["fonts"]
-        try:
-            subtree = lower_canvas_subtree(
-                canvas,
-                require_asset_backed=require_asset_backed,
-                renderer_options={
-                    "assets_base_dir": parent_scene["assets_base_dir"],
-                    "font_dir": parent_fonts["dir"],
-                    "default_font": parent_fonts["default"],
-                    "bold_font": parent_fonts["bold"],
-                    "heavy_font": parent_fonts.get("heavy"),
-                    "emoji_font": parent_fonts.get("emoji"),
-                    "bg_hour": self._bg_hour,
-                    "export_format": parent_scene["export_format"],
-                    "jpg_quality": parent_scene["jpg_quality"],
+        options = {
+            "assets_base_dir": parent_scene["assets_base_dir"],
+            "font_dir": parent_fonts["dir"],
+            "default_font": parent_fonts["default"],
+            "bold_font": parent_fonts["bold"],
+            "heavy_font": parent_fonts.get("heavy"),
+            "emoji_font": parent_fonts.get("emoji"),
+            "bg_hour": self._bg_hour,
+            "export_format": parent_scene["export_format"],
+            "jpg_quality": parent_scene["jpg_quality"],
+        }
+        fragment = None
+        lookup_key = None
+        # Pillow-compatible bicubic already produces a discrete resized raster before
+        # placement. Skia's other filters blend while sampling: caching that resample
+        # against transparency would add a premultiplication rounding step.
+        raster_size = (
+            tuple(size or canvas._get_self_size()) if sampling == "pillow_bicubic" else canvas._get_self_size()
+        )
+        fragment_sampling = "pillow_bicubic" if sampling == "pillow_bicubic" else "nearest"
+        prepared = getattr(canvas, "_native_prepared_canvas", None)
+        if prepared is not None:
+            from src.sekai.base.canvas_cache import current_canvas_preparation
+
+            from . import fragment_cache
+
+            if (
+                prepared.context is not current_canvas_preparation()
+                or prepared.context.options != {k: v for k, v in options.items() if k != "bg_hour"}
+                or require_asset_backed
+            ):
+                raise SkiaUnsupported("prepared canvas used outside its native renderer context")
+            # The lease keeps pixels alive across concurrent eviction/clear. Cache
+            # natural-size rasters so the same prepared child can be placed at any size.
+            fragment = prepared.image
+            lookup_key = prepared.key
+            raster_size = canvas._get_self_size()
+            fragment_sampling = "nearest"
+        elif cache_key and not require_asset_backed:
+            from . import fragment_cache
+
+            lookup_key = fragment_cache.canvas_fragment_lookup_key(
+                cache_key,
+                canvas._get_self_size(),
+                {
+                    **{k: v for k, v in options.items() if k != "bg_hour"},
+                    "raster_size": raster_size,
+                    "sampling": fragment_sampling,
                 },
             )
-        except NativeSubtreeError as exc:
-            raise SkiaUnsupported(str(exc)) from exc
+            fragment = fragment_cache.get_native_fragment_cached(
+                lookup_key, bg_hour=self._bg_hour, signatures=self._fragment_dependency_signatures
+            )
+        subtree = None
+        if fragment is None:
+            try:
+                subtree = lower_canvas_subtree(
+                    canvas, require_asset_backed=require_asset_backed, renderer_options=options
+                )
+            except NativeSubtreeError as exc:
+                raise SkiaUnsupported(str(exc)) from exc
+            if lookup_key is not None:
+                fragment = fragment_cache.render_cached_native_fragment(
+                    subtree,
+                    cache_key or lookup_key,
+                    lookup_key=lookup_key,
+                    bg_hour=self._bg_hour,
+                    isolate=True,
+                    raster_size=raster_size,
+                    sampling=fragment_sampling,
+                )
+        natural_size = fragment.size if fragment is not None else subtree.size
 
-        destination_size = subtree.size if size is None else size
+        destination_size = natural_size if size is None else size
         shadow = (
             image_shadow(
                 alpha=shadow_alpha,
@@ -437,13 +497,32 @@ class IRPainter(PaintContext):
         )
         namespace = f"canvas_subtree.{self._canvas_subtree_index}"
         self._canvas_subtree_index += 1
+        position = self._abs(pos)
+        if (
+            fragment is not None
+            and tuple(destination_size) == tuple(natural_size)
+            and shadow is None
+            and all(value == int(value) for value in position)
+        ):
+            # The cached fragment already is the isolated raster. At integer 1:1 placement,
+            # another surface/snapshot adds copies but no drawing semantics.
+            self._b.image(
+                self._image_ref(fragment),
+                position,
+                natural_size,
+                sampling="nearest" if sampling == "pillow_bicubic" else sampling or "linear_mipmap",
+            )
+            return self
         with self._b.raster_subscene(
-            natural_size=subtree.size,
+            natural_size=natural_size,
             pos=self._abs(pos),
             dst_size=destination_size,
             sampling=sampling or "linear_mipmap",
             shadow=shadow,
         ):
+            if fragment is not None:
+                self._b.image(self._image_ref(fragment), (0, 0), natural_size, blend="src", sampling="nearest")
+                return self
             try:
                 subtree.splice_into(
                     self._b,

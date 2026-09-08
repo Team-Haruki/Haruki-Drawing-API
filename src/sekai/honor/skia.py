@@ -6,16 +6,16 @@ The badge itself is NOT built here: it is the same ``HonorBadgeBox`` widget tree
 cannot express — the raster watermark footer the route would otherwise add AFTER the compose
 (``add_request_watermark_to_image``: a stretched copy of the image's own bottom rows plus two
 shadowed text lines). That footer samples the rendered canvas, so it is a ``SelfImage`` node,
-and it is drawn in the SAME native pass: the badge sub-scene is spliced into the final builder
-(chart/drawer.py does the same).
+and is drawn for each response. The static badge may come from a bounded native fragment
+cache; its source still comes exclusively from the shared asset-backed widget tree.
 
 The badge is lowered as a reusable asset-backed ``NativeSubtree``. Bonds character sprites keep
 their legacy full-resize-then-destination-clip order through rectangular Group clips around full
 Image nodes; Python neither decodes/crops them nor ships ``mem:`` rasters. Subtree lowering is
 required to be asset-backed before anything is spliced into the watermark scene.
 
-Any unsupported shape or unreadable *required* asset returns ``None`` so the caller falls back
-to the Pillow path, which raises the canonical user-visible error.
+Any unsupported shape or unreadable *required* asset returns ``None`` so the service rejects
+the incomplete native render.
 """
 
 from __future__ import annotations
@@ -36,9 +36,11 @@ from src.sekai.base.draw import (
     get_watermark_render_spec,
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
+from src.sekai.base.image_source import native_image_memory
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.utils import run_in_pool
+from src.sekai.base.utils import build_rendered_image_cache_key, run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
+from src.sekai.skia_renderer.fragment_cache import get_native_fragment_cached, render_cached_native_fragment
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.payload_cache import get_skia_payload_cached, put_skia_payload_cache
 from src.sekai.skia_renderer.render_stats import (
@@ -97,7 +99,7 @@ def _new_builder(width: int, height: int, export_format: str = "png") -> IRBuild
 
 async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayload | None:
     """Skia path for the /honor route: the shared badge tree + the route's raster watermark
-    footer (``add_request_watermark_to_image`` equivalent), rendered natively in one pass.
+    footer (``add_request_watermark_to_image`` equivalent), with reusable native badge pixels.
     Returns ``None`` (gate off / unsupported / failure) so the service can reject the declined native render.
     """
     if not skia_plot_enabled():
@@ -111,7 +113,7 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         return None
 
     # lazy: the drawer re-exports this module's entry point at its end
-    from src.sekai.honor.drawer import build_full_honor_cache_key, load_honor_images
+    from src.sekai.honor.drawer import build_full_honor_cache_key, build_honor_badge_cache_key, load_honor_images
     from src.sekai.honor.widget import build_honor_badge_canvas
 
     # The cached payload embeds the footer, so the key must cover everything the footer text
@@ -124,22 +126,36 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         return cached
 
     try:
-        images = await load_honor_images(rqd)
+        badge_key = build_rendered_image_cache_key(
+            "honor.native_badge",
+            build_honor_badge_cache_key(rqd),
+            extra=[
+                str(ASSETS_BASE_DIR),
+                str(FONT_DIR),
+                DEFAULT_FONT,
+                DEFAULT_BOLD_FONT,
+                EXPORT_IMAGE_FORMAT,
+                JPG_QUALITY,
+            ],
+        )
+        cached_badge = get_native_fragment_cached(badge_key)
+        images = await load_honor_images(rqd) if cached_badge is None else None
     except Exception:
-        # FAIL-OPEN. Not just (FileNotFoundError, OSError, ValueError): a corrupt PNG can raise
-        # DecompressionBombError or a plugin's struct.error, and anything that escapes here would
-        # skip _record entirely and 500 instead of letting Pillow render (and raise the canonical
-        # user-visible message).
+        # Record all asset failures before declining the incomplete native response.
         logger.info("honor assets not loadable for the Skia path; declining native render", exc_info=True)
         _record(OUTCOME_FALLBACK)
         return None
 
     def _render():
-        canvas = build_honor_badge_canvas(rqd, images)
-        if canvas is None:
-            return None
-        badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format=EXPORT_IMAGE_FORMAT)
-        w, h = badge.size
+        fragment = cached_badge
+        badge = None
+        if fragment is None:
+            canvas = build_honor_badge_canvas(rqd, images)
+            if canvas is None:
+                return None
+            badge = lower_canvas_subtree(canvas, require_asset_backed=True, export_format=EXPORT_IMAGE_FORMAT)
+            fragment = render_cached_native_fragment(badge, "honor.badge", lookup_key=badge_key)
+        w, h = fragment.size if fragment is not None else badge.size
         mem_images: dict[str, object] = {}
 
         # Single pass: badge nodes + stretched bottom-strip footer (a SelfImage snapshot of
@@ -152,12 +168,16 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
         # outside it (the bonds chara icons overhang) must be cropped exactly as the Pillow
         # canvas bounds crop it.
         with b.group((0, 0), (w, h), clip={"kind": "rect"}):
-            badge.splice_into(
-                b,
-                mem_images,
-                namespace="honor.badge",
-                require_asset_backed=True,
-            )
+            if fragment is None:
+                badge.splice_into(
+                    b,
+                    mem_images,
+                    namespace="honor.badge",
+                    require_asset_backed=True,
+                )
+            else:
+                mem_images["honor.badge.cached"] = native_image_memory(fragment)
+                b.image("mem:honor.badge.cached", (0, 0), (w, h), blend="src", sampling="nearest")
         sample_h = max(1, min(h, footer_h))
         b.self_image((0, h), (w, footer_h), source_rect=(0, h - sample_h, w, h))
         font = get_font(DEFAULT_FONT, font_size)
@@ -171,8 +191,8 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
             b.text(line, (lx + 1, ly + 1), "default", font_size, baseline="ascender", fill=(75, 75, 75, 255))
             b.text(line, (lx, ly), "default", font_size, baseline="ascender", fill=(255, 255, 255, 255))
         ir_json = json.dumps(b.build(), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        # Asset-backed subtree lowering guarantees this stays empty. Keep the explicit registry
-        # in the native call so any future memory-carrying subtree support remains deliberate.
+        # The only memory image allowed here is an immutable native badge fragment.
+        # The source subtree still must be asset-backed; Pillow rasters are never accepted.
         return native.render_scene(ir_json, mem_images)
 
     started = time.perf_counter()

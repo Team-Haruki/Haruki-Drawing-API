@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 import ctypes
 import ctypes.util
+import hashlib
 import json
 import math
 import sys
@@ -28,8 +31,10 @@ from src.sekai.honor.model import HonorRequest
 from src.sekai.profile.custom_profile.cache import (
     GLYPH_CONTOUR_CACHE,
     GLYPH_SDF_CACHE,
+    FLOAT_SDF_CACHE_ENTRY_OVERHEAD,
     MISSING,
     SPRITE_ATLAS_CACHE,
+    SourceGlyphAbsent,
     file_signature,
     get_render_font,
     get_tmp_font_tables,
@@ -782,10 +787,60 @@ class DirectSdfQuad:
     scalars: TMPSdfShadingScalars
 
 
+def _glyph_metrics_from_rows(char: dict[str, Any], glyph: dict[str, Any]) -> TMPGlyphMetrics:
+    metrics = glyph.get("m_Metrics", {}) or {}
+    rect = glyph.get("m_GlyphRect", {}) or {}
+    return TMPGlyphMetrics(
+        width=float(metrics.get("m_Width") or 0.0),
+        height=float(metrics.get("m_Height") or 0.0),
+        bearing_x=float(metrics.get("m_HorizontalBearingX") or 0.0),
+        bearing_y=float(metrics.get("m_HorizontalBearingY") or 0.0),
+        advance=float(metrics.get("m_HorizontalAdvance") or 0.0),
+        rect_x=int(rect.get("m_X") or 0),
+        rect_y=int(rect.get("m_Y") or 0),
+        rect_w=int(rect.get("m_Width") or 0),
+        rect_h=int(rect.get("m_Height") or 0),
+        glyph_scale=float(char.get("m_Scale") or glyph.get("m_Scale") or 1.0),
+        atlas_index=int(glyph.get("m_AtlasIndex") or 0),
+    )
+
+
+class TMPGlyphTable(Mapping[int, TMPGlyphMetrics]):
+    """Lazily decode immutable metrics inside the existing shared metadata entry.
+
+    Keys and source rows are captured when the asset signatures are recorded.
+    Only values change internally, once, under a lock; readers see frozen metrics.
+    This is part of the bounded metadata cache, not another process-level pool.
+    """
+
+    def __init__(self, rows: dict[int, tuple[dict[str, Any], dict[str, Any]]]) -> None:
+        self._entries = rows
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def __iter__(self):
+        return iter(self._entries)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._entries
+
+    def __getitem__(self, key: int) -> TMPGlyphMetrics:
+        value = self._entries[key]
+        if isinstance(value, tuple):
+            with self._lock:
+                value = self._entries[key]
+                if isinstance(value, tuple):
+                    value = _glyph_metrics_from_rows(*value)
+                    self._entries[key] = value
+        return value
+
+
 # frozen: instances are shared PROCESS-WIDE across requests/threads via the TMP metadata table
 # cache (see TMPFontLibrary.load). Attribute rebinding is forbidden by the dataclass; the
-# atlas_paths/fallback_names/glyphs containers are still technically mutable — never mutate them
-# after construction.
+# atlas_paths/fallback_names containers must never mutate after construction. Glyph tables
+# expose a read-only Mapping; internal one-time metric decoding is synchronized.
 @dataclass(frozen=True)
 class TMPFontAsset:
     name: str
@@ -820,7 +875,7 @@ class TMPFontAsset:
     underlay_offset_x: float
     underlay_offset_y: float
     fallback_names: list[str]
-    glyphs: dict[int, TMPGlyphMetrics]
+    glyphs: Mapping[int, TMPGlyphMetrics]
 
     @property
     def has_static_glyphs(self) -> bool:
@@ -1136,6 +1191,8 @@ class TMPFontLibrary:
         self.source_assets = source_assets or assets
         self.runtime_fonts_dir = runtime_fonts_dir
         self._source_fonts: dict[Path, Any] = {}
+        self._source_font_signatures: dict[Path, tuple[int, int]] = {}
+        self._source_font_lock = threading.RLock()
         self._source_metrics: dict[tuple[Path, int, float], TMPGlyphMetrics | None] = {}
 
     @classmethod
@@ -1252,7 +1309,7 @@ class TMPFontLibrary:
         return paths
 
     @staticmethod
-    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> dict[int, TMPGlyphMetrics]:
+    def _load_character_table(base: Path, row: dict[str, Any], record=None) -> Mapping[int, TMPGlyphMetrics]:
         char_rel = row.get("character_table_path")
         glyph_rel = row.get("glyph_table_path")
         if not char_rel or not glyph_rel:
@@ -1267,27 +1324,13 @@ class TMPFontLibrary:
         chars = json.loads(char_path.read_text(encoding="utf-8"))
         glyphs = json.loads(glyph_path.read_text(encoding="utf-8"))
         glyph_by_index = {int(glyph.get("m_Index", 0)): glyph for glyph in glyphs}
-        out: dict[int, TMPGlyphMetrics] = {}
+        out: dict[int, tuple[dict[str, Any], dict[str, Any]]] = {}
         for char in chars:
             glyph = glyph_by_index.get(int(char.get("m_GlyphIndex", 0)))
             if not glyph:
                 continue
-            metrics = glyph.get("m_Metrics", {}) or {}
-            rect = glyph.get("m_GlyphRect", {}) or {}
-            out[int(char.get("m_Unicode", 0))] = TMPGlyphMetrics(
-                width=float(metrics.get("m_Width") or 0.0),
-                height=float(metrics.get("m_Height") or 0.0),
-                bearing_x=float(metrics.get("m_HorizontalBearingX") or 0.0),
-                bearing_y=float(metrics.get("m_HorizontalBearingY") or 0.0),
-                advance=float(metrics.get("m_HorizontalAdvance") or 0.0),
-                rect_x=int(rect.get("m_X") or 0),
-                rect_y=int(rect.get("m_Y") or 0),
-                rect_w=int(rect.get("m_Width") or 0),
-                rect_h=int(rect.get("m_Height") or 0),
-                glyph_scale=float(char.get("m_Scale") or glyph.get("m_Scale") or 1.0),
-                atlas_index=int(glyph.get("m_AtlasIndex") or 0),
-            )
-        return out
+            out[int(char.get("m_Unicode", 0))] = (char, glyph)
+        return TMPGlyphTable(out)
 
     def active_asset(self, font_name: str) -> TMPFontAsset | None:
         rows = self.assets.get(font_name, [])
@@ -1475,43 +1518,68 @@ class TMPFontLibrary:
             if metrics is not None:
                 return metrics
 
+        # FreeType still gets first refusal on every request. Only a successful
+        # FontTools cmap lookup can establish a reusable absence; an FT/import/read
+        # failure must never poison the process pool or hide a recovered glyph.
+        signature = file_signature(path)
+        path_key = str(path.resolve())
+        missing_key = ("source-cmap-absent-v1", path_key, *signature, ord(ch))
+        if isinstance(GLYPH_CONTOUR_CACHE.get(missing_key), SourceGlyphAbsent):
+            return None
+
         try:
             from fontTools.pens.boundsPen import BoundsPen
-            from fontTools.ttLib import TTFont
         except ImportError:
             return None
 
-        font = self._source_fonts.get(path)
-        if font is None:
-            font = TTFont(str(path))
-            self._source_fonts[path] = font
-        cmap = font.getBestCmap() or {}
-        glyph_name = cmap.get(ord(ch))
-        if not glyph_name:
-            return None
-        units_per_em = float(font["head"].unitsPerEm or 1000)
-        advance_width, _ = font["hmtx"][glyph_name]
-        glyph_set = font.getGlyphSet()
-        pen = BoundsPen(glyph_set)
-        glyph_set[glyph_name].draw(pen)
-        if pen.bounds is None:
-            x_min = y_min = x_max = y_max = 0.0
-        else:
-            x_min, y_min, x_max, y_max = (float(v) for v in pen.bounds)
-        scale = font_size / max(1.0, units_per_em)
-        return TMPGlyphMetrics(
-            width=max(0.0, (x_max - x_min) * scale),
-            height=max(0.0, (y_max - y_min) * scale),
-            bearing_x=x_min * scale,
-            bearing_y=y_max * scale,
-            advance=max(0.0, float(advance_width) * scale),
-            rect_x=0,
-            rect_y=0,
-            rect_w=0,
-            rect_h=0,
-            glyph_scale=1.0,
-            atlas_index=0,
-        )
+        with self.source_font(path, signature) as font:
+            cmap = font.getBestCmap() or {}
+            glyph_name = cmap.get(ord(ch))
+            if not glyph_name:
+                if file_signature(path) == signature:
+                    GLYPH_CONTOUR_CACHE.set(missing_key, SourceGlyphAbsent(512 + 4 * len(path_key)))
+                return None
+            units_per_em = float(font["head"].unitsPerEm or 1000)
+            advance_width, _ = font["hmtx"][glyph_name]
+            glyph_set = font.getGlyphSet()
+            pen = BoundsPen(glyph_set)
+            glyph_set[glyph_name].draw(pen)
+            if pen.bounds is None:
+                x_min = y_min = x_max = y_max = 0.0
+            else:
+                x_min, y_min, x_max, y_max = (float(v) for v in pen.bounds)
+            scale = font_size / max(1.0, units_per_em)
+            return TMPGlyphMetrics(
+                width=max(0.0, (x_max - x_min) * scale),
+                height=max(0.0, (y_max - y_min) * scale),
+                bearing_x=x_min * scale,
+                bearing_y=y_max * scale,
+                advance=max(0.0, float(advance_width) * scale),
+                rect_x=0,
+                rect_y=0,
+                rect_w=0,
+                rect_h=0,
+                glyph_scale=1.0,
+                atlas_index=0,
+            )
+
+    @contextmanager
+    def source_font(self, path: Path, signature: tuple[int, int] | None = None):
+        """Pin a request-local reader while using its mutable tables/file cursor.
+
+        Reference rendering can parallelize layers of the same card. Those layers
+        share this library, so a request-local reader still needs synchronization.
+        """
+        from .source_font import open_source_font
+
+        with self._source_font_lock:
+            signature = file_signature(path) if signature is None else signature
+            font = self._source_fonts.get(path)
+            if font is None or self._source_font_signatures.get(path) != signature:
+                font = open_source_font(path)
+                self._source_fonts[path] = font
+                self._source_font_signatures[path] = signature
+            yield font
 
     def line_height(
         self, font_name: str, style_size: float, font_scale: float, divide_face_scale: bool
@@ -1729,6 +1797,46 @@ def alpha_mask_to_sdf_field(
     signed = inside - outside
     aa = (alpha.astype(np.float32) / 255.0) - binary.astype(np.float32)
     return np.clip(0.5 + (signed + aa) / max(1.0, 2.0 * spread), 0.0, 1.0)
+
+
+def cached_fallback_sdf_field(mask: GrayField, spread: float, alpha_threshold: int) -> Any:
+    """Reuse exact fallback samples in the existing bounded process glyph pool.
+
+    The mask is already generated under the caller's scene/layer limits. Its
+    content digest captures changed source fonts and all upstream raster math;
+    spread and threshold affect the distance-field conversion separately.
+    """
+    weight = mask.width * mask.height * 4 + FLOAT_SDF_CACHE_ENTRY_OVERHEAD
+    if not GLYPH_SDF_CACHE.enabled or weight > GLYPH_SDF_CACHE.max_bytes:
+        return alpha_mask_to_sdf_field(mask, spread, alpha_threshold)
+
+    # Preserve the existing optional algorithm choice, without installing cv2 or
+    # conflating its approximate 5x5 L2 transform with the exact Python EDT.
+    try:
+        import cv2
+    except ImportError:
+        algorithm = ("exact-edt-f32-v1",)
+    else:
+        algorithm = ("opencv-l2", cv2.__version__, TMP_DYNAMIC_SDF_DISTANCE_MASK_SIZE)
+    key = (
+        "fallback-alpha-sdf-f32-v1",
+        algorithm,
+        mask.width,
+        mask.height,
+        hashlib.sha256(mask.pixels).digest(),
+        float(spread),
+        alpha_threshold,
+    )
+    cached = GLYPH_SDF_CACHE.get(key)
+    if cached is MISSING:
+        field = alpha_mask_to_sdf_field(mask, spread, alpha_threshold)
+        # Immutable bytes prevent a caller from re-enabling ndarray writes, and
+        # each np.asarray below creates a separate view/shape around those bytes.
+        cached = FloatField.from_array(field)
+        GLYPH_SDF_CACHE.set(key, cached)
+    import numpy as np
+
+    return np.asarray(cached)
 
 
 def rgba_from_premul(rgb_premul: Any, alpha: Any) -> Any:
@@ -9085,21 +9193,22 @@ class PNGRenderer:
         try:
             import numpy as np
             from fontTools.pens.recordingPen import DecomposingRecordingPen
-            from fontTools.ttLib import TTFont
+
+            from .source_font import outline_glyph_set
         except ImportError:
             self._store_vector_glyph(key, l2_key, None)
             return None
 
         try:
-            font = TTFont(source_path)
-            glyph_set = font.getGlyphSet()
-            glyph_name = font.getBestCmap().get(ord(ch[0]))
-            if not glyph_name:
-                self._store_vector_glyph(key, l2_key, None)
-                return None
-            pen = DecomposingRecordingPen(glyph_set)
-            glyph_set[glyph_name].draw(pen)
-            units_per_em = float(font["head"].unitsPerEm or 1000)
+            with self.tmp_font_library.source_font(source_path) as font:
+                glyph_name = font.getBestCmap().get(ord(ch[0]))
+                if not glyph_name:
+                    self._store_vector_glyph(key, l2_key, None)
+                    return None
+                glyph_set = outline_glyph_set(font)
+                pen = DecomposingRecordingPen(glyph_set)
+                glyph_set[glyph_name].draw(pen)
+                units_per_em = float(font["head"].unitsPerEm or 1000)
         except Exception:
             self._store_vector_glyph(key, l2_key, None)
             return None
@@ -9241,6 +9350,19 @@ class PNGRenderer:
         height = max(1, bbox[3] - bbox[1] + pad * 2)
         field_size((width, height))
         ensure_raster_size((width, height), max_pixels=self.max_layer_pixels, label="TMP SDF field")
+        # Optional arithmetic-only native helper; geometry and curve flattening above
+        # still come from the same exact FontTools pen used by the reference path.
+        from .source_font import native_outline_sdf
+
+        native_field = native_outline_sdf(
+            contours,
+            width,
+            height,
+            (bbox[0] - pad, bbox[1] - pad),
+            2.0 * max(1.0, asset.gradient_scale - TMP_DYNAMIC_SDF_VECTOR_SPREAD_BIAS),
+        )
+        if native_field is not None:
+            return GrayField(width, height, native_field)
         xs, ys = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
         px = float(bbox[0] - pad) + xs + 0.5
         py = -(float(bbox[1] - pad) + ys + 0.5)
@@ -9591,7 +9713,7 @@ class PNGRenderer:
                 raise ValueError("fallback TMP scaled field exceeds remaining native scene memory")
             ensure_raster_size(scaled_size, max_pixels=self.max_layer_pixels, label="fallback TMP scaled mask")
             mask = mask.resize_bicubic(scaled_size)
-        field = alpha_mask_to_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
+        field = cached_fallback_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
         return field, asset, bbox, pad
 
     def render_tmp_sdf_run(

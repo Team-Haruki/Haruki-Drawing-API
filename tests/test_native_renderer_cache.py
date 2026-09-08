@@ -1,3 +1,5 @@
+import pytest
+
 from src.sekai.skia_renderer import canvas
 
 
@@ -53,3 +55,20 @@ def test_native_renderer_cache_clear_calls_extension(monkeypatch):
 
     assert canvas.clear_native_renderer_caches() is True
     assert native.cleared is True
+
+
+@pytest.mark.parametrize(("text_bytes", "enabled"), [(0, False), (1024, True)])
+def test_native_renderer_stats_include_text_cache_when_raster_is_disabled(monkeypatch, text_bytes, enabled):
+    native = _NativeRenderer()
+    monkeypatch.setattr(
+        native,
+        "renderer_cache_stats",
+        lambda: {"raster_cache_max_bytes": 0, "text_mask_cache_max_bytes": text_bytes},
+    )
+    monkeypatch.setattr(canvas, "load_native_renderer", lambda: native)
+
+    stats = canvas.get_native_renderer_cache_stats()
+
+    assert stats["available"] is True
+    assert stats["enabled"] is enabled
+    assert stats["text_mask_cache_max_bytes"] == text_bytes

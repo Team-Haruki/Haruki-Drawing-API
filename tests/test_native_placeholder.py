@@ -83,3 +83,20 @@ assert render_placeholder(MissingImageRef()).data.startswith(b"\\x89PNG")
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_batched_refs_keep_order_missing_behavior_and_asset_invalidation(tmp_path):
+    from src.sekai.base.utils import get_asset_image_refs
+
+    path = tmp_path / "one.png"
+    Image.new("RGBA", (7, 5), "red").save(path)
+    refs = asyncio.run(get_asset_image_refs(tmp_path, [path.name, "late.png", None, path.name]))
+    assert refs[0] is refs[3]
+    assert refs[0].size == (7, 5)
+    assert isinstance(refs[1], MissingImageRef)
+    assert isinstance(refs[2], MissingImageRef)
+    Image.new("RGBA", (11, 9), "blue").save(path)
+    Image.new("RGBA", (3, 2), "green").save(tmp_path / "late.png")
+    changed = asyncio.run(get_asset_image_refs(tmp_path, [path.name, "late.png"]))
+    assert [ref.size for ref in changed] == [(11, 9), (3, 2)]
+    assert asyncio.run(get_asset_image_refs(tmp_path, [])) == []

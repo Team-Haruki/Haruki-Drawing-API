@@ -97,8 +97,9 @@ Skia chapter), and every other endpoint re-renders.
    `get_image_asset_signature()` calls (what `honor/drawer.py` does — fourteen paths by name, correct today and
    silently wrong the day someone adds a fifteenth; **prefer the collector**). Without them, an asset **replaced** at a
    path the request already names — or one that finally **arrives** after a `?` placeholder was cached in its place —
-   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` still keys on the
-   request alone; it gets away with it only because its key carries a minute bucket, so it self-heals within 60s.
+   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` keys on the JSON request, collected asset signatures, and the exact displayed
+   start/end/status strings. Its native preparation lookup reuses a fragment before asset loading/layout;
+   the footer remains outside the fragment, and countdown changes within a minute invalidate the entry.
 
 `tests/test_asset_signature_cache_key.py` pins both. A new page/fragment cache must satisfy it.
 
@@ -116,8 +117,9 @@ in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_imag
 `Painter`'s own disk cache (`PAINTER_CACHE_DIR`, swept via `Painter.cleanup_old_disk_cache()`).
 
 Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns exactly
-what `get_runtime_cache_stats()` builds, which is seven keys: `image_cache`, `thumbnail_cache`,
-`composed_image_cache`, `composed_image_disk_cache`, `skia_payload_cache` (a *fourth* in-memory pool, owned by
+what `get_runtime_cache_stats()` builds, which is eight keys: `image_cache`, `thumbnail_cache`,
+`composed_image_cache`, `composed_image_disk_cache`, `native_fragment_cache` (bounded native sub-page rasters; see below), and
+`skia_payload_cache` (another in-memory pool, owned by
 the Skia chapter below — the three caches in the table above are not the whole dump), `native_renderer_cache`
 (the Rust Moka raster/dimension caches, or `available=false` when the extension is absent), and
 `custom_profile_caches` (the custom-profile renderer's process pools in
@@ -126,6 +128,130 @@ keyed with file signatures like everything else, sized by `custom_profile_glyph_
 `custom_profile_sprite_cache_*`, and unlike the other cache knobs **on by default**: the renderer's 1.5s+ cold path
 *was* these caches dying with each request). The `Painter` disk cache has no
 `stats()` and appears nowhere in `src/core/health.py`; to size it you have to look at the directory.
+
+### Native fragment cache
+
+`src/sekai/skia_renderer/fragment_cache.py` stores native-rendered **fragments**, never complete
+clock-bearing pages. Explicit `CanvasImageBox.cache_key` callers retain the same request/layout/time-key
+contract as Pillow's composed cache. Fast hits also check natural size, renderer/font configuration, drawing
+code and every recorded asset/font signature; TriangleBg fragments additionally check the actual background
+hour. A direct subtree (honor badge) uses its complete IR as key material. Asset-backed subtrees and
+native-generated placeholder bytes
+are eligible; arbitrary encoded inputs and Pillow rasters remain ineligible. Placeholder-bearing callers
+must include missing-asset signatures so arrival invalidates the key. Shared dependency stats are reused
+only within one IRPainter scene. Pillow-bicubic fragments cache their final resized raster (keyed by
+destination size and filter); other filters keep the natural raster to preserve blend rounding.
+On insertion, the optional native `decode_fragment_rgba` decoder materializes immutable premultiplied
+RGBA bytes once; the same bounded pool owns and charges those bytes. Old extensions and fragments over
+64 MiB keep PNG transport. Never unpremultiply these cached pixels: that can change alpha edges.
+Integer 1:1 cached placements draw directly; already-resized Pillow-bicubic fragments use nearest
+placement, matching RasterSubscene. Asset-backed PreResizedImageBox caches the two-stage result,
+including the intermediate size, final size, filter and live asset signature in the key.
+`require_asset_backed=True` placement still emits assets directly. Cache misses preserve native
+RasterSubscene sampling semantics; do not render an isolated fragment as a plain root and introduce another
+asset resampling pass. The honor watermark remains outside the cached badge and is redrawn per request.
+
+`base/canvas_cache.py::prepare_cached_canvas` can query this same pool before a child factory
+loads assets or builds its widget tree. Native callers pass an async page factory to
+`render_canvas_payload`; the request-scoped preparation context supplies renderer options and
+validates dependencies. A hit returns dimensions plus a strong immutable fragment reference,
+so concurrent eviction/clear/expiry cannot turn the in-flight child into an empty render. A miss
+builds the original shared tree. Reference builders have no native preparation context and always
+build that tree. Prepared children must be embedded through CanvasImageBox in the same native
+request; misuse fails explicitly. Keys include all request/layout/time inputs and missing-asset
+signatures, plus renderer context and code. Natural-size fragments support downstream resizing;
+page time/background/watermark stay outside the entry cache. No separate size/index pool exists.
+
+This is a separate process pool using `composed_image_cache_size`, `composed_image_cache_max_mb` and TTL;
+those knobs now size three independent pools (Pillow composed, honor response, native fragment). Weight is at
+least width × height × 4 plus dependency metadata. `/cache/stats` exposes `native_fragment_cache`, and
+`clear_runtime_memory_caches` clears it. Strict cold parity bypasses fragment lookups; warm parity must run
+on every change here. Benchmark **full responses**: `Case.route_watermark` must also be applied to Pillow,
+or honor's footer is charged only to Skia and makes the comparison invalid.
+
+### Native triangle background tiles
+
+Only a scene's top-level, full-size, untransformed `TriangleBg` may reuse immutable raster tiles.
+The tiles share the existing Rust raster pool with resized assets; there is no extra cache budget or
+response cache. `HARUKI_SKIA_RASTER_CACHE_MB` / `_MAX_ENTRY_MB` also govern these tiles, and zero disables
+reuse. Each tile is at most 512 rows and obeys the per-entry byte limit; admitting one background requires
+its pixels plus conservatively repeated key metadata to fit within one quarter of the shared pool.
+Cached tile references also count against the current scene's remaining memory budget. Oversized,
+scaled, nested or clipped backgrounds use the original drawing path.
+
+The key contains canvas dimensions, the resolved palette bytes and every caller-provided triangle field.
+It does not round the clock or assume the scatter is constant: fractional-hour color changes and hourly
+scatter changes invalidate whenever they change drawing inputs. Cache misses draw the original complete
+background, then capture tile snapshots from it; rendering translated tile gradients would change rounding.
+All tiles must be available before replay starts, and strong image references survive concurrent eviction.
+Foreground widgets, glass, countdowns and watermarks are drawn afterward on every request.
+`/cache/stats` → `native_renderer_cache` exposes `background_cache_hits/misses/bypasses`; tile entries and
+bytes are included in `raster_cache_entries/bytes`, and the existing runtime clear removes them.
+
+### Native text and fallback SDF caches
+
+Ordinary page text uses main's native Skia glyph rendering with shared BASIC layout metrics.
+Embedded NativeSubtree canvases retain native FreeType BASIC, matching the Pillow-composed
+fragments they replace; explicit mask-lerp text also retains BASIC. The event_list page keeps
+BASIC because its existing pixel budget is tighter than main's Skia glyph drift.
+This compatibility choice lives in the renderer, not duplicated drawer layout. Cache hits and
+misses must use the same text policy; do not globally change all fragments to Skia glyphs.
+
+FreeType BASIC text masks and their metrics are reused in a bounded Rust Moka pool. Color,
+position, baseline placement and mask-lerp blending remain outside the cache. Keys carry the
+resolved font path and live signature, exact font size and text; a hit still checks the current
+request's pixel budget. `HARUKI_SKIA_TEXT_MASK_CACHE_MB` defaults to 64 MiB; `0` disables it.
+This is an independent per-process budget, read once when the pool is initialized. Mutable
+FreeType faces remain thread-local. `/cache/stats` → `native_renderer_cache` exposes
+`text_mask_cache_max_bytes/entries/bytes/hits/misses/bypasses`; the normal runtime cache clear
+also clears masks. A pinned in-flight mask survives eviction. This is not a whole-page cache.
+
+Custom-profile source-font lookups can cache a **confirmed cmap absence** as immutable
+`SourceGlyphAbsent` metadata in the existing `GLYPH_CONTOUR_CACHE`, under a separate key namespace.
+The key carries the absolute resolved source path, live `(mtime_ns, size)` and codepoint; cmap membership
+is independent of font size. FreeType still runs first, so recovered native metrics take precedence.
+Only a successfully parsed FontTools cmap can publish the marker, after a second matching file signature;
+import/read/parse failures are never persisted. FontTools handles remain request-local and are reloaded
+when their signature changes. Marker weight includes the path/key metadata; glyph-cache limits, stats
+and clear/disable behavior are unchanged. This avoids rebuilding a large cmap on every request merely
+to rediscover that a font lacks a character such as `〜`; it never substitutes or removes the character.
+
+Source-font readers now come from `custom_profile/source_font.py`: lazy FontTools tables,
+index-based lookup labels for TrueType/CID CFF, and selected TrueType glyf/hmtx/vmtx entries.
+They preserve FontTools' composite handling, `lsb - xMin` correction, fractional CFF commands,
+and the original cmap choice. Named CFF fonts keep StandardEncoding names for seac; CFF2/VARC
+and variable TrueType retain the generic reader. These are drawing-only readers, not font editors.
+One reader is reused within the request's existing TMPFontLibrary; its context manager locks
+all table/cursor access because reference rendering can parallelize layers of a single card.
+It reads bytes into memory so lazy CFF reference cycles cannot retain OS file descriptors.
+
+`TMPGlyphTable` is a read-only Mapping inside the existing bounded TMP metadata entry. It captures
+raw rows when the asset signatures are recorded and materializes frozen TMPGlyphMetrics only
+when accessed. Keys never change; first-value publication is synchronized and failed conversions
+are not retained as successful metrics. Metadata invalidation/clear and the eight-entry limit
+are unchanged; do not add a second pool or defer asset file reads beyond signature capture.
+
+The optional native `source_outline_sdf` helper evaluates the original NumPy float32 distance/winding
+loop on already flattened FontTools contours. It does not substitute Skia/FreeType glyph geometry.
+It uses separate float32 operations, wrapping int16 winding and ties-to-even gray8 quantization.
+Inputs are bounded to 16,777,216 pixels, 262,144 points, 500,000,000 point-pixel operations and
+finite coordinates within 1e9; oversized/unsupported Python calls retain the original NumPy path.
+There is no new cache or IR node, so IR capability stays 28. Rebuild the wheel to get this helper;
+older extensions keep the NumPy calculation. Cold/warm parity AND before/after PNG checks are
+required: current Pillow and Skia share this arithmetic helper, so their agreement alone is insufficient.
+
+Custom-profile fallback glyphs now share `GLYPH_SDF_CACHE` with dynamic glyphs. Their values
+retain exact float32 samples in immutable `FloatField` bytes; charge four bytes per sample plus
+key metadata, never the dynamic gray8 estimate. Keys include mask dimensions/content digest,
+spread, threshold and algorithm version. They use the existing `custom_profile_glyph_cache_*`
+settings, stats and clear lifecycle; no additional glyph pool or dependency is introduced.
+Scene/layer memory checks still happen before lookup. New glyphs still execute the original
+EDT algorithm on a miss.
+
+The cold parity CLI and fresh no-Pillow checks explicitly disable these text/glyph caches before
+imports so a hit cannot hide broken computation. Warm parity keeps them enabled and clears them
+through the public runtime entry point for its cold reference. Run both after changes to either
+cache. Warm throughput must be measured separately from correctness gates.
 
 ## Configuration
 

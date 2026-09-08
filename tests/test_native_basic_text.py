@@ -217,8 +217,16 @@ def test_irpainter_keeps_the_resolved_font_path():
     painter.text("未来", (0, 0), font)
     scene = painter.builder.build()
     node = scene["root"]["children"][0]
-    assert node["engine"] == "freetype_basic"
+    assert node.get("engine", "skia") == "skia"
+    assert node["baseline"] == "alphabetic"
     assert scene["fonts"]["extra"][node["font"]["name"]] == str(FONTS[0])
+
+    # Explicit Pillow-style mask blending must keep its native BASIC coverage.
+    painter.text("未来", (0, 0), font, mask_lerp=True)
+    node = painter.builder.build()["root"]["children"][-1]
+    assert node["engine"] == "freetype_basic"
+    assert node["mask_lerp"] is True
+    assert node["baseline"] == "cjk_top"
 
 
 def test_basic_engine_rejects_missing_font_and_oversized_mask(tmp_path):

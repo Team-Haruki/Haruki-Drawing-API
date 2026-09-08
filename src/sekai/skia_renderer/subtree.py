@@ -120,6 +120,11 @@ class NativeSubtree:
         """Lower ``canvas`` through IRPainter and capture a detached subtree."""
 
         options = dict(renderer_options or {})
+        # Embedded canvases replace images composed by Pillow on main (event /
+        # VLive entries, profile modules, etc.). Preserve their BASIC glyphs while
+        # page-level text retains main's Skia appearance. This is independent of
+        # whether the fragment cache is enabled or hit.
+        options.setdefault("text_engine", "freetype_basic")
         if bg_hour is not None:
             options["bg_hour"] = bg_hour
         if export_format is not None:

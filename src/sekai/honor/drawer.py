@@ -83,6 +83,19 @@ async def load_honor_images(rqd: HonorRequest) -> dict[str, ImageSource | None]:
     return dict(zip(keys, values))
 
 
+def build_honor_badge_cache_key(rqd: HonorRequest) -> str:
+    """Static badge inputs, including optional/missing assets; footer time lives outside it."""
+    material = rqd.model_dump(mode="json", exclude={"timezone", "dt"})
+    return build_rendered_image_cache_key(
+        "honor_badge",
+        material,
+        asset_signatures={
+            image_key: get_image_asset_signature(ASSETS_BASE_DIR, getattr(rqd, path_field))
+            for image_key, path_field in HONOR_ASSET_MANIFEST.items()
+        },
+    )
+
+
 def build_full_honor_cache_key(rqd: HonorRequest) -> str:
     request_payload = rqd.model_dump(mode="json", exclude_none=False, exclude={"timezone"})
     asset_signatures = {

@@ -59,6 +59,30 @@ class EncodedImageRef:
 
 
 @dataclass(frozen=True, slots=True)
+class NativeRasterImageRef:
+    """Immutable premultiplied RGBA pixels owned by the bounded native fragment cache."""
+
+    data: bytes
+    size: tuple[int, int]
+    mode: str = "RGBA"
+
+    @property
+    def width(self) -> int:
+        return self.size[0]
+
+    @property
+    def height(self) -> int:
+        return self.size[1]
+
+
+def native_image_memory(image: EncodedImageRef | NativeRasterImageRef):
+    """The renderer's encoded or immutable raw transport, shared by IR entry points."""
+    if isinstance(image, NativeRasterImageRef):
+        return (image.width, image.height, image.width * 4, "rgba8888", "premul", image.data)
+    return image.data
+
+
+@dataclass(frozen=True, slots=True)
 class MissingImageRef:
     """Lazy placeholder recipe, rasterized by the selected backend at replay time."""
 

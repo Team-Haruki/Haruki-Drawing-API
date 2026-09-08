@@ -101,6 +101,8 @@ def run_clean_case(case, payload_path: Path, *, timeout: float = 180) -> dict:
         HARUKI_DRAWING__USE_SKIA_PLOT="true",
         HARUKI_DRAWING__COMPOSED_IMAGE_CACHE_SIZE="0",
         HARUKI_DRAWING__COMPOSED_IMAGE_CACHE_MAX_MB="0",
+        HARUKI_DRAWING__CUSTOM_PROFILE_GLYPH_CACHE_SIZE="0",
+        HARUKI_SKIA_TEXT_MASK_CACHE_MB="0",
         HARUKI_BG_TEST_HOUR="12",
     )
     with tempfile.TemporaryDirectory(prefix="haruki-no-pillow-") as directory:

@@ -69,15 +69,22 @@ async def bench_case(
     jpg_quality: int,
 ) -> dict | None:
     expected_media_type = "image/jpeg" if output_format == "jpg" else "image/png"
+    pillow_size = None
 
     async def pillow_bytes() -> tuple[float, int]:
         """compose + the encode the route would do — the whole cost of a Pillow response."""
+        nonlocal pillow_size
         if cold:
             clear_all_caches()
         t0 = time.perf_counter()
         img = await getattr(drawer, case.compose)(req)
         if isinstance(img, tuple):  # sk csb returns (canvas, scale)
             img = img[0]
+        if case.route_watermark:
+            from src.sekai.base.draw import add_request_watermark_to_image
+
+            img = await add_request_watermark_to_image(img, req)
+        pillow_size = img.size
         encoded, _, _ = _encode_image(img, output_format, jpg_quality)
         return time.perf_counter() - t0, encoded.getbuffer().nbytes
 
@@ -97,6 +104,10 @@ async def bench_case(
         # JPG encoder samples and must not silently contaminate a --format jpg result set.
         if payload.media_type != expected_media_type:
             return None
+        if pillow_size is not None and pillow_size != (payload.image_width, payload.image_height):
+            raise ValueError(
+                f"response dimensions differ: Pillow {pillow_size}, Skia {payload.image_width}x{payload.image_height}"
+            )
         return time.perf_counter() - t0, len(payload.image_bytes)
 
     if not case.try_render:

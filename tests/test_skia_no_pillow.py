@@ -53,8 +53,12 @@ def test_clean_process_accepts_only_untouched_native_output(tmp_path, monkeypatc
         ("try:\n    from PIL import Image\nexcept RuntimeError:\n    pass\n" if suppress_import else "")
         + """
 import json
+import os
 from types import SimpleNamespace
 import haruki_skia_renderer as native
+from src.sekai.profile.custom_profile.cache import GLYPH_SDF_CACHE
+assert os.environ["HARUKI_SKIA_TEXT_MASK_CACHE_MB"] == "0"
+assert not GLYPH_SDF_CACHE.enabled
 async def render(req):
     scene = {
         "version": 2, "assets_base_dir": ".", "export_format": "png",

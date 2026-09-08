@@ -710,6 +710,14 @@ async def _preload_event_entry_assets(d) -> dict[str, object]:
     return dict(zip(keys, values))
 
 
+def _add_event_list_card_cell(layers, card_id_style: TextStyle) -> None:
+    with VSplit().set_padding(0).set_sep(0).set_content_align("c").set_item_align("c"):
+        CardFullThumbnailBox(layers, size=(30, 30), sampling="pillow_bicubic")
+        TextBox(f"#{layers.rqd.card_id}", card_id_style, overflow="shrink").set_padding(0).set_size(
+            (40, 10)
+        ).set_content_align("c")
+
+
 def _build_event_list_entry_canvas(
     d,
     loaded: dict[str, object],
@@ -729,11 +737,11 @@ def _build_event_list_entry_canvas(
                     card_layers = loaded.get("cards", [])
                     if card_layers:
                         for layers in card_layers:
-                            CardFullThumbnailBox(layers, size=(30, 30), sampling="pillow_bicubic")
+                            _add_event_list_card_cell(layers, TextStyle(font=DEFAULT_FONT, size=7, color=(70, 70, 70)))
                 if not d.event_cards:
-                    Spacer(h=60)
+                    Spacer(h=81)
                 if d.event_cards and len(d.event_cards) <= 3:
-                    Spacer(h=29)
+                    Spacer(h=39)
             with VSplit().set_padding(0).set_sep(2).set_item_align("lt").set_content_align("lt"):
                 TextBox(f"{d.event_name}", style1, line_count=2, use_real_line_count=False).set_w(100)
                 TextBox(f"ID: {d.id} {d.event_type_name}", style2)
@@ -753,10 +761,16 @@ def _build_event_list_entry_canvas(
 
 
 async def _get_event_list_entry_canvas(d, now, style1: TextStyle, style2: TextStyle):
+    from src.sekai.base.canvas_cache import prepare_cached_canvas
+
     phase = _resolve_event_list_entry_phase(d.start_at, d.end_at, now)
     cache_key = _build_event_list_entry_cache_key(d, phase)
-    loaded = await _preload_event_entry_assets(d)
-    return _build_event_list_entry_canvas(d, loaded, phase, style1, style2), cache_key
+
+    async def build():
+        loaded = await _preload_event_entry_assets(d)
+        return _build_event_list_entry_canvas(d, loaded, phase, style1, style2)
+
+    return await prepare_cached_canvas(cache_key, build), cache_key
 
 
 # 合成活动列表图片
@@ -802,4 +816,4 @@ async def try_render_event_list_payload(rqd: EventListRequest) -> EncodedImagePa
     # caches decoded fragments in its shared memory pool, while Skia rasterizes them natively.
     if not skia_plot_enabled():
         return None
-    return await render_canvas_payload(await _build_event_list_canvas(rqd), endpoint="event_list")
+    return await render_canvas_payload(lambda: _build_event_list_canvas(rqd), endpoint="event_list")

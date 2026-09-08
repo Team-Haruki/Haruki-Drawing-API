@@ -841,7 +841,7 @@ pub(crate) fn render_scene_inner(
 
     let draw_started = Instant::now();
     if let Some(background) = &scene.background {
-        render_node(&mut surface, &mut interp, (0.0, 0.0), background)?;
+        render_background(&mut surface, &mut interp, background)?;
     }
     render_node(&mut surface, &mut interp, (0.0, 0.0), &scene.root)?;
     interp.metrics.draw_elapsed = draw_started.elapsed().as_secs_f64();
@@ -920,6 +920,49 @@ fn resize_output_surface(
         PillowResizeLimits::new(max_scene_bytes / 2, scratch_limit, 32767),
     )
     .map_err(|error| format!("post_resize failed: {error}"))
+}
+
+/// Only the top-level scene background is eligible. A nested background can inherit
+/// fractional/rounded clips whose bounding box looks full but whose AA coverage differs.
+fn render_background(
+    surface: &mut Surface,
+    interp: &mut Interp,
+    node: &Node,
+) -> Result<(), String> {
+    let plan = if let Node::TriangleBg(bg) = node {
+        crate::triangle_cache::plan(
+            surface,
+            bg,
+            interp.canvas_w,
+            interp.canvas_h,
+            interp.available_native_scene_bytes("background cache")?,
+        )
+    } else {
+        None
+    };
+    if let Some(plan) = &plan {
+        // Charge the complete retained tile set, including hits whose buffers could be
+        // evicted concurrently from the global pool while this render still holds them.
+        interp.push_native_runtime_bytes(plan.retained_bytes, "background cache hit")?;
+        let hit = crate::triangle_cache::draw_cached(surface, plan);
+        interp.pop_native_runtime_bytes(plan.retained_bytes);
+        if hit {
+            return Ok(());
+        }
+    }
+    render_node(surface, interp, (0.0, 0.0), node)?;
+    if let Some(plan) = plan {
+        // A cache optimization must not turn a valid render into a budget failure.
+        let retained_bytes = plan.retained_bytes;
+        if interp
+            .push_native_runtime_bytes(retained_bytes, "background tile capture")
+            .is_ok()
+        {
+            crate::triangle_cache::capture(surface, plan);
+            interp.pop_native_runtime_bytes(retained_bytes);
+        }
+    }
+    Ok(())
 }
 
 fn render_node(
@@ -4892,7 +4935,7 @@ fn draw_basic_text(
         .as_ref()
         .and_then(|n| fonts.files.get(n))
         .unwrap_or(&fonts.role_files[role]);
-    let mask = crate::basic_text::raster(
+    let mask = crate::basic_text::raster_cached(
         &fonts.dir,
         name,
         &node.text,

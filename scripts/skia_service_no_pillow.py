@@ -137,6 +137,8 @@ def run_service_check(requests=None, *, timeout=180):
             HARUKI_DRAWING__ISOLATED_WORKER_POOL_SIZE="1",
             HARUKI_DRAWING__COMPOSED_IMAGE_CACHE_SIZE="0",
             HARUKI_DRAWING__COMPOSED_IMAGE_CACHE_MAX_MB="0",
+            HARUKI_DRAWING__CUSTOM_PROFILE_GLYPH_CACHE_SIZE="0",
+            HARUKI_SKIA_TEXT_MASK_CACHE_MB="0",
             HARUKI_BG_TEST_HOUR="12",
         )
         process = subprocess.Popen(

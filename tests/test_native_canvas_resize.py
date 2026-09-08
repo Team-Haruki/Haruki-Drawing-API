@@ -105,14 +105,32 @@ def test_resize_scratch_uses_remaining_scene_budget():
         _render(scene)
 
 
-def test_scaled_basic_text_matches_logical_pillow_resize(real_fonts):
+def test_scaled_native_text_matches_logical_pillow_resize(real_fonts):
     def canvas():
         with Canvas(w=170, h=55, bg=FillBg((255, 255, 255, 255))).set_padding(4) as page:
             TextBox("瑞希 779", TextStyle(font=DEFAULT_FONT, size=24))
         return page
 
-    expected = asyncio.run(canvas().get_img(scale=1.5))
+    # Ordinary widget glyphs follow main's Skia appearance. Verify the independent
+    # Pillow resize oracle on those logical pixels, rather than changing glyphs
+    # to Pillow BASIC while testing the post-render resize contract.
+    logical_payload = asyncio.run(render_canvas_payload(canvas(), endpoint="test_resize", export_format="png"))
+    assert logical_payload is not None
+    logical = Image.open(BytesIO(logical_payload.image_bytes)).convert("RGBA")
+    expected = logical.resize((int(logical.width * 1.5), int(logical.height * 1.5)), Image.Resampling.BILINEAR)
     payload = asyncio.run(render_canvas_payload(canvas(), endpoint="test_resize", scale=1.5, export_format="png"))
     assert payload is not None
     actual = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))
+
+
+def test_large_parallel_post_resize_matches_pillow():
+    scene = _scene()
+    scene["canvas"] = {"width": 1024, "height": 1200}
+    scene["root"]["children"][0]["size"] = [1024, 1200]
+    logical = _image(_render(scene))
+    size = (730, 850)  # Both passes exceed the native parallel-row threshold.
+    scene["post_resize"] = dict(zip(("width", "height"), size))
+    actual = _image(_render(scene))
+    expected = logical.resize(size, Image.Resampling.BILINEAR)
     np.testing.assert_array_equal(np.asarray(actual), np.asarray(expected))

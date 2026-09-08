@@ -14,7 +14,17 @@ from src.sekai.base.image_source import EncodedImageRef, MissingImageRef
 from src.sekai.base.placeholder import placeholder_recipe
 
 
+class NativePlaceholderBytes(bytes):
+    """Immutable generated pixels, safe to retain in a native fragment cache."""
+
+    def __new__(cls, data, dependencies=()):
+        value = super().__new__(cls, data)
+        value.dependencies = dependencies
+        return value
+
+
 def render_placeholder(source: MissingImageRef) -> EncodedImageRef:
+    from src.sekai.base.utils import get_image_asset_signature
     from src.settings import DEFAULT_BOLD_FONT, DEFAULT_HEAVY_FONT, FONT_DIR
 
     native = import_module("haruki_skia_renderer")
@@ -87,4 +97,10 @@ def render_placeholder(source: MissingImageRef) -> EncodedImageRef:
         "root": {"type": "Group", "offset": [0, 0], "size": recipe.size, "children": children},
     }
     result = native.render_scene(json.dumps(scene).encode(), {})
-    return EncodedImageRef(data=result["image_bytes"], size=recipe.size, mode="RGBA")
+    dependencies = tuple(
+        (str(candidate.parent), candidate.name, get_image_asset_signature(candidate.parent, candidate.name))
+        for candidate in candidates
+    )
+    return EncodedImageRef(
+        data=NativePlaceholderBytes(result["image_bytes"], dependencies), size=recipe.size, mode="RGBA"
+    )

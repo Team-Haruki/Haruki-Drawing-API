@@ -67,15 +67,24 @@ def _get_display_window(vlive: VLiveBrief) -> tuple[datetime | None, datetime | 
     return vlive.current_start_at or vlive.start_at, vlive.current_end_at or vlive.end_at
 
 
-def _build_vlive_entry_cache_key(vlive: VLiveBrief, now: datetime) -> str:
+def _vlive_entry_time_texts(vlive: VLiveBrief, now: datetime) -> tuple[str, str, str]:
+    start, end = _get_display_window(vlive)
+    return (
+        _build_vlive_time_text("开始于", start, now),
+        _build_vlive_time_text("结束于", end, now),
+        f"{_build_vlive_status_text(vlive, now)} | 剩余场次: {vlive.rest_count}",
+    )
+
+
+def _build_vlive_entry_cache_key(
+    vlive: VLiveBrief, now: datetime, *, time_texts: tuple[str, str, str] | None = None
+) -> str:
+    material = vlive.model_dump(mode="json")
     return build_rendered_image_cache_key(
         "vlive_list_entry",
-        vlive,
-        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, vlive),
-        extra={
-            "state": "living" if vlive.living else "upcoming",
-            "bucket": now.strftime("%Y%m%d%H%M"),
-        },
+        material,
+        asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, material),
+        extra={"time_texts": time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)},
     )
 
 
@@ -102,6 +111,8 @@ def _build_vlive_entry_canvas(
     vlive: VLiveBrief,
     loaded: dict[str, object],
     now: datetime,
+    *,
+    time_texts: tuple[str, str, str] | None = None,
 ) -> Canvas:
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(20, 20, 20))
     info_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50))
@@ -111,7 +122,7 @@ def _build_vlive_entry_canvas(
     rewards = loaded.get("rewards", [])
     characters = loaded.get("characters", [])
     banner = loaded.get("banner")
-    display_start_at, display_end_at = _get_display_window(vlive)
+    start_text, end_text, status_text = time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)
 
     with Canvas().set_padding(0) as canvas:
         with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
@@ -127,10 +138,10 @@ def _build_vlive_entry_canvas(
                     ImageBox(banner, size=(320, None), use_alpha_blend=True)
 
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
-                    TextBox(_build_vlive_time_text("开始于", display_start_at, now), info_style).set_w(388)
-                    TextBox(_build_vlive_time_text("结束于", display_end_at, now), info_style).set_w(388)
+                    TextBox(start_text, info_style).set_w(388)
+                    TextBox(end_text, info_style).set_w(388)
                     TextBox(
-                        f"{_build_vlive_status_text(vlive, now)} | 剩余场次: {vlive.rest_count}",
+                        status_text,
                         info_style,
                     ).set_w(388)
 
@@ -167,8 +178,16 @@ async def _compose_vlive_entry_image(vlive: VLiveBrief, loaded: dict[str, object
 
 
 async def _get_vlive_list_entry_canvas(vlive: VLiveBrief, now: datetime):
-    loaded = await _preload_vlive_entry_assets(vlive)
-    return _build_vlive_entry_canvas(vlive, loaded, now), _build_vlive_entry_cache_key(vlive, now)
+    from src.sekai.base.canvas_cache import prepare_cached_canvas
+
+    time_texts = _vlive_entry_time_texts(vlive, now)
+    cache_key = _build_vlive_entry_cache_key(vlive, now, time_texts=time_texts)
+
+    async def build():
+        loaded = await _preload_vlive_entry_assets(vlive)
+        return _build_vlive_entry_canvas(vlive, loaded, now, time_texts=time_texts)
+
+    return await prepare_cached_canvas(cache_key, build), cache_key
 
 
 async def _build_vlive_list_canvas(rqd: VLiveListRequest, now: datetime | None = None) -> Canvas:
@@ -202,5 +221,4 @@ async def try_render_vlive_list_payload(rqd: VLiveListRequest) -> EncodedImagePa
     # One `now` for the whole layout: recomputing it inside the builder could cross a minute
     # boundary mid-render and put two different living/upcoming states in one image.
     now = request_now(rqd.timezone)
-    canvas = await _build_vlive_list_canvas(rqd, now=now)
-    return await render_canvas_payload(canvas, endpoint=_VLIVE_LIST_ENDPOINT)
+    return await render_canvas_payload(lambda: _build_vlive_list_canvas(rqd, now=now), endpoint=_VLIVE_LIST_ENDPOINT)

@@ -34,7 +34,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.timezone import datetime_from_millis
-from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_str_display_length
+from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_asset_image_refs, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, RESULT_ASSET_PATH
@@ -800,15 +800,34 @@ async def try_render_music_brief_list_payload(rqd: MusicBriefListRequest) -> Enc
 
 async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
     # Header-only refs: the Skia path emits asset paths into the IR, the Pillow
-    # fallback decodes on demand (Canvas.get_img prefetches concurrently).
-    jackets = {}
-    image_loader = get_asset_image_ref
-    jacket_tasks = [image_loader(ASSETS_BASE_DIR, path) for path in rqd.jackets_path_list.values()]
+    # reference decodes on demand (Canvas.get_img prefetches concurrently).
+    jacket_paths = list(rqd.jackets_path_list.values())
+
+    def result_icon_path(play_result):
+        if rqd.play_result_icon_path_map and play_result in rqd.play_result_icon_path_map:
+            return rqd.play_result_icon_path_map[play_result]
+        return RESULT_ASSET_PATH + f"/icon_{play_result}.png"
+
+    # Probe only icons that this page uses. Distinct results can share an override;
+    # these are immutable metadata refs, not a separate decoded-image/resize cache.
+    result_paths = list(
+        dict.fromkeys(
+            result_icon_path(result) for music in rqd.music_list if (result := rqd.user_results.get(music["id"]))
+        )
+    )
     _t0 = time.perf_counter()
-    loaded_jackets = await asyncio.gather(*jacket_tasks)
-    logger.debug("[perf] compose_music_list_image jackets %d: %.3fs", len(jacket_tasks), time.perf_counter() - _t0)
-    for music_id, img in zip(rqd.jackets_path_list.keys(), loaded_jackets):
-        jackets[music_id] = img
+    loaded_jackets, loaded_results = await asyncio.gather(
+        get_asset_image_refs(ASSETS_BASE_DIR, jacket_paths),
+        get_asset_image_refs(ASSETS_BASE_DIR, result_paths),
+    )
+    logger.debug(
+        "[perf] compose_music_list_image metadata jackets=%d result_icons=%d: %.3fs",
+        len(jacket_paths),
+        len(result_paths),
+        time.perf_counter() - _t0,
+    )
+    jackets = dict(zip(rqd.jackets_path_list, loaded_jackets, strict=True))
+    result_images = dict(zip(result_paths, loaded_results, strict=True))
 
     profile = rqd.profile
     lv_musics_map = {}
@@ -857,16 +876,7 @@ async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
                                     with Frame():
                                         ImageBox(jackets[music["id"]], size=(64, 64), image_size_mode="fill")
                                         if music["play_result"]:
-                                            if (
-                                                rqd.play_result_icon_path_map
-                                                and music["play_result"] in rqd.play_result_icon_path_map
-                                            ):
-                                                result_img_path = rqd.play_result_icon_path_map[music["play_result"]]
-                                            else:
-                                                result_img_path = (
-                                                    RESULT_ASSET_PATH + f"/icon_{music['play_result']}.png"
-                                                )
-                                            result_img = await image_loader(ASSETS_BASE_DIR, result_img_path)
+                                            result_img = result_images[result_icon_path(music["play_result"])]
                                             ImageBox(result_img, size=(16, 16), image_size_mode="fill").set_offset(
                                                 (64 - 10, 64 - 10)
                                             )

@@ -698,6 +698,8 @@ def get_runtime_cache_stats() -> dict[str, Any]:
             evictions=_thumb_cache_evictions,
         )
 
+    from src.sekai.skia_renderer.fragment_cache import get_native_fragment_cache_stats
+
     composed_stats = _composed_image_cache.stats()
     composed_disk_stats = _composed_image_disk_cache.stats()
     # Imported lazily: the Skia payload cache lives under src.sekai.skia_renderer, which imports
@@ -710,6 +712,7 @@ def get_runtime_cache_stats() -> dict[str, Any]:
         "image_cache": image_stats,
         "thumbnail_cache": thumb_stats,
         "composed_image_cache": composed_stats,
+        "native_fragment_cache": get_native_fragment_cache_stats(),
         "composed_image_disk_cache": composed_disk_stats,
         "skia_payload_cache": get_skia_payload_cache_stats(),
         "native_renderer_cache": get_native_renderer_cache_stats(),
@@ -1029,6 +1032,29 @@ async def get_asset_image_ref(
             _log_missing_image_once(path, exc)
             return missing_image_ref(_guess_missing_placeholder_variant(path))
         raise
+
+
+async def get_asset_image_refs(base_path: Path, paths: list[str | None]) -> list[AssetImageRef | MissingImageRef]:
+    """Batch header-only probes, retaining the global signature-keyed metadata pool.
+
+    Tiny per-layer executor jobs cost more than a warm stat/header lookup. Independent
+    batches still overlap I/O; this never creates a per-request decoded-image cache.
+    """
+
+    def load_batch(batch):
+        result = []
+        for path in batch:
+            try:
+                if not path or not path.strip():
+                    raise FileNotFoundError("empty-path")
+                result.append(_load_asset_image_ref_sync(base_path, path))
+            except (FileNotFoundError, OSError) as exc:
+                _log_missing_image_once(path, exc)
+                result.append(missing_image_ref(_guess_missing_placeholder_variant(path)))
+        return result
+
+    batches = await asyncio.gather(*(run_in_pool(load_batch, paths[i : i + 16]) for i in range(0, len(paths), 16)))
+    return [ref for batch in batches for ref in batch]
 
 
 def _load_image_resized_sync(
@@ -1548,11 +1574,17 @@ def clear_runtime_memory_caches() -> None:
     _resolved_existing_cache.clear()
     _composed_image_cache.clear()
 
+    from src.sekai.base.image_info import _asset_alpha_bounds
+
+    _asset_alpha_bounds.cache_clear()
+
     from src.sekai.profile.custom_profile.cache import clear_custom_profile_caches
     from src.sekai.skia_renderer.canvas import clear_native_renderer_caches
+    from src.sekai.skia_renderer.fragment_cache import clear_native_fragment_cache
     from src.sekai.skia_renderer.payload_cache import clear_skia_payload_cache
 
     clear_skia_payload_cache()
+    clear_native_fragment_cache()
     clear_native_renderer_caches()
     clear_custom_profile_caches()
 

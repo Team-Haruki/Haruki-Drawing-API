@@ -1739,6 +1739,9 @@ class AlphaTrimImageBox(CanvasImageBox):
     """Crop nonzero alpha, remap it, then resize the completed raster with bicubic."""
 
     def __init__(self, image: ImageSource, bounds: tuple[int, int, int, int], alpha_floor: int, **kwargs):
+        from .image_source import AssetImageRef
+        from .utils import build_rendered_image_cache_key, get_image_asset_signature
+
         self.source_image = image
         self.bounds = bounds
         width, height = bounds[2] - bounds[0], bounds[3] - bounds[1]
@@ -1746,6 +1749,15 @@ class AlphaTrimImageBox(CanvasImageBox):
         intermediate.add_draw_func(
             lambda _widget, painter: painter.paste_alpha_crop(image, (0, 0), bounds, alpha_floor)
         )
+        if isinstance(image, AssetImageRef):
+            kwargs.setdefault(
+                "cache_key",
+                build_rendered_image_cache_key(
+                    "alpha_trim",
+                    {"bounds": bounds, "alpha_floor": alpha_floor},
+                    asset_signatures=get_image_asset_signature(image.path.parent, image.path.name),
+                ),
+            )
         super().__init__(intermediate, sampling="pillow_bicubic", **kwargs)
 
 
@@ -1757,11 +1769,23 @@ class PreResizedImageBox(CanvasImageBox):
     """
 
     def __init__(self, image: ImageSource, pre_size: tuple[int, int], size=None, **kwargs) -> None:
+        from .image_source import AssetImageRef
+        from .utils import build_rendered_image_cache_key, get_image_asset_signature
+
         self.source_image = image
         intermediate = Canvas(w=pre_size[0], h=pre_size[1]).set_padding(0)
         intermediate.add_draw_func(
             lambda _widget, painter: painter.paste_src(image, (0, 0), pre_size, sampling="pillow_bilinear")
         )
+        if isinstance(image, AssetImageRef):
+            kwargs.setdefault(
+                "cache_key",
+                build_rendered_image_cache_key(
+                    "two_stage_resize",
+                    {"pre_size": pre_size},
+                    asset_signatures=get_image_asset_signature(image.path.parent, image.path.name),
+                ),
+            )
         super().__init__(intermediate, size=size, sampling="pillow_bicubic", **kwargs)
 
 

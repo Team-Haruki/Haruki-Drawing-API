@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Callable
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import threading
@@ -146,16 +147,37 @@ class BoundedCache:
             }
 
 
+FLOAT_SDF_CACHE_ENTRY_OVERHEAD = 512
+
+
 def _glyph_sdf_bytes(value: Any) -> int:
-    """``TMPDynamicGlyphSDF | None``: the L-mode field dominates (~12KB typical glyph)."""
+    """Share one budget between dynamic gray8 glyphs and fallback float32 fields."""
+    from .float_field import FloatField
+
     if value is None:
         return 64
+    if isinstance(value, FloatField):
+        # Four bytes per sample, plus the bounded digest key and field metadata.
+        return len(value.pixels) + FLOAT_SDF_CACHE_ENTRY_OVERHEAD
     field = value.field
     return field.width * field.height + 256
 
 
+@dataclass(frozen=True, slots=True)
+class SourceGlyphAbsent:
+    """A successfully parsed source cmap has no entry; never a transient load failure.
+
+    Shares the bounded contour pool under a distinct key namespace. Charge the
+    Unicode path and scalar key metadata even though the verdict itself is tiny.
+    """
+
+    key_bytes: int
+
+
 def _contours_bytes(value: Any) -> int:
-    """``tuple[list[np.ndarray], module] | None`` from ``tmp_vector_glyph_contours``."""
+    """Glyph contours or a confirmed, signature-keyed source cmap absence."""
+    if isinstance(value, SourceGlyphAbsent):
+        return value.key_bytes
     if value is None:
         return 64
     packed, _np = value

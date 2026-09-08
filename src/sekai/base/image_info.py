@@ -1,5 +1,6 @@
 """Image metadata service with a native implementation and an isolated legacy fallback."""
 
+from functools import lru_cache
 from importlib import import_module
 from pathlib import Path
 
@@ -46,6 +47,12 @@ def probe_encoded(data: bytes) -> tuple[tuple[int, int], str]:
     return (int(result["width"]), int(result["height"])), str(result["mode"])
 
 
+@lru_cache(maxsize=2048)
+def _asset_alpha_bounds(path: Path, mtime_ns: int, size: int, scan):
+    # Keep only geometry, never the decoded image. Re-stat even a reused AssetImageRef.
+    return scan(str(path.parent), path.name)
+
+
 def probe_alpha_bounds(source) -> tuple[int, int, int, int] | None:
     """Scan alpha natively; only the rectangle crosses the renderer boundary."""
     from .image_source import AssetImageRef, EncodedImageRef
@@ -54,7 +61,14 @@ def probe_alpha_bounds(source) -> tuple[int, int, int, int] | None:
     if native is not None and getattr(native, "ALPHA_BOUNDS_CAPABILITY", 0) >= 1:
         try:
             if isinstance(source, AssetImageRef):
-                bounds = native.asset_alpha_bounds(str(source.path.parent), source.path.name)
+                try:
+                    stat = source.path.stat()
+                except OSError:
+                    # Keep the native missing/denied-file error instead of turning a
+                    # removed file into a Pillow placeholder through the legacy adapter.
+                    bounds = native.asset_alpha_bounds(str(source.path.parent), source.path.name)
+                else:
+                    bounds = _asset_alpha_bounds(source.path, stat.st_mtime_ns, stat.st_size, native.asset_alpha_bounds)
             elif isinstance(source, EncodedImageRef):
                 bounds = native.encoded_alpha_bounds(source.data)
             else:

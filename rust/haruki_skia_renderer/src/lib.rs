@@ -32,7 +32,9 @@ mod image_analysis;
 mod interp;
 mod ir;
 mod pillow_resize;
+mod source_sdf;
 mod text_metrics;
+mod triangle_cache;
 mod vector;
 mod vector_text;
 
@@ -41,6 +43,41 @@ mod vector_text;
 enum SceneError {
     Parse(String),
     Render(String),
+}
+
+/// Materialize a fragment once for the Python-owned, byte-bounded fragment pool.
+/// No native global cache: immutable bytes retain their owner through raw transport.
+#[pyfunction]
+fn decode_fragment_rgba(py: Python<'_>, encoded: &[u8]) -> PyResult<Option<Py<PyBytes>>> {
+    let pixels = py.detach(|| {
+        let image = Image::from_encoded(Data::new_copy(encoded))?;
+        let (width, height) = (image.width(), image.height());
+        let length = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        // Oversized fragments retain the existing encoded path rather than allocating
+        // an unbounded decoded entry before the pool can reject it.
+        if width <= 0 || height <= 0 || length > 64 * 1024 * 1024 {
+            return None;
+        }
+        let info = ImageInfo::new(
+            (width, height),
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            None,
+        );
+        let mut pixels = vec![0; length];
+        image
+            .read_pixels(
+                &info,
+                &mut pixels,
+                width as usize * 4,
+                (0, 0),
+                skia_safe::image::CachingHint::Disallow,
+            )
+            .then_some(pixels)
+    });
+    Ok(pixels.map(|data| PyBytes::new(py, &data).unbind()))
 }
 
 #[pyfunction]
@@ -451,6 +488,23 @@ fn basic_text_mask(
     Ok(result.unbind())
 }
 
+/// NumPy-compatible source glyph distance field; immutable little-endian float32 points.
+#[pyfunction]
+fn source_outline_sdf(
+    py: Python<'_>,
+    data: &[u8],
+    ends: Vec<usize>,
+    width: usize,
+    height: usize,
+    origin: (f32, f32),
+    denominator: f32,
+) -> PyResult<Py<PyBytes>> {
+    let result = py
+        .detach(|| source_sdf::field(data, &ends, width, height, origin, denominator))
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    Ok(PyBytes::new(py, &result).unbind())
+}
+
 /// Bounded gray8 SDF resizing. The borrowed input is immutable Python bytes; no
 /// Python image object, encoded intermediate, or four-channel expansion is involved.
 #[pyfunction]
@@ -500,6 +554,8 @@ fn transform_gray8_bicubic(
 #[pymodule(gil_used = false)]
 fn haruki_skia_renderer(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(render_scene, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_fragment_rgba, m)?)?;
+    m.add_function(wrap_pyfunction!(source_outline_sdf, m)?)?;
     m.add_function(wrap_pyfunction!(resize_gray8_bicubic, m)?)?;
     m.add_function(wrap_pyfunction!(transform_gray8_bicubic, m)?)?;
     m.add_function(wrap_pyfunction!(basic_text_mask, m)?)?;
@@ -613,22 +669,8 @@ type GradientPoints = (NormPoint, NormPoint, NormPoint, NormPoint);
 /// derived here too; they now arrive baked into `TriangleBgNode::tris`.
 type TrianglePalette = ([u8; 3], [u8; 3], Rgba, Rgba, u8);
 
-fn draw_sekai_triangle_background(
-    canvas: &Canvas,
-    width: f32,
-    height: f32,
-    hour: f32,
-    time_color: bool,
-    main_hue: f32,
-    tris: &[[f32; 9]],
-) {
-    let mut paint = Paint::default();
-    paint.set_anti_alias(true);
-    let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
-
-    // The gradient palette is still resolved here: it is a pure function of `hour`, both backends
-    // interpolate the same table, and it was never what diverged.
-    let (grad1, grad2, overlay1, overlay2, white_alpha): TrianglePalette = if time_color {
+fn triangle_palette(hour: f32, time_color: bool, main_hue: f32) -> TrianglePalette {
+    if time_color {
         let palette = pink_palette(hour);
         (
             palette.grad1,
@@ -650,7 +692,26 @@ fn draw_sekai_triangle_background(
             Rgba(ov2[0], ov2[1], ov2[2], 100),
             100,
         )
-    };
+    }
+}
+
+fn draw_sekai_triangle_background(
+    canvas: &Canvas,
+    width: f32,
+    height: f32,
+    hour: f32,
+    time_color: bool,
+    main_hue: f32,
+    tris: &[[f32; 9]],
+) {
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    let (primary_p1, primary_p2, overlay_p1, overlay_p2) = gradient_points(width, height);
+
+    // The gradient palette is still resolved here: it is a pure function of `hour`, both backends
+    // interpolate the same table, and it was never what diverged.
+    let (grad1, grad2, overlay1, overlay2, white_alpha) =
+        triangle_palette(hour, time_color, main_hue);
 
     draw_linear_gradient(
         canvas,
@@ -1334,12 +1395,19 @@ pub(crate) struct LoadedAssetDescriptor {
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct RasterCacheKey {
-    asset: AssetIdentity,
-    src_bits: [u32; 4],
-    width: i32,
-    height: i32,
-    sampling: u8,
+enum RasterCacheKey {
+    Asset {
+        asset: AssetIdentity,
+        src_bits: [u32; 4],
+        width: i32,
+        height: i32,
+        sampling: u8,
+    },
+    TriangleTile {
+        background: std::sync::Arc<triangle_cache::BackgroundKey>,
+        top: i32,
+        height: i32,
+    },
 }
 
 #[derive(Clone)]
@@ -1950,7 +2018,7 @@ pub(crate) fn rasterize_asset_cached(
         return Ok(None);
     }
 
-    let key = RasterCacheKey {
+    let key = RasterCacheKey::Asset {
         asset: descriptor.identity.clone(),
         src_bits: [
             normalized_float_bits(source_rect.left),
@@ -2028,15 +2096,28 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
         "dimension_cache_entries",
         image_dimension_cache().entry_count(),
     )?;
+    let backgrounds = triangle_cache::stats();
+    dict.set_item("background_cache_hits", backgrounds.0)?;
+    dict.set_item("background_cache_misses", backgrounds.1)?;
+    dict.set_item("background_cache_bypasses", backgrounds.2)?;
     // Font health: any non-zero count means some text rendered with sans-serif instead of the
     // configured face. `font_fallback_fonts` names them so a misconfigured deploy is actionable.
     dict.set_item("font_fallback_count", font_fallback_count())?;
     dict.set_item("font_fallback_fonts", missing_font_names())?;
+    let text_masks = basic_text::text_mask_cache_snapshot();
+    dict.set_item("text_mask_cache_max_bytes", text_masks.max_bytes)?;
+    dict.set_item("text_mask_cache_entries", text_masks.entries)?;
+    dict.set_item("text_mask_cache_bytes", text_masks.bytes)?;
+    dict.set_item("text_mask_cache_hits", text_masks.hits)?;
+    dict.set_item("text_mask_cache_misses", text_masks.misses)?;
+    dict.set_item("text_mask_cache_bypasses", text_masks.bypasses)?;
     Ok(dict.unbind())
 }
 
 #[pyfunction]
 fn clear_renderer_caches() {
+    triangle_cache::clear_stats();
+    basic_text::clear_text_mask_cache();
     if let Some(cache) = raster_image_cache() {
         cache.invalidate_all();
         cache.run_pending_tasks();

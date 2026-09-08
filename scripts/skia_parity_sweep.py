@@ -56,6 +56,13 @@ import os
 # baseline harness pins.
 os.environ.setdefault("HARUKI_BG_TEST_HOUR", "12.0")
 
+# Only the cold CLI disables glyph caches. Warm parity imports this module for
+# its case catalog and must keep them enabled. Set these before settings/native
+# imports: the Python pools and Rust cache configuration are initialized once.
+if __name__ == "__main__":
+    os.environ["HARUKI_SKIA_TEXT_MASK_CACHE_MB"] = "0"
+    os.environ["HARUKI_DRAWING__CUSTOM_PROFILE_GLYPH_CACHE_SIZE"] = "0"
+
 import argparse
 import asyncio
 from collections import Counter
@@ -401,6 +408,9 @@ def setup() -> None:
 def bypass_caches(*modules) -> None:
     """Neutralize every composed/disk/Skia-payload cache getter on the given modules
     so compose() and try_render() always rebuild instead of masking output drift."""
+    from src.sekai.skia_renderer import fragment_cache
+
+    fragment_cache.get_native_fragment_cached = lambda _key, **_kwargs: None
     for mod in modules:
         if mod is None:
             continue

@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from importlib import import_module
 from pathlib import Path
+from stat import S_ISREG
 
 
 def _native():
@@ -71,7 +72,7 @@ def get_native_font(font_dir: str, name: str, size: float) -> NativeFontMetrics 
             stat = path.stat()
         except OSError:
             continue
-        if path.is_file():
+        if S_ISREG(stat.st_mode):
             return NativeFontMetrics(str(path), max(1, round(float(size))), (stat.st_mtime_ns, stat.st_size))
     return None
 

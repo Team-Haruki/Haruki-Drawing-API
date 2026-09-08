@@ -161,3 +161,25 @@ def test_native_alpha_capacity_failure_keeps_legacy_recovery(monkeypatch):
 
     monkeypatch.setattr(native, "encoded_alpha_bounds", unsupported)
     assert probe_alpha_bounds(ref) == source.getbbox()
+
+
+def test_alpha_scan_reuses_metadata_but_restats_same_reference(tmp_path, monkeypatch):
+    path = tmp_path / "alpha.png"
+    image = _source()
+    image.save(path)
+    ref = asyncio.run(get_asset_image_ref(tmp_path, path.name))
+    original = native.asset_alpha_bounds
+    calls = []
+
+    def scan(root, name):
+        calls.append(name)
+        return original(root, name)
+
+    monkeypatch.setattr(native, "asset_alpha_bounds", scan)
+    assert probe_alpha_bounds(ref) == image.getbbox()
+    assert probe_alpha_bounds(ref) == image.getbbox()
+    assert len(calls) == 1
+    Image.new("RGBA", image.size, (0, 0, 0, 0)).save(path)
+    os.utime(path, ns=(ref.mtime_ns + 1_000_000, ref.mtime_ns + 1_000_000))
+    assert probe_alpha_bounds(ref) is None
+    assert len(calls) == 2

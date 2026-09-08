@@ -15,6 +15,7 @@
 //! future IR crop/resize node must add Pillow's float32 `box` semantics explicitly rather than
 //! pretending a source rectangle is equivalent.
 
+use rayon::prelude::*;
 use std::error::Error;
 use std::fmt;
 use std::mem;
@@ -536,6 +537,26 @@ fn quantize_coefficient(value: f64) -> i32 {
     }
 }
 
+// Share Rayon's bounded process pool. Tiny icons stay serial to avoid scheduling overhead.
+// No coefficient or channel reduction is parallelized, preserving Pillow's exact rounding.
+fn resize_rows(
+    output: &mut [u8],
+    row_bytes: usize,
+    render: impl Fn(usize, &mut [u8]) + Sync + Send,
+) {
+    if output.len() >= 1024 * 1024 {
+        output
+            .par_chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| render(y, row));
+    } else {
+        output
+            .chunks_mut(row_bytes)
+            .enumerate()
+            .for_each(|(y, row)| render(y, row));
+    }
+}
+
 fn resize_horizontal<const N: usize>(
     source: &[u8],
     source_width: usize,
@@ -547,7 +568,7 @@ fn resize_horizontal<const N: usize>(
     let output_len = raster_byte_len::<N>(destination_width, source_height)?;
     let mut output = vec![0_u8; output_len];
 
-    for y in 0..source_height {
+    let render_row = |y: usize, row: &mut [u8]| {
         for destination_x in 0..destination_width {
             let bounds = axis.bounds[destination_x];
             let coefficients = &axis.coefficients
@@ -560,12 +581,13 @@ fn resize_horizontal<const N: usize>(
                         i64::from(source[source_offset + channel]) * i64::from(*coefficient);
                 }
             }
-            let destination_offset = (y * destination_width + destination_x) * N;
+            let destination_offset = destination_x * N;
             for channel in 0..N {
-                output[destination_offset + channel] = clip_fixed_8(sums[channel]);
+                row[destination_offset + channel] = clip_fixed_8(sums[channel]);
             }
         }
-    }
+    };
+    resize_rows(&mut output, destination_width * N, render_row);
     Ok(output)
 }
 
@@ -580,7 +602,7 @@ fn resize_vertical<const N: usize>(
     let output_len = raster_byte_len::<N>(width, destination_height)?;
     let mut output = vec![0_u8; output_len];
 
-    for destination_y in 0..destination_height {
+    let render_row = |destination_y: usize, row: &mut [u8]| {
         let bounds = axis.bounds[destination_y];
         let coefficients = &axis.coefficients
             [destination_y * axis.kernel_size..(destination_y + 1) * axis.kernel_size];
@@ -593,12 +615,13 @@ fn resize_vertical<const N: usize>(
                         i64::from(source[source_offset + channel]) * i64::from(*coefficient);
                 }
             }
-            let destination_offset = (destination_y * width + x) * N;
+            let destination_offset = x * N;
             for channel in 0..N {
-                output[destination_offset + channel] = clip_fixed_8(sums[channel]);
+                row[destination_offset + channel] = clip_fixed_8(sums[channel]);
             }
         }
-    }
+    };
+    resize_rows(&mut output, width * N, render_row);
     Ok(output)
 }
 

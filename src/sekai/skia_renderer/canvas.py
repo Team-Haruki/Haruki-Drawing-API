@@ -109,16 +109,16 @@ def get_native_renderer_cache_stats() -> dict[str, Any]:
             "enabled": False,
             "error": type(exc).__name__,
         }
-    max_bytes = int(stats.get("raster_cache_max_bytes") or 0)
+    enabled = any(int(stats.get(key) or 0) > 0 for key in ("raster_cache_max_bytes", "text_mask_cache_max_bytes"))
     return {
         "available": True,
-        "enabled": max_bytes > 0,
+        "enabled": enabled,
         **stats,
     }
 
 
 def clear_native_renderer_caches() -> bool:
-    """Clear Rust raster/dimension caches; return False in fail-open deployments."""
+    """Clear Rust raster, dimension and text-mask caches; False if native is unavailable."""
     try:
         native = load_native_renderer()
         native.clear_renderer_caches()
@@ -190,6 +190,7 @@ def build_canvas_ir(
     heavy_font: str | None | _UnsetFont = _UNSET_FONT,
     emoji_font: str | None | _UnsetFont = _UNSET_FONT,
     jpg_quality: int | None = None,
+    text_engine: str = "skia",
 ) -> tuple[IRBuilder, dict[str, Any]]:
     """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
 
@@ -216,6 +217,7 @@ def build_canvas_ir(
         bg_hour=background_hour() if bg_hour is None else bg_hour,
         export_format=EXPORT_IMAGE_FORMAT if export_format is None else export_format,
         jpg_quality=JPG_QUALITY if jpg_quality is None else jpg_quality,
+        text_engine=text_engine,
     )
     canvas.draw(painter)
     painter.assert_balanced()
@@ -230,7 +232,11 @@ async def render_canvas_payload(
     scale: float | None = None,
     export_format: str | None = None,
 ) -> EncodedImagePayload | None:
-    """Render a built Canvas via IRPainter → Skia, or return None to fall back to Pillow.
+    """Render a Canvas or an async Canvas factory through IRPainter → Skia.
+
+    A factory runs inside a native preparation context so shared child-canvas helpers
+    can reuse validated fragments before loading assets or building layout. Reference
+    builders use the same widget factory normally. A declined render returns None.
 
     ``scale`` resizes the completed logical raster with native bilinear filtering, matching
     ``Canvas.get_img(scale)`` including its ``int(size * scale)`` dimension truncation.
@@ -251,7 +257,13 @@ async def render_canvas_payload(
         _record(name, OUTCOME_DISABLED)
         return None
     try:
-        payload = await _render_canvas_uncounted(canvas, bg_hour=bg_hour, scale=scale, export_format=export_format)
+        # Event list's full-page Pillow reference has a tighter pixel contract
+        # than the old main Skia glyphs satisfy, including its heading/footer.
+        # Keep that page native BASIC; never weaken its existing parity budget.
+        text_engine = "freetype_basic" if name == "event_list" else "skia"
+        payload = await _render_canvas_uncounted(
+            canvas, bg_hour=bg_hour, scale=scale, export_format=export_format, text_engine=text_engine
+        )
     except SkiaUnsupported as exc:
         logger.info("plot canvas not Skia-expressible (%s); declining native render", exc)
         _record(name, OUTCOME_FALLBACK)
@@ -268,7 +280,12 @@ async def render_canvas_payload(
 
 
 async def _render_canvas_uncounted(
-    canvas, *, bg_hour: float | None = None, scale: float | None = None, export_format: str | None = None
+    canvas,
+    *,
+    bg_hour: float | None = None,
+    scale: float | None = None,
+    export_format: str | None = None,
+    text_engine: str = "skia",
 ) -> EncodedImagePayload | None:
     """The actual render. Returns None when the native extension is unavailable, raises
     ``SkiaUnsupported`` when the tree (or its size) is not Skia-expressible. Counting and the
@@ -280,6 +297,24 @@ async def _render_canvas_uncounted(
         logger.error("haruki_skia_renderer not importable (%s); declining native render", exc)
         return None
     bg = background_hour() if bg_hour is None else bg_hour
+    if callable(canvas):
+        from src.sekai.base.canvas_cache import native_canvas_preparation
+
+        options = {
+            "assets_base_dir": str(ASSETS_BASE_DIR),
+            "font_dir": str(FONT_DIR),
+            "default_font": DEFAULT_FONT,
+            "bold_font": DEFAULT_BOLD_FONT,
+            "heavy_font": DEFAULT_HEAVY_FONT,
+            "emoji_font": DEFAULT_EMOJI_FONT,
+            "export_format": EXPORT_IMAGE_FORMAT if export_format is None else export_format,
+            "jpg_quality": JPG_QUALITY,
+        }
+        with native_canvas_preparation(options, bg):
+            built = await canvas()
+            return await _render_canvas_uncounted(
+                built, bg_hour=bg, scale=scale, export_format=export_format, text_engine=text_engine
+            )
     eff_scale = float(scale) if scale and scale != 1.0 else None
     eff_format = EXPORT_IMAGE_FORMAT if export_format is None else export_format
 
@@ -290,7 +325,7 @@ async def _render_canvas_uncounted(
         # would serialize it across requests and cap throughput — which is why the size guard
         # inside build_canvas_ir runs HERE and not before the offload: _get_self_size() walks
         # the whole tree.
-        builder, mem_images = build_canvas_ir(canvas, bg_hour=bg, export_format=eff_format)
+        builder, mem_images = build_canvas_ir(canvas, bg_hour=bg, export_format=eff_format, text_engine=text_engine)
         scene = builder.build()
         if eff_scale is not None:
             target_size = (

@@ -50,6 +50,7 @@ from src.sekai.base.utils import (
     ImageSource,
     build_rendered_image_cache_key,
     get_asset_image_ref,
+    get_asset_image_refs,
     get_composed_image_cached,
     get_composed_image_disk_cached,
     get_str_display_length,
@@ -197,20 +198,17 @@ class CardFullThumbnailLayers:
 async def get_card_full_thumbnail_layers(rqd: CardFullThumbnailRequest) -> CardFullThumbnailLayers:
     rare_img_path = rqd.birthday_icon_path if rqd.rare == "rarity_birthday" else rqd.rare_img_path
     keys = ["base", "rare"]
-    tasks = [
-        get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_thumbnail_path),
-        get_asset_image_ref(ASSETS_BASE_DIR, rare_img_path),
-    ]
+    paths = [rqd.card_thumbnail_path, rare_img_path]
     if rqd.frame_img_path:
         keys.append("frame")
-        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.frame_img_path))
+        paths.append(rqd.frame_img_path)
     if rqd.is_pcard and rqd.train_rank and rqd.train_rank_img_path:
         keys.append("rank")
-        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.train_rank_img_path))
+        paths.append(rqd.train_rank_img_path)
     if rqd.attr_img_path:
         keys.append("attr")
-        tasks.append(get_asset_image_ref(ASSETS_BASE_DIR, rqd.attr_img_path))
-    loaded = dict(zip(keys, await asyncio.gather(*tasks)))
+        paths.append(rqd.attr_img_path)
+    loaded = dict(zip(keys, await get_asset_image_refs(ASSETS_BASE_DIR, paths)))
     return CardFullThumbnailLayers(
         rqd=rqd,
         base=loaded["base"],
