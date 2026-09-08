@@ -1,7 +1,6 @@
 """Last-resort TMP character coverage keeps the legacy floating SDF."""
 
 from dataclasses import replace
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -17,27 +16,27 @@ from src.sekai.profile.custom_profile.renderer import (
     alpha_mask_to_sdf_field,
     tmp_dynamic_sdf_alpha_threshold,
 )
-from src.settings import CUSTOM_PROFILE_ASSETS_DIR, CUSTOM_PROFILE_FONTS_DIR
+from tests.profile_font_fixture import build_tmp_fixture
 
 ROOT = Path(__file__).resolve().parents[1]
-PAYLOAD = ROOT / "out/parity-payloads/custom_profile_card_static_missing_glyphs.json"
-METADATA = ROOT / "data/custom_profile/tmp-font-assets/cn/metadata.json"
 STYLE = TextStyle("#7030b0", 0.7, 45, 1, 0, None, 0, 0, None, 0, 0, None, False, False, False, False)
 
 
 @pytest.fixture
-def renderer():
+def renderer(tmp_path):
     native = pytest.importorskip("haruki_skia_renderer")
-    if getattr(native, "TEXT_MASK_CAPABILITY", 0) < 1 or not PAYLOAD.is_file() or not METADATA.is_file():
-        pytest.skip("native mask and extracted TMP fixture required")
-    raw = json.loads(PAYLOAD.read_text())
-    return PNGRenderer(
+    if getattr(native, "TEXT_MASK_CAPABILITY", 0) < 1:
+        pytest.skip("native mask required")
+    fixture = build_tmp_fixture(tmp_path)
+    instance = PNGRenderer(
         masterdata=None,
-        assets=Path(str(CUSTOM_PROFILE_ASSETS_DIR).format(region="cn")),
-        fonts=Path(str(CUSTOM_PROFILE_FONTS_DIR).format(region="cn")),
-        tmp_font_metadata=METADATA,
-        resources=raw["resources"],
+        assets=tmp_path,
+        fonts=tmp_path,
+        tmp_font_metadata=fixture.metadata,
+        resources=fixture.resources,
     )
+    instance.test_fixture = fixture
+    return instance
 
 
 def _old_field(renderer, name, path, char, style, size, dilate):
@@ -113,11 +112,10 @@ def mask(*args):
     return result
 native.basic_text_mask = mask
 from src.sekai.profile.custom_profile.renderer import PNGRenderer, TextStyle
-from src.settings import CUSTOM_PROFILE_ASSETS_DIR, CUSTOM_PROFILE_FONTS_DIR
 raw = json.loads(Path(sys.argv[1]).read_text())
 r = PNGRenderer(masterdata=None,
-    assets=Path(str(CUSTOM_PROFILE_ASSETS_DIR).format(region="cn")),
-    fonts=Path(str(CUSTOM_PROFILE_FONTS_DIR).format(region="cn")),
+    assets=Path(sys.argv[2]).parent,
+    fonts=Path(sys.argv[2]).parent,
     tmp_font_metadata=Path(sys.argv[2]), resources=raw["resources"])
 style = TextStyle("#7030b0", .7, 45, 1, 0, None, 0, 0, None, 0, 0, None, False, False, False, False)
 name = "FOT-RodinNTLGPro-EB-OnDemand"
@@ -129,7 +127,15 @@ assert not guard.rejected and "PIL" not in sys.modules
 print("Five fallback float SDFs built through native masks without Pillow")
 """
     result = subprocess.run(
-        [sys.executable, "-X", "gil=0", "-c", code, str(PAYLOAD), str(METADATA)],
+        [
+            sys.executable,
+            "-X",
+            "gil=0",
+            "-c",
+            code,
+            str(renderer.test_fixture.payload),
+            str(renderer.test_fixture.metadata),
+        ],
         cwd=ROOT,
         text=True,
         capture_output=True,

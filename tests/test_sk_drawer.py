@@ -67,7 +67,6 @@ def _patch_drawing_dependencies(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
     monkeypatch.setattr(drawer, "request_now", lambda _timezone: NOW)
     monkeypatch.setattr(drawer, "add_request_watermark", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(drawer, "plt_fig_to_image", lambda _fig: DUMMY_IMAGE)
 
 
 def test_collect_skl_display_ranks_uses_payload_ranks_without_default_filter():

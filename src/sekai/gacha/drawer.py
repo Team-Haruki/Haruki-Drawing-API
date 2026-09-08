@@ -504,71 +504,6 @@ async def try_render_gacha_detail_payload(rqd: GachaDetailRequest) -> EncodedIma
     return await render_canvas_payload(await _build_gacha_detail_canvas(rqd), endpoint="gacha_detail")
 
 
-async def _draw_gacha_detail_content(
-    rqd: GachaDetailRequest,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-) -> None:
-    width = 600
-    title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK)
-    label_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(50, 50, 50))
-    text_style = TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70))
-    small_style = TextStyle(font=DEFAULT_FONT, size=12, color=(70, 70, 70))
-    with (
-        VSplit()
-        .set_padding(8)
-        .set_sep(8)
-        .set_content_align("c")
-        .set_item_align("c")
-        .set_item_bg(roundrect_bg(alpha=80))
-        .set_bg(roundrect_bg(alpha=80))
-    ):
-        _draw_gacha_detail_heading(rqd, assets, title_style, label_style, text_style, width)
-        _draw_gacha_detail_timing(rqd, label_style, text_style)
-        _draw_gacha_detail_behaviors(rqd, assets, label_style, text_style)
-        await _draw_gacha_detail_pickups(rqd, assets, label_style, small_style)
-        _draw_gacha_detail_rates(rqd, assets, label_style, text_style)
-
-
-def _draw_gacha_detail_rates(
-    rqd: GachaDetailRequest,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    label_style: TextStyle,
-    text_style: TextStyle,
-) -> None:
-    with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
-        with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align("l").set_item_align("l"):
-            if rqd.pickup_cards:
-                with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
-                    TextBox("当期", label_style)
-                    TextBox(f"({len(rqd.pickup_cards)})", text_style)
-                TextBox(_pickup_rate_text(rqd), text_style)
-            for rarity in GACHA_RATE_RARITIES:
-                rate = getattr(rqd.weight_info, f"{rarity}_rate", 0.0)
-                if math.isclose(rate, 0.0, abs_tol=1.0e-12):
-                    continue
-                count = getattr(rqd.gacha, f"{rarity}_count", 0)
-                _draw_gacha_rarity_label(rarity, count, assets, label_style, text_style)
-                guaranteed_rate = rqd.weight_info.guaranteed_rates.get(rarity, 0.0)
-                TextBox(_rate_text(rate, guaranteed_rate), text_style)
-
-
-def _draw_gacha_rarity_label(
-    rarity: str,
-    count: int,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    label_style: TextStyle,
-    text_style: TextStyle,
-) -> None:
-    rarity_name = GACHA_RARE_NAMES.get(rarity, rarity.replace("rarity_", ""))
-    with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
-        if rarity_img := assets.get(f"rarity_{rarity}"):
-            ImageBox(rarity_img, size=(None, 24))
-        else:
-            TextBox(rarity_name, label_style)
-        if count > 0:
-            TextBox(f"({count})", text_style)
-
-
 def _pickup_rate_text(rqd: GachaDetailRequest) -> str:
     pickup_total_rate = sum(card.rate for card in rqd.pickup_cards or [])
     guaranteed_rate = 0.0
@@ -585,67 +520,6 @@ def _rate_text(rate: float, guaranteed_rate: float) -> str:
         return normal_text
     guaranteed_text = f"{get_float_str(guaranteed_rate * 100, 4)}%"
     return f"{normal_text} / {guaranteed_text} (保底)"
-
-
-async def _draw_gacha_detail_pickups(
-    rqd: GachaDetailRequest,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    label_style: TextStyle,
-    small_style: TextStyle,
-) -> None:
-    if not rqd.pickup_cards:
-        return
-    with HSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
-        TextBox("当期卡片", label_style)
-        with (
-            Grid(col_count=min(5, len(rqd.pickup_cards)))
-            .set_padding(0)
-            .set_sep(8, 8)
-            .set_content_align("c")
-            .set_item_align("c")
-        ):
-            card_size = 80
-            for index, card in enumerate(rqd.pickup_cards):
-                with VSplit().set_padding(0).set_sep(1).set_content_align("c").set_item_align("c"):
-                    card_layers = assets.get(f"card_{index}")
-                    if card_layers is not None:
-                        CardFullThumbnailBox(card_layers, size=(card_size, card_size), shadow=True)
-                    else:
-                        ImageBox(await get_unknown_fallback_image(), size=(card_size, card_size), shadow=True)
-                    TextBox(f"{card.id} ({get_float_str(card.rate * 100, 4)}%)", small_style)
-
-
-def _draw_gacha_detail_behaviors(
-    rqd: GachaDetailRequest,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    label_style: TextStyle,
-    text_style: TextStyle,
-) -> None:
-    with VSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
-        with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align("l").set_item_align("l"):
-            for text, behaviors in _group_gacha_behaviors(rqd.gacha.behaviors).items():
-                TextBox(text, label_style)
-                with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
-                    for index, behavior in enumerate(behaviors):
-                        if index > 0:
-                            TextBox(" / ", text_style)
-                        _draw_gacha_behavior_cost(behavior, assets, text_style)
-
-
-def _draw_gacha_behavior_cost(
-    behavior: GachaBehavior,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    text_style: TextStyle,
-) -> None:
-    if not behavior.cost_type:
-        TextBox("免费", text_style)
-        return
-    if behavior.cost_icon_path and (cost_icon := assets.get(f"cost_{behavior.cost_icon_path}")):
-        ImageBox(cost_icon, size=(None, 48))
-    if "paid" in behavior.cost_type:
-        TextBox("(付费)", text_style)
-    if behavior.cost_quantity and behavior.cost_quantity > 1:
-        TextBox(f"x{behavior.cost_quantity}", text_style)
 
 
 def _group_gacha_behaviors(behaviors: list[GachaBehavior]) -> dict[str, list[GachaBehavior]]:
@@ -670,56 +544,6 @@ def _gacha_behavior_label(behavior: GachaBehavior) -> str:
     if behavior.execute_limit:
         text += f"(限{behavior.execute_limit}次)"
     return text
-
-
-def _draw_gacha_detail_timing(rqd: GachaDetailRequest, label_style: TextStyle, text_style: TextStyle) -> None:
-    start_time = datetime_from_millis(rqd.gacha.start_at, rqd.timezone)
-    end_time = datetime_from_millis(rqd.gacha.end_at, rqd.timezone)
-    now = request_now(rqd.timezone)
-    with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
-        with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
-            TextBox("开始时间", label_style)
-            TextBox(start_time.strftime("%Y-%m-%d %H:%M"), text_style)
-        with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
-            TextBox("结束时间", label_style)
-            TextBox(end_time.strftime("%Y-%m-%d %H:%M"), text_style)
-        with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
-            if start_time >= now:
-                TextBox("距离开始还有", label_style)
-                TextBox(get_readable_timedelta(end_time - now), text_style)
-            elif end_time >= now:
-                TextBox("距离结束还有", label_style)
-                TextBox(get_readable_timedelta(end_time - now), text_style)
-            else:
-                TextBox("卡池已结束", label_style)
-
-
-def _draw_gacha_detail_heading(
-    rqd: GachaDetailRequest,
-    assets: dict[str, ImageSource | CardFullThumbnailLayers | None],
-    title_style: TextStyle,
-    label_style: TextStyle,
-    text_style: TextStyle,
-    width: int,
-) -> None:
-    with HSplit().set_padding(8).set_sep(32).set_content_align("c").set_item_align("c").set_omit_parent_bg(True):
-        if rqd.logo_img_path and (logo_img := assets.get("logo")):
-            ImageBox(logo_img, size=(None, 100))
-        if rqd.banner_img_path and (banner_img := assets.get("banner")):
-            ImageBox(banner_img, size=(None, 100))
-
-    TextBox(rqd.gacha.name, title_style, use_real_line_count=True).set_w(width).set_padding(16).set_content_align("c")
-    with HSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
-        TextBox("ID", label_style)
-        TextBox(f"{rqd.gacha.id} ({rqd.region.upper()})", text_style)
-        Spacer(w=24)
-        TextBox("类型", label_style)
-        TextBox(GACHA_TYPE_NAMES.get(rqd.gacha.gacha_type, rqd.gacha.gacha_type), text_style)
-        if rqd.gacha.ceil_item_img_path:
-            Spacer(w=24)
-            TextBox("交换物品", label_style)
-            if ceil_item_img := assets.get("ceil_item"):
-                ImageBox(ceil_item_img, size=(None, 30))
 
 
 async def _preload_gacha_detail_assets(

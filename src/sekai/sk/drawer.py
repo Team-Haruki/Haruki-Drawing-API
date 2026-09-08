@@ -7,7 +7,6 @@ from itertools import pairwise
 from typing import TYPE_CHECKING
 
 from src.sekai.base.plot import TextStyle
-from src.sekai.base.utils import plt_fig_to_image
 
 StyledText = tuple[str, TextStyle]
 
@@ -625,57 +624,6 @@ async def try_render_winrate_predict_payload(rqd: WinRateRequest) -> EncodedImag
     return await render_canvas_payload(await _build_winrate_predict_canvas(rqd), endpoint="sk_winrate", scale=2.0)
 
 
-def _render_rank_trace_plot(
-    rqd: RankTraceRequest,
-    times: list[datetime],
-    scores: list[int],
-    speeds: list[float],
-    point_colors: list[str],
-    final_score: int | None,
-) -> Image.Image:
-    import matplotlib.dates as mdates
-    from matplotlib.figure import Figure
-    from matplotlib.ticker import FuncFormatter
-
-    from .matplotlib_backend import PLOT_LABEL_PATH_EFFECTS, draw_day_night_bg
-
-    fig = Figure(figsize=(12, 8))
-    ax = fig.add_subplot(111)
-    try:
-        fig.subplots_adjust(wspace=0, hspace=0)
-        draw_day_night_bg(ax, times[0], times[-1])
-        score_points = ax.scatter(times, scores, c=point_colors, s=3, label="分数线", zorder=3)
-        ax.annotate(
-            get_board_score_str(scores[-1]),
-            xy=(times[-1], scores[-1]),
-            xytext=(times[-1], scores[-1]),
-            color=point_colors[-1],
-            fontsize=12,
-            ha="right",
-            path_effects=PLOT_LABEL_PATH_EFFECTS,
-        )
-        if final_score is not None:
-            _draw_rank_trace_prediction(ax, times, final_score)
-
-        ax2 = ax.twinx()
-        (line_speeds,) = ax2.plot(times, speeds, "o", label="时速", color="green", markersize=0.5, linewidth=0.5)
-        ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(int(x)) + "/h"))
-        valid_speeds = [speed for speed in speeds if speed >= 0]
-        max_speed = max(valid_speeds) if valid_speeds else 1
-        ax2.set_ylim(0, max_speed * 1.2)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=times[0].tzinfo))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
-        ax.set_title(f"{get_event_id_and_name_text(rqd.region, rqd.event_id, '')} T{rqd.target_rank} 分数线")
-        lines = [score_points, line_speeds]
-        labels = [line.get_label() for line in lines]
-        legend = ax2.legend(lines, labels, loc="upper left")
-        legend.set_zorder(1000)
-        return plt_fig_to_image(fig)
-    finally:
-        fig.clear()
-
-
 def _draw_rank_trace_prediction(ax, times: list[datetime], final_score: int) -> None:
     ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
     ax.text(
@@ -697,22 +645,6 @@ def _rank_trace_point_colors(ranks: list[RankInfo]) -> list[str]:
     return [name_to_color[name] for name in original_names]
 
 
-def _calculate_rank_trace_speeds(ranks: list[RankInfo]) -> list[float]:
-    speeds: list[float] = []
-    min_period = timedelta(minutes=50)
-    max_period = timedelta(minutes=60)
-    left = 0
-    for right, rank in enumerate(ranks):
-        while rank.time - ranks[left].time > max_period:
-            left += 1
-        period = rank.time - ranks[left].time
-        if min_period <= period <= max_period:
-            speeds.append((rank.score - ranks[left].score) / period.total_seconds() * 3600)
-        else:
-            speeds.append(-1)
-    return speeds
-
-
 def _draw_trace_canvas(img: Image.Image, wl_chara_icon, *, show_icon: bool) -> Canvas:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
@@ -728,60 +660,6 @@ def _draw_trace_canvas(img: Image.Image, wl_chara_icon, *, show_icon: bool) -> C
                 ImageBox(wl_chara_icon, size=(None, 50))
                 TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
     return canvas
-
-
-def _render_player_trace_plot(
-    rqd: PlayerTraceRequest,
-    primary: _PlayerTraceSeries,
-    secondary: _PlayerTraceSeries | None,
-    compare_series: _ScoreTraceSeries | None,
-    compare_rank: int | None,
-    compare_line_score: int | None,
-    compare_line_time: datetime,
-    plot_start: datetime,
-    plot_end: datetime,
-) -> Image.Image:
-    import matplotlib.dates as mdates
-    from matplotlib.figure import Figure
-    from matplotlib.ticker import FuncFormatter
-
-    from .matplotlib_backend import draw_day_night_bg
-
-    fig = Figure(figsize=(12, 8))
-    ax = fig.add_subplot(111)
-    try:
-        fig.subplots_adjust(wspace=0, hspace=0)
-        draw_day_night_bg(ax, plot_start, plot_end)
-        min_score, max_score = _player_trace_bounds(primary, secondary, compare_series, compare_line_score)
-        lines = []
-        _draw_player_score_series(ax, primary, ("royalblue", "cornflowerblue"), lines)
-        if secondary is not None:
-            _draw_player_score_series(ax, secondary, ("orangered", "coral"), lines)
-        if compare_series is not None:
-            _draw_compare_score_series(ax, compare_series, compare_rank, lines)
-        if compare_line_score is not None and compare_series is None:
-            _draw_player_reference_line(ax, compare_rank, compare_line_score, compare_line_time, lines)
-
-        ax.set_ylim(min_score * 0.95, max_score * 1.05)
-        ax.set_xlim(plot_start, plot_end)
-        ax.yaxis.set_major_formatter(FuncFormatter(lambda x, _: get_board_score_str(x)))
-        ax.grid(True, linestyle="-", alpha=0.3, color="gray")
-        ax2 = ax.twinx()
-        _draw_player_rank_series(ax2, primary, "cornflowerblue", lines)
-        if secondary is not None:
-            _draw_player_rank_series(ax2, secondary, "coral", lines)
-        ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, _: str(int(x)) if 1 <= int(x) <= 100 else ""))
-        ax2.set_ylim(110, -10)
-        ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=plot_start.tzinfo))
-        ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-        fig.autofmt_xdate()
-        ax.set_title(_player_trace_title(rqd, primary, secondary))
-        labels = [line.get_label() for line in lines]
-        legend = ax2.legend(lines, labels, loc="upper left")
-        legend.set_zorder(1000)
-        return plt_fig_to_image(fig)
-    finally:
-        fig.clear()
 
 
 def _player_trace_title(
@@ -904,41 +782,6 @@ def _draw_player_score_series(ax, series: _PlayerTraceSeries, colors: tuple[str,
         ha="right",
         path_effects=PLOT_LABEL_PATH_EFFECTS,
     )
-
-
-def _player_trace_bounds(
-    primary: _PlayerTraceSeries,
-    secondary: _PlayerTraceSeries | None,
-    compare_series: _ScoreTraceSeries | None,
-    compare_line_score: int | None,
-) -> tuple[int, int]:
-    score_groups = [primary.scores]
-    if secondary is not None:
-        score_groups.append(secondary.scores)
-    if compare_series is not None:
-        score_groups.append(compare_series.scores)
-    values = [score for group in score_groups for score in group]
-    if compare_line_score is not None and compare_series is None:
-        values.append(compare_line_score)
-    return min(values), max(values)
-
-
-def _resolve_player_trace_reference(
-    rqd: PlayerTraceRequest,
-    compare_series: _ScoreTraceSeries | None,
-    fallback_time: datetime,
-) -> tuple[int | None, datetime]:
-    line_score = rqd.compare_rank_line_score
-    line_time = None
-    if line_score is None and rqd.compare_rank_latest is not None:
-        line_score = rqd.compare_rank_latest.score
-    if rqd.compare_rank_latest is not None:
-        line_time = rqd.compare_rank_latest.time
-    if line_score is None and compare_series is not None:
-        line_score = compare_series.scores[-1]
-    if line_time is None and compare_series is not None:
-        line_time = compare_series.times[-1]
-    return line_score, line_time or fallback_time
 
 
 def _prepare_score_trace_series(ranks: list[RankInfo] | None) -> tuple[_ScoreTraceSeries | None, int | None]:

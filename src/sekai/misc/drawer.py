@@ -8,7 +8,7 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from PIL import Image, ImageDraw
+    from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
@@ -1135,75 +1135,11 @@ async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePa
     return await render_canvas_payload(canvas, endpoint="alias_list")
 
 
-def _draw_birthday_calendar(all_characters, calendar_icons: dict[int, ImageSource], selected_cid: int) -> None:
-    with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
-        index = _birthday_calendar_start_index(all_characters)
-        for _ in range(len(all_characters)):
-            character = all_characters[index % len(all_characters)]
-            index += 1
-            with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
-                icon_box = ImageBox(calendar_icons[character.cid], size=(40, 40)).set_padding(4)
-                if character.cid == selected_cid:
-                    icon_box.set_bg(roundrect_bg(radius=8, alpha=80))
-                TextBox(f"{character.month}/{character.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
-
-
 def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
     for index, item in enumerate(all_characters):
         if item.cid == start_cid:
             return index
     return 0
-
-
-def _draw_birthday_cards(cards, card_thumbs: list[ImageSource], label_style: TextStyle) -> None:
-    with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-        TextBox("卡牌", label_style)
-        Spacer(w=8)
-        with Grid(col_count=6).set_sep(4, 4):
-            for index, thumb in enumerate(card_thumbs):
-                with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
-                    ImageBox(
-                        thumb,
-                        image_size_mode="fill",
-                        size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
-                        shadow=True,
-                        sampling="linear",
-                    )
-                    TextBox(f"{cards[index].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
-
-
-def _draw_birthday_optional_times(
-    rqd: CharaBirthdayRequest,
-    label_style: TextStyle,
-    value_style: TextStyle,
-) -> None:
-    if not rqd.is_fifth_anniv:
-        return
-    with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-        if rqd.drop_time:
-            _draw_birthday_time_range(rqd, "💧露滴掉落时间", rqd.drop_time, label_style, value_style)
-        if rqd.flower_time:
-            _draw_birthday_time_range(rqd, "🌱浇水开放时间", rqd.flower_time, label_style, value_style)
-        if rqd.party_time:
-            _draw_birthday_time_range(rqd, "🎂派对开放时间", rqd.party_time, label_style, value_style)
-
-
-def _draw_birthday_time_range(
-    rqd: CharaBirthdayRequest,
-    label: str,
-    time_range: BirthdayEventTime,
-    label_style: TextStyle,
-    value_style: TextStyle,
-) -> None:
-    start_at = datetime_from_millis(time_range.start_at, rqd.timezone)
-    end_at = datetime_from_millis(time_range.end_at, rqd.timezone)
-    timezone_label = _birthday_timezone_label(start_at, end_at, rqd.timezone)
-    with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
-        TextBox(f"{label} ", label_style)
-        TextBox(
-            f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}",
-            value_style,
-        )
 
 
 def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
@@ -1213,99 +1149,6 @@ def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
     if not timezone_label and end_at and end_at.tzinfo:
         timezone_label = end_at.tzname() or ""
     return f" ({timezone_label})" if timezone_label else ""
-
-
-def _draw_command_help_section(
-    draw: ImageDraw.ImageDraw,
-    section: _CommandHelpSection,
-    section_box: tuple[int, int, int, int],
-    section_padding_x: int,
-    section_padding_y: int,
-) -> None:
-    header_box = (section_box[0] + 24, section_box[1] + 18, section_box[2] - 24, section_box[1] + 50)
-    draw.text(
-        (header_box[0], header_box[1]),
-        section.title,
-        font=get_font(DEFAULT_BOLD_FONT, 24),
-        fill=(24, 38, 58, 255),
-    )
-    draw.line(
-        (header_box[0], header_box[3] + 8, header_box[2], header_box[3] + 8),
-        fill=(255, 255, 255, 86),
-        width=2,
-    )
-
-    text_y = section_box[1] + section_padding_y + 48
-    text_x = section_box[0] + section_padding_x
-    text_right = section_box[2] - section_padding_x
-    for line in section.lines:
-        text_y += line.gap_before
-        line_height = _command_help_line_height(line.size)
-        if line.bg is not None:
-            bg_box = (
-                text_x + line.indent - 14,
-                text_y - 4,
-                text_right + 8,
-                text_y + line_height - 1,
-            )
-            draw.rounded_rectangle(bg_box, radius=10, fill=line.bg)
-        if line.text:
-            font = get_font(line.font_name, line.size)
-            if line.label:
-                draw.text(
-                    (text_x + line.indent, text_y),
-                    line.label,
-                    font=get_font(DEFAULT_BOLD_FONT, line.size),
-                    fill=(30, 45, 66, 255),
-                )
-            text_offset = line.label_width if line.label_width > 0 else 0
-            draw.text((text_x + line.indent + text_offset, text_y), line.text, font=font, fill=line.fill)
-        text_y += line_height
-
-
-def _draw_command_help_glass_box(
-    img: Image.Image,
-    draw: ImageDraw.ImageDraw,
-    box: tuple[int, int, int, int],
-    radius: int,
-    fill_alpha: int = 112,
-) -> None:
-    from PIL import ImageDraw, ImageFilter
-
-    shadow = Image.new("RGBA", img.size, (255, 255, 255, 0))
-    shadow_draw = ImageDraw.Draw(shadow, "RGBA")
-    shadow_draw.rounded_rectangle(
-        (box[0] + 4, box[1] + 6, box[2] + 4, box[3] + 6),
-        radius=radius,
-        fill=(72, 96, 128, 30),
-    )
-    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(10)))
-    draw.rounded_rectangle(
-        box,
-        radius=radius,
-        fill=(255, 255, 255, fill_alpha),
-        outline=(255, 255, 255, 150),
-        width=2,
-    )
-
-
-def _command_help_section_layout(
-    sections: list[_CommandHelpSection],
-    content_width: int,
-    section_padding_y: int,
-    section_gap: int,
-    title_height: int,
-) -> tuple[list[tuple[int, int]], int]:
-    height = _HELP_CARD_MARGIN + title_height + section_gap
-    section_sizes: list[tuple[int, int]] = []
-    for section in sections:
-        section_h = section_padding_y * 2 + 42
-        for line in section.lines:
-            section_h += line.gap_before + _command_help_line_height(line.size)
-        section_h = max(92, section_h)
-        section_sizes.append((content_width, section_h))
-        height += section_h + section_gap
-    return section_sizes, max(360, height + _HELP_CARD_MARGIN - section_gap)
 
 
 def _append_command_help_body_line(
