@@ -3,10 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path, PurePosixPath, PureWindowsPath
+import re
 import subprocess
 import sys
 import tempfile
 from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.core.path_safety import resolve_cli_path
 
 DEFAULT_SSH_HOST = "root@100.111.213.59"
 DEFAULT_REMOTE_ROOT = "/data/HarukiServices/data/drawing"
@@ -32,6 +39,8 @@ THUMBNAIL_ASSET_FIELDS = (
     "train_rank_img_path",
     "birthday_icon_path",
 )
+_SAFE_SSH_HOST = re.compile(r"(?:[A-Za-z0-9_.-]+@)?[A-Za-z0-9_.:-]+\Z")
+_SAFE_REMOTE_ROOT = re.compile(r"/[A-Za-z0-9_./-]*\Z")
 
 
 class AssetPathError(ValueError):
@@ -74,6 +83,35 @@ def _append_path(paths: list[str], value: Any, *, field: str) -> None:
         paths.append(path)
 
 
+def _append_card_skill_paths(paths: list[str], card: dict[str, Any], card_index: int) -> None:
+    for skill_field in ("skill", "special_skill_info"):
+        skill = card.get(skill_field)
+        if skill is None:
+            continue
+        skill_map = _as_mapping(skill, field=f"cards[{card_index}].{skill_field}")
+        _append_path(
+            paths,
+            skill_map.get("skill_type_icon_path"),
+            field=f"cards[{card_index}].{skill_field}.skill_type_icon_path",
+        )
+
+
+def _append_card_thumbnail_paths(paths: list[str], card: dict[str, Any], card_index: int) -> None:
+    thumbnails = card.get("thumbnail_info", [])
+    if thumbnails is None:
+        return
+    if not isinstance(thumbnails, list):
+        raise TypeError(f"cards[{card_index}].thumbnail_info must be a list")
+    for thumb_index, raw_thumb in enumerate(thumbnails):
+        thumb = _as_mapping(raw_thumb, field=f"cards[{card_index}].thumbnail_info[{thumb_index}]")
+        for field in THUMBNAIL_ASSET_FIELDS:
+            _append_path(
+                paths,
+                thumb.get(field),
+                field=f"cards[{card_index}].thumbnail_info[{thumb_index}].{field}",
+            )
+
+
 def extract_card_list_asset_paths(payload: dict[str, Any], *, include_fonts: bool = True) -> list[str]:
     paths: list[str] = []
 
@@ -86,30 +124,8 @@ def extract_card_list_asset_paths(payload: dict[str, Any], *, include_fonts: boo
 
     for card_index, raw_card in enumerate(cards):
         card = _as_mapping(raw_card, field=f"cards[{card_index}]")
-        for skill_field in ("skill", "special_skill_info"):
-            skill = card.get(skill_field)
-            if skill is None:
-                continue
-            skill_map = _as_mapping(skill, field=f"cards[{card_index}].{skill_field}")
-            _append_path(
-                paths,
-                skill_map.get("skill_type_icon_path"),
-                field=f"cards[{card_index}].{skill_field}.skill_type_icon_path",
-            )
-
-        thumbnails = card.get("thumbnail_info", [])
-        if thumbnails is None:
-            continue
-        if not isinstance(thumbnails, list):
-            raise TypeError(f"cards[{card_index}].thumbnail_info must be a list")
-        for thumb_index, raw_thumb in enumerate(thumbnails):
-            thumb = _as_mapping(raw_thumb, field=f"cards[{card_index}].thumbnail_info[{thumb_index}]")
-            for field in THUMBNAIL_ASSET_FIELDS:
-                _append_path(
-                    paths,
-                    thumb.get(field),
-                    field=f"cards[{card_index}].thumbnail_info[{thumb_index}].{field}",
-                )
+        _append_card_skill_paths(paths, card, card_index)
+        _append_card_thumbnail_paths(paths, card, card_index)
 
     if include_fonts:
         paths.extend(DEFAULT_FONT_FILES)
@@ -148,6 +164,12 @@ def build_rsync_command(
     manifest_path: Path,
     dry_run: bool,
 ) -> list[str]:
+    if not _SAFE_SSH_HOST.fullmatch(ssh_host) or ssh_host.startswith("-"):
+        raise ValueError(f"unsafe SSH host: {ssh_host!r}")
+    if ssh_port is not None and not 1 <= ssh_port <= 65535:
+        raise ValueError(f"SSH port out of range: {ssh_port}")
+    if not _SAFE_REMOTE_ROOT.fullmatch(remote_root) or ".." in PurePosixPath(remote_root).parts:
+        raise ValueError(f"unsafe remote root: {remote_root!r}")
     remote_root = remote_root.rstrip("/")
     ssh_command = "ssh -o BatchMode=yes -o ConnectTimeout=15"
     if ssh_port is not None:
@@ -155,6 +177,7 @@ def build_rsync_command(
     command = [
         "rsync",
         "-aR",
+        "--protect-args",
         "--files-from",
         str(manifest_path),
         "-e",
@@ -162,7 +185,7 @@ def build_rsync_command(
     ]
     if dry_run:
         command.append("--dry-run")
-    command.extend([f"{ssh_host}:{remote_root}/", str(local_root)])
+    command.extend(["--", f"{ssh_host}:{remote_root}/", str(local_root)])
     return command
 
 
@@ -203,12 +226,9 @@ def build_rsync_commands(
     return commands
 
 
-def run_rsync_commands(commands: list[list[str]]) -> int:
+def run_rsync_commands(commands: list[list[str]]) -> None:
     for command in commands:
-        result = subprocess.run(command, check=False)
-        if result.returncode != 0:
-            return result.returncode
-    return 0
+        subprocess.run(command, check=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -237,22 +257,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> int:
+def main() -> None:
     args = parse_args()
-    payload = load_payload(args.payload_file)
+    payload_file = resolve_cli_path(args.payload_file, must_exist=True)
+    local_root = resolve_cli_path(args.local_root)
+    manifest_out = resolve_cli_path(args.manifest_out) if args.manifest_out else None
+    payload = load_payload(payload_file)
     paths = extract_card_list_asset_paths(payload, include_fonts=args.include_fonts)
 
     if args.list_only:
         sys.stdout.write("".join(f"{asset_path}\n" for asset_path in paths))
-        return 0
+        return
 
-    args.local_root.mkdir(parents=True, exist_ok=True)
-    if args.manifest_out:
-        write_manifest(paths, args.manifest_out)
+    local_root.mkdir(parents=True, exist_ok=True)
+    if manifest_out:
+        write_manifest(paths, manifest_out)
 
     drawing_paths, game_asset_paths = split_remote_asset_paths(paths)
     if not drawing_paths and not game_asset_paths:
-        return 0
+        return
 
     temp_paths: list[Path] = []
     try:
@@ -275,16 +298,16 @@ def main() -> int:
             ssh_port=args.ssh_port,
             remote_root=args.remote_root,
             remote_game_assets_root=args.remote_game_assets_root,
-            local_root=args.local_root,
+            local_root=local_root,
             drawing_manifest_path=drawing_manifest_path,
             game_assets_manifest_path=game_assets_manifest_path,
             dry_run=args.dry_run,
         )
-        return run_rsync_commands(commands)
+        run_rsync_commands(commands)
     finally:
         for path in temp_paths:
             path.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()

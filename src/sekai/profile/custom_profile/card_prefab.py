@@ -498,61 +498,70 @@ class PillowCardAdapter:
         masked.putalpha(ImageChops.multiply(masked.getchannel("A"), mask))
         return masked
 
+    def _apply_cover_art(self, image: Image.Image, op: CardCoverArtOp) -> None:
+        source = self._load_asset(op.path)
+        if source is None:
+            raise FileNotFoundError(f"required card art is missing: {op.path}")
+        art = self._resize_cover_aligned(
+            source,
+            op.cover_size,
+            op.cover_align,
+            self._RESAMPLING[op.sampling],
+        )
+        crop_left = max(0, round((art.width - image.width) * op.crop_align[0]))
+        crop_top = max(0, round((art.height - image.height) * op.crop_align[1]))
+        cropped = art.crop((crop_left, crop_top, crop_left + image.width, crop_top + image.height))
+        if op.blend == "src":
+            image.paste(cropped, (0, 0))
+        else:
+            image.alpha_composite(cropped)
+
+    @staticmethod
+    def _draw_rect(draw: ImageDraw.ImageDraw, op: CardRectOp, rect: Rect) -> None:
+        if op.radius > 0:
+            draw.rounded_rectangle(
+                rect,
+                radius=op.radius,
+                fill=op.fill,
+                outline=op.outline,
+                width=op.width,
+            )
+        else:
+            draw.rectangle(
+                rect,
+                fill=op.fill,
+                outline=op.outline,
+                width=op.width,
+            )
+
+    def _apply_rect(self, image: Image.Image, op: CardRectOp) -> None:
+        rect = tuple(round(value) for value in op.rect) if op.round_coordinates else op.rect
+        if op.blend == "src":
+            self._draw_rect(ImageDraw.Draw(image), op, rect)
+            return
+        overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        self._draw_rect(ImageDraw.Draw(overlay), op, rect)
+        image.alpha_composite(overlay)
+
+    def _apply_text(self, image: Image.Image, op: CardTextOp) -> None:
+        ImageDraw.Draw(image).text(
+            op.pos,
+            op.text,
+            font=self._font(op.font, op.size),
+            fill=op.fill,
+            anchor=op.anchor,
+        )
+
     def apply_ops(self, image: Image.Image, ops: tuple[CardOp, ...]) -> Image.Image:
         for op in ops:
             if isinstance(op, CardCoverArtOp):
-                source = self._load_asset(op.path)
-                if source is None:
-                    raise FileNotFoundError(f"required card art is missing: {op.path}")
-                art = self._resize_cover_aligned(
-                    source,
-                    op.cover_size,
-                    op.cover_align,
-                    self._RESAMPLING[op.sampling],
-                )
-                crop_left = max(0, round((art.width - image.width) * op.crop_align[0]))
-                crop_top = max(0, round((art.height - image.height) * op.crop_align[1]))
-                cropped = art.crop((crop_left, crop_top, crop_left + image.width, crop_top + image.height))
-                if op.blend == "src":
-                    image.paste(cropped, (0, 0))
-                else:
-                    image.alpha_composite(cropped)
+                self._apply_cover_art(image, op)
                 continue
             if isinstance(op, CardRectOp):
-                rect = tuple(round(value) for value in op.rect) if op.round_coordinates else op.rect
-
-                def draw_rect(draw: ImageDraw.ImageDraw) -> None:
-                    if op.radius > 0:
-                        draw.rounded_rectangle(
-                            rect,
-                            radius=op.radius,
-                            fill=op.fill,
-                            outline=op.outline,
-                            width=op.width,
-                        )
-                    else:
-                        draw.rectangle(
-                            rect,
-                            fill=op.fill,
-                            outline=op.outline,
-                            width=op.width,
-                        )
-
-                if op.blend == "src":
-                    draw_rect(ImageDraw.Draw(image))
-                else:
-                    overlay = Image.new("RGBA", image.size, (0, 0, 0, 0))
-                    draw_rect(ImageDraw.Draw(overlay))
-                    image.alpha_composite(overlay)
+                self._apply_rect(image, op)
                 continue
             if isinstance(op, CardTextOp):
-                ImageDraw.Draw(image).text(
-                    op.pos,
-                    op.text,
-                    font=self._font(op.font, op.size),
-                    fill=op.fill,
-                    anchor=op.anchor,
-                )
+                self._apply_text(image, op)
                 continue
             if isinstance(op, CardSpriteOp):
                 self._paste_sprite(image, op)

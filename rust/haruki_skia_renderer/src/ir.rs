@@ -170,6 +170,11 @@ pub enum Clip {
         #[serde(default = "all_corners")]
         corners: [bool; 4],
     },
+    /// Integer-pixel ``ImageDraw.rounded_rectangle`` alpha mask. This is deliberately not a
+    /// geometric clip: the interpreter isolates the Group and applies the generated mask with
+    /// DstIn so legacy L-mode alpha multiplication remains exact.
+    #[serde(rename = "pillow_rrect")]
+    PillowRRect { radius: f32 },
 }
 
 fn all_corners() -> [bool; 4] {
@@ -312,6 +317,8 @@ pub enum Node {
     RasterSubscene(RasterSubsceneNode),
     SelfImage(SelfImageNode),
     SdfQuad(SdfQuadNode),
+    SdfAtlasQuad(SdfAtlasQuadNode),
+    SdfFontQuad(SdfFontQuadNode),
     SdfShape(SdfShapeNode),
     Text(TextNode),
     Shadow(ShadowNode),
@@ -339,6 +346,54 @@ pub struct SdfQuadNode {
     /// `mem:<key>` reference to the pre-warped A8 field. Anything but a raw Alpha8 mem entry
     /// fails the whole scene loudly (-> Python fail-open to Pillow).
     pub field: String,
+    pub shading: SdfShading,
+}
+
+/// Asset-backed TMP-SDF glyph (requires IR_CAPABILITY >= 18).
+///
+/// Rust extracts the atlas alpha crop, performs Pillow-compatible BICUBIC resize to
+/// `field_size`, then applies Pillow-compatible BICUBIC affine warp into the device-space
+/// `pos`/`size` patch before running the same SDF shading as `SdfQuad`.  This removes Pillow
+/// pixel work and display-sized A8 `mem:` transport for static-atlas rich/decorative glyphs.
+#[derive(Debug, Deserialize)]
+pub struct SdfAtlasQuadNode {
+    pub path: String,
+    /// Metadata dimensions used by Python's Unity-bottom-origin crop conversion. A mismatch
+    /// with the decoded asset fails the whole scene instead of shifting the glyph silently.
+    pub atlas_size: [i32; 2],
+    /// Pillow-coordinate atlas crop `[left, top, right, bottom]`; out-of-image pixels are zero.
+    pub crop: [i32; 4],
+    /// Size of the unwarped glyph field after the atlas crop resize.
+    pub field_size: [i32; 2],
+    /// Device-space destination patch top-left and dimensions.
+    pub pos: Vec2,
+    pub size: [i32; 2],
+    /// Pillow `Image.Transform.AFFINE` inverse coefficients for the destination patch.
+    pub affine: [f64; 6],
+    pub shading: SdfShading,
+}
+
+/// Source-font TMP-SDF glyph (requires IR_CAPABILITY >= 19).
+///
+/// Python retains TMP parsing/layout and sends only controlled font/glyph geometry. Rust
+/// resolves the registered typeface, flattens its outline with the same fixed curve steps as
+/// the former fontTools path, builds the uint8 SDF field, then uses the same Pillow-compatible
+/// resize/affine-warp and shading pipeline as `SdfAtlasQuad`.
+#[derive(Debug, Deserialize)]
+pub struct SdfFontQuadNode {
+    pub font: FontRef,
+    pub codepoint: u32,
+    /// Baseline-relative glyph bounds `[left, top, right, bottom]` at `font.size`.
+    pub bbox: [i32; 4],
+    /// Full source-field padding and the smaller padding retained before `field_size` resize.
+    pub padding: i32,
+    pub crop_padding: i32,
+    pub field_size: [i32; 2],
+    /// Signed-distance spread in font pixels.
+    pub spread: f32,
+    pub pos: Vec2,
+    pub size: [i32; 2],
+    pub affine: [f64; 6],
     pub shading: SdfShading,
 }
 

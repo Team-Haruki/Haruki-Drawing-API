@@ -33,24 +33,32 @@ TIMEZONE = "Asia/Shanghai"
 # Mongo extended-JSON normalization (snapshot/normalize.go:12-80)
 # ---------------------------------------------------------------------------
 
-_EXT_KEYS = {"$numberLong", "$numberInt", "$numberDouble", "$oid", "$date"}
+_EXTENDED_JSON_CONVERTERS = {
+    "$numberLong": int,
+    "$numberInt": int,
+    "$numberDouble": float,
+    "$oid": str,
+}
+
+
+def _normalize_extended_json_object(value: dict[str, Any]) -> Any:
+    if len(value) != 1:
+        return {key: normalize_extended_json(item) for key, item in value.items()}
+
+    ((key, item),) = value.items()
+    if key == "$date":
+        return normalize_extended_json(item)
+    converter = _EXTENDED_JSON_CONVERTERS.get(key)
+    if converter is not None:
+        return converter(item)
+    return {key: normalize_extended_json(item)}
 
 
 def normalize_extended_json(value: Any) -> Any:
     if isinstance(value, dict):
-        if len(value) == 1:
-            ((k, v),) = value.items()
-            if k in ("$numberLong", "$numberInt"):
-                return int(v)
-            if k == "$numberDouble":
-                return float(v)
-            if k == "$oid":
-                return str(v)
-            if k == "$date":
-                return normalize_extended_json(v)
-        return {k: normalize_extended_json(v) for k, v in value.items()}
+        return _normalize_extended_json_object(value)
     if isinstance(value, list):
-        return [normalize_extended_json(v) for v in value]
+        return [normalize_extended_json(item) for item in value]
     return value
 
 

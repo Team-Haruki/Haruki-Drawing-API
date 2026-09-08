@@ -5,6 +5,7 @@ Replicates Haruki-Cloud's request construction offline per
 /Users/seiun/GolandProjects/Haruki-Cloud/.
 """
 
+from functools import partial
 from pathlib import Path
 import re
 import sys
@@ -106,37 +107,47 @@ def _format_dual_effects(e1: dict, e2: dict, mode: str) -> str:
     return "?"
 
 
+def _placeholder_ids(raw_ids: str) -> list[int]:
+    ids = []
+    for raw in raw_ids.split(","):
+        try:
+            ids.append(int(raw.strip()))
+        except ValueError:
+            continue
+    return ids
+
+
+def _character_placeholder(card_character_id: int) -> str:
+    character = MD.character_by_id().get(card_character_id)
+    if character:
+        return character.get("firstName", "") + character.get("givenName", "")
+    return "???"
+
+
+def _render_skill_placeholder(match: re.Match, *, effects_by_id: dict[int, dict], card_character_id: int) -> str:
+    parts = match.group(1).split(";")
+    if len(parts) != 2:
+        return match.group(0)
+    ids = _placeholder_ids(parts[0])
+    if not ids:
+        return match.group(0)
+    if parts[1] == "c":
+        return _character_placeholder(card_character_id)
+    effects = [effects_by_id[effect_id] for effect_id in ids if effect_id in effects_by_id]
+    if len(effects) != len(ids):
+        return "?"
+    if len(effects) == 1:
+        return _format_single_effect(effects[0], parts[1])
+    if len(effects) == 2:
+        return _format_dual_effects(effects[0], effects[1], parts[1])
+    return match.group(0)
+
+
 def render_skill_detail(skill: dict, card_character_id: int) -> str:
     """JP-only line of the {{ids;mode}} template (FormatDescription)."""
-    effects_by_id = {e["id"]: e for e in skill.get("skillEffects") or []}
-
-    def repl(match: re.Match) -> str:
-        parts = match.group(1).split(";")
-        if len(parts) != 2:
-            return match.group(0)
-        ids: list[int] = []
-        for raw in parts[0].split(","):
-            try:
-                ids.append(int(raw.strip()))
-            except ValueError:
-                continue
-        if not ids:
-            return match.group(0)
-        if parts[1] == "c":
-            character = MD.character_by_id().get(card_character_id)
-            if character:
-                return character.get("firstName", "") + character.get("givenName", "")
-            return "???"
-        effects = [effects_by_id[i] for i in ids if i in effects_by_id]
-        if len(effects) != len(ids):
-            return "?"
-        if len(effects) == 1:
-            return _format_single_effect(effects[0], parts[1])
-        if len(effects) == 2:
-            return _format_dual_effects(effects[0], effects[1], parts[1])
-        return match.group(0)
-
-    return _PLACEHOLDER.sub(repl, skill.get("description", ""))
+    effects_by_id = {effect["id"]: effect for effect in skill.get("skillEffects") or []}
+    replace = partial(_render_skill_placeholder, effects_by_id=effects_by_id, card_character_id=card_character_id)
+    return _PLACEHOLDER.sub(replace, skill.get("description", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -330,6 +341,76 @@ def costume_image_paths(card_id: int) -> list[str]:
     return paths
 
 
+def _card_detail_event(card_id: int) -> tuple[dict[str, Any] | None, dict[str, str]]:
+    event_id = MD.event_id_by_card().get(card_id)
+    event = MD.event_by_id().get(event_id) if event_id else None
+    if event is None:
+        return None, {}
+
+    event_info: dict[str, Any] = {
+        "event_id": event["id"],
+        "event_name": event.get("name", ""),
+        "start_at": event.get("startAt"),
+        "end_at": event.get("aggregateAt", 0) + 1000,
+        "event_banner_path": event_banner_path(event.get("assetbundleName", "")),
+    }
+    asset_paths: dict[str, str] = {}
+    bonuses = [bonus for bonus in MD.get("eventDeckBonuses") if bonus.get("eventId") == event["id"]]
+    for bonus in bonuses:  # last non-empty cardAttr wins (builder.go:54-61)
+        attr = bonus.get("cardAttr")
+        if attr:
+            event_info["bonus_attr"] = attr
+            asset_paths["event_attr_icon_path"] = ASSETS.static(f"card/attr_icon_{attr}.png")
+    unit_by_gcu = {unit["id"]: unit.get("unit", "") for unit in MD.get("gameCharacterUnits")}
+    units = {
+        unit_by_gcu[bonus["gameCharacterUnitId"]]
+        for bonus in bonuses
+        if bonus.get("gameCharacterUnitId", 0) > 0 and bonus["gameCharacterUnitId"] in unit_by_gcu
+    }
+    if len(units) == 1:
+        _add_card_detail_event_unit(event_info, asset_paths, event["id"], next(iter(units)))
+    return event_info, asset_paths
+
+
+def _add_card_detail_event_unit(
+    event_info: dict[str, Any], asset_paths: dict[str, str], event_id: int, unit: str
+) -> None:
+    event_info["unit"] = unit
+    icon = common.UNIT_ICONS.get(unit)
+    if icon:
+        asset_paths["event_unit_icon_path"] = ASSETS.static(icon)
+    banner_cid = event_banner_character_id(event_id)
+    if banner_cid:
+        event_info["banner_cid"] = banner_cid
+        asset_paths["event_chara_icon_path"] = ASSETS.chara_icon(banner_cid)
+
+
+def _card_detail_gacha(card_id: int) -> dict[str, Any] | None:
+    gacha = find_gacha_for_card(card_id)
+    if gacha is None:
+        return None
+    return {
+        "gacha_id": gacha["id"],
+        "gacha_name": gacha.get("name", ""),
+        "start_at": gacha.get("startAt"),
+        "end_at": (gacha.get("endAt", 0) // 1000 + 1) * 1000,
+        "gacha_banner_path": ASSETS.region_asset(
+            f"home/banner/banner_gacha{gacha['id']}/banner_gacha{gacha['id']}.png",
+            f"gacha/banner_gacha{gacha['id']}.png",
+        ),
+    }
+
+
+def _card_detail_image_paths(card: dict) -> list[str]:
+    asset_bundle_name = card.get("assetbundleName", "")
+    paths = []
+    if not only_after_training(card):
+        paths.append(member_image_path(asset_bundle_name, "card_normal.png"))
+    if has_after_training(card):
+        paths.append(member_image_path(asset_bundle_name, "card_after_training.png"))
+    return paths
+
+
 def build_card_detail_body(card: dict) -> dict:
     card_info = build_card_basic(card)
     supply = common.supply_label_for_detail(common.card_supply_type(card))
@@ -337,61 +418,15 @@ def build_card_detail_body(card: dict) -> dict:
         card_info["supply_type"] = supply
 
     body: dict[str, Any] = {"card_info": card_info, "region": common.REGION}
-
-    event_id = MD.event_id_by_card().get(card["id"])
-    event = MD.event_by_id().get(event_id) if event_id else None
-    if event:
-        event_info: dict[str, Any] = {
-            "event_id": event["id"],
-            "event_name": event.get("name", ""),
-            "start_at": event.get("startAt"),
-            "end_at": event.get("aggregateAt", 0) + 1000,
-            "event_banner_path": event_banner_path(event.get("assetbundleName", "")),
-        }
-        bonuses = [b for b in MD.get("eventDeckBonuses") if b.get("eventId") == event["id"]]
-        for bonus in bonuses:  # last non-empty cardAttr wins (builder.go:54-61)
-            attr = bonus.get("cardAttr")
-            if attr:
-                event_info["bonus_attr"] = attr
-                body["event_attr_icon_path"] = ASSETS.static(f"card/attr_icon_{attr}.png")
-        unit_by_gcu = {u["id"]: u.get("unit", "") for u in MD.get("gameCharacterUnits")}
-        units = {
-            unit_by_gcu[b["gameCharacterUnitId"]]
-            for b in bonuses
-            if b.get("gameCharacterUnitId", 0) > 0 and b["gameCharacterUnitId"] in unit_by_gcu
-        }
-        if len(units) == 1:
-            unit = next(iter(units))
-            event_info["unit"] = unit
-            icon = common.UNIT_ICONS.get(unit)
-            if icon:
-                body["event_unit_icon_path"] = ASSETS.static(icon)
-            banner_cid = event_banner_character_id(event["id"])
-            if banner_cid:
-                event_info["banner_cid"] = banner_cid
-                body["event_chara_icon_path"] = ASSETS.chara_icon(banner_cid)
+    event_info, event_asset_paths = _card_detail_event(card["id"])
+    if event_info is not None:
         body["event_info"] = event_info
+        body.update(event_asset_paths)
+    gacha_info = _card_detail_gacha(card["id"])
+    if gacha_info is not None:
+        body["gacha_info"] = gacha_info
 
-    gacha = find_gacha_for_card(card["id"])
-    if gacha:
-        body["gacha_info"] = {
-            "gacha_id": gacha["id"],
-            "gacha_name": gacha.get("name", ""),
-            "start_at": gacha.get("startAt"),
-            "end_at": (gacha.get("endAt", 0) // 1000 + 1) * 1000,
-            "gacha_banner_path": ASSETS.region_asset(
-                f"home/banner/banner_gacha{gacha['id']}/banner_gacha{gacha['id']}.png",
-                f"gacha/banner_gacha{gacha['id']}.png",
-            ),
-        }
-
-    abn = card.get("assetbundleName", "")
-    card_images: list[str] = []
-    if not only_after_training(card):
-        card_images.append(member_image_path(abn, "card_normal.png"))
-    if has_after_training(card):
-        card_images.append(member_image_path(abn, "card_after_training.png"))
-    body["card_images_path"] = card_images
+    body["card_images_path"] = _card_detail_image_paths(card)
     body["costume_images_path"] = costume_image_paths(card["id"])
     body["character_icon_path"] = ASSETS.chara_icon(card["characterId"])
     unit = card_unit(card)
@@ -522,6 +557,54 @@ def _apply_ratios(stats: list[dict], max_count: int, denominator: int) -> None:
             stat["share"] = stat["bar_count"] / denominator
 
 
+def _distribution_buckets(items: list[dict]) -> tuple[dict, dict, dict, int]:
+    character_buckets: dict[int, list[int]] = {}
+    attribute_buckets: dict[str, list[int]] = {}
+    attr_character_buckets: dict[str, dict[int, list[int]]] = {}
+    owned_count = 0
+    for item in items:
+        has_card = item["has_card"]
+        owned_count += int(has_card)
+        character_id = item["card"].get("character_id") or 0
+        if character_id > 0:
+            _add_bucket(character_buckets, character_id, has_card)
+        attr = _normalize_distribution_attr(item["card"].get("attr") or "")
+        _add_bucket(attribute_buckets, attr, has_card)
+        if character_id > 0:
+            _add_bucket(attr_character_buckets.setdefault(attr, {}), character_id, has_card)
+    return character_buckets, attribute_buckets, attr_character_buckets, owned_count
+
+
+def _distribution_attribute_stat(
+    attr: str,
+    attribute_buckets: dict[str, list[int]],
+    attr_character_buckets: dict[str, dict[int, list[int]]],
+    icon_paths: dict,
+    color_codes: dict,
+    owned_data: bool,
+) -> dict:
+    count, owned = attribute_buckets.get(attr, [0, 0])
+    bar_count = owned if owned_data else count
+    char_stats = _character_stat_list(attr_character_buckets.get(attr, {}), icon_paths, color_codes, owned_data)
+    max_char = max((stat["bar_count"] for stat in char_stats), default=0)
+    _apply_ratios(char_stats, max_char, bar_count)
+    stat: dict[str, Any] = {
+        "attr": attr,
+        "label": _ATTR_LABELS.get(attr) or attr,
+        "count": count,
+        "owned_count": owned,
+        "bar_count": bar_count,
+        "bar_ratio": 0.0,
+        "share": 0.0,
+        "color_code": _ATTR_COLORS.get(attr) or _ATTR_COLORS["unknown"],
+    }
+    if attr in _ATTR_ORDER:
+        stat["attr_icon_path"] = ASSETS.static(f"card/attr_icon_{attr}.png")
+    if char_stats:
+        stat["character_stats"] = char_stats
+    return stat
+
+
 def build_distribution(items: list[dict], icon_paths: dict, color_codes: dict, owned_data: bool) -> dict:
     dist: dict[str, Any] = {
         "total_count": 0,
@@ -530,20 +613,9 @@ def build_distribution(items: list[dict], icon_paths: dict, color_codes: dict, o
         "max_character_bar_count": 0,
         "max_attribute_bar_count": 0,
     }
-    character_buckets: dict[int, list[int]] = {}
-    attribute_buckets: dict[str, list[int]] = {}
-    attr_character_buckets: dict[str, dict[int, list[int]]] = {}
-    for item in items:
-        dist["total_count"] += 1
-        if item["has_card"]:
-            dist["owned_count"] += 1
-        character_id = item["card"].get("character_id") or 0
-        if character_id > 0:
-            _add_bucket(character_buckets, character_id, item["has_card"])
-        attr = _normalize_distribution_attr(item["card"].get("attr") or "")
-        _add_bucket(attribute_buckets, attr, item["has_card"])
-        if character_id > 0:
-            _add_bucket(attr_character_buckets.setdefault(attr, {}), character_id, item["has_card"])
+    character_buckets, attribute_buckets, attr_character_buckets, owned_count = _distribution_buckets(items)
+    dist["total_count"] = len(items)
+    dist["owned_count"] = owned_count
 
     denominator = dist["owned_count"] if owned_data else dist["total_count"]
 
@@ -553,28 +625,17 @@ def build_distribution(items: list[dict], icon_paths: dict, color_codes: dict, o
     dist["character_stats"] = character_stats
 
     attrs = list(_ATTR_ORDER) + [a for a in attribute_buckets if a not in _ATTR_ORDER]
-    attribute_stats = []
-    for attr in attrs:
-        count, owned = attribute_buckets.get(attr, [0, 0])
-        bar_count = owned if owned_data else count
-        char_stats = _character_stat_list(attr_character_buckets.get(attr, {}), icon_paths, color_codes, owned_data)
-        max_char = max((s["bar_count"] for s in char_stats), default=0)
-        _apply_ratios(char_stats, max_char, bar_count)
-        stat: dict[str, Any] = {
-            "attr": attr,
-            "label": _ATTR_LABELS.get(attr) or attr,
-            "count": count,
-            "owned_count": owned,
-            "bar_count": bar_count,
-            "bar_ratio": 0.0,
-            "share": 0.0,
-            "color_code": _ATTR_COLORS.get(attr) or _ATTR_COLORS["unknown"],
-        }
-        if attr in _ATTR_ORDER:
-            stat["attr_icon_path"] = ASSETS.static(f"card/attr_icon_{attr}.png")
-        if char_stats:
-            stat["character_stats"] = char_stats
-        attribute_stats.append(stat)
+    attribute_stats = [
+        _distribution_attribute_stat(
+            attr,
+            attribute_buckets,
+            attr_character_buckets,
+            icon_paths,
+            color_codes,
+            owned_data,
+        )
+        for attr in attrs
+    ]
     dist["max_attribute_bar_count"] = max((s["bar_count"] for s in attribute_stats), default=0)
     _apply_ratios(attribute_stats, dist["max_attribute_bar_count"], denominator)
     dist["attribute_stats"] = attribute_stats
