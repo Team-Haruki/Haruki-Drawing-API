@@ -1,7 +1,6 @@
-name: Native Renderer Release Validation
+name: Manual Full Renderer Validation
 
 on:
-  workflow_call:
   workflow_dispatch:
 
 permissions:

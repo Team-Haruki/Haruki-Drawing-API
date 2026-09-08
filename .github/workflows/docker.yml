@@ -6,13 +6,13 @@ on:
       - "v*"
 
 jobs:
-  renderer-validation:
-    uses: ./.github/workflows/renderer-release.yml
+  renderer-wheels:
+    uses: ./.github/workflows/skia-wheels.yml
     permissions:
       contents: read
 
   docker:
-    needs: renderer-validation
+    needs: renderer-wheels
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -22,12 +22,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v7
 
-      - name: Download the wheel that passed full renderer validation
+      - name: Download the wheel that passed native smoke validation
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_RUN_ID: ${{ github.run_id }}
         run: |
-          gh run download "$RELEASE_RUN_ID" --name validated-native-wheel --dir docker/skia-wheels
+          gh run download "$RELEASE_RUN_ID" --name haruki-skia-renderer-linux-x86_64 --dir docker/skia-wheels
           test "$(find docker/skia-wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1
 
       - name: Log in to GitHub Container Registry

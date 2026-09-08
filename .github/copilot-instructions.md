@@ -11,9 +11,10 @@ legacy composers. Missing/stale native wheels or unresolved text fonts fail star
 Legacy compose functions remain for pixel-reference tools, not service recovery. References to fail-open
 below describe the earlier migration and must not be reintroduced into production routes.
 
-Release: `scripts/skia_release_gate.py` runs Linux cold/pure-service and strict warm parity; tag publishing
-requires `.github/workflows/renderer-release.yml` and uses its validated wheel. The configured fixture
-runner/paths are mandatory, never silently skipped. Private MySekai and uncaptured symbol/stamps are
+Release: tag publishing calls `.github/workflows/skia-wheels.yml` on GitHub-hosted runners and uses
+the same wheel that passed ABI, capability and native codec smoke checks. Full Linux cold/pure-service
+and strict warm parity remain manual acceptance via `scripts/skia_release_gate.py` or the optional
+`renderer-release.yml` workflow; only that manual workflow requires a configured fixture runner/paths. Private MySekai and uncaptured symbol/stamps are
 user-excluded diagnostic cases, not release blockers. The private real file was explicitly authorized
 for migration in this task and remains untracked; preserve it and its implementation.
 
@@ -430,8 +431,8 @@ collision between two *different* payloads (there is one payload per endpoint) â
 read the key material.
 
 Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
-an index). Docker requires exactly one matching wheel. Tag releases use the wheel produced by the full
-`renderer-release.yml` validation job. Wheels are Python-version-specific: **upgrading Python means
+an index). Docker requires exactly one matching wheel. Tag releases use the wheel produced and smoke-tested by the reusable
+`skia-wheels.yml` workflow on GitHub-hosted runners. Wheels are Python-version-specific: **upgrading Python means
 rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 **Traps that have already cost real debugging time:**
