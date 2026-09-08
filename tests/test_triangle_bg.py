@@ -8,7 +8,10 @@ had to route around the background. These tests pin the three properties that fi
 
 from __future__ import annotations
 
+import hashlib
 import random
+
+import pytest
 
 from src.sekai.base.triangle_bg import build_triangle_bg, triangle_bg_seed
 
@@ -91,3 +94,16 @@ def test_the_custom_hue_palette_differs_from_the_time_palette():
     hue_spec = build_triangle_bg(900, 600, 15.5, False, 0.05, 0.0)
     assert time_spec.grad1 != hue_spec.grad1
     assert time_spec.white_alpha != hue_spec.white_alpha or time_spec.grad2 != hue_spec.grad2
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_digest"),
+    [
+        ((900, 600, 15.5, True, None, 0.0), "3dd53203551e053ca348ae89eadcac0c85f0428f3856560977299d45a367b5a2"),
+        ((1536, 880, 2.25, False, 0.31, 0.4), "ba7d5dc59b6c9b362256a3a32cb6367801fdc3b1e6e5625ed86537488de2fbcc"),
+        ((400, 1200, 23.9, True, None, 1.0), "3ff2a6033fc0492829baca7edd6d378ee89630540d43fcba62c54dff7d14e7ea"),
+    ],
+)
+def test_triangle_spec_keeps_the_pre_refactor_sequence(args, expected_digest) -> None:
+    digest = hashlib.sha256(repr(build_triangle_bg(*args)).encode()).hexdigest()
+    assert digest == expected_digest

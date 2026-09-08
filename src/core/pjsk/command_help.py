@@ -1,14 +1,19 @@
 from fastapi import APIRouter, HTTPException
 
 from src.core.debug import set_request_stage
+from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.utils import encoded_image_payload_to_response, image_to_response
 from src.sekai.misc.drawer import compose_command_help_image, try_render_command_help_payload
 from src.sekai.misc.model import CommandHelpRenderRequest
 
-router = APIRouter(tags=["Help"])
+router = APIRouter(tags=["Help"], responses=INTERNAL_SERVER_ERROR_RESPONSES)
 
 
-@router.post("/render", summary="Generate command help image")
+@router.post(
+    "/render",
+    summary="Generate command help image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
 async def command_help(request: CommandHelpRenderRequest):
     try:
         set_request_stage("help:try_render_payload")

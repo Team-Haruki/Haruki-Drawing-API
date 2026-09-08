@@ -8,6 +8,7 @@ still holds now that card/list rides use_skia_plot like every other endpoint.
 
 from __future__ import annotations
 
+from PIL import Image
 import pytest
 
 from src.sekai.card import drawer as card
@@ -63,6 +64,89 @@ async def test_card_list_orders_cards_newest_first():
 
     ids = [w.layers.rqd.card_id for w in _walk(canvas) if isinstance(w, card.CardFullThumbnailBox)]
     assert ids == [2, 3, 1]
+
+
+@pytest.mark.anyio
+async def test_load_card_list_thumbs_covers_empty_single_and_pair(monkeypatch):
+    no_thumbnails = _card(1, 1000)
+    no_thumbnails.thumbnail_info = []
+    single = _card(2, 2000)
+    pair = _card(3, 3000)
+    pair.thumbnail_info.append(_thumbnail(3, "cards/after.png"))
+
+    async def fake_layers(thumbnail):
+        return None if thumbnail.card_thumbnail_path.endswith("after.png") else thumbnail.card_thumbnail_path
+
+    monkeypatch.setattr(card, "get_card_full_thumbnail_layers", fake_layers)
+
+    assert await card._load_card_list_thumbs(no_thumbnails) == []
+    assert await card._load_card_list_thumbs(single) == ["cards/card.png"]
+    assert await card._load_card_list_thumbs(pair) == ["cards/card.png"]
+
+
+@pytest.mark.anyio
+async def test_load_card_list_assets_filters_failed_optional_images(monkeypatch):
+    request = _request(_card(1, 1000))
+    request.term_limited_icon_path = "term.png"
+    request.fes_limited_icon_path = "fes.png"
+
+    async def fake_asset_ref(_base_dir, path, **_kwargs):
+        if path == "term.png":
+            raise OSError("missing")
+        return path
+
+    monkeypatch.setattr(card, "get_asset_image_ref", fake_asset_ref)
+
+    assets, skill_paths, _elapsed = await card._load_card_list_assets(request, [(request.cards[0], [object()])])
+
+    assert assets.term is None
+    assert assets.fes == "fes.png"
+    assert assets.skills == {"icons/skill.png": "icons/skill.png"}
+    assert skill_paths == ["icons/skill.png"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failure", [None, FileNotFoundError, OSError, ValueError])
+async def test_card_list_background_uses_image_or_fallback(monkeypatch, failure):
+    request = _request()
+    request.background_img_path = "background.png"
+    image = Image.new("RGB", (16, 16), "navy")
+
+    async def fake_asset_ref(_base_dir, _path, **_kwargs):
+        if failure:
+            raise failure
+        return image
+
+    monkeypatch.setattr(card, "get_asset_image_ref", fake_asset_ref)
+
+    background = await card._card_list_background(request)
+
+    if failure:
+        assert background is card.SEKAI_BLUE_BG
+    else:
+        assert isinstance(background, card.ImageBg)
+
+
+@pytest.mark.anyio
+async def test_card_list_draws_notice_and_supply_variants(monkeypatch):
+    normal = _card(1, 1000)
+    normal.supply_type = "normal"
+    normal.skill = None
+    term = _card(2, 2000)
+    term.supply_type = "期间限定"
+    future = _card(3, 4_000_000_000_000)
+    request = _request(normal, term, future)
+    request.title = "Notice"
+    request.term_limited_icon_path = "term.png"
+    request.fes_limited_icon_path = "fes.png"
+
+    canvas = await card._build_card_list_canvas(request)
+
+    texts = [widget.text for widget in _walk(canvas) if isinstance(widget, card.TextBox)]
+    assert "提示" in texts
+    assert "未上线" in texts
+    assert "ID:1" in texts
+    assert "ID:2【期间限定】" in texts
 
 
 @pytest.mark.anyio
