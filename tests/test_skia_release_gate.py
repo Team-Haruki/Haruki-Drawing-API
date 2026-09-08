@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 import json
 from pathlib import Path
@@ -99,3 +100,24 @@ def test_release_runs_fresh_phases_and_never_accepts_missing_or_failed_evidence(
     assert result["passed"] is (expected == 0)
     with pytest.raises(SystemExit):
         gate.main()  # An existing successful report must never be reused.
+
+
+@pytest.mark.parametrize("second", ["later:8x8", None])
+def test_live_clock_gate_consumes_actual_cold_reference_evidence(monkeypatch, second):
+    from scripts import skia_warm_parity as warm
+
+    hashes = iter(["first:8x8", second] * 2)
+
+    async def render(*args):
+        return next(hashes)
+
+    monkeypatch.setattr(warm, "_render", render)
+    monkeypatch.setattr(warm, "clear_all_caches", lambda: None)
+    case = _case("event_planner")
+    rows = []
+    for backend in ("skia", "pillow"):
+        row = {"endpoint": case.name, "backend": backend}
+        asyncio.run(warm._render_cold_reference((case, None, None, None), backend, row))
+        assert row["cold_repeat"] == second
+        rows.append(row)
+    assert bool(strict_warm_issues(rows, (case,))) is (second is None)

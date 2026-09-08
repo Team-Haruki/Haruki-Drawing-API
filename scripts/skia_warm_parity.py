@@ -156,6 +156,7 @@ async def _render_cold_reference(bound_case: tuple, backend: str, row: dict) -> 
         row["status"] = "no-path"
         return
     row["cold"] = first
+    row["cold_repeat"] = second
     row["status"] = "pending" if first == second else "nondeterministic"
 
 

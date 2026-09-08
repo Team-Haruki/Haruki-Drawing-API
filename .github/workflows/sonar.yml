@@ -98,6 +98,9 @@ jobs:
         run: .venv314t/bin/python -c "import haruki_skia_renderer as m; from src.sekai.skia_renderer.canvas import REQUIRED_NATIVE_IR_CAPABILITY; assert m.IR_CAPABILITY >= REQUIRED_NATIVE_IR_CAPABILITY, m.IR_CAPABILITY; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
 
       - name: Generate Python coverage report
+        env:
+          # Match the Linux native job and the downloaded COLR emoji font.
+          HARUKI_FONT__EMOJI: TwemojiMozilla
         run: |
           .venv314t/bin/python -X gil=0 -m coverage run -m pytest -q
           .venv314t/bin/python -X gil=0 -m coverage xml --fail-under=0 -o coverage.xml
