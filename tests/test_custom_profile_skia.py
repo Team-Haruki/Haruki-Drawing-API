@@ -197,7 +197,7 @@ def test_pool_render_exception_is_contained_and_recorded(monkeypatch, caplog):
 
 
 def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp_path):
-    from src.sekai.profile.custom_profile import drawer as drawer_mod
+    from src.sekai.profile.custom_profile import resource_paths as drawer_mod
 
     monkeypatch.setattr(skia_mod, "skia_plot_enabled", lambda: True)
     monkeypatch.setattr(drawer_mod, "_require_region_path", lambda *args: tmp_path)

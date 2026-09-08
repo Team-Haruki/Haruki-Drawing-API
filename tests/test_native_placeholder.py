@@ -37,7 +37,7 @@ def test_placeholder_recipe_parity(variant, monkeypatch):
     monkeypatch.setattr(
         pillow_placeholder,
         "_load_placeholder_font",
-        lambda size: load_font(size).font_variant(layout_engine=ImageFont.Layout.BASIC),
+        lambda size: ImageFont.truetype(load_font(size).path, size, layout_engine=ImageFont.Layout.BASIC),
     )
     source = MissingImageRef(variant)
     actual = Image.open(BytesIO(render_placeholder(source).data)).convert("RGBA")

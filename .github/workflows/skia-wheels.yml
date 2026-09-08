@@ -29,7 +29,7 @@ jobs:
         include:
           - os: ubuntu-latest
             platform: linux-x86_64
-          - os: macos-14
+          - os: macos-15
             platform: macos-arm64
     steps:
       - name: Checkout
@@ -41,6 +41,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+
+      - name: Select C++20-capable Xcode (macOS)
+        if: runner.os == 'macOS'
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
 
       - name: Setup free-threaded Python
         uses: actions/setup-python@v7

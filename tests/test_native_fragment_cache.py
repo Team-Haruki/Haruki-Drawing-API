@@ -324,7 +324,9 @@ def test_embedded_text_keeps_basic_pixels_with_cache_on_and_off(native, pool, re
     monkeypatch.setattr(
         painter,
         "get_font",
-        lambda *args: load_font(*args).font_variant(layout_engine=ImageFont.Layout.BASIC),
+        lambda *args: ImageFont.truetype(
+            load_font(*args).path, load_font(*args).size, layout_engine=ImageFont.Layout.BASIC
+        ),
     )
     import json
 

@@ -559,22 +559,9 @@ class IRPainter(PaintContext):
         )
         namespace = f"canvas_subtree.{self._canvas_subtree_index}"
         self._canvas_subtree_index += 1
-        position = self._abs(pos)
-        if (
-            fragment is not None
-            and tuple(destination_size) == tuple(natural_size)
-            and shadow is None
-            and all(value == int(value) for value in position)
-        ):
-            # The cached fragment already is the isolated raster. At integer 1:1 placement,
-            # another surface/snapshot adds copies but no drawing semantics.
-            self._b.image(
-                self._image_ref(fragment),
-                position,
-                natural_size,
-                sampling="nearest" if sampling == "pillow_bicubic" else sampling or "linear_mipmap",
-            )
-            return self
+        # Recreate the N32 snapshot even for an integer 1:1 placement. On x86,
+        # drawing raw RGBA directly selects a different Skia blitter than drawing
+        # the BGRA subscene snapshot and changes premultiplied rounding.
         with self._b.raster_subscene(
             natural_size=natural_size,
             pos=self._abs(pos),

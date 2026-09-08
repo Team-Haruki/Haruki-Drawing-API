@@ -34,7 +34,7 @@ jobs:
       - name: Install Skia link dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libfontconfig1-dev libfreetype6-dev
+          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -44,6 +44,33 @@ jobs:
         with:
           workspaces: rust/haruki_skia_renderer
           shared-key: sonar-skia-renderer
+
+      # Fonts are OFL/CC licensed and too large to vendor; download once and cache.
+      - name: Cache CI fonts
+        id: font-cache
+        uses: actions/cache@v6
+        with:
+          path: |
+            data/SourceHanSansSC-Regular.otf
+            data/SourceHanSansSC-Bold.otf
+            data/SourceHanSansSC-Heavy.otf
+            data/TwemojiMozilla.ttf
+          key: ci-fonts-source-han-sans-release-twemoji-mozilla-v0.7.0
+
+      - name: Download CI fonts
+        if: steps.font-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p data
+          for weight in Regular Bold Heavy; do
+            curl -fsSL --retry 3 -o "data/SourceHanSansSC-${weight}.otf" \
+              "https://github.com/adobe-fonts/source-han-sans/raw/release/OTF/SimplifiedChinese/SourceHanSansSC-${weight}.otf"
+          done
+          # COLR-format Twemoji: FreeType/Skia render it in color with default features
+          # (the SVGinOT variant only yields monochrome fallbacks on the Linux backend).
+          curl -fsSL --retry 3 -o data/TwemojiMozilla.ttf \
+            "https://github.com/mozilla/twemoji-colr/releases/download/v0.7.0/Twemoji.Mozilla.ttf"
+          ls -l data/SourceHanSansSC-*.otf data/TwemojiMozilla.ttf
 
       - name: Create 3.14t venv and sync dependencies
         run: |

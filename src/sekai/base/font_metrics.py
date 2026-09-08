@@ -41,7 +41,9 @@ class NativeFontMetrics:
         record_pillow_touch(PILLOW_TOUCH_TEXT_METRIC)
         font = get_font(self.path, self.size)
         if font.layout_engine != ImageFont.Layout.BASIC:
-            font = font.font_variant(layout_engine=ImageFont.Layout.BASIC)
+            font = ImageFont.truetype(
+                font.path, font.size, index=font.index, encoding=font.encoding, layout_engine=ImageFont.Layout.BASIC
+            )
         ascent, descent = font.getmetrics()
         return {
             "pillow_bbox": font.getbbox(text),
