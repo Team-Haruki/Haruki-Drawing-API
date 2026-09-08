@@ -2,7 +2,7 @@
 
 Haruki Drawing API 是 Team Haruki 的 Project Sekai 图片生成服务。它接收 JSON 请求并输出 PNG/JPG，覆盖玩家资料、卡牌、活动、歌曲、谱面、招募、成绩和 MySekai 等页面。
 
-当前版本为 `3.0.0-rc2`。生产绘图必须使用 Rust + Skia 后端；缺失或过旧的原生扩展会阻止构建/启动，渲染失败不再调用 Pillow。Pillow 仅作为开发对照环境的依赖，继续消费共享 widget 树来验证像素。
+当前版本为 `3.1.0`。生产绘图必须使用 Rust + Skia 后端；缺失或过旧的原生扩展会阻止构建/启动，渲染失败不再调用 Pillow。Pillow 仅作为开发对照环境的依赖，继续消费共享 widget 树来验证像素。
 
 ## 运行要求
 
@@ -46,7 +46,7 @@ Compose 默认把 `./data` 挂载到容器内 `/pjskdata/Data`，并把 `configs
 
 公开仓库中的 `src/sekai/mysekai/drawer.py` 只是接口占位文件。生产环境必须将真实实现 bind-mount 到同一路径；不要把 `drawer.real.py` 复制进镜像或提交到仓库。
 
-Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。标签发布使用完整渲染校验通过的同一个 wheel。
+Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。标签发布使用 GitHub 托管 runner 构建并通过 ABI、能力握手和原生编解码检查的同一个 wheel。
 
 ## 运维端点
 
@@ -80,7 +80,9 @@ uv run python -X gil=0 scripts/skia_release_gate.py --out-dir out/release-gate
 
 该命令要求完整资产和 `out/parity-payloads/`，串联冷像素、禁止 Pillow 的绘图入口/完整服务、双后端热缓存检查。私有 MySekai 与尚未捕获的 symbol/stamps 按约定仅作诊断，不阻塞发布。
 
-标签工作流依赖 `.github/workflows/renderer-release.yml`。配置仓库变量 `RENDER_VALIDATION_RUNNER`（可信 Linux x86_64 runner 标签）、`RENDER_ASSETS_DIR`、`RENDER_PAYLOAD_DIR`、`RENDER_CONFIG_PATH`。后三项必须是 runner 上 checkout 之外的绝对路径；配置文件中的字体等路径必须适用于该 runner。缺少配置会明确失败，不能跳过校验发布。校验通过后才上传 wheel，镜像作业下载该 wheel 构建并推送；请求样本与图片不上传为工作流诊断产物。
+标签工作流复用 `.github/workflows/skia-wheels.yml`，在 GitHub 托管 runner 上构建并检查 wheel；镜像作业下载同一次工作流中通过检查的 Linux wheel，保留生产依赖无 Pillow 检查和实际编解码自检。发布不需要自建 runner 或私有素材。
+
+完整素材对拍保留为手动验收：渲染或缓存逻辑变化时，在具备资产和样本的 Linux 环境运行上述命令。也可手动触发 `.github/workflows/renderer-release.yml`；只有该可选工作流需要配置 `RENDER_VALIDATION_RUNNER`、`RENDER_ASSETS_DIR`、`RENDER_PAYLOAD_DIR`、`RENDER_CONFIG_PATH`。路径必须位于 runner checkout 之外；请求样本与图片不上传为工作流诊断产物。
 
 生产依赖安装使用 `uv sync --frozen --no-dev`，随后安装匹配的 wheel；默认开发组包含 `legacy-renderer`，因此本地对拍与测试仍可使用 Pillow。
 

@@ -1,6 +1,6 @@
 [project]
 name = "Haruki-Drawing-API"
-version = "3.0.5"
+version = "3.1.0"
 description = "FastAPI image rendering service for Project Sekai"
 readme = "README.md"
 license = "MIT"

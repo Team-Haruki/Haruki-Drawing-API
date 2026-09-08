@@ -547,17 +547,18 @@ fontTools 仍被 TMP 轮廓与备用度量使用，已从旧 Matplotlib 间接�
 悄悄切换字形算法。
 
 Docker 要求恰好一个匹配平台的 wheel，调用 `load_native_renderer()` 检查当前能力，实际执行
-codec smoke，并断言三个旧后端包不可导入。标签工作流依赖新增 `renderer-release.yml`；该作业
-构建并安装 wheel，执行 `skia_release_gate.py`，通过后上传 wheel。镜像作业下载这个已验证的
-wheel，构建成功后才推送。没有通过重新编译另一个 wheel 绕过已验证产物。
+codec smoke，并断言三个旧后端包不可导入。标签工作流复用 `skia-wheels.yml`，在 GitHub
+托管 runner 构建并安装 wheel，完成 ABI、能力握手与 codec smoke 后上传。镜像作业下载
+同一次运行中已验证的 Linux wheel，构建成功后才推送。
 
-发布校验要求可信 Linux x86_64 runner 和 checkout 外的素材、payload、配置文件路径。
+2026-09-09 调整：完整素材对拍保留为手动验收，不再要求每次标签发布重复执行。
+仅可选的 `renderer-release.yml` 手动工作流要求可信 Linux x86_64 runner 和 checkout 外的素材、payload、配置文件路径。
 仓库变量为 `RENDER_VALIDATION_RUNNER`、`RENDER_ASSETS_DIR`、`RENDER_PAYLOAD_DIR`、
 `RENDER_CONFIG_PATH`；配置内字体路径应适用于该 runner。未设置这些输入会在 preflight 失败，
-不会默许发布。工作流代码已接入；本任务未配置远端 runner，也未推送或部署。
+该手动验收不会静默跳过；普通标签发布不依赖这些变量或自建 runner。
 
 `skia_release_gate.py` 只接受全新输出目录，依次运行严格冷对拍/无 Pillow 完整服务和严格双后端
-热缓存。超时、缺报告或任何阶段失败都阻止发布。严格热缓存检查拒绝缺样本、无渲染路径、缺少
+热缓存。超时、缺报告或任何阶段失败都令该手动验收失败。严格热缓存检查拒绝缺样本、无渲染路径、缺少
 哈希、未知结果、重复结果及无法解释的漂移；只有 event_planner 的已知实时倒计时可在两个成功
 冷渲染确实不同的前提下记录为 nondeterministic。返回 None 不能冒充时间变化。
 严格冷门槛还核对实际 OpenAPI 绘图路由，防止新增路由通过“不登记 Case”逃过检查。
@@ -594,8 +595,8 @@ wheel，构建成功后才推送。没有通过重新编译另一个 wheel 绕�
 Pillow 恢复调用，生产依赖不含旧后端。开发用 Pillow composer 和惰性适配器仍保留供参考检查，
 不构成生产渲染恢复能力。未采集的 symbol/stamps 按用户要求留待实际问题修复。
 
-部署交接仍需在 GitHub 配置上述可信 runner 和外部素材变量后运行标签发布；本地完成不等同于
-远端 CI 已运行。此前 stage30 压测中的 readiness 阈值触发仍是独立容量发现，未将该压测称为
+标签发布使用 GitHub 托管 runner，不再需要上述自建 runner 和素材变量；完整素材验收应在
+渲染或缓存逻辑变化时手动执行，本地完成不等同于远端 CI 已运行。此前 stage30 压测中的 readiness 阈值触发仍是独立容量发现，未将该压测称为
 全通过，也未擅自调整阈值；所有图像响应成功及 Pillow 退役结果不依赖容量门槛放宽。
 
 

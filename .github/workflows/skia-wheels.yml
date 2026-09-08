@@ -4,6 +4,7 @@ name: Skia Renderer Wheels
 # for the platforms we deploy/develop on and uploads them as workflow artifacts.
 
 on:
+  workflow_call:
   push:
     branches:
       - main
@@ -16,7 +17,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: skia-wheels-${{ github.ref }}
+  group: skia-wheels-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
