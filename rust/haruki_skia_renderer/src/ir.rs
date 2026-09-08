@@ -170,6 +170,11 @@ pub enum Clip {
         #[serde(default = "all_corners")]
         corners: [bool; 4],
     },
+    /// Integer-pixel ``ImageDraw.rounded_rectangle`` alpha mask. This is deliberately not a
+    /// geometric clip: the interpreter isolates the Group and applies the generated mask with
+    /// DstIn so legacy L-mode alpha multiplication remains exact.
+    #[serde(rename = "pillow_rrect")]
+    PillowRRect { radius: f32 },
 }
 
 fn all_corners() -> [bool; 4] {

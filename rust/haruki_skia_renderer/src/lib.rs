@@ -346,7 +346,8 @@ fn validate_raw_image(
 /// 17 = generic RasterSubscene isolate-then-place composition with whole-image shadow.
 /// 18 = asset-backed SdfAtlasQuad with Pillow-compatible L-mode resize and affine warp.
 /// 19 = source-font SdfFontQuad with native outline flattening, SDF generation, and caching.
-pub const IR_CAPABILITY: u32 = 19;
+/// 20 = discrete Pillow-compatible rounded-rectangle Group mask.
+pub const IR_CAPABILITY: u32 = 20;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for

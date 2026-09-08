@@ -31,12 +31,12 @@ from src.core.pillow_telemetry import (
     record_pillow_touch,
 )
 from src.sekai.base.painter import (
-    ALIGN_MAP,
     AdaptiveTextColor,
     FontDesc,
     LinearGradient,
     Painter,
     RadialGradient,
+    _iter_image_bg_placements,
 )
 from src.sekai.base.triangle_bg import build_triangle_bg
 from src.sekai.base.utils import (
@@ -65,6 +65,17 @@ def _rgba(color: Any) -> tuple[int, int, int, int]:
     if len(c) == 3:
         return (c[0], c[1], c[2], 255)
     return (c[0], c[1], c[2], c[3])
+
+
+def _image_bg_tint(fade: float):
+    if fade <= 0:
+        return None
+    multiplier = int(max(0.0, min(1.0, 1.0 - float(fade))) * 255)
+    return image_tint((multiplier, multiplier, multiplier, 255), "multiply")
+
+
+def _image_bg_blur_sigma(blur: bool, source_scale: tuple[float, float]):
+    return (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
 
 
 class IRPainter(Painter):
@@ -194,31 +205,41 @@ class IRPainter(Painter):
         self._mem_by_id[id(img)] = (img, key)
         return f"mem:{key}"
 
+    def _encoded_image_ref(self, img: EncodedImageRef) -> str:
+        entry = self._mem_by_id.get(id(img))
+        if entry is not None and entry[0] is img:
+            return f"mem:{entry[1]}"
+        key = f"m{len(self._mem_images)}"
+        # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
+        self._mem_images[key] = img.data
+        self._mem_by_id[id(img)] = (img, key)
+        return f"mem:{key}"
+
+    def _asset_image_ref(self, img: Any) -> str | None:
+        source = get_pristine_image_asset_path(img)
+        if source is None:
+            return None
+        resolved = resolve_existing_asset_path(source)
+        if resolved is None:
+            return None
+        try:
+            relative = resolved.relative_to(self._assets_base_dir)
+        except ValueError:
+            return None
+        if not relative.parts or any(part in ("", ".", "..") for part in relative.parts):
+            return None
+        return relative.as_posix()
+
     def _image_ref(self, img: Any) -> str:
         if isinstance(img, Image.Image):
             # Count the boundary even when a pristine cached PIL image can be replaced with
             # its asset path. That request still depends on Pillow producing the source object.
             record_pillow_touch(PILLOW_TOUCH_IRPAINTER_PIL_IMAGE)
         if isinstance(img, EncodedImageRef):
-            entry = self._mem_by_id.get(id(img))
-            if entry is not None and entry[0] is img:
-                return f"mem:{entry[1]}"
-            key = f"m{len(self._mem_images)}"
-            # Plain bytes → decoded Rust-side (MemImage::Encoded); no Python decode at all.
-            self._mem_images[key] = img.data
-            self._mem_by_id[id(img)] = (img, key)
-            return f"mem:{key}"
-        source = get_pristine_image_asset_path(img)
-        if source is not None:
-            resolved = resolve_existing_asset_path(source)
-            if resolved is not None:
-                try:
-                    relative = resolved.relative_to(self._assets_base_dir)
-                except ValueError:
-                    pass
-                else:
-                    if relative.parts and all(part not in ("", ".", "..") for part in relative.parts):
-                        return relative.as_posix()
+            return self._encoded_image_ref(img)
+        asset_ref = self._asset_image_ref(img)
+        if asset_ref is not None:
+            return asset_ref
         if not isinstance(img, Image.Image):
             # AssetImageRef outside the assets root or vanished on disk: decode
             # (placeholder on missing) so mem transport still renders something.
@@ -272,6 +293,32 @@ class IRPainter(Painter):
             baseline="cjk_top",
             fill=fillval,
             adaptive=adaptive,
+            font_name=font_name,
+        )
+        return self
+
+    def anchored_text(
+        self,
+        text,
+        pos,
+        font,
+        fill=(0, 0, 0, 255),
+        align="left",
+        baseline="ascender",
+        exclude_on_hash=False,
+    ):
+        del exclude_on_hash
+        if align not in {"left", "center", "right"} or baseline not in {"ascender", "alphabetic"}:
+            raise ValueError(f"unsupported anchored text alignment: {align}/{baseline}")
+        role, size, font_name = self._font(font)
+        self._b.text(
+            text,
+            self._abs(pos),
+            role,
+            size,
+            align=align,
+            baseline=baseline,
+            fill=_rgba(fill),
             font_name=font_name,
         )
         return self
@@ -468,46 +515,22 @@ class IRPainter(Painter):
         target raster reuse, and the shared-tree rule.
         """
         path = self._image_ref(image)
-        image_w, image_h = image.size
-        ha, va = ALIGN_MAP[align]
-        tint = None
-        if fade > 0:
-            multiplier = int(max(0.0, min(1.0, 1.0 - float(fade))) * 255)
-            tint = image_tint((multiplier, multiplier, multiplier, 255), "multiply")
-
-        def emit(pos, size, source_scale=(1.0, 1.0)):
-            sigma = (3.0 * source_scale[0], 3.0 * source_scale[1]) if blur else None
-            self._b.image(
-                path,
-                self._abs(pos),
-                size,
-                fit="stretch",
-                sampling="catmull_rom",
-                tint=tint,
-                blur_sigma=sigma,
-            )
-
-        if mode == "fit":
-            scale = max(self.w / image_w, self.h / image_h)
-            width, height = int(image_w * scale), int(image_h * scale)
-            x = (self.w - width) // 2 if ha == "c" else (0 if ha == "l" else self.w - width)
-            y = (self.h - height) // 2 if va == "c" else (0 if va == "t" else self.h - height)
-            emit((x, y), (width, height), (width / image_w, height / image_h))
-            return self
-        if mode == "fill":
-            emit((0, 0), self.size, (self.w / image_w, self.h / image_h))
-            return self
-        if mode == "fixed":
-            x = (self.w - image_w) // 2 if ha == "c" else (0 if ha == "l" else self.w - image_w)
-            y = (self.h - image_h) // 2 if va == "c" else (0 if va == "t" else self.h - image_h)
-            emit((x, y), (image_w, image_h))
-            return self
-        if mode == "repeat":
-            for y in range(0, self.h, image_h):
-                for x in range(0, self.w, image_w):
-                    emit((x, y), (image_w, image_h))
-            return self
-        raise SkiaUnsupported(f"unsupported image background mode: {mode}")
+        tint = _image_bg_tint(fade)
+        try:
+            placements = _iter_image_bg_placements(self.size, image.size, align, mode)
+            for pos, size, source_scale, _ in placements:
+                self._b.image(
+                    path,
+                    self._abs(pos),
+                    size,
+                    fit="stretch",
+                    sampling="catmull_rom",
+                    tint=tint,
+                    blur_sigma=_image_bg_blur_sigma(blur, source_scale),
+                )
+        except ValueError as exc:
+            raise SkiaUnsupported(str(exc)) from exc
+        return self
 
     def paste_with_alpha_blend(
         self,

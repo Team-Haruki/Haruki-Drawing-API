@@ -1002,16 +1002,21 @@ fn render_node(
     match node {
         Node::Group(group) => {
             let child_off = (off.0 + group.offset[0], off.1 + group.offset[1]);
-            let mask_rect = group
-                .mask
-                .as_ref()
-                .map(|_| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
+            let pillow_rrect_radius = match group.clip.as_ref() {
+                Some(Clip::PillowRRect { radius }) => Some(*radius),
+                _ => None,
+            };
+            let mask_rect = (group.mask.is_some() || pillow_rrect_radius.is_some())
+                .then(|| Rect::from_xywh(child_off.0, child_off.1, group.size[0], group.size[1]));
             if let Some(rect) = mask_rect {
                 let layer = skia_safe::canvas::SaveLayerRec::default().bounds(&rect);
                 surface.canvas().save_layer(&layer);
             }
-            let clipped = group.clip.is_some();
-            if let Some(clip) = &group.clip {
+            let geometric_clip = group
+                .clip
+                .as_ref()
+                .filter(|clip| !matches!(clip, Clip::PillowRRect { .. }));
+            if let Some(clip) = geometric_clip {
                 let canvas = surface.canvas();
                 canvas.save();
                 apply_clip(canvas, child_off, group.size, clip);
@@ -1019,17 +1024,35 @@ fn render_node(
             for child in &group.children {
                 render_node(surface, interp, child_off, child)?;
             }
-            if clipped {
+            if geometric_clip.is_some() {
                 surface.canvas().restore();
             }
             if let Some(rect) = mask_rect {
-                let mask_ref = group.mask.as_deref().unwrap_or_default();
-                if let Some(mask) = interp.load_direct(mask_ref) {
+                let generated_pillow_mask = pillow_rrect_radius.is_some();
+                let generated_mask = pillow_rrect_radius
+                    .map(|radius| {
+                        pillow_rounded_rectangle_mask(
+                            group.size,
+                            radius,
+                            interp.max_node_pixels,
+                            interp.available_native_scene_bytes("pillow_rrect mask")?,
+                        )
+                    })
+                    .transpose()?;
+                if let Some(mask) = generated_mask.or_else(|| {
+                    group
+                        .mask
+                        .as_deref()
+                        .and_then(|mask_ref| interp.load_direct(mask_ref))
+                }) {
                     let mut keep = Paint::default();
-                    keep.set_anti_alias(true);
+                    // The generated mask already carries Pillow's discrete edge pixels, while
+                    // legacy external masks keep their historical filtered draw behavior.
+                    keep.set_anti_alias(!generated_pillow_mask);
                     keep.set_blend_mode(BlendMode::DstIn);
                     surface.canvas().draw_image_rect(&mask, None, rect, &keep);
                 } else {
+                    let mask_ref = group.mask.as_deref().unwrap_or_default();
                     if interp.strict_asset_depth > 0 {
                         surface.canvas().restore();
                         return Err(format!(
@@ -1293,7 +1316,274 @@ fn apply_clip(canvas: &Canvas, off: (f32, f32), size: Vec2, clip: &Clip) {
             let radii = corner_radii(*radius, corners);
             canvas.clip_rrect(RRect::new_rect_radii(rect, &radii), ClipOp::Intersect, true);
         }
+        Clip::PillowRRect { .. } => {
+            // This variant is a discrete alpha mask, not a geometric clip. Group handles it
+            // through an isolated saveLayer before this helper is called.
+        }
     }
+}
+
+fn pillow_rounded_rectangle_mask(
+    size: Vec2,
+    radius: f32,
+    max_node_pixels: usize,
+    available_scene_bytes: usize,
+) -> Result<Image, String> {
+    if !size[0].is_finite() || !size[1].is_finite() || !radius.is_finite() {
+        return Err("pillow_rrect contains a non-finite scalar".to_string());
+    }
+    let width = size[0].round() as i32;
+    let height = size[1].round() as i32;
+    if width <= 0 || height <= 0 {
+        return Err("pillow_rrect Group dimensions must be positive".to_string());
+    }
+    let byte_count =
+        validate_strict_asset_size(width, height, max_node_pixels, "pillow_rrect mask")?;
+    // `Data::new_copy` briefly coexists with the source Vec. Guard that construction peak,
+    // not merely the one retained raster copy used by the following DstIn draw.
+    let construction_peak = byte_count
+        .checked_mul(2)
+        .ok_or_else(|| "pillow_rrect mask construction byte count overflow".to_string())?;
+    if construction_peak > available_scene_bytes {
+        return Err(format!(
+            "pillow_rrect mask construction requires {construction_peak} bytes; only \
+             {available_scene_bytes} bytes remain in the scene limit"
+        ));
+    }
+    let x1 = width - 1;
+    let y1 = height - 1;
+    let mut diameter = (radius.max(0.0) * 2.0).min(x1.min(y1) as f32).round() as i32;
+    let full_x = diameter >= x1 - 1;
+    if full_x {
+        diameter = x1;
+    }
+    let full_y = diameter >= y1 - 1;
+    if full_y {
+        diameter = y1;
+    }
+
+    let mut rows = if full_x && full_y {
+        pillow_filled_ellipse_rows(width, height)
+    } else if diameter <= 0 {
+        vec![(0, x1); height as usize]
+    } else {
+        let corner_rows = pillow_filled_ellipse_rows(diameter + 1, diameter + 1);
+        let radius_i = diameter / 2;
+        let mut rows = vec![(0, x1); height as usize];
+        for y in 0..=radius_i.min(y1) {
+            let left = corner_rows[y as usize].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        let corner_top = y1 - diameter;
+        for y in (y1 - radius_i).max(0)..=y1 {
+            let corner_y = (y - corner_top).clamp(0, diameter) as usize;
+            let left = corner_rows[corner_y].0;
+            rows[y as usize] = (left, x1 - left);
+        }
+        rows
+    };
+    if rows.len() != height as usize {
+        return Err("pillow_rrect ellipse raster returned the wrong row count".to_string());
+    }
+
+    let row_bytes = usize::try_from(width)
+        .ok()
+        .and_then(|value| value.checked_mul(4))
+        .ok_or_else(|| "pillow_rrect row byte count overflow".to_string())?;
+    debug_assert_eq!(row_bytes * height as usize, byte_count);
+    let mut rgba = vec![0_u8; byte_count];
+    for (y, (left, right)) in rows.drain(..).enumerate() {
+        for x in left.max(0)..=right.min(x1) {
+            let offset = y * row_bytes + x as usize * 4;
+            rgba[offset..offset + 4].fill(255);
+        }
+    }
+    let info = ImageInfo::new(
+        (width, height),
+        ColorType::RGBA8888,
+        AlphaType::Premul,
+        None,
+    );
+    skia_safe::images::raster_from_data(&info, Data::new_copy(&rgba), row_bytes)
+        .ok_or_else(|| "pillow_rrect mask image construction failed".to_string())
+}
+
+#[derive(Clone, Copy)]
+struct PillowQuarterState {
+    cx: i32,
+    cy: i32,
+    ex: i32,
+    ey: i32,
+    a2: i64,
+    b2: i64,
+    a2b2: i64,
+    finished: bool,
+}
+
+impl PillowQuarterState {
+    fn new(a: i32, b: i32) -> Self {
+        if a < 0 || b < 0 {
+            return Self {
+                cx: 0,
+                cy: 0,
+                ex: 0,
+                ey: 0,
+                a2: 0,
+                b2: 0,
+                a2b2: 0,
+                finished: true,
+            };
+        }
+        let a2 = i64::from(a) * i64::from(a);
+        let b2 = i64::from(b) * i64::from(b);
+        Self {
+            cx: a,
+            cy: b % 2,
+            ex: a % 2,
+            ey: b,
+            a2,
+            b2,
+            a2b2: a2 * b2,
+            finished: false,
+        }
+    }
+
+    fn delta(&self, x: i64, y: i64) -> i64 {
+        (self.a2 * y * y + self.b2 * x * x - self.a2b2).abs()
+    }
+
+    fn next(&mut self) -> Option<(i32, i32)> {
+        if self.finished {
+            return None;
+        }
+        let result = (self.cx, self.cy);
+        if self.cx == self.ex && self.cy == self.ey {
+            self.finished = true;
+            return Some(result);
+        }
+        let mut nx = self.cx;
+        let mut ny = self.cy + 2;
+        let mut next_delta = self.delta(i64::from(nx), i64::from(ny));
+        if nx > 1 {
+            let diagonal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy + 2));
+            if next_delta > diagonal_delta {
+                nx = self.cx - 2;
+                ny = self.cy + 2;
+                next_delta = diagonal_delta;
+            }
+            let horizontal_delta = self.delta(i64::from(self.cx - 2), i64::from(self.cy));
+            if next_delta > horizontal_delta {
+                nx = self.cx - 2;
+                ny = self.cy;
+            }
+        }
+        self.cx = nx;
+        self.cy = ny;
+        Some(result)
+    }
+}
+
+struct PillowEllipseState {
+    outer: PillowQuarterState,
+    inner: PillowQuarterState,
+    py: i32,
+    pl: i32,
+    pr: i32,
+    buffer: Vec<(i32, i32, i32)>,
+    finished: bool,
+    leftmost: i32,
+}
+
+impl PillowEllipseState {
+    fn new(a: i32, b: i32, width: i32) -> Self {
+        let leftmost = a % 2;
+        let mut outer = PillowQuarterState::new(a, b);
+        let first = outer.next();
+        Self {
+            outer,
+            inner: PillowQuarterState::new(a - 2 * (width - 1), b - 2 * (width - 1)),
+            py: first.map_or(0, |(_, y)| y),
+            pl: leftmost,
+            pr: first.map_or(0, |(x, _)| x),
+            buffer: Vec::with_capacity(4),
+            finished: width < 1 || first.is_none(),
+            leftmost,
+        }
+    }
+
+    fn next(&mut self) -> Option<(i32, i32, i32)> {
+        if self.buffer.is_empty() {
+            if self.finished {
+                return None;
+            }
+            let y = self.py;
+            let mut left = self.pl;
+            let right = self.pr;
+            let mut outer_next = None;
+            while let Some(point @ (_, cy)) = self.outer.next() {
+                outer_next = Some(point);
+                if cy > y {
+                    break;
+                }
+            }
+            if let Some((cx, cy)) = outer_next.filter(|(_, cy)| *cy > y) {
+                self.pr = cx;
+                self.py = cy;
+            } else {
+                self.finished = true;
+            }
+
+            let mut inner_next = None;
+            while let Some(point @ (cx, cy)) = self.inner.next() {
+                inner_next = Some(point);
+                if cy <= y {
+                    left = cx;
+                } else {
+                    break;
+                }
+            }
+            self.pl = inner_next
+                .filter(|(_, cy)| *cy > y)
+                .map_or(self.leftmost, |(cx, _)| cx);
+
+            if (left > 0 || left < right) && y > 0 {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, y, right));
+            }
+            if y > 0 {
+                self.buffer.push((-right, y, -left));
+            }
+            if left > 0 || left < right {
+                self.buffer
+                    .push((if left == 0 { 2 } else { left }, -y, right));
+            }
+            self.buffer.push((-right, -y, -left));
+        }
+        self.buffer.pop()
+    }
+}
+
+fn pillow_filled_ellipse_rows(width: i32, height: i32) -> Vec<(i32, i32)> {
+    let a = width - 1;
+    let b = height - 1;
+    let mut rows = vec![(0, -1); height.max(0) as usize];
+    let mut state = PillowEllipseState::new(a, b, a + b);
+    while let Some((x0, y, x1)) = state.next() {
+        let row = (y + b) / 2;
+        if !(0..height).contains(&row) {
+            continue;
+        }
+        let left = (x0 + a) / 2;
+        let right = (x1 + a) / 2;
+        let slot = &mut rows[row as usize];
+        if slot.1 < slot.0 {
+            *slot = (left, right);
+        } else {
+            slot.0 = slot.0.min(left);
+            slot.1 = slot.1.max(right);
+        }
+    }
+    rows
 }
 
 /// Resolve a gradient spec to (colors, positions) where positions are strictly increasing.
@@ -2262,7 +2552,9 @@ fn prepare_sdf_shape_sources(node: &Node, interp: &mut Interp) -> Result<(), Str
                 .sdf_shape_sources
                 .get(&shape.path)
                 .ok_or_else(|| format!("SdfShape source was not prepared: {}", shape.path))?;
-            sdf_shape_dimensions(shape, source.width, source.height, interp.max_node_pixels)?;
+            // The full logical patch may be much larger than the output canvas. Allocation is
+            // checked against the canvas-clipped patch in draw_sdf_shape instead.
+            sdf_shape_dimensions(shape, source.width, source.height, usize::MAX)?;
             Ok(())
         }
         _ => Ok(()),
@@ -3148,86 +3440,137 @@ fn sample_sdf_shape_channel(
     top * (1.0 - ty) + bottom * ty
 }
 
-fn sample_sdf_shape_row(
+fn sample_sdf_shape_row_range(
     source: &SdfShapeSource,
     out_width: usize,
     out_height: usize,
     y: usize,
     channel: usize,
+    left: usize,
+    right: usize,
 ) -> Vec<f32> {
-    (0..out_width)
+    (left..right)
         .map(|x| sample_sdf_shape_channel(source, out_width, out_height, x, y, channel))
         .collect()
 }
 
+#[cfg(test)]
 fn shade_sdf_shape(
     source: &SdfShapeSource,
     node: &SdfShapeNode,
     out_width: usize,
     out_height: usize,
 ) -> Result<Vec<u8>, String> {
-    let byte_len = out_width
-        .checked_mul(out_height)
+    shade_sdf_shape_region(
+        source,
+        node,
+        out_width,
+        out_height,
+        (0, 0, out_width, out_height),
+    )
+}
+
+fn shade_sdf_shape_region(
+    source: &SdfShapeSource,
+    node: &SdfShapeNode,
+    out_width: usize,
+    out_height: usize,
+    bounds: (usize, usize, usize, usize),
+) -> Result<Vec<u8>, String> {
+    let (left, top, right, bottom) = bounds;
+    if left >= right || top >= bottom || right > out_width || bottom > out_height {
+        return Err(format!(
+            "invalid SdfShape region {left},{top}..{right},{bottom} for {out_width}x{out_height}"
+        ));
+    }
+    let region_width = right - left;
+    let region_height = bottom - top;
+    let byte_len = region_width
+        .checked_mul(region_height)
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| "SdfShape output byte size overflow".to_string())?;
     let mut patch = Vec::new();
-    patch
-        .try_reserve_exact(byte_len)
-        .map_err(|_| format!("SdfShape output allocation rejected: {out_width}x{out_height}"))?;
+    patch.try_reserve_exact(byte_len).map_err(|_| {
+        format!("SdfShape output allocation rejected: {region_width}x{region_height}")
+    })?;
     patch.resize(byte_len, 0);
 
     let field_channel = match node.field_channel {
         SdfShapeFieldChannel::Red => 0,
         SdfShapeFieldChannel::Alpha => 3,
     };
-    let mut previous = sample_sdf_shape_row(source, out_width, out_height, 0, field_channel);
-    let mut current = previous.clone();
-    let mut next = sample_sdf_shape_row(
+    let softness = node.softness.max(0.0);
+    let sample_left = left.saturating_sub(1);
+    let sample_right = (right + 1).min(out_width);
+    let mut previous = sample_sdf_shape_row_range(
         source,
         out_width,
         out_height,
-        usize::from(out_height > 1),
+        top.saturating_sub(1),
         field_channel,
+        sample_left,
+        sample_right,
     );
-    let softness = node.softness.max(0.0);
+    let mut current = sample_sdf_shape_row_range(
+        source,
+        out_width,
+        out_height,
+        top,
+        field_channel,
+        sample_left,
+        sample_right,
+    );
+    let mut next = sample_sdf_shape_row_range(
+        source,
+        out_width,
+        out_height,
+        (top + 1).min(out_height - 1),
+        field_channel,
+        sample_left,
+        sample_right,
+    );
 
-    for y in 0..out_height {
-        let texture_alpha = sample_sdf_shape_row(source, out_width, out_height, y, 3);
-        for x in 0..out_width {
+    for y in top..bottom {
+        let texture_alpha =
+            sample_sdf_shape_row_range(source, out_width, out_height, y, 3, left, right);
+        for x in left..right {
+            let sample_x = x - sample_left;
+            let field = current[sample_x];
             let grad_x = if out_width <= 1 {
                 0.0
             } else if x == 0 {
-                current[1] - current[0]
+                current[sample_x + 1] - field
             } else if x + 1 == out_width {
-                current[x] - current[x - 1]
+                field - current[sample_x - 1]
             } else {
-                (current[x + 1] - current[x - 1]) * 0.5
+                (current[sample_x + 1] - current[sample_x - 1]) * 0.5
             };
             let grad_y = if out_height <= 1 {
                 0.0
             } else if y == 0 {
-                next[x] - current[x]
+                next[sample_x] - field
             } else if y + 1 == out_height {
-                current[x] - previous[x]
+                field - previous[sample_x]
             } else {
-                (next[x] - previous[x]) * 0.5
+                (next[sample_x] - previous[sample_x]) * 0.5
             };
             let fwidth = grad_x.abs() + grad_y.abs();
             let half_width = softness * 0.5 + fwidth;
             let edge0 = 0.5 - half_width;
             let edge1 = 0.5 + half_width;
             let span = (edge1 - edge0).max(1.0e-6);
-            let t = ((current[x] - edge0) / span).clamp(0.0, 1.0);
+            let t = ((field - edge0) / span).clamp(0.0, 1.0);
             let smooth = t * t * (3.0 - 2.0 * t);
+            let texture_alpha = texture_alpha[x - left];
             let face = if smooth >= 0.899999976 {
-                texture_alpha[x] * smooth * node.fill_alpha
+                texture_alpha * smooth * node.fill_alpha
             } else {
                 0.0
             };
-            let outline_distance = current[x] + smooth * 0.5 + node.face_dilate * 0.5;
+            let outline_distance = field + smooth * 0.5 + node.face_dilate * 0.5;
             let outline_t = (outline_distance * 10.0).clamp(0.0, 1.0);
             let outline_smooth = outline_t * outline_t * (3.0 - 2.0 * outline_t);
-            let outline = texture_alpha[x] * outline_smooth * node.outline_alpha;
+            let outline = texture_alpha * outline_smooth * node.outline_alpha;
             let outline_pixel =
                 outline_distance >= 1.0 - node.outer_fill_ratio && outline_distance < 1.0;
             let alpha = if outline_pixel { outline } else { face };
@@ -3236,24 +3579,65 @@ fn shade_sdf_shape(
             } else {
                 node.fill_color
             };
-            let pixel = &mut patch[(y * out_width + x) * 4..][..4];
+            let pixel = &mut patch[((y - top) * region_width + (x - left)) * 4..][..4];
             pixel[..3].copy_from_slice(&rgb);
             pixel[3] = (alpha * 255.0).round_ties_even().clamp(0.0, 255.0) as u8;
         }
 
-        if y + 1 < out_height {
+        if y + 1 < bottom {
             previous = current;
             current = next;
-            next = sample_sdf_shape_row(
+            next = sample_sdf_shape_row_range(
                 source,
                 out_width,
                 out_height,
                 (y + 2).min(out_height - 1),
                 field_channel,
+                sample_left,
+                sample_right,
             );
         }
     }
     Ok(patch)
+}
+
+fn sdf_shape_visible_bounds(
+    canvas_size: (i32, i32),
+    node: &SdfShapeNode,
+    patch_size: (i32, i32),
+    off: (f32, f32),
+    padding: i32,
+) -> Option<(i32, i32, i32, i32)> {
+    let (width, height) = patch_size;
+    let anchor = (node.anchor[0] + off.0, node.anchor[1] + off.1);
+    let theta = (node.rotation % 360.0).to_radians();
+    let cos_t = theta.cos();
+    let sin_t = theta.sin();
+    let pivot = (width as f32 * 0.5, height as f32 * 0.5);
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for (canvas_x, canvas_y) in [
+        (0.0, 0.0),
+        (canvas_size.0 as f32, 0.0),
+        (canvas_size.0 as f32, canvas_size.1 as f32),
+        (0.0, canvas_size.1 as f32),
+    ] {
+        let dx = canvas_x - anchor.0;
+        let dy = canvas_y - anchor.1;
+        let local_x = pivot.0 + (cos_t * dx + sin_t * dy) / node.post_scale[0];
+        let local_y = pivot.1 + (-sin_t * dx + cos_t * dy) / node.post_scale[1];
+        min_x = min_x.min(local_x);
+        min_y = min_y.min(local_y);
+        max_x = max_x.max(local_x);
+        max_y = max_y.max(local_y);
+    }
+    let left = ((min_x.floor() as i64) - i64::from(padding)).clamp(0, i64::from(width)) as i32;
+    let top = ((min_y.floor() as i64) - i64::from(padding)).clamp(0, i64::from(height)) as i32;
+    let right = ((max_x.ceil() as i64) + i64::from(padding)).clamp(0, i64::from(width)) as i32;
+    let bottom = ((max_y.ceil() as i64) + i64::from(padding)).clamp(0, i64::from(height)) as i32;
+    (left < right && top < bottom).then_some((left, top, right, bottom))
 }
 
 fn draw_sdf_shape(
@@ -3266,32 +3650,61 @@ fn draw_sdf_shape(
         .sdf_shape_sources
         .get(&node.path)
         .ok_or_else(|| format!("SdfShape source was not prepared: {}", node.path))?;
-    let (width, height) =
-        sdf_shape_dimensions(node, source.width, source.height, interp.max_node_pixels)?;
-    let patch_bytes = usize::try_from(width)
+    let (width, height) = sdf_shape_dimensions(node, source.width, source.height, usize::MAX)?;
+    let Some((crop_left, crop_top, crop_right, crop_bottom)) = sdf_shape_visible_bounds(
+        (surface.width(), surface.height()),
+        node,
+        (width, height),
+        off,
+        3,
+    ) else {
+        return Ok(());
+    };
+    let crop_width = crop_right - crop_left;
+    let crop_height = crop_bottom - crop_top;
+    let crop_pixels = usize::try_from(crop_width)
         .ok()
-        .and_then(|width| {
-            usize::try_from(height)
+        .and_then(|crop_width| {
+            usize::try_from(crop_height)
                 .ok()
-                .and_then(|height| width.checked_mul(height))
+                .and_then(|crop_height| crop_width.checked_mul(crop_height))
         })
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| "SdfShape patch byte count overflow".to_string())?;
+        .ok_or_else(|| "SdfShape visible patch pixel count overflow".to_string())?;
+    if crop_pixels > interp.max_node_pixels {
+        return Err(format!(
+            "SdfShape visible patch {crop_width}x{crop_height} ({crop_pixels} pixels) exceeds limit {}",
+            interp.max_node_pixels
+        ));
+    }
+    let patch_bytes = crop_pixels
+        .checked_mul(4)
+        .ok_or_else(|| "SdfShape visible patch byte count overflow".to_string())?;
     interp.ensure_native_scene_bytes(
         patch_bytes
             .checked_mul(2)
             .ok_or_else(|| "SdfShape transient byte count overflow".to_string())?,
         "SdfShape patch",
     )?;
-    let patch = shade_sdf_shape(source, node, width as usize, height as usize)?;
+    let patch = shade_sdf_shape_region(
+        source,
+        node,
+        width as usize,
+        height as usize,
+        (
+            crop_left as usize,
+            crop_top as usize,
+            crop_right as usize,
+            crop_bottom as usize,
+        ),
+    )?;
     let info = ImageInfo::new(
-        (width, height),
+        (crop_width, crop_height),
         ColorType::RGBA8888,
         AlphaType::Unpremul,
         None,
     );
     let image =
-        skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), width as usize * 4)
+        skia_safe::images::raster_from_data(&info, Data::new_copy(&patch), crop_width as usize * 4)
             .ok_or_else(|| "failed to build SdfShape raster image".to_string())?;
     let anchor = (node.anchor[0] + off.0, node.anchor[1] + off.1);
     let angle = node.rotation % 360.0;
@@ -3307,10 +3720,19 @@ fn draw_sdf_shape(
             .max(1.0);
         let left = (anchor.0 - width as f32 * 0.5 * node.post_scale[0]).round_ties_even();
         let top = (anchor.1 - height as f32 * 0.5 * node.post_scale[1]).round_ties_even();
+        let crop_dest_left = left + crop_left as f32 * final_width / width as f32;
+        let crop_dest_top = top + crop_top as f32 * final_height / height as f32;
+        let crop_dest_width = crop_width as f32 * final_width / width as f32;
+        let crop_dest_height = crop_height as f32 * final_height / height as f32;
         surface.canvas().draw_image_rect_with_sampling_options(
             &image,
             None,
-            Rect::from_xywh(left, top, final_width, final_height),
+            Rect::from_xywh(
+                crop_dest_left,
+                crop_dest_top,
+                crop_dest_width,
+                crop_dest_height,
+            ),
             CubicResampler::catmull_rom(),
             &paint,
         );
@@ -3339,7 +3761,7 @@ fn draw_sdf_shape(
     canvas.concat(&matrix);
     canvas.draw_image_with_sampling_options(
         &image,
-        (0.0, 0.0),
+        (crop_left as f32, crop_top as f32),
         CubicResampler::catmull_rom(),
         Some(&paint),
     );
@@ -6971,6 +7393,51 @@ mod tests {
     }
 
     #[test]
+    fn sdf_shape_region_matches_the_same_pixels_from_the_full_patch() {
+        let mut pixels = Vec::with_capacity(4 * 4 * 4);
+        for value in 0_u8..16 {
+            pixels.extend_from_slice(&[value.saturating_mul(17), 0, 0, 255]);
+        }
+        let source = SdfShapeSource {
+            pixels,
+            width: 4,
+            height: 4,
+        };
+        let node = test_sdf_shape_node();
+        let full = shade_sdf_shape(&source, &node, 9, 7).expect("shades full patch");
+        let bounds = (2, 1, 8, 6);
+        let region = shade_sdf_shape_region(&source, &node, 9, 7, bounds).expect("shades region");
+        let region_width = bounds.2 - bounds.0;
+
+        for y in bounds.1..bounds.3 {
+            let full_start = (y * 9 + bounds.0) * 4;
+            let region_start = (y - bounds.1) * region_width * 4;
+            assert_eq!(
+                &region[region_start..region_start + region_width * 4],
+                &full[full_start..full_start + region_width * 4],
+            );
+        }
+    }
+
+    #[test]
+    fn sdf_shape_oversized_logical_patch_is_clipped_to_the_canvas() {
+        let mut node = test_sdf_shape_node();
+        node.anchor = [1024.0, 454.5];
+        node.post_scale = [2048.0 / 1830.0, 909.0 / 813.0];
+        let logical_size = (4491, 1902);
+        assert!(logical_size.0 as usize * logical_size.1 as usize > 8 * 1024 * 1024);
+
+        let bounds = sdf_shape_visible_bounds((2048, 909), &node, logical_size, (0.0, 0.0), 3)
+            .expect("centred shape intersects the canvas");
+        let visible_width = (bounds.2 - bounds.0) as usize;
+        let visible_height = (bounds.3 - bounds.1) as usize;
+
+        assert!(visible_width < logical_size.0 as usize);
+        assert!(visible_height < logical_size.1 as usize);
+        assert!(visible_width * visible_height < 8 * 1024 * 1024);
+    }
+
+    #[test]
     fn sdf_shape_rejects_huge_patch_before_allocation() {
         let mut node = test_sdf_shape_node();
         node.sdf_scale = [10.0, 10.0];
@@ -7012,6 +7479,39 @@ mod tests {
                 .any(|pixel| pixel[3] > 0 && pixel[..3] == [20, 120, 240]),
             "SdfShape must draw the shaded asset"
         );
+    }
+
+    #[test]
+    fn sdf_shape_oversized_asset_node_renders_only_its_visible_patch() {
+        let fixture_dir = fixture_path("sdf_quad_face_only_field.png")
+            .parent()
+            .expect("fixture parent")
+            .to_string_lossy()
+            .into_owned();
+        let root = r#"{
+            "type": "SdfShape",
+            "path": "sdf_quad_face_only_field.png",
+            "anchor": [32, 32],
+            "sdf_scale": [64, 64],
+            "post_scale": [1, 1],
+            "rotation": 0,
+            "field_channel": "red",
+            "fill_color": [20, 120, 240],
+            "fill_alpha": 1,
+            "outline_color": [255, 255, 255],
+            "outline_alpha": 0,
+            "outer_fill_ratio": 0,
+            "face_dilate": 0,
+            "softness": 0
+        }"#;
+        let json = bare_scene_json((64, 64), root).replace("/tmp/does-not-matter", &fixture_dir);
+        let scene: Scene = serde_json::from_str(&json).expect("parses");
+
+        let rendered = render_scene_inner(&scene, HashMap::new()).expect("renders clipped shape");
+        let (pixels, width, height) = decode_pixels(&rendered);
+
+        assert_eq!((width, height), (64, 64));
+        assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] > 0));
     }
 
     #[test]
