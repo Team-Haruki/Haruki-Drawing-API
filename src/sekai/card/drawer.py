@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 import math
 import time
@@ -51,7 +51,6 @@ from src.sekai.profile.drawer import (
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 
-# 从 model.py 导入数据模型
 from .model import (
     CardBoxDistribution,
     CardBoxRequest,
@@ -60,6 +59,9 @@ from .model import (
     CardDistributionCharacterStat,
     CardListRequest,
 )
+
+# 从 model.py 导入数据模型
+from .timeline import CARD_SIZE as TIMELINE_CARD_SIZE, draw_timeline, timeline_columns, timeline_width
 
 NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
 TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
@@ -1120,7 +1122,11 @@ async def _load_card_box_records(rqd: CardBoxRequest) -> tuple[list[dict], float
     elapsed = time.perf_counter() - started_at
     records = []
     for user_card, layers in zip(rqd.cards, thumbs):
-        if layers is None or (rqd.show_box and not user_card.has_card) or (rqd.unowned_only and user_card.has_card):
+        if (
+            layers is None
+            or ((rqd.show_box or rqd.group_by == "time") and not user_card.has_card)
+            or (rqd.unowned_only and user_card.has_card)
+        ):
             continue
         records.append({**user_card.model_dump(), "thumb_layers": layers, "has": user_card.has_card})
     return records, elapsed
@@ -1309,6 +1315,7 @@ class _CardBoxRenderer:
         self.profile = profile
         self.panel_width = panel_width
         self.panel_text_width = panel_text_width
+        self.timeline_columns = []
 
     def _character_color(self, character_id: int):
         color_code = self.rqd.character_color_codes.get(character_id) or CHARACTER_COLOR_CODE.get(
@@ -1571,9 +1578,11 @@ class _CardBoxRenderer:
                 if self.profile:
                     with HSplit().set_content_align("l").set_item_align("l").set_w(self.panel_width) as profile_panel:
                         profile_panel.add_item(self.profile)
-                if self.layout.single_progress is not None:
+                if self.layout.single_progress is not None and self.rqd.group_by != "time":
                     self._draw_single_character_progress(self.layout.single_progress)
-                if self.layout.group_by_attribute:
+                if self.rqd.group_by == "time":
+                    draw_timeline(self, self.timeline_columns)
+                elif self.layout.group_by_attribute:
                     self._draw_attribute_grid()
                 else:
                     self._draw_normal_grid()
@@ -1585,10 +1594,20 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
     started_at = time.perf_counter()
     records, thumbs_elapsed = await _load_card_box_records(rqd)
     layout = _card_box_layout(rqd, records)
+    columns = timeline_columns(records, rqd.timezone) if rqd.group_by == "time" else []
+    if rqd.group_by == "time":
+        if rqd.unowned_only:
+            raise ValueError("时间模式不能与未持有同时使用")
+        width = timeline_width(columns)
+        layout = replace(
+            layout, card_size=TIMELINE_CARD_SIZE, card_sep=6, panel_width=width, panel_text_width=width - 120
+        )
     assets, preload_elapsed = await _load_card_box_assets(rqd, layout)
     profile, panel_width, panel_text_width = await _card_box_profile(rqd, layout)
     background = await _card_box_background(rqd)
-    canvas = _CardBoxRenderer(rqd, layout, assets, profile, panel_width, panel_text_width).draw_canvas(background)
+    renderer = _CardBoxRenderer(rqd, layout, assets, profile, panel_width, panel_text_width)
+    renderer.timeline_columns = columns
+    canvas = renderer.draw_canvas(background)
     add_request_watermark(canvas, rqd)
     _perf_logger.info(
         "card/box build: %.3fs (thumbs=%.3fs, preload=%.3fs, cards=%d, visible=%d, groups=%d)",
