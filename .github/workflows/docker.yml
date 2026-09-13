@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Download the wheel that passed native smoke validation
         env:
@@ -47,12 +49,13 @@ jobs:
           VERSION=${{ github.ref_name }}
           echo "image=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
-            echo "$VERSION is a stable release — it will also be pushed as :latest"
+          NEWEST_STABLE_TAG=$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+          if [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ && "$VERSION" == "$NEWEST_STABLE_TAG" ]]; then
+            echo "push_latest=true" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is the newest stable release; publish :latest"
           else
-            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
-            echo "$VERSION is a pre-release — :latest will NOT be moved"
+            echo "push_latest=false" >> "$GITHUB_OUTPUT"
+            echo "$VERSION is a prerelease or maintenance release; preserve :latest"
           fi
 
       - name: Build Docker image
@@ -60,7 +63,7 @@ jobs:
           IMAGE_NAME=${{ steps.tags.outputs.image }}
           VERSION=${{ steps.tags.outputs.version }}
           TAGS="-t $IMAGE_NAME:$VERSION"
-          if [[ "${{ steps.tags.outputs.is_prerelease }}" == "false" ]]; then
+          if [[ "${{ steps.tags.outputs.push_latest }}" == "true" ]]; then
             TAGS="$TAGS -t $IMAGE_NAME:latest"
           fi
           docker build \
@@ -74,8 +77,8 @@ jobs:
           IMAGE_NAME=${{ steps.tags.outputs.image }}
           VERSION=${{ steps.tags.outputs.version }}
           docker push $IMAGE_NAME:$VERSION
-          if [[ "${{ steps.tags.outputs.is_prerelease }}" == "false" ]]; then
+          if [[ "${{ steps.tags.outputs.push_latest }}" == "true" ]]; then
             docker push $IMAGE_NAME:latest
           else
-            echo "pre-release: skipping :latest"
+            echo "preserving :latest"
           fi

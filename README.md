@@ -2,7 +2,7 @@
 
 Haruki Drawing API 是 Team Haruki 的 Project Sekai 图片生成服务。它接收 JSON 请求并输出 PNG/JPG，覆盖玩家资料、卡牌、活动、歌曲、谱面、招募、成绩和 MySekai 等页面。
 
-当前版本为 `3.1.0`。生产绘图必须使用 Rust + Skia 后端；缺失或过旧的原生扩展会阻止构建/启动，渲染失败不再调用 Pillow。Pillow 仅作为开发对照环境的依赖，继续消费共享 widget 树来验证像素。
+当前版本为 `3.1.1`。生产绘图必须使用 Rust + Skia 后端；缺失或过旧的原生扩展会阻止构建/启动，渲染失败不再调用 Pillow。Pillow 仅作为开发对照环境的依赖，继续消费共享 widget 树来验证像素。
 
 ## 运行要求
 
