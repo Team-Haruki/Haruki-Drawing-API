@@ -17,14 +17,14 @@ def test_timeline_uses_acquisition_time_timezone_and_owned_only():
     assert acquired_datetime(record(1, 10**30), "UTC") is None
 
 
-def test_dense_month_splits_without_losing_order_or_growing_unbounded_width():
+def test_dense_month_stays_one_group_without_losing_order():
     timestamp = 1780000000000
     columns = timeline_columns([record(i, timestamp) for i in reversed(range(1000))], "UTC")
-    assert len(columns) == 21
-    assert max(len(items) for _, items in columns) == 48
+    assert len(columns) == 1
+    assert len(columns[0][1]) == 1000
     assert [r["card"]["card_id"] for _, items in columns for r in items] == list(range(1000))
-    assert timeline_width(columns) == timeline_width(columns[:9])
-    assert timeline_width([]) >= 480
+    assert "续" not in columns[0][0]
+    assert timeline_width([], 1, 100, 8) >= 480
 
 
 def test_timeline_draws_month_rows_dates_and_character_tints():
@@ -40,7 +40,8 @@ def test_timeline_draws_month_rows_dates_and_character_tints():
         Spacer(w=72, h=72)
 
     renderer = SimpleNamespace(
-        panel_width=timeline_width([("2026.01", [])] * 10),
+        panel_width=timeline_width([("2026.01", [])] * 11, 20, 72, 6),
+        layout=SimpleNamespace(best_height=20, card_size=72, card_sep=6),
         rqd=SimpleNamespace(timezone="UTC"),
         _draw_card=draw_card,
         _character_color=lambda _: (51, 170, 238, 255),
@@ -51,7 +52,7 @@ def test_timeline_draws_month_rows_dates_and_character_tints():
         draw_timeline(renderer, columns)
     width, height = canvas._get_self_size()
     assert width == renderer.panel_width
-    assert height > 250
+    assert height > 200
     assert drawn == list(range(1, 12))
     with Canvas() as empty:
         draw_timeline(renderer, [])

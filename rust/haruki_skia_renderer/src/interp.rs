@@ -597,6 +597,28 @@ fn rgba_byte_len(width: i32, height: i32, label: &str) -> Result<usize, String> 
         .ok_or_else(|| format!("{label} byte count overflow"))
 }
 
+/// Bound the explicit glass surfaces at their device-pixel sizes. The padded
+/// backdrop bounds also conservatively contain the alpha layer and sample rect.
+/// Keep this in sync with draw_blur_glass_rect: only the backdrop and alpha layer
+/// are full size; its two blur surfaces use ceil(size / floor(blur / 2)).
+fn blur_glass_scratch_bytes(bounds: IRect, blur: f32) -> Result<usize, String> {
+    let label = "BlurGlass scratch";
+    let full = rgba_byte_len(bounds.width(), bounds.height(), label)?;
+    let reduced = if blur > 0.01 {
+        let downsample = (blur / 2.0).floor().max(1.0);
+        rgba_byte_len(
+            (bounds.width() as f32 / downsample).ceil().max(1.0) as i32,
+            (bounds.height() as f32 / downsample).ceil().max(1.0) as i32,
+            label,
+        )?
+    } else {
+        0
+    };
+    full.checked_add(reduced)
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or_else(|| "BlurGlass scratch size overflow".to_string())
+}
+
 fn mem_payload_bytes(mem_images: &HashMap<String, MemImage>) -> Result<usize, String> {
     mem_images.values().try_fold(0usize, |total, image| {
         let bytes = match image {
@@ -1401,12 +1423,7 @@ fn render_node(
                 return Ok(());
             }
             let ibounds = logical_rect_to_device(bounds, interp.device_scale);
-            // Backdrop, alpha-replacement layer, downsample and blur surfaces.
-            // The latter two are no larger than the padded region; charge the
-            // conservative peak before Skia allocates any of them.
-            let scratch = rgba_byte_len(ibounds.width(), ibounds.height(), "BlurGlass scratch")?
-                .checked_mul(if glass.blur > 0.01 { 4 } else { 2 })
-                .ok_or_else(|| "BlurGlass scratch size overflow".to_string())?;
+            let scratch = blur_glass_scratch_bytes(ibounds, glass.blur)?;
             interp.push_native_runtime_bytes(scratch, "BlurGlass scratch")?;
             let backdrop = surface
                 .image_snapshot_with_bounds(ibounds)
@@ -6842,6 +6859,20 @@ mod tests {
             .err()
             .expect("must reject");
         assert!(error.contains("post_resize dimensions"), "{error}");
+    }
+
+    #[test]
+    fn glass_scratch_accounts_for_downsampled_surfaces_and_rounding() {
+        let bounds = IRect::from_xywh(0, 0, 4000, 4000);
+        assert_eq!(blur_glass_scratch_bytes(bounds, 0.0).unwrap(), 128_000_000);
+        assert_eq!(blur_glass_scratch_bytes(bounds, 2.0).unwrap(), 256_000_000);
+        assert_eq!(blur_glass_scratch_bytes(bounds, 4.0).unwrap(), 160_000_000);
+        assert_eq!(blur_glass_scratch_bytes(bounds, 8.0).unwrap(), 136_000_000);
+        let odd = IRect::from_xywh(10, 20, 101, 103);
+        assert_eq!(
+            blur_glass_scratch_bytes(odd, 4.0).unwrap(),
+            (101 * 103 + 51 * 52) * 8
+        );
     }
 
     #[test]

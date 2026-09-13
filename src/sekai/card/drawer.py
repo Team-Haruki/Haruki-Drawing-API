@@ -61,8 +61,7 @@ from .model import (
 )
 
 # 从 model.py 导入数据模型
-from .panel import card_box_panel_bg
-from .timeline import CARD_SIZE as TIMELINE_CARD_SIZE, draw_timeline, timeline_columns, timeline_width
+from .timeline import draw_timeline, timeline_columns, timeline_width
 
 NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
 TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
@@ -1388,7 +1387,7 @@ class _CardBoxRenderer:
         detail_width = max(260, self.panel_width - 32 - avatar_size - 16)
         with (
             HSplit()
-            .set_bg(card_box_panel_bg(alpha=80))
+            .set_bg(roundrect_bg(alpha=80))
             .set_content_align("l")
             .set_item_align("c")
             .set_padding(16)
@@ -1489,7 +1488,7 @@ class _CardBoxRenderer:
     def _draw_normal_grid(self) -> None:
         with (
             HSplit()
-            .set_bg(card_box_panel_bg(alpha=80))
+            .set_bg(roundrect_bg(alpha=80))
             .set_content_align("lt")
             .set_item_align("lt")
             .set_padding(16)
@@ -1526,7 +1525,7 @@ class _CardBoxRenderer:
         with (
             HSplit()
             .set_bg(
-                card_box_panel_bg(
+                roundrect_bg(
                     fill=_with_alpha(color, 38),
                     radius=10,
                     blur_glass_kwargs={"shadow_alpha": 0.18},
@@ -1558,7 +1557,7 @@ class _CardBoxRenderer:
             return
         with (
             HSplit()
-            .set_bg(card_box_panel_bg(fill=(255, 246, 219, 220)))
+            .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
             .set_padding(14)
             .set_sep(12)
             .set_content_align("l")
@@ -1599,9 +1598,17 @@ async def _build_box_canvas(rqd: CardBoxRequest) -> Canvas:
     if rqd.group_by == "time":
         if rqd.unowned_only:
             raise ValueError("时间模式不能与未持有同时使用")
-        width = timeline_width(columns)
+        # Use the same row/column balance and thumbnail sizing as the normal box.
+        height = _best_card_box_height(columns)
+        card_size, card_sep = _card_box_card_geometry(columns, height)
+        width = timeline_width(columns, height, card_size, card_sep)
         layout = replace(
-            layout, card_size=TIMELINE_CARD_SIZE, card_sep=6, panel_width=width, panel_text_width=width - 120
+            layout,
+            best_height=height,
+            card_size=card_size,
+            card_sep=card_sep,
+            panel_width=width,
+            panel_text_width=width - 120,
         )
     assets, preload_elapsed = await _load_card_box_assets(rqd, layout)
     profile, panel_width, panel_text_width = await _card_box_profile(rqd, layout)
