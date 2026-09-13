@@ -4,9 +4,11 @@ from collections import OrderedDict
 from datetime import datetime
 from typing import Any
 
-from src.sekai.base import DEFAULT_BOLD_FONT, DEFAULT_FONT, roundrect_bg
+from src.sekai.base import DEFAULT_BOLD_FONT, DEFAULT_FONT
 from src.sekai.base.plot import FillBg, Frame, Grid, HSplit, RoundRectBg, Spacer, TextBox, TextStyle, VSplit
 from src.sekai.base.timezone import datetime_from_millis
+
+from .panel import card_box_panel_bg
 
 CARD_SIZE = 72
 PADDING = 5
@@ -52,7 +54,7 @@ def draw_timeline(renderer: Any, columns: list[tuple[str, list[dict]]]) -> None:
         .set_w(renderer.panel_width)
         .set_padding(16)
         .set_sep(16)
-        .set_bg(roundrect_bg(alpha=80))
+        .set_bg(card_box_panel_bg(alpha=80))
         .set_content_align("lt")
         .set_item_align("lt")
     ):

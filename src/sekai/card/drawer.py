@@ -61,6 +61,7 @@ from .model import (
 )
 
 # 从 model.py 导入数据模型
+from .panel import card_box_panel_bg
 from .timeline import CARD_SIZE as TIMELINE_CARD_SIZE, draw_timeline, timeline_columns, timeline_width
 
 NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
@@ -1387,7 +1388,7 @@ class _CardBoxRenderer:
         detail_width = max(260, self.panel_width - 32 - avatar_size - 16)
         with (
             HSplit()
-            .set_bg(roundrect_bg(alpha=80))
+            .set_bg(card_box_panel_bg(alpha=80))
             .set_content_align("l")
             .set_item_align("c")
             .set_padding(16)
@@ -1488,7 +1489,7 @@ class _CardBoxRenderer:
     def _draw_normal_grid(self) -> None:
         with (
             HSplit()
-            .set_bg(roundrect_bg(alpha=80))
+            .set_bg(card_box_panel_bg(alpha=80))
             .set_content_align("lt")
             .set_item_align("lt")
             .set_padding(16)
@@ -1525,7 +1526,7 @@ class _CardBoxRenderer:
         with (
             HSplit()
             .set_bg(
-                roundrect_bg(
+                card_box_panel_bg(
                     fill=_with_alpha(color, 38),
                     radius=10,
                     blur_glass_kwargs={"shadow_alpha": 0.18},
@@ -1557,7 +1558,7 @@ class _CardBoxRenderer:
             return
         with (
             HSplit()
-            .set_bg(roundrect_bg(fill=(255, 246, 219, 220)))
+            .set_bg(card_box_panel_bg(fill=(255, 246, 219, 220)))
             .set_padding(14)
             .set_sep(12)
             .set_content_align("l")
