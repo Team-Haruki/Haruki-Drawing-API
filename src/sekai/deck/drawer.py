@@ -413,7 +413,7 @@ def _collect_deck_asset_requests(rqd: DeckRequest) -> tuple[list, list[tuple], l
     for deck in rqd.deck_data:
         if rqd.music_compare and deck.music_cover_path and deck.music_cover_path not in compare_cover_paths:
             compare_cover_paths.append(deck.music_cover_path)
-        for card in deck.card_data:
+        for card in [*deck.card_data, *deck.support_card_data]:
             card_thumb_tasks.append(get_card_full_thumbnail_layers(card.card_thumbnail))
             card_thumb_keys.append(
                 (
@@ -574,7 +574,7 @@ def _draw_deck_warning_or_music(rqd: DeckRequest, assets: _DeckRecommendAssets) 
             "友情提醒：控分前请核对加成和体力设置",
             TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)),
         )
-        if rqd.recommend_type == "wl_bonus":
+        if rqd.recommend_type == "wl_bonus" and not any(deck.support_card_data for deck in rqd.deck_data):
             TextBox(
                 "WL仅支持自动组主队，支援队请自行配置",
                 TextStyle(font=DEFAULT_FONT, size=26, color=(50, 50, 50)),
@@ -642,6 +642,13 @@ _DECK_POWER_WIDTH = 100
 _DECK_CARD_WIDTH = 96
 
 
+def _deck_column_padding(rqd: DeckRequest) -> tuple[int, int]:
+    # Reuse the main row's vertical padding for larger support thumbnails and text.
+    if rqd.is_wl and len(rqd.deck_data) == 1 and rqd.deck_data[0].support_card_data:
+        return (8, 2 if len(rqd.deck_data[0].support_card_data) > 12 else 5)
+    return (8, 8)
+
+
 def _draw_deck_compare_music_row(deck, assets: _DeckRecommendAssets) -> None:
     with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0).set_h(_DECK_ROW_HEIGHT):
         with Frame().set_content_align("c"):
@@ -680,10 +687,19 @@ def _draw_deck_compare_music_row(deck, assets: _DeckRecommendAssets) -> None:
             ).set_w(120).set_content_align("c")
 
 
-def _draw_deck_compare_music_column(rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle) -> None:
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        TextBox("歌曲", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
-        Spacer(h=6)
+def _draw_deck_compare_music_column(
+    rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle, *, show_heading: bool = True
+) -> None:
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            TextBox("歌曲", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+            Spacer(h=6)
         for deck in rqd.deck_data:
             _draw_deck_compare_music_row(deck, assets)
 
@@ -705,20 +721,29 @@ def _draw_deck_score_column(
     heading_style: TextStyle,
     secondary_heading_style: TextStyle,
     value_style: TextStyle,
+    *,
+    show_heading: bool = True,
 ) -> None:
     target_score = rqd.target == "score"
     boost_bonus = BOOST_BONUS_DICT.get(rqd.boost or 0, 1) if rqd.boost is not None else 1
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        text = _deck_score_name(rqd) + ("∇" if target_score else "")
-        style = heading_style if target_score else secondary_heading_style
-        with Frame().set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c"):
-            TextBox(text, style).set_w(_DECK_SCORE_WIDTH).set_content_align("c")
-            if rqd.boost is not None and target_score:
-                TextBox(
-                    f"{rqd.boost}🔥(x{boost_bonus})",
-                    TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
-                ).set_w(_DECK_SCORE_WIDTH).set_content_align("c").set_offset((0, 28))
-        Spacer(h=6)
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            text = _deck_score_name(rqd) + ("∇" if target_score else "")
+            style = heading_style if target_score else secondary_heading_style
+            with Frame().set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c"):
+                TextBox(text, style).set_w(_DECK_SCORE_WIDTH).set_content_align("c")
+                if rqd.boost is not None and target_score:
+                    TextBox(
+                        f"{rqd.boost}🔥(x{boost_bonus})",
+                        TextStyle(font=DEFAULT_FONT, size=18, color=(75, 75, 75)),
+                    ).set_w(_DECK_SCORE_WIDTH).set_content_align("c").set_offset((0, 28))
+            Spacer(h=6)
         algorithms = rqd.model_name or [""] * len(rqd.deck_data)
         for deck, algorithm in zip(rqd.deck_data, algorithms):
             with Frame().set_content_align("rb").set_w(_DECK_SCORE_WIDTH).set_h(_DECK_ROW_HEIGHT):
@@ -819,24 +844,42 @@ def _draw_deck_card(rqd: DeckRequest, assets: _DeckRecommendAssets, card) -> Non
             ).set_bg(info_bg)
 
 
-def _draw_deck_cards_column(rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle) -> None:
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        TextBox("卡组", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
-        Spacer(h=6)
+def _draw_deck_cards_column(
+    rqd: DeckRequest, assets: _DeckRecommendAssets, heading_style: TextStyle, *, show_heading: bool = True
+) -> None:
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            TextBox("卡组", heading_style).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+            Spacer(h=6)
         for deck in rqd.deck_data:
             with HSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(0):
                 for card in deck.card_data:
                     _draw_deck_card(rqd, assets, card)
 
 
-def _draw_deck_bonus_column(rqd: DeckRequest, heading_style: TextStyle, value_style: TextStyle) -> None:
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        TextBox("加成", heading_style).set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
-        Spacer(h=6)
+def _draw_deck_bonus_column(
+    rqd: DeckRequest, heading_style: TextStyle, value_style: TextStyle, *, show_heading: bool = True
+) -> None:
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            TextBox("加成", heading_style).set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+            Spacer(h=6)
         for deck in rqd.deck_data:
             if rqd.is_wl:
-                bonus = f"{deck.event_bonus_rate:.1f}+{deck.support_deck_bonus_rate:.1f}%"
-                total = f"{deck.event_bonus_rate + deck.support_deck_bonus_rate:.1f}%"
+                bonus = f"{deck.event_bonus_rate:.1f}+{(deck.support_deck_bonus_rate or 0):g}%"
+                total = f"{deck.event_bonus_rate + (deck.support_deck_bonus_rate or 0):g}%"
             else:
                 bonus = None
                 total = f"{deck.event_bonus_rate:.1f}%"
@@ -857,14 +900,23 @@ def _draw_deck_skill_column(
     heading_style: TextStyle,
     secondary_heading_style: TextStyle,
     value_style: TextStyle,
+    *,
+    show_heading: bool = True,
 ) -> None:
     target_skill = rqd.target == "skill"
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        TextBox(
-            "实效" + ("∇" if target_skill else ""),
-            heading_style if target_skill else secondary_heading_style,
-        ).set_w(_DECK_SKILL_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
-        Spacer(h=6)
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            TextBox(
+                "实效" + ("∇" if target_skill else ""),
+                heading_style if target_skill else secondary_heading_style,
+            ).set_w(_DECK_SKILL_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+            Spacer(h=6)
         for deck in rqd.deck_data:
             with Frame().set_content_align("rb").set_w(_DECK_SKILL_WIDTH).set_h(_DECK_ROW_HEIGHT):
                 if rqd.multi_live_teammate_score_up is not None:
@@ -883,14 +935,23 @@ def _draw_deck_power_column(
     heading_style: TextStyle,
     secondary_heading_style: TextStyle,
     value_style: TextStyle,
+    *,
+    show_heading: bool = True,
 ) -> None:
     target_power = rqd.target == "total_power"
-    with VSplit().set_content_align("c").set_item_align("c").set_sep(_DECK_VERTICAL_SEP).set_padding(8):
-        TextBox(
-            "综合力" + ("∇" if target_power else ""),
-            heading_style if target_power else secondary_heading_style,
-        ).set_w(_DECK_POWER_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
-        Spacer(h=6)
+    with (
+        VSplit()
+        .set_content_align("c")
+        .set_item_align("c")
+        .set_sep(_DECK_VERTICAL_SEP)
+        .set_padding(_deck_column_padding(rqd))
+    ):
+        if show_heading:
+            TextBox(
+                "综合力" + ("∇" if target_power else ""),
+                heading_style if target_power else secondary_heading_style,
+            ).set_w(_DECK_POWER_WIDTH).set_h(_DECK_ROW_HEIGHT // 2).set_content_align("c")
+            Spacer(h=6)
         for deck in rqd.deck_data:
             with Frame().set_content_align("rb").set_w(_DECK_POWER_WIDTH).set_h(_DECK_ROW_HEIGHT):
                 if rqd.multi_live_teammate_power is not None:
@@ -904,27 +965,71 @@ def _draw_deck_power_column(
                     ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
 
 
-def _draw_deck_results_table(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+def _draw_deck_main_results_table(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
     with VSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(16).set_bg(roundrect_bg(alpha=80)):
         if not rqd.deck_data:
             TextBox("未找到符合条件的卡组", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(255, 50, 50)))
             return
 
-        with HSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(0):
-            heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(0, 0, 0))
-            secondary_heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(75, 75, 75))
-            value_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
-            if rqd.music_compare:
-                _draw_deck_compare_music_column(rqd, assets, secondary_heading_style)
-            if rqd.recommend_type not in {"bonus", "wl_bonus"}:
-                _draw_deck_score_column(rqd, heading_style, secondary_heading_style, value_style)
-            _draw_deck_cards_column(rqd, assets, secondary_heading_style)
-            if rqd.recommend_type not in {"challenge", "challenge_all", "no_event"}:
-                _draw_deck_bonus_column(rqd, secondary_heading_style, value_style)
-            if rqd.live_type in {"multi", "cheerful"}:
-                _draw_deck_skill_column(rqd, heading_style, secondary_heading_style, value_style)
-            if rqd.recommend_type not in {"bonus", "wl_bonus"}:
-                _draw_deck_power_column(rqd, heading_style, secondary_heading_style, value_style)
+        _draw_deck_result_columns(rqd, assets)
+
+
+def _draw_deck_result_columns(rqd: DeckRequest, assets: _DeckRecommendAssets, *, show_heading: bool = True) -> None:
+    with HSplit().set_content_align("c").set_item_align("c").set_sep(16).set_padding(0):
+        heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(0, 0, 0))
+        secondary_heading_style = TextStyle(font=DEFAULT_BOLD_FONT, size=28, color=(75, 75, 75))
+        value_style = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=(70, 70, 70))
+        if rqd.music_compare:
+            _draw_deck_compare_music_column(rqd, assets, secondary_heading_style, show_heading=show_heading)
+        if rqd.recommend_type not in {"bonus", "wl_bonus"}:
+            _draw_deck_score_column(rqd, heading_style, secondary_heading_style, value_style, show_heading=show_heading)
+        _draw_deck_cards_column(rqd, assets, secondary_heading_style, show_heading=show_heading)
+        if rqd.recommend_type not in {"challenge", "challenge_all", "no_event"}:
+            _draw_deck_bonus_column(rqd, secondary_heading_style, value_style, show_heading=show_heading)
+        if rqd.live_type in {"multi", "cheerful"}:
+            _draw_deck_skill_column(rqd, heading_style, secondary_heading_style, value_style, show_heading=show_heading)
+        if rqd.recommend_type not in {"bonus", "wl_bonus"}:
+            _draw_deck_power_column(rqd, heading_style, secondary_heading_style, value_style, show_heading=show_heading)
+
+
+def _draw_deck_support_configuration(deck, assets: _DeckRecommendAssets) -> None:
+    cards = deck.support_card_data
+    if not cards:
+        return
+    # Shift within the existing inter-result gap to balance space above and below support cards.
+    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(2).set_padding((8, 0)).set_offset((0, 6)):
+        columns = (len(cards) + 1) // 2 if len(cards) > 12 else len(cards)
+        for start in range(0, len(cards), columns):
+            with HSplit().set_content_align("l").set_item_align("t").set_sep(12):
+                for card in cards[start : start + columns]:
+                    thumb = card.card_thumbnail
+                    key = (thumb.card_id, thumb.is_after_training, thumb.card_thumbnail_path)
+                    with VSplit().set_content_align("c").set_item_align("c").set_sep(0).set_w(54):
+                        CardFullThumbnailBox(assets.card_layers[key], size=(52, 52))
+                        TextBox(
+                            f"{card.event_bonus_rate:g}%",
+                            TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(55, 100, 120)),
+                        )
+
+
+def _draw_deck_results_table(rqd: DeckRequest, assets: _DeckRecommendAssets) -> None:
+    if not rqd.is_wl or not rqd.deck_data:
+        _draw_deck_main_results_table(rqd, assets)
+        return
+    with (
+        VSplit().set_content_align("lt").set_item_align("lt").set_sep(12).set_padding(16).set_bg(roundrect_bg(alpha=80))
+    ):
+        algorithms = rqd.model_name or []
+        for index, deck in enumerate(rqd.deck_data):
+            single = rqd.model_copy(
+                update={
+                    "deck_data": [deck],
+                    "model_name": [algorithms[index] if index < len(algorithms) else ""],
+                }
+            )
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(0):
+                _draw_deck_result_columns(single, assets, show_heading=index == 0)
+                _draw_deck_support_configuration(deck, assets)
 
 
 def _draw_deck_notes(rqd: DeckRequest) -> None:
