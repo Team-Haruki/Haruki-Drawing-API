@@ -4,7 +4,7 @@ Deck 模块数据模型
 定义组卡推荐相关的 Pydantic 模型，用于组卡推荐图片的绘制请求。
 """
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
@@ -88,6 +88,9 @@ class DeckData(BaseModel):
     """
 
     card_data: list[DeckCardData]
+    support_card_data: list[DeckCardData] = Field(
+        default_factory=list, description="该结果的 WL 支援卡配置，event_bonus_rate 为逐卡支援加成"
+    )
     music_title: str | None = None
     music_id: int | None = None
     music_diff: str | None = None
