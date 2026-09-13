@@ -6,7 +6,7 @@ from src.sekai.base.draw import roundrect_bg
 from src.sekai.base.plot import Canvas, Frame
 
 
-def test_large_card_panel_keeps_glass_under_native_scene_memory_limit():
+def test_large_card_panel_keeps_glass_under_native_scene_memory_limit(monkeypatch):
     pytest.importorskip("haruki_skia_renderer")
     from src.sekai.skia_renderer.canvas import render_canvas_payload
 
@@ -15,9 +15,21 @@ def test_large_card_panel_keeps_glass_under_native_scene_memory_limit():
             Frame().set_size((4000, 4000)).set_bg(roundrect_bg(alpha=80, blur_glass_kwargs={"blur": blur}))
         return await render_canvas_payload(canvas, endpoint="card_box")
 
-    # Blur 4 downsamples each axis by 2. The full glass effect fits the unchanged
-    # 256 MiB scene budget; blur 2 has four full-size buffers and must still fail.
-    result = asyncio.run(render(4))
+    # Full-resolution blur needs 320 MB here: valid under the new default,
+    # but still rejected when a caller explicitly requests the old 256 MiB cap.
+    result = asyncio.run(render(2))
     assert result is not None
     assert (result.image_width, result.image_height) == (4000, 4000)
+
+    from src.sekai.skia_renderer.ir_builder import IRBuilder
+
+    original = IRBuilder.build
+
+    def limited_scene(self):
+        scene = original(self)
+        scene["limits"] = {"max_scene_bytes": 256 * 1024 * 1024}
+        return scene
+
+    monkeypatch.setattr(IRBuilder, "build", limited_scene)
     assert asyncio.run(render(2)) is None
+    assert asyncio.run(render(4)) is not None

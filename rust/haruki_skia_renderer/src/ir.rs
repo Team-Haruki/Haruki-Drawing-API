@@ -55,7 +55,7 @@ const fn default_max_node_pixels() -> u64 {
 }
 
 const fn default_max_scene_bytes() -> u64 {
-    256 * 1024 * 1024
+    512 * 1024 * 1024
 }
 
 #[derive(Debug, Deserialize)]
