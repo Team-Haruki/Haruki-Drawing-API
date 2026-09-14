@@ -27,7 +27,7 @@ from src.sekai.base.draw import (
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.utils import run_in_pool
+from src.sekai.base.utils import record_missing_asset_error, resolve_local_dir, resolve_logical_file, run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.render_stats import (
@@ -70,18 +70,49 @@ def chart_font_kwargs() -> dict[str, list[str]]:
     return {"font_dirs": [str(FONT_DIR)]}
 
 
-def chart_asset_path(key: AssetKey) -> Path:
-    """Local path of a chart input: the first candidate that exists, else the first candidate (C1).
+def _today_path(resolved: Path, key: str) -> Path:
+    """The unresolved ``ASSETS_BASE_DIR / key`` join when it names the same file as ``resolved``.
 
-    A plain string joins exactly as before. Mirror materialisation of these non-image inputs lands with the
-    chart helpers (plan §7); until then only files already on local disk are considered.
+    With the local source the chart inputs are handed to the crate exactly as before (no realpath rewrite);
+    a mirror-materialised file keeps its resolved mirror path.
     """
-    if isinstance(key, str):
-        return ASSETS_BASE_DIR / key
-    paths = [ASSETS_BASE_DIR / item for item in candidates(key)]
-    if not paths:
+    joined = ASSETS_BASE_DIR / key
+    try:
+        if joined.resolve() == resolved:
+            return joined
+    except (OSError, RuntimeError):  # pragma: no cover - resolve() only fails on symlink loops
+        pass
+    return resolved
+
+
+def chart_asset_path(key: AssetKey) -> Path:
+    """Local path of a chart input file (`.txt`/`.sus`/`.css`/jacket), materialised before the crate reads it.
+
+    Candidates are tried in order through `resolve_logical_file` (mirror map + traversal guard + on-demand fetch);
+    the first one that exists wins (C1). A traversal raises `ValueError`. When nothing materialises, today's join of
+    the first candidate is returned so the crate fails (or, for a jacket, degrades) exactly as it does today, and
+    the miss is counted.
+    """
+    if isinstance(key, str) and key.strip() == "":
+        return ASSETS_BASE_DIR / key  # today's join; a blank key never reaches the resolver
+    items = candidates(key)
+    if not items:
         raise ValueError("chart asset candidate list is empty")
-    return next((path for path in paths if path.is_file()), paths[0])
+    first_error: FileNotFoundError | None = None
+    for item in items:
+        try:
+            return _today_path(resolve_logical_file(ASSETS_BASE_DIR, item), item)
+        except FileNotFoundError as exc:
+            if first_error is None:
+                first_error = exc
+    assert first_error is not None
+    record_missing_asset_error(first_error, candidate_count=len(items))
+    return ASSETS_BASE_DIR / items[0].lstrip("/")
+
+
+def chart_note_host_path(key: str) -> Path:
+    """Local directory of the chart note sprites; never fetched (the crate enumerates it itself, plan §7)."""
+    return _today_path(resolve_local_dir(ASSETS_BASE_DIR, key), key)
 
 
 def load_score(rqd: GenerateMusicChartRequest) -> Score:
@@ -108,7 +139,7 @@ def _prepare_chart_render(rqd: GenerateMusicChartRequest) -> tuple[Drawing, Scor
         songid=str(rqd.music_id),
     )
     drawing = Drawing(
-        note_host=str(ASSETS_BASE_DIR / rqd.note_host),
+        note_host=str(chart_note_host_path(rqd.note_host)),
         style_sheet=style_sheet,
         skill=rqd.skill,
         music_meta=rqd.music_meta,

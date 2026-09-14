@@ -32,7 +32,8 @@ class GenerateMusicChartRequest(TimeZoneRequest):
     style_path : Optional[ str ] = None
         css样式路径
     note_host : str
-        note图片根路径
+        note图片根路径。按约定固定为本地目录 ``static_images/chart_asset/notes``：谱面 crate 自行枚举该目录，
+        因此它从不经由资源镜像拉取；位于 ``asset/`` 下的值会记录一次 ERROR 日志并仍按本地路径拼接（不会报错）
     music_meta : Optional[ dict ] = None
         歌曲元数据
     target_segment_seconds : Optional[ float ] = None

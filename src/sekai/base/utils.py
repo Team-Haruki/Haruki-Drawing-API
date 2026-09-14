@@ -222,6 +222,14 @@ def _record_missing(reason: str | BaseException | None) -> None:
     record_missing_asset(_missing_reason_of(reason))
 
 
+def record_missing_asset_error(exc: FileNotFoundError, *, candidate_count: int = 1) -> None:
+    """Count one miss surfaced by a resolver error (e.g. `resolve_logical_file`) under its §5.3 reason.
+
+    A candidate list of more than one key counts as ``candidates_exhausted``, like `get_asset_image_ref`.
+    """
+    record_missing_asset(MISSING_CANDIDATES_EXHAUSTED if candidate_count > 1 else _missing_reason_of(exc))
+
+
 def _log_missing_image_once(
     path: str | None,
     reason: str | BaseException,
