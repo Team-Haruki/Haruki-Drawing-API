@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from src.artifact.stats import get_artifact_stats
 from src.core.debug import evaluate_runtime_readiness, get_http_request_stats, runtime_readiness_thresholds
 from src.sekai.base.utils import get_runtime_cache_stats
 from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
@@ -58,4 +59,5 @@ async def render_stats():
         "renders": get_render_stats(),
         "http_requests": get_http_request_stats(),
         "skia_payload_cache": get_skia_payload_cache_stats(),
+        "artifacts": get_artifact_stats(),
     }
