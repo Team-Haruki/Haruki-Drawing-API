@@ -30,6 +30,9 @@ def test_cache_stats_endpoint_contract():
     assert "thumbnail_cache" in payload["caches"]
     assert "composed_image_cache" in payload["caches"]
     assert "native_renderer_cache" in payload["caches"]
+    assert "asset_mirror" in payload["caches"]
+    assert "missing_assets" in payload["caches"]
+    assert len(payload["caches"]) == 10
 
 
 def test_readiness_endpoint_contract():

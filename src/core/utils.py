@@ -12,6 +12,7 @@ from src.core.debug import (
     snapshot_process_metrics,
 )
 from src.core.image_payload import EncodedImagePayload
+from src.core.missing_asset_telemetry import current_missing_asset_count
 from src.sekai.base.utils import run_in_pool
 from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
 
@@ -122,7 +123,7 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
     byte_len = len(payload.image_bytes)
     logger.info(
         "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
-        "backend=%s metrics=%s",
+        "backend=%s missing_assets=%d metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -135,6 +136,7 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
         # The payload carries its own backend across the heavy-worker process boundary, where a
         # contextvar set in the child is invisible here; in-process renders set the contextvar.
         payload.backend or current_render_backend(),
+        current_missing_asset_count(),
         snapshot_process_metrics(include_asyncio=False),
     )
     set_request_stage("send_response")

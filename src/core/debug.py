@@ -15,6 +15,7 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from src.core.missing_asset_telemetry import begin_missing_asset_scope, end_missing_asset_scope
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope
 from src.settings import (
     OVERLOAD_MAX_INFLIGHT_REQUESTS,
@@ -156,6 +157,7 @@ class RequestContextTokens:
     stage: contextvars.Token
     render_backend: contextvars.Token | None = None
     pillow_telemetry: contextvars.Token | None = None
+    missing_assets: object | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -176,10 +178,13 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         stage=_request_stage_var.set(RequestStageRef("middleware")),
         render_backend=_render_backend_var.set(DEFAULT_RENDER_BACKEND),
         pillow_telemetry=begin_pillow_touch_scope(),
+        missing_assets=begin_missing_asset_scope(),
     )
 
 
 def pop_request_context(tokens: RequestContextTokens) -> None:
+    if tokens.missing_assets is not None:
+        end_missing_asset_scope(tokens.missing_assets)
     if tokens.pillow_telemetry is not None:
         end_pillow_touch_scope(tokens.pillow_telemetry)
     _request_id_var.reset(tokens.request_id)
