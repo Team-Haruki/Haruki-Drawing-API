@@ -33,7 +33,7 @@ async def score_control(request: ScoreControlRequest):
     try:
         payload = await try_render_score_control_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -52,7 +52,7 @@ async def custom_room_score_control(request: CustomRoomScoreRequest):
     try:
         payload = await try_render_custom_room_score_control_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -71,7 +71,7 @@ async def music_meta(request: list[MusicMetaRequest]):
     try:
         payload = await try_render_music_meta_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -90,6 +90,6 @@ async def music_board(request: MusicBoardRequest):
     try:
         payload = await try_render_music_board_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

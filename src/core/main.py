@@ -57,7 +57,11 @@ This API provides endpoints for generating various Project Sekai images.
 
 
 ### Response Format:
-All endpoints return PNG images as binary stream.
+Every drawing endpoint returns the rendered image as ONE response body (`image/png` or `image/jpeg`).
+When the request carries `X-Haruki-Artifact: 1` plus a valid render cache directive, the image is
+uploaded to object storage and an `artifact_ref` JSON document is returned instead; any storage
+failure falls back to image bytes with `X-Haruki-Artifact-Degraded: 1`. Every response carries
+`X-Haruki-Node`.
     """
 
 

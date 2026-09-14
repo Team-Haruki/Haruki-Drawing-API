@@ -53,7 +53,10 @@ Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配�
 - `GET /health`：进程存活状态
 - `GET /ready`：流量接入就绪状态及资源阈值
 - `GET /cache/stats`：图片、Skia 原生栅格/尺寸缓存与其他渲染缓存统计
-- `GET /render-stats`：各端点的 Skia、回退、禁用和错误计数
+- `GET /render-stats`：各端点的 Skia、回退、禁用和错误计数；`artifacts` 字段是制品上传/索引计数
+
+
+所有绘图端点都经由异步出口 `encoded_image_payload_to_response`（`src/core/utils.py`）返回**单条响应 body**：默认是图片字节；请求带 `X-Haruki-Artifact: 1` 及合法缓存指令且存储开启时，改为上传对象存储并返回 `artifact_ref` JSON（失败时回退图片字节并加 `X-Haruki-Artifact-Degraded: 1`）。每个响应都带 `X-Haruki-Node`。
 
 `HARUKI_DRAWING__USE_SKIA_PLOT` 必须保持 `true`；设为 `false` 会拒绝启动。需要恢复旧 Pillow 服务时，应回滚至此前包含旧后端的镜像。
 

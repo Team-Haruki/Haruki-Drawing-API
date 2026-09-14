@@ -37,7 +37,7 @@ async def mysekai_resource(request: MysekaiResourceRequest):
 
         payload = await try_render_mysekai_resource_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_resource render failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -57,7 +57,7 @@ async def mysekai_msr_map(request: MysekaiMsrMapRequest):
 
         payload = await try_render_mysekai_msr_map_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_msr_map render failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -77,7 +77,7 @@ async def mysekai_fixture_list(request: MysekaiFixtureListRequest):
 
         payload = await try_render_mysekai_fixture_list_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -96,7 +96,7 @@ async def mysekai_fixture_detail(request: list[MysekaiFixtureDetailRequest]):
 
         payload = await try_render_mysekai_fixture_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -115,7 +115,7 @@ async def mysekai_door_upgrade(request: MysekaiDoorUpgradeRequest):
 
         payload = await try_render_mysekai_door_upgrade_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -134,7 +134,7 @@ async def mysekai_music_record(request: MysekaiMusicrecordRequest):
 
         payload = await try_render_mysekai_musicrecord_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -153,7 +153,7 @@ async def mysekai_talk_list(request: MysekaiTalkListRequest):
 
         payload = await try_render_mysekai_talk_list_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -168,7 +168,7 @@ async def mysekai_housing_competition(request: MysekaiHousingCompetitionRequest)
     try:
         payload = await try_render_mysekai_housing_competition_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_housing_competition render failed")
         raise HTTPException(status_code=500, detail=str(e))

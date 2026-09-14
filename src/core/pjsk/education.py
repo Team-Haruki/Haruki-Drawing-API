@@ -41,7 +41,7 @@ async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
     try:
         payload = await try_render_challenge_live_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -60,7 +60,7 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
     try:
         payload = await try_render_power_bonus_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -80,7 +80,7 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
     try:
         payload = await try_render_area_item_upgrade_materials_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -100,7 +100,7 @@ async def bonds_level(request: BondsRequest):
     try:
         payload = await try_render_bonds_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -120,7 +120,7 @@ async def leader_count(request: LeaderCountRequest):
     try:
         payload = await try_render_leader_count_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -134,7 +134,7 @@ async def character_mission_overview(request: CharacterMissionOverviewRequest):
     try:
         payload = await try_render_character_mission_overview_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -148,6 +148,6 @@ async def character_mission_all(request: CharacterMissionAllRequest):
     try:
         payload = await try_render_character_mission_all_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

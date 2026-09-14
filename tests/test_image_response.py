@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 
 from src.core.image_payload import EncodedImagePayload
-from src.core.utils import encoded_image_payload_to_response
+from src.core.utils import encoded_image_payload_to_bytes_response
 
 # 0x0A is what BytesIO would have split on. A real PNG carries one roughly every 256 bytes.
 PNG_LIKE = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8
@@ -51,7 +51,7 @@ def _payload() -> EncodedImagePayload:
 
 
 def test_the_image_leaves_in_a_single_body_message():
-    sent = _drive_asgi(encoded_image_payload_to_response(_payload()))
+    sent = _drive_asgi(encoded_image_payload_to_bytes_response(_payload()))
     bodies = [m for m in sent if m["type"] == "http.response.body"]
     assert len(bodies) == 1, (
         f"{len(bodies)} body messages for a {len(PNG_LIKE)}-byte image — the response is chunking "
@@ -61,7 +61,7 @@ def test_the_image_leaves_in_a_single_body_message():
 
 
 def test_the_body_is_byte_identical_and_length_is_declared():
-    sent = _drive_asgi(encoded_image_payload_to_response(_payload()))
+    sent = _drive_asgi(encoded_image_payload_to_bytes_response(_payload()))
     start = next(m for m in sent if m["type"] == "http.response.start")
     headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
 
@@ -76,8 +76,27 @@ def test_a_newline_heavy_image_is_not_split():
     """The regression in its purest form: bytes that are *nothing but* line breaks."""
     payload = _payload()
     payload.image_bytes = b"\n" * 4096
-    sent = _drive_asgi(encoded_image_payload_to_response(payload))
+    sent = _drive_asgi(encoded_image_payload_to_bytes_response(payload))
     bodies = [m for m in sent if m["type"] == "http.response.body"]
 
     assert len(bodies) == 1, f"4096 newlines became {len(bodies)} body messages"
     assert bodies[0]["body"] == b"\n" * 4096
+
+
+def test_the_async_exit_without_a_directive_sends_the_same_bytes_response():
+    """The route exit is async now; with no directive it is today's response plus only `X-Haruki-Node`."""
+    from src.core.utils import encoded_image_payload_to_response
+
+    baseline = _drive_asgi(encoded_image_payload_to_bytes_response(_payload()))
+    sent = _drive_asgi(asyncio.run(encoded_image_payload_to_response(_payload())))
+
+    def headers(messages):
+        start = next(m for m in messages if m["type"] == "http.response.start")
+        return {k.decode().lower(): v.decode() for k, v in start["headers"]}
+
+    bodies = [m for m in sent if m["type"] == "http.response.body"]
+    assert len(bodies) == 1
+    assert bodies[0]["body"] == PNG_LIKE
+    async_headers = headers(sent)
+    assert async_headers.pop("x-haruki-node")
+    assert async_headers == headers(baseline)

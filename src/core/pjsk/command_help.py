@@ -20,6 +20,6 @@ async def command_help(request: CommandHelpRenderRequest):
         set_request_stage("help:try_render_payload")
         payload = await try_render_command_help_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e

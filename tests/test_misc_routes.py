@@ -13,6 +13,7 @@ from src.core.heavy_render_pool import (
     HeavyRenderTaskTimeoutError,
 )
 from src.core.pjsk import misc
+from tests.route_test_helpers import async_exit_stub
 
 
 class _WorkerPool:
@@ -41,7 +42,7 @@ def test_chara_birthday_returns_worker_payload(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         misc,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(misc.chara_birthday(_BirthdayRequest())) is response
@@ -84,7 +85,7 @@ def test_alias_list_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setattr(
         misc,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(misc.alias_list(request)) is response

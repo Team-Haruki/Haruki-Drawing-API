@@ -16,7 +16,7 @@ from src.assets.mirror import AssetMirror, MirrorStats, NullMirror, set_asset_mi
 from src.assets.version import StaticVersion
 from src.core import debug, missing_asset_telemetry as telemetry
 from src.core.image_payload import EncodedImagePayload
-from src.core.utils import encoded_image_payload_to_response
+from src.core.utils import encoded_image_payload_to_bytes_response
 from src.sekai.base import utils
 from src.settings import AssetMirrorSettings
 from src.storage.protocols import StorageUnavailable
@@ -266,7 +266,7 @@ def test_image_response_line_reports_missing_assets(caplog) -> None:
         try:
             utils.record_missing_asset("local_not_found")
             utils.record_missing_asset("vanished")
-            encoded_image_payload_to_response(payload)
+            encoded_image_payload_to_bytes_response(payload)
         finally:
             debug.pop_request_context(tokens)
 

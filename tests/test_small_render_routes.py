@@ -9,6 +9,7 @@ from fastapi import HTTPException
 import pytest
 
 from src.core.pjsk import command_help, costume, gacha, honor, inventory, stamp, vlive
+from tests.route_test_helpers import async_exit_stub
 
 
 @dataclass(frozen=True)
@@ -60,7 +61,7 @@ def test_small_routes_return_native_payloads(case: _RouteCase, monkeypatch: pyte
     monkeypatch.setattr(
         case.module,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(getattr(case.module, case.endpoint)(request)) is response
@@ -109,7 +110,7 @@ def test_honor_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         honor,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(honor.honor(request)) is response
