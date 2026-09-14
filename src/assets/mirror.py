@@ -221,6 +221,11 @@ class AssetMirror:
         return self._mirror_root
 
     @property
+    def mirror_dir(self) -> str:
+        """The normalised mirror directory, relative to `base_dir` (the `.tmp` digest prefix)."""
+        return self._map.mirror_dir
+
+    @property
     def fetch_loop_running(self) -> bool:
         thread = self._loop_thread
         return thread is not None and thread.is_alive()
@@ -684,3 +689,36 @@ def set_asset_mirror(mirror: AssetMirror | NullMirror | None) -> None:
     global _asset_mirror
     with _asset_mirror_lock:
         _asset_mirror = mirror
+
+
+def start_asset_mirror() -> AssetMirror | NullMirror:
+    """Lifespan startup: build the process mirror and start its fetch loop. Never raises (fail-open to local)."""
+    try:
+        mirror = get_asset_mirror()
+        mirror.start()
+    except Exception as exc:
+        logger.error("mirror.start_failed error=%s: %s (falling back to local assets)", type(exc).__name__, exc)
+        mirror = NullMirror(source="mirror", disabled_reason=f"{type(exc).__name__}: {exc}")
+        set_asset_mirror(mirror)
+        return mirror
+    if isinstance(mirror, AssetMirror):
+        logger.info(
+            "mirror.started version=%s root=%s bucket=%s", mirror.version, mirror.mirror_root, mirror.stats.bucket
+        )
+    return mirror
+
+
+def shutdown_asset_mirror() -> None:
+    """Lifespan shutdown: close the installed mirror (stores, fetch loop). Never builds one, never raises.
+
+    The closed mirror stays installed so late lookups during shutdown fall back to local paths instead of
+    lazily building a new mirror.
+    """
+    with _asset_mirror_lock:
+        mirror = _asset_mirror
+    if mirror is None:
+        return
+    try:
+        mirror.close()
+    except Exception as exc:
+        logger.warning("mirror.shutdown_failed error=%s: %s", type(exc).__name__, exc)
