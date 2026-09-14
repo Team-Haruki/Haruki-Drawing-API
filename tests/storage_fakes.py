@@ -6,8 +6,11 @@ Fakes live in `tests/`, never in `src/` (coverage `source = ["src"]`).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 import time
+from typing import Any
 
+from src.index.protocols import ContentRow, RequestRow
 from src.storage.protocols import ObjectStat, StorageNotFound, StorageTooLarge, StorageUnavailable, validate_object_key
 
 
@@ -98,3 +101,143 @@ class FakeObjectStore:
 
     async def close(self) -> None:
         self.closed = True
+
+
+# ---------------------------------------------------------------------------------------------- render index
+
+
+class UndefinedTableError(Exception):
+    """Stand-in for `asyncpg.exceptions.UndefinedTableError`, matched by class name."""
+
+
+class UndefinedColumnError(Exception):
+    """Stand-in for `asyncpg.exceptions.UndefinedColumnError`, matched by class name."""
+
+
+class FakeRenderIndex:
+    """Implements `RenderIndex` over a dict of content rows; records every call."""
+
+    def __init__(
+        self,
+        content: dict[str, ContentRow] | None = None,
+        *,
+        preflight_error: Exception | None = None,
+        lookup_error: Exception | None = None,
+        record_error: Exception | None = None,
+    ) -> None:
+        self.content: dict[str, ContentRow] = dict(content or {})
+        self.requests: dict[str, RequestRow] = {}
+        self.preflight_error = preflight_error
+        self.lookup_error = lookup_error
+        self.record_error = record_error
+        self.calls: list[tuple[str, object]] = []
+        self.closed = False
+
+    async def preflight(self) -> None:
+        self.calls.append(("preflight", None))
+        if self.preflight_error is not None:
+            raise self.preflight_error
+
+    async def lookup_content(self, content_hash: str) -> ContentRow | None:
+        self.calls.append(("lookup_content", content_hash))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.content.get(content_hash)
+
+    async def record(self, content: ContentRow, request: RequestRow) -> None:
+        self.calls.append(("record", (content, request)))
+        if self.record_error is not None:
+            raise self.record_error
+        existing = self.content.get(content.hash)
+        if existing is None or existing.storage_backend != "garage":
+            self.content[content.hash] = content
+        self.requests[request.request_key] = request
+
+    async def close(self) -> None:
+        self.calls.append(("close", None))
+        self.closed = True
+
+
+class _AsyncContext:
+    def __init__(self, value: Any, on_exit: Callable[[BaseException | None], None] | None = None) -> None:
+        self._value = value
+        self._on_exit = on_exit
+
+    async def __aenter__(self) -> Any:
+        return self._value
+
+    async def __aexit__(self, exc_type: object, exc: BaseException | None, tb: object) -> bool:
+        if self._on_exit is not None:
+            self._on_exit(exc)
+        return False
+
+
+class FakeConn:
+    """Duck-typed asyncpg connection: `execute`, `fetchrow`, `transaction()`; records SQL text and args.
+
+    `rows` maps the first positional argument of `fetchrow` to the returned row (a dict). `errors` maps an
+    exact SQL text to the exception raised when that statement runs.
+    """
+
+    def __init__(self, pool: FakePgPool) -> None:
+        self._pool = pool
+
+    async def execute(self, sql: str, *args: Any) -> str:
+        self._pool.log("execute", sql, args)
+        return "OK"
+
+    async def fetchrow(self, sql: str, *args: Any) -> Any:
+        self._pool.log("fetchrow", sql, args)
+        return self._pool.rows.get(args[0]) if args else None
+
+    def transaction(self) -> _AsyncContext:
+        self._pool.events.append(("transaction.begin", None, ()))
+
+        def _end(exc: BaseException | None) -> None:
+            self._pool.events.append(("transaction.rollback" if exc else "transaction.commit", None, ()))
+
+        return _AsyncContext(None, _end)
+
+
+class FakePgPool:
+    """Duck-typed asyncpg pool: `acquire()` yields a `FakeConn`; `events` is the ordered call log."""
+
+    def __init__(
+        self,
+        *,
+        rows: dict[str, dict[str, Any]] | None = None,
+        errors: dict[str, Exception] | None = None,
+        acquire_error: Exception | None = None,
+        close_error: Exception | None = None,
+    ) -> None:
+        self.rows: dict[str, dict[str, Any]] = dict(rows or {})
+        self.errors: dict[str, Exception] = dict(errors or {})
+        self.acquire_error = acquire_error
+        self.close_error = close_error
+        self.events: list[tuple[str, str | None, tuple[Any, ...]]] = []
+        self.acquire_kwargs: list[dict[str, Any]] = []
+        self.closed = False
+
+    def log(self, kind: str, sql: str, args: tuple[Any, ...]) -> None:
+        self.events.append((kind, sql, args))
+        error = self.errors.get(sql)
+        if error is not None:
+            raise error
+
+    def statements(self) -> list[str]:
+        return [sql for kind, sql, _ in self.events if sql is not None and kind in ("execute", "fetchrow")]
+
+    @property
+    def round_trips(self) -> int:
+        return len(self.statements())
+
+    def acquire(self, **kwargs: Any) -> _AsyncContext:
+        self.acquire_kwargs.append(kwargs)
+        if self.acquire_error is not None:
+            raise self.acquire_error
+        return _AsyncContext(FakeConn(self))
+
+    async def close(self) -> None:
+        self.closed = True
+        if self.close_error is not None:
+            raise self.close_error
