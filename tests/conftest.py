@@ -39,3 +39,20 @@ def real_fonts():
     """Skip a test that is only meaningful with the real fonts present."""
     if not fonts_available():
         pytest.skip("configured fonts are not installed (CI lint-test has no data/ fonts)")
+
+
+@pytest.fixture
+def memory_store():
+    """A fresh `FakeObjectStore` (no opendal)."""
+    from tests.storage_fakes import FakeObjectStore
+
+    return FakeObjectStore()
+
+
+@pytest.fixture
+def opendal_memory_store():
+    """An `OpendalObjectStore` over `opendal.AsyncOperator("memory")`; skips when the wheel is absent."""
+    opendal = pytest.importorskip("opendal")
+    from src.storage.opendal_store import OpendalObjectStore
+
+    return OpendalObjectStore(opendal.AsyncOperator("memory"), name="memory", bucket="memory")
