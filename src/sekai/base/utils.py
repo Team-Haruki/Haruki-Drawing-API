@@ -25,6 +25,7 @@ from src.core.debug import current_request_context, snapshot_process_metrics
 from src.core.missing_asset_telemetry import (
     MISSING_ASSET_REASONS as MISSING_ASSET_REASONS,
     MISSING_BIRTHDAY_FALLBACK,
+    MISSING_CANDIDATES_EXHAUSTED,
     MISSING_EMPTY_PATH,
     MISSING_LOCAL_NOT_FOUND,
     MISSING_VANISHED,
@@ -40,6 +41,7 @@ from src.core.pillow_telemetry import (
     PILLOW_TOUCH_PLACEHOLDER,
     record_pillow_touch,
 )
+from src.sekai.base.asset_key import AssetKey, candidates, first_candidate
 from src.sekai.base.image_info import probe_asset, probe_encoded
 from src.sekai.base.image_source import (
     AssetImageRef,
@@ -136,16 +138,17 @@ def get_readable_timedelta(delta: timedelta, precision: str = "m", use_en_unit: 
 
 async def get_img_from_path(
     base_path: Path,
-    path: str | None,
+    path: AssetKey | None,
     on_missing: MissingImageMode = "placeholder",
 ) -> Image.Image:
     """
-    通过路径获取图片
+    通过路径获取图片（候选列表取第一个存在的）
     """
-    if path is None or path.strip() == "":
+    label = _key_label(path)
+    if not candidates(path):
         if on_missing == "placeholder":
-            _log_missing_image_once(path, "empty-path")
-            return _get_missing_placeholder_image(path)
+            _log_missing_image_once(label, "empty-path")
+            return _get_missing_placeholder_image(label)
         _record_missing("empty-path")
         raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
 
@@ -153,8 +156,8 @@ async def get_img_from_path(
         return await run_in_pool(_load_image_from_path_sync, base_path, path)
     except (FileNotFoundError, OSError) as exc:
         if on_missing == "placeholder":
-            _log_missing_image_once(path, exc)
-            return _get_missing_placeholder_image(path)
+            _log_missing_image_once(label, exc)
+            return _get_missing_placeholder_image(label)
         _record_missing(exc)
         raise
 
@@ -617,7 +620,17 @@ def build_rendered_image_cache_key(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def get_image_asset_signature(base_path: Path, path: str | None) -> dict[str, Any] | None:
+def get_image_asset_signature(base_path: Path, path: AssetKey | None) -> dict[str, Any] | None:
+    """Stat signature of an asset; a candidate list gives ``{"candidates": [sig, ...]}`` in candidate order.
+
+    Every candidate is signed (``{"missing": True}`` markers kept), so a candidate that appears or is replaced
+    moves the signature even when an earlier one is the file currently chosen.
+    """
+    if isinstance(path, list):
+        items = candidates(path)
+        if not items:
+            return None
+        return {"candidates": [get_image_asset_signature(base_path, item) for item in items]}
     if path is None or path.strip() == "":
         return None
 
@@ -858,21 +871,62 @@ def _put_image_cache(
         _record_image_cache_write(is_thumb, current_bytes, evictions)
 
 
-def _birthday_fallback_request(full_path: Path, resolved_base: Path) -> tuple[str, int, tuple[str, ...]] | None:
+_STATIC_BIRTHDAY_PARTS = ("static_images", "mysekai", "birthday")
+_BUCKET_BIRTHDAY_PARTS = ("mysekai", "birthday")
+_BUCKET_MODES = frozenset({"startapp", "ondemand"})
+
+
+def _is_region_assets_segment(part: str) -> bool:
+    region, sep, suffix = part.partition("-")
+    return bool(sep) and suffix == "assets" and len(region) == 2 and region.isascii() and region.islower()
+
+
+def _bucket_birthday_root_len(parts: tuple[str, ...], region_index: int) -> int | None:
+    """``<cc>-assets/<mode>/mysekai/birthday`` starting at ``region_index``: the root length, else ``None``."""
+    end = region_index + 4
+    if len(parts) < end or not _is_region_assets_segment(parts[region_index]):
+        return None
+    if parts[region_index + 1] not in _BUCKET_MODES or parts[region_index + 2 : end] != _BUCKET_BIRTHDAY_PARTS:
+        return None
+    return end
+
+
+def _birthday_root_len(parts: tuple[str, ...]) -> int | None:
+    """Length of the birthday-root prefix of ``parts`` for the three accepted shapes (plan §5.4/§6.3).
+
+    ``static_images/mysekai/birthday``; the legacy tree ``asset/<cc>-assets/<mode>/mysekai/birthday``; and the
+    mirror tree ``<mirror_dir>/<version>/<cc>-assets/<mode>/mysekai/birthday``.
+    """
+    if parts[:3] == _STATIC_BIRTHDAY_PARTS:
+        return 3
+    if parts[:1] == ("asset",):
+        return _bucket_birthday_root_len(parts, 1)
+    mirror_dir = getattr(_asset_mirror(), "mirror_dir", None)
+    if not isinstance(mirror_dir, str) or not mirror_dir:
+        return None
+    mirror_parts = tuple(part for part in mirror_dir.split("/") if part)
+    if parts[: len(mirror_parts)] != mirror_parts:
+        return None
+    return _bucket_birthday_root_len(parts, len(mirror_parts) + 1)
+
+
+def _birthday_fallback_request(full_path: Path, resolved_base: Path) -> tuple[Path, str, int, tuple[str, ...]] | None:
+    """``(birthday_root, chara_name, year, tail_parts)`` when ``full_path`` names a yearly birthday asset."""
     try:
         rel_path = full_path.relative_to(resolved_base)
     except ValueError:
         return None
     parts = rel_path.parts
-    if len(parts) < 5 or parts[:3] != ("static_images", "mysekai", "birthday"):
+    root_len = _birthday_root_len(parts)
+    if root_len is None or len(parts) < root_len + 2:
         return None
-    directory_name = parts[3]
+    directory_name = parts[root_len]
     if "_" not in directory_name:
         return None
     chara_name, year_text = directory_name.rsplit("_", 1)
     if not chara_name or not year_text.isdigit():
         return None
-    return chara_name, int(year_text), parts[4:]
+    return resolved_base.joinpath(*parts[:root_len]), chara_name, int(year_text), parts[root_len + 1 :]
 
 
 def _generic_birthday_fallback(resolved_base: Path) -> Path | None:
@@ -910,8 +964,7 @@ def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Pat
     request = _birthday_fallback_request(full_path, resolved_base)
     if request is None:
         return None
-    chara_name, target_year, tail_parts = request
-    birthday_root = resolved_base / "static_images" / "mysekai" / "birthday"
+    birthday_root, chara_name, target_year, tail_parts = request
     if not birthday_root.is_dir():
         return _generic_birthday_fallback(resolved_base)
     fallback_candidates = _birthday_fallback_candidates(birthday_root, chara_name, tail_parts)
@@ -924,8 +977,8 @@ def _resolve_birthday_year_fallback(full_path: Path, resolved_base: Path) -> Pat
     return min(fallback_candidates, key=lambda item: item[0])[1]
 
 
-def _load_image_from_path_sync(base_path: Path, path: str) -> Image.Image:
-    full_path, _, stat = _resolve_and_stat(base_path, path)
+def _load_image_from_path_sync(base_path: Path, path: AssetKey) -> Image.Image:
+    full_path, _, stat = _resolve_key_and_stat(base_path, path)
     return _load_image_full_path_sync(full_path, stat=stat)
 
 
@@ -1056,11 +1109,14 @@ def _stat_regular_file(full_path: Path) -> os.stat_result | None:
     return st if S_ISREG(st.st_mode) else None
 
 
-def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_result]:
+def _resolve_and_stat(
+    base_path: Path, path: str, *, birthday_fallback: bool = True
+) -> tuple[Path, str, os.stat_result]:
     """解析路径并获取 stat，供 resize 和原始加载共用。
 
     Order: stat -> mirror `ensure_local` (fetch on a miss; `None` with NullMirror) -> birthday fallback ->
     `FileNotFoundError`. The raised error carries the §5.3 miss reason for the consumer to count.
+    ``birthday_fallback=False`` skips the fallback (a candidate list tries every candidate first).
     """
     resolved_base, full_path, full_path_str = _resolve_asset_path(base_path, path)
 
@@ -1073,13 +1129,66 @@ def _resolve_and_stat(base_path: Path, path: str) -> tuple[Path, str, os.stat_re
             if fetched_st is not None:
                 return fetched, str(fetched), fetched_st
         miss_reason = mirror.last_miss_reason() or MISSING_LOCAL_NOT_FOUND
-        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
+        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base) if birthday_fallback else None
         if fallback_path is None:
             raise _missing_error(f"图片文件不存在: {full_path}", miss_reason)
         record_missing_asset(MISSING_BIRTHDAY_FALLBACK)
         return fallback_path, str(fallback_path), fallback_path.stat()
 
     return full_path, full_path_str, st
+
+
+def _key_label(key: AssetKey | None) -> str | None:
+    """The string used for logs and placeholder variants: the key itself, or a list's FIRST candidate."""
+    if key is None or isinstance(key, str):
+        return key
+    return first_candidate(key)
+
+
+def _resolve_key_and_stat(base_path: Path, key: AssetKey) -> tuple[Path, str, os.stat_result]:
+    """`_resolve_and_stat` for an `AssetKey`: a string is resolved exactly as before.
+
+    A candidate list tries each candidate in order (stat -> mirror fetch) and the first existing one wins; a
+    traversal (`ValueError`) propagates at once. When none exists, the birthday fallback is tried for the
+    candidates in order; failing that, the FIRST candidate's `FileNotFoundError` is raised, counted as
+    ``candidates_exhausted``.
+    """
+    if isinstance(key, str):
+        return _resolve_and_stat(base_path, key)
+    items = candidates(key)
+    if not items:
+        raise _missing_error(_EMPTY_IMAGE_PATH_MESSAGE, MISSING_EMPTY_PATH)
+    first_error: FileNotFoundError | None = None
+    for item in items:
+        try:
+            return _resolve_and_stat(base_path, item, birthday_fallback=False)
+        except FileNotFoundError as exc:
+            if first_error is None:
+                first_error = exc
+    for item in items:
+        resolved_base, full_path, _ = _resolve_asset_path(base_path, item)
+        fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base)
+        if fallback_path is not None:
+            record_missing_asset(MISSING_BIRTHDAY_FALLBACK)
+            return fallback_path, str(fallback_path), fallback_path.stat()
+    assert first_error is not None
+    setattr(first_error, _MISSING_REASON_ATTR, MISSING_CANDIDATES_EXHAUSTED)
+    raise first_error
+
+
+def first_existing_asset_path(base_path: Path, key: AssetKey | None) -> Path | None:
+    """Local path of the first existing candidate of `key` (mirror fetch and birthday fallback included).
+
+    ``None`` when the key is blank or nothing exists; a traversal still raises `ValueError`. Nothing is counted
+    here: the caller decides whether an absent asset is a miss.
+    """
+    if not candidates(key):
+        return None
+    assert key is not None
+    try:
+        return _resolve_key_and_stat(base_path, key)[0]
+    except FileNotFoundError:
+        return None
 
 
 def resolve_logical_file(base_path: Path, key: str) -> Path:
@@ -1147,25 +1256,28 @@ def _load_asset_image_ref_cached(
     return AssetImageRef(path=full_path, size=size, mode=mode, mtime_ns=mtime_ns, file_size=file_size)
 
 
-def _load_asset_image_ref_sync(base_path: Path, path: str) -> AssetImageRef:
-    _, full_path_str, stat = _resolve_and_stat(base_path, path)
+def _load_asset_image_ref_sync(base_path: Path, path: AssetKey) -> AssetImageRef:
+    _, full_path_str, stat = _resolve_key_and_stat(base_path, path)
     return _load_asset_image_ref_cached(full_path_str, stat.st_mtime_ns, stat.st_size)
 
 
 async def get_asset_image_ref(
     base_path: Path,
-    path: str | None,
+    path: AssetKey | None,
     on_missing: MissingImageMode = "placeholder",
 ) -> AssetImageRef | MissingImageRef:
     """Resolve an asset without decoding its pixels.
 
     This is intended for renderer-specific paths that emit the source path into an IR.
     Missing assets retain a lazy placeholder recipe; only the chosen renderer creates pixels.
+    A candidate list is tried in order inside ONE pool task; when every candidate is missing the log line and
+    the placeholder variant use the first candidate.
     """
-    if path is None or path.strip() == "":
+    label = _key_label(path)
+    if not candidates(path):
         if on_missing == "placeholder":
-            _log_missing_image_once(path, "empty-path")
-            return missing_image_ref(_guess_missing_placeholder_variant(path))
+            _log_missing_image_once(label, "empty-path")
+            return missing_image_ref(_guess_missing_placeholder_variant(label))
         _record_missing("empty-path")
         raise ValueError("图片路径不能为空(None)")
 
@@ -1173,29 +1285,31 @@ async def get_asset_image_ref(
         return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
     except (FileNotFoundError, OSError) as exc:
         if on_missing == "placeholder":
-            _log_missing_image_once(path, exc)
-            return missing_image_ref(_guess_missing_placeholder_variant(path))
+            _log_missing_image_once(label, exc)
+            return missing_image_ref(_guess_missing_placeholder_variant(label))
         _record_missing(exc)
         raise
 
 
-async def get_asset_image_refs(base_path: Path, paths: list[str | None]) -> list[AssetImageRef | MissingImageRef]:
+async def get_asset_image_refs(base_path: Path, paths: list[AssetKey | None]) -> list[AssetImageRef | MissingImageRef]:
     """Batch header-only probes, retaining the global signature-keyed metadata pool.
 
     Tiny per-layer executor jobs cost more than a warm stat/header lookup. Independent
     batches still overlap I/O; this never creates a per-request decoded-image cache.
+    A candidate-list element is one slot of a batch.
     """
 
     def load_batch(batch):
         result = []
         for path in batch:
+            label = _key_label(path)
             try:
-                if not path or not path.strip():
+                if not candidates(path):
                     raise _missing_error("empty-path", MISSING_EMPTY_PATH)
                 result.append(_load_asset_image_ref_sync(base_path, path))
             except (FileNotFoundError, OSError) as exc:
-                _log_missing_image_once(path, exc)
-                result.append(missing_image_ref(_guess_missing_placeholder_variant(path)))
+                _log_missing_image_once(label, exc)
+                result.append(missing_image_ref(_guess_missing_placeholder_variant(label)))
         return result
 
     batches = await asyncio.gather(*(run_in_pool(load_batch, paths[i : i + 16]) for i in range(0, len(paths), 16)))
@@ -1204,13 +1318,13 @@ async def get_asset_image_refs(base_path: Path, paths: list[str | None]) -> list
 
 def _load_image_resized_sync(
     base_path: Path,
-    path: str,
+    path: AssetKey,
     target_w: int,
     target_h: int,
     resample: int = RasterResample.BILINEAR,
 ) -> Image.Image:
-    """加载图片并 resize 到目标尺寸，结果缓存。"""
-    full_path, _, stat = _resolve_and_stat(base_path, path)
+    """加载图片并 resize 到目标尺寸，结果缓存（缓存键是解析后的路径，候选列表不改变键形状）。"""
+    full_path, _, stat = _resolve_key_and_stat(base_path, path)
     return _load_image_resized_full_path_sync(full_path, target_w, target_h, resample, stat=stat)
 
 
@@ -1260,7 +1374,7 @@ def _load_image_resized_full_path_sync(
 
 async def get_img_resized(
     base_path: Path,
-    path: str | None,
+    path: AssetKey | None,
     target_w: int,
     target_h: int,
     *,
@@ -1274,10 +1388,11 @@ async def get_img_resized(
     if target_w <= 0 or target_h <= 0:
         return await get_img_from_path(base_path, path, on_missing)
 
-    if path is None or path.strip() == "":
+    label = _key_label(path)
+    if not candidates(path):
         if on_missing == "placeholder":
-            _log_missing_image_once(path, "empty-path")
-            img = _get_missing_placeholder_image(path)
+            _log_missing_image_once(label, "empty-path")
+            img = _get_missing_placeholder_image(label)
             return img.resize((target_w, target_h), resample)
         _record_missing("empty-path")
         raise ValueError(_EMPTY_IMAGE_PATH_MESSAGE)
@@ -1286,8 +1401,8 @@ async def get_img_resized(
         return await run_in_pool(_load_image_resized_sync, base_path, path, target_w, target_h, resample)
     except (FileNotFoundError, OSError) as exc:
         if on_missing == "placeholder":
-            _log_missing_image_once(path, exc)
-            img = _get_missing_placeholder_image(path)
+            _log_missing_image_once(label, exc)
+            img = _get_missing_placeholder_image(label)
             return img.resize((target_w, target_h), resample)
         _record_missing(exc)
         raise
@@ -1295,7 +1410,7 @@ async def get_img_resized(
 
 async def get_img_resized_long_edge(
     base_path: Path,
-    path: str | None,
+    path: AssetKey | None,
     long_edge: int,
     *,
     resample: int = RasterResample.BILINEAR,
@@ -1335,9 +1450,9 @@ def _contain_resize(img: Image.Image, max_w: int, max_h: int) -> Image.Image:
     return img.resize((new_w, new_h))
 
 
-def _load_image_contain_resized_sync(base_path: Path, path: str, max_w: int, max_h: int) -> Image.Image:
+def _load_image_contain_resized_sync(base_path: Path, path: AssetKey, max_w: int, max_h: int) -> Image.Image:
     """加载图片并 contain-resize，结果缓存（key 使用负值 max 尺寸以区分 exact resize）。"""
-    full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+    full_path, full_path_str, stat = _resolve_key_and_stat(base_path, path)
 
     # 使用负值区分 contain resize 与 exact resize
     cache_tw, cache_th = -max_w, -max_h

@@ -637,3 +637,64 @@ def test_runtime_cache_stats_expose_asset_mirror_and_missing_assets(null_mirror)
     assert stats["asset_mirror"]["enabled"] is False
     assert stats["asset_mirror"]["source"] == "local"
     assert set(stats["missing_assets"]) == {"total", "by_reason"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Birthday fallback prefix shapes (plan §5.4/§6.3 item 2, task T7)
+# ---------------------------------------------------------------------------------------------------------------
+
+_BIRTHDAY_ROOTS = {
+    "static": ("static_images/mysekai/birthday", None),
+    "legacy_asset": ("asset/jp-assets/ondemand/mysekai/birthday", None),
+    "mirror": ("mirror/v0/jp-assets/ondemand/mysekai/birthday", "asset/jp-assets/ondemand/mysekai/birthday"),
+}
+
+
+@pytest.mark.parametrize("shape", list(_BIRTHDAY_ROOTS))
+def test_birthday_fallback_fires_for_every_prefix_shape_and_is_counted(tmp_path, request, shape) -> None:
+    from src.core import missing_asset_telemetry as telemetry
+
+    # The mirror shape only exists with a mirror; the other two are what the local source (NullMirror) produces.
+    request.getfixturevalue("asset_mirror" if shape == "mirror" else "null_mirror")
+    telemetry.reset_missing_asset_stats()
+    disk_root, logical_root = _BIRTHDAY_ROOTS[shape]
+    older = tmp_path / disk_root / "miku_2024" / "icon" / "item.png"
+    _save_image(older)
+    logical = f"{logical_root or disk_root}/miku_2026/icon/item.png"
+
+    requested = utils._resolve_asset_path(tmp_path, logical)[1]
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path.resolve()) == older.resolve()
+
+    full_path, _, _ = utils._resolve_and_stat(tmp_path, logical)
+    assert full_path == older.resolve()
+    assert telemetry.get_missing_asset_stats()["by_reason"]["birthday_fallback"] == 1
+    telemetry.reset_missing_asset_stats()
+
+
+def test_birthday_fallback_rejects_near_miss_shapes(tmp_path, asset_mirror) -> None:
+    base = tmp_path.resolve()
+    for rel in (
+        "asset/jp-assets/ondemand/mysekai/birthday/miku_2026",  # no tail file
+        "asset/jpn-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # region is not two letters
+        "asset/JP-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # upper-case region
+        "asset/jp-assets/other/mysekai/birthday/miku_2026/x.png",  # unknown mode
+        "asset/jp-assets/ondemand/mysekai/fixture/miku_2026/x.png",  # not the birthday dir
+        "asset/jp-assets/ondemand/mysekai/birthday/miku2026/x.png",  # no year separator
+        "asset/jp-assets/ondemand/mysekai/birthday/_2026/x.png",  # no chara name
+        "asset/jp-assets/ondemand/mysekai/birthday/miku_next/x.png",  # non-numeric year
+        "other/v0/jp-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # not under the mirror dir
+        "mirror/v0/jp-assets/ondemand/mysekai",  # too short
+    ):
+        assert utils._birthday_fallback_request(base / rel, base) is None, rel
+
+    root, chara, year, tail = utils._birthday_fallback_request(
+        base / "mirror/v7/kr-assets/startapp/mysekai/birthday/ichika_2025/a/b.png", base
+    )
+    assert root == base / "mirror/v7/kr-assets/startapp/mysekai/birthday"
+    assert (chara, year, tail) == ("ichika", 2025, ("a", "b.png"))
+
+
+def test_birthday_mirror_shape_needs_a_mirror_with_a_directory(tmp_path, null_mirror) -> None:
+    base = tmp_path.resolve()
+    rel = "mirror/v0/jp-assets/ondemand/mysekai/birthday/miku_2026/x.png"
+    assert utils._birthday_fallback_request(base / rel, base) is None
