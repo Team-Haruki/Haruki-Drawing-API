@@ -43,6 +43,7 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
+from src.sekai.base.asset_key import legacy_key
 from src.sekai.base.paint_types import WHITE, get_font_desc
 
 if TYPE_CHECKING:
@@ -189,7 +190,7 @@ class HonorBadgeBox(Widget):
             return
         if group_type == "rank_match":
             rank_pos = (190, 0) if self.rqd.is_main_honor else (17, 42)
-        elif is_world_link_rank_style(group_type, self.rqd.rank_img_path):
+        elif is_world_link_rank_style(group_type, legacy_key(self.rqd.rank_img_path)):
             rank_pos = (0, 0)
         else:
             rank_pos = resolve_event_rank_position(_size_of(base), _size_of(rank_img), self.rqd.is_main_honor)

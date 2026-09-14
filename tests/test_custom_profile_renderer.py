@@ -1017,6 +1017,31 @@ def test_custom_profile_request_asset_path_stays_inside_data_roots(tmp_path: Pat
         renderer.resolve_request_asset_path("../outside.png")
 
 
+def test_custom_profile_request_asset_path_takes_the_first_candidate_inside_the_roots(tmp_path: Path) -> None:
+    renderer = _make_renderer(tmp_path)
+    first = renderer.assets / "first.png"
+    second = renderer.assets / "second.png"
+    _write_png(first)
+    _write_png(second)
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-list.png"
+    _write_png(outside)
+    missing = (renderer.assets / "missing.png").as_posix()
+
+    assert renderer.resolve_request_asset_path([missing, second.as_posix(), first.as_posix()]) == second.resolve()
+    assert renderer.resolve_request_asset_path([outside.as_posix(), first.as_posix()]) == first.resolve()
+    assert renderer.resolve_request_asset_path([missing]) is None
+    assert renderer.resolve_request_asset_path([]) is None
+    with pytest.raises(ValueError, match="outside configured data roots"):
+        renderer.resolve_request_asset_path([missing, outside.as_posix()])
+    with pytest.raises(ValueError, match="traversal"):
+        renderer.resolve_request_asset_path(["../outside.png", first.as_posix()])
+    assert renderer.open_request_rgba([missing, first.as_posix()]) is not None
+
+
+def test_ondemand_preferred_top_level_includes_unit_story(tmp_path: Path) -> None:
+    assert "unit_story" in renderer_mod.ONDEMAND_PREFERRED_TOP_LEVEL
+
+
 def test_custom_profile_source_image_budget_runs_before_decode(tmp_path: Path) -> None:
     renderer = _make_renderer(tmp_path, max_layer_pixels=4)
     source = renderer.assets / "too-large.png"

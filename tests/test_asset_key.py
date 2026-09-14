@@ -279,3 +279,11 @@ def test_birthday_candidates_are_all_tried_before_the_year_fallback(tmp_path) ->
     assert utils.first_existing_asset_path(tmp_path, stale) == future.resolve()
     assert _reason("birthday_fallback") == 1
     assert _reason("candidates_exhausted") == 0
+
+
+def test_legacy_key_is_hashable_and_string_exact() -> None:
+    from src.sekai.base.asset_key import legacy_key
+
+    assert legacy_key(" a ") == " a "
+    assert legacy_key(["", " b ", "c"]) == "b"
+    assert legacy_key(None) is None

@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.paint_types import Color
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import ProfileCardRequest
@@ -31,7 +32,7 @@ class MysekaiPhenomRequest(BaseModel):
     """
 
     refresh_reason: str
-    image_path: str
+    image_path: AssetKey
     background_fill: Color = (255, 255, 255, 75)
     start_at: int
     text_fill: Color = (125, 125, 125, 255)
@@ -78,7 +79,7 @@ class MysekaiResourceNumber(BaseModel):
         已拥有的唱片
     """
 
-    image_path: str
+    image_path: AssetKey
     number: int = 0
     text_color: Color = (100, 100, 100)
     has_music_record: bool = False
@@ -97,7 +98,7 @@ class MysekaiSiteResourceNumber(BaseModel):
         地区中的资源数量列表
     """
 
-    image_path: str
+    image_path: AssetKey
     resource_numbers: list[MysekaiResourceNumber]
 
 
@@ -166,7 +167,7 @@ class MysekaiMsrMapSiteInfo(BaseModel):
         裁剪框 (x, y, w, h)
     """
 
-    image_path: str
+    image_path: AssetKey
     grid_size: float
     offset_x: float = 0.0
     offset_z: float = 0.0
@@ -207,7 +208,7 @@ class MysekaiMsrMapHarvestPoint(BaseModel):
     """
 
     id: int | None = None
-    image_path: str
+    image_path: AssetKey
     fallback_image_path: str | None = None
     position_x: float
     position_z: float
@@ -409,7 +410,7 @@ class MysekaiFixtureMainGenre(BaseModel):
     """
 
     name: str
-    image_path: str
+    image_path: AssetKey
     progress_message: str | None = None
     sub_genres: list[MysekaiFixtureSubGenre] = []
 
@@ -457,7 +458,7 @@ class MysekaiFixtureColorImage(BaseModel):
         颜色代码
     """
 
-    image_path: str
+    image_path: AssetKey
     color_code: str | None = None
 
 
@@ -474,7 +475,7 @@ class MysekaiFixtureMaterial(BaseModel):
         制作所需或回收所得的材料数量
     """
 
-    image_path: str
+    image_path: AssetKey
     quantity: int
 
 

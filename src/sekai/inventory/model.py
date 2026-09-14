@@ -1,5 +1,6 @@
 from pydantic import BaseModel
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest
 
@@ -10,7 +11,7 @@ class InventoryItem(BaseModel):
     description: str = ""
     category: str
     resource_type: str
-    icon_path: str
+    icon_path: AssetKey
     quantity: int
     seq: int
     recovery_value: int | None = None

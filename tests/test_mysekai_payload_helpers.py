@@ -98,17 +98,50 @@ def test_site_resource_helpers_count_and_render_available_resources(monkeypatch,
     ]
 
 
-def test_birthday_refresh_candidates_prefer_current_then_latest_past(tmp_path: Path) -> None:
-    for directory in ("miku_2024", "miku_2025", "miku_2027", "miku_invalid"):
-        path = tmp_path / directory
-        path.mkdir()
-        (path / "icon_refresh.png").touch()
+def test_birthday_refresh_icon_candidates_use_the_frozen_year_order(monkeypatch, tmp_path: Path) -> None:
+    # Addendum A4: exactly [Y, Y-1, Y-2, Y+1]; the pre-addendum [Y, Y-1, Y-2, Y-3] must not come back.
+    assets = _FakeAssets(tmp_path)
+    monkeypatch.setattr(gen, "ASSETS", assets)
+    monkeypatch.setattr(gen.common, "REGION", "jp")
 
-    candidates = gen._birthday_refresh_candidates(tmp_path, "miku")
+    paths = gen._birthday_refresh_icon_path({"givenNameEnglish": " Miku "}, current_year=2026)
 
-    assert gen._select_birthday_refresh(candidates, 2025) == "miku_2025"
-    assert gen._select_birthday_refresh(candidates, 2026) == "miku_2025"
-    assert gen._select_birthday_refresh(candidates, 2023) == "miku_2024"
+    root = "asset/jp-assets/ondemand/mysekai/birthday"
+    assert gen.BIRTHDAY_REFRESH_YEAR_OFFSETS == (0, -1, -2, 1)
+    assert gen._birthday_refresh_years(2026) == [2026, 2025, 2024, 2027]
+    assert paths == [
+        f"{root}/miku_2026/icon_refresh.png",
+        f"{root}/miku_2025/icon_refresh.png",
+        f"{root}/miku_2024/icon_refresh.png",
+        f"{root}/miku_2027/icon_refresh.png",
+    ]
+    assert assets.candidates == set(paths)
+    assert gen._birthday_refresh_icon_path({"givenNameEnglish": ""}) == []
+
+
+def test_birthday_refresh_icon_candidates_default_to_the_current_jp_year(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    year = gen.datetime.now(gen.JP_TZ).year
+
+    paths = gen._birthday_refresh_icon_path({"givenNameEnglish": "rin"})
+
+    assert [path.split("/")[-2] for path in paths] == [
+        f"rin_{year}",
+        f"rin_{year - 1}",
+        f"rin_{year - 2}",
+        f"rin_{year + 1}",
+    ]
+
+
+def test_birthday_harvest_image_falls_back_to_the_fixture_icon(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
+    key = gen._pos_key(1.0, 2.0)
+
+    assert gen._birthday_harvest_image("icon.png", 1.0, 2.0, {}, {}) == "icon.png"
+    assert gen._birthday_harvest_image("icon.png", 1.0, 2.0, {key: 39}, {}) == "icon.png"
+    listed = gen._birthday_harvest_image("icon.png", 1.0, 2.0, {key: 39}, {39: {"givenNameEnglish": "len"}})
+    assert isinstance(listed, list)
+    assert len(listed) == 4
 
 
 def test_map_harvest_points_builds_birthday_metadata_and_skips_tone_gust(monkeypatch, tmp_path: Path) -> None:
@@ -126,7 +159,9 @@ def test_map_harvest_points_builds_birthday_metadata_and_skips_tone_gust(monkeyp
     }
     monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
     monkeypatch.setattr(gen, "_md_map", lambda name: fixtures if name == "mysekaiSiteHarvestFixtures" else {39: {}})
-    monkeypatch.setattr(gen, "_birthday_refresh_icon_path", lambda _row: "asset/birthday.png")
+    monkeypatch.setattr(
+        gen, "_birthday_refresh_icon_path", lambda _row: ["asset/birthday_2026.png", "asset/birthday_2025.png"]
+    )
     site_map = {
         "userMysekaiSiteHarvestFixtures": [
             {"mysekaiSiteHarvestFixtureId": 1, "positionX": 1.0, "positionZ": 2.0},
@@ -137,7 +172,7 @@ def test_map_harvest_points_builds_birthday_metadata_and_skips_tone_gust(monkeyp
     result = gen._map_harvest_points(site_map, {gen._pos_key(1.0, 2.0): 39})
 
     assert len(result) == 1
-    assert result[0]["image_path"] == "asset/birthday.png"
+    assert result[0]["image_path"] == ["asset/birthday_2026.png", "asset/birthday_2025.png"]
     assert result[0]["fallback_image_path"].endswith("mdl_site_wood_common_fieldtree01.png")
     assert result[0]["size"] == 50
     assert result[0]["offset_x"] == 7.5

@@ -703,53 +703,34 @@ _SITE_CONFIGS: dict[int, dict[str, Any]] = {
 }
 
 
-def _birthday_refresh_candidates(base_dir: Path, name: str) -> list[tuple[int, str]]:
-    if not base_dir.is_dir():
-        return []
-    candidates = []
-    for entry in base_dir.iterdir():
-        if not entry.is_dir() or not entry.name.startswith(f"{name}_"):
-            continue
-        if not (entry / "icon_refresh.png").exists():
-            continue
-        try:
-            candidates.append((int(entry.name.removeprefix(f"{name}_")), entry.name))
-        except ValueError:
-            continue
-    return candidates
+# Frozen candidate order (addendum A4): current year, the two most recent past years, then the nearest
+# future year. Cloud T15 emits exactly this list and Drawing takes the first candidate that exists (C1).
+BIRTHDAY_REFRESH_YEAR_OFFSETS = (0, -1, -2, 1)
 
 
-def _select_birthday_refresh(candidates: list[tuple[int, str]], current_year: int) -> str:
-    exact = next((entry for year, entry in candidates if year == current_year), "")
-    if exact:
-        return exact
-    past = [(year, entry) for year, entry in candidates if year < current_year]
-    if past:
-        return max(past)[1]
-    future = [(year, entry) for year, entry in candidates if year > current_year]
-    return min(future)[1] if future else ""
+def _birthday_refresh_years(current_year: int) -> list[int]:
+    return [current_year + offset for offset in BIRTHDAY_REFRESH_YEAR_OFFSETS]
 
 
-def _birthday_refresh_icon_path(char_row: dict) -> str:
-    """resolveMysekaiBirthdayRefreshIconPath (controller_resources.go:341-405)."""
+def _birthday_refresh_icon_path(char_row: dict, current_year: int | None = None) -> list[str]:
+    """Birthday refresh icon candidate list (C1 replica of Cloud's ``map_builder.go`` after T15).
+
+    Cloud's directory scan (``controller_resources.go:341-405``) is replaced by a deterministic list; no
+    listing happens here either. Every candidate is recorded for the rsync manifest.
+    """
     name = (char_row.get("givenNameEnglish") or "").strip().lower()
     if not name:
-        return ""
-    current_year = datetime.now(JP_TZ).year
-    base_dir = ASSETS.data_dir / "asset" / f"{common.REGION}-assets" / "ondemand" / "mysekai" / "birthday"
-    chosen = _select_birthday_refresh(_birthday_refresh_candidates(base_dir, name), current_year)
-    if not chosen:
-        # Construction-time dependency: record for the rsync manifest.
-        ASSETS.candidates.add(
-            f"asset/{common.REGION}-assets/ondemand/mysekai/birthday/{name}_{current_year}/icon_refresh.png"
-        )
-        return ""
-    return ASSETS.region_asset(f"mysekai/birthday/{chosen}/icon_refresh.png")
+        return []
+    year = datetime.now(JP_TZ).year if current_year is None else current_year
+    root = f"asset/{common.REGION}-assets/ondemand/mysekai/birthday"
+    paths = [f"{root}/{name}_{candidate_year}/icon_refresh.png" for candidate_year in _birthday_refresh_years(year)]
+    ASSETS.candidates.update(paths)
+    return paths
 
 
 def _birthday_harvest_image(
     image_rel: str, x: float, z: float, birthday_char_by_pos: dict[str, int], characters: dict[int, dict]
-) -> str:
+) -> str | list[str]:
     char_id = birthday_char_by_pos.get(_pos_key(x, z), 0)
     if char_id <= 0:
         return image_rel
@@ -784,7 +765,9 @@ def _map_harvest_point(
         }
         offset_x, offset_z = 7.5, 0.0
     result: dict[str, Any] = {
-        "image_path": image_rel if image_rel.startswith("asset/") else ASSETS.static(image_rel),
+        "image_path": image_rel
+        if isinstance(image_rel, list) or image_rel.startswith("asset/")
+        else ASSETS.static(image_rel),
         "position_x": x,
         "position_z": z,
         "status": point.get("userMysekaiSiteHarvestFixtureStatus")

@@ -8,11 +8,14 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
 
 from src.core.debug import set_render_backend
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, candidates
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
     WATERMARK_LINE_SEP,
@@ -67,6 +70,20 @@ def chart_font_kwargs() -> dict[str, list[str]]:
     return {"font_dirs": [str(FONT_DIR)]}
 
 
+def chart_asset_path(key: AssetKey) -> Path:
+    """Local path of a chart input: the first candidate that exists, else the first candidate (C1).
+
+    A plain string joins exactly as before. Mirror materialisation of these non-image inputs lands with the
+    chart helpers (plan §7); until then only files already on local disk are considered.
+    """
+    if isinstance(key, str):
+        return ASSETS_BASE_DIR / key
+    paths = [ASSETS_BASE_DIR / item for item in candidates(key)]
+    if not paths:
+        raise ValueError("chart asset candidate list is empty")
+    return next((path for path in paths if path.is_file()), paths[0])
+
+
 def load_score(rqd: GenerateMusicChartRequest) -> Score:
     if rqd.chart_json is not None:
         if isinstance(rqd.chart_json, str):
@@ -74,20 +91,20 @@ def load_score(rqd: GenerateMusicChartRequest) -> Score:
         return Score.from_json(json.dumps(rqd.chart_json, ensure_ascii=False))
     if not rqd.sus_path:
         raise ValueError("either chart_json or sus_path is required")
-    return Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
+    return Score.open(str(chart_asset_path(rqd.sus_path)))
 
 
 def _prepare_chart_render(rqd: GenerateMusicChartRequest) -> tuple[Drawing, Score]:
     style_sheet = ""
     if rqd.style_path:
-        style_sheet = (ASSETS_BASE_DIR / rqd.style_path).read_text(encoding="utf-8")
+        style_sheet = chart_asset_path(rqd.style_path).read_text(encoding="utf-8")
     score = load_score(rqd)
     score.set_meta(
         title=rqd.title,
         artist=rqd.artist,
         difficulty=rqd.difficulty,
         playlevel=str(rqd.play_level),
-        jacket=str(ASSETS_BASE_DIR / rqd.jacket_path),
+        jacket=str(chart_asset_path(rqd.jacket_path)),
         songid=str(rqd.music_id),
     )
     drawing = Drawing(

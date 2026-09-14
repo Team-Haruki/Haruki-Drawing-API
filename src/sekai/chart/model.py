@@ -1,5 +1,6 @@
 from typing import Any, Literal
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 
 
@@ -44,10 +45,10 @@ class GenerateMusicChartRequest(TimeZoneRequest):
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"]
     play_level: str | int
     skill: bool = False
-    jacket_path: str
-    sus_path: str | None = None
+    jacket_path: AssetKey
+    sus_path: AssetKey | None = None
     chart_json: str | dict[str, Any] | None = None
-    style_path: str | None = None
+    style_path: AssetKey | None = None
     note_host: str
     music_meta: dict | None = None
     target_segment_seconds: float | None = None

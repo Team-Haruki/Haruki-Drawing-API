@@ -44,6 +44,17 @@ def first_candidate(key: AssetKey | None) -> str | None:
     return items[0] if items else None
 
 
+def legacy_key(key: AssetKey | None) -> str | None:
+    """A string form of `key` for code that used the plain path as a string or a dict key.
+
+    A string is returned exactly as sent (blank included), so legacy payloads keep their behaviour
+    byte for byte; a candidate list gives its first candidate. The result is always hashable.
+    """
+    if key is None or isinstance(key, str):
+        return key
+    return first_candidate(key)
+
+
 def is_candidate_list(key: AssetKey | None) -> bool:
     """Whether `key` arrived as a candidate list rather than a single path."""
     return isinstance(key, list)
