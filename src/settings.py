@@ -13,15 +13,165 @@ Usage:
     from src.settings import ASSETS_BASE_DIR, DEFAULT_FONT
 """
 
-from pathlib import Path
-from typing import Literal
+import logging
+from pathlib import Path, PurePosixPath
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import yaml
 
+logger = logging.getLogger("src.settings")
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_IMAGE_DIR = "static_images"
+
+# Every key a provider block may carry (canonical names and accepted aliases, contract addendum A7).
+# `endpoints` is handled separately: it is Cloud's per-node list and Drawing only borrows its first element.
+_PROVIDER_KEYS = frozenset(
+    {
+        "provider",
+        "name",
+        "scheme",
+        "kind",
+        "endpoint",
+        "tls",
+        "bucket",
+        "root",
+        "prefix",
+        "region",
+        "access_key_id",
+        "access_key",
+        "secret_access_key",
+        "secret_key",
+        "base_url",
+        "public_base_url",
+        "public_read",
+        "path_style",
+        "options",
+    }
+)
+
+
+class StorageProviderSettings(BaseModel):
+    """Object-storage provider block, key names shared with Asset-Updater and Haruki-Cloud (addendum A7).
+
+    `scheme` defaults to `fs` (not Asset-Updater's `s3`) so a zero-config service keeps today's local
+    behaviour. `memory` is a Drawing-local test/smoke value. Secrets are `SecretStr` and never appear in
+    `repr`, `model_dump()` or `describe()`.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    provider: str = Field(default="", validation_alias=AliasChoices("provider", "name"))
+    scheme: Literal["s3", "fs", "memory"] = Field(default="fs", validation_alias=AliasChoices("scheme", "kind"))
+    endpoint: str = ""  # host[:port] or a full URL; `tls` decides the URL scheme of a bare host
+    tls: bool = True
+    bucket: str = ""  # "{region}" / "{server}" templated
+    root: str = ""  # "{region}" templated; "" = bucket root (the configured value on both slots)
+    prefix: str | None = None  # legacy alias of root; root wins when both are set
+    region: str = "garage"
+    access_key_id: SecretStr | None = Field(default=None, validation_alias=AliasChoices("access_key_id", "access_key"))
+    secret_access_key: SecretStr | None = Field(
+        default=None, validation_alias=AliasChoices("secret_access_key", "secret_key")
+    )
+    base_url: str = Field(default="", validation_alias=AliasChoices("base_url", "public_base_url"))
+    public_read: bool = False
+    path_style: bool = True
+    options: dict[str, str] = {}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalise_provider_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        data = dict(data)
+        for key in list(data):
+            if key == "endpoints" or key in _PROVIDER_KEYS:
+                continue
+            logger.warning("settings.provider_unknown_key key=%s", key)
+            data.pop(key)
+        if "endpoints" in data:
+            endpoints = data.pop("endpoints")
+            logger.warning("settings.provider_endpoints_ignored count=%s", _endpoint_count(endpoints))
+            if not data.get("endpoint") and isinstance(endpoints, (list, tuple)) and endpoints:
+                data["endpoint"] = str(endpoints[0])
+        return data
+
+    @field_validator("scheme", mode="before")
+    @classmethod
+    def _scheme_alias_value(cls, v: Any) -> Any:
+        if isinstance(v, str):
+            v = v.strip().lower()
+            if v in ("", "local"):
+                return "fs"
+        return v
+
+    def describe(self) -> dict[str, str]:
+        """Loggable identity of the provider — never credentials."""
+        return {
+            "provider": self.provider,
+            "scheme": self.scheme,
+            "endpoint": self.endpoint,
+            "bucket": self.bucket,
+            "root": self.root,
+        }
+
+
+def _endpoint_count(endpoints: Any) -> int:
+    return len(endpoints) if isinstance(endpoints, (list, tuple)) else 1
+
+
+class AssetMirrorProviderSettings(StorageProviderSettings):
+    """Assets slot: object keys are `<region>-assets/<mode>/<rel>`, so `root` stays "" (addendum A9(7)).
+
+    A subclass (not a default instance) so a partial env/YAML block keeps the slot defaults.
+    """
+
+    scheme: Literal["s3", "fs", "memory"] = Field(default="s3", validation_alias=AliasChoices("scheme", "kind"))
+    bucket: str = "pjsk-assets"
+
+
+class ArtifactProviderSettings(StorageProviderSettings):
+    """Image-cache slot: object keys are `pjsk/<api_path>/<sha256>.<ext>`, `root` stays "" (addendum A9(8))."""
+
+    scheme: Literal["s3", "fs", "memory"] = Field(default="s3", validation_alias=AliasChoices("scheme", "kind"))
+    bucket: str = "image-cache"
+
+
+class AssetMirrorSettings(BaseModel):
+    """On-demand asset mirror (read side). Nothing is wired until `assets.source == "mirror"`."""
+
+    provider: AssetMirrorProviderSettings = AssetMirrorProviderSettings()
+    dir: str = "mirror"  # RELATIVE to assets.base_dir
+    manifest_version: str = "v0"  # E5 path segment; assets.manifest_version wins when set (addendum B7)
+    manifest_version_file: Path | None = None  # optional per-node file; its first line has top precedence
+    manifest_version_poll_seconds: int = 30
+    versions_keep: int = 2
+    max_bytes: int = 8 * 1024**3  # 0 = unlimited
+    max_entries: int = 200_000  # 0 = unlimited
+    sweep_interval_seconds: int = 600
+    fetch_timeout_seconds: float = 5.0  # total budget per ensure_local
+    fetch_io_timeout_seconds: float = 5.0  # per opendal I/O op
+    fetch_retries: int = 1
+    fetch_concurrency: int = 8
+    fetch_max_bytes: int = 64 * 1024**2
+    negative_ttl_seconds: float = 60.0  # 0 disables the NotFound memo
+    negative_memo_max: int = 32_768
+    local_fallback: bool = True
+    breaker_failures: int = 5
+    breaker_open_seconds: float = 30.0
+    tmp_max_age_seconds: int = 3600
+
+    @field_validator("dir")
+    @classmethod
+    def _dir_must_stay_under_base(cls, v: str) -> str:
+        normalised = v.replace("\\", "/")
+        if not normalised.strip() or normalised.startswith("/") or Path(v).is_absolute():
+            raise ValueError("assets.mirror.dir must be a non-empty path relative to assets.base_dir")
+        if ".." in PurePosixPath(normalised).parts:
+            raise ValueError("assets.mirror.dir must not contain '..'")
+        return v
 
 
 class AssetsSettings(BaseModel):
@@ -31,6 +181,9 @@ class AssetsSettings(BaseModel):
     result_asset_path: str = STATIC_IMAGE_DIR
     tmp_path: str = "tmp"
     tri_paths: list[str] = []
+    source: Literal["local", "mirror"] = "local"
+    manifest_version: str | None = None  # HARUKI_ASSETS__MANIFEST_VERSION (addendum B7)
+    mirror: AssetMirrorSettings = AssetMirrorSettings()
 
     @field_validator("base_dir", mode="before")
     @classmethod
@@ -161,6 +314,33 @@ class DrawingSettings(BaseModel):
         return path
 
 
+class IndexSettings(BaseModel):
+    """PostgreSQL render index (INSERT/SELECT only; Cloud owns the DDL)."""
+
+    enabled: bool = True  # empty dsn == disabled (uploads still happen)
+    dsn: SecretStr | None = None  # ENV ONLY — from_yaml drops a YAML value with a WARNING
+    pool_min_size: int = 0
+    pool_max_size: int = 4
+    connect_timeout_seconds: float = 2.0
+    command_timeout_seconds: float = 2.0
+    connect_retry_seconds: float = 30.0
+
+
+class StorageSettings(BaseModel):
+    """Artifact output (write side). `enabled=false` is the unilateral rollback switch."""
+
+    enabled: bool = False
+    node_name: str = ""  # "" -> socket.gethostname() at runtime
+    provider: ArtifactProviderSettings = ArtifactProviderSettings()
+    index: IndexSettings = IndexSettings()
+    ttl_max_seconds: int = 30 * 86400  # X-Haruki-Cache-TTL cap; Cloud clamps to the same value
+    upload_timeout_seconds: float = 8.0  # total per request; must stay below debug._WATCHDOG_WARN_SECONDS
+    upload_io_timeout_seconds: float = 4.0
+    upload_retries: int = 1
+    upload_concurrency: int = 4
+    hash_in_pool_min_bytes: int = 262_144
+
+
 class Settings(BaseSettings):
     """Main settings class."""
 
@@ -184,6 +364,7 @@ class Settings(BaseSettings):
     server: ServerSettings = ServerSettings()
     logging: LoggingSettings = LoggingSettings()
     drawing: DrawingSettings = DrawingSettings()
+    storage: StorageSettings = StorageSettings()
 
     @model_validator(mode="after")
     def fill_custom_profile_defaults(self) -> "Settings":
@@ -227,6 +408,8 @@ class Settings(BaseSettings):
             mapped["server"] = data["server"]
         if "logging" in data:
             mapped["logging"] = data["logging"]
+        if "storage" in data:
+            mapped["storage"] = _strip_yaml_index_dsn(data["storage"])
 
         # Drawing settings
         drawing: dict = {}
@@ -238,6 +421,17 @@ class Settings(BaseSettings):
             mapped["drawing"] = drawing
 
         return cls(**mapped)
+
+
+def _strip_yaml_index_dsn(storage: Any) -> Any:
+    """The index DSN carries a password and configs.docker.yaml is a plaintext bind mount: env only."""
+    if not isinstance(storage, dict) or not isinstance(storage.get("index"), dict):
+        return storage
+    if "dsn" not in storage["index"]:
+        return storage
+    logger.warning("settings.index_dsn_ignored source=yaml")
+    index = {k: v for k, v in storage["index"].items() if k != "dsn"}
+    return {**storage, "index": index}
 
 
 # Singleton instance

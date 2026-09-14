@@ -4,6 +4,10 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: haruki-drawing-api
+    # Storage credentials and the index DSN are env only (HARUKI_STORAGE__INDEX__DSN,
+    # HARUKI_STORAGE__PROVIDER__ACCESS_KEY_ID, ...); keep them in a .env file next to this compose file.
+    # env_file:
+    #   - .env
     ports:
       - "28000:8000"
     environment:

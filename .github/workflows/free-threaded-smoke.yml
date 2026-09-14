@@ -64,6 +64,11 @@ jobs:
           print("free-threaded import smoke passed")
           PY
 
+      # opendal and asyncpg are native extensions; a wheel without Py_MOD_GIL_NOT_USED would silently
+      # re-enable the GIL with a RuntimeWarning, which -W error turns into a failure.
+      - name: Verify storage dependency imports
+        run: .venv314t/bin/python -X gil=0 -W error::RuntimeWarning -c "import opendal, asyncpg; import src.core.main"
+
       - name: Compile check
         run: |
           UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python -m compileall src
