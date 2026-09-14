@@ -1,5 +1,5 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 import os
 from pathlib import Path
@@ -318,16 +318,22 @@ def test_rendered_image_cache_key_is_stable_for_dict_ordering():
     assert first != changed
 
 
-def test_temp_file_path_can_schedule_and_cleanup_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(utils, "TEMP_FILE_DIR", tmp_path)
-
-    with utils.TempFilePath("txt", remove_after=timedelta(seconds=0)) as path:
-        temp_path = Path(path)
-        temp_path.write_text("temporary", encoding="utf-8")
-        assert temp_path.exists()
+def test_cleanup_expired_tmp_files_removes_due_entries_and_keeps_pending(monkeypatch, tmp_path):
+    due = tmp_path / "due.txt"
+    due.write_text("temporary", encoding="utf-8")
+    pending = tmp_path / "pending.txt"
+    pending.write_text("temporary", encoding="utf-8")
+    now = datetime.now()
+    monkeypatch.setattr(
+        utils,
+        "_tmp_files_to_remove",
+        [(str(due), now - timedelta(seconds=1)), (str(pending), now + timedelta(hours=1))],
+    )
 
     assert utils.cleanup_expired_tmp_files() == 1
-    assert not temp_path.exists()
+    assert not due.exists()
+    assert pending.exists()
+    assert [path for path, _ in utils._tmp_files_to_remove] == [str(pending)]
 
 
 # ---------------------------------------------------------------------------------------------------------------

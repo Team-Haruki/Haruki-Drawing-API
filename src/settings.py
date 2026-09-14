@@ -445,11 +445,6 @@ settings = Settings.from_yaml()
 ASSETS_BASE_DIR = settings.assets.base_dir
 RESULT_ASSET_PATH = settings.assets.result_asset_path
 TMP_PATH = settings.assets.tmp_path
-TRI_PATHS = settings.assets.tri_paths or [
-    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri1.png"),
-    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri2.png"),
-    str(ASSETS_BASE_DIR / RESULT_ASSET_PATH / "triangle/tri3.png"),
-]
 
 # Fonts
 FONT_DIR = settings.font.dir

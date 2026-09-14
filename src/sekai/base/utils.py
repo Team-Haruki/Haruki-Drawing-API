@@ -10,7 +10,6 @@ import io
 import json
 import logging
 import os
-from os.path import join as pjoin
 from pathlib import Path
 from stat import S_ISREG
 import threading
@@ -1482,26 +1481,6 @@ def _load_image_contain_resized_sync(base_path: Path, path: AssetKey, max_w: int
     return resized
 
 
-def batch_load_and_contain_resize(
-    base_path: Path,
-    paths: list[str],
-    max_w: int,
-    max_h: int,
-) -> dict[str, Image.Image]:
-    """批量加载图片并 contain-resize 到 (max_w, max_h)，结果缓存。
-
-    同步函数，设计用于 run_in_pool 中执行。
-    """
-    result: dict[str, Image.Image] = {}
-    for path in paths:
-        try:
-            result[path] = _load_image_contain_resized_sync(base_path, path, max_w, max_h)
-        except (FileNotFoundError, OSError):
-            img = _get_missing_placeholder_image(path)
-            result[path] = _contain_resize(img, max_w, max_h)
-    return result
-
-
 def get_str_display_length(s: str) -> int:
     """
     获取字符串的显示长度，中文字符算两个字符
@@ -1677,8 +1656,6 @@ def get_chara_nickname(cid: int) -> str:
 
 # ======================= 临时文件 ======================= #
 
-# generate music chart 使用，用于保存临时的svg图片使用浏览器截图生成png图片
-# 这个路径和存放所需资源（note host和jacket）的路径都必须与那个浏览器微服务设置同一个volumes
 TEMP_FILE_DIR = ASSETS_BASE_DIR / TMP_PATH
 _tmp_files_to_remove: list[tuple[str, datetime]] = []
 _tmp_files_lock = threading.Lock()
@@ -1749,29 +1726,6 @@ def remove_file(file_path):
     """
     if os.path.exists(file_path):
         os.remove(file_path)
-
-
-class TempFilePath:
-    """
-    临时文件路径
-    remove_after为None表示使用后立即删除，否则延时删除
-    """
-
-    def __init__(self, ext: str, remove_after: timedelta | None = None):
-        self.ext = ext
-        self.path = os.path.abspath(pjoin(TEMP_FILE_DIR, rand_filename(ext)))
-        self.remove_after = remove_after
-        create_parent_folder(self.path)
-
-    def __enter__(self) -> str:
-        return self.path
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.remove_after is None:
-            remove_file(self.path)
-        else:
-            with _tmp_files_lock:
-                _tmp_files_to_remove.append((self.path, datetime.now() + self.remove_after))
 
 
 # ============================ 异步和任务 ============================ #
