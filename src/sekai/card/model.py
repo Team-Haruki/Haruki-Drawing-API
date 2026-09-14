@@ -203,6 +203,7 @@ class UserCard(BaseModel):
 
     card: CardBasic
     has_card: bool
+    acquired_at: int | None = None
 
 
 class CardDistributionCharacterStat(BaseModel):

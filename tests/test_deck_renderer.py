@@ -241,3 +241,66 @@ def test_deck_renderer_helpers_cover_story_and_score_defaults():
     assert drawer._story_read_color(True) == (50, 150, 50, 255)
     assert drawer._story_read_color(False) == (150, 50, 50, 255)
     assert drawer._deck_card_is_fixed(request, 101, 999)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("support_count", [12, 20, 25])
+async def test_wl_support_rows_keep_per_result_totals_and_compact_cards(monkeypatch, support_count):
+    texts = []
+    sizes = []
+    original_text = drawer.TextBox
+
+    def text_box(text, *args, **kwargs):
+        texts.append(text)
+        return original_text(text, *args, **kwargs)
+
+    def thumbnail(_layers, *, size):
+        sizes.append(size)
+        return drawer.Spacer(w=size[0] or size[1], h=size[1])
+
+    async def load_assets(_request):
+        return _assets()
+
+    monkeypatch.setattr(drawer, "_load_deck_recommend_assets", load_assets)
+    monkeypatch.setattr(drawer, "TextBox", text_box)
+    monkeypatch.setattr(drawer, "CardFullThumbnailBox", thumbnail)
+    request = _request(
+        is_wl=True,
+        recommend_type="wl",
+        deck_data=[
+            _deck(
+                support_card_data=[_card(event_bonus_rate=12.75)] * support_count,
+                support_deck_bonus_rate=12.75 * support_count,
+            ),
+            _deck(support_card_data=[_card(event_bonus_rate=5)], support_deck_bonus_rate=5),
+        ],
+    )
+    canvas = await drawer._build_deck_recommend_canvas(request)
+    rendered = await canvas.get_img()
+    assert rendered.width > 0
+    assert not any("支援配置" in text or "总支援加成" in text for text in texts)
+    assert texts.count("12.75%") == support_count
+    assert texts.count("卡组") == 1
+    assert texts.count("加成") == 1
+    assert texts.count("综合力") == 1
+    assert sizes.count((52, 52)) == support_count + 1
+    assert sizes.count((None, 80)) == 2
+
+
+def test_support_card_assets_are_loaded_with_main_cards(monkeypatch):
+    loaded = []
+
+    async def load(_base, _path):
+        return _asset()
+
+    async def load_card(card):
+        loaded.append(card.card_id)
+        return "layers"
+
+    support = _card()
+    support.card_thumbnail.card_id = 202
+    monkeypatch.setattr(drawer, "get_asset_image_ref", load)
+    monkeypatch.setattr(drawer, "get_card_full_thumbnail_layers", load_card)
+    assets = asyncio.run(drawer._load_deck_recommend_assets(_request(deck_data=[_deck(support_card_data=[support])])))
+    assert loaded == [101, 202]
+    assert assets.card_layers[(202, True, "card.png")] == "layers"
