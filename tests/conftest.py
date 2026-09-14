@@ -56,3 +56,30 @@ def opendal_memory_store():
     from src.storage.opendal_store import OpendalObjectStore
 
     return OpendalObjectStore(opendal.AsyncOperator("memory"), name="memory", bucket="memory")
+
+
+@pytest.fixture
+def asset_mirror(tmp_path):
+    """An `AssetMirror` over a `FakeObjectStore` rooted at `tmp_path`, installed via `set_asset_mirror`.
+
+    The fake store is reachable as `asset_mirror.store_for("<region>")` (one shared store for every region).
+    """
+    from src.assets.mirror import AssetMirror, MirrorStats, set_asset_mirror
+    from src.assets.version import StaticVersion
+    from src.settings import AssetMirrorSettings
+    from tests.storage_fakes import FakeObjectStore
+
+    store = FakeObjectStore(bucket="pjsk-assets")
+    mirror = AssetMirror(
+        base_dir=tmp_path,
+        settings=AssetMirrorSettings(),
+        store_factory=lambda region: store,
+        version_source=StaticVersion("v0"),
+        stats=MirrorStats(),
+    )
+    set_asset_mirror(mirror)
+    try:
+        yield mirror
+    finally:
+        set_asset_mirror(None)
+        mirror.close()
