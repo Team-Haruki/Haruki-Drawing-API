@@ -10,6 +10,19 @@ Example:
     --requests 100 \
     --concurrency 16 \
     --output-dir ./out/profile-load
+
+Artifact mode (a Drawing node with `HARUKI_STORAGE__ENABLED=true`):
+  python scripts/concurrent_fetch_images.py \
+    --base-url http://127.0.0.1:8000 \
+    --endpoint /api/pjsk/honor/ \
+    --payload-file payloads/honor.json \
+    --expect artifact \
+    --fetch-cdn http://image-cache.example.internal
+
+`--expect artifact` sends a complete render cache directive (docs/artifact-storage.md) unless the caller
+overrides a header with `--header`, and counts a 200 `application/json` body whose `kind` is
+`artifact_ref` as an ok image. `--fetch-cdn` additionally GETs `<base>/<cdn_path>` for every ref and
+requires the bytes to match `size_bytes`.
 """
 
 from __future__ import annotations
@@ -19,6 +32,7 @@ import asyncio
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 import json
 from pathlib import Path
 import statistics
@@ -45,9 +59,23 @@ class RequestResult:
     response_bytes: int
     content_type: str | None
     error: str | None
+    cdn_path: str | None = None
+    reused: bool | None = None
+    cdn_status: int | None = None
 
 
-def parse_args() -> argparse.Namespace:
+EXPECT_IMAGE = "image"
+EXPECT_ARTIFACT = "artifact"
+ARTIFACT_REF_KIND = "artifact_ref"
+
+# The directive `--expect artifact` sends by default (plan §8.1). A `--header` with the same name wins.
+DEFAULT_DIRECTIVE_TTL_SECONDS = "3600"
+DEFAULT_DIRECTIVE_KEY_VERSION = "3"
+DEFAULT_DIRECTIVE_GROUP = "pjsk"
+DEFAULT_DIRECTIVE_USER_ID = "public"
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Concurrent fetcher for image endpoints.")
     parser.add_argument("--base-url", default="http://127.0.0.1:8000", help="API base URL.")
     parser.add_argument("--endpoint", required=True, help="Endpoint path, e.g. /api/pjsk/profile/.")
@@ -77,7 +105,18 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Disable TLS verification for HTTPS targets.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--expect",
+        default=EXPECT_IMAGE,
+        choices=(EXPECT_IMAGE, EXPECT_ARTIFACT),
+        help="What counts as ok: image bytes (default) or an artifact_ref JSON document.",
+    )
+    parser.add_argument(
+        "--fetch-cdn",
+        default="",
+        help="With --expect artifact: GET <base>/<cdn_path> for every ref and require size_bytes to match.",
+    )
+    return parser.parse_args(argv)
 
 
 def parse_headers(header_items: list[str]) -> dict[str, str]:
@@ -110,6 +149,38 @@ def get_output_dir(cli_value: str) -> Path:
         out = Path("out") / f"load_images_{ts}"
     out.mkdir(parents=True, exist_ok=True)
     return out
+
+
+def build_artifact_headers(endpoint: str, headers: dict[str, str]) -> dict[str, str]:
+    """The full directive for `--expect artifact`; any header the caller already set (case-insensitive) wins."""
+    api_path = endpoint.strip("/") or "api"
+    defaults = {
+        "X-Haruki-Artifact": "1",
+        "X-Haruki-Cache-Key": hashlib.sha256(api_path.encode("utf-8")).hexdigest(),
+        "X-Haruki-Cache-Key-Version": DEFAULT_DIRECTIVE_KEY_VERSION,
+        "X-Haruki-Cache-TTL": DEFAULT_DIRECTIVE_TTL_SECONDS,
+        "X-Haruki-Cache-Group": DEFAULT_DIRECTIVE_GROUP,
+        "X-Haruki-Api-Path": api_path,
+        "X-Haruki-User-Id": DEFAULT_DIRECTIVE_USER_ID,
+        "X-Haruki-Cache-Store": "1",
+    }
+    present = {name.lower() for name in headers}
+    merged = {name: value for name, value in defaults.items() if name.lower() not in present}
+    merged.update(headers)
+    return merged
+
+
+def parse_artifact_ref(body: bytes) -> dict[str, Any] | None:
+    """The decoded ref when `body` is a JSON object with `kind == "artifact_ref"`, else `None`."""
+    try:
+        doc = json.loads(body)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not isinstance(doc, dict) or doc.get("kind") != ARTIFACT_REF_KIND:
+        return None
+    if not isinstance(doc.get("cdn_path"), str) or not doc["cdn_path"]:
+        return None
+    return doc
 
 
 def build_url(base_url: str, endpoint: str) -> str:
@@ -161,6 +232,8 @@ async def fire_one(
     payload: dict[str, Any],
     out_dir: Path,
     save_errors: bool,
+    expect: str = EXPECT_IMAGE,
+    fetch_cdn: str = "",
 ) -> RequestResult:
     started = time.perf_counter()
     try:
@@ -168,11 +241,15 @@ async def fire_one(
             async with session.get(url, params=payload) as resp:
                 body = await resp.read()
                 elapsed_ms = (time.perf_counter() - started) * 1000
-                return await save_response(index, resp, body, elapsed_ms, out_dir, save_errors)
-        async with session.post(url, json=payload) as resp:
-            body = await resp.read()
-            elapsed_ms = (time.perf_counter() - started) * 1000
-            return await save_response(index, resp, body, elapsed_ms, out_dir, save_errors)
+                result = await save_response(index, resp, body, elapsed_ms, out_dir, save_errors, expect=expect)
+        else:
+            async with session.post(url, json=payload) as resp:
+                body = await resp.read()
+                elapsed_ms = (time.perf_counter() - started) * 1000
+                result = await save_response(index, resp, body, elapsed_ms, out_dir, save_errors, expect=expect)
+        if result.ok and fetch_cdn and result.cdn_path:
+            await verify_cdn_object(session, result, fetch_cdn, body, out_dir)
+        return result
     except Exception as exc:
         elapsed_ms = (time.perf_counter() - started) * 1000
         return RequestResult(
@@ -194,8 +271,12 @@ async def save_response(
     elapsed_ms: float,
     out_dir: Path,
     save_errors: bool,
+    *,
+    expect: str = EXPECT_IMAGE,
 ) -> RequestResult:
     content_type = resp.headers.get("Content-Type", "")
+    if expect == EXPECT_ARTIFACT:
+        return save_artifact_response(index, resp.status, content_type, body, elapsed_ms, out_dir, save_errors)
     is_image = 200 <= resp.status < 300 and content_type.startswith("image/")
     file_path: str | None = None
     if is_image:
@@ -223,14 +304,88 @@ async def save_response(
     )
 
 
-async def run() -> int:
-    args = parse_args()
+def save_artifact_response(
+    index: int,
+    status: int,
+    content_type: str,
+    body: bytes,
+    elapsed_ms: float,
+    out_dir: Path,
+    save_errors: bool,
+) -> RequestResult:
+    """`--expect artifact`: ok only for 200 + application/json + `kind == "artifact_ref"`."""
+    ref = None
+    if status == 200 and content_type.lower().startswith("application/json"):
+        ref = parse_artifact_ref(body)
+    ok = ref is not None
+    file_path: str | None = None
+    if ok or save_errors:
+        ext = extension_from_content_type(content_type)
+        folder = "refs" if ok else "errors"
+        path = out_dir / folder / f"{index:06d}_{status}.{ext}"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(body)
+        file_path = str(path)
+    return RequestResult(
+        index=index,
+        status=status,
+        elapsed_ms=elapsed_ms,
+        ok=ok,
+        response_path=file_path,
+        response_bytes=len(body),
+        content_type=content_type,
+        error=None if ok else f"expected artifact_ref: status={status}, content-type={content_type}",
+        cdn_path=ref["cdn_path"] if ref else None,
+        reused=bool(ref.get("reused")) if ref else None,
+    )
+
+
+async def verify_cdn_object(
+    session: aiohttp.ClientSession,
+    result: RequestResult,
+    base: str,
+    ref_body: bytes,
+    out_dir: Path,
+) -> None:
+    """GET `<base>/<cdn_path>`; a non-200 or a size mismatch against `size_bytes` turns the result into a failure."""
+    ref = parse_artifact_ref(ref_body) or {}
+    url = build_url(base, result.cdn_path or "")
+    try:
+        async with session.get(url) as resp:
+            data = await resp.read()
+            result.cdn_status = resp.status
+    except Exception as exc:
+        result.ok = False
+        result.error = f"cdn fetch failed: {exc}"
+        return
+    expected = ref.get("size_bytes")
+    if result.cdn_status != 200:
+        result.ok = False
+        result.error = f"cdn status={result.cdn_status} url={url}"
+        return
+    if isinstance(expected, int) and expected != len(data):
+        result.ok = False
+        result.error = f"cdn size mismatch: ref={expected} fetched={len(data)} url={url}"
+        return
+    suffix = Path(result.cdn_path or "").suffix or ".bin"
+    path = out_dir / "images" / f"{result.index:06d}_cdn{suffix}"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+
+
+async def run(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if args.requests <= 0:
         raise ValueError("--requests must be > 0")
     if args.concurrency <= 0:
         raise ValueError("--concurrency must be > 0")
 
+    if args.fetch_cdn and args.expect != EXPECT_ARTIFACT:
+        raise ValueError("--fetch-cdn requires --expect artifact")
+
     headers = parse_headers(args.header)
+    if args.expect == EXPECT_ARTIFACT:
+        headers = build_artifact_headers(args.endpoint, headers)
     payloads = load_payloads(args.payload_file)
     out_dir = get_output_dir(args.output_dir)
     url = build_url(args.base_url, args.endpoint)
@@ -252,6 +407,8 @@ async def run() -> int:
                     payload=payload,
                     out_dir=out_dir,
                     save_errors=args.save_errors,
+                    expect=args.expect,
+                    fetch_cdn=args.fetch_cdn,
                 )
 
         tasks = [asyncio.create_task(wrapped(i)) for i in range(args.requests)]
@@ -272,9 +429,11 @@ async def run() -> int:
         "method": args.method,
         "requests": args.requests,
         "concurrency": args.concurrency,
+        "expect": args.expect,
         "ok_images": ok_count,
         "failed": fail_count,
         "status_counts": status_counts,
+        "artifact_reused": sum(1 for r in results if r.reused),
         "latency_ms": {
             "avg": round(statistics.mean(elapsed_list), 2) if elapsed_list else 0.0,
             "p50": round(percentile(elapsed_list, 0.50), 2),
