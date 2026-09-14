@@ -241,3 +241,36 @@ class FakePgPool:
         self.closed = True
         if self.close_error is not None:
             raise self.close_error
+
+
+# ---------------------------------------------------------------------------------------------- artifact runtime
+
+
+def build_test_runtime(
+    *,
+    store: Any = None,
+    index: Any = None,
+    settings: Any = None,
+    node_name: str = "test-node",
+    stats: Any = None,
+    **service_kwargs: Any,
+) -> Any:
+    """An enabled `ArtifactRuntime` over fakes (a fresh `FakeObjectStore` when `store` is None)."""
+    from src.artifact.runtime import ArtifactRuntime
+    from src.artifact.service import ArtifactService
+    from src.artifact.stats import artifact_stats
+    from src.settings import StorageSettings
+
+    storage = settings if settings is not None else StorageSettings(enabled=True)
+    store = store if store is not None else FakeObjectStore(bucket="image-cache")
+    stats = stats if stats is not None else artifact_stats
+    service = ArtifactService(
+        store=store,
+        index=index,
+        settings=storage,
+        node_name=node_name,
+        stats=stats,
+        **service_kwargs,
+    )
+    stats.set_runtime_state(enabled=True, bucket=store.bucket)
+    return ArtifactRuntime(service=service, store=store, index=service.index, stats=stats)

@@ -296,6 +296,25 @@ def _start_asset_mirror() -> None:
         )
 
 
+async def _start_artifact_runtime() -> None:
+    """Build the artifact runtime and warm its index; a failure never fails boot (bytes mode keeps serving)."""
+    from src.artifact.runtime import startup_artifact_runtime
+
+    try:
+        await startup_artifact_runtime()
+    except Exception:
+        logger.error("artifact runtime startup failed; serving image bytes only", exc_info=True)
+
+
+async def _stop_artifact_runtime() -> None:
+    from src.artifact.runtime import shutdown_artifact_runtime
+
+    try:
+        await shutdown_artifact_runtime()
+    except Exception:
+        logger.warning("artifact runtime shutdown failed", exc_info=True)
+
+
 async def _startup_runtime() -> list[asyncio.Task[None]]:
     from src.core.heavy_render_pool import startup_heavy_render_worker_pool
 
@@ -307,6 +326,7 @@ async def _startup_runtime() -> list[asyncio.Task[None]]:
     cleanup_tasks = _create_cleanup_tasks()
     _run_initial_disk_cleanup()
     await startup_heavy_render_worker_pool()
+    await _start_artifact_runtime()
     logger.info("Haruki Drawing API is starting...")
     return cleanup_tasks
 
@@ -323,6 +343,7 @@ async def _shutdown_runtime(cleanup_tasks: list[asyncio.Task[None]]) -> None:
         cleanup_task.cancel()
     await asyncio.gather(*cleanup_tasks, return_exceptions=True)
     await shutdown_heavy_render_worker_pool()
+    await _stop_artifact_runtime()
     shutdown_asset_mirror()
     cleanup_painter_disk_cache()
     shutdown_utils()

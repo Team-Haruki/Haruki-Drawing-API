@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from src.artifact import runtime as artifact_runtime_mod
 from src.assets import mirror as mirror_mod
 from src.assets.mirror import AssetMirror, MirrorStats, NullMirror
 from src.assets.version import StaticVersion
@@ -198,8 +199,56 @@ def test_runtime_startup_runs_each_stage(monkeypatch: pytest.MonkeyPatch) -> Non
 
     monkeypatch.setattr(heavy_render_pool, "startup_heavy_render_worker_pool", start_pool)
 
+    async def start_artifacts() -> None:
+        calls.append("artifacts")
+
+    monkeypatch.setattr(artifact_runtime_mod, "startup_artifact_runtime", start_artifacts)
+
     assert asyncio.run(main_mod._startup_runtime()) is cleanup_tasks
-    assert calls == ["nogil", "logging", "diagnostics", "fonts", "mirror", "tasks", "disk", "pool"]
+    assert calls == ["nogil", "logging", "diagnostics", "fonts", "mirror", "tasks", "disk", "pool", "artifacts"]
+
+
+def test_artifact_startup_failure_does_not_fail_boot(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    monkeypatch.setattr(main_mod, "_ensure_nogil_runtime", lambda: None)
+    monkeypatch.setattr(main_mod.coloredlogs, "install", lambda **_kwargs: None)
+    monkeypatch.setattr(main_mod, "configure_runtime_diagnostics", lambda: None)
+    monkeypatch.setattr(main_mod, "_self_check_fonts", lambda: None)
+    monkeypatch.setattr(mirror_mod, "start_asset_mirror", lambda: None)
+    monkeypatch.setattr(main_mod, "_create_cleanup_tasks", lambda: [])
+    monkeypatch.setattr(main_mod, "_run_initial_disk_cleanup", lambda: None)
+
+    async def start_pool() -> None:
+        return None
+
+    async def exploding() -> None:
+        raise RuntimeError("garage exploded")
+
+    monkeypatch.setattr(heavy_render_pool, "startup_heavy_render_worker_pool", start_pool)
+    monkeypatch.setattr(artifact_runtime_mod, "startup_artifact_runtime", exploding)
+    with caplog.at_level(logging.ERROR, logger=main_mod.__name__):
+        assert asyncio.run(main_mod._startup_runtime()) == []
+    assert "artifact runtime startup failed" in caplog.text
+
+
+def test_failed_native_startup_builds_no_artifact_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_mod, "_ensure_nogil_runtime", lambda: None)
+    monkeypatch.setattr(main_mod, "configure_runtime_diagnostics", lambda: None)
+    monkeypatch.setattr(main_mod, "_self_check_fonts", lambda: (_ for _ in ()).throw(RuntimeError("no native")))
+    monkeypatch.setattr(
+        artifact_runtime_mod, "startup_artifact_runtime", lambda: pytest.fail("artifact runtime built before checks")
+    )
+    with pytest.raises(RuntimeError, match="no native"):
+        asyncio.run(main_mod._startup_runtime())
+
+
+def test_artifact_shutdown_failure_is_logged(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    async def exploding() -> None:
+        raise RuntimeError("close exploded")
+
+    monkeypatch.setattr(artifact_runtime_mod, "shutdown_artifact_runtime", exploding)
+    with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
+        asyncio.run(main_mod._stop_artifact_runtime())
+    assert "artifact runtime shutdown failed" in caplog.text
 
 
 def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -210,6 +259,11 @@ def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pyte
         calls.append("pool")
 
     monkeypatch.setattr(heavy_render_pool, "shutdown_heavy_render_worker_pool", stop_pool)
+
+    async def stop_artifacts() -> None:
+        calls.append("artifacts")
+
+    monkeypatch.setattr(artifact_runtime_mod, "shutdown_artifact_runtime", stop_artifacts)
     monkeypatch.setattr(mirror_mod, "shutdown_asset_mirror", lambda: calls.append("mirror"))
     monkeypatch.setattr(painter_cache, "cleanup_painter_disk_cache", lambda: calls.append("painter"))
     monkeypatch.setattr(utils, "shutdown_utils", lambda: calls.append("utils"))
@@ -220,7 +274,7 @@ def test_runtime_shutdown_cancels_tasks_and_releases_resources(monkeypatch: pyte
         assert task.cancelled()
 
     asyncio.run(exercise())
-    assert calls == ["lifespan_shutdown", "pool", "mirror", "painter", "utils"]
+    assert calls == ["lifespan_shutdown", "pool", "artifacts", "mirror", "painter", "utils"]
 
 
 def test_lifespan_delegates_startup_and_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:

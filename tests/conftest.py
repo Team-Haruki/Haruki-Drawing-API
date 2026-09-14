@@ -83,3 +83,28 @@ def asset_mirror(tmp_path):
     finally:
         set_asset_mirror(None)
         mirror.close()
+
+
+@pytest.fixture
+def memory_index():
+    """A fresh `FakeRenderIndex` (no asyncpg)."""
+    from tests.storage_fakes import FakeRenderIndex
+
+    return FakeRenderIndex()
+
+
+@pytest.fixture
+def artifact_runtime(memory_store, memory_index):
+    """An enabled `ArtifactRuntime` over `memory_store` + `memory_index`, installed via `set_artifact_runtime`."""
+    from src.artifact.runtime import set_artifact_runtime
+    from src.artifact.stats import reset_artifact_stats
+    from tests.storage_fakes import build_test_runtime
+
+    reset_artifact_stats()
+    runtime = build_test_runtime(store=memory_store, index=memory_index)
+    set_artifact_runtime(runtime)
+    try:
+        yield runtime
+    finally:
+        set_artifact_runtime(None)
+        reset_artifact_stats()
