@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Generic, Literal, TypeVar
 
+from src.sekai.base.asset_key import AssetKey, candidates, legacy_key
+
 from .model import HonorRequest
 
 HonorAssetBranch = Literal["empty", "normal", "birthday", "bonds", "unsupported"]
@@ -246,21 +248,35 @@ def _load_failure_or_none(
     return _HonorAssetLoadFailure(status, reason, raw_path, detail)
 
 
+def _request_asset_key(raw_value: object) -> AssetKey | None:
+    """The key handed to ``path_resolver``, or ``None`` when the field is absent.
+
+    A string keeps today's exact semantics (any non-empty string is passed through as sent). A
+    candidate list (C1) is absent only when it names no candidate.
+    """
+
+    if isinstance(raw_value, list):
+        items = candidates(raw_value)
+        return items or None
+    return str(raw_value) if raw_value else None
+
+
 def _load_honor_asset_source(
     request: HonorRequest,
     spec: HonorAssetSpec,
     *,
-    path_resolver: Callable[[str], ResolvedPathT | None],
+    path_resolver: Callable[[AssetKey], ResolvedPathT | None],
     source_factory: Callable[[ResolvedPathT], SourceT | None],
 ) -> tuple[SourceT | None, _HonorAssetLoadFailure | None]:
-    raw_value = getattr(request, spec.path_field)
-    raw_path = str(raw_value) if raw_value else None
-    if raw_path is None:
+    raw_key = _request_asset_key(getattr(request, spec.path_field))
+    if raw_key is None:
         failure = _HonorAssetLoadFailure("unrenderable", "path_absent") if spec.required else None
         return None, failure
+    # Failures report the first candidate: a candidate list has no single string form (C1).
+    raw_path = legacy_key(raw_key) or ""
 
     try:
-        resolved_path = path_resolver(raw_path)
+        resolved_path = path_resolver(raw_key)
     except Exception as exc:
         failure = _load_failure_or_none(
             spec,
@@ -297,14 +313,14 @@ def _load_honor_asset_source(
 def resolve_honor_assets(
     request: HonorRequest,
     *,
-    path_resolver: Callable[[str], ResolvedPathT | None],
+    path_resolver: Callable[[AssetKey], ResolvedPathT | None],
     source_factory: Callable[[ResolvedPathT], SourceT | None],
 ) -> HonorAssetResolution[SourceT]:
     """Resolve the active branch without importing or constructing image pixels.
 
-    ``path_resolver`` converts a request path to any caller-owned token. ``source_factory`` turns
-    that token into the source consumed by the caller's honor tree. Returning ``None`` or raising
-    an exception from either callback is classified using the asset's policy:
+    ``path_resolver`` converts a request path (a string, or a C1 candidate list) to any caller-owned
+    token. ``source_factory`` turns that token into the source consumed by the caller's honor tree.
+    Returning ``None`` or raising an exception from either callback is classified using the asset's policy:
 
     - an absent/unresolved required base is ``unrenderable`` so a lower-priority request key may
       be tried;

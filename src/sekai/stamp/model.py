@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.paint_types import Color
 from src.sekai.base.timezone import TimeZoneRequest
 
@@ -24,7 +25,7 @@ class StampData(BaseModel):
     """
 
     id: int
-    image_path: str
+    image_path: AssetKey
     text_color: Color = (200, 0, 0, 255)
 
 

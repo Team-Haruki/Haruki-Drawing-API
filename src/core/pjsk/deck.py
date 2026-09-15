@@ -32,7 +32,7 @@ async def deck_recommend(request: DeckRequest):
         set_request_stage("deck:heavy_worker")
         payload = await get_heavy_render_worker_pool().render("deck_recommend", request.model_dump(mode="json"))
         set_request_stage("deck:stream_response")
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except (HeavyRenderQueueFullError, HeavyRenderQueueTimeoutError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except HeavyRenderTaskTimeoutError as exc:

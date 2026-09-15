@@ -337,3 +337,52 @@ def test_unknown_honor_type_is_unrenderable_without_callbacks() -> None:
     assert result.sources is None
     assert result.failure is not None
     assert result.failure.reason == "unsupported_branch"
+
+
+def test_candidate_list_is_handed_to_the_resolver_whole() -> None:
+    # C1: the resolver receives the list and takes the first existing candidate itself.
+    request = HonorRequest(honor_type="normal", honor_img_path=["missing.png", "base.png"])
+    seen: list[object] = []
+
+    def resolve(key):
+        seen.append(key)
+        return next((item for item in key if item == "base.png"), None)
+
+    result = resolve_honor_assets(request, path_resolver=resolve, source_factory=_source_factory)
+
+    assert result.status == "ready"
+    assert seen == [["missing.png", "base.png"]]
+    assert result.sources == {"honor_img": "source:base.png", "rank_img": None, "frame_img": None}
+
+
+def test_empty_candidate_list_is_absent_and_failures_report_the_first_candidate() -> None:
+    absent = resolve_honor_assets(
+        HonorRequest(honor_type="normal", honor_img_path=[" ", ""]),
+        path_resolver=_available_resolver({}),
+        source_factory=_source_factory,
+    )
+    assert absent.status == "unrenderable"
+    assert absent.failure is not None
+    assert absent.failure.reason == "path_absent"
+
+    unresolved = resolve_honor_assets(
+        HonorRequest(honor_type="normal", honor_img_path=["a.png", "b.png"]),
+        path_resolver=lambda _key: None,
+        source_factory=_source_factory,
+    )
+    assert unresolved.status == "unrenderable"
+    assert unresolved.failure is not None
+    assert unresolved.failure.reason == "path_unresolved"
+    assert unresolved.failure.raw_path == "a.png"
+
+
+def test_blank_string_keeps_its_legacy_classification() -> None:
+    result = resolve_honor_assets(
+        HonorRequest(honor_type="normal", honor_img_path="  "),
+        path_resolver=lambda _key: None,
+        source_factory=_source_factory,
+    )
+
+    assert result.failure is not None
+    assert result.failure.reason == "path_unresolved"
+    assert result.failure.raw_path == "  "

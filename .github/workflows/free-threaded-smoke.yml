@@ -64,6 +64,11 @@ jobs:
           print("free-threaded import smoke passed")
           PY
 
+      # opendal and asyncpg are native extensions; a wheel without Py_MOD_GIL_NOT_USED would silently
+      # re-enable the GIL with a RuntimeWarning, which -W error turns into a failure.
+      - name: Verify storage dependency imports
+        run: .venv314t/bin/python -X gil=0 -W error::RuntimeWarning -c "import opendal, asyncpg; import src.core.main"
+
       - name: Compile check
         run: |
           UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python -m compileall src
@@ -166,6 +171,57 @@ jobs:
           print("nogil concurrency smoke passed")
           PY
 
+      # Optional and additive: the three bytes-mode runs above stay the gate. This boots a second server with
+      # the artifact runtime on an in-memory object store (no Garage, no PostgreSQL, so index_written=false)
+      # and requires every honor request to come back as an artifact_ref JSON document.
+      - name: Artifact memory-provider smoke
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+
+          HARUKI_FONT__EMOJI=TwemojiMozilla \
+          HARUKI_STORAGE__ENABLED=true \
+          HARUKI_STORAGE__PROVIDER__SCHEME=memory \
+          HARUKI_STORAGE__NODE_NAME=ci-smoke \
+            .venv314t/bin/python -X gil=0 -m granian --interface asgi --host 127.0.0.1 --port 18081 src.core.main:app > /tmp/haruki_granian_artifact.log 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "${server_pid}" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:18081/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.25
+          done
+          if ! curl -fsS http://127.0.0.1:18081/health >/dev/null; then
+            cat /tmp/haruki_granian_artifact.log
+            exit 1
+          fi
+
+          UV_PROJECT_ENVIRONMENT=.venv314t uv run --python .venv314t/bin/python python scripts/concurrent_fetch_images.py \
+            --base-url http://127.0.0.1:18081 \
+            --endpoint /api/pjsk/honor/ \
+            --payload-file out/ci-sk-trend/honor_payload.json \
+            --requests 20 \
+            --concurrency 4 \
+            --timeout 60 \
+            --expect artifact \
+            --output-dir out/ci-artifact-honor \
+            --save-errors
+
+          .venv314t/bin/python - <<'PY'
+          import json
+
+          with open("out/ci-artifact-honor/summary.json", encoding="utf-8") as f:
+              summary = json.load(f)
+          assert summary["expect"] == "artifact", summary
+          assert summary["ok_images"] == summary["requests"], summary
+          print("artifact memory-provider smoke passed")
+          PY
+
       - name: GIL vs noGIL benchmark compare
         run: |
           set -euo pipefail
@@ -210,6 +266,9 @@ jobs:
           if [ -f /tmp/haruki_granian.log ]; then
             cp /tmp/haruki_granian.log out/haruki_granian.log
           fi
+          if [ -f /tmp/haruki_granian_artifact.log ]; then
+            cp /tmp/haruki_granian_artifact.log out/haruki_granian_artifact.log
+          fi
 
       - name: Upload smoke artifacts
         if: failure()
@@ -222,4 +281,5 @@ jobs:
             out/**/*.png
             out/**/*.txt
             out/haruki_granian.log
+            out/haruki_granian_artifact.log
           if-no-files-found: ignore

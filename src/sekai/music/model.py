@@ -3,6 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest, ProfileCardRequest
 
@@ -180,7 +181,7 @@ class MusicDetailRequest(TimeZoneRequest):
     difficulty: DifficultyInfo
     event_id: int | None = None
     cn_name: str | None = None
-    music_jacket_path: str
+    music_jacket_path: AssetKey
     event_banner_path: str | None = None
     limited_times: list[tuple[int, int]] | None = None
     leaderboard_matrix: list[list[LeaderboardInfo | None]] | None = None
@@ -218,7 +219,7 @@ class MusicBriefList(BaseModel):
     level: int
     difficulty: DifficultyInfo | None = None
     music_info: MusicMD | None = None
-    music_jacket_path: str
+    music_jacket_path: AssetKey
     play_result: str | None = None
 
 

@@ -32,7 +32,7 @@ async def chara_birthday(request: CharaBirthdayRequest):
         set_request_stage("misc:chara_birthday:heavy_worker")
         payload = await get_heavy_render_worker_pool().render("chara_birthday", request.model_dump(mode="json"))
         set_request_stage("misc:chara_birthday:stream_response")
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except (HeavyRenderQueueFullError, HeavyRenderQueueTimeoutError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except HeavyRenderTaskTimeoutError as exc:
@@ -59,6 +59,6 @@ async def alias_list(request: AliasListRequest):
         payload = await try_render_alias_list_payload(request)
         payload = require_native_payload(payload)
         set_request_stage("misc:alias_list:image_to_response")
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

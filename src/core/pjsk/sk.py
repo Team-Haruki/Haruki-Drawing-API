@@ -35,7 +35,7 @@ async def sk_line(request: SklRequest):
     try:
         payload = await try_render_skl_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -50,7 +50,7 @@ async def sk_query(request: SKRequest):
     try:
         payload = await try_render_sk_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -65,7 +65,7 @@ async def sk_check_room(request: CFRequest):
     try:
         payload = await try_render_cf_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -80,7 +80,7 @@ async def sk_csb(request: CSBRequest):
     try:
         payload = await try_render_csb_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -95,7 +95,7 @@ async def sk_speed(request: SpeedRequest):
     try:
         payload = await try_render_sks_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -110,7 +110,7 @@ async def sk_player_trace(request: PlayerTraceRequest):
     try:
         payload = await try_render_player_trace_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -125,7 +125,7 @@ async def sk_rank_trace(request: RankTraceRequest):
     try:
         payload = await try_render_rank_trace_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -140,6 +140,6 @@ async def sk_winrate(request: WinRateRequest):
     try:
         payload = await try_render_winrate_predict_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -35,7 +35,7 @@ async def card_detail(request: CardDetailRequest):
     try:
         payload = await try_render_card_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -55,7 +55,7 @@ async def card_list(request: CardListRequest):
         _t0 = time.perf_counter()
         payload = await try_render_card_list_payload(request)
         payload = require_native_payload(payload)
-        resp = encoded_image_payload_to_response(payload)
+        resp = await encoded_image_payload_to_response(payload)
         _perf_logger.info(
             "/list total: %.3fs (backend=skia, encode=%.3fs, image=%dx%d, cards=%d)",
             time.perf_counter() - _t0,
@@ -84,7 +84,7 @@ async def card_box(request: CardBoxRequest):
         _t0 = time.perf_counter()
         payload = await try_render_box_payload(request)
         payload = require_native_payload(payload)
-        resp = encoded_image_payload_to_response(payload)
+        resp = await encoded_image_payload_to_response(payload)
         _perf_logger.info(
             "/box total: %.3fs (backend=skia, encode=%.3fs, image=%dx%d, cards=%d)",
             time.perf_counter() - _t0,

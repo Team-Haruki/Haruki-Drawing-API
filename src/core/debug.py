@@ -15,6 +15,14 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
+from src.artifact.directive import (
+    DirectiveError,
+    RenderCacheDirective,
+    is_artifact_requested,
+    parse_render_cache_directive,
+)
+from src.artifact.stats import artifact_node_name, artifact_stats
+from src.core.missing_asset_telemetry import begin_missing_asset_scope, end_missing_asset_scope
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope
 from src.settings import (
     OVERLOAD_MAX_INFLIGHT_REQUESTS,
@@ -37,6 +45,13 @@ DEFAULT_RENDER_BACKEND = "pillow"
 _render_backend_var: contextvars.ContextVar[str] = contextvars.ContextVar(
     "drawing_render_backend",
     default=DEFAULT_RENDER_BACKEND,
+)
+
+
+# The validated render cache directive of the current request (plan §8.2); `None` in bytes mode.
+_render_directive_var: contextvars.ContextVar[RenderCacheDirective | None] = contextvars.ContextVar(
+    "drawing_render_directive",
+    default=None,
 )
 
 
@@ -70,6 +85,7 @@ _EXEMPT_RUNTIME_GUARD_PATHS = frozenset(
         "/health",
         "/ready",
         "/cache/stats",
+        "/render-stats",
         "/docs",
         "/redoc",
         "/openapi.json",
@@ -156,6 +172,8 @@ class RequestContextTokens:
     stage: contextvars.Token
     render_backend: contextvars.Token | None = None
     pillow_telemetry: contextvars.Token | None = None
+    missing_assets: object | None = None
+    render_directive: contextvars.Token | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -176,18 +194,29 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         stage=_request_stage_var.set(RequestStageRef("middleware")),
         render_backend=_render_backend_var.set(DEFAULT_RENDER_BACKEND),
         pillow_telemetry=begin_pillow_touch_scope(),
+        missing_assets=begin_missing_asset_scope(),
     )
 
 
 def pop_request_context(tokens: RequestContextTokens) -> None:
+    if tokens.missing_assets is not None:
+        end_missing_asset_scope(tokens.missing_assets)
     if tokens.pillow_telemetry is not None:
         end_pillow_touch_scope(tokens.pillow_telemetry)
     _request_id_var.reset(tokens.request_id)
     _request_path_var.reset(tokens.path)
     _request_method_var.reset(tokens.method)
     _request_stage_var.reset(tokens.stage)
+    if tokens.render_directive is not None:
+        _render_directive_var.reset(tokens.render_directive)
+        tokens.render_directive = None
     if tokens.render_backend is not None:
         _render_backend_var.reset(tokens.render_backend)
+
+
+def current_render_directive() -> RenderCacheDirective | None:
+    """The directive validated by the middleware for this request, or `None` (bytes mode)."""
+    return _render_directive_var.get()
 
 
 def set_render_backend(backend: str) -> None:
@@ -674,13 +703,14 @@ async def _log_request_start(request: Request, trace: _DebugRequestTrace) -> Non
     _dump_request_body(request.url.path, trace.request_id, body)
     content_type = request.headers.get("content-type")
     logger.info(
-        "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s body=%s focus=%s metrics=%s",
+        "request.start id=%s method=%s path=%s query=%s client=%s inflight=%s artifact=%s body=%s focus=%s metrics=%s",
         trace.request_id,
         request.method,
         request.url.path,
         request.url.query,
         getattr(request.client, "host", "-"),
         trace.inflight,
+        "1" if is_artifact_requested(request.headers) else "0",
         summarize_request_body(body, content_type),
         extract_debug_request_focus(request.url.path, body, content_type),
         snapshot_process_metrics(include_asyncio=True),
@@ -740,6 +770,32 @@ def _log_request_end(request: Request, response: Any, trace: _DebugRequestTrace)
     )
 
 
+def _directive_rejection_response(request: Request, trace: _DebugRequestTrace, exc: DirectiveError) -> JSONResponse:
+    artifact_stats.directive_rejected(exc.header)
+    logger.warning("request.reject_directive id=%s header=%s reason=%s", trace.request_id, exc.header, exc.reason)
+    record_http_request_outcome(request, 400, route_label=_request_route_label(request))
+    return JSONResponse(
+        status_code=400,
+        content={"detail": f"invalid {exc.header}: {exc.reason}", "header": exc.header, "code": exc.reason},
+        headers={"X-Haruki-Directive-Error": exc.header, "X-Haruki-Node": artifact_node_name()},
+    )
+
+
+def _bind_render_directive(request: Request, trace: _DebugRequestTrace) -> JSONResponse | None:
+    """Validate the directive headers; return the 400 to send, or bind the directive and return `None`."""
+    from src.settings import settings
+
+    try:
+        directive = parse_render_cache_directive(request.headers, ttl_max=settings.storage.ttl_max_seconds)
+    except DirectiveError as exc:
+        return _directive_rejection_response(request, trace, exc)
+    if directive is not None:
+        artifact_stats.incr("requests_with_directive")
+        if trace.tokens is not None:
+            trace.tokens.render_directive = _render_directive_var.set(directive)
+    return None
+
+
 async def _run_debug_request(request: Request, call_next: Any):
     trace = _new_debug_request_trace()
     try:
@@ -748,6 +804,9 @@ async def _run_debug_request(request: Request, call_next: Any):
             return overload
         trace.begin(request)
         await _log_request_start(request, trace)
+        rejection = _bind_render_directive(request, trace)
+        if rejection is not None:
+            return rejection
         set_request_stage("handler")
         response = await call_next(request)
     except Exception:

@@ -62,3 +62,15 @@ def test_every_script_import_is_installed(script: Path):
         "pytest never imports these files and compileall does not resolve their imports, "
         "so nothing else here would have caught it (CI would, loudly)."
     )
+
+
+def test_concurrent_fetch_images_accepts_expect_artifact():
+    """The smoke workflow's memory-provider step runs `--expect artifact`; the script must import and parse it."""
+    import scripts.concurrent_fetch_images as fetch
+
+    args = fetch.parse_args(
+        ["--endpoint", "/api/pjsk/honor/", "--payload-file", "payload.json", "--expect", "artifact", "--fetch-cdn", "x"]
+    )
+    assert args.expect == "artifact"
+    assert args.fetch_cdn == "x"
+    assert fetch.parse_args(["--endpoint", "/e", "--payload-file", "p.json"]).expect == "image"

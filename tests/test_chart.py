@@ -1,6 +1,7 @@
 import asyncio
 from io import BytesIO
 import struct
+from typing import ClassVar
 
 from PIL import Image
 import pytest
@@ -53,7 +54,7 @@ def test_chart_font_score_and_prepare_helpers_cover_file_and_fallback_inputs(tmp
 
     request = _chart_request()
     from_json: list[str] = []
-    opened: list[str] = []
+    opened: ClassVar[list[str]] = []
 
     class FakeScore:
         @staticmethod
@@ -295,3 +296,176 @@ def test_chart_skia_render_failure_is_classified(monkeypatch):
 
     assert asyncio.run(drawer.try_render_music_chart_payload(_chart_request())) is None
     assert outcomes == [drawer.OUTCOME_ERROR]
+
+
+# --- T9: chart materialisation (plan §7) -------------------------------------------------------------------------
+
+
+class _RecordingScore:
+    opened: ClassVar[list[str]] = []
+
+    def __init__(self):
+        self.meta = {}
+
+    @classmethod
+    def open(cls, value):
+        cls.opened.append(value)
+        return cls()
+
+    def set_meta(self, **kwargs):
+        self.meta = kwargs
+
+
+class _RecordingDrawing:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+
+def _file_chart_request(**update) -> GenerateMusicChartRequest:
+    fields = {
+        "chart_json": None,
+        "sus_path": "music/score/expert.txt",
+        "style_path": "music/score/style.css",
+        "jacket_path": "music/jacket/jacket.png",
+        "note_host": "static_images/chart_asset/notes",
+    }
+    fields.update(update)
+    return _chart_request().model_copy(update=fields)
+
+
+def _patch_chart_crate(monkeypatch, base) -> None:
+    _RecordingScore.opened = []
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", base)
+    monkeypatch.setattr(drawer, "Score", _RecordingScore)
+    monkeypatch.setattr(drawer, "Drawing", _RecordingDrawing)
+    monkeypatch.setattr(drawer, "chart_font_kwargs", lambda: {"font_dirs": ["fonts"]})
+
+
+def test_local_source_chart_inputs_resolve_to_todays_paths(tmp_path, monkeypatch):
+    from src.assets.mirror import NullMirror, set_asset_mirror
+
+    real = tmp_path / "real"
+    for rel, content in (
+        ("music/score/expert.txt", "#SUS"),
+        ("music/score/style.css", "note {}"),
+        ("music/jacket/jacket.png", "png"),
+    ):
+        (real / rel).parent.mkdir(parents=True, exist_ok=True)
+        (real / rel).write_text(content, encoding="utf-8")
+    (real / "static_images/chart_asset/notes").mkdir(parents=True)
+    base = tmp_path / "link"  # a symlinked base: today's join is NOT realpath-rewritten
+    base.symlink_to(real, target_is_directory=True)
+    _patch_chart_crate(monkeypatch, base)
+    set_asset_mirror(NullMirror())
+    try:
+        drawing, score = drawer._prepare_chart_render(_file_chart_request())
+    finally:
+        set_asset_mirror(None)
+
+    request = _file_chart_request()
+    assert _RecordingScore.opened == [str(base / request.sus_path)]
+    assert drawing.kwargs["style_sheet"] == "note {}"
+    assert score.meta["jacket"] == str(base / request.jacket_path)
+    assert drawing.kwargs["note_host"] == str(base / request.note_host)
+
+
+def test_mirror_materialises_chart_files_before_the_crate_reads_them(tmp_path, monkeypatch, asset_mirror):
+    store = asset_mirror.store_for("jp")
+    prefix = "jp-assets/startapp/music"
+    store.objects[f"{prefix}/music_score/0001_01/expert.txt"] = b"#SUS"
+    store.objects[f"{prefix}/style.css"] = b"note { color: red; }"
+    store.objects[f"{prefix}/jacket/jacket_s_001.png"] = b"png"
+    (tmp_path / "static_images/chart_asset/notes").mkdir(parents=True)
+    _patch_chart_crate(monkeypatch, tmp_path)
+
+    request = _file_chart_request(
+        sus_path=f"asset/{prefix}/music_score/0001_01/expert.txt",
+        style_path=[f"asset/{prefix}/missing.css", f"asset/{prefix}/style.css"],
+        jacket_path=f"asset/{prefix}/jacket/jacket_s_001.png",
+    )
+    drawing, score = drawer._prepare_chart_render(request)
+
+    mirror_root = tmp_path / "mirror" / "v0"
+    sus = mirror_root / f"{prefix}/music_score/0001_01/expert.txt"
+    assert _RecordingScore.opened == [str(sus)]
+    assert sus.read_bytes() == b"#SUS"
+    assert drawing.kwargs["style_sheet"] == "note { color: red; }"
+    assert score.meta["jacket"] == str(mirror_root / f"{prefix}/jacket/jacket_s_001.png")
+    assert (mirror_root / f"{prefix}/jacket/jacket_s_001.png").is_file()
+    assert drawing.kwargs["note_host"] == str(tmp_path / "static_images/chart_asset/notes")
+
+
+@pytest.mark.parametrize("field", ["sus_path", "style_path", "jacket_path", "note_host"])
+def test_chart_key_traversal_raises_value_error(tmp_path, monkeypatch, field):
+    for rel in ("music/score/expert.txt", "music/score/style.css", "music/jacket/jacket.png"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("x", encoding="utf-8")
+    _patch_chart_crate(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="越界"):
+        drawer._prepare_chart_render(_file_chart_request(**{field: "../escape.txt"}))
+
+
+def test_unmaterialised_chart_input_keeps_todays_join_and_counts_the_miss(tmp_path, monkeypatch):
+    from src.core import missing_asset_telemetry as telemetry
+
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    telemetry.reset_missing_asset_stats()
+    try:
+        assert drawer.chart_asset_path("jacket.png") == tmp_path / "jacket.png"
+        assert drawer.chart_asset_path("/jacket.png") == tmp_path / "jacket.png"
+        assert drawer.chart_asset_path(["a.png", "b.png"]) == tmp_path / "a.png"
+        assert drawer.chart_asset_path("") == tmp_path
+        by_reason = telemetry.get_missing_asset_stats()["by_reason"]
+        assert by_reason["local_not_found"] == 2
+        assert by_reason["candidates_exhausted"] == 1
+    finally:
+        telemetry.reset_missing_asset_stats()
+
+
+def test_note_host_under_asset_logs_error_and_still_renders_200(tmp_path, monkeypatch, asset_mirror, caplog):
+    import logging
+
+    from src.core.pjsk import chart as chart_route
+    from src.sekai.base import utils as base_utils
+
+    note_host = "asset/jp-assets/startapp/music/notes"
+    (tmp_path / note_host).mkdir(parents=True)
+    observed = {}
+
+    class Drawing:
+        def __init__(self, **kwargs):
+            observed["note_host"] = kwargs["note_host"]
+
+        raster = None
+
+        def png(self, _score):
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 8, 6)
+
+    class Native:
+        RAW_BUFFER_CAPABILITY = 0
+
+        def render_scene(self, scene, mem_images):
+            return {"native": True}
+
+    monkeypatch.setattr(base_utils, "_local_dir_logged", set())
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(drawer, "Drawing", Drawing)
+    monkeypatch.setattr(drawer, "chart_font_kwargs", lambda: {"font_dirs": ["fonts"]})
+    monkeypatch.setattr(drawer, "skia_plot_enabled", lambda: True)
+    monkeypatch.setattr(drawer, "load_native_renderer", lambda: Native())
+    monkeypatch.setattr(drawer, "payload_from_native", lambda _result: _chart_payload())
+    monkeypatch.setattr(drawer, "get_watermark_render_spec", lambda *_args: (12, ["watermark"], 40, 14))
+    monkeypatch.setattr(drawer, "get_font", lambda *_args: object())
+    monkeypatch.setattr(drawer, "get_text_size", lambda _font, text: (len(text) * 4, 12))
+    caplog.set_level(logging.ERROR, logger=base_utils.logger.name)
+    request = _chart_request().model_copy(update={"note_host": note_host})
+
+    response = asyncio.run(chart_route.music_chart(request))
+
+    assert response.status_code == 200
+    assert response.body == b"encoded"
+    assert observed["note_host"] == str(tmp_path / note_host)
+    errors = [r for r in caplog.records if "chart.note_host_not_local" in r.getMessage()]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert asset_mirror.store_for("jp").reads == []

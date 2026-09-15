@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
 
@@ -186,7 +187,7 @@ class ProfileCardRequest(TimeZoneRequest):
 
 class CardFullThumbnailRequest(BaseModel):
     card_id: int
-    card_thumbnail_path: str
+    card_thumbnail_path: AssetKey
     rare: str
     frame_img_path: str
     attr_img_path: str

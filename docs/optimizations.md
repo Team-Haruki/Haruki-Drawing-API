@@ -100,6 +100,10 @@ missing-placeholder / 路径与 AssetRef 缓存 / `_composed_image_cache` / `ski
 > 全部导入了 `encoded_image_payload_to_response()`；其中 `src/core/pjsk/deck.py` **根本不导入**
 > `image_to_response()`，只有 `return encoded_image_payload_to_response(payload)` 一条返回路径。
 > 其余 17 个 router 两者都在用。详见下文「当前形态」。
+>
+> 再次订正（Phase 2 制品存储）：`image_to_response()` 已删除（Pillow 退役后零调用方，只保留 `_encode_image`
+> 供 `scripts/skia_bench.py` 与测试使用）。18 个 router 的 55 处出口全部改为
+> `await encoded_image_payload_to_response(payload)`。
 
 ### 实现
 
@@ -126,11 +130,13 @@ drawing:
 
 ### 当前形态
 
-- 端点可用 `image_to_response(image, export_format=None, jpg_quality=None, *, jpeg_subsampling=None)`
-  的参数逐次覆盖全局配置；编码本身走 `run_in_pool()`，不阻塞事件循环。
-- Skia 后端直接产出编码字节时不再回到 PIL：`src/core/utils.py` 另有
-  `encoded_image_payload_to_response(payload)`，把已编码的 `EncodedImagePayload` 经 `_image_response()`
-  作**单条 body 消息**（`Response(content=...)`）发出，省掉一次解码 + 重编码。
+- （历史）端点曾可用 `image_to_response(image, export_format=None, jpg_quality=None, *, jpeg_subsampling=None)`
+  的参数逐次覆盖全局配置；该函数已随 Pillow 退役删除。
+- Skia 后端直接产出编码字节，不再回到 PIL：`src/core/utils.py` 的**异步**出口
+  `encoded_image_payload_to_response(payload)` 把已编码的 `EncodedImagePayload` 经 `_image_response()`
+  作**单条 body 消息**（`Response(content=...)`）发出；同步的 `encoded_image_payload_to_bytes_response()`
+  是其字节分支。请求带 `X-Haruki-Artifact: 1` 且存储开启时，出口改为上传制品并返回单条 body 的
+  `artifact_ref` JSON（`JSONResponse`，带 `Content-Length`）；每个分支都加 `X-Haruki-Node` 头。
   > ⚠️ **不要改回 `StreamingResponse(io.BytesIO(...))`**（本文早期版本就是这么写的，那是个 bug）：
   > 字节本来就整块在内存里，流式一点内存都省不下；但它把一个**同步**可迭代对象交给 Starlette，而
   > Starlette 会用 `iterate_in_threadpool()` 逐项取——**`BytesIO` 的迭代协议是按行的**，二进制 PNG 于是
@@ -139,7 +145,7 @@ drawing:
   > 客户端要等约 10 秒，而 CPU 全程 95% 空闲。修复后吞吐 **32 倍**（0.78 → 24.8 req/s）。
   > 回归锁：`tests/test_image_response.py` 断言 **ASGI body 消息数 == 1**（不能断言字节内容——坏版本的
   > 字节也是对的，只有消息数会露馅）。见 commit `5792b02`。
-- 两条路径都会打一条 `image.response ... backend=<pillow|skia|skia_cache|skia_fallback>` 的 INFO 日志
+- 每个请求在每个分支上恰好打一条 `image.response ... backend=<pillow|skia|skia_cache|skia_fallback> artifact=<0|1|store0|degraded>` 的 INFO 日志
   （标签定义见 `src/sekai/skia_renderer/render_stats.py`，聚合计数由 `GET /render-stats` 暴露）。
 
 ---

@@ -29,7 +29,7 @@ async def gacha_list(request: GachaListRequest):
     try:
         payload = await try_render_gacha_list_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -48,6 +48,6 @@ async def gacha_detail(request: GachaDetailRequest):
     try:
         payload = await try_render_gacha_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

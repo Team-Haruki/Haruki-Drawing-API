@@ -25,7 +25,7 @@ async def vlive_list(request: VLiveListRequest):
     try:
         payload = await try_render_vlive_list_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))

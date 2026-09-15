@@ -9,6 +9,7 @@ import pytest
 
 from src.core.pjsk import mysekai
 from src.sekai.mysekai import drawer as private_drawer
+from tests.route_test_helpers import async_exit_stub
 
 
 @dataclass(frozen=True)
@@ -79,7 +80,7 @@ def test_mysekai_routes_return_native_payloads(case: _RouteCase, monkeypatch: py
     monkeypatch.setattr(
         mysekai,
         "encoded_image_payload_to_response",
-        lambda payload: response if payload is native_payload else pytest.fail("unexpected native payload"),
+        async_exit_stub(native_payload, response),
     )
 
     result = asyncio.run(getattr(mysekai, case.endpoint)(request))

@@ -6,6 +6,20 @@ assets:
     - ./data/static_images/triangle/tri1.png
     - ./data/static_images/triangle/tri2.png
     - ./data/static_images/triangle/tri3.png
+  # Asset source: local (default, today's <base_dir>/asset/... tree) or mirror (fetch on demand from Garage).
+  # source: local
+  # mirror:
+  #   dir: mirror                    # relative to base_dir
+  #   provider:
+  #     provider: garage
+  #     scheme: s3                   # fs | s3 ("local" is accepted as fs)
+  #     endpoint: http://100.64.0.9:3900
+  #     bucket: pjsk-assets
+  #     root: ""                     # keep empty: object keys already are <region>-assets/<mode>/<rel> (A9(7))
+  #     region: garage
+  #     path_style: true
+  #     # access_key_id / secret_access_key: env only,
+  #     # HARUKI_ASSETS__MIRROR__PROVIDER__ACCESS_KEY_ID / HARUKI_ASSETS__MIRROR__PROVIDER__SECRET_ACCESS_KEY
 
 font:
   dir: ./data
@@ -79,3 +93,24 @@ logging:
     message:
       color: 144
       bright: false
+
+# Artifact output (X-Haruki-Artifact: 1 uploads the rendered image to Garage). Off by default.
+# storage:
+#   enabled: false
+#   node_name: ""                    # "" -> hostname; reported as ArtifactRef.node_name and X-Haruki-Node
+#   provider:
+#     provider: garage
+#     scheme: s3
+#     endpoint: http://100.64.0.9:3900
+#     bucket: image-cache
+#     root: ""                       # keep empty: Cloud reads objects at ArtifactRef.cdn_path verbatim (A9(8))
+#     region: garage
+#     base_url: ""                   # unused by Drawing; Cloud picks the node host
+#     public_read: false
+#     path_style: true
+#     options: {}
+#     # access_key_id / secret_access_key: env only,
+#     # HARUKI_STORAGE__PROVIDER__ACCESS_KEY_ID / HARUKI_STORAGE__PROVIDER__SECRET_ACCESS_KEY
+#   index:
+#     enabled: true
+#     # dsn is env only (HARUKI_STORAGE__INDEX__DSN); a dsn written here is dropped with a WARNING

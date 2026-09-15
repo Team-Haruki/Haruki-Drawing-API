@@ -101,6 +101,11 @@ from fontTools.ttLib import TTFont  # TMP vector contours require this independe
 from src.sekai.skia_renderer.canvas import load_native_renderer
 native = load_native_renderer()
 print(f"native renderer self-check passed (IR_CAPABILITY={native.IR_CAPABILITY})")
+# Object storage (Garage) and the render index; both must load without re-enabling the GIL.
+import opendal
+import asyncpg
+assert not sys._is_gil_enabled(), "opendal/asyncpg re-enabled the GIL"
+print(f"storage self-check passed (opendal={opendal.__version__}, asyncpg={asyncpg.__version__})")
 PYTHON
 RUN /app/haruki_drawing_api/.venv/bin/python -X gil=0 scripts/skia_codec_smoke.py
 

@@ -10,6 +10,7 @@ import pytest
 
 from src.core.pjsk import card, chart, profile
 from src.sekai.chart import drawer as chart_drawer
+from tests.route_test_helpers import async_exit_stub
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ def test_remaining_routes_return_native_payloads(case: _RouteCase, monkeypatch: 
     monkeypatch.setattr(
         case.module,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(getattr(case.module, case.endpoint)(request)) is response
@@ -113,7 +114,7 @@ def test_chart_returns_native_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         chart,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(chart.music_chart(request)) is response

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from src.core.path_safety import resolve_cli_path
 
+from src.sekai.base.asset_key import AssetKey, candidates
 from src.sekai.base.paint_types import RasterResample
 from src.sekai.profile.custom_profile.gray_field import MAX_FIELD_PIXELS, GrayField, field_size
 from src.sekai.profile.custom_profile.float_field import FloatField
@@ -319,6 +320,7 @@ ONDEMAND_PREFERRED_TOP_LEVEL = {
     "gacha",
     "lottery_game",
     "mysekai",
+    "unit_story",
     "virtual_live",
 }
 FC_AP_HONOR_IDS = {
@@ -2585,13 +2587,39 @@ class PNGRenderer:
         clean = raw.strip("/")
         return _dedupe_paths(self._relative_request_asset_candidates(clean))
 
-    def resolve_request_asset_path(self, raw_path: str | None) -> Path | None:
+    def resolve_request_asset_path(self, raw_path: AssetKey | None) -> Path | None:
+        """Resolve a request asset path inside the configured data roots.
+
+        A candidate list (C1) resolves to the first candidate that exists inside an allowed root. A
+        traversal candidate raises at once; a candidate that exists only outside the roots raises
+        ``ValueError`` after every candidate has been tried, exactly like a single path does.
+        """
+        if isinstance(raw_path, list):
+            rejected: ValueError | None = None
+            for candidate in candidates(raw_path):
+                self._reject_request_asset_traversal(candidate)
+                try:
+                    resolved = self._resolve_single_request_asset_path(candidate)
+                except ValueError as exc:
+                    rejected = exc
+                    continue
+                if resolved is not None:
+                    return resolved
+            if rejected is not None:
+                raise rejected
+            return None
+        return self._resolve_single_request_asset_path(raw_path)
+
+    @staticmethod
+    def _reject_request_asset_traversal(raw: str) -> None:
+        if any(part == ".." for part in Path(raw).parts):
+            raise ValueError(f"custom profile asset path traversal is not allowed: {raw!r}")
+
+    def _resolve_single_request_asset_path(self, raw_path: str | None) -> Path | None:
         raw = str(raw_path or "").strip()
         if not raw:
             return None
-        requested = Path(raw)
-        if any(part == ".." for part in requested.parts):
-            raise ValueError(f"custom profile asset path traversal is not allowed: {raw!r}")
+        self._reject_request_asset_traversal(raw)
 
         allowed_roots: list[Path] = []
         for root in (self.assets, self.game_assets, self.static_images, *self.data_root_candidates()):
@@ -2615,7 +2643,7 @@ class PNGRenderer:
             raise ValueError(f"custom profile asset path is outside configured data roots: {raw!r}")
         return None
 
-    def open_request_rgba(self, raw_path: str | None) -> Image.Image | None:
+    def open_request_rgba(self, raw_path: AssetKey | None) -> Image.Image | None:
         return self.open_rgba(self.resolve_request_asset_path(raw_path))
 
     def honor_request_path(self, path: Path | None) -> str | None:

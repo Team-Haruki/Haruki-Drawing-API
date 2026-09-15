@@ -8,6 +8,7 @@ from fastapi import HTTPException
 import pytest
 
 from src.core.pjsk import music
+from tests.route_test_helpers import async_exit_stub
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ def test_music_routes_return_native_payloads(case: _RouteCase, monkeypatch: pyte
     monkeypatch.setattr(
         music,
         "encoded_image_payload_to_response",
-        lambda payload: response if payload is native_payload else pytest.fail("unexpected native payload"),
+        async_exit_stub(native_payload, response),
     )
 
     result = asyncio.run(getattr(music, case.endpoint)(request))

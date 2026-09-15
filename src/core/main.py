@@ -13,6 +13,7 @@ import asyncio
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 import logging
+from pathlib import Path
 import sys
 
 import coloredlogs
@@ -56,7 +57,11 @@ This API provides endpoints for generating various Project Sekai images.
 
 
 ### Response Format:
-All endpoints return PNG images as binary stream.
+Every drawing endpoint returns the rendered image as ONE response body (`image/png` or `image/jpeg`).
+When the request carries `X-Haruki-Artifact: 1` plus a valid render cache directive, the image is
+uploaded to object storage and an `artifact_ref` JSON document is returned instead; any storage
+failure falls back to image bytes with `X-Haruki-Artifact-Degraded: 1`. Every response carries
+`X-Haruki-Node`.
     """
 
 
@@ -158,10 +163,59 @@ async def _periodic_cleanup(interval_seconds: float, cleanup: Callable[[], objec
             logger.warning(warning, exc_info=True)
 
 
+async def _periodic_pool_task(interval_seconds: float, func: Callable[[], object], warning: str) -> None:
+    """Like `_periodic_cleanup`, but runs the sync job on the default render pool (filesystem walks)."""
+    from src.sekai.base.utils import run_in_pool
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await run_in_pool(func)
+        except Exception:
+            logger.warning(warning, exc_info=True)
+
+
+def _sweep_asset_mirror() -> None:
+    """One mirror sweep (version dirs, stale `.tmp`, byte/entry caps); a disabled mirror is skipped."""
+    from src.assets.mirror import AssetMirror, get_asset_mirror
+    from src.assets.sweeper import MirrorSweeper
+
+    mirror = get_asset_mirror()
+    if not isinstance(mirror, AssetMirror):
+        return
+    config = settings.assets.mirror
+    result = MirrorSweeper(
+        root=mirror.mirror_root,
+        current_version=lambda: mirror.version,
+        max_bytes=config.max_bytes,
+        max_entries=config.max_entries,
+        versions_keep=config.versions_keep,
+        tmp_max_age_seconds=config.tmp_max_age_seconds,
+        stats=mirror.stats,
+        mirror_dir=mirror.mirror_dir,
+    ).sweep_once()
+    if result.versions_removed or result.evicted_entries:
+        logger.info(
+            "mirror.sweep versions_removed=%d evicted_entries=%d evicted_bytes=%d entries=%d bytes=%d",
+            result.versions_removed,
+            result.evicted_entries,
+            result.evicted_bytes,
+            result.entries,
+            result.bytes,
+        )
+
+
+def _poll_asset_mirror_version() -> None:
+    """Re-read the manifest version source and swap the mirror layout when it changed."""
+    from src.assets.mirror import get_asset_mirror
+
+    get_asset_mirror().refresh_version()
+
+
 def _create_cleanup_tasks() -> list[asyncio.Task[None]]:
     from src.sekai.base.utils import cleanup_expired_tmp_files
 
-    return [
+    tasks = [
         asyncio.create_task(
             _periodic_cleanup(TMP_CLEANUP_INTERVAL, cleanup_expired_tmp_files, "Failed to cleanup tmp files")
         ),
@@ -173,6 +227,27 @@ def _create_cleanup_tasks() -> list[asyncio.Task[None]]:
             )
         ),
     ]
+    if settings.assets.source == "mirror":
+        mirror_config = settings.assets.mirror
+        tasks.append(
+            asyncio.create_task(
+                _periodic_pool_task(
+                    max(1.0, float(mirror_config.sweep_interval_seconds)),
+                    _sweep_asset_mirror,
+                    "Failed to sweep the asset mirror",
+                )
+            )
+        )
+        tasks.append(
+            asyncio.create_task(
+                _periodic_pool_task(
+                    max(1.0, float(mirror_config.manifest_version_poll_seconds)),
+                    _poll_asset_mirror_version,
+                    "Failed to poll the asset mirror manifest version",
+                )
+            )
+        )
+    return tasks
 
 
 def _run_initial_disk_cleanup() -> None:
@@ -182,6 +257,68 @@ def _run_initial_disk_cleanup() -> None:
         logger.warning("Failed to cleanup drawing disk caches", exc_info=True)
 
 
+_CUSTOM_PROFILE_DIR_FIELDS = (
+    "custom_profile_assets_dir",
+    "custom_profile_fonts_dir",
+    "custom_profile_shape_sprite_dir",
+    "custom_profile_unity_ui_sprite_dir",
+)
+
+
+def _missing_custom_profile_dirs() -> list[str]:
+    """Custom-profile directories (expanded per region) that do not exist; they are local-only by contract."""
+    from src.sekai.profile.custom_profile.resource_paths import REGION_CODES
+
+    missing: list[str] = []
+    for name in _CUSTOM_PROFILE_DIR_FIELDS:
+        configured = getattr(settings.drawing, name, None)
+        if configured is None:
+            continue
+        raw = str(configured)
+        paths = [raw.replace("{region}", region) for region in sorted(REGION_CODES)] if "{region}" in raw else [raw]
+        missing.extend(f"{name}={path}" for path in paths if not Path(path).is_dir())
+    return missing
+
+
+def _start_asset_mirror() -> None:
+    """Start the asset mirror (never fatal) and warn when mirror mode runs without the local-only dirs."""
+    from src.assets.mirror import start_asset_mirror
+
+    start_asset_mirror()
+    if settings.assets.source != "mirror":
+        return
+    try:
+        missing = _missing_custom_profile_dirs()
+    except Exception:
+        logger.warning("custom-profile directory check failed", exc_info=True)
+        return
+    if missing:
+        logger.warning(
+            "assets.source=mirror but custom-profile directories are missing (they are never mirrored; "
+            "keep rsyncing them): %s",
+            ", ".join(missing),
+        )
+
+
+async def _start_artifact_runtime() -> None:
+    """Build the artifact runtime and warm its index; a failure never fails boot (bytes mode keeps serving)."""
+    from src.artifact.runtime import startup_artifact_runtime
+
+    try:
+        await startup_artifact_runtime()
+    except Exception:
+        logger.error("artifact runtime startup failed; serving image bytes only", exc_info=True)
+
+
+async def _stop_artifact_runtime() -> None:
+    from src.artifact.runtime import shutdown_artifact_runtime
+
+    try:
+        await shutdown_artifact_runtime()
+    except Exception:
+        logger.warning("artifact runtime shutdown failed", exc_info=True)
+
+
 async def _startup_runtime() -> list[asyncio.Task[None]]:
     from src.core.heavy_render_pool import startup_heavy_render_worker_pool
 
@@ -189,14 +326,17 @@ async def _startup_runtime() -> list[asyncio.Task[None]]:
     coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
     configure_runtime_diagnostics()
     _self_check_fonts()
+    _start_asset_mirror()
     cleanup_tasks = _create_cleanup_tasks()
     _run_initial_disk_cleanup()
     await startup_heavy_render_worker_pool()
+    await _start_artifact_runtime()
     logger.info("Haruki Drawing API is starting...")
     return cleanup_tasks
 
 
 async def _shutdown_runtime(cleanup_tasks: list[asyncio.Task[None]]) -> None:
+    from src.assets.mirror import shutdown_asset_mirror
     from src.core.heavy_render_pool import shutdown_heavy_render_worker_pool
     from src.sekai.base.painter_cache import cleanup_painter_disk_cache
     from src.sekai.base.utils import shutdown_utils
@@ -207,6 +347,8 @@ async def _shutdown_runtime(cleanup_tasks: list[asyncio.Task[None]]) -> None:
         cleanup_task.cancel()
     await asyncio.gather(*cleanup_tasks, return_exceptions=True)
     await shutdown_heavy_render_worker_pool()
+    await _stop_artifact_runtime()
+    shutdown_asset_mirror()
     cleanup_painter_disk_cache()
     shutdown_utils()
     logger.info("Resources cleaned up.")

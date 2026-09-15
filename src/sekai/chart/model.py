@@ -1,5 +1,6 @@
 from typing import Any, Literal
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 
 
@@ -31,7 +32,8 @@ class GenerateMusicChartRequest(TimeZoneRequest):
     style_path : Optional[ str ] = None
         css样式路径
     note_host : str
-        note图片根路径
+        note图片根路径。按约定固定为本地目录 ``static_images/chart_asset/notes``：谱面 crate 自行枚举该目录，
+        因此它从不经由资源镜像拉取；位于 ``asset/`` 下的值会记录一次 ERROR 日志并仍按本地路径拼接（不会报错）
     music_meta : Optional[ dict ] = None
         歌曲元数据
     target_segment_seconds : Optional[ float ] = None
@@ -44,10 +46,10 @@ class GenerateMusicChartRequest(TimeZoneRequest):
     difficulty: Literal["easy", "normal", "hard", "expert", "master", "append"]
     play_level: str | int
     skill: bool = False
-    jacket_path: str
-    sus_path: str | None = None
+    jacket_path: AssetKey
+    sus_path: AssetKey | None = None
     chart_json: str | dict[str, Any] | None = None
-    style_path: str | None = None
+    style_path: AssetKey | None = None
     note_host: str
     music_meta: dict | None = None
     target_segment_seconds: float | None = None

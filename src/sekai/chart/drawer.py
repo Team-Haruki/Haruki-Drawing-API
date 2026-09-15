@@ -8,11 +8,14 @@ import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from PIL import Image
 from pjsekai_scores_rs import Drawing, Score
 
 from src.core.debug import set_render_backend
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, candidates
 from src.sekai.base.draw import (
     WATERMARK_BOTTOM_OFFSET,
     WATERMARK_LINE_SEP,
@@ -24,7 +27,7 @@ from src.sekai.base.draw import (
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.utils import run_in_pool
+from src.sekai.base.utils import record_missing_asset_error, resolve_local_dir, resolve_logical_file, run_in_pool
 from src.sekai.skia_renderer.canvas import load_native_renderer, payload_from_native, skia_plot_enabled
 from src.sekai.skia_renderer.ir_builder import IRBuilder
 from src.sekai.skia_renderer.render_stats import (
@@ -67,6 +70,51 @@ def chart_font_kwargs() -> dict[str, list[str]]:
     return {"font_dirs": [str(FONT_DIR)]}
 
 
+def _today_path(resolved: Path, key: str) -> Path:
+    """The unresolved ``ASSETS_BASE_DIR / key`` join when it names the same file as ``resolved``.
+
+    With the local source the chart inputs are handed to the crate exactly as before (no realpath rewrite);
+    a mirror-materialised file keeps its resolved mirror path.
+    """
+    joined = ASSETS_BASE_DIR / key
+    try:
+        if joined.resolve() == resolved:
+            return joined
+    except (OSError, RuntimeError):  # pragma: no cover - resolve() only fails on symlink loops
+        pass
+    return resolved
+
+
+def chart_asset_path(key: AssetKey) -> Path:
+    """Local path of a chart input file (`.txt`/`.sus`/`.css`/jacket), materialised before the crate reads it.
+
+    Candidates are tried in order through `resolve_logical_file` (mirror map + traversal guard + on-demand fetch);
+    the first one that exists wins (C1). A traversal raises `ValueError`. When nothing materialises, today's join of
+    the first candidate is returned so the crate fails (or, for a jacket, degrades) exactly as it does today, and
+    the miss is counted.
+    """
+    if isinstance(key, str) and key.strip() == "":
+        return ASSETS_BASE_DIR / key  # today's join; a blank key never reaches the resolver
+    items = candidates(key)
+    if not items:
+        raise ValueError("chart asset candidate list is empty")
+    first_error: FileNotFoundError | None = None
+    for item in items:
+        try:
+            return _today_path(resolve_logical_file(ASSETS_BASE_DIR, item), item)
+        except FileNotFoundError as exc:
+            if first_error is None:
+                first_error = exc
+    assert first_error is not None
+    record_missing_asset_error(first_error, candidate_count=len(items))
+    return ASSETS_BASE_DIR / items[0].lstrip("/")
+
+
+def chart_note_host_path(key: str) -> Path:
+    """Local directory of the chart note sprites; never fetched (the crate enumerates it itself, plan §7)."""
+    return _today_path(resolve_local_dir(ASSETS_BASE_DIR, key), key)
+
+
 def load_score(rqd: GenerateMusicChartRequest) -> Score:
     if rqd.chart_json is not None:
         if isinstance(rqd.chart_json, str):
@@ -74,24 +122,24 @@ def load_score(rqd: GenerateMusicChartRequest) -> Score:
         return Score.from_json(json.dumps(rqd.chart_json, ensure_ascii=False))
     if not rqd.sus_path:
         raise ValueError("either chart_json or sus_path is required")
-    return Score.open(str(ASSETS_BASE_DIR / rqd.sus_path))
+    return Score.open(str(chart_asset_path(rqd.sus_path)))
 
 
 def _prepare_chart_render(rqd: GenerateMusicChartRequest) -> tuple[Drawing, Score]:
     style_sheet = ""
     if rqd.style_path:
-        style_sheet = (ASSETS_BASE_DIR / rqd.style_path).read_text(encoding="utf-8")
+        style_sheet = chart_asset_path(rqd.style_path).read_text(encoding="utf-8")
     score = load_score(rqd)
     score.set_meta(
         title=rqd.title,
         artist=rqd.artist,
         difficulty=rqd.difficulty,
         playlevel=str(rqd.play_level),
-        jacket=str(ASSETS_BASE_DIR / rqd.jacket_path),
+        jacket=str(chart_asset_path(rqd.jacket_path)),
         songid=str(rqd.music_id),
     )
     drawing = Drawing(
-        note_host=str(ASSETS_BASE_DIR / rqd.note_host),
+        note_host=str(chart_note_host_path(rqd.note_host)),
         style_sheet=style_sheet,
         skill=rqd.skill,
         music_meta=rqd.music_meta,

@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, field_validator
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.deck.model import DeckRequest
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
@@ -133,8 +134,8 @@ class EventAssets(BaseModel):
         加成角色图标路径列表
     """
 
-    event_bg_path: str
-    event_logo_path: str
+    event_bg_path: AssetKey
+    event_logo_path: AssetKey
     event_story_bg_path: str
     event_attr_image_path: str
     event_ban_chara_img: str

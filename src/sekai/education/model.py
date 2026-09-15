@@ -6,6 +6,7 @@ Education 模块数据模型
 
 from pydantic import BaseModel
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import DetailedProfileCardRequest
 
@@ -190,7 +191,7 @@ class AreaItemMaterial(BaseModel):
     """
 
     material_id: int
-    material_icon_path: str
+    material_icon_path: AssetKey
     quantity: int
     have_quantity: int
     sum_quantity: int
@@ -237,8 +238,8 @@ class AreaItemInfo(BaseModel):
 
     item_id: int
     current_level: int
-    item_icon_path: str
-    target_icon_path: str | None = None
+    item_icon_path: AssetKey
+    target_icon_path: AssetKey | None = None
     levels: list[AreaItemLevel]
 
 

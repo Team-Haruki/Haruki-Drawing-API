@@ -8,6 +8,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_watermark, roundrect_bg
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit
@@ -80,25 +81,29 @@ async def try_render_inventory_list_payload(rqd: InventoryListRequest) -> Encode
     return await render_canvas_payload(canvas, endpoint="inventory_list")
 
 
+def _inventory_icon_key(icon_path: AssetKey | None) -> str:
+    """Cache key of an item icon: the stripped path, or the first candidate of a C1 list."""
+    return (legacy_key(icon_path) or "").strip()
+
+
 async def _load_inventory_icons(sections: list[InventorySection]) -> dict[str, ImageSource]:
-    paths = []
-    seen = set()
+    requests: dict[str, AssetKey] = {}
     for section in sections:
         for item in section.items:
-            path = (item.icon_path or "").strip()
-            if not path or path in seen:
+            key = _inventory_icon_key(item.icon_path)
+            if not key or key in requests:
                 continue
-            seen.add(path)
-            paths.append(path)
+            requests[key] = item.icon_path if isinstance(item.icon_path, list) else key
 
-    if not paths:
+    if not requests:
         return {}
 
-    loaded = await asyncio.gather(*[_load_inventory_icon(path) for path in paths])
-    return {path: icon for path, icon in zip(paths, loaded) if icon is not None}
+    keys = list(requests)
+    loaded = await asyncio.gather(*[_load_inventory_icon(requests[key]) for key in keys])
+    return {key: icon for key, icon in zip(keys, loaded) if icon is not None}
 
 
-async def _load_inventory_icon(path: str) -> ImageSource | None:
+async def _load_inventory_icon(path: AssetKey) -> ImageSource | None:
     try:
         return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise")
     except (FileNotFoundError, OSError, ValueError) as exc:
@@ -132,7 +137,7 @@ def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource])
 
 
 def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource]) -> None:
-    icon = icon_cache.get((item.icon_path or "").strip())
+    icon = icon_cache.get(_inventory_icon_key(item.icon_path))
     with (
         HSplit()
         .set_size((TILE_WIDTH, TILE_HEIGHT))

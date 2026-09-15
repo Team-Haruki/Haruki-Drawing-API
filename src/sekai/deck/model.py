@@ -6,6 +6,7 @@ Deck 模块数据模型
 
 from pydantic import BaseModel, Field
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
@@ -94,7 +95,7 @@ class DeckData(BaseModel):
     music_title: str | None = None
     music_id: int | None = None
     music_diff: str | None = None
-    music_cover_path: str | None = None
+    music_cover_path: AssetKey | None = None
     music_query: str | None = None
     pt: int | None = None
     event_bonus_rate: float | None = None
@@ -119,7 +120,7 @@ class DeckPlannerSong(BaseModel):
     music_id: int | None = None
     query: str | None = None
     title: str
-    music_cover_path: str | None = None
+    music_cover_path: AssetKey | None = None
     difficulty: str | None = None
     rows: list[DeckPlannerBoostRow]
 
@@ -228,7 +229,7 @@ class DeckRequest(TimeZoneRequest):
     music_id: int | None = None
     music_diff: str | None = None
     event_banner_path: str | None = None
-    music_cover_path: str | None = None
+    music_cover_path: AssetKey | None = None
     is_max_deck: bool = False
     recommend_type: str = ""
     wl_chara_name: str | None = None

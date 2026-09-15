@@ -65,7 +65,7 @@ async def profile(request: ProfileRequest):
         payload = await try_render_profile_payload(request)
         payload = require_native_payload(payload)
         set_request_stage("profile:image_to_response")
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -92,10 +92,11 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
             if attempt.error is not None:
                 raise attempt.error
             payload = require_native_payload(attempt.payload)
-            set_request_stage("custom_profile_card:image_to_response")
-            response = encoded_image_payload_to_response(payload)
-            attempt.record(response.status_code)
-            return response
+        # The exit may upload an artifact; it must never hold the single custom-profile render slot.
+        set_request_stage("custom_profile_card:image_to_response")
+        response = await encoded_image_payload_to_response(payload)
+        attempt.record(response.status_code)
+        return response
     except ValueError as e:
         if attempt is not None:
             attempt.reject()

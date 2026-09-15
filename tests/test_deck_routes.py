@@ -12,6 +12,7 @@ from src.core.heavy_render_pool import (
     HeavyRenderTaskTimeoutError,
 )
 from src.core.pjsk import deck
+from tests.route_test_helpers import async_exit_stub
 
 
 class _WorkerPool:
@@ -40,7 +41,7 @@ def test_deck_recommend_returns_worker_payload(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(
         deck,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(deck.deck_recommend(_DeckRequest())) is response

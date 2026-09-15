@@ -9,6 +9,7 @@ from fastapi import HTTPException
 import pytest
 
 from src.core.pjsk import event, score
+from tests.route_test_helpers import async_exit_stub
 
 
 @dataclass(frozen=True)
@@ -57,7 +58,7 @@ def test_event_and_score_routes_return_native_payloads(case: _RouteCase, monkeyp
     monkeypatch.setattr(
         case.module,
         "encoded_image_payload_to_response",
-        lambda value: response if value is payload else pytest.fail("unexpected payload"),
+        async_exit_stub(payload, response),
     )
 
     assert asyncio.run(getattr(case.module, case.endpoint)(request)) is response

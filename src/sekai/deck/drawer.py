@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -178,7 +179,7 @@ def format_planner_optional_int(value: int | None) -> str:
 
 
 def planner_cover_key(song) -> str:
-    return str(song.music_id or song.music_cover_path or song.title)
+    return str(song.music_id or legacy_key(song.music_cover_path) or song.title)
 
 
 def _planner_rows(planner: DeckPlannerInfo) -> list[tuple[DeckPlannerSong, DeckPlannerBoostRow | None]]:
@@ -230,7 +231,7 @@ def _draw_planner_song_cell(
             diff = (song.difficulty or "").lower()
             if diff in DIFF_COLORS:
                 Spacer(w=52, h=52).set_bg(FillBg(fill=DIFF_COLORS[diff])).set_offset((3, 3))
-            cover = planner_music_imgs.get(song.music_cover_path or planner_cover_key(song))
+            cover = planner_music_imgs.get(legacy_key(song.music_cover_path) or planner_cover_key(song))
             if cover is not None:
                 ImageBox(cover, size=(52, 52)).set_offset((-2, -2))
             else:
@@ -412,8 +413,8 @@ def _deck_optional_asset_tasks(rqd: DeckRequest) -> dict[str, object]:
 def _collect_deck_asset_requests(rqd: DeckRequest) -> tuple[list, list[tuple], list[str], list[str]]:
     card_thumb_tasks = []
     card_thumb_keys = []
-    compare_cover_paths = []
-    planner_cover_paths = []
+    compare_cover_paths: list[AssetKey] = []
+    planner_cover_paths: list[AssetKey] = []
     for deck in rqd.deck_data:
         if rqd.music_compare and deck.music_cover_path and deck.music_cover_path not in compare_cover_paths:
             compare_cover_paths.append(deck.music_cover_path)
@@ -423,7 +424,7 @@ def _collect_deck_asset_requests(rqd: DeckRequest) -> tuple[list, list[tuple], l
                 (
                     card.card_thumbnail.card_id,
                     card.card_thumbnail.is_after_training,
-                    card.card_thumbnail.card_thumbnail_path,
+                    legacy_key(card.card_thumbnail.card_thumbnail_path),
                 )
             )
     if rqd.event_planner:
@@ -468,8 +469,8 @@ async def _load_deck_recommend_assets(rqd: DeckRequest) -> _DeckRecommendAssets:
         music_cover=deck_images.get("music_cover"),
         canvas_thumbnail=deck_images.get("canvas_thumb"),
         card_layers=dict(zip(card_thumb_keys, thumbnail_results)),
-        compare_music_imgs=dict(zip(compare_cover_paths, compare_results)),
-        planner_music_imgs=dict(zip(planner_cover_paths, planner_results)),
+        compare_music_imgs={legacy_key(path): img for path, img in zip(compare_cover_paths, compare_results)},
+        planner_music_imgs={legacy_key(path): img for path, img in zip(planner_cover_paths, planner_results)},
     )
 
 
@@ -658,7 +659,9 @@ def _draw_deck_compare_music_row(deck, assets: _DeckRecommendAssets) -> None:
         with Frame().set_content_align("c"):
             if deck.music_diff and deck.music_diff in DIFF_COLORS:
                 Spacer(w=64, h=64).set_bg(FillBg(fill=DIFF_COLORS[deck.music_diff])).set_offset((3, 3))
-            music_img = assets.compare_music_imgs.get(deck.music_cover_path) if deck.music_cover_path else None
+            music_img = (
+                assets.compare_music_imgs.get(legacy_key(deck.music_cover_path)) if deck.music_cover_path else None
+            )
             if music_img:
                 ImageBox(music_img, size=(64, 64)).set_offset((-3, -3))
 
@@ -794,7 +797,7 @@ def _draw_deck_card(rqd: DeckRequest, assets: _DeckRecommendAssets, card) -> Non
     card_key = (
         card_id,
         card.card_thumbnail.is_after_training,
-        card.card_thumbnail.card_thumbnail_path,
+        legacy_key(card.card_thumbnail.card_thumbnail_path),
     )
     event_bonus = card.event_bonus_rate
     show_event_bonus = event_bonus > 0

@@ -2,6 +2,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 
 
@@ -23,7 +24,7 @@ class VLiveBrief(BaseModel):
     current_end_at: datetime | None = None
     living: bool = False
     rest_count: int = 0
-    banner_path: str | None = None
+    banner_path: AssetKey | None = None
     rewards: list[VLiveRewardItem] | None = None
     characters: list[VLiveCharacterItem] | None = None
 

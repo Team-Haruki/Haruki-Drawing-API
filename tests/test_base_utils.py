@@ -1,5 +1,6 @@
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
+import logging
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -317,13 +318,389 @@ def test_rendered_image_cache_key_is_stable_for_dict_ordering():
     assert first != changed
 
 
-def test_temp_file_path_can_schedule_and_cleanup_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(utils, "TEMP_FILE_DIR", tmp_path)
-
-    with utils.TempFilePath("txt", remove_after=timedelta(seconds=0)) as path:
-        temp_path = Path(path)
-        temp_path.write_text("temporary", encoding="utf-8")
-        assert temp_path.exists()
+def test_cleanup_expired_tmp_files_removes_due_entries_and_keeps_pending(monkeypatch, tmp_path):
+    due = tmp_path / "due.txt"
+    due.write_text("temporary", encoding="utf-8")
+    pending = tmp_path / "pending.txt"
+    pending.write_text("temporary", encoding="utf-8")
+    now = datetime.now()
+    monkeypatch.setattr(
+        utils,
+        "_tmp_files_to_remove",
+        [(str(due), now - timedelta(seconds=1)), (str(pending), now + timedelta(hours=1))],
+    )
 
     assert utils.cleanup_expired_tmp_files() == 1
-    assert not temp_path.exists()
+    assert not due.exists()
+    assert pending.exists()
+    assert [path for path, _ in utils._tmp_files_to_remove] == [str(pending)]
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Asset-mirror hooks (plan §5.1/§5.2, task T5)
+# ---------------------------------------------------------------------------------------------------------------
+
+_MIRROR_LOGICAL = "asset/jp-assets/startapp/music/jacket/j001.png"
+_MIRROR_OBJECT_KEY = "jp-assets/startapp/music/jacket/j001.png"
+
+
+def _png_bytes(size: tuple[int, int] = (9, 7)) -> bytes:
+    import io
+
+    buffer = io.BytesIO()
+    Image.new("RGBA", size, (1, 2, 3, 255)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _legacy_resolve_asset_path(base_path: Path, path: str) -> tuple[Path, Path, str]:
+    """`_resolve_asset_path` exactly as it was at 5c2f807 (no memo), the regression oracle."""
+    resolved_base = base_path.resolve()
+    full_path = (resolved_base / path.lstrip("/")).resolve()
+    if not full_path.is_relative_to(resolved_base):
+        raise ValueError(f"图片路径越界: {path}")
+    return resolved_base, full_path, str(full_path)
+
+
+@pytest.fixture
+def null_mirror():
+    from src.assets.mirror import NullMirror, set_asset_mirror
+
+    mirror = NullMirror()
+    set_asset_mirror(mirror)
+    try:
+        yield mirror
+    finally:
+        set_asset_mirror(None)
+
+
+class _RecordingMirror:
+    """A NullMirror-shaped double that records `ensure_local` calls and can hand back a path."""
+
+    version = "rec"
+
+    def __init__(self, result: Path | None = None, reason: str | None = None, calls: list | None = None) -> None:
+        self.result = result
+        self.reason = reason
+        self.calls = calls if calls is not None else []
+
+    def local_path(self, logical: str):
+        return None
+
+    def ensure_local(self, logical: str):
+        self.calls.append(("ensure_local", logical))
+        return self.result
+
+    def last_miss_reason(self):
+        return self.reason
+
+    def clear_memos(self) -> None:
+        self.calls.append(("clear_memos", None))
+
+    def stats_snapshot(self) -> dict:
+        return {"enabled": False}
+
+
+@pytest.fixture
+def recording_mirror():
+    from src.assets.mirror import set_asset_mirror
+
+    mirror = _RecordingMirror()
+    set_asset_mirror(mirror)
+    try:
+        yield mirror
+    finally:
+        set_asset_mirror(None)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "asset.png",
+        "/leading/slash.png",
+        "thumbnail/icon.png",
+        "nested/dir/banner.jpg",
+        "asset/jp-assets/startapp/music/jacket/j001.png",
+        "static_images/mysekai/birthday/miku_2026/icon/item.png",
+        "custom_profile/frame.png",
+        "fonts/x.otf",
+        "missing/icon.png",
+        "a/./b/../c.png",
+        "late.png",
+        "tmp/file.png",
+    ],
+)
+def test_resolve_asset_path_with_local_source_is_identical_to_the_base_commit(tmp_path, null_mirror, path) -> None:
+    _save_image(tmp_path / "asset.png")
+    expected = _legacy_resolve_asset_path(tmp_path, path)
+
+    assert utils._resolve_asset_path(tmp_path, path) == expected
+    assert utils._resolve_asset_path(tmp_path, path) == expected  # memoized entry identical too
+    assert (str(tmp_path), path, "") in utils._resolved_path_cache
+
+
+def test_resolve_asset_path_local_source_still_rejects_traversal(tmp_path, null_mirror) -> None:
+    with pytest.raises(ValueError, match="越界"):
+        utils._resolve_asset_path(tmp_path, "../outside.png")
+    assert not utils._resolved_path_cache
+
+
+def test_mirror_memo_key_carries_the_version_and_a_bump_remaps(tmp_path, asset_mirror) -> None:
+    _base, first, _ = utils._resolve_asset_path(tmp_path, _MIRROR_LOGICAL)
+    assert first == (tmp_path / "mirror" / "v0" / _MIRROR_OBJECT_KEY).resolve()
+    assert (str(tmp_path), _MIRROR_LOGICAL, "v0") in utils._resolved_path_cache
+
+    assert asset_mirror.set_version("v1") is True
+    assert not utils._resolved_path_cache  # set_version calls clear_resolved_path_cache()
+
+    _base, second, _ = utils._resolve_asset_path(tmp_path, _MIRROR_LOGICAL)
+    assert second == (tmp_path / "mirror" / "v1" / _MIRROR_OBJECT_KEY).resolve()
+    assert (str(tmp_path), _MIRROR_LOGICAL, "v1") in utils._resolved_path_cache
+
+
+def test_mirror_non_bucket_keys_keep_the_legacy_join(tmp_path, asset_mirror) -> None:
+    assert utils._resolve_asset_path(tmp_path, "static_images/x.png") == _legacy_resolve_asset_path(
+        tmp_path, "static_images/x.png"
+    )
+
+
+def test_traversal_guard_fires_on_the_mapped_mirror_path(tmp_path, asset_mirror) -> None:
+    base = tmp_path / "base"
+    outside = tmp_path / "outside"
+    base.mkdir()
+    outside.mkdir()
+    (base / "mirror").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="越界"):
+        utils._resolve_asset_path(base, _MIRROR_LOGICAL)
+    with pytest.raises(ValueError, match="越界"):
+        utils._resolve_asset_path(base, "../outside.png")
+    assert not utils._resolved_path_cache
+
+
+def test_resolve_and_stat_fetches_a_cold_asset_through_the_mirror(tmp_path, asset_mirror) -> None:
+    store = asset_mirror.store_for("jp")
+    store.objects[_MIRROR_OBJECT_KEY] = _png_bytes((9, 7))
+
+    ref = asyncio.run(utils.get_asset_image_ref(tmp_path, _MIRROR_LOGICAL, on_missing="raise"))
+
+    assert isinstance(ref, utils.AssetImageRef)
+    assert ref.size == (9, 7)
+    assert ref.path == tmp_path / "mirror" / "v0" / _MIRROR_OBJECT_KEY
+    assert store.reads == [_MIRROR_OBJECT_KEY]
+    # Warm: a plain local stat, no second remote read.
+    asyncio.run(utils.get_asset_image_ref(tmp_path, _MIRROR_LOGICAL, on_missing="raise"))
+    assert store.reads == [_MIRROR_OBJECT_KEY]
+
+
+def test_resolve_and_stat_returns_the_legacy_file_through_the_mirror_fallback(tmp_path, asset_mirror) -> None:
+    legacy = tmp_path / _MIRROR_LOGICAL
+    _save_image(legacy, size=(5, 4))
+
+    full_path, full_path_str, st = utils._resolve_and_stat(tmp_path, _MIRROR_LOGICAL)
+
+    assert full_path == legacy
+    assert full_path_str == str(legacy)
+    assert st.st_size == legacy.stat().st_size
+
+
+def test_resolve_and_stat_order_is_stat_then_mirror_then_birthday_then_raise(
+    tmp_path, recording_mirror, monkeypatch
+) -> None:
+    calls = recording_mirror.calls
+    original_birthday = utils._resolve_birthday_year_fallback
+
+    def birthday(full_path, resolved_base):
+        calls.append(("birthday", None))
+        return original_birthday(full_path, resolved_base)
+
+    original_stat = utils._stat_regular_file
+
+    def stat(path):
+        calls.append(("stat", None))
+        return original_stat(path)
+
+    monkeypatch.setattr(utils, "_resolve_birthday_year_fallback", birthday)
+    monkeypatch.setattr(utils, "_stat_regular_file", stat)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        utils._resolve_and_stat(tmp_path, "missing/icon.png")
+
+    assert [name for name, _ in calls] == ["stat", "ensure_local", "birthday"]
+    assert str(excinfo.value) == f"图片文件不存在: {(tmp_path / 'missing' / 'icon.png').resolve()}"
+    assert type(excinfo.value) is FileNotFoundError
+
+    # A local hit never reaches the mirror.
+    calls.clear()
+    _save_image(tmp_path / "present.png")
+    utils._resolve_and_stat(tmp_path, "present.png")
+    assert [name for name, _ in calls] == ["stat"]
+
+
+def test_resolve_and_stat_uses_a_path_the_mirror_hands_back(tmp_path, recording_mirror) -> None:
+    elsewhere = tmp_path / "elsewhere.png"
+    _save_image(elsewhere)
+    recording_mirror.result = elsewhere
+
+    assert utils._resolve_and_stat(tmp_path, "missing.png")[0] == elsewhere
+
+    # A handed-back path that is not a regular file is ignored and the miss proceeds.
+    recording_mirror.result = tmp_path / "nope.png"
+    with pytest.raises(FileNotFoundError):
+        utils._resolve_and_stat(tmp_path, "missing.png")
+
+
+def test_every_resolve_and_stat_entry_point_reaches_the_mirror_hook(tmp_path, recording_mirror) -> None:
+    calls = recording_mirror.calls
+
+    def count() -> int:
+        n = sum(1 for name, _ in calls if name == "ensure_local")
+        calls.clear()
+        return n
+
+    assert utils.get_image_asset_signature(tmp_path, "a.png") == {"source_path": "a.png", "missing": True}
+    assert count() == 1
+    with pytest.raises(FileNotFoundError):
+        utils._load_image_from_path_sync(tmp_path, "b.png")
+    assert count() == 1
+    with pytest.raises(FileNotFoundError):
+        utils._load_asset_image_ref_sync(tmp_path, "c.png")
+    assert count() == 1
+    with pytest.raises(FileNotFoundError):
+        utils._load_image_resized_sync(tmp_path, "d.png", 4, 4)
+    assert count() == 1
+    with pytest.raises(FileNotFoundError):
+        utils._load_image_contain_resized_sync(tmp_path, "e.png", 4, 4)
+    assert count() == 1
+
+
+def test_resolve_logical_file_is_file_generic(tmp_path, asset_mirror) -> None:
+    store = asset_mirror.store_for("jp")
+    logical = "asset/jp-assets/startapp/music/music_score/0001_01/expert.txt"
+    store.objects["jp-assets/startapp/music/music_score/0001_01/expert.txt"] = b"#SUS"
+
+    fetched = utils.resolve_logical_file(tmp_path, logical)
+    assert fetched == tmp_path / "mirror" / "v0" / "jp-assets/startapp/music/music_score/0001_01/expert.txt"
+    assert fetched.read_bytes() == b"#SUS"
+    assert utils.resolve_logical_file(tmp_path, logical) == fetched.resolve()  # warm local stat
+
+    (tmp_path / "static_images").mkdir()
+    (tmp_path / "static_images" / "style.css").write_text("x", encoding="utf-8")
+    assert (
+        utils.resolve_logical_file(tmp_path, "static_images/style.css")
+        == (tmp_path / "static_images" / "style.css").resolve()
+    )
+
+    with pytest.raises(FileNotFoundError, match="文件不存在"):
+        utils.resolve_logical_file(tmp_path, "asset/jp-assets/startapp/music/none.txt")
+    with pytest.raises(FileNotFoundError):
+        utils.resolve_logical_file(tmp_path, "  ")
+    with pytest.raises(ValueError, match="越界"):
+        utils.resolve_logical_file(tmp_path, "../escape.txt")
+
+
+def test_resolve_local_dir_never_fetches_and_never_raises_on_payload_quirks(tmp_path, asset_mirror, caplog) -> None:
+    notes = tmp_path / "static_images" / "chart_asset" / "notes"
+    notes.mkdir(parents=True)
+    store = asset_mirror.store_for("jp")
+
+    assert utils.resolve_local_dir(tmp_path, "static_images/chart_asset/notes") == notes.resolve()
+
+    caplog.set_level(logging.WARNING, logger=utils.logger.name)
+    key = "asset/jp-assets/startapp/notes"
+    for _ in range(2):
+        assert utils.resolve_local_dir(tmp_path, key) == (tmp_path / key).resolve()
+    errors = [r for r in caplog.records if "chart.note_host_not_local" in r.getMessage()]
+    missing = [r for r in caplog.records if "assets.local_dir_missing" in r.getMessage()]
+    assert len(errors) == 1
+    assert errors[0].levelno == logging.ERROR
+    assert len(missing) == 1
+    assert store.reads == []
+    assert store.stats == []
+
+    with pytest.raises(ValueError, match="越界"):
+        utils.resolve_local_dir(tmp_path, "../escape")
+
+
+def test_local_dir_log_gate_is_bounded(monkeypatch) -> None:
+    monkeypatch.setattr(utils, "_local_dir_logged", {f"missing|k{i}" for i in range(4096)})
+    utils._log_local_dir_once("missing", "fresh")
+    assert utils._local_dir_logged == {"missing|fresh"}
+
+
+def test_clear_runtime_memory_caches_clears_mirror_memos(recording_mirror) -> None:
+    utils._resolved_path_cache[("b", "p", "v")] = (Path("a"), Path("b"), "b")
+
+    utils.clear_runtime_memory_caches()
+
+    assert not utils._resolved_path_cache
+    assert ("clear_memos", None) in recording_mirror.calls
+
+
+def test_runtime_cache_stats_expose_asset_mirror_and_missing_assets(null_mirror) -> None:
+    stats = utils.get_runtime_cache_stats()
+
+    assert len(stats) == 10
+    assert stats["asset_mirror"]["enabled"] is False
+    assert stats["asset_mirror"]["source"] == "local"
+    assert set(stats["missing_assets"]) == {"total", "by_reason"}
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# Birthday fallback prefix shapes (plan §5.4/§6.3 item 2, task T7)
+# ---------------------------------------------------------------------------------------------------------------
+
+_BIRTHDAY_ROOTS = {
+    "static": ("static_images/mysekai/birthday", None),
+    "legacy_asset": ("asset/jp-assets/ondemand/mysekai/birthday", None),
+    "mirror": ("mirror/v0/jp-assets/ondemand/mysekai/birthday", "asset/jp-assets/ondemand/mysekai/birthday"),
+}
+
+
+@pytest.mark.parametrize("shape", list(_BIRTHDAY_ROOTS))
+def test_birthday_fallback_fires_for_every_prefix_shape_and_is_counted(tmp_path, request, shape) -> None:
+    from src.core import missing_asset_telemetry as telemetry
+
+    # The mirror shape only exists with a mirror; the other two are what the local source (NullMirror) produces.
+    request.getfixturevalue("asset_mirror" if shape == "mirror" else "null_mirror")
+    telemetry.reset_missing_asset_stats()
+    disk_root, logical_root = _BIRTHDAY_ROOTS[shape]
+    older = tmp_path / disk_root / "miku_2024" / "icon" / "item.png"
+    _save_image(older)
+    logical = f"{logical_root or disk_root}/miku_2026/icon/item.png"
+
+    requested = utils._resolve_asset_path(tmp_path, logical)[1]
+    assert utils._resolve_birthday_year_fallback(requested, tmp_path.resolve()) == older.resolve()
+
+    full_path, _, _ = utils._resolve_and_stat(tmp_path, logical)
+    assert full_path == older.resolve()
+    assert telemetry.get_missing_asset_stats()["by_reason"]["birthday_fallback"] == 1
+    telemetry.reset_missing_asset_stats()
+
+
+def test_birthday_fallback_rejects_near_miss_shapes(tmp_path, asset_mirror) -> None:
+    base = tmp_path.resolve()
+    for rel in (
+        "asset/jp-assets/ondemand/mysekai/birthday/miku_2026",  # no tail file
+        "asset/jpn-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # region is not two letters
+        "asset/JP-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # upper-case region
+        "asset/jp-assets/other/mysekai/birthday/miku_2026/x.png",  # unknown mode
+        "asset/jp-assets/ondemand/mysekai/fixture/miku_2026/x.png",  # not the birthday dir
+        "asset/jp-assets/ondemand/mysekai/birthday/miku2026/x.png",  # no year separator
+        "asset/jp-assets/ondemand/mysekai/birthday/_2026/x.png",  # no chara name
+        "asset/jp-assets/ondemand/mysekai/birthday/miku_next/x.png",  # non-numeric year
+        "other/v0/jp-assets/ondemand/mysekai/birthday/miku_2026/x.png",  # not under the mirror dir
+        "mirror/v0/jp-assets/ondemand/mysekai",  # too short
+    ):
+        assert utils._birthday_fallback_request(base / rel, base) is None, rel
+
+    root, chara, year, tail = utils._birthday_fallback_request(
+        base / "mirror/v7/kr-assets/startapp/mysekai/birthday/ichika_2025/a/b.png", base
+    )
+    assert root == base / "mirror/v7/kr-assets/startapp/mysekai/birthday"
+    assert (chara, year, tail) == ("ichika", 2025, ("a", "b.png"))
+
+
+def test_birthday_mirror_shape_needs_a_mirror_with_a_directory(tmp_path, null_mirror) -> None:
+    base = tmp_path.resolve()
+    rel = "mirror/v0/jp-assets/ondemand/mysekai/birthday/miku_2026/x.png"
+    assert utils._birthday_fallback_request(base / rel, base) is None

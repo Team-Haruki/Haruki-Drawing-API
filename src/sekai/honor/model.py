@@ -4,6 +4,7 @@ Honor 模块数据模型
 定义称号/勋章相关的 Pydantic 模型，用于称号图片的绘制请求。
 """
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest
 
 
@@ -67,19 +68,19 @@ class HonorRequest(TimeZoneRequest):
     fc_or_ap_level: str | None = None
     is_empty: bool = False
     is_main_honor: bool = False
-    honor_img_path: str | None = None
-    rank_img_path: str | None = None
+    honor_img_path: AssetKey | None = None
+    rank_img_path: AssetKey | None = None
     lv_img_path: str | None = None
     lv6_img_path: str | None = None
     empty_honor_path: str | None = None
-    scroll_img_path: str | None = None
-    word_img_path: str | None = None
-    chara_icon_path: str | None = None
-    chara_icon_path2: str | None = None
+    scroll_img_path: AssetKey | None = None
+    word_img_path: AssetKey | None = None
+    chara_icon_path: AssetKey | None = None
+    chara_icon_path2: AssetKey | None = None
     chara_id: str | None = None
     chara_id2: str | None = None
     bonds_bg_path: str | None = None
     bonds_bg_path2: str | None = None
     mask_img_path: str | None = None
-    frame_img_path: str | None = None
-    frame_degree_level_img_path: str | None = None
+    frame_img_path: AssetKey | None = None
+    frame_degree_level_img_path: AssetKey | None = None

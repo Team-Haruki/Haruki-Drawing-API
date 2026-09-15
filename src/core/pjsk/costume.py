@@ -21,7 +21,7 @@ async def costume_list(request: CostumeListRequest):
     try:
         payload = await try_render_costume_list_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -35,6 +35,6 @@ async def costume_detail(request: CostumeDetailRequest):
     try:
         payload = await try_render_costume_detail_payload(request)
         payload = require_native_payload(payload)
-        return encoded_image_payload_to_response(payload)
+        return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

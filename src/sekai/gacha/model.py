@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.profile.model import CardFullThumbnailRequest
 
@@ -46,7 +47,7 @@ class GachaBehavior(BaseModel):
     type: str
     spin_count: int
     cost_type: str | None = None
-    cost_icon_path: str | None = None
+    cost_icon_path: AssetKey | None = None
     cost_quantity: int | None = None
     execute_limit: int | None = None
     colorful_pass: bool = False
@@ -99,7 +100,7 @@ class GachaInfo(BaseModel):
     start_at: int
     end_at: int
     asset_name: str
-    ceil_item_img_path: str | None = None
+    ceil_item_img_path: AssetKey | None = None
     behaviors: list[GachaBehavior] = []
     rarity_1_count: int = 0
     rarity_2_count: int = 0
@@ -262,8 +263,8 @@ class GachaDetailRequest(TimeZoneRequest):
     gacha: GachaInfo
     weight_info: GachaWeight
     pickup_cards: list[GachaCardWeight] = Field(default_factory=list)
-    logo_img_path: str | None = None
-    banner_img_path: str | None = None
+    logo_img_path: AssetKey | None = None
+    banner_img_path: AssetKey | None = None
     bg_img_path: str | None = None
     region: str = "jp"
 

@@ -125,9 +125,7 @@ def test_contain_resize_batch_and_cache_paths(tmp_path, monkeypatch) -> None:
 
     monkeypatch.setattr(utils, "_cache_enabled", lambda _path: False)
     assert utils._load_image_contain_resized_sync(tmp_path, "source.png", 6, 6).size == (6, 3)
-    result = utils.batch_load_and_contain_resize(tmp_path, ["source.png", "missing.png"], 4, 4)
-    assert result["source.png"].size == (4, 2)
-    assert max(result["missing.png"].size) <= 4
+    assert utils._load_image_contain_resized_sync(tmp_path, "source.png", 4, 4).size == (4, 2)
 
     sentinel = _image((3, 3))
     monkeypatch.setattr(utils, "_cache_enabled", lambda _path: True)

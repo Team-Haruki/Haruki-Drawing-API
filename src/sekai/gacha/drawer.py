@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 GACHA_LIST_LOGO_BOX_SIZE = (130, 60)
 
 
-async def get_unknown_fallback_image(path: str | None = None) -> ImageSource:
+async def get_unknown_fallback_image(path: AssetKey | None = None) -> ImageSource:
     """加载缺失图；优先按目标路径返回比例合适的 placeholder。"""
     if path:
         try:
@@ -68,7 +69,7 @@ async def get_unknown_fallback_image(path: str | None = None) -> ImageSource:
         return missing_image_ref("gacha_unknown")
 
 
-async def get_gacha_image_ref_or_unknown(path: str | None, *, allow_empty: bool = False) -> ImageSource | None:
+async def get_gacha_image_ref_or_unknown(path: AssetKey | None, *, allow_empty: bool = False) -> ImageSource | None:
     """加载卡池图片（惰性引用），缺图时自动回退到 UnKnown 占位图。
 
     只探测图片头部，缺图回退也保持为引用，由 ImageBox/ImageBg 在重放时解析。
@@ -84,8 +85,8 @@ async def get_gacha_image_ref_or_unknown(path: str | None, *, allow_empty: bool 
 
 
 async def get_gacha_list_image_with_fallback(
-    logo_path: str | None,
-    banner_path: str | None,
+    logo_path: AssetKey | None,
+    banner_path: AssetKey | None,
 ) -> tuple[ImageSource, str]:
     """优先使用 logo，缺失时回退到 banner，再退回 unknown。
 
@@ -255,7 +256,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
     _cost_icon_indices: list[tuple[str, str]] = []
     for behavior in rqd.gacha.behaviors:
         if behavior.cost_type and behavior.cost_icon_path:
-            key = f"cost_{behavior.cost_icon_path}"
+            key = f"cost_{legacy_key(behavior.cost_icon_path)}"
             if key not in _gd_keys:
                 _gd_keys.append(key)
                 _gd_coros.append(get_gacha_image_ref_or_unknown(behavior.cost_icon_path))
@@ -377,7 +378,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                         TextBox(" / ", text_style)
                                     if behavior.cost_type:
                                         if behavior.cost_icon_path:
-                                            cost_icon = _gd_cache.get(f"cost_{behavior.cost_icon_path}")
+                                            cost_icon = _gd_cache.get(f"cost_{legacy_key(behavior.cost_icon_path)}")
                                             if cost_icon:
                                                 ImageBox(cost_icon, size=(None, 48))
                                         if "paid" in behavior.cost_type:
@@ -575,7 +576,7 @@ def _gacha_detail_preload_items(rqd: GachaDetailRequest) -> tuple[list[str], lis
     if rqd.gacha.ceil_item_img_path:
         add("ceil_item", get_gacha_image_ref_or_unknown(rqd.gacha.ceil_item_img_path))
     for behavior in rqd.gacha.behaviors:
-        key = f"cost_{behavior.cost_icon_path}"
+        key = f"cost_{legacy_key(behavior.cost_icon_path)}"
         if behavior.cost_type and behavior.cost_icon_path and key not in keys:
             add(key, get_gacha_image_ref_or_unknown(behavior.cost_icon_path))
     for index, card in enumerate(rqd.pickup_cards or []):

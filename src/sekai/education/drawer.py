@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -77,7 +78,7 @@ def _character_mission_card_bg() -> RoundRectBg:
     return roundrect_bg(alpha=CHARACTER_MISSION_CARD_ALPHA)
 
 
-async def _load_asset_refs(paths: list[str], perf_name: str) -> list[ImageSource]:
+async def _load_asset_refs(paths: list[AssetKey], perf_name: str) -> list[ImageSource]:
     started_at = time.perf_counter()
     images = await asyncio.gather(*(get_asset_image_ref(ASSETS_BASE_DIR, path) for path in paths))
     logger.debug("[perf] %s preload %d icons: %.3fs", perf_name, len(paths), time.perf_counter() - started_at)
@@ -422,23 +423,29 @@ def _get_quant_text(q: int) -> str:
         return str(q)
 
 
-def _collect_area_item_icon_paths(area_items) -> list[str]:
-    paths: dict[str, None] = {}
+def _collect_area_item_icon_paths(area_items) -> list[AssetKey]:
+    """Icon keys to load in first-seen order, deduplicated by `legacy_key` (C1 lists are unhashable)."""
+    paths: dict[str | None, AssetKey] = {}
+
+    def add(key: AssetKey) -> None:
+        paths.setdefault(legacy_key(key), key)
+
     for item in area_items:
         if item.item_icon_path:
-            paths[item.item_icon_path] = None
+            add(item.item_icon_path)
         if item.target_icon_path:
-            paths[item.target_icon_path] = None
+            add(item.target_icon_path)
         for level_info in item.levels:
             for material in level_info.materials:
-                paths[material.material_icon_path] = None
-    return list(paths)
+                add(material.material_icon_path)
+    return list(paths.values())
 
 
-async def _load_asset_ref_cache(paths: list[str], perf_name: str) -> dict[str, ImageSource]:
+async def _load_asset_ref_cache(paths: list[AssetKey], perf_name: str) -> dict[str | None, ImageSource]:
     if not paths:
         return {}
-    return dict(zip(paths, await _load_asset_refs(paths, perf_name), strict=True))
+    refs = await _load_asset_refs(paths, perf_name)
+    return {legacy_key(path): ref for path, ref in zip(paths, refs, strict=True)}
 
 
 def _area_level_color(level: int, current_level: int, can_upgrade: bool, has_profile: bool):
@@ -451,8 +458,8 @@ def _area_level_color(level: int, current_level: int, can_upgrade: bool, has_pro
 def _build_area_item_header(item, icon_cache: dict[str, ImageSource]) -> HSplit:
     gray_color = (50, 50, 50)
     header = HSplit().set_content_align("c").set_item_align("c").set_omit_parent_bg(True)
-    target_icon = icon_cache.get(item.target_icon_path) if item.target_icon_path else None
-    item_icon = icon_cache.get(item.item_icon_path) if item.item_icon_path else None
+    target_icon = icon_cache.get(legacy_key(item.target_icon_path)) if item.target_icon_path else None
+    item_icon = icon_cache.get(legacy_key(item.item_icon_path)) if item.item_icon_path else None
     if target_icon:
         header.add_item(ImageBox(target_icon, size=(None, 64)))
     if item_icon:
@@ -477,7 +484,7 @@ def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profi
     material_widget = VSplit().set_content_align("c").set_item_align("c").set_sep(4)
     icon_frame = Frame()
     size = 64
-    material_icon = icon_cache.get(material.material_icon_path)
+    material_icon = icon_cache.get(legacy_key(material.material_icon_path))
     if material_icon:
         icon_frame.add_item(ImageBox(material_icon, size=(size, size)))
     icon_frame.add_item(

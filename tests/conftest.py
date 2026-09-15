@@ -39,3 +39,72 @@ def real_fonts():
     """Skip a test that is only meaningful with the real fonts present."""
     if not fonts_available():
         pytest.skip("configured fonts are not installed (CI lint-test has no data/ fonts)")
+
+
+@pytest.fixture
+def memory_store():
+    """A fresh `FakeObjectStore` (no opendal)."""
+    from tests.storage_fakes import FakeObjectStore
+
+    return FakeObjectStore()
+
+
+@pytest.fixture
+def opendal_memory_store():
+    """An `OpendalObjectStore` over `opendal.AsyncOperator("memory")`; skips when the wheel is absent."""
+    opendal = pytest.importorskip("opendal")
+    from src.storage.opendal_store import OpendalObjectStore
+
+    return OpendalObjectStore(opendal.AsyncOperator("memory"), name="memory", bucket="memory")
+
+
+@pytest.fixture
+def asset_mirror(tmp_path):
+    """An `AssetMirror` over a `FakeObjectStore` rooted at `tmp_path`, installed via `set_asset_mirror`.
+
+    The fake store is reachable as `asset_mirror.store_for("<region>")` (one shared store for every region).
+    """
+    from src.assets.mirror import AssetMirror, MirrorStats, set_asset_mirror
+    from src.assets.version import StaticVersion
+    from src.settings import AssetMirrorSettings
+    from tests.storage_fakes import FakeObjectStore
+
+    store = FakeObjectStore(bucket="pjsk-assets")
+    mirror = AssetMirror(
+        base_dir=tmp_path,
+        settings=AssetMirrorSettings(),
+        store_factory=lambda region: store,
+        version_source=StaticVersion("v0"),
+        stats=MirrorStats(),
+    )
+    set_asset_mirror(mirror)
+    try:
+        yield mirror
+    finally:
+        set_asset_mirror(None)
+        mirror.close()
+
+
+@pytest.fixture
+def memory_index():
+    """A fresh `FakeRenderIndex` (no asyncpg)."""
+    from tests.storage_fakes import FakeRenderIndex
+
+    return FakeRenderIndex()
+
+
+@pytest.fixture
+def artifact_runtime(memory_store, memory_index):
+    """An enabled `ArtifactRuntime` over `memory_store` + `memory_index`, installed via `set_artifact_runtime`."""
+    from src.artifact.runtime import set_artifact_runtime
+    from src.artifact.stats import reset_artifact_stats
+    from tests.storage_fakes import build_test_runtime
+
+    reset_artifact_stats()
+    runtime = build_test_runtime(store=memory_store, index=memory_index)
+    set_artifact_runtime(runtime)
+    try:
+        yield runtime
+    finally:
+        set_artifact_runtime(None)
+        reset_artifact_stats()

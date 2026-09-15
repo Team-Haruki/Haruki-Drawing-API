@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, field_validator
 
+from src.sekai.base.asset_key import AssetKey
 from src.sekai.base.timezone import TimeZoneRequest, localize_datetime, parse_datetime_utc
 from src.sekai.profile.model import CardFullThumbnailRequest, DetailedProfileCardRequest
 
@@ -126,7 +127,7 @@ class CardGachaInfo(BaseModel):
     gacha_name: str
     start_at: datetime | int | str
     end_at: datetime | int | str
-    gacha_banner_path: str
+    gacha_banner_path: AssetKey
 
     @field_validator("start_at", "end_at", mode="before")
     @classmethod
@@ -288,7 +289,7 @@ class CardDetailRequest(TimeZoneRequest):
     event_info: CardEventInfo | None = None
     gacha_info: CardGachaInfo | None = None
     card_images_path: list[str] = Field(default_factory=list)
-    costume_images_path: list[str] = Field(default_factory=list)
+    costume_images_path: list[AssetKey] = Field(default_factory=list)
     character_icon_path: str
     unit_logo_path: str
     background_image_path: str | None = None

@@ -1,21 +1,27 @@
-from functools import partial
+from collections.abc import Mapping
 import io
 import logging
-import time
 
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
+from src.artifact.runtime import get_artifact_runtime
+from src.artifact.stats import artifact_node_name, artifact_stats
 from src.core.debug import (
     current_render_backend,
+    current_render_directive,
     current_request_context,
     set_request_stage,
     snapshot_process_metrics,
 )
 from src.core.image_payload import EncodedImagePayload
-from src.sekai.base.utils import run_in_pool
-from src.settings import EXPORT_IMAGE_FORMAT, JPG_QUALITY
+from src.core.missing_asset_telemetry import current_missing_asset_count
 
 logger = logging.getLogger(__name__)
+
+ARTIFACT_HEADER = "X-Haruki-Artifact"
+DEGRADED_HEADER = "X-Haruki-Artifact-Degraded"
+CACHE_STORE_HEADER = "X-Haruki-Cache-Store"
+NODE_HEADER = "X-Haruki-Node"
 
 
 def _encode_image(
@@ -51,55 +57,13 @@ def _encode_image(
     return buffer, media_type, filename
 
 
-async def image_to_response(
-    image,
-    export_format: str | None = None,
-    jpg_quality: int | None = None,
+def _image_response(
+    image_bytes: bytes,
+    media_type: str,
+    filename: str,
     *,
-    jpeg_subsampling: int | str | None = None,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> Response:
-    """Encode a PIL Image off the event loop and return it as a single-body response."""
-    request_ctx = current_request_context()
-    image_width = getattr(image, "width", None)
-    image_height = getattr(image, "height", None)
-    image_mode = getattr(image, "mode", None)
-    set_request_stage("encode_image")
-    started = time.perf_counter()
-    encoder = partial(
-        _encode_image,
-        image,
-        export_format if export_format is not None else EXPORT_IMAGE_FORMAT,
-        jpg_quality if jpg_quality is not None else JPG_QUALITY,
-        jpeg_subsampling=jpeg_subsampling,
-    )
-    buffer, media_type, filename = await run_in_pool(encoder)
-    elapsed = time.perf_counter() - started
-    byte_len = buffer.getbuffer().nbytes
-    logger.info(
-        "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
-        "backend=%s metrics=%s",
-        request_ctx["request_id"],
-        request_ctx["path"],
-        request_ctx["method"],
-        image_width,
-        image_height,
-        image_mode,
-        media_type,
-        byte_len,
-        elapsed,
-        # A request that never attempted Skia leaves the default "pillow"; one where Skia
-        # declined/raised was tagged "skia_fallback" by the render helper.
-        current_render_backend(),
-        snapshot_process_metrics(include_asyncio=False),
-    )
-    set_request_stage("send_response")
-    try:
-        return _image_response(buffer.getvalue(), media_type, filename)
-    finally:
-        buffer.close()
-
-
-def _image_response(image_bytes: bytes, media_type: str, filename: str) -> Response:
     """Send the encoded image as ONE body message.
 
     This used to be ``StreamingResponse(io.BytesIO(image_bytes))``, which streamed nothing useful:
@@ -113,16 +77,29 @@ def _image_response(image_bytes: bytes, media_type: str, filename: str) -> Respo
     return Response(
         content=image_bytes,
         media_type=media_type,
-        headers={"Content-Disposition": f"inline; filename={filename}"},
+        headers={"Content-Disposition": f"inline; filename={filename}", **(extra_headers or {})},
     )
 
 
-def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
+def _log_and_return_bytes(
+    payload: EncodedImagePayload,
+    *,
+    artifact: str,
+    missing: int,
+    headers: Mapping[str, str] | None = None,
+    reason: str | None = None,
+) -> Response:
+    _log_image_response(payload, artifact=artifact, missing=missing, detail=f" reason={reason}" if reason else "")
+    set_request_stage("send_response")
+    return _image_response(payload.image_bytes, payload.media_type, payload.filename, extra_headers=headers)
+
+
+def _log_image_response(payload: EncodedImagePayload, *, artifact: str, missing: int, detail: str = "") -> None:
+    """The one `image.response` line per request, on every exit branch."""
     request_ctx = current_request_context()
-    byte_len = len(payload.image_bytes)
     logger.info(
         "image.response id=%s path=%s method=%s size=%sx%s mode=%s media=%s bytes=%d elapsed=%.3fs "
-        "backend=%s metrics=%s",
+        "backend=%s artifact=%s%s missing_assets=%d metrics=%s",
         request_ctx["request_id"],
         request_ctx["path"],
         request_ctx["method"],
@@ -130,12 +107,74 @@ def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
         payload.image_height,
         payload.image_mode,
         payload.media_type,
-        byte_len,
+        len(payload.image_bytes),
         payload.encode_elapsed,
         # The payload carries its own backend across the heavy-worker process boundary, where a
         # contextvar set in the child is invisible here; in-process renders set the contextvar.
         payload.backend or current_render_backend(),
+        artifact,
+        detail,
+        missing,
         snapshot_process_metrics(include_asyncio=False),
     )
-    set_request_stage("send_response")
-    return _image_response(payload.image_bytes, payload.media_type, payload.filename)
+
+
+def encoded_image_payload_to_bytes_response(
+    payload: EncodedImagePayload,
+    *,
+    extra_headers: Mapping[str, str] | None = None,
+) -> Response:
+    """Today's bytes body, verbatim, plus optional extra headers (ONE body message, `Content-Length` set)."""
+    return _log_and_return_bytes(
+        payload,
+        artifact="0",
+        missing=current_missing_asset_count(),
+        headers=extra_headers,
+    )
+
+
+async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Response:
+    """The single route exit: image bytes, or the `artifact_ref` JSON when the request asked for one.
+
+    Every branch carries `X-Haruki-Node` (addendum A1) and emits exactly one `image.response` line. A request
+    without a directive gets today's bytes response plus that one header. In artifact mode `Cache-Store: 0`
+    returns bytes and stores nothing (E2/A3); any storage failure degrades to bytes with
+    `X-Haruki-Artifact-Degraded: 1` (invariant I1).
+    """
+    directive = current_render_directive()
+    missing = current_missing_asset_count()
+    node = {NODE_HEADER: artifact_node_name()}
+    if directive is None:
+        artifact_stats.incr("bytes_no_directive")
+        return _log_and_return_bytes(payload, artifact="0", missing=missing, headers=node)
+    # `requests_with_directive` is counted once by the debug middleware when it binds the directive.
+    if not directive.store:
+        artifact_stats.incr("store_skipped")
+        return _log_and_return_bytes(
+            payload,
+            artifact="store0",
+            missing=missing,
+            headers={**node, CACHE_STORE_HEADER: "0"},
+        )
+    outcome = await get_artifact_runtime().process(payload, directive)
+    ref = outcome.ref
+    if ref is not None:
+        _log_image_response(
+            payload,
+            artifact="1",
+            missing=missing,
+            detail=(
+                f" hash={ref.hash} reused={int(ref.reused)} index_written={int(ref.index_written)} "
+                f"upload={ref.upload_elapsed:.3f}"
+            ),
+        )
+        set_request_stage("send_response")
+        # JSONResponse renders the whole document up front: ONE body message with Content-Length.
+        return JSONResponse(ref.to_json(), headers={ARTIFACT_HEADER: "1", **node})
+    return _log_and_return_bytes(
+        payload,
+        artifact="degraded",
+        reason=outcome.reason,
+        missing=missing,
+        headers={**node, DEGRADED_HEADER: "1"},
+    )
