@@ -5,6 +5,10 @@ import time and never at startup. A failed connect or a missing Cloud schema sta
 `connect_retry_seconds` backoff window during which no PostgreSQL round trip is attempted at all, so shipping
 Drawing with a DSN before Cloud's schema lands costs one failing round trip per window, not one per request.
 
+An asyncpg pool belongs to the loop that created it, and one process runs several loops (the lifespan loop and
+the request loops), so each running loop gets its own pool, lock and preflight. The backoff window and the
+stats stay shared across loops.
+
 The DSN password never reaches a log record or a `repr`: every rendering goes through `dsn_redacted()`.
 """
 
@@ -12,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
@@ -93,6 +99,16 @@ async def _asyncpg_pool_factory(dsn: str, **kwargs: Any) -> Any:
     return await asyncpg.create_pool(dsn, **kwargs)
 
 
+@dataclass
+class _LoopPool:
+    """The pool, first-caller lock and preflight flag of one event loop."""
+
+    loop: asyncio.AbstractEventLoop
+    pool: Any = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    ready: bool = False
+
+
 class AsyncpgRenderIndex:
     """Lazy pool, preflight once per healthy period, backoff after any schema or transport failure."""
 
@@ -109,9 +125,8 @@ class AsyncpgRenderIndex:
         self._settings = settings
         self._pool_factory: PoolFactory = pool_factory or _asyncpg_pool_factory
         self._clock = clock
-        self._pool: Any = None
-        self._lock: asyncio.Lock | None = None
-        self._ready = False
+        self._loops: dict[int, _LoopPool] = {}
+        self._loops_lock = threading.Lock()
         self._retry_at = 0.0
         self._backoff_error: type[Exception] = IndexUnavailable
         self._schema_logged = False
@@ -128,7 +143,7 @@ class AsyncpgRenderIndex:
         }
 
     def __repr__(self) -> str:
-        return f"AsyncpgRenderIndex(dsn={self._redacted!r}, ready={self._ready})"
+        return f"AsyncpgRenderIndex(dsn={self._redacted!r}, ready={self.ready})"
 
     __str__ = __repr__
 
@@ -138,7 +153,8 @@ class AsyncpgRenderIndex:
 
     @property
     def ready(self) -> bool:
-        return self._ready
+        with self._loops_lock:
+            return any(slot.ready for slot in self._loops.values())
 
     def in_backoff(self) -> bool:
         return self._clock() < self._retry_at
@@ -163,7 +179,9 @@ class AsyncpgRenderIndex:
         return text
 
     def _start_backoff(self, error_type: type[Exception]) -> None:
-        self._ready = False
+        with self._loops_lock:
+            for slot in self._loops.values():
+                slot.ready = False
         self._backoff_error = error_type
         self._retry_at = self._clock() + max(0.0, float(self._settings.connect_retry_seconds))
 
@@ -220,9 +238,21 @@ class AsyncpgRenderIndex:
             self.stats["backoff_skips"] += 1
             raise self._backoff_error("render index in backoff window")
 
-    async def _get_pool(self) -> Any:
-        if self._pool is not None:
-            return self._pool
+    def _loop_slot(self) -> _LoopPool:
+        loop = asyncio.get_running_loop()
+        with self._loops_lock:
+            # A closed loop took its connections with it; forget its slot.
+            for key in [key for key, slot in self._loops.items() if slot.loop.is_closed()]:
+                del self._loops[key]
+            slot = self._loops.get(id(loop))
+            if slot is None or slot.loop is not loop:
+                slot = _LoopPool(loop=loop)
+                self._loops[id(loop)] = slot
+            return slot
+
+    async def _get_pool(self, slot: _LoopPool) -> Any:
+        if slot.pool is not None:
+            return slot.pool
         try:
             pool = await self._pool_factory(
                 self._dsn,
@@ -235,12 +265,12 @@ class AsyncpgRenderIndex:
             if _is_schema_error(exc):
                 raise self._schema_missing(exc) from None
             raise self._unavailable(exc, "connect", IndexUnavailable) from None
-        self._pool = pool
+        slot.pool = pool
         self.stats["pool_created"] += 1
         return pool
 
-    async def _run_preflight(self) -> None:
-        pool = await self._get_pool()
+    async def _run_preflight(self, slot: _LoopPool) -> None:
+        pool = await self._get_pool(slot)
         try:
             async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
                 await conn.execute(PREFLIGHT_REQUEST)
@@ -249,23 +279,19 @@ class AsyncpgRenderIndex:
             if _is_schema_error(exc):
                 raise self._schema_missing(exc) from None
             raise self._unavailable(exc, "preflight", IndexUnavailable) from None
-        self._ready = True
+        slot.ready = True
         self.stats["preflight_ok"] += 1
-
-    def _get_lock(self) -> asyncio.Lock:
-        if self._lock is None:
-            self._lock = asyncio.Lock()
-        return self._lock
 
     async def _ensure_ready(self) -> Any:
         self._check_backoff()
-        if self._ready:
-            return self._pool
-        async with self._get_lock():
+        slot = self._loop_slot()
+        if slot.ready:
+            return slot.pool
+        async with slot.lock:
             self._check_backoff()
-            if not self._ready:
-                await self._run_preflight()
-        return self._pool
+            if not slot.ready:
+                await self._run_preflight(slot)
+        return slot.pool
 
     async def preflight(self) -> None:
         await self._ensure_ready()
@@ -323,11 +349,25 @@ class AsyncpgRenderIndex:
 
     async def close(self) -> None:
         self._closed = True
-        self._ready = False
-        pool, self._pool = self._pool, None
-        if pool is None:
-            return
+        with self._loops_lock:
+            slots = list(self._loops.values())
+            self._loops.clear()
         try:
-            await pool.close()
-        except Exception as exc:  # shutdown never raises
-            logger.warning("render index close failed (%s) dsn=%s", type(exc).__name__, self._redacted)
+            current = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - close() is always awaited
+            current = None
+        for slot in slots:
+            slot.ready = False
+            pool, slot.pool = slot.pool, None
+            if pool is None:
+                continue
+            try:
+                if slot.loop is current:
+                    await pool.close()
+                elif slot.loop.is_running():
+                    # A pool can only be closed on its own loop; hand it over and do not wait.
+                    asyncio.run_coroutine_threadsafe(pool.close(), slot.loop)
+                elif hasattr(pool, "terminate"):
+                    pool.terminate()
+            except Exception as exc:  # shutdown never raises
+                logger.warning("render index close failed (%s) dsn=%s", type(exc).__name__, self._redacted)
