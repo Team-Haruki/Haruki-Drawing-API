@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 import logging
 import subprocess
 import sys
+import threading
 from typing import Any
 
 import pytest
@@ -78,8 +79,22 @@ def _index(factory: Factory, clock: Clock | None = None, **settings: Any) -> tup
     return idx, clock
 
 
+_runner: asyncio.Runner | None = None
+
+
+@pytest.fixture(autouse=True)
+def _event_loop() -> Any:
+    """One long-lived loop per test, like a worker's loop in production."""
+    global _runner
+    with asyncio.Runner() as runner:
+        _runner = runner
+        yield
+    _runner = None
+
+
 def _run(coro: Any) -> Any:
-    return asyncio.run(coro)
+    assert _runner is not None
+    return _runner.run(coro)
 
 
 def _assert_no_password(caplog: pytest.LogCaptureFixture) -> None:
@@ -383,6 +398,129 @@ def test_concurrent_first_calls_preflight_once() -> None:
     _run(main())
     assert len(factory.calls) == 1
     assert idx.stats["preflight_ok"] == 1
+
+
+# ------------------------------------------------------------------------------------------ event loops
+
+
+def _run_in_thread_loop(coro_factory: Any) -> Any:
+    result: dict[str, Any] = {}
+
+    def target() -> None:
+        try:
+            result["value"] = asyncio.run(coro_factory())
+        except BaseException as exc:  # surfaced to the test thread
+            result["error"] = exc
+
+    thread = threading.Thread(target=target)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
+class LoopBoundPool(FakePgPool):
+    """Fails like asyncpg when used from a loop other than the one that created it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.loop = asyncio.get_running_loop()
+
+    def acquire(self, **kwargs: Any) -> Any:
+        if asyncio.get_running_loop() is not self.loop:
+            raise RuntimeError("got Future attached to a different loop")
+        return super().acquire(**kwargs)
+
+
+def test_each_event_loop_gets_its_own_pool_and_preflight() -> None:
+    pools: list[LoopBoundPool] = []
+
+    async def factory(dsn: str, **kwargs: Any) -> LoopBoundPool:
+        pool = LoopBoundPool()
+        pools.append(pool)
+        return pool
+
+    idx = AsyncpgRenderIndex(DSN, IndexSettings(), pool_factory=factory, clock=Clock())
+    _run(idx.preflight())  # the lifespan loop
+    assert _run_in_thread_loop(lambda: idx.lookup_content("x")) is None  # a worker loop
+    assert _run(idx.lookup_content("x")) is None  # back on the first loop: pool reused
+    assert len(pools) == 2
+    assert pools[0].loop is not pools[1].loop
+    assert idx.stats["pool_created"] == 2
+    assert idx.stats["preflight_ok"] == 2
+    assert idx.ready
+
+
+def test_backoff_is_shared_across_loops() -> None:
+    pool = FakePgPool(errors={SELECT_CONTENT: TimeoutError()})
+    idx, _ = _index(Factory(pool), connect_retry_seconds=30)
+    with pytest.raises(IndexUnavailable):
+        _run(idx.lookup_content("x"))
+    trips = pool.round_trips
+    with pytest.raises(IndexUnavailable):
+        _run_in_thread_loop(lambda: idx.lookup_content("x"))
+    assert pool.round_trips == trips
+    assert idx.stats["backoff_skips"] == 1
+    assert not idx.ready
+
+
+def test_close_hands_foreign_running_loop_pools_to_their_loop() -> None:
+    closed = threading.Event()
+    started = threading.Event()
+    release = threading.Event()
+    holder: dict[str, Any] = {}
+
+    class ClosingPool(FakePgPool):
+        async def close(self) -> None:
+            await super().close()
+            closed.set()
+
+    async def factory(dsn: str, **kwargs: Any) -> ClosingPool:
+        return ClosingPool()
+
+    idx = AsyncpgRenderIndex(DSN, IndexSettings(), pool_factory=factory, clock=Clock())
+
+    def worker() -> None:
+        loop = asyncio.new_event_loop()
+        holder["loop"] = loop
+
+        async def main() -> None:
+            await idx.preflight()
+            started.set()
+            await asyncio.to_thread(release.wait)
+
+        loop.run_until_complete(main())
+        loop.close()
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    assert started.wait(5)
+    _run(idx.close())
+    assert closed.wait(5)
+    release.set()
+    thread.join()
+    assert not idx.ready
+
+
+def test_close_terminates_pools_of_stopped_loops() -> None:
+    terminated: list[bool] = []
+
+    class TerminablePool(FakePgPool):
+        def terminate(self) -> None:
+            terminated.append(True)
+
+    async def factory(dsn: str, **kwargs: Any) -> TerminablePool:
+        return TerminablePool()
+
+    idx = AsyncpgRenderIndex(DSN, IndexSettings(), pool_factory=factory, clock=Clock())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(idx.preflight())
+        _run(idx.close())  # the other loop exists but is not running
+    finally:
+        loop.close()
+    assert terminated == [True]
 
 
 # ------------------------------------------------------------------------------------------ close
