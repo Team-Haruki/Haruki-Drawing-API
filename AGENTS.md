@@ -1,6 +1,6 @@
 # Repository Guide for AI Coding Agents
 
-This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is mirrored as `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md`.
+This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is the single source of truth and is mirrored as `.github/copilot-instructions.md`.
 
 ## Native-only service (2026-09-07)
 
