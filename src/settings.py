@@ -174,6 +174,55 @@ class AssetMirrorSettings(BaseModel):
         return v
 
 
+class UserUploadProviderSettings(StorageProviderSettings):
+    """User-upload slot: Cloud's keys already carry the `user_upload/` prefix, so an s3 `root` is dropped.
+
+    `opendal_kwargs` would otherwise pass `root` to opendal as a key prefix, and `root: user_upload` turns every
+    read into `user_upload/user_upload/...` (all NotFound). On `fs` the root is the directory that holds
+    `user_upload/profile_bg/...` (Cloud's local store root) and is kept. A subclass (not a default instance) so
+    a partial env/YAML block keeps the slot defaults.
+    """
+
+    scheme: Literal["s3", "fs", "memory"] = Field(default="s3", validation_alias=AliasChoices("scheme", "kind"))
+    bucket: str = "user-upload"
+
+    @model_validator(mode="after")
+    def _drop_s3_root(self) -> "UserUploadProviderSettings":
+        if self.scheme == "fs":
+            return self
+        dropped = self.root.strip() or (self.prefix or "").strip()
+        if dropped:
+            logger.warning(
+                "settings.user_upload_root_dropped root=%r: object keys already start with user_upload/", dropped
+            )
+        self.root = ""
+        self.prefix = None
+        return self
+
+
+class UserUploadSettings(BaseModel):
+    """Cloud-written user uploads (profile backgrounds), read on demand from the `user-upload` bucket.
+
+    Off by default: `bg_settings.img_path` keeps resolving under `assets.base_dir` exactly as before. With
+    `enabled`, a `user_upload/profile_bg/...` path is read from the bucket first; a miss or a store failure
+    falls back to the local file (`local_fallback`) and then to the default background, never a 500.
+    """
+
+    enabled: bool = False
+    provider: UserUploadProviderSettings = UserUploadProviderSettings()
+    fetch_timeout_seconds: float = 3.0  # total wall-clock budget per read (HEAD + GET, retries), an asyncio.wait_for
+    fetch_io_timeout_seconds: float = 2.0  # per opendal operation, inside that budget
+    fetch_retries: int = 1
+    fetch_concurrency: int = 8
+    fetch_max_bytes: int = 2 * 1024**2  # Cloud caps a profile background at 1 MiB; larger objects are refused
+    breaker_failures: int = 5  # consecutive transport failures/timeouts (not NotFound) before the bucket is skipped
+    breaker_open_seconds: float = 30.0  # skip window; then one probe read decides whether the breaker closes
+    cache_size: int = 64  # the cache holds ENCODED bytes keyed by object key (Cloud names every upload uniquely)
+    cache_max_mb: int = 32
+    cache_ttl_seconds: float = 300.0  # 0 disables the cache
+    local_fallback: bool = True  # after a bucket miss/failure, try today's <base_dir>/user_upload/... file
+
+
 class AssetsSettings(BaseModel):
     """资产文件配置"""
 
@@ -184,6 +233,7 @@ class AssetsSettings(BaseModel):
     source: Literal["local", "mirror"] = "local"
     manifest_version: str | None = None  # HARUKI_ASSETS__MANIFEST_VERSION (addendum B7)
     mirror: AssetMirrorSettings = AssetMirrorSettings()
+    user_upload: UserUploadSettings = UserUploadSettings()
 
     @field_validator("base_dir", mode="before")
     @classmethod

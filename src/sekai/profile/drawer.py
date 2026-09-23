@@ -11,6 +11,7 @@ if TYPE_CHECKING:
 
 from typing import TYPE_CHECKING
 
+from src.assets.user_upload import get_user_upload_store, profile_bg_object_key
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.draw import (
     BG_PADDING,
@@ -47,15 +48,18 @@ from src.sekai.base.plot import (
 from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
     AssetImageRef,
+    EncodedImageRef,
     ImageSource,
     build_rendered_image_cache_key,
     get_asset_image_ref,
     get_asset_image_refs,
     get_composed_image_cached,
     get_composed_image_disk_cached,
+    get_encoded_image_ref,
     get_str_display_length,
     put_composed_image_cache,
     put_composed_image_disk_cache,
+    run_in_pool,
     truncate,
 )
 from src.sekai.honor.drawer import (
@@ -901,6 +905,41 @@ async def _build_profile_layout_modules(ctx: _ProfileLayoutContext) -> dict[str,
     }
 
 
+async def _load_profile_background(img_path: str) -> AssetImageRef | EncodedImageRef | None:
+    """The user-uploaded background for `img_path`, or `None` for the default background.
+
+    With `assets.user_upload.enabled`, a `user_upload/profile_bg/...` path (the key Cloud's ProfileBGStore writes
+    to the `user-upload` bucket) is read from that store first and travels to the renderer as encoded bytes. A
+    bucket miss or failure has already been logged by the store; it then tries today's local file when
+    `local_fallback` is on. Any other path — and every path while the store is off — resolves under the assets
+    root exactly as before — including a `user_upload/` path whose shape the bucket cannot hold. Only traversal
+    (`..`) and NUL are rejected outright; those and unreadable images end in the default background, never a 500.
+    """
+    store = get_user_upload_store()
+    if store.enabled:
+        try:
+            key = profile_bg_object_key(img_path)
+        except ValueError as exc:
+            logger.warning("profile.bg_rejected path=%r reason=%s", img_path, exc)
+            return None
+        if key is None and "user_upload" in img_path:
+            logger.info("profile.bg_not_a_bucket_key path=%r (local read)", img_path)
+        if key is not None:
+            data = await store.fetch(key)
+            if data is not None:
+                try:
+                    return await run_in_pool(get_encoded_image_ref, data)
+                except (OSError, ValueError) as exc:
+                    logger.warning("profile.bg_undecodable key=%s exc=%s: %s", key, type(exc).__name__, exc)
+                    return None
+            if not store.local_fallback:
+                return None
+    try:
+        return await get_asset_image_ref(ASSETS_BASE_DIR, img_path, on_missing="raise")
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
 async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
     """Build the profile widget tree (shared by the Pillow and Skia render paths)."""
     # 玩家基本信息
@@ -912,14 +951,8 @@ async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
     # 背景设置
     # 使用传入的背景图片，如果没有则使用默认蓝色背景
     bg_settings = rqd.bg_settings if rqd.bg_settings is not None else ProfileBgSettings()
-    if bg_settings.img_path:
-        try:
-            bg_img = await get_asset_image_ref(ASSETS_BASE_DIR, bg_settings.img_path, on_missing="raise")
-            bg = ImageBg(bg_img, blur=False, fade=0)
-        except (FileNotFoundError, OSError, ValueError):
-            bg = SEKAI_BLUE_BG
-    else:
-        bg = SEKAI_BLUE_BG
+    bg_img = await _load_profile_background(bg_settings.img_path) if bg_settings.img_path else None
+    bg = ImageBg(bg_img, blur=False, fade=0) if bg_img is not None else SEKAI_BLUE_BG
     ui_bg = roundrect_bg(
         fill=(255, 255, 255, bg_settings.alpha), blur_glass=True, blur_glass_kwargs={"blur": bg_settings.blur}
     )
