@@ -263,29 +263,37 @@ relative path as the object key, and this slot lets Drawing read it from there.
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__SCHEME` | `s3` | |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ENDPOINT` | `""` | tailnet address of the node-local Garage S3 API |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__BUCKET` | `user-upload` | |
-| `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ROOT` | `""` | **must stay empty**: the key already starts with `user_upload/` |
+| `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ROOT` | `""` | on `s3` a value (or legacy `prefix`) is **dropped** by the settings validator with `settings.user_upload_root_dropped` — opendal would otherwise prefix every key (`user_upload/user_upload/...`, all NotFound); on `fs` it is the directory that holds `user_upload/profile_bg/...` and is kept |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__REGION` | `garage` | |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ACCESS_KEY_ID` / `__SECRET_ACCESS_KEY` | — | secret (a read-only key is enough) |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__PATH_STYLE` | `true` | |
 | `HARUKI_ASSETS__USER_UPLOAD__PROVIDER__OPTIONS` | `{}` | JSON |
-| `HARUKI_ASSETS__USER_UPLOAD__FETCH_TIMEOUT_SECONDS` | `3.0` | total budget per read, retries included; a hard `wait_for` sits 1 s above it |
-| `HARUKI_ASSETS__USER_UPLOAD__FETCH_IO_TIMEOUT_SECONDS` | `3.0` | |
+| `HARUKI_ASSETS__USER_UPLOAD__FETCH_TIMEOUT_SECONDS` | `3.0` | **total wall-clock budget per read** — one `asyncio.wait_for` around HEAD + GET and any retry; a timeout counts as a transport failure |
+| `HARUKI_ASSETS__USER_UPLOAD__FETCH_IO_TIMEOUT_SECONDS` | `2.0` | per opendal operation (HEAD or GET), clamped to the total budget |
 | `HARUKI_ASSETS__USER_UPLOAD__FETCH_RETRIES` | `1` | |
 | `HARUKI_ASSETS__USER_UPLOAD__FETCH_CONCURRENCY` | `8` | |
-| `HARUKI_ASSETS__USER_UPLOAD__FETCH_MAX_BYTES` | `8388608` | Cloud caps an upload at 1 MiB; larger objects are refused |
+| `HARUKI_ASSETS__USER_UPLOAD__FETCH_MAX_BYTES` | `2097152` | Cloud caps an upload at 1 MiB; larger objects are refused |
+| `HARUKI_ASSETS__USER_UPLOAD__BREAKER_FAILURES` | `5` | consecutive transport failures/timeouts (NotFound is an answer, not a failure) before the bucket is skipped |
+| `HARUKI_ASSETS__USER_UPLOAD__BREAKER_OPEN_SECONDS` | `30.0` | skip window; the first read after it is the single half-open probe (success closes, failure re-opens) |
 | `HARUKI_ASSETS__USER_UPLOAD__CACHE_SIZE` / `__CACHE_MAX_MB` / `__CACHE_TTL_SECONDS` | `64` / `32` / `300` | in-memory cache of the encoded bytes keyed by object key; any `0` disables it |
 | `HARUKI_ASSETS__USER_UPLOAD__LOCAL_FALLBACK` | `true` | after a bucket miss or failure, still try `<base_dir>/user_upload/...` (keep on while Cloud dual-writes) |
 
 **Resolution order with the store enabled.** `img_path` is mapped to an object key by locating its
 `user_upload/profile_bg/` segments: the canonical relative path, one with a leading `/` or `./`, backslashes, or an
 absolute host path such as `/pjskdata/Data/user_upload/profile_bg/jp/uid_1_ab.jpg` all map to
-`user_upload/profile_bg/jp/uid_1_ab.jpg`. Any `..` segment or NUL byte rejects the path (default background,
-WARNING `profile.bg_rejected`). A path outside that namespace is not a user upload and keeps the local read. A
-bucket miss logs `user_upload.not_found`, a transport failure, timeout or oversized object logs
-`user_upload.read_failed`; either then tries the local file (if `local_fallback`) and finally the default
-background. The route never answers 5xx for a background problem. The store shares nothing with the asset
-mirror: no file is materialised, the bytes go to the renderer as an encoded in-memory image, and the object
-store is closed at lifespan shutdown.
+`user_upload/profile_bg/jp/uid_1_ab.jpg`. The key must be exactly `user_upload/profile_bg/<server>/<file>` with
+`<server>` two to four lowercase letters and `<file>` what Cloud's writer produces (`uid_<id>_<8hex>.jpg`, or the
+pre-2026-04 `binding_<id>[_<8hex>].jpg`). Any `..` segment, NUL byte or other shape rejects the path (default
+background, WARNING `profile.bg_rejected`). A path outside that namespace is not a user upload and keeps the local
+read. Per key the order is: in-memory cache → circuit breaker (open: skip the bucket, DEBUG
+`user_upload.breaker_skip`) → single-flight (concurrent first reads of one key on one loop share one request) →
+the bounded read. A bucket miss logs `user_upload.not_found`; a transport failure, timeout or oversized object logs
+`user_upload.read_failed` and counts toward the breaker (`user_upload.breaker_open` at WARNING when it trips,
+`user_upload.breaker_closed` at INFO when a probe succeeds). Every `None` then tries the local file (if
+`local_fallback`) and finally the default background. Worst case per request during a Garage outage is one
+`fetch_timeout_seconds` budget until the breaker opens, then zero. The route never answers 5xx for a background
+problem. The store shares nothing with the asset mirror: no file is materialised, the bytes go to the renderer as an
+encoded in-memory image, and the object store is closed at lifespan shutdown.
 
 **Rollout.** Enable after Cloud's `user_upload` slot points at Garage (Cloud release R6) and the existing
 `user_upload/profile_bg/**` tree has been backfilled with `rclone`; keep `local_fallback=true` for the dual-write

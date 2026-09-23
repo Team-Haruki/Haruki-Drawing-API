@@ -29,13 +29,16 @@ assets:
   #     scheme: s3
   #     endpoint: http://100.64.0.9:3900
   #     bucket: user-upload
-  #     root: ""                     # keep empty: Cloud's keys already start with user_upload/
+  #     root: ""                     # an s3 root is dropped (keys already start with user_upload/); fs keeps it
   #     region: garage
   #     path_style: true
   #     # access_key_id / secret_access_key: env only,
   #     # HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ACCESS_KEY_ID / HARUKI_ASSETS__USER_UPLOAD__PROVIDER__SECRET_ACCESS_KEY
-  #   fetch_timeout_seconds: 3.0
-  #   fetch_max_bytes: 8388608
+  #   fetch_timeout_seconds: 3.0     # total wall-clock budget per read (HEAD + GET + retries)
+  #   fetch_io_timeout_seconds: 2.0  # per opendal operation
+  #   fetch_max_bytes: 2097152
+  #   breaker_failures: 5            # consecutive failures/timeouts before the bucket is skipped ...
+  #   breaker_open_seconds: 30       # ... for this long; then one probe read
   #   cache_size: 64
   #   cache_max_mb: 32
   #   cache_ttl_seconds: 300

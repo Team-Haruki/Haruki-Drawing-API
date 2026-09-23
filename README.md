@@ -58,7 +58,7 @@ Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配�
 
 所有绘图端点都经由异步出口 `encoded_image_payload_to_response`（`src/core/utils.py`）返回**单条响应 body**：默认是图片字节；请求带 `X-Haruki-Artifact: 1` 及合法缓存指令且存储开启时，改为上传对象存储并返回 `artifact_ref` JSON（失败时回退图片字节并加 `X-Haruki-Artifact-Degraded: 1`）。每个响应都带 `X-Haruki-Node`。
 
-对象存储制品输出（`HARUKI_STORAGE__*`）、按需素材镜像（`HARUKI_ASSETS__SOURCE=mirror`）与用户上传读取（`HARUKI_ASSETS__USER_UPLOAD__ENABLED`，个人信息背景从 `user-upload` 桶按 `user_upload/profile_bg/...` 键读取，未开启时仍读本地磁盘）默认关闭；请求头、`artifact_ref` 字段、降级规则、环境变量、计数器、发布顺序与上线步骤见 [`docs/artifact-storage.md`](./docs/artifact-storage.md)。
+对象存储制品输出（`HARUKI_STORAGE__*`）、按需素材镜像（`HARUKI_ASSETS__SOURCE=mirror`）与用户上传读取（`HARUKI_ASSETS__USER_UPLOAD__ENABLED`，个人信息背景从 `user-upload` 桶按 `user_upload/profile_bg/...` 键读取；单次读取受总超时约束，连续失败后熔断跳过桶，未命中或失败回退本地文件再回退默认背景；未开启时仍读本地磁盘）默认关闭；请求头、`artifact_ref` 字段、降级规则、环境变量、计数器、发布顺序与上线步骤见 [`docs/artifact-storage.md`](./docs/artifact-storage.md)。
 
 `HARUKI_DRAWING__USE_SKIA_PLOT` 必须保持 `true`；设为 `false` 会拒绝启动。需要恢复旧 Pillow 服务时，应回滚至此前包含旧后端的镜像。
 

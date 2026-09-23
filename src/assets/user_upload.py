@@ -9,6 +9,10 @@ read is awaited directly on the caller's loop (opendal's `AsyncOperator` is loop
 bytes travel to the renderer as an `EncodedImageRef`. A bounded TTL cache keyed by object key skips the
 round trip for a repeated render; Cloud names every upload uniquely, so a key's bytes never change.
 
+Degradation order for one key: cache -> circuit breaker (open: skip the bucket) -> single-flight (one read per
+key per loop) -> bounded read (`fetch_timeout_seconds` is a real wall-clock `wait_for` over HEAD + GET and
+retries) -> `None` on any failure. The caller then takes its fallback path (local file, default background).
+
 Nothing here touches the network at import time, and `get_user_upload_store()` returns a disabled store
 (no operator, never imports `opendal`) unless `assets.user_upload.enabled` is set.
 """
@@ -19,6 +23,7 @@ import asyncio
 from collections import OrderedDict
 from collections.abc import Callable
 import logging
+import re
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -32,6 +37,10 @@ if TYPE_CHECKING:  # pragma: no cover
 logger = logging.getLogger("src.assets.user_upload")
 
 PROFILE_BG_NAMESPACE = ("user_upload", "profile_bg")
+# Cloud's ProfileBGStore writes `uid_<userID>_<8 hex>.jpg`; rows from before April 2026 are
+# `binding_<id>.jpg` / `binding_<id>_<8 hex>.jpg`. Nothing else has ever been written under this prefix.
+_PROFILE_BG_SERVER = re.compile(r"[a-z]{2,4}\Z")
+_PROFILE_BG_FILENAME = re.compile(r"(?:uid_[A-Za-z0-9]{1,64}|binding_[0-9]{1,20})(?:_[0-9a-f]{8})?\.jpg\Z")
 
 
 def profile_bg_object_key(img_path: str | None) -> str | None:
@@ -39,10 +48,11 @@ def profile_bg_object_key(img_path: str | None) -> str | None:
 
     Cloud sends the persisted relative path verbatim (`user_upload/profile_bg/<server>/<file>`). Also accepted:
     a leading `/` or `./`, backslashes, surrounding whitespace, and an absolute host path that contains the
-    `user_upload/profile_bg/` segments (the file's location on the shared asset disk). Anything else — an
-    ordinary asset path, another `user_upload/` namespace — is `None` so the caller keeps its local read.
+    `user_upload/profile_bg/` segments (the file's location on the shared asset disk). A path outside that
+    namespace — an ordinary asset path, another `user_upload/` area — is `None` so the caller keeps its local read.
 
-    Raises `ValueError` for traversal (`..` anywhere), NUL bytes, or a namespace path without a file segment.
+    Raises `ValueError` for traversal (`..` anywhere), NUL bytes, or a namespace path that is not exactly
+    `user_upload/profile_bg/<server>/<file>` with a filename Cloud's writer produces.
     """
     if not img_path or not img_path.strip():
         return None
@@ -60,8 +70,12 @@ def profile_bg_object_key(img_path: str | None) -> str | None:
     key_parts = parts[start:]
     if len(key_parts) < 2 or key_parts[1] != PROFILE_BG_NAMESPACE[1]:
         return None
-    if len(key_parts) < 4:
-        raise ValueError(f"profile background path has no file segment: {img_path!r}")
+    if (
+        len(key_parts) != 4
+        or not _PROFILE_BG_SERVER.match(key_parts[2])
+        or not _PROFILE_BG_FILENAME.match(key_parts[3])
+    ):
+        raise ValueError(f"profile background path is malformed: {img_path!r}")
     return validate_object_key("/".join(key_parts))
 
 
@@ -132,8 +146,9 @@ class _TTLBytesCache:
 class UserUploadStore:
     """Reads profile backgrounds by object key. `enabled` is False for the disabled/failed store.
 
-    `fetch(key)` never raises for a remote problem: a missing object, a transport failure, a timeout or an
-    oversized object logs a WARNING and returns `None`, and the caller takes its fallback path.
+    `fetch(key)` never raises for a remote problem: a missing object, a transport failure, a timeout, an
+    oversized object or an open breaker logs (a WARNING, the breaker skip at DEBUG) and returns `None`, and the
+    caller takes its fallback path.
     """
 
     def __init__(
@@ -146,14 +161,28 @@ class UserUploadStore:
     ) -> None:
         self._settings = settings
         self._store = store
+        self._clock = clock
         self.disabled_reason = disabled_reason if store is None else ""
         self.closed = False
         self._cache = _TTLBytesCache(
             settings.cache_size, settings.cache_max_mb * 1024 * 1024, settings.cache_ttl_seconds, clock
         )
+        # Single-flight: one read per (loop, key). Keyed by loop because Granian runs lifespan and requests on
+        # different loops and a Future cannot be awaited from another loop.
+        self._inflight: dict[tuple[int, str], asyncio.Future[bytes | None]] = {}
+        self._inflight_lock = threading.Lock()
+        # Breaker (same shape as the asset mirror's): N consecutive failures open it for `breaker_open_seconds`;
+        # the first fetch after that window is the single half-open probe.
+        self._breaker_lock = threading.Lock()
+        self._consecutive_failures = 0
+        self._open_until: float | None = None
+        self._probe_in_flight = False
         self.fetches = 0
         self.not_found = 0
         self.errors = 0
+        self.single_flight_waits = 0
+        self.breaker_trips = 0
+        self.breaker_skips = 0
 
     @property
     def enabled(self) -> bool:
@@ -167,28 +196,112 @@ class UserUploadStore:
     def bucket(self) -> str:
         return self._store.bucket if self._store is not None else ""
 
+    @property
+    def breaker_open(self) -> bool:
+        with self._breaker_lock:
+            return self._open_until is not None
+
+    # ------------------------------------------------------------------ breaker
+    def _breaker_admit(self) -> str | None:
+        """`"closed"` (read), `"probe"` (the single half-open read) or `None` (skip the bucket)."""
+        with self._breaker_lock:
+            if self._open_until is None:
+                return "closed"
+            if self._clock() < self._open_until or self._probe_in_flight:
+                return None
+            self._probe_in_flight = True
+            return "probe"
+
+    def _breaker_success(self) -> None:
+        with self._breaker_lock:
+            was_open = self._open_until is not None
+            self._consecutive_failures = 0
+            self._open_until = None
+            self._probe_in_flight = False
+        if was_open:
+            logger.info("user_upload.breaker_closed bucket=%s", self.bucket)
+
+    def _breaker_failure(self, probe: bool) -> None:
+        threshold = max(1, int(self._settings.breaker_failures))
+        with self._breaker_lock:
+            self._consecutive_failures += 1
+            tripped = probe or (self._open_until is None and self._consecutive_failures >= threshold)
+            if tripped:
+                self._open_until = self._clock() + max(0.0, float(self._settings.breaker_open_seconds))
+            self._probe_in_flight = False
+            failures = self._consecutive_failures
+        if tripped:
+            self.breaker_trips += 1
+            logger.warning(
+                "user_upload.breaker_open bucket=%s failures=%s open_seconds=%s (profile backgrounds fall back)",
+                self.bucket,
+                failures,
+                self._settings.breaker_open_seconds,
+            )
+
+    # ------------------------------------------------------------------ read
     async def fetch(self, key: str) -> bytes | None:
-        """The object's bytes, or `None` after a WARNING. Must run on a running event loop."""
-        store = self._store
-        if store is None or self.closed:
+        """The object's bytes, or `None` after a log line. Must run on a running event loop."""
+        if self._store is None or self.closed:
             return None
         cached = self._cache.get(key)
         if cached is not None:
             return cached
+        loop = asyncio.get_running_loop()
+        flight = (id(loop), key)
+        with self._inflight_lock:
+            future = self._inflight.get(flight)
+            if future is None:
+                future = loop.create_future()
+                self._inflight[flight] = future
+                leader = True
+            else:
+                leader = False
+        if not leader:
+            self.single_flight_waits += 1
+            return await asyncio.shield(future)
+        try:
+            result = await self._read(key)
+        except BaseException as exc:  # cancellation included: waiters must not hang on a dead leader
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        else:
+            if not future.done():
+                future.set_result(result)
+            return result
+        finally:
+            with self._inflight_lock:
+                if self._inflight.get(flight) is future:
+                    del self._inflight[flight]
+
+    async def _read(self, key: str) -> bytes | None:
+        store = self._store
+        if store is None:
+            return None
+        admission = self._breaker_admit()
+        if admission is None:
+            self.breaker_skips += 1
+            logger.debug("user_upload.breaker_skip bucket=%s key=%s", store.bucket, key)
+            return None
+        probe = admission == "probe"
         self.fetches += 1
-        budget = max(0.1, float(self._settings.fetch_timeout_seconds)) + 1.0  # hard cap over the layered timeout
+        budget = max(0.1, float(self._settings.fetch_timeout_seconds))  # the whole read: HEAD + GET + retries
         try:
             data, _ = await asyncio.wait_for(store.read(key, max_bytes=self._settings.fetch_max_bytes), budget)
         except StorageNotFound:
+            self._breaker_success()  # the bucket answered; a missing object is not an outage
             self.not_found += 1
             logger.warning("user_upload.not_found bucket=%s key=%s", store.bucket, key)
             return None
         except (StorageError, TimeoutError, OSError) as exc:
+            self._breaker_failure(probe)
             self.errors += 1
             logger.warning(
                 "user_upload.read_failed bucket=%s key=%s exc=%s: %s", store.bucket, key, type(exc).__name__, exc
             )
             return None
+        self._breaker_success()
         data = bytes(data)
         self._cache.set(key, data)
         return data
@@ -204,6 +317,10 @@ class UserUploadStore:
             "fetches": self.fetches,
             "not_found": self.not_found,
             "errors": self.errors,
+            "single_flight_waits": self.single_flight_waits,
+            "breaker_open": self.breaker_open,
+            "breaker_trips": self.breaker_trips,
+            "breaker_skips": self.breaker_skips,
             "cache": self._cache.snapshot(),
         }
 
@@ -227,11 +344,13 @@ def _default_store_factory(settings: UserUploadSettings) -> ObjectStore:
     from src.storage.provider import opendal_kwargs
 
     opendal_kwargs(settings.provider, None)  # validate the provider block (e.g. missing bucket) without I/O
+    total = max(0.1, float(settings.fetch_timeout_seconds))
+    per_op = min(total, max(0.1, float(settings.fetch_io_timeout_seconds)))
     return OpendalObjectStore.from_provider(
         settings.provider,
         region=None,
-        timeout=settings.fetch_timeout_seconds,
-        io_timeout=settings.fetch_io_timeout_seconds,
+        timeout=per_op,  # opendal's layer bounds ONE operation (HEAD or GET); `fetch` bounds the whole read
+        io_timeout=per_op,
         retries=settings.fetch_retries,
         concurrency=settings.fetch_concurrency,
         name="user-upload",
@@ -249,6 +368,12 @@ def build_user_upload_store(
     config = settings.assets.user_upload
     if not config.enabled:
         return UserUploadStore(settings=config, store=None, disabled_reason="disabled", clock=clock)
+    provider = config.provider
+    if provider.scheme != "fs" and (provider.root.strip() or (provider.prefix or "").strip()):
+        # The settings validator drops an s3 root; a value can only get here by assignment after construction.
+        reason = "provider root must stay empty: object keys already start with user_upload/"
+        logger.error("user_upload.disabled reason=%s provider=%s", reason, provider.describe())
+        return UserUploadStore(settings=config, store=None, disabled_reason=reason, clock=clock)
     try:
         store = (store_factory or _default_store_factory)(config)
     except Exception as exc:
@@ -256,16 +381,10 @@ def build_user_upload_store(
         logger.error(
             "user_upload.disabled reason=%s provider=%s (profile backgrounds stay on local disk)",
             reason,
-            config.provider.describe(),
+            provider.describe(),
         )
         return UserUploadStore(settings=config, store=None, disabled_reason=reason, clock=clock)
-    if config.provider.root:
-        logger.warning(
-            "user_upload provider root=%r is ignored: Cloud's keys already start with user_upload/ "
-            "(keep assets.user_upload.provider.root empty)",
-            config.provider.root,
-        )
-    logger.info("user_upload.enabled provider=%s", config.provider.describe())
+    logger.info("user_upload.enabled provider=%s", provider.describe())
     return UserUploadStore(settings=config, store=store, clock=clock)
 
 
