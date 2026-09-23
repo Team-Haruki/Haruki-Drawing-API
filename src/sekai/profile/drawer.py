@@ -912,7 +912,8 @@ async def _load_profile_background(img_path: str) -> AssetImageRef | EncodedImag
     to the `user-upload` bucket) is read from that store first and travels to the renderer as encoded bytes. A
     bucket miss or failure has already been logged by the store; it then tries today's local file when
     `local_fallback` is on. Any other path — and every path while the store is off — resolves under the assets
-    root exactly as before. Traversal and unreadable images end in the default background, never a 500.
+    root exactly as before — including a `user_upload/` path whose shape the bucket cannot hold. Only traversal
+    (`..`) and NUL are rejected outright; those and unreadable images end in the default background, never a 500.
     """
     store = get_user_upload_store()
     if store.enabled:
@@ -921,6 +922,8 @@ async def _load_profile_background(img_path: str) -> AssetImageRef | EncodedImag
         except ValueError as exc:
             logger.warning("profile.bg_rejected path=%r reason=%s", img_path, exc)
             return None
+        if key is None and "user_upload" in img_path:
+            logger.info("profile.bg_not_a_bucket_key path=%r (local read)", img_path)
         if key is not None:
             data = await store.fetch(key)
             if data is not None:

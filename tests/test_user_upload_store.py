@@ -103,6 +103,16 @@ def test_profile_bg_object_key_returns_none_outside_the_namespace(img_path: str 
         "../user_upload/profile_bg/jp/uid_1.jpg",
         "user_upload/profile_bg/jp/../cn/uid_1.jpg",
         "user_upload/profile_bg/jp/uid_1.jpg\x00.png",
+    ],
+)
+def test_profile_bg_object_key_rejects_traversal_and_nul(img_path: str) -> None:
+    with pytest.raises(ValueError, match="profile background path"):
+        profile_bg_object_key(img_path)
+
+
+@pytest.mark.parametrize(
+    "img_path",
+    [
         "user_upload/profile_bg/jp",
         "user_upload/profile_bg/",
         "user_upload/profile_bg/jp/extra/uid_1_0badf00d.jpg",
@@ -113,9 +123,8 @@ def test_profile_bg_object_key_returns_none_outside_the_namespace(img_path: str 
         "user_upload/profile_bg/jp/uid_1_XYZ.jpg",
     ],
 )
-def test_profile_bg_object_key_rejects_traversal_and_malformed_paths(img_path: str) -> None:
-    with pytest.raises(ValueError, match="profile background path"):
-        profile_bg_object_key(img_path)
+def test_profile_bg_object_key_treats_other_shapes_as_not_a_bucket_key(img_path: str) -> None:
+    assert profile_bg_object_key(img_path) is None  # the caller keeps its local read
 
 
 # ---------------------------------------------------------------------------------------------- store reads
@@ -229,6 +238,49 @@ def test_single_flight_waiters_see_the_leaders_failure_and_the_slot_is_released(
     assert store.stats_snapshot()["errors"] == 1
 
 
+def test_leader_cancellation_resolves_waiters_with_none_and_does_not_propagate(caplog) -> None:
+    fake = FakeObjectStore({KEY: b"jpeg-bytes"}, delay=0.2, bucket="user-upload")
+    store = _enabled_store(fake)
+
+    async def run():
+        leader = asyncio.create_task(store.fetch(KEY))
+        await asyncio.sleep(0.01)  # the leader is in flight
+        waiters = [asyncio.create_task(store.fetch(KEY)) for _ in range(3)]
+        await asyncio.sleep(0.01)
+        leader.cancel()  # the leader's client disconnected
+        results = await asyncio.gather(*waiters)
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+        return results
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        results = asyncio.run(run())
+    assert results == [None, None, None]  # unrelated renders fall back; none of them is cancelled
+    assert store._inflight == {}
+    assert store.stats_snapshot()["single_flight_waits"] == 3
+    assert not any("never retrieved" in record.message for record in caplog.records)
+    assert asyncio.run(store.fetch(KEY)) == b"jpeg-bytes"  # the slot is free again
+
+
+def test_leader_cancellation_without_waiters_leaves_no_unretrieved_future(caplog) -> None:
+    import gc
+
+    fake = FakeObjectStore({KEY: b"x"}, delay=0.2, bucket="user-upload")
+    store = _enabled_store(fake)
+
+    async def run():
+        leader = asyncio.create_task(store.fetch(KEY))
+        await asyncio.sleep(0.01)
+        leader.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await leader
+
+    with caplog.at_level(logging.ERROR, logger="asyncio"):
+        asyncio.run(run())
+        gc.collect()
+    assert not any("never retrieved" in record.message for record in caplog.records)
+
+
 # ---------------------------------------------------------------------------------------------- breaker
 
 
@@ -281,6 +333,36 @@ def test_breaker_half_open_probe_failure_reopens_and_success_closes(caplog: pyte
     assert fake.ops == ops_before + 3
 
 
+def test_cancelled_probe_releases_the_half_open_slot(caplog: pytest.LogCaptureFixture) -> None:
+    """Regression: a cancelled probe used to leave _probe_in_flight=True, so the bucket was never read again."""
+    clock = _Clock()
+    fake = FakeObjectStore({KEY: b"jpeg-bytes"}, fail=StorageUnavailable("down"), bucket="user-upload")
+    store = _enabled_store(fake, clock, breaker_failures=1, breaker_open_seconds=30.0)
+    asyncio.run(store.fetch(KEY))
+    assert store.breaker_open
+    trips_before = store.stats_snapshot()["breaker_trips"]
+
+    clock.now += 31.0  # the next fetch is the probe; its client disconnects mid-flight
+    fake.fail = None
+    fake.delay = 0.2
+
+    async def cancel_probe():
+        probe = asyncio.create_task(store.fetch(KEY))
+        await asyncio.sleep(0.01)
+        probe.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await probe
+
+    asyncio.run(cancel_probe())
+    assert store.breaker_open  # a cancelled probe is neither a success ...
+    assert store.stats_snapshot()["breaker_trips"] == trips_before  # ... nor a failure
+    assert not store._probe_in_flight
+
+    fake.delay = 0.0
+    assert asyncio.run(store.fetch(KEY)) == b"jpeg-bytes"  # the next call is admitted as the probe and closes
+    assert not store.breaker_open
+
+
 def test_breaker_treats_not_found_as_an_answer_and_timeouts_as_failures() -> None:
     clock = _Clock()
     fake = FakeObjectStore({KEY: b"x"}, fail=StorageUnavailable("down"), bucket="user-upload")
@@ -300,9 +382,21 @@ def test_breaker_treats_not_found_as_an_answer_and_timeouts_as_failures() -> Non
     assert timing_out.stats_snapshot()["errors"] == 2
 
 
-def test_fetch_refuses_oversized_objects() -> None:
+def test_fetch_refuses_oversized_objects_as_an_answer_not_a_failure(caplog: pytest.LogCaptureFixture) -> None:
     fake = FakeObjectStore({KEY: b"0" * 64}, bucket="user-upload")
-    store = _enabled_store(fake, fetch_max_bytes=16)
+    store = _enabled_store(fake, fetch_max_bytes=16, breaker_failures=1)
+    with caplog.at_level(logging.WARNING, logger="src.assets.user_upload"):
+        assert asyncio.run(store.fetch(KEY)) is None
+    snapshot = store.stats_snapshot()
+    assert snapshot["too_large"] == 1
+    assert snapshot["errors"] == 0
+    assert not store.breaker_open  # breaker_failures=1: a transport failure would have opened it
+    assert any("user_upload.too_large" in record.message for record in caplog.records)
+
+
+def test_unexpected_store_exception_is_a_failure_not_a_500() -> None:
+    fake = FakeObjectStore({KEY: b"x"}, fail=RuntimeError("opendal bug"), bucket="user-upload")
+    store = _enabled_store(fake)
     assert asyncio.run(store.fetch(KEY)) is None
     assert store.stats_snapshot()["errors"] == 1
 
@@ -587,6 +681,22 @@ async def test_traversal_is_rejected_with_a_warning(local_assets: list[str], cap
     assert fake.stats == []
     assert local_assets == []
     assert any("profile.bg_rejected" in record.message for record in caplog.records)
+
+
+@pytest.mark.anyio
+async def test_malformed_namespace_path_falls_through_to_the_local_read(local_assets: list[str], caplog) -> None:
+    fake = FakeObjectStore(bucket="user-upload")
+    mod.set_user_upload_store(_enabled_store(fake))
+    path = "user_upload/profile_bg/jp/avatar.jpg"  # safe, but not a filename Cloud ever wrote
+    with caplog.at_level(logging.INFO, logger=drawer.logger.name):
+        canvas = await drawer._build_profile_canvas(_request(path))
+    assert isinstance(canvas.bg, ImageBg)  # served from local disk, as before this feature
+    assert isinstance(canvas.bg.img, Image.Image)
+    assert fake.reads == []
+    assert fake.stats == []
+    assert local_assets == [path]
+    assert any("profile.bg_not_a_bucket_key" in record.message for record in caplog.records)
+    assert not any("profile.bg_rejected" in record.message for record in caplog.records)
 
 
 @pytest.mark.anyio

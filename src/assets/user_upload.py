@@ -11,7 +11,9 @@ round trip for a repeated render; Cloud names every upload uniquely, so a key's 
 
 Degradation order for one key: cache -> circuit breaker (open: skip the bucket) -> single-flight (one read per
 key per loop) -> bounded read (`fetch_timeout_seconds` is a real wall-clock `wait_for` over HEAD + GET and
-retries) -> `None` on any failure. The caller then takes its fallback path (local file, default background).
+retries) -> `None` on any failure. NotFound and TooLarge are answers (the breaker resets); only transport
+failures and timeouts count toward it, and a cancelled probe just releases its slot. The caller then takes
+its fallback path (local file, default background).
 
 Nothing here touches the network at import time, and `get_user_upload_store()` returns a disabled store
 (no operator, never imports `opendal`) unless `assets.user_upload.enabled` is set.
@@ -28,7 +30,7 @@ import threading
 import time
 from typing import TYPE_CHECKING, Any
 
-from src.storage.protocols import StorageError, StorageNotFound, validate_object_key
+from src.storage.protocols import StorageNotFound, StorageTooLarge, validate_object_key
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.settings import Settings, UserUploadSettings
@@ -51,8 +53,10 @@ def profile_bg_object_key(img_path: str | None) -> str | None:
     `user_upload/profile_bg/` segments (the file's location on the shared asset disk). A path outside that
     namespace — an ordinary asset path, another `user_upload/` area — is `None` so the caller keeps its local read.
 
-    Raises `ValueError` for traversal (`..` anywhere), NUL bytes, or a namespace path that is not exactly
-    `user_upload/profile_bg/<server>/<file>` with a filename Cloud's writer produces.
+    Raises `ValueError` only for traversal (`..` anywhere) or a NUL byte — those never reach any store. A path
+    inside the namespace that is not exactly `user_upload/profile_bg/<server>/<file>` with a filename Cloud's
+    writer produces is also `None`: it is not something the bucket can hold, so the caller keeps its local read
+    (whose own traversal guard still applies).
     """
     if not img_path or not img_path.strip():
         return None
@@ -75,7 +79,7 @@ def profile_bg_object_key(img_path: str | None) -> str | None:
         or not _PROFILE_BG_SERVER.match(key_parts[2])
         or not _PROFILE_BG_FILENAME.match(key_parts[3])
     ):
-        raise ValueError(f"profile background path is malformed: {img_path!r}")
+        return None
     return validate_object_key("/".join(key_parts))
 
 
@@ -179,6 +183,7 @@ class UserUploadStore:
         self._probe_in_flight = False
         self.fetches = 0
         self.not_found = 0
+        self.too_large = 0
         self.errors = 0
         self.single_flight_waits = 0
         self.breaker_trips = 0
@@ -221,6 +226,11 @@ class UserUploadStore:
         if was_open:
             logger.info("user_upload.breaker_closed bucket=%s", self.bucket)
 
+    def _breaker_release_probe(self) -> None:
+        """A probe that ended without an answer (cancelled, interrupted): free the slot, count nothing."""
+        with self._breaker_lock:
+            self._probe_in_flight = False
+
     def _breaker_failure(self, probe: bool) -> None:
         threshold = max(1, int(self._settings.breaker_failures))
         with self._breaker_lock:
@@ -260,17 +270,16 @@ class UserUploadStore:
         if not leader:
             self.single_flight_waits += 1
             return await asyncio.shield(future)
+        result: bytes | None = None
         try:
             result = await self._read(key)
-        except BaseException as exc:  # cancellation included: waiters must not hang on a dead leader
-            if not future.done():
-                future.set_exception(exc)
-            raise
-        else:
-            if not future.done():
-                future.set_result(result)
             return result
         finally:
+            # Waiters are unrelated renders: whatever ended the leader (its client disconnecting, a bug) they
+            # get `None` and fall back normally. Never `set_exception`: with no waiters that only logs
+            # "Future exception was never retrieved", and a CancelledError would cancel every waiter.
+            if not future.done():
+                future.set_result(result)
             with self._inflight_lock:
                 if self._inflight.get(flight) is future:
                     del self._inflight[flight]
@@ -287,24 +296,40 @@ class UserUploadStore:
         probe = admission == "probe"
         self.fetches += 1
         budget = max(0.1, float(self._settings.fetch_timeout_seconds))  # the whole read: HEAD + GET + retries
+        settled = False  # the breaker heard an answer or a failure; anything else releases a probe untouched
         try:
-            data, _ = await asyncio.wait_for(store.read(key, max_bytes=self._settings.fetch_max_bytes), budget)
-        except StorageNotFound:
-            self._breaker_success()  # the bucket answered; a missing object is not an outage
-            self.not_found += 1
-            logger.warning("user_upload.not_found bucket=%s key=%s", store.bucket, key)
-            return None
-        except (StorageError, TimeoutError, OSError) as exc:
-            self._breaker_failure(probe)
-            self.errors += 1
-            logger.warning(
-                "user_upload.read_failed bucket=%s key=%s exc=%s: %s", store.bucket, key, type(exc).__name__, exc
-            )
-            return None
-        self._breaker_success()
-        data = bytes(data)
-        self._cache.set(key, data)
-        return data
+            try:
+                data, _ = await asyncio.wait_for(store.read(key, max_bytes=self._settings.fetch_max_bytes), budget)
+            except StorageNotFound:
+                settled = True
+                self._breaker_success()  # the bucket answered; a missing object is not an outage
+                self.not_found += 1
+                logger.warning("user_upload.not_found bucket=%s key=%s", store.bucket, key)
+                return None
+            except StorageTooLarge as exc:
+                settled = True
+                self._breaker_success()  # also an answer: the object exists, we decline it
+                self.too_large += 1
+                logger.warning("user_upload.too_large bucket=%s key=%s: %s", store.bucket, key, exc)
+                return None
+            except Exception as exc:
+                # StorageError / TimeoutError / OSError are the expected transport failures; anything else is a
+                # bug in the store or opendal and must still end in the fallback, never a 5xx.
+                settled = True
+                self._breaker_failure(probe)
+                self.errors += 1
+                logger.warning(
+                    "user_upload.read_failed bucket=%s key=%s exc=%s: %s", store.bucket, key, type(exc).__name__, exc
+                )
+                return None
+            settled = True
+            self._breaker_success()
+            data = bytes(data)
+            self._cache.set(key, data)
+            return data
+        finally:
+            if probe and not settled:  # cancelled (client gone, shutdown): neither a failure nor a success
+                self._breaker_release_probe()
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -316,6 +341,7 @@ class UserUploadStore:
             "bucket": self.bucket,
             "fetches": self.fetches,
             "not_found": self.not_found,
+            "too_large": self.too_large,
             "errors": self.errors,
             "single_flight_waits": self.single_flight_waits,
             "breaker_open": self.breaker_open,
