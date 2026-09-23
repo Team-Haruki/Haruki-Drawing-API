@@ -20,6 +20,26 @@ assets:
   #     path_style: true
   #     # access_key_id / secret_access_key: env only,
   #     # HARUKI_ASSETS__MIRROR__PROVIDER__ACCESS_KEY_ID / HARUKI_ASSETS__MIRROR__PROVIDER__SECRET_ACCESS_KEY
+  # User uploads written by Cloud (profile backgrounds). Off by default: bg_settings.img_path keeps resolving
+  # under base_dir. Enabled, user_upload/profile_bg/... is read from the bucket first, then local disk.
+  # user_upload:
+  #   enabled: false
+  #   provider:
+  #     provider: garage
+  #     scheme: s3
+  #     endpoint: http://100.64.0.9:3900
+  #     bucket: user-upload
+  #     root: ""                     # keep empty: Cloud's keys already start with user_upload/
+  #     region: garage
+  #     path_style: true
+  #     # access_key_id / secret_access_key: env only,
+  #     # HARUKI_ASSETS__USER_UPLOAD__PROVIDER__ACCESS_KEY_ID / HARUKI_ASSETS__USER_UPLOAD__PROVIDER__SECRET_ACCESS_KEY
+  #   fetch_timeout_seconds: 3.0
+  #   fetch_max_bytes: 8388608
+  #   cache_size: 64
+  #   cache_max_mb: 32
+  #   cache_ttl_seconds: 300
+  #   local_fallback: true           # after a bucket miss/failure, still try <base_dir>/user_upload/...
 
 font:
   dir: ./data

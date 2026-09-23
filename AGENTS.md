@@ -283,6 +283,13 @@ Notable `drawing.*` keys:
   would re-serialize the parsed model).
 - `use_skia_plot` — the Skia gate (default `true`). By convention it is **not** written into `configs.yaml`; flip it with `HARUKI_DRAWING__USE_SKIA_PLOT`. See the Skia chapter below.
 
+Object storage (all off by default, documented in `docs/artifact-storage.md`): `storage.*` is the artifact output
+(write side), `assets.source=mirror` + `assets.mirror.*` the on-demand asset mirror, and `assets.user_upload.*`
+(`HARUKI_ASSETS__USER_UPLOAD__ENABLED`) the read side for Cloud-written profile backgrounds — `bg_settings.img_path`
+is `user_upload/profile_bg/<server>/<file>`, which is both today's path under `assets.base_dir` and the object key
+in the `user-upload` bucket (`src/assets/user_upload.py`; a miss falls back to the local file, then the default
+background). Provider blocks share one vocabulary (`StorageProviderSettings`) and `root` stays empty on every slot.
+
 ## Proprietary File: `src/sekai/mysekai/drawer.py`
 
 This file is a **public placeholder stub** in the open-source repository. It exports the same async function signatures consumed by `src/core/pjsk/mysekai.py` but raises `NotImplementedError` at runtime.

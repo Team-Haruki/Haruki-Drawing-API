@@ -319,6 +319,22 @@ async def _stop_artifact_runtime() -> None:
         logger.warning("artifact runtime shutdown failed", exc_info=True)
 
 
+def _start_user_upload_store() -> None:
+    """Build the user-upload store (profile backgrounds); a failure never fails boot (local disk keeps serving)."""
+    from src.assets.user_upload import start_user_upload_store
+
+    start_user_upload_store()
+
+
+async def _stop_user_upload_store() -> None:
+    from src.assets.user_upload import shutdown_user_upload_store
+
+    try:
+        await shutdown_user_upload_store()
+    except Exception:
+        logger.warning("user-upload store shutdown failed", exc_info=True)
+
+
 async def _startup_runtime() -> list[asyncio.Task[None]]:
     from src.core.heavy_render_pool import startup_heavy_render_worker_pool
 
@@ -327,6 +343,7 @@ async def _startup_runtime() -> list[asyncio.Task[None]]:
     configure_runtime_diagnostics()
     _self_check_fonts()
     _start_asset_mirror()
+    _start_user_upload_store()
     cleanup_tasks = _create_cleanup_tasks()
     _run_initial_disk_cleanup()
     await startup_heavy_render_worker_pool()
@@ -348,6 +365,7 @@ async def _shutdown_runtime(cleanup_tasks: list[asyncio.Task[None]]) -> None:
     await asyncio.gather(*cleanup_tasks, return_exceptions=True)
     await shutdown_heavy_render_worker_pool()
     await _stop_artifact_runtime()
+    await _stop_user_upload_store()
     shutdown_asset_mirror()
     cleanup_painter_disk_cache()
     shutdown_utils()
