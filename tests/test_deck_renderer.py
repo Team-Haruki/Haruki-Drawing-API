@@ -304,3 +304,19 @@ def test_support_card_assets_are_loaded_with_main_cards(monkeypatch):
     assets = asyncio.run(drawer._load_deck_recommend_assets(_request(deck_data=[_deck(support_card_data=[support])])))
     assert loaded == [101, 202]
     assert assets.card_layers[(202, True, "card.png")] == "layers"
+
+
+@pytest.mark.parametrize("recommend_type", ["event", "challenge", "challenge_all"])
+@pytest.mark.parametrize("notice", [None, "使用终章期间限定 AUTO 数值（判定系数 1.8）"])
+def test_limited_auto_notice_is_drawn_only_when_applied(monkeypatch, recommend_type, notice):
+    texts = []
+    original_text = drawer.TextBox
+
+    def text_box(text, *args, **kwargs):
+        texts.append(text)
+        return original_text(text, *args, **kwargs)
+
+    monkeypatch.setattr(drawer, "TextBox", text_box)
+    with drawer.Canvas():
+        drawer._draw_deck_notes(_request(recommend_type=recommend_type, auto_score_notice=notice))
+    assert any("终章期间限定 AUTO" in text for text in texts) == bool(notice)

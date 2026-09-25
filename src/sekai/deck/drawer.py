@@ -1043,6 +1043,12 @@ def _draw_deck_notes(rqd: DeckRequest) -> None:
     note_text_width = 920 if rqd.music_compare else 760
     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
         tip_style = TextStyle(font=DEFAULT_FONT, size=16, color=(20, 20, 20))
+        if rqd.auto_score_notice:
+            TextBox(
+                rqd.auto_score_notice,
+                TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(170, 65, 20)),
+                use_real_line_count=True,
+            ).set_w(note_text_width)
         if rqd.recommend_type not in {"bonus", "wl_bonus"}:
             TextBox(
                 "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",

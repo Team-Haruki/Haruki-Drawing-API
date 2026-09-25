@@ -237,6 +237,7 @@ class DeckRequest(TimeZoneRequest):
     event_id: int | None = None
     live_type: str | None = None
     live_name: str | None = None
+    auto_score_notice: str | None = None
     chara_icon_path: str | None = None
     chara_name: str | None = None
     unit_logo_path: str | None = None
