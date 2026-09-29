@@ -1805,6 +1805,27 @@ def summarize_honor_group(group: dict[str, Any] | None) -> dict[str, Any] | None
     return {key: group[key] for key in keys if key in group}
 
 
+@dataclass(frozen=True, slots=True)
+class HonorCustomization:
+    """JP 7.0.0 honor customization of one slot (``honorBackgroundId`` / ``honorWordId``, 0 = unset)."""
+
+    background_id: int = 0
+    word_id: int = 0
+
+    def __bool__(self) -> bool:
+        return bool(self.background_id or self.word_id)
+
+
+def honor_customization_from(item: Mapping[str, Any] | None) -> HonorCustomization:
+    """Read the customization keys of a custom-profile honor item or ``userProfileHonors`` row."""
+
+    if not isinstance(item, Mapping):
+        return HonorCustomization()
+    background_id = int_or_none(item.get("honorBackgroundId", item.get("honor_background_id"))) or 0
+    word_id = int_or_none(item.get("honorWordId", item.get("honor_word_id"))) or 0
+    return HonorCustomization(max(background_id, 0), max(word_id, 0))
+
+
 def bool_from_profile(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -2360,6 +2381,11 @@ class PNGRenderer:
         self.bonds_honor_words = self.load_resource_index(
             "bondsHonorWords", "bonds_honor_words", filename="bondsHonorWords.json"
         )
+        # JP 7.0.0 honor customization tables; empty for regions/masterdata that predate them.
+        self.honor_backgrounds = self.load_resource_index(
+            "honorBackgrounds", "honor_backgrounds", filename="honorBackgrounds.json"
+        )
+        self.honor_words = self.load_resource_index("honorWords", "honor_words", filename="honorWords.json")
         self.game_character_units = self.load_resource_index(
             "gameCharacterUnits", "game_character_units", filename="gameCharacterUnits.json"
         )
@@ -3717,7 +3743,12 @@ class PNGRenderer:
             row = dict(slot.profile_row)
             badge = self.compose_profile_honor_image(row, full_size=slot.full_size)
             if badge is None:
-                badge = self.compose_honor_image(slot.honor_id, slot.honor_level, full_size=slot.full_size)
+                badge = self.compose_honor_image(
+                    slot.honor_id,
+                    slot.honor_level,
+                    full_size=slot.full_size,
+                    customization=honor_customization_from(row),
+                )
             if badge is None:
                 continue
             self.paste_in_rect(image, badge, slot.target_rect)
@@ -4090,11 +4121,21 @@ class PNGRenderer:
             "chara_icon_2": self.open_request_rgba(request.chara_icon_path2),
             "mask_img": self.open_request_rgba(request.mask_img_path),
             "word_img": self.open_request_rgba(request.word_img_path),
+            "medal_img": self.open_request_rgba(request.medal_img_path),
         }
         return compose_full_honor_image_from_loaded_assets(request, images)
 
     def honor_slot_key(self, honor_id: int, level: int, full_size: bool) -> str:
         return f"{honor_id}:{level}:{'main' if full_size else 'sub'}"
+
+    def custom_honor_slot_key(
+        self, honor_id: int, level: int, full_size: bool, customization: HonorCustomization
+    ) -> str:
+        """Request-map key of a customized (honorBackgroundId / honorWordId) slot."""
+
+        return (
+            f"{self.honor_slot_key(honor_id, level, full_size)}:{customization.background_id}:{customization.word_id}"
+        )
 
     def bonds_honor_slot_key(
         self,
@@ -4120,6 +4161,9 @@ class PNGRenderer:
             self.honor_slot_key(honor_id, level, full_size),
             str(honor_id),
         ]
+        customization = honor_customization_from(row)
+        if customization:
+            keys.insert(0, self.custom_honor_slot_key(honor_id, level, full_size, customization))
         for key in keys:
             if image := self.honor_request_image(self.profile_honor_requests.get(key)):
                 return image
@@ -4627,6 +4671,7 @@ class PNGRenderer:
             honor_id,
             self.user_honor_level_for(honor_id),
             bool_from_profile(item.get("fullSize", False)),
+            customization=honor_customization_from(item),
         )
         if image is not None:
             return image, (image.width / 2, image.height / 2)
@@ -4640,13 +4685,35 @@ class PNGRenderer:
             generated_data=self.generate_honor_data(item),
         )
 
-    def compose_honor_image(self, honor_id: int, level: int, full_size: bool) -> Image.Image | None:
+    def compose_honor_image(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+        customization: HonorCustomization | None = None,
+    ) -> Image.Image | None:
+        if customization:
+            # A customized slot prefers its own request key, then the customized masterdata
+            # derivation; only then the plain keys (which cannot know the chosen background/word).
+            custom_key = self.custom_honor_slot_key(honor_id, level, full_size, customization)
+            if image := self.honor_request_image(self.honor_requests.get(custom_key)):
+                return image
+            if image := self.compose_masterdata_honor_image(honor_id, level, full_size, customization):
+                return image
         if image := self.honor_request_image(self.honor_requests.get(self.honor_slot_key(honor_id, level, full_size))):
             return image
         if image := self.honor_request_image(self.honor_requests.get(str(honor_id))):
             return image
+        return self.compose_masterdata_honor_image(honor_id, level, full_size)
 
-        request = self.build_masterdata_honor_request(honor_id, level, full_size)
+    def compose_masterdata_honor_image(
+        self,
+        honor_id: int,
+        level: int,
+        full_size: bool,
+        customization: HonorCustomization | None = None,
+    ) -> Image.Image | None:
+        request = self.build_masterdata_honor_request(honor_id, level, full_size, customization=customization)
         if request is None:
             return None
         images = {
@@ -4661,6 +4728,8 @@ class PNGRenderer:
             "scroll_img": self.open_rgba(Path(request.scroll_img_path)) if request.scroll_img_path else None,
             "lv_img": self.open_rgba(Path(request.lv_img_path)) if request.lv_img_path else None,
             "lv6_img": self.open_rgba(Path(request.lv6_img_path)) if request.lv6_img_path else None,
+            "word_img": self.open_rgba(Path(request.word_img_path)) if request.word_img_path else None,
+            "medal_img": self.open_rgba(Path(request.medal_img_path)) if request.medal_img_path else None,
         }
         return compose_full_honor_image_from_loaded_assets(request, images)
 
@@ -4669,8 +4738,14 @@ class PNGRenderer:
         honor_id: int,
         level: int,
         full_size: bool,
+        customization: HonorCustomization | None = None,
     ) -> HonorRequest | None:
-        """Derive an honor request from loaded masterdata without decoding or composing images."""
+        """Derive an honor request from loaded masterdata without decoding or composing images.
+
+        ``customization`` carries the JP 7.0.0 ``honorBackgroundId`` / ``honorWordId`` of the slot.
+        Without it (or for masterdata that has no honorBackgrounds/honorWords/isMedalDisplayed)
+        the derived request is exactly the legacy one.
+        """
 
         if self.masterdata is None:
             return None
@@ -4699,6 +4774,15 @@ class PNGRenderer:
         scroll_path = self._honor_scroll_path(asset_name)
         lv_path, lv6_path = self._honor_level_icon_paths(request_group_type, group_type)
 
+        word_path: Path | None = None
+        if customization and honor_type == "normal" and str(group.get("honorType", "") or "") == "character":
+            custom_bg = self.honor_customization_background_path(group, customization, mode)
+            if custom_bg is not None:
+                honor_path = custom_bg
+            if full_size:
+                word_path = self.honor_customization_word_path(group, customization, rarity_rank)
+        medal_path = self.honor_medal_path(honor, group, level) if honor_type == "normal" else None
+
         request = HonorRequest(
             honor_type=honor_type,
             group_type=request_group_type,
@@ -4713,8 +4797,68 @@ class PNGRenderer:
             scroll_img_path=self.honor_request_path(scroll_path),
             lv_img_path=self.honor_request_path(lv_path),
             lv6_img_path=self.honor_request_path(lv6_path),
+            word_img_path=self.honor_request_path(word_path),
+            medal_img_path=self.honor_request_path(medal_path),
         )
         return request
+
+    def _group_customization_row(
+        self, table: dict[int, dict[str, Any]], row_id: int, group_id: int
+    ) -> dict[str, Any] | None:
+        """The chosen row, else the group's first row (the client's default when an id is unset)."""
+
+        if row_id and (row := table.get(row_id)):
+            return row
+        rows = [row for row in table.values() if int(row.get("honorGroupId", 0) or 0) == group_id]
+        if not rows:
+            return None
+        return min(rows, key=lambda row: (int(row.get("seq", 0) or 0), int(row.get("id", 0) or 0)))
+
+    def honor_customization_background_path(
+        self, group: dict[str, Any], customization: HonorCustomization, mode: str
+    ) -> Path | None:
+        row = self._group_customization_row(
+            self.honor_backgrounds, customization.background_id, int(group.get("id", 0) or 0)
+        )
+        bundle = str((row or {}).get("assetbundleName", "") or "")
+        if not bundle:
+            return None
+        return self.first_region_asset([Path("honor_background") / bundle / f"degree_{mode}.png"])
+
+    def honor_customization_word_path(
+        self, group: dict[str, Any], customization: HonorCustomization, rarity_rank: int
+    ) -> Path | None:
+        """``honor_word/<bundle>_<rarity 1..4>``: a one-texture bundle (the client loads its first asset)."""
+
+        row = self._group_customization_row(self.honor_words, customization.word_id, int(group.get("id", 0) or 0))
+        bundle = str((row or {}).get("assetbundleName", "") or "")
+        if not bundle:
+            return None
+        name = f"{bundle}_{rarity_rank}"
+        if path := self.first_region_asset(
+            [Path("honor_word") / f"{name}.png", Path("honor_word") / name / f"{name}.png"]
+        ):
+            return path
+        for directory in self.region_asset_candidate_paths([Path("honor_word") / name]):
+            if directory.is_dir():
+                pngs = sorted(directory.glob("*.png"))
+                if pngs:
+                    return pngs[0]
+        return None
+
+    def honor_medal_path(self, honor: dict[str, Any], group: dict[str, Any], level: int) -> Path | None:
+        """``honor_medal/medal/icon_degree_medal{tier}.png`` per ``UIPartsHonorMedal`` (JP 7.0.0).
+
+        Shown only for honors with levels whose group sets ``isMedalDisplayed``; tier is
+        ``min((level - 1) // 10, 9)`` and nothing is drawn below tier 1 (level <= 10).
+        """
+
+        if not bool_from_profile(group.get("isMedalDisplayed", False)) or not honor.get("levels"):
+            return None
+        if level - 1 < 10:
+            return None
+        tier = min((level - 1) // 10, 9)
+        return self.first_region_asset([Path("honor_medal") / "medal" / f"icon_degree_medal{tier}.png"])
 
     def honor_group_for(self, honor: dict[str, Any]) -> dict[str, Any] | None:
         return self.honor_groups.get(int(honor.get("groupId", 0) or 0))
@@ -5697,7 +5841,7 @@ class PNGRenderer:
         group = self.honor_group_for(honor) if honor else None
         level = self.user_honor_level_for(honor_id)
         full_size = bool_from_profile(item.get("fullSize", False))
-        return {
+        data = {
             "honorType": 1,
             "id": honor_id,
             "level": level,
@@ -5712,6 +5856,10 @@ class PNGRenderer:
             if honor and group
             else [],
         }
+        if customization := honor_customization_from(item):
+            data["honorBackgroundId"] = customization.background_id
+            data["honorWordId"] = customization.word_id
+        return data
 
     def generate_bonds_honor_data(self, item: dict[str, Any]) -> dict[str, Any]:
         honor_id = content_data_id("bonds_honor", item)

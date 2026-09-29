@@ -15,8 +15,8 @@ Op-for-op notes (the Pillow output is the ground truth this reproduces pixel for
   square the alpha of its anti-aliased corners over the empty canvas, and ``paste_with_alpha_blend``
   would zero the rgb UNDER those transparent corners — which Pillow's paste-lerp reads back when
   the frame's AA edge crosses them (up to 228/255 on ~200 px). See ``Painter.paste_src``.
-- every OVERLAY (frame, level icons, rank, scroll, word, stars, the bonds left half, the empty
-  slot art) keeps the legacy ``img.paste(x, pos, x)`` alpha-lerp via the explicit
+- every OVERLAY (frame, level icons, rank, scroll, word, medal, stars, the bonds left half, the
+  empty slot art) keeps the legacy ``img.paste(x, pos, x)`` alpha-lerp via the explicit
   ``paste_resized_clipped(..., blend="paste_lerp")`` primitive.
 - the two bonds chara icons use the shared ``BondsHonorPlan`` and
   ``Painter.paste_resized_clipped``: resize the FULL source 0.8x, then clip it at the destination
@@ -57,6 +57,14 @@ from .model import HonorRequest
 
 FCAP_TEXT_SIZE = 22
 FCAP_TEXT_TOP_Y = 46  # ImageDraw's "la" anchor y in the legacy composer
+
+# JP 7.0.0 medal (honor_medal/medal/icon_degree_medal{tier}.png). The prefab's slot rects are
+# serialized in the asset bundle, not in the client binary, so this is an approximation: the medal
+# is fitted to a fixed height and right-aligned just left of the first level star (x=50), sitting
+# on the badge's bottom edge. Main and sub badges share the star coordinates, so they share this.
+MEDAL_BOX_H = 24
+MEDAL_RIGHT_X = 48
+MEDAL_BOTTOM_MARGIN = 3
 
 
 def honor_group_uses_scroll_level(group_type: str | None) -> bool:
@@ -207,14 +215,45 @@ class HonorBadgeBox(Widget):
         if group_type == "fc_ap" or scroll_img is not None:
             self._add_fcap_lv(p)
 
+    def _draw_word(self, p: Painter) -> None:
+        """JP 7.0.0 honor word (honor_word/...). The client only shows it on the main slot of a
+        ``normal`` honor; like the bonds word it is centred on the badge."""
+
+        if self.rqd.honor_type != "normal" or not self.rqd.is_main_honor:
+            return
+        word = self.images.get("word_img")
+        if word is None:
+            return
+        word_w, word_h = _size_of(word)
+        badge_w, badge_h = self.badge_size
+        self._paste_overlay(p, word, (int(badge_w / 2 - word_w / 2), int(badge_h / 2 - word_h / 2)))
+
+    def _draw_medal(self, p: Painter) -> None:
+        if self.rqd.honor_type != "normal":
+            return
+        medal = self.images.get("medal_img")
+        if medal is None:
+            return
+        medal_w, medal_h = _size_of(medal)
+        if medal_w <= 0 or medal_h <= 0:
+            return
+        height = MEDAL_BOX_H
+        width = max(1, round(medal_w * height / medal_h))
+        _, badge_h = self.badge_size
+        self._paste_overlay(p, medal, (MEDAL_RIGHT_X - width, badge_h - height - MEDAL_BOTTOM_MARGIN), (width, height))
+
     def _draw_normal(self, p: Painter) -> None:
         rqd = self.rqd
         gtype = rqd.group_type
         base = self.images["honor_img"]
         p.paste_src(base, (0, 0))
+        # The optional 7.0.0 layers draw nothing when their source is absent, so requests without
+        # them keep exactly the legacy op sequence.
+        self._draw_word(p)
         self._add_frame(p, rqd.honor_level)
         self._draw_rank(p, base, gtype)
         self._draw_normal_level(p, gtype)
+        self._draw_medal(p)
 
     def _draw_bonds_op(self, p: Painter, op: FullResizeClipOp) -> None:
         source = self.images.get(op.source_key)

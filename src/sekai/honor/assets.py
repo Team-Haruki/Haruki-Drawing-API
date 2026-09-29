@@ -54,6 +54,7 @@ HONOR_ASSET_MANIFEST: Mapping[str, str] = MappingProxyType(
         "mask_img": "mask_img_path",
         "frame_img": "frame_img_path",
         "frame_degree_level_img": "frame_degree_level_img_path",
+        "medal_img": "medal_img_path",
     }
 )
 
@@ -155,6 +156,15 @@ def _normal_honor_asset_specs(
         specs.append(_optional("scroll_img"))
     elif group_type in _STAR_LEVEL_GROUP_TYPES:
         specs.extend((_optional("lv_img"), _optional("lv6_img")))
+    if branch == "normal":
+        # JP 7.0.0 layers. Both are optional decorations the caller computes per region: a
+        # supplied-but-missing file is skipped (like rank_img) instead of failing the badge,
+        # because older regions' asset trees may simply not carry honor_word / honor_medal yet.
+        # They are listed only when supplied, so legacy requests keep their exact spec tuple.
+        if request.is_main_honor and request.word_img_path:
+            specs.append(_optional("word_img", on_supplied_missing="ignore"))
+        if request.medal_img_path:
+            specs.append(_optional("medal_img", on_supplied_missing="ignore"))
     return tuple(specs)
 
 
@@ -326,7 +336,8 @@ def resolve_honor_assets(
       be tried;
     - a missing explicitly supplied overlay is ``hybrid`` because silently omitting it changes
       the selected request;
-    - ``rank_img`` remains optional and resolves to ``None`` even when its supplied path is bad.
+    - ``rank_img`` (and the normal branch's ``word_img`` / ``medal_img``) remain optional and
+      resolve to ``None`` even when the supplied path is bad.
 
     Callback exceptions and source-factory failures are different from an unresolved path: they
     mean a supplied resource exists but is unsafe, corrupt, or unsupported by this backend, so the

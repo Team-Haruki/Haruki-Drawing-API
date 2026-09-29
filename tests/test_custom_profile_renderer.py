@@ -3574,3 +3574,87 @@ def test_custom_profile_api_uses_cropped_profile_viewport(tmp_path: Path, monkey
     assert captured["canvas_h"] == 909
     assert captured["origin_x"] == 1024.0
     assert captured["origin_y"] == 454.5
+
+
+def _customizable_renderer(tmp_path: Path, monkeypatch) -> tuple[PNGRenderer, Path]:
+    renderer = _make_renderer(tmp_path)
+    renderer.masterdata = tmp_path
+    renderer.honors = {
+        1: {
+            "id": 1,
+            "groupId": 7,
+            "assetbundleName": "honor_0001",
+            "honorRarity": "high",
+            "levels": [{"level": level} for level in range(1, 17)],
+        }
+    }
+    renderer.honor_groups = {7: {"id": 7, "honorType": "character", "isMedalDisplayed": True}}
+    renderer.honor_backgrounds = {
+        70: {"id": 70, "seq": 2, "honorGroupId": 7, "assetbundleName": "bg_b"},
+        71: {"id": 71, "seq": 1, "honorGroupId": 7, "assetbundleName": "bg_a"},
+    }
+    renderer.honor_words = {80: {"id": 80, "seq": 1, "honorGroupId": 7, "assetbundleName": "word_a"}}
+    root = tmp_path / "region"
+    for rel in (
+        "honor/honor_0001/degree_main.png",
+        "honor/honor_0001/degree_sub.png",
+        "honor_background/bg_a/degree_main.png",
+        "honor_background/bg_b/degree_main.png",
+        "honor_word/word_a_3/some_texture.png",
+        "honor_medal/medal/icon_degree_medal1.png",
+    ):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", (8, 8)).save(root / rel)
+    monkeypatch.setattr(renderer, "region_asset_candidate_paths", lambda rels: [root / rel for rel in rels])
+    monkeypatch.setattr(renderer, "honor_frame_path", lambda *_: None)
+    return renderer, root
+
+
+def test_masterdata_honor_request_applies_700_background_word_and_medal(tmp_path: Path, monkeypatch) -> None:
+    renderer, root = _customizable_renderer(tmp_path, monkeypatch)
+
+    legacy = renderer.build_masterdata_honor_request(1, 5, True)
+    assert legacy is not None
+    assert legacy.honor_img_path == (root / "honor/honor_0001/degree_main.png").as_posix()
+    assert legacy.word_img_path is None
+    assert legacy.medal_img_path is None  # level 5 is below the first medal tier
+
+    customized = renderer.build_masterdata_honor_request(
+        1, 14, True, customization=renderer_mod.HonorCustomization(background_id=70, word_id=0)
+    )
+    assert customized is not None
+    assert customized.honor_img_path == (root / "honor_background/bg_b/degree_main.png").as_posix()
+    # word id unset -> the group's first word row, bundle suffix = rarity rank (high -> 3)
+    assert customized.word_img_path == (root / "honor_word/word_a_3/some_texture.png").as_posix()
+    assert customized.medal_img_path == (root / "honor_medal/medal/icon_degree_medal1.png").as_posix()
+
+    sub = renderer.build_masterdata_honor_request(
+        1, 14, False, customization=renderer_mod.HonorCustomization(background_id=0, word_id=80)
+    )
+    assert sub is not None
+    assert sub.word_img_path is None  # the word is a main-slot layer
+    # background id unset -> group's first background (seq 1), but bg_a has no degree_sub -> legacy art
+    assert sub.honor_img_path == (root / "honor/honor_0001/degree_sub.png").as_posix()
+
+
+def test_masterdata_honor_request_without_700_tables_is_unchanged(tmp_path: Path, monkeypatch) -> None:
+    renderer, _root = _customizable_renderer(tmp_path, monkeypatch)
+    renderer.honor_backgrounds = {}
+    renderer.honor_words = {}
+    renderer.honor_groups = {7: {"id": 7, "honorType": "character"}}  # pre-7.0.0 group: no isMedalDisplayed
+    plain = renderer.build_masterdata_honor_request(1, 14, True)
+    customized = renderer.build_masterdata_honor_request(
+        1, 14, True, customization=renderer_mod.HonorCustomization(background_id=70, word_id=80)
+    )
+    assert plain == customized
+    assert plain is not None
+    assert plain.word_img_path is None
+    assert plain.medal_img_path is None
+
+
+def test_honor_customization_reads_game_keys() -> None:
+    assert not renderer_mod.honor_customization_from({"id": 1})
+    assert not renderer_mod.honor_customization_from(None)
+    custom = renderer_mod.honor_customization_from({"honorBackgroundId": 3, "honorWordId": None})
+    assert custom == renderer_mod.HonorCustomization(3, 0)
+    assert custom

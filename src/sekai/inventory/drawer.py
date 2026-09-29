@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 from typing import TYPE_CHECKING
 
@@ -13,6 +14,7 @@ from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_w
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.text_layout import get_text_size
+from src.sekai.base.timezone import normalize_unix_millis, request_now
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -29,6 +31,7 @@ TILE_COL_COUNT = 4
 TILE_GAP = 10
 ICON_SIZE = 58
 ITEM_TEXT_WIDTH = 178
+EXPIRY_TEXT_WIDTH = 104
 
 TITLE_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(45, 50, 70))
 SECTION_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(46, 52, 72))
@@ -49,11 +52,18 @@ RESOURCE_TYPE_DESCRIPTIONS = {
     "practice_ticket": "育成",
     "skill_practice_ticket": "育成",
     "mysekai_material": "MySekai",
+    # JP 7.0.0 resource types
+    "honor_background": "称号背景",
+    "honor_word": "称号文字",
+    "virtual_item": "虚拟道具",
 }
+EXPIRY_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(92, 100, 122))
+EXPIRED_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(200, 40, 40))
 
 
 async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
     icon_cache = await _load_inventory_icons(rqd.sections)
+    now = request_now(rqd.timezone)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
@@ -62,7 +72,7 @@ async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
             with VSplit().set_w(PANEL_WIDTH).set_content_align("lt").set_item_align("lt").set_sep(14):
                 _draw_header()
                 for section in rqd.sections:
-                    _draw_section(section, icon_cache)
+                    _draw_section(section, icon_cache, now)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -115,7 +125,7 @@ def _draw_header() -> None:
     TextBox("背包一览", TITLE_STYLE).set_padding((8, 0))
 
 
-def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource]) -> None:
+def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource], now: datetime | None = None) -> None:
     with (
         VSplit()
         .set_w(PANEL_WIDTH)
@@ -133,10 +143,10 @@ def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource])
 
         with Grid(col_count=TILE_COL_COUNT).set_sep(TILE_GAP, TILE_GAP).set_item_align("lt"):
             for item in section.items:
-                _draw_item_tile(item, icon_cache)
+                _draw_item_tile(item, icon_cache, now)
 
 
-def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource]) -> None:
+def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource], now: datetime | None = None) -> None:
     icon = icon_cache.get(_inventory_icon_key(item.icon_path))
     with (
         HSplit()
@@ -161,9 +171,34 @@ def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource]) -> 
                 ITEM_TEXT_WIDTH
             ).set_padding(0)
             quantity = _format_quantity(item.quantity)
-            TextBox(quantity, _quantity_style(quantity), overflow="clip").set_w(ITEM_TEXT_WIDTH).set_content_align(
-                "r"
-            ).set_padding(0)
+            expiry = _expiry_text(item, now)
+            if expiry is None:
+                TextBox(quantity, _quantity_style(quantity), overflow="clip").set_w(ITEM_TEXT_WIDTH).set_content_align(
+                    "r"
+                ).set_padding(0)
+            else:
+                expiry_text, expired = expiry
+                with HSplit().set_w(ITEM_TEXT_WIDTH).set_content_align("l").set_item_align("c").set_sep(4):
+                    TextBox(expiry_text, EXPIRED_STYLE if expired else EXPIRY_STYLE, overflow="clip").set_w(
+                        EXPIRY_TEXT_WIDTH
+                    ).set_padding(0)
+                    qty_width = ITEM_TEXT_WIDTH - EXPIRY_TEXT_WIDTH - 4
+                    TextBox(quantity, _quantity_style(quantity, qty_width), overflow="clip").set_w(
+                        qty_width
+                    ).set_content_align("r").set_padding(0)
+
+
+def _expiry_text(item: InventoryItem, now: datetime | None) -> tuple[str, bool] | None:
+    """``(label, expired)`` for an item carrying ``expired_at``; ``None`` keeps the legacy tile."""
+
+    if not item.expired_at:
+        return None
+    if now is None:
+        now = request_now(None)
+    expires = datetime.fromtimestamp(normalize_unix_millis(item.expired_at) / 1000, tz=now.tzinfo)
+    if expires <= now:
+        return "已过期", True
+    return f"有效期至 {expires:%m-%d %H:%M}", False
 
 
 def _item_description_text(item: InventoryItem) -> str:
@@ -179,9 +214,9 @@ def _format_quantity(value: int) -> str:
     return f"{value:,}"
 
 
-def _quantity_style(text: str) -> TextStyle:
+def _quantity_style(text: str, width: int = ITEM_TEXT_WIDTH) -> TextStyle:
     for size in range(QTY_STYLE.size, 9, -1):
-        if get_text_size(get_font(QTY_STYLE.font, size), text)[0] <= ITEM_TEXT_WIDTH:
+        if get_text_size(get_font(QTY_STYLE.font, size), text)[0] <= width:
             return TextStyle(font=QTY_STYLE.font, size=size, color=QTY_STYLE.color)
     return TextStyle(font=QTY_STYLE.font, size=10, color=QTY_STYLE.color)
 

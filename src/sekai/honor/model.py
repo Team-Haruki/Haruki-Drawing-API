@@ -40,7 +40,7 @@ class HonorRequest(TimeZoneRequest):
     scroll_img_path : Optional[str]
         滚动图片路径
     word_img_path : Optional[str]
-        文字图片路径
+        文字图片路径（羁绊称号的台词；JP 7.0.0 起也用于普通称号主槽位的称号文字 honor_word）
     chara_icon_path : Optional[str]
         角色图标路径
     chara_icon_path2 : Optional[str]
@@ -59,6 +59,8 @@ class HonorRequest(TimeZoneRequest):
         边框图片路径
     frame_degree_level_img_path : Optional[str]
         等级边框图片路径
+    medal_img_path : Optional[str]
+        称号勋章图片路径（JP 7.0.0 honor_medal；仅普通称号绘制，档位由调用方计算）
     """
 
     honor_type: str | None = None
@@ -84,3 +86,4 @@ class HonorRequest(TimeZoneRequest):
     mask_img_path: str | None = None
     frame_img_path: AssetKey | None = None
     frame_degree_level_img_path: AssetKey | None = None
+    medal_img_path: AssetKey | None = None

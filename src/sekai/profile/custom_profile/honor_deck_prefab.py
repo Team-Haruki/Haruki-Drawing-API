@@ -128,20 +128,41 @@ def honor_deck_request_candidates(
     honor_id: int,
     honor_level: int,
     full_size: bool,
+    honor_background_id: int = 0,
+    honor_word_id: int = 0,
 ) -> HonorDeckRequestCandidates:
-    """Build the exact profile-then-ordinary request-key order used by HonorDeck."""
+    """Build the exact profile-then-ordinary request-key order used by HonorDeck.
+
+    A row customized with JP 7.0.0 ``honorBackgroundId`` / ``honorWordId`` first tries the
+    customized slot key ``{id}:{level}:{mode}:{bg}:{word}``; uncustomized rows are unchanged.
+    """
 
     mode = "main" if full_size else "sub"
     slot_key = f"{honor_id}:{honor_level}:{mode}"
+    custom_keys: tuple[str, ...] = ()
+    if honor_background_id or honor_word_id:
+        custom_keys = (f"{slot_key}:{honor_background_id}:{honor_word_id}",)
     return HonorDeckRequestCandidates(
         profile_keys=(
+            *custom_keys,
             f"profile:{seq}",
             f"profile:{honor_id}:{seq}",
             slot_key,
             str(honor_id),
         ),
-        ordinary_keys=(slot_key, str(honor_id)),
+        ordinary_keys=(*custom_keys, slot_key, str(honor_id)),
     )
+
+
+def _row_int(row: Mapping[str, Any], *keys: str) -> int:
+    for key in keys:
+        try:
+            value = int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0
 
 
 def build_honor_deck_plan(
@@ -183,6 +204,8 @@ def build_honor_deck_plan(
                     honor_id=honor_id,
                     honor_level=honor_level,
                     full_size=mode == "main",
+                    honor_background_id=_row_int(row, "honorBackgroundId", "honor_background_id"),
+                    honor_word_id=_row_int(row, "honorWordId", "honor_word_id"),
                 ),
                 profile_row=MappingProxyType(dict(row)),
             )

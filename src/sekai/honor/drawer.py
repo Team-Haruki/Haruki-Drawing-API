@@ -124,7 +124,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
     logger.info(
         "compose honor debug: type=%s group=%s main=%s level=%s rarity=%s "
         "honor_img=%s frame=%s frame_level=%s rank=%s scroll=%s word=%s "
-        "bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s",
+        "bonds_bg=%s bonds_bg2=%s mask=%s lv_img=%s lv6_img=%s medal=%s",
         rqd.honor_type,
         rqd.group_type,
         rqd.is_main_honor,
@@ -141,6 +141,7 @@ async def compose_full_honor_image(rqd: HonorRequest):
         rqd.mask_img_path,
         rqd.lv_img_path,
         rqd.lv6_img_path,
+        rqd.medal_img_path,
     )
 
     canvas = await build_honor_badge_canvas_from_request(rqd)

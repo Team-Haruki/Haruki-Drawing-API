@@ -121,3 +121,17 @@ def test_honor_deck_plan_requires_at_least_one_profile_row():
 def test_honor_deck_plan_rejects_non_mapping_rows():
     with pytest.raises(TypeError, match="must be mappings"):
         build_honor_deck_plan([{"seq": 1}, 2])  # type: ignore[list-item]
+
+
+def test_customized_honor_deck_row_tries_its_customized_key_first():
+    plan = build_honor_deck_plan(
+        [{"seq": 1, "honorId": 1, "honorLevel": 14, "honorBackgroundId": 70, "honorWordId": 0}]
+    )
+    assert plan is not None
+    candidates = plan.slots[0].request_candidates
+    assert candidates.profile_keys[0] == "1:14:main:70:0"
+    assert candidates.ordinary_keys == ("1:14:main:70:0", "1:14:main", "1")
+
+    plain = build_honor_deck_plan([{"seq": 1, "honorId": 1, "honorLevel": 14}])
+    assert plain is not None
+    assert plain.slots[0].request_candidates.ordinary_keys == ("1:14:main", "1")
