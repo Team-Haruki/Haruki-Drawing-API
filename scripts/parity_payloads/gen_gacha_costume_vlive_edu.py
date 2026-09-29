@@ -32,7 +32,7 @@ from src.sekai.education.model import (
     PowerBonusDetailRequest,
 )
 from src.sekai.gacha.model import GachaDetailRequest, GachaListRequest
-from src.sekai.vlive.model import VLiveListRequest
+from src.sekai.vlive.model import VLiveDetailRequest, VLiveListRequest
 
 MD = common.MD
 ASSETS = common.ASSETS
@@ -733,6 +733,131 @@ def build_vlive_list() -> str:
 
     body = {"region": common.REGION, "lives": lives, "timezone": common.TIMEZONE, "dt": now}
     return _emit("vlive_list", VLiveListRequest, body)
+
+
+def _vlive_group_title(name: str) -> str:
+    """ "6th Anniversary スペシャルソロライブ（一歌）" -> the shared title before the character suffix."""
+    for opener in ("（", "("):
+        if name.endswith(("）", ")")) and opener in name:
+            return name[: name.rindex(opener)].strip() or name
+    return name
+
+
+def _vlive_box_items(boxes: dict[int, dict], box_id: int | None) -> list[dict]:
+    box = boxes.get(box_id or 0)
+    return _vlive_reward_details(box) if box else []
+
+
+def _vlive_detail_live_row(live: dict, now: int, unit_by_id: dict[int, dict]) -> dict:
+    schedules = _vlive_schedules(live)
+    current, living, rest_count = _current_vlive_window(schedules, now)
+    row: dict = {
+        "id": live["id"],
+        "name": (live.get("name") or "").strip() or None,
+        "living": living,
+        "rest_count": rest_count,
+        "schedule_count": len(schedules),
+    }
+    if current is not None:
+        row["current_start_at"], row["current_end_at"] = current
+    if characters := _vlive_characters(live, unit_by_id):
+        row["character_icon_path"] = characters[0]["icon_path"]
+    return row
+
+
+def _vlive_detail_rewards(lead: dict) -> tuple[list[dict] | None, dict | None, dict | None]:
+    """JP 7.0.0 total cheer-point rewards, surplus reward and override cost of the group's lead live."""
+    total_boxes = _resource_boxes("virtual_live_total_cheer_point_reward")
+    surplus_boxes = _resource_boxes("virtual_live_total_cheer_point_surplus_reward")
+    rows = sorted(lead.get("virtualLiveTotalCheerPointRewards") or [], key=lambda r: r.get("threshold", 0))
+    total = [
+        {"threshold": row["threshold"], "rewards": _vlive_box_items(total_boxes, row.get("resourceBoxId"))}
+        for row in rows
+    ] or None
+    surplus = None
+    if raw := lead.get("virtualLiveTotalCheerPointSurplusReward"):
+        surplus = {
+            "base_point": raw.get("basePoint", 0),
+            "rewards": _vlive_box_items(surplus_boxes, raw.get("resourceBoxId")),
+        }
+    override = None
+    if raw := lead.get("virtualLiveVirtualItemOverrideCost"):
+        resource_type, resource_id = raw.get("costResourceType", ""), int(raw.get("costResourceId", 0) or 0)
+        material = next((m for m in MD.get("materials") if m.get("id") == resource_id), {})
+        override = {
+            "image_path": _material_icon(resource_type, resource_id),
+            "name": material.get("name"),
+            "resource_type": resource_type,
+            "resource_id": resource_id,
+        }
+    return total, surplus, override
+
+
+def build_vlive_detail() -> str:
+    """vlive/detail: the first solo_virtual_live group (JP 7.0.0), collapsed into one page.
+
+    A pre-7.0.0 master has no solo lives or total cheer-point rewards; the fixture then falls back to
+    the first live of the list fixture's window with SYNTHETIC cheer-point rows built from its normal
+    reward box, so every section of the page is still exercised by the parity gate.
+    """
+    now = VLIVE_NOW_MS
+    unit_by_id = {u["id"]: u for u in MD.get("gameCharacterUnits")}
+    lives = MD.get("virtualLives")
+    solo = [
+        live for live in lives if live.get("virtualLiveType") == "solo_virtual_live" and live.get("virtualLiveGroupId")
+    ]
+    if solo:
+        group_id = min(live["virtualLiveGroupId"] for live in solo)
+        members = sorted(
+            (live for live in solo if live["virtualLiveGroupId"] == group_id),
+            key=lambda member: (member.get("seq", 0), member["id"]),
+        )
+        now = max(now, min(_unix_ms(live.get("startAt")) for live in members))
+        lead = members[0]
+        total, surplus, override = _vlive_detail_rewards(lead)
+        body = {
+            "id": group_id,
+            "title": _vlive_group_title((lead.get("name") or "").strip()),
+            "virtual_live_type": "solo_virtual_live",
+            "start_at": min(_unix_ms(live.get("startAt")) for live in members),
+            "end_at": max(_unix_ms(live.get("endAt")) for live in members),
+            "lives": [_vlive_detail_live_row(live, now, unit_by_id) for live in members],
+        }
+    else:
+        resolved = sorted(
+            (entry for live in lives if (entry := _resolve_vlive(live, now))), key=lambda e: (e[1], e[0]["id"])
+        )
+        reward_boxes = _resource_boxes("virtual_live_reward")
+        lead = next((entry[0] for entry in resolved if _vlive_rewards(entry[0], reward_boxes)), resolved[0][0])
+        items = _vlive_rewards(lead, reward_boxes)
+        total = [
+            {"threshold": threshold, "rewards": items, "received": index == 0}
+            for index, threshold in enumerate((300, 900, 1500, 3000))
+        ]
+        surplus = {"base_point": 10, "rewards": items[:1], "received_count": 2}
+        override = {"image_path": _material_icon("virtual_coin", 0), "name": "Virtual Coin", "have_quantity": 30}
+        body = {
+            "id": lead["id"],
+            "title": (lead.get("name") or "").strip() or f"Virtual Live #{lead['id']}",
+            "virtual_live_type": lead.get("virtualLiveType"),
+            "start_at": _unix_ms(lead.get("startAt")),
+            "end_at": _unix_ms(lead.get("endAt")),
+            "lives": [_vlive_detail_live_row(lead, now, unit_by_id)],
+        }
+    if banner_path := _vlive_banner_path(lead, _vlive_events().get(lead["id"])):
+        body["banner_path"] = banner_path
+    body.update(
+        {
+            "region": common.REGION,
+            "total_cheer_point": 1000,
+            "total_cheer_point_rewards": total,
+            "surplus_reward": surplus,
+            "override_cost": override,
+            "timezone": common.TIMEZONE,
+            "dt": now,
+        }
+    )
+    return _emit("vlive_detail", VLiveDetailRequest, body)
 
 
 # ===========================================================================
@@ -2051,6 +2176,7 @@ def generate() -> list[str]:
         build_costume_list(),
         build_costume_detail(),
         build_vlive_list(),
+        build_vlive_detail(),
         build_education_challenge_live(),
         build_education_power_bonus(),
         build_education_area_item(),

@@ -87,6 +87,9 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "sk_winrate": (5.942, 107.0),
     "stamp_list": (6.555, 130.1),
     "vlive_list": (1.002, 9.4),
+    # Calibrated on the JP 7.0.0 solo-live fixture (26 icon rows + reward icons: mean=4.870/p99=145);
+    # the pre-7.0.0 fallback fixture measured mean=3.306/p99=94.
+    "vlive_detail": (5.701, 154.3),
 }
 
 # Synthetic branch fixtures keep their parent endpoint ceilings; no budget is widened.

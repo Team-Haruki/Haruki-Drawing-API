@@ -52,7 +52,12 @@ WIDENED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
     },
     "src.sekai.card.model": {"CardGachaInfo": ("gacha_banner_path",)},
     "src.sekai.profile.model": {"CardFullThumbnailRequest": ("card_thumbnail_path",)},
-    "src.sekai.vlive.model": {"VLiveBrief": ("banner_path",)},
+    "src.sekai.vlive.model": {
+        "VLiveBrief": ("banner_path",),
+        "VLiveDetailRequest": ("banner_path",),
+        "VLiveDetailLive": ("character_icon_path",),
+        "VLiveOverrideCost": ("image_path",),
+    },
     "src.sekai.mysekai.model": {
         "MysekaiPhenomRequest": ("image_path",),
         "MysekaiResourceNumber": ("image_path",),
