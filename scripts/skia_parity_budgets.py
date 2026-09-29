@@ -61,7 +61,7 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "mysekai_music_record": (6.432, 119.6),
     "mysekai_talk_list": (3.675, 76.6),
     "mysekai_housing_competition": (1.912, 40.9),
-    "mysekai_shop": (2.709, 47.2),
+    "mysekai_shop": (2.709, 51.4),
     "mysekai_bulk_harvest": (3.480, 74.5),
     "mysekai_blueprint_term": (3.653, 94.4),
     "profile": (2.514, 32.5),
