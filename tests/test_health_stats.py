@@ -60,7 +60,7 @@ def test_render_stats_has_artifacts_block_with_zero_counters() -> None:
     }
     assert all(v == 0 for v in artifacts["degraded"].values())
     assert artifacts["directive_rejected"] == {}
-    assert set(artifacts["stages"]) == {"hash", "index_lookup", "upload", "index_write"}
+    assert set(artifacts["stages"]) == {"hash", "upload", "index_connect", "index_acquire", "index_write", "total"}
     assert artifacts["last_error"] is None
 
 

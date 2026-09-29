@@ -10,7 +10,7 @@ from collections.abc import Callable
 import time
 from typing import Any
 
-from src.index.protocols import ContentRow, RequestRow
+from src.index.protocols import ContentRow, RecordResult, RequestRow
 from src.storage.protocols import ObjectStat, StorageNotFound, StorageTooLarge, StorageUnavailable, validate_object_key
 
 
@@ -115,21 +115,23 @@ class UndefinedColumnError(Exception):
 
 
 class FakeRenderIndex:
-    """Implements `RenderIndex` over a dict of content rows; records every call."""
+    """Implements `RenderIndex` over a dict of content rows (the `RECORD` conflict rules); records every call."""
 
     def __init__(
         self,
         content: dict[str, ContentRow] | None = None,
         *,
         preflight_error: Exception | None = None,
-        lookup_error: Exception | None = None,
         record_error: Exception | None = None,
+        acquire_seconds: float = 0.0,
+        connect_seconds: float = 0.0,
     ) -> None:
         self.content: dict[str, ContentRow] = dict(content or {})
         self.requests: dict[str, RequestRow] = {}
         self.preflight_error = preflight_error
-        self.lookup_error = lookup_error
         self.record_error = record_error
+        self.acquire_seconds = acquire_seconds
+        self.connect_seconds = connect_seconds
         self.calls: list[tuple[str, object]] = []
         self.closed = False
 
@@ -138,13 +140,7 @@ class FakeRenderIndex:
         if self.preflight_error is not None:
             raise self.preflight_error
 
-    async def lookup_content(self, content_hash: str) -> ContentRow | None:
-        self.calls.append(("lookup_content", content_hash))
-        if self.lookup_error is not None:
-            raise self.lookup_error
-        return self.content.get(content_hash)
-
-    async def record(self, content: ContentRow, request: RequestRow) -> None:
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
         self.calls.append(("record", (content, request)))
         if self.record_error is not None:
             raise self.record_error
@@ -152,6 +148,15 @@ class FakeRenderIndex:
         if existing is None or existing.storage_backend != "garage":
             self.content[content.hash] = content
         self.requests[request.request_key] = request
+        stored = self.content[content.hash]
+        return RecordResult(
+            cdn_path=stored.cdn_path,
+            media_type=stored.media_type,
+            size_bytes=stored.size_bytes,
+            prior_backend=existing.storage_backend if existing is not None else None,
+            acquire_seconds=self.acquire_seconds,
+            connect_seconds=self.connect_seconds,
+        )
 
     async def close(self) -> None:
         self.calls.append(("close", None))
@@ -175,8 +180,8 @@ class _AsyncContext:
 class FakeConn:
     """Duck-typed asyncpg connection: `execute`, `fetchrow`, `transaction()`; records SQL text and args.
 
-    `rows` maps the first positional argument of `fetchrow` to the returned row (a dict). `errors` maps an
-    exact SQL text to the exception raised when that statement runs.
+    `rows` maps the first positional argument of `fetchrow` to the returned row (a dict); an unknown key returns
+    `default_row`. `errors` maps an exact SQL text to the exception raised when that statement runs.
     """
 
     def __init__(self, pool: FakePgPool) -> None:
@@ -188,7 +193,7 @@ class FakeConn:
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         self._pool.log("fetchrow", sql, args)
-        return self._pool.rows.get(args[0]) if args else None
+        return self._pool.rows.get(args[0], self._pool.default_row) if args else None
 
     def transaction(self) -> _AsyncContext:
         self._pool.events.append(("transaction.begin", None, ()))
@@ -206,11 +211,13 @@ class FakePgPool:
         self,
         *,
         rows: dict[str, dict[str, Any]] | None = None,
+        default_row: dict[str, Any] | None = None,
         errors: dict[str, Exception] | None = None,
         acquire_error: Exception | None = None,
         close_error: Exception | None = None,
     ) -> None:
         self.rows: dict[str, dict[str, Any]] = dict(rows or {})
+        self.default_row = default_row
         self.errors: dict[str, Exception] = dict(errors or {})
         self.acquire_error = acquire_error
         self.close_error = close_error

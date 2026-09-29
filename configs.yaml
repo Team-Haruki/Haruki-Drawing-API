@@ -137,3 +137,6 @@ logging:
 #   index:
 #     enabled: true
 #     # dsn is env only (HARUKI_STORAGE__INDEX__DSN); a dsn written here is dropped with a WARNING
+#     pool_min_size: 1               # per event loop; keeps one connection warm
+#     pool_max_size: 4
+#     pool_max_inactive_seconds: 0   # 0 = never close idle connections (asyncpg default would be 300)

@@ -94,6 +94,13 @@ def _log_and_return_bytes(
     return _image_response(payload.image_bytes, payload.media_type, payload.filename, extra_headers=headers)
 
 
+def _format_artifact_stages(stages: Mapping[str, float]) -> str:
+    """` stages=hash:0.0012,upload:0.0461,...` (seconds per artifact sub-stage), or `""` when none ran."""
+    if not stages:
+        return ""
+    return " stages=" + ",".join(f"{name}:{seconds:.4f}" for name, seconds in stages.items())
+
+
 def _log_image_response(payload: EncodedImagePayload, *, artifact: str, missing: int, detail: str = "") -> None:
     """The one `image.response` line per request, on every exit branch."""
     request_ctx = current_request_context()
@@ -165,7 +172,7 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
             missing=missing,
             detail=(
                 f" hash={ref.hash} reused={int(ref.reused)} index_written={int(ref.index_written)} "
-                f"upload={ref.upload_elapsed:.3f}"
+                f"upload={ref.upload_elapsed:.3f}{_format_artifact_stages(outcome.stages)}"
             ),
         )
         set_request_stage("send_response")
@@ -174,7 +181,7 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
     return _log_and_return_bytes(
         payload,
         artifact="degraded",
-        reason=outcome.reason,
+        reason=f"{outcome.reason}{_format_artifact_stages(outcome.stages)}",
         missing=missing,
         headers={**node, DEGRADED_HEADER: "1"},
     )

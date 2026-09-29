@@ -159,6 +159,9 @@ def test_storage_and_mirror_defaults_keep_todays_behaviour():
     assert settings.storage.enabled is False
     assert settings.storage.node_name == ""
     assert settings.storage.index.dsn is None
+    assert settings.storage.index.pool_min_size == 1  # one warm connection per event loop
+    assert settings.storage.index.pool_max_size == 4
+    assert settings.storage.index.pool_max_inactive_seconds == 0.0  # never close it for being idle
     assert settings.storage.provider.scheme == "s3"
     assert settings.storage.provider.bucket == "image-cache"
     assert settings.storage.provider.root == ""
@@ -300,6 +303,8 @@ def test_storage_and_mirror_nested_environment(monkeypatch):
         "HARUKI_STORAGE__UPLOAD_CONCURRENCY": "2",
         "HARUKI_STORAGE__INDEX__DSN": _SECRET_DSN,
         "HARUKI_STORAGE__INDEX__POOL_MAX_SIZE": "8",
+        "HARUKI_STORAGE__INDEX__POOL_MIN_SIZE": "0",
+        "HARUKI_STORAGE__INDEX__POOL_MAX_INACTIVE_SECONDS": "300",
         "HARUKI_STORAGE__INDEX__CONNECT_RETRY_SECONDS": "5",
     }
     for key, value in env.items():
@@ -343,6 +348,8 @@ def test_storage_and_mirror_nested_environment(monkeypatch):
     assert storage.upload_concurrency == 2
     assert storage.index.dsn.get_secret_value() == _SECRET_DSN
     assert storage.index.pool_max_size == 8
+    assert storage.index.pool_min_size == 0
+    assert storage.index.pool_max_inactive_seconds == 300.0
     assert storage.index.connect_retry_seconds == 5
 
     dumped = str(settings.model_dump())

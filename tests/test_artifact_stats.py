@@ -76,7 +76,7 @@ def test_counters_and_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     assert snap["directive_rejected"] == {"X-Haruki-Api-Path": 2}
     assert snap["stages"]["upload"] == {"count": 2, "total": 0.75}
     assert snap["stages"]["hash"] == {"count": 0, "total": 0.0}
-    assert list(snap["stages"])[:4] == ["hash", "index_lookup", "upload", "index_write"]
+    assert list(snap["stages"])[:6] == ["hash", "upload", "index_connect", "index_acquire", "index_write", "total"]
     assert snap["stages"]["custom"]["count"] == 1
     assert snap["last_error"]["stage"] == "upload"
     assert snap["last_error"]["exc"].startswith("RuntimeError: x")
