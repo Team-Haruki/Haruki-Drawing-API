@@ -44,6 +44,7 @@ def test_manifest_is_the_single_request_field_map() -> None:
         "mask_img": "mask_img_path",
         "frame_img": "frame_img_path",
         "frame_degree_level_img": "frame_degree_level_img_path",
+        "medal_img": "medal_img_path",
     }
 
 
@@ -386,3 +387,36 @@ def test_blank_string_keeps_its_legacy_classification() -> None:
     assert result.failure is not None
     assert result.failure.reason == "path_unresolved"
     assert result.failure.raw_path == "  "
+
+
+def test_normal_branch_lists_700_layers_only_when_supplied_and_ignores_missing_files() -> None:
+    legacy = HonorRequest(honor_type="normal", group_type="character", is_main_honor=True, honor_img_path="base.png")
+    assert "word_img" not in _spec_map(legacy)
+    assert "medal_img" not in _spec_map(legacy)
+
+    request = HonorRequest(
+        honor_type="normal",
+        group_type="character",
+        is_main_honor=True,
+        honor_img_path="base.png",
+        word_img_path="word.png",
+        medal_img_path="medal.png",
+    )
+    specs = _spec_map(request)
+    assert specs["word_img"].on_supplied_missing == "ignore"
+    assert specs["medal_img"].on_supplied_missing == "ignore"
+
+    result = resolve_honor_assets(
+        request,
+        path_resolver=_available_resolver({"base.png": "base.png", "medal.png": "medal.png"}),
+        source_factory=_source_factory,
+    )
+    assert result.ready
+    assert result.sources["word_img"] is None
+    assert result.sources["medal_img"] == "source:medal.png"
+
+    sub = request.model_copy(update={"is_main_honor": False})
+    assert "word_img" not in _spec_map(sub)
+    birthday = request.model_copy(update={"honor_type": "birthday"})
+    assert "word_img" not in _spec_map(birthday)
+    assert "medal_img" not in _spec_map(birthday)

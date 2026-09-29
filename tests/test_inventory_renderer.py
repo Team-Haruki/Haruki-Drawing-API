@@ -42,6 +42,9 @@ def _item(**overrides) -> InventoryItem:
         ({"resource_type": "practice_ticket"}, "育成"),
         ({"resource_type": "skill_practice_ticket"}, "育成"),
         ({"resource_type": "mysekai_material"}, "MySekai"),
+        ({"resource_type": "honor_background"}, "称号背景"),
+        ({"resource_type": "honor_word"}, "称号文字"),
+        ({"resource_type": "virtual_item"}, "虚拟道具"),
         ({"resource_type": "unknown", "id": 99}, "ID 99"),
     ],
 )
@@ -95,6 +98,7 @@ def test_build_inventory_canvas_coordinates_sections(monkeypatch):
     profile_request = object()
     request = SimpleNamespace(
         sections=sections,
+        timezone="Asia/Tokyo",
         profile=SimpleNamespace(to_profile_card_request=lambda: profile_request),
     )
     icon_cache = {"icon": object()}
@@ -111,7 +115,7 @@ def test_build_inventory_canvas_coordinates_sections(monkeypatch):
     monkeypatch.setattr(drawer, "_load_inventory_icons", load_icons)
     monkeypatch.setattr(drawer, "get_profile_card", profile)
     monkeypatch.setattr(drawer, "_draw_header", lambda: events.append("header"))
-    monkeypatch.setattr(drawer, "_draw_section", lambda section, icons: events.append((section.title, icons)))
+    monkeypatch.setattr(drawer, "_draw_section", lambda section, icons, _now: events.append((section.title, icons)))
     monkeypatch.setattr(drawer, "add_request_watermark", lambda canvas, received: events.append((canvas, received)))
 
     canvas = asyncio.run(drawer._build_inventory_canvas(request))
@@ -201,3 +205,26 @@ def test_line_fitting_and_clipping(monkeypatch):
     assert drawer._fits_lines("", "font", 12, 20, 2)
     assert drawer._clip_text_to_width("abcd", object(), 20) == 2
     assert drawer._clip_text_to_width("abcd", object(), 25) == 2
+
+
+def test_expiry_text_is_absent_without_expired_at_and_formats_in_request_timezone():
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=9))
+    now = datetime(2026, 9, 30, 12, 0, tzinfo=tz)
+    assert drawer._expiry_text(_item(), now) is None
+    future = int(datetime(2026, 11, 11, 23, 59, tzinfo=tz).timestamp() * 1000)
+    assert drawer._expiry_text(_item(expired_at=future), now) == ("有效期至 11-11 23:59", False)
+    past = int(datetime(2026, 9, 1, tzinfo=tz).timestamp() * 1000)
+    assert drawer._expiry_text(_item(expired_at=past), now) == ("已过期", True)
+
+
+def test_draw_item_tile_with_expiry_keeps_tile_size():
+    from datetime import UTC, datetime
+
+    now = datetime(2026, 9, 30, tzinfo=UTC)
+    with Canvas() as canvas, VSplit():
+        drawer._draw_item_tile(_item(expired_at=1_800_000_000_000), {}, now)
+
+    image = asyncio.run(canvas.get_img())
+    assert image.size == (drawer.TILE_WIDTH, drawer.TILE_HEIGHT)

@@ -2754,3 +2754,35 @@ def _local_rgb_diff_metrics(reference: Image.Image, rendered: Image.Image) -> tu
         if seen >= threshold:
             return mean, value
     return mean, 255
+
+
+def test_native_honor_candidates_follow_pillow_order_for_customized_slots():
+    from types import SimpleNamespace as _NS
+
+    from src.sekai.profile.custom_profile import skia as skia_module
+    from src.sekai.profile.custom_profile.renderer import PNGRenderer as _PNGRenderer
+
+    calls = []
+
+    def build(honor_id, level, full_size, customization=None):
+        calls.append(customization)
+        return f"masterdata:{bool(customization)}"
+
+    renderer = _NS(
+        user_honor_level_for=lambda _id: 14,
+        honor_slot_key=lambda *args: _PNGRenderer.honor_slot_key(None, *args),
+        custom_honor_slot_key=lambda *args: _PNGRenderer.custom_honor_slot_key(renderer, *args),
+        honor_requests={"1:14:main:70:0": "custom", "1:14:main": "plain", "1": "id"},
+        build_masterdata_honor_request=build,
+    )
+    content = _NS(kind="honor", item={"id": 1, "fullSize": True, "honorBackgroundId": 70})
+    assert list(skia_module._native_honor_candidates(renderer, content)) == [
+        "custom",
+        "masterdata:True",
+        "plain",
+        "id",
+        "masterdata:False",
+    ]
+
+    plain = _NS(kind="honor", item={"id": 1, "fullSize": True})
+    assert list(skia_module._native_honor_candidates(renderer, plain)) == ["plain", "id", "masterdata:False"]

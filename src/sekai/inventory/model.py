@@ -15,6 +15,8 @@ class InventoryItem(BaseModel):
     quantity: int
     seq: int
     recovery_value: int | None = None
+    # JP 7.0.0 materials.expiredAt (epoch ms). Optional: absent keeps the legacy tile.
+    expired_at: int | None = None
 
 
 class InventorySection(BaseModel):

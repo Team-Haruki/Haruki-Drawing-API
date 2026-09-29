@@ -119,6 +119,7 @@ from src.sekai.profile.custom_profile.renderer import (
     bool_from_profile,
     content_data_id,
     hex_to_rgba,
+    honor_customization_from,
     unity_tint_rgba,
 )
 from src.sekai.profile.custom_profile.svg import unity_rotation_degrees
@@ -1055,10 +1056,21 @@ def _native_honor_candidates(
         honor_id = content_data_id("honor", content.item)
         level = renderer.user_honor_level_for(honor_id)
         keys = (renderer.honor_slot_key(honor_id, level, full_size), str(honor_id))
+        customization = honor_customization_from(content.item)
 
         def ordinary_candidates():
-            yield from (renderer.honor_requests.get(key) for key in keys)
             build_request = getattr(renderer, "build_masterdata_honor_request", None)
+            if customization:
+                # Same order as PNGRenderer.compose_honor_image for a customized slot.
+                yield renderer.honor_requests.get(
+                    renderer.custom_honor_slot_key(honor_id, level, full_size, customization)
+                )
+                yield (
+                    build_request(honor_id, level, full_size, customization=customization)
+                    if callable(build_request)
+                    else None
+                )
+            yield from (renderer.honor_requests.get(key) for key in keys)
             yield build_request(honor_id, level, full_size) if callable(build_request) else None
 
         return ordinary_candidates()
@@ -1142,11 +1154,14 @@ def _native_profile_honor_badge(
     seq = int(row.get("seq", 0) or 0)
     honor_id = int(row.get("honorId", 0) or 0)
     level = int(row.get("honorLevel", 0) or 0)
+    customization = honor_customization_from(row)
     candidates = honor_deck_request_candidates(
         seq=seq,
         honor_id=honor_id,
         honor_level=level,
         full_size=full_size,
+        honor_background_id=customization.background_id,
+        honor_word_id=customization.word_id,
     )
     for payload in _native_profile_honor_payloads(renderer, candidates):
         request = HonorRequest.model_validate(payload)

@@ -332,3 +332,59 @@ def test_bonds_honor_lazy_sources_lower_to_asset_only_resize_then_clip_ir(tmp_pa
     masked_groups = [node for node in nodes if node.get("type") == "Group" and node.get("mask")]
     assert len(masked_groups) == 1
     assert [child["type"] for child in masked_groups[0]["children"]] == ["UnitySubscene"]
+
+
+def _character_honor(**extra) -> HonorRequest:
+    return HonorRequest(
+        honor_type="normal",
+        group_type="character",
+        honor_rarity="highest",
+        honor_level=14,
+        is_main_honor=True,
+        **extra,
+    )
+
+
+def test_normal_honor_without_700_layers_ignores_them_and_matches_legacy() -> None:
+    base = Image.new("RGBA", (380, 80), (10, 20, 30, 255))
+    legacy = compose_full_honor_image_from_loaded_assets(_character_honor(), {"honor_img": base})
+    with_none = compose_full_honor_image_from_loaded_assets(
+        _character_honor(), {"honor_img": base, "word_img": None, "medal_img": None}
+    )
+    assert legacy is not None
+    assert with_none is not None
+    assert legacy.tobytes() == with_none.tobytes()
+
+
+def test_main_normal_honor_centres_word_and_draws_medal_left_of_stars() -> None:
+    base = Image.new("RGBA", (380, 80), (0, 0, 0, 255))
+    word = Image.new("RGBA", (100, 20), (255, 0, 0, 255))
+    medal = Image.new("RGBA", (48, 48), (0, 255, 0, 255))
+    image = compose_full_honor_image_from_loaded_assets(
+        _character_honor(word_img_path="word.png", medal_img_path="medal.png"),
+        {"honor_img": base, "word_img": word, "medal_img": medal},
+    )
+    assert image is not None
+    # word: 100x20 centred on 380x80 -> (140, 30)..(240, 50)
+    assert image.getpixel((190, 40)) == (255, 0, 0, 255)
+    assert image.getpixel((139, 40)) == (0, 0, 0, 255)
+    # medal: fitted to 24x24, right edge at x=48, bottom 3px above the badge edge
+    assert image.getpixel((36, 65)) == (0, 255, 0, 255)
+    assert image.getpixel((50, 65)) == (0, 0, 0, 255)
+
+
+def test_word_is_main_slot_only_and_never_on_birthday_honors() -> None:
+    base = Image.new("RGBA", (180, 80), (0, 0, 0, 255))
+    word = Image.new("RGBA", (100, 20), (255, 0, 0, 255))
+    sub = compose_full_honor_image_from_loaded_assets(
+        HonorRequest(honor_type="normal", group_type="character", is_main_honor=False, word_img_path="word.png"),
+        {"honor_img": base, "word_img": word},
+    )
+    assert sub is not None
+    assert sub.getpixel((90, 40)) == (0, 0, 0, 255)
+    birthday = compose_full_honor_image_from_loaded_assets(
+        HonorRequest(honor_type="birthday", group_type="birthday", is_main_honor=True, word_img_path="word.png"),
+        {"honor_img": base, "word_img": word},
+    )
+    assert birthday is not None
+    assert birthday.getpixel((90, 40)) == (0, 0, 0, 255)
