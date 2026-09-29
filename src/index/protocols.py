@@ -11,11 +11,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 @dataclass(frozen=True, slots=True)
 class ContentRow:
-    """One `image_cache_entries` row as Drawing reads and writes it.
+    """One `image_cache_entries` row as Drawing writes it.
 
-    `cdn_path` is authoritative for a reused artifact (addendum A2). There is deliberately no `bucket` field:
-    the table has no bucket column and the programme has exactly one image-cache bucket.
-    `last_referenced_at` is written but never read back by Drawing, so it is not part of this row.
+    There is deliberately no `bucket` field: the table has no bucket column and the programme has exactly one
+    image-cache bucket. `last_referenced_at` is written but never read back by Drawing, so it is not part of
+    this row.
     """
 
     hash: str
@@ -41,6 +41,24 @@ class RequestRow:
     expires_at: datetime | None
 
 
+@dataclass(frozen=True, slots=True)
+class RecordResult:
+    """What the one-statement index write reports back.
+
+    `cdn_path`, `media_type` and `size_bytes` are the stored row after the upsert: for a hash that already had a
+    `garage` row they are that row's own values, which are authoritative (addendum A2). `prior_backend` is the
+    row's `storage_backend` before the write (`None` for a new hash). The timings are the pool acquire and, on
+    the first write of an event loop, the pool creation plus preflight (`0.0` otherwise).
+    """
+
+    cdn_path: str
+    media_type: str | None
+    size_bytes: int | None
+    prior_backend: str | None
+    acquire_seconds: float = 0.0
+    connect_seconds: float = 0.0
+
+
 class IndexUnavailable(Exception):  # names fixed by the plan (§9.1)
     """Connect / timeout / transport failure, or a backoff window after one."""
 
@@ -57,8 +75,6 @@ class IndexWriteFailed(IndexUnavailable):
 class RenderIndex(Protocol):
     async def preflight(self) -> None: ...  # raises IndexSchemaError / IndexUnavailable
 
-    async def lookup_content(self, content_hash: str) -> ContentRow | None: ...
-
-    async def record(self, content: ContentRow, request: RequestRow) -> None: ...  # ONE transaction
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult: ...  # ONE statement
 
     async def close(self) -> None: ...

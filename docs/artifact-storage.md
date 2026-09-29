@@ -79,7 +79,7 @@ row is written, and one counter under `artifacts.degraded` is incremented:
 Index trouble is **not** a degradation. If the upload succeeded the ref is returned with
 `index_written=false`, and the reason goes into `artifacts.index_skipped` (`disabled`, `schema_missing`,
 `unavailable`) or `index_write_failures`. The object is durable. Only the request-key → hash mapping is
-missing, so Cloud re-renders on its next miss, and Drawing dedups by content hash once the index is back.
+missing, so Cloud re-renders on its next miss.
 
 `/ready` is never influenced by storage or index health.
 
@@ -119,9 +119,9 @@ missing, so Cloud re-renders on its next miss, and Drawing dedups by content has
 | `width`, `height` | may be `null` (Cloud reads null as 0) |
 | `cache_key`, `ttl_seconds` | echoed from the directive |
 | `expires_at` | RFC 3339 UTC (`…Z`), or JSON `null` when `ttl_seconds == 0` (infinite) |
-| `reused` | `true` when an existing `garage` row with the same hash was found and the upload was skipped |
+| `reused` | `true` when the index write found an existing `garage` row with the same hash (the ref then carries that row's path) |
 | `index_written` | `true` only when both index rows were written |
-| `upload_elapsed` | seconds spent in the upload step; `0.0` when reused |
+| `upload_elapsed` | seconds spent in the upload step (every ref uploads, reused or not) |
 | `node_name` | the rendering node, the same value as `X-Haruki-Node` |
 
 ### Object keys, the reuse rule, and the `pjsk/api/` ops prefix
@@ -136,7 +136,16 @@ missing, so Cloud re-renders on its next miss, and Drawing dedups by content has
      name a different `api_path` than the request did.
   2. Cloud's own `imagecache.storeHashed` rows (`pjsk/<sha256>.<ext>`) share the table and the bucket and may be
      reused by Drawing. Such hits are counted `reused_foreign`.
-- GC deletes only the recorded `cdn_path`, so nothing leaks either way.
+- **The hit is detected by the index write, not by a lookup before the upload.** A pre-upload lookup cost two
+  PostgreSQL round trips per request and never hit in production (pages embed the render time: `reused=0` over
+  532 requests), so the bytes are always uploaded under the request's own key first, and the one-statement write
+  then returns the stored row. For a hit under the **same** key (same endpoint, same bytes) the upload rewrote the
+  same content-addressed object: nothing changes. For a hit whose stored `cdn_path` is a **different** key (cases 1
+  and 2 above) the object just uploaded is not recorded in the index; it is counted as
+  `reused_unrecorded_objects`, and GC — which deletes only recorded paths — will not remove it. That is at most one
+  object per `(api_path, hash)` pair (re-uploads overwrite it). Ops can list such keys under `pjsk/api/` and
+  delete those with no `image_cache_entries.cdn_path` pointing at them.
+- GC deletes only the recorded `cdn_path`.
 - **Ops tooling that must target only Drawing artifacts uses the prefix `pjsk/api/`, never `pjsk/`.**
   `pjsk/` also matches Cloud's own `pjsk/<sha256>.<ext>` objects.
 
@@ -200,7 +209,8 @@ Unknown keys in a provider block log `settings.provider_unknown_key` at WARNING 
 | `HARUKI_STORAGE__HASH_IN_POOL_MIN_BYTES` | `262144` | sha256 runs on the thread pool above this size |
 | `HARUKI_STORAGE__INDEX__ENABLED` | `true` | sub-switch; an empty DSN also disables the index (uploads still happen) |
 | `HARUKI_STORAGE__INDEX__DSN` | — | **env only**; a YAML value is dropped with `settings.index_dsn_ignored` |
-| `HARUKI_STORAGE__INDEX__POOL_MIN_SIZE` / `__POOL_MAX_SIZE` | `0` / `4` | |
+| `HARUKI_STORAGE__INDEX__POOL_MIN_SIZE` / `__POOL_MAX_SIZE` | `1` / `4` | per event loop (each worker process runs its own pool) |
+| `HARUKI_STORAGE__INDEX__POOL_MAX_INACTIVE_SECONDS` | `0` | idle time after which a pooled connection is closed; `0` = never. asyncpg's own default is 300 s, which made a quiet worker reconnect (~4 round trips) on its next write. It applies to every pooled connection, so an idle loop keeps as many connections as its peak concurrent writes, at most `POOL_MAX_SIZE` |
 | `HARUKI_STORAGE__INDEX__CONNECT_TIMEOUT_SECONDS` | `2.0` | |
 | `HARUKI_STORAGE__INDEX__COMMAND_TIMEOUT_SECONDS` | `2.0` | |
 | `HARUKI_STORAGE__INDEX__CONNECT_RETRY_SECONDS` | `30.0` | backoff after a failed connect or preflight |
@@ -310,14 +320,14 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 | `requests_with_directive` | requests that bound a valid directive |
 | `bytes_no_directive` | image responses sent without a directive |
 | `store_skipped` | artifact-mode requests with `Cache-Store: 0` |
-| `published`, `reused`, `reused_foreign` | refs returned; hash hits; hits on a row not under `pjsk/api/` |
+| `published`, `reused`, `reused_foreign` | refs returned; hash hits (found by the index write); hits on a row not under `pjsk/api/` |
+| `reused_unrecorded_objects` | hits whose stored `cdn_path` differs from the key just uploaded: that object is not in the index and GC will not delete it |
 | `uploads`, `upload_bytes`, `upload_elapsed_total`, `upload_failures`, `upload_timeouts` | object writes |
-| `index_lookups`, `index_lookup_hits`, `index_lookup_errors` | content-hash lookups |
-| `index_writes`, `index_write_failures` | two-row index writes |
+| `index_writes`, `index_write_failures` | two-row index writes (one statement) |
 | `index_skipped.{disabled,schema_missing,unavailable}` | refs returned with `index_written=false` |
 | `degraded.{disabled,runtime_unavailable,upload_failed,upload_timeout,unsupported_media,internal}` | bytes returned instead of a ref |
 | `directive_rejected.<header>` | 400s by offending header |
-| `stages.{hash,index_lookup,upload,index_write}.{count,total}` | per-stage timing |
+| `stages.{hash,upload,index_connect,index_acquire,index_write,total}.{count,total}` | per-stage timing in seconds. `index_write` is the whole write and contains `index_acquire` (pool acquire) and, on an event loop's first write, `index_connect` (pool creation + preflight); `total` is the whole artifact step. The former `index_lookup` stage and `index_lookup*` counters are gone with the lookup |
 | `last_error` | last artifact error `{ts, stage, exc}` |
 
 `GET /cache/stats` → `asset_mirror`: `enabled`, `source`, `disabled_reason`, `manifest_version`, `provider`,
@@ -330,7 +340,9 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 mirror_fetch_error, mirror_breaker_open, candidates_exhausted, birthday_fallback, vanished}`.
 
 Every image response also logs one `image.response` line with `artifact=0|1|store0|degraded`,
-`missing_assets=N`, and, depending on the branch, `hash= reused= index_written= upload=` or `reason=`.
+`missing_assets=N`, and, depending on the branch, `hash= reused= index_written= upload=` or `reason=`. Artifact
+and degraded lines also carry `stages=hash:0.0006,upload:0.0213,index_write:0.0588,index_acquire:0.0000,total:0.0815`
+(seconds per sub-stage of that request, same names as `stages` above).
 
 ## 6. Index (PostgreSQL) — Cloud owns the DDL
 
@@ -340,11 +352,18 @@ Drawing never ships or runs schema changes. Cloud's `renderIndexDDL` is the cano
 `content_hash` FK to `image_cache_entries(hash)`, `api_path`, `user_id`, `group_name`, `key_version`,
 `ttl_seconds`, `expires_at`, `created_at`, `last_used_at`).
 
-Drawing runs exactly five statements (`src/index/sql.py`): two `LIMIT 0` preflights, a content lookup by
-hash, a content upsert, and a request upsert. The content upsert never changes the `cdn_path`, `size_bytes` or
-`media_type` of an existing `garage` row. It always sets `last_referenced_at = now()`, and merges `expires_at` as
-`GREATEST` with NULL meaning infinite. If the schema is missing, preflight classifies it as `schema_missing`,
-backs off for `connect_retry_seconds`, and uploads continue with `index_written=false`.
+Drawing runs exactly three statements (`src/index/sql.py`): two `LIMIT 0` preflights (once per event loop) and
+`RECORD`, the whole index write as **one** statement: a CTE that upserts the `image_cache_entries` row and a CTE
+that upserts the `render_cache_index` row, atomic without BEGIN/COMMIT and one round trip on a warm pool. The two
+CTEs are the former `UPSERT_CONTENT` and `UPSERT_REQUEST` statements verbatim, so the rows are identical to what the
+two-statement transaction wrote (pinned by `tests/test_index_sql.py`, and checked against a real PostgreSQL by
+`tests/test_index_record_pg.py` with `HARUKI_TEST_PG_DSN`). The content upsert never changes the `cdn_path`,
+`size_bytes` or `media_type` of an existing `garage` row. It always sets `last_referenced_at = now()`, and merges
+`expires_at` as `GREATEST` with NULL meaning infinite. `RECORD` returns the stored row and its prior
+`storage_backend`, which is how a dedup hit is detected. Pooled connections skip asyncpg's per-release session
+reset (`pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`): Drawing never sets session state, and an
+open transaction is still rolled back by asyncpg. If the schema is missing, preflight classifies it as
+`schema_missing`, backs off for `connect_retry_seconds`, and uploads continue with `index_written=false`.
 
 ## 7. Garbage collection — owned by Cloud
 

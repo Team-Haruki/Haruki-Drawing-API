@@ -9,6 +9,7 @@ from src.index.protocols import (
     IndexSchemaError,
     IndexUnavailable,
     IndexWriteFailed,
+    RecordResult,
     RenderIndex,
     RequestRow,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "IndexSchemaError",
     "IndexUnavailable",
     "IndexWriteFailed",
+    "RecordResult",
     "RenderIndex",
     "RequestRow",
 ]

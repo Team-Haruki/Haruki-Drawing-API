@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import json
 import logging
+import re
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from src.core import debug, utils as core_utils
 from src.core.image_payload import EncodedImagePayload
 from src.core.utils import encoded_image_payload_to_bytes_response, encoded_image_payload_to_response
 from src.settings import settings
+from src.storage.protocols import StorageUnavailable
 from tests.storage_fakes import FakeObjectStore, FakeRenderIndex, build_test_runtime
 
 PNG_LIKE = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 8
@@ -176,6 +178,20 @@ def test_upload_failure_degrades_to_bytes() -> None:
     assert _bodies(sent)[0]["body"] == PNG_LIKE
 
 
+def test_degraded_line_carries_the_artifact_stages(caplog: pytest.LogCaptureFixture) -> None:
+    store = FakeObjectStore(bucket="image-cache", fail=StorageUnavailable("down"))
+    set_artifact_runtime(build_test_runtime(store=store, index=FakeRenderIndex()))
+    caplog.set_level(logging.INFO, logger="src.core.utils")
+
+    _drive(_exit(_payload(), _directive()))
+
+    lines = _response_lines(caplog)
+    assert len(lines) == 1
+    match = re.search(r" artifact=degraded reason=upload_failed stages=(\S+) ", lines[0])
+    assert match is not None
+    assert [part.split(":")[0] for part in match.group(1).split(",")] == ["hash", "upload", "total"]
+
+
 def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCaptureFixture) -> None:
     store = FakeObjectStore(bucket="image-cache")
     index = FakeRenderIndex()
@@ -197,10 +213,19 @@ def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCap
     assert document["node_name"] == "cn-exit"
     assert document["object_key"].startswith("pjsk/api/pjsk/honor/")
     assert store.writes == [(document["object_key"], len(PNG_LIKE), "image/png")]
-    assert [name for name, _ in index.calls] == ["lookup_content", "record"]
+    assert [name for name, _ in index.calls] == ["record"]
     lines = _response_lines(caplog)
     assert len(lines) == 1
     assert f" artifact=1 hash={document['hash']} reused=0 index_written=1 upload=" in lines[0]
+    stages = re.search(r" stages=(\S+) ", lines[0])
+    assert stages is not None
+    assert [part.split(":")[0] for part in stages.group(1).split(",")] == [
+        "hash",
+        "upload",
+        "index_write",
+        "index_acquire",
+        "total",
+    ]
     assert " missing_assets=0 " in lines[0]
     assert artifact_stats_mod.get_artifact_stats()["published"] == 1
 

@@ -19,13 +19,11 @@ SIMPLE_COUNTERS: tuple[str, ...] = (
     "published",
     "reused",
     "reused_foreign",
+    "reused_unrecorded_objects",
     "uploads",
     "upload_bytes",
     "upload_failures",
     "upload_timeouts",
-    "index_lookups",
-    "index_lookup_hits",
-    "index_lookup_errors",
     "index_writes",
     "index_write_failures",
 )
@@ -38,7 +36,9 @@ DEGRADED_REASONS: tuple[str, ...] = (
     "unsupported_media",
     "internal",
 )
-STAGES: tuple[str, ...] = ("hash", "index_lookup", "upload", "index_write")
+# `index_write` is the whole write and contains `index_acquire` (pool acquire) and, on an event loop's first
+# write, `index_connect` (pool creation + preflight). `total` is the whole artifact step of one request.
+STAGES: tuple[str, ...] = ("hash", "upload", "index_connect", "index_acquire", "index_write", "total")
 
 _node_name_lock = threading.Lock()
 _node_name: str | None = None

@@ -9,6 +9,10 @@ An asyncpg pool belongs to the loop that created it, and one process runs severa
 the request loops), so each running loop gets its own pool, lock and preflight. The backoff window and the
 stats stay shared across loops.
 
+A write is one round trip on a warm pool: `RECORD` is a single statement (no BEGIN/COMMIT), the pool keeps
+`pool_min_size` connections open for `pool_max_inactive_seconds` (0 = forever), and a released connection is
+not sent asyncpg's session-reset query (see `_skip_session_reset`).
+
 The DSN password never reaches a log record or a `repr`: every rendering goes through `dsn_redacted()`.
 """
 
@@ -23,8 +27,15 @@ import time
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
-from src.index.protocols import ContentRow, IndexSchemaError, IndexUnavailable, IndexWriteFailed, RequestRow
-from src.index.sql import PREFLIGHT_CONTENT, PREFLIGHT_REQUEST, SELECT_CONTENT, UPSERT_CONTENT, UPSERT_REQUEST
+from src.index.protocols import (
+    ContentRow,
+    IndexSchemaError,
+    IndexUnavailable,
+    IndexWriteFailed,
+    RecordResult,
+    RequestRow,
+)
+from src.index.sql import PREFLIGHT_CONTENT, PREFLIGHT_REQUEST, RECORD
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.settings import IndexSettings
@@ -93,6 +104,18 @@ def dsn_redacted(dsn: str) -> str:
     return f"{prefix}{location}/{fields.get('dbname', '')}"
 
 
+async def _skip_session_reset(connection: Any) -> None:
+    """The pool's `reset=` hook: nothing to undo, so no round trip on release.
+
+    asyncpg's default reset sends `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;` every time
+    a connection goes back to the pool — one extra round trip (~50 ms to CN08) inside every `async with acquire()`.
+    Drawing's connections never take advisory locks, DECLARE cursors, LISTEN or SET anything: they only run the
+    `LIMIT 0` preflights and `RECORD`, each an autocommit statement. asyncpg still rolls back a transaction left
+    open (a cancelled statement) before calling this hook, and still terminates the connection if that fails.
+    """
+    return None
+
+
 async def _asyncpg_pool_factory(dsn: str, **kwargs: Any) -> Any:
     import asyncpg  # lazy by design: importing src.index never imports the wheel
 
@@ -137,7 +160,6 @@ class AsyncpgRenderIndex:
             "schema_missing": 0,
             "unavailable": 0,
             "backoff_skips": 0,
-            "lookups": 0,
             "records": 0,
             "write_failures": 0,
         }
@@ -260,6 +282,8 @@ class AsyncpgRenderIndex:
                 max_size=self._settings.pool_max_size,
                 timeout=self._settings.connect_timeout_seconds,
                 command_timeout=self._settings.command_timeout_seconds,
+                max_inactive_connection_lifetime=max(0.0, float(self._settings.pool_max_inactive_seconds)),
+                reset=_skip_session_reset,
             )
         except Exception as exc:
             if _is_schema_error(exc):
@@ -282,70 +306,62 @@ class AsyncpgRenderIndex:
         slot.ready = True
         self.stats["preflight_ok"] += 1
 
-    async def _ensure_ready(self) -> Any:
+    async def _ensure_ready(self) -> tuple[Any, float]:
+        """The loop's pool, and the seconds spent creating it and running the preflight (`0.0` when ready)."""
         self._check_backoff()
         slot = self._loop_slot()
         if slot.ready:
-            return slot.pool
+            return slot.pool, 0.0
+        started = time.perf_counter()
         async with slot.lock:
             self._check_backoff()
             if not slot.ready:
                 await self._run_preflight(slot)
-        return slot.pool
+        return slot.pool, time.perf_counter() - started
 
     async def preflight(self) -> None:
         await self._ensure_ready()
 
     # ------------------------------------------------------------------ protocol
 
-    async def lookup_content(self, content_hash: str) -> ContentRow | None:
-        pool = await self._ensure_ready()
-        self.stats["lookups"] += 1
-        try:
-            async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
-                row = await conn.fetchrow(SELECT_CONTENT, content_hash)
-        except Exception as exc:
-            raise self._classify(exc, "lookup", write=False) from None
-        if row is None:
-            return None
-        return ContentRow(
-            hash=row["hash"],
-            group_name=row["group_name"],
-            cdn_path=row["cdn_path"],
-            storage_backend=row["storage_backend"],
-            media_type=row["media_type"],
-            size_bytes=row["size_bytes"],
-            expires_at=row["expires_at"],
-        )
-
-    async def record(self, content: ContentRow, request: RequestRow) -> None:
-        pool = await self._ensure_ready()
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
+        pool, connect_seconds = await self._ensure_ready()
         self.stats["records"] += 1
         try:
+            started = time.perf_counter()
             async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
-                async with conn.transaction():
-                    await conn.execute(
-                        UPSERT_CONTENT,
-                        content.hash,
-                        content.group_name,
-                        content.cdn_path,
-                        content.size_bytes,
-                        content.media_type,
-                        content.expires_at,
-                    )
-                    await conn.execute(
-                        UPSERT_REQUEST,
-                        request.request_key,
-                        request.content_hash,
-                        request.api_path,
-                        request.user_id,
-                        request.group_name,
-                        request.key_version,
-                        request.ttl_seconds,
-                        request.expires_at,
-                    )
+                acquire_seconds = time.perf_counter() - started
+                row = await conn.fetchrow(
+                    RECORD,
+                    content.hash,
+                    content.group_name,
+                    content.cdn_path,
+                    content.size_bytes,
+                    content.media_type,
+                    content.expires_at,
+                    request.request_key,
+                    request.content_hash,
+                    request.api_path,
+                    request.user_id,
+                    request.group_name,
+                    request.key_version,
+                    request.ttl_seconds,
+                    request.expires_at,
+                )
         except Exception as exc:
             raise self._classify(exc, "record", write=True) from None
+        if row is None:  # not reached: ON CONFLICT DO UPDATE returns the row; fall back to what was sent
+            return RecordResult(
+                content.cdn_path, content.media_type, content.size_bytes, None, acquire_seconds, connect_seconds
+            )
+        return RecordResult(
+            cdn_path=row["cdn_path"],
+            media_type=row["media_type"],
+            size_bytes=row["size_bytes"],
+            prior_backend=row["prior_backend"],
+            acquire_seconds=acquire_seconds,
+            connect_seconds=connect_seconds,
+        )
 
     async def close(self) -> None:
         self._closed = True

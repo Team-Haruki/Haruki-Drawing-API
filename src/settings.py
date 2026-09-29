@@ -369,8 +369,13 @@ class IndexSettings(BaseModel):
 
     enabled: bool = True  # empty dsn == disabled (uploads still happen)
     dsn: SecretStr | None = None  # ENV ONLY — from_yaml drops a YAML value with a WARNING
-    pool_min_size: int = 0
+    # Per event loop. One warm connection saves the ~4-RTT connect on the first write after an idle gap.
+    pool_min_size: int = 1
     pool_max_size: int = 4
+    # asyncpg closes a connection idle this long (its default is 300 s, which made a quiet worker reconnect on
+    # its next write); 0 keeps idle connections open. It applies to every pooled connection, so the steady
+    # state is the peak concurrent index writes per loop, bounded by pool_max_size.
+    pool_max_inactive_seconds: float = 0.0
     connect_timeout_seconds: float = 2.0
     command_timeout_seconds: float = 2.0
     connect_retry_seconds: float = 30.0

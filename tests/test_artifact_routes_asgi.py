@@ -147,7 +147,8 @@ def test_artifact_mode_returns_the_ref_and_writes_both_rows() -> None:
     reused = second.json()
     assert reused["reused"] is True
     assert reused["cdn_path"] == ref["cdn_path"]
-    assert len(store.writes) == 1
+    # No pre-upload lookup: the identical bytes are re-put under the same content-addressed key.
+    assert [key for key, _, _ in store.writes] == [ref["object_key"], ref["object_key"]]
 
     artifacts = stats.json()["artifacts"]
     assert artifacts["requests_with_directive"] == 2
