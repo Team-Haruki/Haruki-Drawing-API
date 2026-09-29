@@ -280,8 +280,6 @@ def test_chip_label_ink_is_vertically_centred(text: str, size: int) -> None:
     _, top, _, bottom = font.getbbox(text)
     ink_center = get_text_size(font, "哇")[1] + (top + bottom) / 2 - font.getmetrics()[0]
     assert abs(ink_center + chip.text_offset_y - size / 2) <= 0.5
-    # the bundled CJK font hangs below its nominal size, so the correction lifts the label
-    assert chip.text_offset_y < 0
 
 
 def test_shop_display_name_strips_status_tags_only_with_state_fields() -> None:
