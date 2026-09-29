@@ -348,3 +348,87 @@ def test_mission_section_builds_standard_and_ex_display_rows(monkeypatch: pytest
     assert ex["reached_seq"] == 2
     assert ex["display_rows"][1]["acc_requirement"] == 30
     assert ex["current_round_no"] == 2
+
+
+def _area_item_56_rows(level: int) -> list[dict]:
+    rate = 0.5 * level
+    return [
+        {"areaItemId": 56, "level": level, "targetUnit": "any", "targetCardAttr": "any", "power1BonusRate": rate},
+        {
+            "areaItemId": 56,
+            "level": level,
+            "targetUnit": "multi_unit",
+            "targetCardAttr": "any",
+            "power1BonusRate": rate,
+        },
+    ]
+
+
+def test_power_bonus_splits_all_character_and_multi_unit_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        payloads,
+        "MD",
+        _FakeMasterData({"areaItemLevels": _area_item_56_rows(1) + _area_item_56_rows(2) + _area_item_56_rows(3)}),
+    )
+    monkeypatch.setattr(payloads, "SUITE", {"userAreas": [{"areaItems": [{"areaItemId": 56, "level": 3}]}]})
+    chara, unit, attr = payloads._empty_power_bonuses()
+
+    multi_unit_bonus = payloads._apply_area_item_power_bonus({56: 2}, chara, unit, attr)
+
+    assert multi_unit_bonus == 1.0  # capped at level 2
+    assert all(bonuses["area_item"] == 1.0 for bonuses in chara.values())
+    assert all(bonuses["area_item"] == 0.0 for bonuses in unit.values())
+    assert all(bonuses["area_item"] == 0.0 for bonuses in attr.values())
+
+
+def test_power_bonus_without_multi_unit_rows_reports_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        payloads,
+        "MD",
+        _FakeMasterData(
+            {"areaItemLevels": [{"areaItemId": 1, "level": 1, "power1BonusRate": 1.0, "targetGameCharacterId": 1}]}
+        ),
+    )
+    monkeypatch.setattr(payloads, "SUITE", {"userAreas": [{"areaItems": [{"areaItemId": 1, "level": 1}]}]})
+    chara, unit, attr = payloads._empty_power_bonuses()
+
+    assert payloads._apply_area_item_power_bonus({}, chara, unit, attr) is None
+    assert chara[1]["area_item"] == 1.0
+    assert chara[2]["area_item"] == 0.0
+
+
+def test_area_item_level_infos_emit_multi_unit_bonus_only_for_multi_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(payloads, "_material_icon", lambda resource_type, resource_id: f"{resource_type}:{resource_id}")
+    rows = payloads._area_item_level_infos(
+        _area_item_56_rows(1) + _area_item_56_rows(2),
+        {},
+        current=2,
+        min_current=0,
+        max_visible=2,
+        materials={},
+    )
+    plain = payloads._area_item_level_infos(
+        [{"level": 1, "power1BonusRate": 1.0, "targetGameCharacterId": 3}],
+        {},
+        current=1,
+        min_current=0,
+        max_visible=1,
+        materials={},
+    )
+
+    assert [(row["bonus"], row["multi_unit_bonus"]) for row in rows] == [(0.5, 0.5), (1.0, 1.0)]
+    assert "multi_unit_bonus" not in plain[0]
+
+
+def test_area_item_info_labels_all_character_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(payloads.ASSETS, "region_asset", lambda path: path, raising=False)
+    monkeypatch.setattr(payloads, "_material_icon", lambda resource_type, resource_id: f"{resource_type}:{resource_id}")
+    master = {"assetbundleName": "areaitem2701"}
+    info = payloads._area_item_info((56, master, _area_item_56_rows(1), 1, 1), 0, {}, {})
+    unit_info = payloads._area_item_info(
+        (7, master, [{"level": 1, "power1BonusRate": 1.0, "targetUnit": "idol"}], 1, 1), 0, {}, {}
+    )
+
+    assert info["target_label"] == "全角色"
+    assert "target_icon_path" not in info
+    assert "target_label" not in unit_info

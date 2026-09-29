@@ -804,6 +804,26 @@ def _normalize_unit(unit: str) -> str:
     }.get(unit, unit)  # fmt: skip
 
 
+# JP 7.0.0 (area item 56): a level may carry a second row whose targetUnit is "multi_unit" — a
+# conditional bonus that applies when the deck has two or more units. It is never a unit key.
+_MULTI_UNIT_TARGET = "multi_unit"
+_ALL_CHARACTERS_LABEL = "全角色"
+
+
+def _is_multi_unit_row(row: dict) -> bool:
+    return str(row.get("targetUnit", "") or "").strip().lower() == _MULTI_UNIT_TARGET
+
+
+def _is_all_character_row(row: dict) -> bool:
+    """An unconditional row with no character / unit / attribute target: it boosts every character."""
+    return (
+        not _is_multi_unit_row(row)
+        and row.get("targetGameCharacterId", 0) <= 0
+        and not _normalize_unit(row.get("targetUnit", ""))
+        and not _normalize_attr(row.get("targetCardAttr", ""))
+    )
+
+
 def _normalize_attr(attr: str) -> str:
     attr = (attr or "").strip().lower()
     return "" if attr in ("", "any") else attr
@@ -1145,6 +1165,12 @@ def _apply_area_power_row(
     attr: dict[str, dict],
 ) -> None:
     bonus = row.get("power1BonusRate", 0.0)
+    if _is_multi_unit_row(row):
+        return  # conditional; reported separately as multi_unit_bonus
+    if _is_all_character_row(row):
+        for bonuses in chara.values():
+            bonuses["area_item"] += bonus
+        return
     character_id = row.get("targetGameCharacterId", 0)
     if character_id > 0 and character_id in chara:
         chara[character_id]["area_item"] += bonus
@@ -1161,11 +1187,20 @@ def _apply_area_item_power_bonus(
     chara: dict[int, dict],
     unit: dict[str, dict],
     attr: dict[str, dict],
-) -> None:
-    level_rows = {(level["areaItemId"], level["level"]): level for level in MD.get("areaItemLevels")}
+) -> float | None:
+    """Apply unconditional area-item rows; return the multi-unit total, or None when no such row applies."""
+    level_rows: dict[tuple[int, int], dict] = {}
+    multi_rows: dict[tuple[int, int], dict] = {}
+    for level in MD.get("areaItemLevels"):
+        target = multi_rows if _is_multi_unit_row(level) else level_rows
+        target[(level["areaItemId"], level["level"])] = level
+    multi_unit_bonus: float | None = None
     for item in _user_area_items():
         if row := _area_power_level_row(item, caps, level_rows):
             _apply_area_power_row(row, chara, unit, attr)
+        if multi := _area_power_level_row(item, caps, multi_rows):
+            multi_unit_bonus = (multi_unit_bonus or 0.0) + multi.get("power1BonusRate", 0.0)
+    return multi_unit_bonus
 
 
 def _apply_character_power_bonuses(chara: dict[int, dict]) -> None:
@@ -1236,7 +1271,7 @@ def build_education_power_bonus() -> str:
     item_ids = sorted(user_levels)
     caps = _released_caps(item_ids, _area_shop_items(item_ids, NOW_MS))
     chara, unit, attr = _empty_power_bonuses()
-    _apply_area_item_power_bonus(caps, chara, unit, attr)
+    multi_unit_bonus = _apply_area_item_power_bonus(caps, chara, unit, attr)
     _apply_character_power_bonuses(chara)
     _apply_gate_power_bonuses(unit)
 
@@ -1247,6 +1282,8 @@ def build_education_power_bonus() -> str:
         "attr_bonuses": _attr_power_rows(attr),
         "dt": NOW_MS,
     }
+    if multi_unit_bonus is not None:
+        body["multi_unit_bonus"] = multi_unit_bonus
     return _emit("education_power_bonus", PowerBonusDetailRequest, body)
 
 
@@ -1308,6 +1345,7 @@ def _area_item_level_info(
     shop_item: dict | None,
     sum_materials: dict[int, int],
     materials: dict[int, int],
+    multi_row: dict | None = None,
 ) -> dict:
     if not row_master:
         return {"level": level, "bonus": 0.0, "can_upgrade": False, "materials": []}
@@ -1317,6 +1355,8 @@ def _area_item_level_info(
         "can_upgrade": True,
         "materials": [],
     }
+    if multi_row is not None:
+        row["multi_unit_bonus"] = multi_row.get("power1BonusRate", 0.0)
     if level <= current:
         return row
     if not shop_item:
@@ -1337,7 +1377,8 @@ def _area_item_level_infos(
     max_visible: int,
     materials: dict[int, int],
 ) -> list[dict]:
-    level_map = {level["level"]: level for level in levels}
+    level_map = {level["level"]: level for level in levels if not _is_multi_unit_row(level)}
+    multi_map = {level["level"]: level for level in levels if _is_multi_unit_row(level)}
     sum_materials: dict[int, int] = {}
     return [
         _area_item_level_info(
@@ -1347,6 +1388,7 @@ def _area_item_level_infos(
             shop_levels.get(level),
             sum_materials,
             materials,
+            multi_map.get(level),
         )
         for level in range(min_current + 1, max_visible + 1)
     ]
@@ -1375,6 +1417,9 @@ def _area_item_info(
     }
     if target := _area_item_target_icon(levels):
         info["target_icon_path"] = target
+    base_rows = [level for level in levels if not _is_multi_unit_row(level)]
+    if base_rows and all(_is_all_character_row(level) for level in base_rows):
+        info["target_label"] = _ALL_CHARACTERS_LABEL
     return info
 
 

@@ -521,3 +521,125 @@ def test_asset_load_helpers_handle_empty_and_optional_paths(isolated_assets: Non
     assert isinstance(loaded[0], Image.Image)
     assert loaded[1] is None
     assert isinstance(loaded[2], Image.Image)
+
+
+def _area_item(**extra) -> SimpleNamespace:
+    levels = [
+        SimpleNamespace(level=1, bonus=0.5, can_upgrade=True, materials=[], **extra.pop("level_extra", {})),
+        SimpleNamespace(
+            level=2,
+            bonus=1.0,
+            can_upgrade=True,
+            materials=[
+                SimpleNamespace(
+                    material_icon_path="material-a.png",
+                    quantity=10,
+                    have_quantity=20,
+                    sum_quantity=10,
+                    is_enough=True,
+                )
+            ],
+            **extra.pop("level2_extra", {}),
+        ),
+    ]
+    return SimpleNamespace(
+        item_icon_path="item.png",
+        target_icon_path=extra.pop("target_icon_path", None),
+        current_level=1,
+        levels=levels,
+        **extra,
+    )
+
+
+def _render_bytes(canvas: Canvas) -> bytes:
+    image = asyncio.run(canvas.get_img())
+    return image.tobytes()
+
+
+def test_area_item_absent_new_fields_render_identically_to_legacy(isolated_assets: None) -> None:
+    legacy = SimpleNamespace(profile=_profile(), area_items=[_area_item()], has_profile=True)
+    explicit_none = SimpleNamespace(
+        profile=_profile(),
+        area_items=[
+            _area_item(
+                target_label=None,
+                level_extra={"multi_unit_bonus": None},
+                level2_extra={"multi_unit_bonus": None},
+            )
+        ],
+        has_profile=True,
+    )
+
+    legacy_canvas = asyncio.run(drawer._build_area_item_upgrade_materials_canvas(legacy))
+    none_canvas = asyncio.run(drawer._build_area_item_upgrade_materials_canvas(explicit_none))
+
+    assert _texts(legacy_canvas) == _texts(none_canvas)
+    assert _render_bytes(legacy_canvas) == _render_bytes(none_canvas)
+
+
+def test_area_item_renders_target_label_and_multi_unit_bonus(isolated_assets: None) -> None:
+    item = _area_item(
+        target_icon_path="target.png",
+        target_label="全角色",
+        level_extra={"multi_unit_bonus": 0.5},
+        level2_extra={"multi_unit_bonus": 1.0},
+    )
+    header = drawer._build_area_item_header(item, {"target.png": object(), "item.png": object()})
+    header_kinds = [type(widget).__name__ for widget in header.items]
+    label_index = next(i for i, w in enumerate(header.items) if isinstance(w, TextBox) and w.text == "全角色")
+
+    assert header_kinds[0] == "ImageBox"  # target icon first
+    assert label_index == 1  # label between target icon and item icon
+    assert header_kinds[2] == "ImageBox"
+
+    request = SimpleNamespace(profile=_profile(), area_items=[item], has_profile=True)
+    canvas = asyncio.run(drawer._build_area_item_upgrade_materials_canvas(request))
+    texts = _texts(canvas)
+    assert {"全角色", "+0.5%", "多团+0.5%", "+1.0%", "多团+1.0%"}.issubset(texts)
+
+
+def _power_request(**extra) -> SimpleNamespace:
+    return SimpleNamespace(
+        profile=_profile(),
+        chara_bonuses=[
+            SimpleNamespace(chara_icon_path="chara.png", total=3.5, area_item=1.5, rank=1.0, fixture=1.0),
+        ],
+        unit_bonuses=[SimpleNamespace(unit_icon_path="unit.png", total=4.0, area_item=1.0, gate=3.0)],
+        attr_bonuses=[SimpleNamespace(attr_icon_path="attr.png", total=5.0)],
+        **extra,
+    )
+
+
+def test_power_bonus_multi_unit_row_only_when_present(isolated_assets: None) -> None:
+    legacy = asyncio.run(drawer._build_power_bonus_detail_canvas(_power_request()))
+    explicit_none = asyncio.run(drawer._build_power_bonus_detail_canvas(_power_request(multi_unit_bonus=None)))
+    present = asyncio.run(drawer._build_power_bonus_detail_canvas(_power_request(multi_unit_bonus=10.0)))
+
+    assert _texts(legacy) == _texts(explicit_none)
+    assert _render_bytes(legacy) == _render_bytes(explicit_none)
+    assert "混合编成(2种以上组合) +10.0%" not in _texts(legacy)
+    assert _texts(present)[-1] == "混合编成(2种以上组合) +10.0%"
+
+
+def test_education_models_accept_optional_area_item_56_fields() -> None:
+    from src.sekai.education.model import AreaItemInfo, AreaItemLevel, PowerBonusDetailRequest
+
+    level = AreaItemLevel(level=1, bonus=0.5, can_upgrade=True, materials=[])
+    assert level.multi_unit_bonus is None
+    assert (
+        AreaItemLevel.model_validate(
+            {"level": 3, "bonus": 1.5, "multi_unit_bonus": 1.5, "can_upgrade": True, "materials": []}
+        ).multi_unit_bonus
+        == 1.5
+    )
+
+    info = AreaItemInfo(item_id=56, current_level=1, item_icon_path="item.png", levels=[level])
+    assert info.target_label is None
+    assert (
+        AreaItemInfo.model_validate(
+            {"item_id": 56, "current_level": 1, "item_icon_path": "i.png", "levels": [], "target_label": "全角色"}
+        ).target_label
+        == "全角色"
+    )
+    assert "multi_unit_bonus" in PowerBonusDetailRequest.model_fields
+    assert PowerBonusDetailRequest.model_fields["multi_unit_bonus"].default is None
