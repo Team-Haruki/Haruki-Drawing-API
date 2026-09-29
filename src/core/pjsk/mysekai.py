@@ -5,10 +5,17 @@ from fastapi import APIRouter, HTTPException
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
+from src.sekai.mysekai.content_drawer import (
+    try_render_mysekai_blueprint_term_payload,
+    try_render_mysekai_bulk_harvest_payload,
+    try_render_mysekai_shop_payload,
+)
 from src.sekai.mysekai.housing_drawer import (
     try_render_mysekai_housing_competition_payload,
 )
 from src.sekai.mysekai.model import (
+    MysekaiBlueprintTermRequest,
+    MysekaiBulkHarvestRequest,
     MysekaiDoorUpgradeRequest,
     MysekaiFixtureDetailRequest,
     MysekaiFixtureListRequest,
@@ -16,6 +23,7 @@ from src.sekai.mysekai.model import (
     MysekaiMsrMapRequest,
     MysekaiMusicrecordRequest,
     MysekaiResourceRequest,
+    MysekaiShopRequest,
     MysekaiTalkListRequest,
 )
 
@@ -171,4 +179,52 @@ async def mysekai_housing_competition(request: MysekaiHousingCompetitionRequest)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_housing_competition render failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/shop",
+    summary="Generate MySekai shop image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
+async def mysekai_shop(request: MysekaiShopRequest):
+    """Generate the MySekai material/tool shop list (JP 7.0.0+)."""
+    try:
+        payload = await try_render_mysekai_shop_payload(request)
+        payload = require_native_payload(payload)
+        return await encoded_image_payload_to_response(payload)
+    except Exception as e:
+        _logger.exception("mysekai_shop render failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/bulk-harvest",
+    summary="Generate MySekai bulk harvest target image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
+async def mysekai_bulk_harvest(request: MysekaiBulkHarvestRequest):
+    """Generate the per-site bulk harvest target groups (JP 7.0.0+)."""
+    try:
+        payload = await try_render_mysekai_bulk_harvest_payload(request)
+        payload = require_native_payload(payload)
+        return await encoded_image_payload_to_response(payload)
+    except Exception as e:
+        _logger.exception("mysekai_bulk_harvest render failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/blueprint-term",
+    summary="Generate MySekai blueprint term tab image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
+async def mysekai_blueprint_term(request: MysekaiBlueprintTermRequest):
+    """Generate the limited-term / birthday-anniversary blueprint tabs (JP 7.0.0+)."""
+    try:
+        payload = await try_render_mysekai_blueprint_term_payload(request)
+        payload = require_native_payload(payload)
+        return await encoded_image_payload_to_response(payload)
+    except Exception as e:
+        _logger.exception("mysekai_blueprint_term render failed")
         raise HTTPException(status_code=500, detail=str(e))

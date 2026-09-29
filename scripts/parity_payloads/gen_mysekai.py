@@ -1,4 +1,4 @@
-"""Real-payload generator for the mysekai domain (8 endpoints).
+"""Real-payload generator for the mysekai domain (11 endpoints).
 
 Offline replica of Haruki-Cloud's ``internal/pjsk/render/mysekai`` Build*
 functions (see ``out/payload-specs/mysekai.md`` for the field-by-field spec,
@@ -28,6 +28,8 @@ sys.path.insert(0, str(_HERE.parents[1]))
 import common
 
 from src.sekai.mysekai.model import (
+    MysekaiBlueprintTermRequest,
+    MysekaiBulkHarvestRequest,
     MysekaiDoorUpgradeRequest,
     MysekaiFixtureDetailRequest,
     MysekaiFixtureListRequest,
@@ -35,6 +37,7 @@ from src.sekai.mysekai.model import (
     MysekaiMsrMapRequest,
     MysekaiMusicrecordRequest,
     MysekaiResourceRequest,
+    MysekaiShopRequest,
     MysekaiTalkListRequest,
 )
 
@@ -1401,27 +1404,54 @@ def build_fixture_details() -> list[dict]:
 # Endpoint 5: /api/pjsk/mysekai/door-upgrade (door_upgrade_builder.go:11-178)
 # ---------------------------------------------------------------------------
 
-_GATE_MAX_LEVEL = 40
+# Only used when the masterdata carries no gate level at all. The real cap comes from the data:
+# JP 7.0.0 raised it from 40 to 70, and other regions move on their own schedule.
+_GATE_MAX_LEVEL_FALLBACK = 70
 
 
-def _gate_materials_by_id() -> dict[int, list[list[dict]]]:
-    gate_temp: dict[int, list[list[dict]]] = {}
+def _gate_max_level(material_group_levels: list[int] | None = None) -> int:
+    """Highest gate level in the masterdata (``mysekaiGateLevels``, else the material groups)."""
+
+    try:
+        gate_levels = MD.get("mysekaiGateLevels") or []
+    except FileNotFoundError:  # older masterdata snapshots without the table
+        gate_levels = []
+    levels = [int(item.get("level", 0) or 0) for item in gate_levels]
+    levels.extend(material_group_levels or [])
+    levels = [level for level in levels if level > 0]
+    return max(levels) if levels else _GATE_MAX_LEVEL_FALLBACK
+
+
+def _gate_materials_by_id() -> tuple[dict[int, list[list[dict]]], int]:
+    """Per-gate material lists indexed by ``level - 1``, plus the data-derived max gate level."""
+
+    rows = []
     for item in MD.get("mysekaiGateMaterialGroups"):
         group_id = int(item.get("groupId", 0))
         gate_id, level = group_id // 1000, group_id % 1000
-        if not group_id or not gate_id or not 1 <= level <= _GATE_MAX_LEVEL:
+        if not group_id or not gate_id or level < 1:
             continue
-        gate_temp.setdefault(gate_id, [[] for _ in range(_GATE_MAX_LEVEL)])
+        rows.append((gate_id, level, item))
+    max_level = _gate_max_level([level for _gate_id, level, _item in rows])
+    gate_temp: dict[int, list[list[dict]]] = {}
+    for gate_id, level, item in rows:
+        if level > max_level:
+            continue
+        gate_temp.setdefault(gate_id, [[] for _ in range(max_level)])
         gate_temp[gate_id][level - 1].append(
             {"material_id": int(item.get("mysekaiMaterialId", 0)), "quantity": int(item.get("quantity", 0))}
         )
-    return gate_temp
+    return gate_temp, max_level
 
 
 def _selected_gate_materials(
-    gate_materials: dict[int, list[list[dict]]], spec_levels: dict[int, int]
+    gate_materials: dict[int, list[list[dict]]],
+    spec_levels: dict[int, int],
+    max_level: int = _GATE_MAX_LEVEL_FALLBACK,
 ) -> dict[int, list[list[dict]]]:
-    eligible = [(gate_id, level) for gate_id, level in sorted(spec_levels.items()) if 0 < level < _GATE_MAX_LEVEL]
+    """Pick the highest-level gate that is not yet at ``max_level`` (ties keep the lower gate id)."""
+
+    eligible = [(gate_id, level) for gate_id, level in sorted(spec_levels.items()) if 0 < level < max_level]
     if not eligible:
         return gate_materials
     gate_id, _ = max(eligible, key=lambda item: item[1])
@@ -1480,7 +1510,7 @@ def _gate_level_materials(
 
 
 def build_door_upgrade() -> dict:
-    """Default query: no gate id — picks the highest-level gate below 40 (suite-only)."""
+    """Default query: no gate id — picks the highest-level gate below its max level (suite-only)."""
     merged = dict(common.load_suite())  # suite-only path (handler/mysekai.go:603-607)
     user_materials = {
         int(item.get("mysekaiMaterialId", 0)): int(item.get("quantity", 0))
@@ -1491,7 +1521,8 @@ def build_door_upgrade() -> dict:
         for item in _nested_list(merged, "userMysekaiGates")
         if int(item.get("mysekaiGateId", 0))
     }
-    gate_temp = _selected_gate_materials(_gate_materials_by_id(), spec_levels)
+    all_gate_materials, max_level = _gate_materials_by_id()
+    gate_temp = _selected_gate_materials(all_gate_materials, spec_levels, max_level)
     material_icons = _icon_map("mysekaiMaterials", "iconAssetbundleName")
     gate_materials = [
         {
@@ -1989,6 +2020,287 @@ def build_housing_competition() -> dict:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Endpoints 9-11 (JP 7.0.0): /api/pjsk/mysekai/{shop,bulk-harvest,blueprint-term}
+#
+# Built from the 7.0.0 tables when the local masterdata has them; older snapshots (every region
+# before its 7.0.0 update) lack them, so a deterministic synthetic body is built from the tables
+# that do exist — the renderer only needs realistic names/icons/quantities.
+# ---------------------------------------------------------------------------
+
+
+def _optional_table(name: str) -> list[dict]:
+    try:
+        return list(MD.get(name) or [])
+    except FileNotFoundError:
+        return []
+
+
+def _user_material_quantities() -> dict[int, int]:
+    return {
+        int(item.get("mysekaiMaterialId", 0)): int(item.get("quantity", 0))
+        for item in _nested_list(dict(common.load_suite()), "userMysekaiMaterials")
+    }
+
+
+def _resource_path(resource_type: str, resource_id: int) -> str:
+    path, _has_record = _resource_image_path(f"{resource_type}_{resource_id}")
+    return path
+
+
+def _tool_image_path(tool: dict) -> str:
+    return ASSETS.region_asset(f"mysekai/thumbnail/tool/{tool.get('spriteName') or tool.get('assetbundleName')}.png")
+
+
+def _material_path(material_id: int) -> str:
+    return _resource_path("mysekai_material", material_id)
+
+
+def _real_shops(user_materials: dict[int, int]) -> list[dict]:
+    shops = sorted(_optional_table("mysekaiShops"), key=lambda row: (row.get("seq", 0), row["id"]))
+    if not shops:
+        return []
+    costs_by_shop: dict[int, list[dict]] = {}
+    for cost in _optional_table("mysekaiShopCosts"):
+        costs_by_shop.setdefault(int(cost.get("mysekaiShopId", 0)), []).append(cost)
+    boxes = {row["id"]: row for row in MD.get("resourceBoxes") if "mysekai" in str(row.get("resourceBoxPurpose", ""))}
+    user_counts = {
+        int(row.get("mysekaiShopId", 0)): int(row.get("count", 0))
+        for row in _nested_list(dict(common.load_suite()), "userMysekaiShops")
+    }
+    by_type: dict[str, list[dict]] = {}
+    for shop in shops:
+        details = (boxes.get(shop.get("resourceBoxId")) or {}).get("resourceBoxDetails") or []
+        if not details:
+            continue
+        detail = details[0]
+        costs = []
+        for cost in sorted(costs_by_shop.get(shop["id"], []), key=lambda row: row.get("seq", 0)):
+            resource_type, resource_id = cost.get("resourceType", ""), int(cost.get("resourceId", 0))
+            costs.append(
+                {
+                    "image_path": _resource_path(resource_type, resource_id),
+                    "quantity": int(cost.get("quantity", 0)),
+                    "have_quantity": user_materials.get(resource_id) if resource_type == "mysekai_material" else None,
+                }
+            )
+        limit_type = shop.get("mysekaiShopExchangeLimitType") or "none"
+        by_type.setdefault(shop.get("mysekaiShopType", "material"), []).append(
+            {
+                "id": shop["id"],
+                "image_path": _resource_path(detail.get("resourceType", ""), int(detail.get("resourceId", 0))),
+                "quantity": int(detail.get("resourceQuantity", 1)),
+                "costs": costs,
+                "exchange_limit_type": limit_type,
+                "exchange_limit_value": shop.get("mysekaiShopExchangeLimitValue") if limit_type != "none" else None,
+                "exchanged_count": user_counts.get(shop["id"], 0),
+            }
+        )
+    return [{"shop_type": shop_type, "items": items} for shop_type, items in by_type.items()]
+
+
+def _synthetic_shops(user_materials: dict[int, int]) -> list[dict]:
+    materials = sorted(MD.get("mysekaiMaterials"), key=lambda row: (row.get("seq", 0), row["id"]))[:7]
+    currency = materials[0]
+    material_items = []
+    for index, material in enumerate(materials[1:]):
+        pass_limited = index % 2 == 1
+        material_items.append(
+            {
+                "id": index + 1,
+                "name": material.get("name"),
+                "image_path": _material_path(material["id"]),
+                "quantity": 5 * (index + 1),
+                "costs": [
+                    {
+                        "image_path": _material_path(currency["id"]),
+                        "quantity": 50 * (index + 1),
+                        "have_quantity": user_materials.get(currency["id"], 0),
+                    }
+                ],
+                "exchange_limit_type": "limited_per_mysekai_colorful_pass" if pass_limited else "none",
+                "exchange_limit_value": 3 if pass_limited else None,
+                "exchanged_count": index % 4 if pass_limited else None,
+            }
+        )
+    tool_items = [
+        {
+            "id": 100 + tool["id"],
+            "name": tool.get("name"),
+            "image_path": _tool_image_path(tool),
+            "quantity": 1,
+            "costs": [{"image_path": _material_path(currency["id"]), "quantity": 200 * tool.get("toolLevel", 1)}],
+        }
+        for tool in sorted(MD.get("mysekaiTools"), key=lambda row: row.get("seq", 0))[:4]
+    ]
+    ISSUES.append("mysekai_shop: masterdata 无 mysekaiShops(7.0.0 前快照),使用合成商品")
+    return [
+        {"shop_type": "material", "items": material_items},
+        {"shop_type": "tool", "items": tool_items},
+    ]
+
+
+def build_shop() -> dict:
+    user_materials = _user_material_quantities()
+    shops = _real_shops(user_materials) or _synthetic_shops(user_materials)
+    return {"pass_active": True, "shops": shops}
+
+
+def _site_image_path(site_id: int) -> str | None:
+    config = _SITE_CONFIGS.get(site_id)
+    return ASSETS.static(f"mysekai/site/{config['name']}.png") if config else None
+
+
+def _real_bulk_sites(sites: dict[int, dict], tools: dict[int, dict]) -> list[dict]:
+    bulk = _optional_table("mysekaiSiteBulkHarvests")
+    if not bulk:
+        return []
+    targets = {row["id"]: row for row in _optional_table("mysekaiSiteBulkHarvestTargets")}
+    groups = {row["id"]: row for row in _optional_table("mysekaiSiteBulkHarvestTargetGroups")}
+    fixture_counts: dict[int, int] = {}
+    for fixture in MD.get("mysekaiSiteHarvestFixtures"):
+        target_id = int(fixture.get("mysekaiSiteBulkHarvestTargetId", 0) or 0)
+        if target_id:
+            fixture_counts[target_id] = fixture_counts.get(target_id, 0) + 1
+    by_site: dict[int, dict[int, list[dict]]] = {}
+    for row in bulk:
+        target = targets.get(int(row.get("mysekaiSiteBulkHarvestTargetId", 0)))
+        if not target:
+            continue
+        group_id = int(target.get("mysekaiSiteBulkHarvestTargetGroupId", 0))
+        by_site.setdefault(int(row.get("mysekaiSiteId", 0)), {}).setdefault(group_id, []).append(target)
+    result = []
+    for site_id in sorted(by_site):
+        site_groups = []
+        for group_id in sorted(by_site[site_id], key=lambda gid: (groups.get(gid, {}).get("seq", 0), gid)):
+            group = groups.get(group_id, {"id": group_id, "name": f"group {group_id}"})
+            tool = tools.get(int(group.get("requiredToolId", 0) or 0))
+            site_groups.append(
+                {
+                    "id": group_id,
+                    "name": group.get("name", ""),
+                    "required_tool_name": tool.get("name") if tool else None,
+                    "required_tool_image_path": _tool_image_path(tool) if tool else None,
+                    "targets": [
+                        {"id": t["id"], "name": t.get("name", ""), "fixture_count": fixture_counts.get(t["id"])}
+                        for t in sorted(by_site[site_id][group_id], key=lambda t: (t.get("seq", 0), t["id"]))
+                    ],
+                }
+            )
+        result.append(
+            {
+                "site_id": site_id,
+                "name": sites.get(site_id, {}).get("name", str(site_id)),
+                "image_path": _site_image_path(site_id),
+                "groups": site_groups,
+            }
+        )
+    return result
+
+
+_SYNTHETIC_BULK_GROUPS = (("wood", "axe", "木"), ("mineral", "pickaxe", "鉱石"), ("plant", None, "植物"))
+
+
+def _synthetic_bulk_sites(sites: dict[int, dict], tools: dict[int, dict]) -> list[dict]:
+    fixtures = MD.get("mysekaiSiteHarvestFixtures")
+    first_tool = {}
+    for tool in sorted(tools.values(), key=lambda row: (row.get("toolLevel", 0), row["id"])):
+        first_tool.setdefault(tool.get("mysekaiToolType"), tool)
+    groups = []
+    for index, (fixture_type, tool_type, name) in enumerate(_SYNTHETIC_BULK_GROUPS):
+        rows = [row for row in fixtures if row.get("mysekaiSiteHarvestFixtureType") == fixture_type][:6]
+        tool = first_tool.get(tool_type) if tool_type else None
+        groups.append(
+            {
+                "id": index + 1,
+                "name": name,
+                "required_tool_name": tool.get("name") if tool else None,
+                "required_tool_image_path": _tool_image_path(tool) if tool else None,
+                "targets": [
+                    {
+                        "id": row["id"],
+                        "name": row.get("assetbundleName", ""),
+                        "image_path": ASSETS.static(
+                            f"mysekai/harvest_fixture_icon/{row.get('mysekaiSiteHarvestFixtureRarityType')}/"
+                            f"{row.get('assetbundleName')}.png"
+                        ),
+                        "checked": position % 3 != 2,
+                        "fixture_count": 3 + position,
+                    }
+                    for position, row in enumerate(rows)
+                ],
+            }
+        )
+    ISSUES.append("mysekai_bulk_harvest: masterdata 无 mysekaiSiteBulkHarvests(7.0.0 前快照),使用合成分组")
+    return [
+        {
+            "site_id": site_id,
+            "name": sites.get(site_id, {}).get("name", str(site_id)),
+            "image_path": _site_image_path(site_id),
+            "groups": groups if site_id == 5 else groups[:1],
+        }
+        for site_id in (5, 6)
+    ]
+
+
+def build_bulk_harvest() -> dict:
+    sites = _md_map("mysekaiSites")
+    tools = _md_map("mysekaiTools")
+    return {"sites": _real_bulk_sites(sites, tools) or _synthetic_bulk_sites(sites, tools)}
+
+
+def build_blueprint_term() -> dict:
+    blueprints = _md_map("mysekaiBlueprints")
+    fixtures = _md_map("mysekaiFixtures")
+    term_costs: dict[int, list[dict]] = {}
+    for row in _optional_table("mysekaiBlueprintTermMysekaiMaterialCosts"):
+        term_costs.setdefault(int(row.get("groupId", 0)), []).append(row)
+    blueprint_costs: dict[int, list[dict]] = {}
+    for row in MD.get("mysekaiBlueprintMysekaiMaterialCosts"):
+        blueprint_costs.setdefault(int(row.get("mysekaiBlueprintId", 0)), []).append(row)
+    lend_counts = {
+        int(row.get("mysekaiBlueprintTermId", 0)): int(row.get("craftCount", 0))
+        for row in _nested_list(dict(common.load_suite()), "userMysekaiBlueprintLendCraftCounts")
+    }
+    user_materials = _user_material_quantities()
+    terms = sorted(MD.get("mysekaiBlueprintTerms"), key=lambda row: (-int(row.get("startAt", 0)), row["id"]))
+    has_tabs = any(row.get("mysekaiBlueprintTermTabType") for row in terms)
+    tabs: dict[str, list[dict]] = {}
+    for index, term in enumerate(terms[:8]):
+        blueprint = blueprints.get(int(term.get("mysekaiBlueprintId", 0))) or {}
+        fixture = fixtures.get(int(blueprint.get("craftTargetId", 0))) if blueprint else None
+        if not fixture:
+            continue
+        group_id = int(term.get("mysekaiBlueprintTermMysekaiMaterialCostGroupId", 0) or 0)
+        costs = term_costs.get(group_id) or blueprint_costs.get(blueprint["id"], [])
+        tab_type = term.get("mysekaiBlueprintTermTabType") or (
+            "limited_term" if has_tabs or index % 2 == 0 else "birthday_anniversary"
+        )
+        craft_limit = term.get("craftLimit") if has_tabs else (1 if index % 2 else None)
+        tabs.setdefault(tab_type, []).append(
+            {
+                "id": term["id"],
+                "name": fixture.get("name", ""),
+                "image_path": _fixture_thumbnail_path(fixture),
+                "start_at": int(term.get("startAt", 0)) or None,
+                "end_at": int(term.get("endAt", 0)) or None,
+                "craft_limit": craft_limit,
+                "craft_count": lend_counts.get(term["id"], 0) if craft_limit is not None else None,
+                "cost_materials": [
+                    {
+                        "image_path": _material_path(int(cost.get("mysekaiMaterialId", 0))),
+                        "quantity": int(cost.get("quantity", 0)),
+                        "have_quantity": user_materials.get(int(cost.get("mysekaiMaterialId", 0)), 0),
+                    }
+                    for cost in sorted(costs, key=lambda row: row.get("seq", 0))
+                ],
+            }
+        )
+    if not has_tabs:
+        ISSUES.append("mysekai_blueprint_term: masterdata 无 mysekaiBlueprintTermTabType(7.0.0 前快照),标签为合成")
+    return {"tabs": [{"tab_type": tab_type, "blueprints": entries} for tab_type, entries in tabs.items()]}
+
+
 def _write_list_payload(name: str, items: list[dict]) -> None:
     """fixture-detail body is a JSON array (client.go:385); finalize each element."""
     finalized = [common.finalize(dict(item)) for item in items]
@@ -2008,6 +2320,9 @@ def generate() -> list[str]:
         ("mysekai_music_record", build_music_record, MysekaiMusicrecordRequest),
         ("mysekai_talk_list", build_talk_list, MysekaiTalkListRequest),
         ("mysekai_housing_competition", build_housing_competition, MysekaiHousingCompetitionRequest),
+        ("mysekai_shop", build_shop, MysekaiShopRequest),
+        ("mysekai_bulk_harvest", build_bulk_harvest, MysekaiBulkHarvestRequest),
+        ("mysekai_blueprint_term", build_blueprint_term, MysekaiBlueprintTermRequest),
     ):
         body = builder()
         model.model_validate(body)

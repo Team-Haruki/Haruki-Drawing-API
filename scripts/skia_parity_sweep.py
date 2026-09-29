@@ -25,7 +25,7 @@ harness-error / skipped / no-payload.
 ``budget=(mean, p99)`` ceiling; counts as a failure.)
 
 Known deviations (not failures in the default development mode):
-- ``mysekai_*`` (except housing-competition): needs the gitignored
+- ``mysekai_*`` (except housing-competition, shop, bulk-harvest, blueprint-term): needs the gitignored
   ``src/sekai/mysekai/drawer.real.py``; the whole domain is ``skipped`` when absent.
 
 ``--strict`` is the public Pillow-removal gate. Required cases accept only ``ok`` rows and
@@ -95,6 +95,7 @@ SAVE_IMAGES = False  # CLI-only output option; preserve raw RGBA references for 
 
 # Sentinel drawer module: resolved at runtime from the gitignored drawer.real.py.
 MYSEKAI_REAL = "mysekai-real"
+MYSEKAI_CONTENT = "src.sekai.mysekai.content_drawer"  # public JP 7.0.0 views (shop, bulk harvest, blueprint term)
 CUSTOM_PROFILE_DRAWER = "src.sekai.profile.custom_profile.drawer"
 
 # Every cache getter a drawer module may consult before rebuilding. All are
@@ -251,6 +252,22 @@ CASES: tuple[Case, ...] = (
         "mysekai_housing_competition",
         "MysekaiHousingCompetitionRequest",
         drawer="src.sekai.mysekai.housing_drawer",
+    ),
+    # JP 7.0.0 public views (content_drawer): shop / bulk harvest / blueprint term tabs.
+    _case("mysekai_shop", "mysekai", "mysekai_shop", "MysekaiShopRequest", drawer=MYSEKAI_CONTENT),
+    _case(
+        "mysekai_bulk_harvest",
+        "mysekai",
+        "mysekai_bulk_harvest",
+        "MysekaiBulkHarvestRequest",
+        drawer=MYSEKAI_CONTENT,
+    ),
+    _case(
+        "mysekai_blueprint_term",
+        "mysekai",
+        "mysekai_blueprint_term",
+        "MysekaiBlueprintTermRequest",
+        drawer=MYSEKAI_CONTENT,
     ),
     # ---- profile ----
     _case("profile", "profile", "profile", "ProfileRequest"),

@@ -1,6 +1,7 @@
 """Accepted Pillow-vs-Skia pixel-diff ceilings for the real parity fixtures.
 
-The 63 ordinary budgets were derived from ``out/parity-sweep-real/results.json``:
+The ordinary budgets were derived from ``out/parity-sweep-real/results.json`` (the three JP 7.0.0
+MySekai views — shop, bulk harvest, blueprint term — from ``out/parity-sweep-jp700``):
 
 * mean: ``max(0.25, accepted_mean * 1.15 + 0.1)``
 * p99: ``min(255, accepted_p99 * 1.05 + 2)``
@@ -60,6 +61,9 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "mysekai_music_record": (6.432, 119.6),
     "mysekai_talk_list": (3.675, 76.6),
     "mysekai_housing_competition": (1.912, 40.9),
+    "mysekai_shop": (2.709, 47.2),
+    "mysekai_bulk_harvest": (3.480, 74.5),
+    "mysekai_blueprint_term": (3.653, 94.4),
     "profile": (2.514, 32.5),
     "custom_profile_card": (2.000, 25.0),
     "custom_profile_card_collections": (2.000, 40.9),
