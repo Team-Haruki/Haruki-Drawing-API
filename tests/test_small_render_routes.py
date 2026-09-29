@@ -29,6 +29,7 @@ _STANDARD_CASES = (
     _RouteCase(inventory, "inventory_list", "try_render_inventory_list_payload", "compose_inventory_list_image"),
     _RouteCase(stamp, "stamp_list", "try_render_stamp_payload", "compose_stamp_list_image"),
     _RouteCase(vlive, "vlive_list", "try_render_vlive_list_payload", "compose_vlive_list_image"),
+    _RouteCase(vlive, "vlive_detail", "try_render_vlive_detail_payload", "compose_vlive_detail_image"),
 )
 
 

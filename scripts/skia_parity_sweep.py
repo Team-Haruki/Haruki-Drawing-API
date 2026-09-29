@@ -392,6 +392,7 @@ CASES: tuple[Case, ...] = (
     _case("stamp_list", "stamp", "stamp_list", "StampListRequest", try_render="try_render_stamp_payload"),
     # ---- vlive ----
     _case("vlive_list", "vlive", "vlive_list", "VLiveListRequest"),
+    _case("vlive_detail", "vlive", "vlive_detail", "VLiveDetailRequest"),
 )
 
 
