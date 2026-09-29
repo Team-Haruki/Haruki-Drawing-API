@@ -8,7 +8,9 @@ from datetime import UTC, datetime
 import httpx
 import pytest
 
+from src.sekai.base.font_metrics import get_layout_font
 from src.sekai.base.plot import TextBox
+from src.sekai.base.text_layout import get_text_size, ink_centered_text_offset_y
 from src.sekai.mysekai import content_drawer as drawer
 from src.sekai.mysekai.model import (
     GATE_FALLBACK_COLOR,
@@ -264,6 +266,22 @@ def test_shop_state_structured_fields() -> None:
 
     # an unexplained caller verdict still gets a chip
     assert _state(available=False, pass_active=True).badges == (("不可购买", drawer.CHIP_GREY),)
+
+
+@pytest.mark.parametrize("text", ["已持有", "本期已购买", "剩余99次", "5 件", "x100"])
+@pytest.mark.parametrize("size", [13, 15])
+def test_chip_label_ink_is_vertically_centred(text: str, size: int) -> None:
+    """The chip offsets its label by the measured ink bounds, not by line height: CJK and digits alike."""
+
+    style = drawer.CHIP_STYLE.replace(size=size)
+    chip = drawer._chip(text, drawer.CHIP_GREEN, style=style)
+    assert chip.text_offset_y == ink_centered_text_offset_y(style.font, size, text, size)
+    font = get_layout_font(style.font, size)
+    _, top, _, bottom = font.getbbox(text)
+    ink_center = get_text_size(font, "哇")[1] + (top + bottom) / 2 - font.getmetrics()[0]
+    assert abs(ink_center + chip.text_offset_y - size / 2) <= 0.5
+    # the bundled CJK font hangs below its nominal size, so the correction lifts the label
+    assert chip.text_offset_y < 0
 
 
 def test_shop_display_name_strips_status_tags_only_with_state_fields() -> None:

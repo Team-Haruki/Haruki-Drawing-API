@@ -22,6 +22,7 @@ from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.paint_types import Color
 from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, RoundRectBg, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.text_layout import ink_centered_text_offset_y
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
@@ -291,7 +292,15 @@ def shop_item_state(item: MysekaiShopItem, pass_active: bool | None) -> ShopItem
 
 
 def _chip(text: str, fill: Color, *, style: TextStyle = CHIP_STYLE, radius: int = 9) -> TextBox:
-    return TextBox(text, style).set_padding((8, 3)).set_bg(RoundRectBg(fill, radius, blur_glass=False))
+    """A rounded status chip; the label's ink is centred by its measured glyph bounds."""
+
+    offset_y = ink_centered_text_offset_y(style.font, style.size, text, style.size)
+    return (
+        TextBox(text, style)
+        .set_padding((8, 3))
+        .set_text_offset((0, offset_y))
+        .set_bg(RoundRectBg(fill, radius, blur_glass=False))
+    )
 
 
 def _icon_well(images: ImageMap, path: AssetKey | None, size: int, *, dim: bool = False) -> None:
