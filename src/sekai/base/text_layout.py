@@ -92,3 +92,19 @@ def ascender_top_to_painter_y(font_path: str, font_size: int, ascender_top_y: in
     ``cjk_top`` baseline)."""
     font = get_layout_font(font_path, font_size)
     return ascender_top_y + font.getmetrics()[0] - get_text_size(font, "哇")[1]
+
+
+def ink_centered_text_offset_y(font_path: str, font_size: int, text: str, box_height: int) -> int:
+    """The ``TextBox.set_text_offset`` y that centres ``text``'s ink inside a ``box_height`` box.
+
+    A one-line ``TextBox`` is ``style.size`` tall and ``Painter.text`` puts the baseline at
+    ``ink_height("哇")`` below its top, so the CJK ink (which spans more than the nominal size
+    and hangs below the baseline) sits visibly low in the box — 2px at sizes 13–24 for the
+    bundled Source Han Sans. Measure the real ink bounds instead of guessing: ``getbbox`` is
+    relative to the ascender top, and the baseline is ``ascent`` below that, so the ink centre
+    relative to the box top is ``ink_height("哇") + (top + bottom) / 2 - ascent``. Digits and
+    Latin have a different ink box than CJK, so a mixed string is measured as a whole."""
+    font = get_layout_font(font_path, font_size)
+    _, top, _, bottom = _measure_bbox(font, text)
+    ink_center = get_text_size(font, "哇")[1] + (top + bottom) / 2 - font.getmetrics()[0]
+    return round(box_height / 2 - ink_center)

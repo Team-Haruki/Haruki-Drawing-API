@@ -839,7 +839,18 @@ class MysekaiShopCost(BaseModel):
 
 
 class MysekaiShopItem(BaseModel):
-    """One exchangeable entry of a MySekai shop (``mysekaiShops`` + its resource box)."""
+    """One exchangeable entry of a MySekai shop (``mysekaiShops`` / ``mysekaiBlueprintShops`` + its resource box).
+
+    The five state fields are optional and were added after the first contract: an older caller
+    that omits all of them gets its state derived from ``exchange_limit_*`` / ``exchanged_count``
+    and the request's ``pass_active`` exactly as before.
+
+    - ``available``: the caller's verdict on whether the item can be bought right now.
+    - ``owned``: blueprint already in the player's collection (buying is still allowed).
+    - ``is_bought``: blueprint bought in the current daily/weekly period.
+    - ``remaining_count``: exchanges left in the current limit window.
+    - ``material_capacity_count``: how many more exchanges fit in the material warehouse; ``0`` = full.
+    """
 
     id: int
     name: str | None = None
@@ -849,6 +860,26 @@ class MysekaiShopItem(BaseModel):
     exchange_limit_type: str = "none"
     exchange_limit_value: int | None = None
     exchanged_count: int | None = None
+    available: bool | None = None
+    owned: bool | None = None
+    is_bought: bool | None = None
+    remaining_count: int | None = None
+    material_capacity_count: int | None = None
+
+    @property
+    def has_state_fields(self) -> bool:
+        """Whether the caller sent any structured state (so status text in ``name`` is redundant)."""
+
+        return any(
+            value is not None
+            for value in (
+                self.available,
+                self.owned,
+                self.is_bought,
+                self.remaining_count,
+                self.material_capacity_count,
+            )
+        )
 
 
 class MysekaiShop(BaseModel):

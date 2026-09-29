@@ -9,7 +9,9 @@ type strings are shown verbatim.
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,7 +20,9 @@ if TYPE_CHECKING:
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.asset_key import AssetKey, legacy_key
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
-from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.paint_types import Color
+from src.sekai.base.plot import Canvas, Frame, Grid, HSplit, ImageBox, RoundRectBg, Spacer, TextBox, TextStyle, VSplit
+from src.sekai.base.text_layout import ink_centered_text_offset_y
 from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
@@ -52,9 +56,40 @@ INFO_STYLE = TextStyle(font=DEFAULT_FONT, size=16, color=GRAY)
 SMALL_STYLE = TextStyle(font=DEFAULT_FONT, size=14, color=GRAY)
 QTY_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=GRAY)
 
-SHOP_TYPE_LABELS = {"material": "素材商店", "tool": "道具商店"}
+SHOP_TYPE_LABELS = {
+    "blueprint_daily": "每日蓝图",
+    "blueprint_weekly": "每周蓝图",
+    "tool": "工具",
+    "material": "素材",
+}
+SHOP_TYPE_CAPTIONS = {
+    "blueprint_daily": "每日刷新",
+    "blueprint_weekly": "每周刷新",
+}
+SHOP_TYPE_ACCENTS: dict[str, Color] = {
+    "blueprint_daily": (255, 170, 0, 255),
+    "blueprint_weekly": (187, 51, 238, 255),
+    "tool": (51, 187, 238, 255),
+    "material": (102, 221, 17, 255),
+}
+SHOP_ACCENT_FALLBACK: Color = (150, 156, 170, 255)
 SHOP_LIMIT_PASS = "limited_per_mysekai_colorful_pass"
+SHOP_LIMIT_LABELS = {
+    "none": "不限",
+    "daily": "每日",
+    "weekly": "每周",
+    SHOP_LIMIT_PASS: "每期通行证",
+}
 BLUEPRINT_TAB_LABELS = {"limited_term": "期间限定", "birthday_anniversary": "生日・周年纪念"}
+
+# status chips (fill colours; the label is white bold text)
+CHIP_GREEN: Color = (52, 168, 96, 255)
+CHIP_RED: Color = (222, 72, 92, 255)
+CHIP_BLUE: Color = (58, 140, 220, 255)
+CHIP_GREY: Color = (140, 144, 156, 255)
+CHIP_AMBER: Color = (226, 140, 20, 255)
+CHIP_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(255, 255, 255, 255))
+CAPTION_STYLE = TextStyle(font=DEFAULT_FONT, size=15, color=DIM)
 
 ImageMap = dict[str, ImageSource]
 
@@ -129,20 +164,20 @@ def _format_quantity(value: int) -> str:
     return f"{value:,}"
 
 
-def _have_text(have: int | None, need: int) -> tuple[str, tuple[int, int, int, int]]:
+def _have_text(have: int | None, need: int, *, prefix: str = "x") -> tuple[str, tuple[int, int, int, int]]:
     if have is None:
-        return f"x{_format_quantity(need)}", GRAY
+        return f"{prefix}{_format_quantity(need)}", GRAY
     return f"{_format_quantity(have)}/{_format_quantity(need)}", GREEN if have >= need else RED
 
 
-def _cost_row(images: ImageMap, costs, *, icon_size: int = 28) -> None:
+def _cost_row(images: ImageMap, costs, *, icon_size: int = 28, quantity_prefix: str = "x") -> None:
     """Icons with quantities (or have/need) for shop costs and blueprint materials."""
 
     with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
         for cost in costs:
             with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
                 _icon(images, cost.image_path, icon_size)
-                text, color = _have_text(cost.have_quantity, cost.quantity)
+                text, color = _have_text(cost.have_quantity, cost.quantity, prefix=quantity_prefix)
                 TextBox(text, TextStyle(font=QTY_STYLE.font, size=QTY_STYLE.size, color=color))
 
 
@@ -159,64 +194,191 @@ def _format_time(value: int | None, timezone: str) -> str:
 # shop
 # ---------------------------------------------------------------------------
 
-SHOP_COL_COUNT = 3
+SHOP_COL_COUNT = 4
 SHOP_TILE_WIDTH = (PANEL_INNER_WIDTH - (SHOP_COL_COUNT - 1) * 10) // SHOP_COL_COUNT
+SHOP_TILE_PADDING = 10
+SHOP_TILE_INNER_WIDTH = SHOP_TILE_WIDTH - 2 * SHOP_TILE_PADDING
+SHOP_ICON_WELL = 68
+SHOP_COST_ROW_HEIGHT = 30
+SHOP_BADGE_ROW_HEIGHT = 24
+SHOP_HEADER_STATUS_WIDTH = 330
+
+_NAME_STATUS_TAGS = re.compile(r"(?:\s*【[^【】]*】)+\s*$")
 
 
-def shop_item_limit_text(item: MysekaiShopItem, pass_active: bool | None) -> tuple[str, tuple[int, ...]]:
-    """Exchange-limit line and its colour; ``pass_active is False`` marks pass-only items unavailable."""
+@dataclass(frozen=True)
+class ShopItemState:
+    """What a shop tile shows besides the goods: dimming, the limit line and its status chips."""
+
+    available: bool
+    limit_text: str
+    badges: tuple[tuple[str, Color], ...]
+
+
+def shop_item_display_name(item: MysekaiShopItem) -> str:
+    """The item name, minus trailing ``【…】`` status tags once structured state fields are present.
+
+    Cloud appends the status as ``【已持有】``-style suffixes for drawers that predate the state
+    fields; with the fields present the chips carry that information, so the suffixes would only
+    repeat it. A caller that sends no state fields keeps its name untouched.
+    """
+
+    name = item.name or f"ID {item.id}"
+    if item.has_state_fields:
+        stripped = _NAME_STATUS_TAGS.sub("", name).strip()
+        if stripped:
+            return stripped
+    return name
+
+
+def shop_limit_label(limit_type: str) -> str:
+    return SHOP_LIMIT_LABELS.get(limit_type, limit_type)
+
+
+def shop_item_state(item: MysekaiShopItem, pass_active: bool | None) -> ShopItemState:
+    """Derive the tile state from the structured fields, falling back to the legacy fields.
+
+    Legacy fallback (no state fields): only ``limited_per_mysekai_colorful_pass`` items depend on
+    the pass, and an item is sold out once ``exchanged_count`` reaches ``exchange_limit_value``.
+    With state fields the caller's ``available`` wins, and ``pass_active is False`` marks every
+    item (the whole shop needs the pass), matching how Cloud computes ``available``.
+    """
 
     limit_type = str(item.exchange_limit_type or "none")
+    limit = item.exchange_limit_value
     count = item.exchanged_count
-    limit = item.exchange_limit_value
-    if limit_type == "none" or limit is None:
-        text = "不限次数" if limit_type == "none" else f"限制: {limit_type}"
-        return (text if count is None else f"{text} (已兑换 {count})"), DIM
-    progress = f"{count if count is not None else '-'}/{limit}"
-    if limit_type == SHOP_LIMIT_PASS:
-        if pass_active is False:
-            return f"需缤纷通行证 {progress}", DIM
-        text = f"每期通行证限兑 {progress}"
+    limited = limit_type != "none" and limit is not None
+    remaining = item.remaining_count
+    if remaining is None and limited and count is not None:
+        remaining = max(0, limit - count)
+    bought = item.is_bought is True
+    sold_out = limited and remaining == 0 and not bought
+    needs_pass = pass_active is False and (item.has_state_fields or limit_type == SHOP_LIMIT_PASS)
+    warehouse_full = item.material_capacity_count == 0
+    if item.available is not None:
+        available = item.available
     else:
-        text = f"限兑 {progress} ({limit_type})"
-    if count is not None and count >= limit:
-        return f"{text} 已兑完", RED
-    return text, GREEN
+        available = not (needs_pass or sold_out or bought or warehouse_full)
+
+    if limit_type == "none":
+        limit_text = "不限次数"
+        if count:
+            limit_text += f" · 已兑换 {count}"
+    elif limit is None:
+        limit_text = f"限制: {limit_type}"
+        if count is not None:
+            limit_text += f" · 已兑换 {count}"
+    else:
+        progress = f"{count if count is not None else '-'}/{limit}"
+        label = shop_limit_label(limit_type)
+        limit_text = f"{label}限购 {progress}" if label != limit_type else f"限购 {progress} ({limit_type})"
+
+    badges: list[tuple[str, Color]] = []
+    if item.owned is True:
+        badges.append(("已持有", CHIP_BLUE))
+    if bought:
+        badges.append(("本期已购买", CHIP_GREY))
+    elif sold_out:
+        badges.append(("已兑完", CHIP_RED))
+    elif limited and remaining is not None and item.is_bought is None:
+        badges.append((f"剩余{remaining}次", CHIP_GREEN))
+    if needs_pass:
+        badges.append(("需通行证", CHIP_AMBER))
+    if warehouse_full:
+        badges.append(("仓库已满", CHIP_AMBER))
+    if not available and not any(fill != CHIP_BLUE and fill != CHIP_GREEN for _, fill in badges):
+        badges.append(("不可购买", CHIP_GREY))
+    return ShopItemState(available=available, limit_text=limit_text, badges=tuple(badges))
 
 
-def _shop_item_available(item: MysekaiShopItem, pass_active: bool | None) -> bool:
-    if item.exchange_limit_type == SHOP_LIMIT_PASS and pass_active is False:
-        return False
-    limit = item.exchange_limit_value
-    return not (limit is not None and item.exchanged_count is not None and item.exchanged_count >= limit)
+def _chip(text: str, fill: Color, *, style: TextStyle = CHIP_STYLE, radius: int = 9) -> TextBox:
+    """A rounded status chip; the label's ink is centred by its measured glyph bounds."""
+
+    offset_y = ink_centered_text_offset_y(style.font, style.size, text, style.size)
+    return (
+        TextBox(text, style)
+        .set_padding((8, 3))
+        .set_text_offset((0, offset_y))
+        .set_bg(RoundRectBg(fill, radius, blur_glass=False))
+    )
+
+
+def _icon_well(images: ImageMap, path: AssetKey | None, size: int, *, dim: bool = False) -> None:
+    """A rounded white well with the icon centred; a dimmed well fades the icon with the tile."""
+
+    image = _image(images, path)
+    well_fill = (255, 255, 255, 120) if dim else (255, 255, 255, 190)
+    with Frame().set_size((size, size)).set_content_align("c").set_bg(RoundRectBg(well_fill, 10, blur_glass=False)):
+        if image is not None:
+            inner = size - 10
+            ImageBox(
+                image,
+                size=(inner, inner),
+                image_size_mode="fit",
+                use_alpha_blend=True,
+                alpha_adjust=0.45 if dim else 1.0,
+            ).set_content_align("c")
+        else:
+            Spacer(w=size - 10, h=size - 10)
 
 
 def _draw_shop_item(item: MysekaiShopItem, images: ImageMap, pass_active: bool | None) -> None:
-    available = _shop_item_available(item, pass_active)
-    tile = _tile(SHOP_TILE_WIDTH)
-    if not available:
-        tile.set_bg(roundrect_bg(fill=(200, 200, 208, 150), radius=8))
-    with tile:
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
-            _icon(images, item.image_path, 56)
-            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-                name = item.name or f"ID {item.id}"
-                TextBox(name, NAME_STYLE, line_count=2, use_real_line_count=True, overflow="shrink").set_w(
-                    SHOP_TILE_WIDTH - 88
-                )
-                TextBox(f"x{_format_quantity(item.quantity)}", QTY_STYLE)
-        if item.costs:
-            _cost_row(images, item.costs)
-        text, color = shop_item_limit_text(item, pass_active)
-        TextBox(text, TextStyle(font=SMALL_STYLE.font, size=SMALL_STYLE.size, color=color), overflow="shrink").set_w(
-            SHOP_TILE_WIDTH - 16
-        )
+    state = shop_item_state(item, pass_active)
+    tile_fill = (255, 255, 255, 125) if state.available else (206, 208, 216, 125)
+    name_color = NAME_STYLE.color if state.available else DIM
+    with (
+        VSplit()
+        .set_w(SHOP_TILE_WIDTH)
+        .set_content_align("lt")
+        .set_item_align("lt")
+        .set_sep(6)
+        .set_padding(SHOP_TILE_PADDING)
+        .set_bg(RoundRectBg(tile_fill, 10, blur_glass=False))
+    ):
+        with HSplit().set_content_align("l").set_item_align("t").set_sep(8):
+            _icon_well(images, item.image_path, SHOP_ICON_WELL, dim=not state.available)
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(2):
+                name_width = SHOP_TILE_INNER_WIDTH - SHOP_ICON_WELL - 8
+                TextBox(
+                    shop_item_display_name(item),
+                    NAME_STYLE.replace(color=name_color),
+                    line_count=2,
+                    overflow="shrink",
+                ).set_w(name_width)
+                TextBox(f"x{_format_quantity(item.quantity)}", QTY_STYLE.replace(color=name_color))
+        with Frame().set_size((SHOP_TILE_INNER_WIDTH, SHOP_COST_ROW_HEIGHT)).set_content_align("l"):
+            if item.costs:
+                _cost_row(images, item.costs, icon_size=26, quantity_prefix="")
+            else:
+                TextBox("免费", QTY_STYLE.replace(color=GREEN))
+        TextBox(state.limit_text, SMALL_STYLE.replace(color=DIM), overflow="shrink").set_w(SHOP_TILE_INNER_WIDTH)
+        with Frame().set_size((SHOP_TILE_INNER_WIDTH, SHOP_BADGE_ROW_HEIGHT)).set_content_align("l"):
+            if state.badges:
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                    for text, fill in state.badges:
+                        _chip(text, fill)
+
+
+def shop_title(shop: MysekaiShop) -> str:
+    return shop.title or SHOP_TYPE_LABELS.get(shop.shop_type, shop.shop_type)
+
+
+def _draw_shop_header(shop: MysekaiShop, pass_active: bool | None) -> None:
+    accent = SHOP_TYPE_ACCENTS.get(shop.shop_type, SHOP_ACCENT_FALLBACK)
+    purchasable = sum(1 for item in shop.items if shop_item_state(item, pass_active).available)
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+        Spacer(w=6, h=26).set_bg(RoundRectBg(accent, 3, blur_glass=False))
+        TextBox(shop_title(shop), SECTION_STYLE)
+        _chip(f"{len(shop.items)} 件", accent)
+        if shop.items and purchasable != len(shop.items):
+            TextBox(f"可购买 {purchasable} 件", CAPTION_STYLE)
+        if caption := SHOP_TYPE_CAPTIONS.get(shop.shop_type):
+            TextBox(caption, CAPTION_STYLE)
 
 
 def _draw_shop(shop: MysekaiShop, images: ImageMap, pass_active: bool | None) -> None:
     with _panel():
-        title = shop.title or SHOP_TYPE_LABELS.get(shop.shop_type, shop.shop_type)
-        TextBox(f"{title} ({len(shop.items)})", SECTION_STYLE)
+        _draw_shop_header(shop, pass_active)
         if not shop.items:
             _empty_hint("暂无可兑换的商品")
             return
@@ -234,23 +396,49 @@ def _shop_image_paths(rqd: MysekaiShopRequest) -> list[AssetKey | None]:
     return paths
 
 
+def _draw_shop_page_header(rqd: MysekaiShopRequest) -> None:
+    items = [item for shop in rqd.shops for item in shop.items]
+    purchasable = sum(1 for item in items if shop_item_state(item, rqd.pass_active).available)
+    with _panel():
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+            with (
+                VSplit()
+                .set_content_align("lt")
+                .set_item_align("lt")
+                .set_sep(2)
+                .set_w(PANEL_INNER_WIDTH - SHOP_HEADER_STATUS_WIDTH - 10)
+            ):
+                TextBox(rqd.title or "烤森商店", TITLE_STYLE, overflow="shrink").set_w(
+                    PANEL_INNER_WIDTH - SHOP_HEADER_STATUS_WIDTH - 14
+                )
+                if items:
+                    TextBox(f"共 {len(items)} 件商品 · 可购买 {purchasable} 件", INFO_STYLE)
+            with HSplit().set_content_align("r").set_item_align("c").set_sep(8).set_w(SHOP_HEADER_STATUS_WIDTH):
+                if rqd.pass_active is not None:
+                    TextBox("缤纷通行证", INFO_STYLE)
+                    if rqd.pass_active:
+                        _chip("生效中", CHIP_GREEN, style=CHIP_STYLE.replace(size=15), radius=11)
+                    else:
+                        _chip("未生效", CHIP_GREY, style=CHIP_STYLE.replace(size=15), radius=11)
+
+
 async def _build_mysekai_shop_canvas(rqd: MysekaiShopRequest) -> Canvas:
     images = await _load_images(_shop_image_paths(rqd))
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if rqd.profile is not None:
                 await get_profile_card(rqd.profile)
-            with _panel():
-                TextBox(rqd.title or "烤森商店", TITLE_STYLE)
-                if rqd.pass_active is not None:
-                    status = "缤纷通行证: 生效中" if rqd.pass_active else "缤纷通行证: 未生效"
-                    TextBox(
-                        status,
-                        TextStyle(font=INFO_STYLE.font, size=INFO_STYLE.size, color=GREEN if rqd.pass_active else DIM),
-                    )
+            _draw_shop_page_header(rqd)
             if not rqd.shops:
                 with _panel():
-                    _empty_hint("暂无商店数据")
+                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4).set_padding(6):
+                        TextBox("暂无可显示的商品", SECTION_STYLE.replace(color=DIM))
+                        hint = (
+                            "通行证未生效时商店内的商品均不可购买"
+                            if rqd.pass_active is False
+                            else "已购买、已达上限或当前不可购买的商品不在此列表中"
+                        )
+                        TextBox(hint, INFO_STYLE.replace(color=DIM))
             for shop in rqd.shops:
                 _draw_shop(shop, images, rqd.pass_active)
     add_request_watermark(canvas, rqd)
