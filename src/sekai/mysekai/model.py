@@ -827,14 +827,171 @@ class MysekaiHousingCompetitionRequest(TimeZoneRequest):
     entries: list[MysekaiHousingCompetitionEntry] = Field(default_factory=list)
 
 
+# =========================== 7.0.0: 烤森商店 =========================== #
+
+
+class MysekaiShopCost(BaseModel):
+    """One cost line of a shop item (``mysekaiShopCosts``)."""
+
+    image_path: AssetKey
+    quantity: int
+    have_quantity: int | None = None
+
+
+class MysekaiShopItem(BaseModel):
+    """One exchangeable entry of a MySekai shop (``mysekaiShops`` + its resource box)."""
+
+    id: int
+    name: str | None = None
+    image_path: AssetKey
+    quantity: int = 1
+    costs: list[MysekaiShopCost] = Field(default_factory=list)
+    exchange_limit_type: str = "none"
+    exchange_limit_value: int | None = None
+    exchanged_count: int | None = None
+
+
+class MysekaiShop(BaseModel):
+    """A shop tab (``mysekaiShopType``: ``material`` / ``tool`` / future types)."""
+
+    shop_type: str
+    title: str | None = None
+    items: list[MysekaiShopItem] = Field(default_factory=list)
+
+
+class MysekaiShopRequest(TimeZoneRequest):
+    """``POST /api/pjsk/mysekai/shop``."""
+
+    profile: ProfileCardRequest | None = None
+    title: str | None = None
+    pass_active: bool | None = None
+    shops: list[MysekaiShop] = Field(default_factory=list)
+
+    def model_post_init(self, __context, /) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
+
+
+# =========================== 7.0.0: 一键采集 =========================== #
+
+
+class MysekaiBulkHarvestTarget(BaseModel):
+    """``mysekaiSiteBulkHarvestTargets`` row available on a site."""
+
+    id: int
+    name: str
+    image_path: AssetKey | None = None
+    checked: bool | None = None
+    fixture_count: int | None = None
+
+
+class MysekaiBulkHarvestTargetGroup(BaseModel):
+    """``mysekaiSiteBulkHarvestTargetGroups`` row (with its required tool)."""
+
+    id: int
+    name: str
+    required_tool_name: str | None = None
+    required_tool_image_path: AssetKey | None = None
+    targets: list[MysekaiBulkHarvestTarget] = Field(default_factory=list)
+
+
+class MysekaiBulkHarvestSite(BaseModel):
+    site_id: int
+    name: str
+    image_path: AssetKey | None = None
+    groups: list[MysekaiBulkHarvestTargetGroup] = Field(default_factory=list)
+
+
+class MysekaiBulkHarvestRequest(TimeZoneRequest):
+    """``POST /api/pjsk/mysekai/bulk-harvest``."""
+
+    profile: ProfileCardRequest | None = None
+    sites: list[MysekaiBulkHarvestSite] = Field(default_factory=list)
+
+    def model_post_init(self, __context, /) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
+
+
+# =========================== 7.0.0: 期间限定蓝图 =========================== #
+
+
+class MysekaiBlueprintTermMaterial(BaseModel):
+    """``mysekaiBlueprintTermMysekaiMaterialCosts`` row."""
+
+    image_path: AssetKey
+    quantity: int
+    have_quantity: int | None = None
+
+
+class MysekaiBlueprintTermEntry(BaseModel):
+    id: int
+    name: str
+    image_path: AssetKey
+    start_at: int | None = None
+    end_at: int | None = None
+    craft_limit: int | None = None
+    craft_count: int | None = None
+    cost_materials: list[MysekaiBlueprintTermMaterial] = Field(default_factory=list)
+
+
+class MysekaiBlueprintTermTab(BaseModel):
+    """``mysekaiBlueprintTermTabType`` tab: ``limited_term`` / ``birthday_anniversary`` / future types."""
+
+    tab_type: str
+    title: str | None = None
+    blueprints: list[MysekaiBlueprintTermEntry] = Field(default_factory=list)
+
+
+class MysekaiBlueprintTermRequest(TimeZoneRequest):
+    """``POST /api/pjsk/mysekai/blueprint-term``."""
+
+    profile: ProfileCardRequest | None = None
+    tabs: list[MysekaiBlueprintTermTab] = Field(default_factory=list)
+
+    def model_post_init(self, __context, /) -> None:
+        super().model_post_init(__context)
+        self.apply_timezone(self.profile)
+
+
+# 超出团色表的大门（例如 JP 7.0.0 的 6 号「交わるセカイのゲート」，mysekaiGateType=shuffle）使用的颜色。
+GATE_FALLBACK_COLOR: Color = (51, 204, 187, 255)
+
+
+class _GateColorList(list):
+    """Unit colour table indexed by ``gate_id - 1`` that tolerates gates beyond the table.
+
+    The (out-of-repo) MySekai drawer indexes ``UNIT_COLORS[gate_id - 1]``. Gate ids are data, not a
+    fixed five: a non-negative index past the end returns :data:`GATE_FALLBACK_COLOR` instead of
+    raising. Negative indexes and slices keep plain ``list`` semantics, so ``gate_id == 0`` still
+    resolves exactly as before.
+    """
+
+    def __getitem__(self, index):
+        if isinstance(index, int) and not isinstance(index, bool) and index >= len(self):
+            return GATE_FALLBACK_COLOR
+        return super().__getitem__(index)
+
+
 # 各团代表色，没有VS团！
-UNIT_COLORS = [
-    (68, 85, 221, 255),
-    (136, 221, 68, 255),
-    (238, 17, 102, 255),
-    (255, 153, 0, 255),
-    (136, 68, 153, 255),
-]
+UNIT_COLORS = _GateColorList(
+    [
+        (68, 85, 221, 255),
+        (136, 221, 68, 255),
+        (238, 17, 102, 255),
+        (255, 153, 0, 255),
+        (136, 68, 153, 255),
+    ]
+)
+
+
+def gate_color(gate_id: int) -> Color:
+    """Colour of a MySekai gate; gates without a unit colour (shuffle, future ids) get the fallback."""
+
+    if gate_id < 1:
+        return GATE_FALLBACK_COLOR
+    return UNIT_COLORS[gate_id - 1]
+
 
 # 唱片tag到团名映射
 MUSIC_TAG_UNIT_MAP = {

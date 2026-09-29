@@ -192,6 +192,43 @@ def test_gate_material_helpers_keep_first_gate_on_equal_level_and_accumulate_cos
     assert levels[1]["color"] == [200, 0, 0]
 
 
+class _FakeMasterdata:
+    def __init__(self, tables: dict[str, list[dict]]) -> None:
+        self.tables = tables
+
+    def get(self, name: str) -> list[dict]:
+        if name not in self.tables:
+            raise FileNotFoundError(name)
+        return self.tables[name]
+
+
+def test_gate_materials_derive_max_level_beyond_forty(monkeypatch) -> None:
+    """JP 7.0.0 raised the gate cap to 70: level 41..70 material rows must survive."""
+    groups = [{"groupId": 1000 + level, "mysekaiMaterialId": 10, "quantity": level} for level in range(1, 71)] + [
+        {"groupId": 6001, "mysekaiMaterialId": 11, "quantity": 1}
+    ]
+    monkeypatch.setattr(gen, "MD", _FakeMasterdata({"mysekaiGateMaterialGroups": groups}))
+
+    gate_materials, max_level = gen._gate_materials_by_id()
+
+    assert max_level == 70
+    assert len(gate_materials[1]) == 70
+    assert gate_materials[1][69] == [{"material_id": 10, "quantity": 70}]
+    assert gate_materials[6][0] == [{"material_id": 11, "quantity": 1}]
+    # A gate at 45 is no longer "maxed" and outranks a gate at 40; a maxed gate (70) is skipped.
+    selected = gen._selected_gate_materials(gate_materials, {1: 45, 6: 70}, max_level)
+    assert list(selected) == [1]
+
+
+def test_gate_max_level_prefers_gate_level_table(monkeypatch) -> None:
+    monkeypatch.setattr(
+        gen, "MD", _FakeMasterdata({"mysekaiGateLevels": [{"mysekaiGateId": 1, "level": lv} for lv in (1, 40)]})
+    )
+    assert gen._gate_max_level([3]) == 40
+    monkeypatch.setattr(gen, "MD", _FakeMasterdata({}))
+    assert gen._gate_max_level([]) == gen._GATE_MAX_LEVEL_FALLBACK
+
+
 def test_music_record_category_counts_missing_asset_and_sorts_obtained_first(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(gen, "ASSETS", _FakeAssets(tmp_path))
     category, total, obtained = gen._music_record_category(

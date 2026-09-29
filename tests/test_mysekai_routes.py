@@ -52,7 +52,26 @@ _ROUTE_CASES = (
         "try_render_mysekai_housing_competition_payload",
         "compose_mysekai_housing_competition_image",
     ),
+    _RouteCase("mysekai_shop", "try_render_mysekai_shop_payload", "compose_mysekai_shop_image"),
+    _RouteCase(
+        "mysekai_bulk_harvest",
+        "try_render_mysekai_bulk_harvest_payload",
+        "compose_mysekai_bulk_harvest_image",
+    ),
+    _RouteCase(
+        "mysekai_blueprint_term",
+        "try_render_mysekai_blueprint_term_payload",
+        "compose_mysekai_blueprint_term_image",
+    ),
 )
+
+# Public in-repo drawers are imported into the route module; the private ones are looked up lazily.
+_PUBLIC_ROUTE_ENDPOINTS = {
+    "mysekai_housing_competition",
+    "mysekai_shop",
+    "mysekai_bulk_harvest",
+    "mysekai_blueprint_term",
+}
 
 
 @pytest.mark.parametrize("case", _ROUTE_CASES, ids=lambda case: case.endpoint)
@@ -72,7 +91,7 @@ def test_mysekai_routes_return_native_payloads(case: _RouteCase, monkeypatch: py
         return object()
 
     monkeypatch.setattr(
-        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        mysekai if case.endpoint in _PUBLIC_ROUTE_ENDPOINTS else private_drawer,
         case.native_renderer,
         native_renderer,
     )
@@ -97,7 +116,7 @@ def test_mysekai_routes_reject_missing_native_without_pillow(case: _RouteCase, m
         return None
 
     monkeypatch.setattr(
-        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        mysekai if case.endpoint in _PUBLIC_ROUTE_ENDPOINTS else private_drawer,
         case.native_renderer,
         native_renderer,
     )
@@ -113,7 +132,7 @@ def test_mysekai_routes_convert_renderer_errors(case: _RouteCase, monkeypatch: p
         raise RuntimeError("render failed")
 
     monkeypatch.setattr(
-        mysekai if case.endpoint == "mysekai_housing_competition" else private_drawer,
+        mysekai if case.endpoint in _PUBLIC_ROUTE_ENDPOINTS else private_drawer,
         case.native_renderer,
         failed_renderer,
     )
