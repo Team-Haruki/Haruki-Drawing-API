@@ -383,8 +383,18 @@ async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canv
                                 "clip"
                             )
 
+                # 多团编成条件加成（JP 7.0.0 区域道具 56）：仅在请求携带时绘制，缺省时页面不变
+                multi_unit_bonus = getattr(rqd, "multi_unit_bonus", None)
+                if multi_unit_bonus is not None:
+                    with HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_padding(16):
+                        TextBox(_power_bonus_multi_unit_text(multi_unit_bonus), header_style)
+
     add_request_watermark(canvas, rqd)
     return canvas
+
+
+def _power_bonus_multi_unit_text(bonus: float) -> str:
+    return f"混合编成(2种以上组合) +{bonus:.1f}%"
 
 
 async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Image.Image:
@@ -462,6 +472,9 @@ def _build_area_item_header(item, icon_cache: dict[str, ImageSource]) -> HSplit:
     item_icon = icon_cache.get(legacy_key(item.item_icon_path)) if item.item_icon_path else None
     if target_icon:
         header.add_item(ImageBox(target_icon, size=(None, 64)))
+    target_label = getattr(item, "target_label", None)
+    if target_label:
+        header.add_item(TextBox(target_label, TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=gray_color)))
     if item_icon:
         header.add_item(ImageBox(item_icon, size=(128, 64), image_size_mode="fit").set_content_align("c"))
     if item.current_level:
@@ -506,6 +519,10 @@ def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profi
     return material_widget
 
 
+def _area_multi_unit_text(bonus: float) -> str:
+    return f"多团+{bonus:.1f}%"
+
+
 def _build_area_level_row(
     level_info,
     current_level: int,
@@ -532,6 +549,14 @@ def _build_area_level_row(
             TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color),
         ).set_w(64)
     )
+    multi_unit_bonus = getattr(level_info, "multi_unit_bonus", None)
+    if multi_unit_bonus is not None:
+        # 2 种以上组合编成时的条件加成：只在请求携带时追加第二行，缺省时布局不变
+        level_column.add_item(
+            TextBox(
+                _area_multi_unit_text(multi_unit_bonus), TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=gray_color)
+            )
+        )
     row.add_item(level_column)
     if level_info.level <= current_level:
         row.add_item(_build_completed_area_material_placeholder())

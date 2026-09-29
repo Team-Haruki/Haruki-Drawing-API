@@ -156,12 +156,16 @@ class PowerBonusDetailRequest(TimeZoneRequest):
         组合加成列表
     attr_bonuses : List[AttrBonus]
         属性加成列表
+    multi_unit_bonus : Optional[float]
+        编成 2 种以上组合时生效的条件加成（targetUnit == "multi_unit" 的区域道具合计）。
+        缺省时不绘制。
     """
 
     profile: DetailedProfileCardRequest
     chara_bonuses: list[CharacterBonus]
     unit_bonuses: list[UnitBonus]
     attr_bonuses: list[AttrBonus]
+    multi_unit_bonus: float | None = None
 
     def model_post_init(self, __context, /) -> None:
         super().model_post_init(__context)
@@ -211,12 +215,16 @@ class AreaItemLevel(BaseModel):
         是否可升级
     materials : List[AreaItemMaterial]
         升级材料列表
+    multi_unit_bonus : Optional[float]
+        编成 2 种以上组合时的额外加成率（areaItemLevels 中 targetUnit == "multi_unit" 的行，
+        JP 7.0.0 起的区域道具 56）。缺省时不绘制。
     """
 
     level: int
     bonus: float
     can_upgrade: bool
     materials: list[AreaItemMaterial]
+    multi_unit_bonus: float | None = None
 
 
 class AreaItemInfo(BaseModel):
@@ -234,6 +242,9 @@ class AreaItemInfo(BaseModel):
         目标图标路径（角色/组合/属性）
     levels : List[AreaItemLevel]
         等级信息列表
+    target_label : Optional[str]
+        无单一角色/组合/属性目标时的目标文字（如 "全角色"），绘制在目标图标之后、道具图标之前。
+        缺省时不绘制。
     """
 
     item_id: int
@@ -241,6 +252,7 @@ class AreaItemInfo(BaseModel):
     item_icon_path: AssetKey
     target_icon_path: AssetKey | None = None
     levels: list[AreaItemLevel]
+    target_label: str | None = None
 
 
 class AreaItemUpgradeMaterialsRequest(TimeZoneRequest):
