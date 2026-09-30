@@ -74,15 +74,16 @@ row is written, and one counter under `artifacts.degraded` is incremented:
 | --- | --- |
 | `disabled` | `HARUKI_STORAGE__ENABLED=false` but the caller asked for an artifact |
 | `runtime_unavailable` | provider config invalid or the `opendal` operator could not be built; retried after `storage.index.connect_retry_seconds` without a restart |
-| `index_unavailable` | missing/disabled index, lock/intent failure, or index transaction failure; no unlocked upload is attempted |
+| `index_unavailable` | missing/disabled index, intent/lock failure, index transaction failure, or the locked write found its intent expired/claimed (or a hit's row retired); no upload is attempted without a committed intent |
 | `upload_failed` | the object store rejected the write, or it was unreachable |
 | `upload_timeout` | the write exceeded `storage.upload_timeout_seconds` |
 | `unsupported_media` | the payload media type is not `image/png` or `image/jpeg` |
 | `internal` | an unexpected exception inside the artifact service (logged with a traceback) |
 
-Index trouble degrades to bytes. An object write requires a durable upload intent and the shared PostgreSQL
-content lock. No ref is returned until both index rows commit; failed/aborted writes retain their cleanup intent
-for Cloud GC. `index_written=false` remains accepted by older consumers but is not emitted by this writer.
+Index trouble degrades to bytes. An object write requires a committed, unexpired upload intent; the path is
+recorded under the shared PostgreSQL content lock only while that intent is still unclaimed (§6). No ref is
+returned until both index rows commit; failed/aborted writes retain (or re-queue) their cleanup intent for
+Cloud GC. `index_written=false` remains accepted by older consumers but is not emitted by this writer.
 Missing assets and renderer-epoch mismatches return bytes with `X-Haruki-Cache-Store: 0`, including images
 returned without an artifact directive. Callers must not cache those bytes or a derived ref.
 
@@ -136,7 +137,9 @@ returned without an artifact directive. Callers must not cache those bytes or a 
   start with `api/`, Drawing-written keys start with `pjsk/api/`.
 - **Reuse (hit):** Drawing dedups by `image_cache_entries.hash`. For a hit whose `storage_backend` is
   `garage`, the ref copies `cdn_path`, `bucket`, `object_key`, `media_type` and `size_bytes` from the stored row
-  and **never recomputes the key**. Two consequences follow:
+  and **never recomputes the key**. The lookup rides on the intent round trip, before the PUT; a row that
+  appears only by the locked write (another writer won the race during the PUT) is reused the same way, and
+  the fresh upload stays queued for GC (`unrecorded_uploads`). Two consequences follow:
   1. The same bytes rendered by two endpoints keep the **first** endpoint's key, so a ref's `cdn_path` may
      name a different `api_path` than the request did.
   2. Cloud's own `imagecache.storeHashed` rows (`pjsk/<sha256>.<ext>`) share the table and the bucket and may be
@@ -319,12 +322,13 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 | `store_skipped` | artifact-mode requests with `Cache-Store: 0` |
 | `published`, `reused`, `reused_foreign` | refs returned; hash hits; hits on a row not under `pjsk/api/` |
 | `uploads`, `upload_bytes`, `upload_elapsed_total`, `upload_failures`, `upload_timeouts` | object writes |
-| `index_lookups`, `index_lookup_hits`, `index_lookup_errors` | content-hash lookups |
+| `index_lookups`, `index_lookup_hits`, `index_lookup_errors` | content-hash lookups (made by the intent round trip, before the PUT) |
 | `index_writes`, `index_write_failures` | two-row index writes |
+| `unrecorded_uploads` | uploads whose hash another writer recorded first; the ref reuses that row and the upload is left to GC |
 | `index_skipped.{disabled,schema_missing,unavailable}` | index disabled/backoff decisions before safe artifact publication |
 | `degraded.{disabled,runtime_unavailable,upload_failed,upload_timeout,unsupported_media,internal}` | bytes returned instead of a ref |
 | `directive_rejected.<header>` | 400s by offending header |
-| `stages.{hash,index_prepare,index_lookup,index_lock,upload,index_connect,index_acquire,index_write,total}.{count,total}` | seconds per stage; connect/acquire timings are contained by their parent operation, and total is the whole artifact step |
+| `stages.{hash,index_prepare,upload,index_lock,index_write,index_connect,index_acquire,total}.{count,total}` | seconds per stage: `index_prepare` is the lookup + intent round trip, `index_lock` the `BEGIN` + hash lock round trip, `index_write` the gated upsert plus `COMMIT`. `index_connect`/`index_acquire` are reported separately for the prepare and the locked write (contained in `index_prepare`, excluded from `index_lock`/`index_write`); total is the whole artifact step |
 | `last_error` | last artifact error `{ts, stage, exc}` |
 
 `GET /cache/stats` → `asset_mirror`: `enabled`, `source`, `disabled_reason`, `manifest_version`, `provider`,
@@ -352,21 +356,57 @@ The schema also contains `image_cache_entries.writer_node`, `written_at` (both n
 `(content_hash, cdn_path)`. The test-only schema fixture mirrors Cloud's canonical DDL; Drawing runtime only
 checks/uses the schema. Missing columns/tables cause bytes degradation and bounded reconnect backoff.
 
-The writer performs these steps in order:
+The writer makes four round trips, and holds no transaction or lock while the object is uploaded:
 
-1. Generate a unique candidate object key and independently commit an upload cleanup intent with
-   `next_attempt_at = now() + interval '5 minutes'` (`ON CONFLICT DO NOTHING`). This does not borrow a
-   second pool connection while another transaction is open, so a pool of size one works.
-2. Begin one transaction and execute
-   `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, where `$1` is the lowercase SHA-256 content hash.
-3. Look up the hash under that lock. Reuse an existing Garage row's recorded path and original writer/time.
-   On a miss, lock/check the candidate intent is unclaimed (`attempts=0`) and unexpired before uploading.
-4. Upsert content and request rows in one `RECORD` statement, remove the candidate intent, then commit before returning a ref.
-   Failures/cancellation roll back the index transaction and leave the independently committed intent.
+1. **Prepare** (autocommit): generate a unique candidate object key (`<sha256>-<generation>`), look the hash up
+   and, on a miss, commit Cloud's upload intent for the candidate (`next_attempt_at = now() + interval
+   '5 minutes'`, `ON CONFLICT DO NOTHING`) in one statement. A hit (an existing Garage row) registers no
+   intent and skips the PUT. It borrows no second pool connection, so a pool of size one works.
+2. **PUT** the candidate object, outside any transaction.
+3. **Lock**: `BEGIN ISOLATION LEVEL READ COMMITTED; SELECT pg_advisory_xact_lock(hashtextextended('<hash>', 0))`
+   as one simple-protocol query (the hash is our own lowercase SHA-256 hex digest, validated before it is
+   inlined). This is Cloud's `ContentLockSQL`.
+4. **Record** (`RECORD_UPLOAD`, one statement, then `COMMIT`): under the lock, check the candidate's intent is
+   unclaimed and unexpired (Cloud's `verifyUploadSQL`). Upsert the content and request rows only if it is, or
+   if a Garage row already owns the hash (that row keeps its path, media, size and writer/time). Delete the
+   intent only if the candidate is the recorded path. If the candidate was uploaded but is not recorded,
+   re-insert its intent when GC has already consumed it. No row back means nothing was recorded: the
+   transaction still commits (for that re-insert) and the request degrades to bytes.
 
-Pooled connections retain the warm minimum and skip session reset: only transaction-scoped locks are used, and asyncpg still rolls back interrupted transactions. The single-statement write is checked against the equivalent two-upsert transaction by `test_index_record_pg.py`. Unlike the earlier uncoordinated writer, the complete operation now includes lock, lookup and durable intent round trips; its latency must be measured after rollout.
+Failures/cancellation roll back the locked write and leave the independently committed intent; a cancelled
+PUT never reaches step 3.
 
-The complete transaction budget is capped at four minutes, below the five-minute intent grace period.
+**Why an unlocked PUT is safe.** Cloud's GC deletes an object only in `deletePending`, under the same hash lock,
+for a queued `(hash, path)` that is due (`next_attempt_at <= clock_timestamp()`) and no longer an
+`image_cache_entries` path; `retireObject` queues a recorded path only under that lock, after removing its
+row. Two invariants follow:
+
+- *A recorded path is never deleted while recorded.* Step 4 records a fresh candidate only if, at a moment
+  when the writer holds the lock, its intent still has `attempts = 0` and is not yet due. Every GC attempt on
+  that key needs the lock and a due row, so none has started before step 4 (an attempt that failed would have
+  bumped `attempts` or left the row due), none can start during it, and after commit the intent row is gone:
+  GC can reach the key again only by retiring it first. A reused path is taken from a row that exists under
+  the lock, and a retired path is never recorded again (candidates are fresh keys, and a hit whose row
+  vanished records nothing), so no delete of it can be pending or still in flight.
+- *An uploaded object is always recorded or queued.* Its intent is committed before the PUT starts; step 4
+  either removes it together with recording the path, or leaves it, or puts it back if GC consumed it while
+  the PUT was still running (GC's delete then found nothing, and the late PUT landed). The only exception is a
+  PUT abandoned locally that still completes remotely after GC's delete, as with any writer.
+
+Step 4 runs as the statement after the lock, and the isolation level is pinned, so its snapshot postdates
+the lock grant: a GC retire that committed while the writer waited is seen (under REPEATABLE READ the
+snapshot would date from before the wait). The request budget (at most four minutes, below the five-minute
+grace) keeps a slow PUT from racing its own intent in practice, but correctness does not depend on it.
+
+Before this protocol (3.6.x) the writer made eight round trips per miss (prepare, `BEGIN`, lock, lookup,
+intent check, record, intent removal, `COMMIT`) and held the transaction through the PUT; the lookup it
+paid for almost never hits in production.
+
+Pooled connections retain the warm minimum and skip session reset: only transaction-scoped locks are used,
+and asyncpg still rolls back a transaction left open (the writer sends `BEGIN`/`COMMIT` itself). The
+single-statement write is checked against the equivalent two-upsert transaction, and the writer's
+`PREPARE_UPLOAD` + `RECORD_UPLOAD` against both, by `test_index_record_pg.py`.
+
 The content upsert preserves an existing Garage row's path, media, size and writer/time, while refreshing
 `last_referenced_at` and merging `expires_at` with NULL meaning infinite.
 
@@ -461,7 +501,9 @@ store, and the response carries `X-Haruki-Cache-Store: 0` even for a bytes-only 
 
 Optional loopback PostgreSQL checks can be run with `HARUKI_TEST_INDEX_DSN` and
 `pytest -q tests/test_index_postgres_integration.py`. They create and remove only a random test schema and
-verify lock exclusion, single-connection operation, dedup, rollback and expired-intent rejection.
+verify the unlocked PUT, single-connection operation, dedup, rollback, expired/consumed intents, a row retired
+during the lock wait, a lost writer race and a randomised writers-versus-GC run (all replaying Cloud's GC
+statements), plus the four-round-trip count measured on the wire.
 
 The supported service layout uses one ASGI worker per mirror directory (the Docker command uses
 `--workers 1`). Separate ASGI processes must have separate mirror roots: in-process leases do not coordinate

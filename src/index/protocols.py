@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
-    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
 
 
@@ -48,16 +47,30 @@ class RequestRow:
 class RecordResult:
     """What the one-statement index write reports back.
 
-    `cdn_path`, `media_type` and `size_bytes` are the stored row after the upsert: for a hash that already had a
-    `garage` row they are that row's own values, which are authoritative (addendum A2). `prior_backend` is the
-    row's `storage_backend` before the write (`None` for a new hash). The timings are the pool acquire and, on
-    the first write of an event loop, the pool creation plus preflight (`0.0` otherwise).
+    `cdn_path`, `media_type`, `size_bytes`, `writer_node` and `written_at` are the stored row after the upsert:
+    for a hash that already had a `garage` row they are that row's own values, which are authoritative
+    (addendum A2). `prior_backend` is the row's `storage_backend` before the write (`None` for a new hash). The
+    timings are the pool acquire, the `BEGIN` + hash-lock round trip, and, on the first write of an event loop,
+    the pool creation plus preflight (`0.0` otherwise).
     """
 
     cdn_path: str
     media_type: str | None
     size_bytes: int | None
     prior_backend: str | None
+    acquire_seconds: float = 0.0
+    connect_seconds: float = 0.0
+    writer_node: str | None = None
+    written_at: datetime | None = None
+    lock_seconds: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedUpload:
+    """What `prepare_upload` found: the path of an existing `garage` row (no intent was queued, skip the PUT),
+    or `None` (the candidate's cleanup intent is committed and the PUT may start)."""
+
+    existing_path: str | None
     acquire_seconds: float = 0.0
     connect_seconds: float = 0.0
 
@@ -78,21 +91,14 @@ class IndexWriteFailed(IndexUnavailable):
     """`record` did not commit."""
 
 
-class ContentWriter(Protocol):
-    async def upload_prepared(self, cdn_path: str) -> bool: ...
-
-    async def lookup_content(self, content_hash: str) -> ContentRow | None: ...
-
-    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult: ...
-
-    async def finish_upload(self, cdn_path: str) -> None: ...
-
-
 @runtime_checkable
 class RenderIndex(Protocol):
-    async def prepare_upload(self, content_hash: str, cdn_path: str) -> dict[str, float] | None: ...
+    async def prepare_upload(self, content_hash: str, cdn_path: str) -> PreparedUpload: ...
 
-    def content_writer(self, content_hash: str) -> AbstractAsyncContextManager[ContentWriter]: ...
+    # Lock, ownership-gated RECORD and commit; None when no index row was written.
+    async def record_upload(
+        self, content: ContentRow, request: RequestRow, *, uploaded: bool
+    ) -> RecordResult | None: ...
 
     async def preflight(self) -> None: ...  # raises IndexSchemaError / IndexUnavailable
 

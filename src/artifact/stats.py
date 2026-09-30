@@ -28,6 +28,7 @@ SIMPLE_COUNTERS: tuple[str, ...] = (
     "index_lookup_errors",
     "index_writes",
     "index_write_failures",
+    "unrecorded_uploads",
 )
 INDEX_SKIP_REASONS: tuple[str, ...] = ("disabled", "schema_missing", "unavailable")
 DEGRADED_REASONS: tuple[str, ...] = (
@@ -39,8 +40,9 @@ DEGRADED_REASONS: tuple[str, ...] = (
     "unsupported_media",
     "internal",
 )
-# Connection timings are contained by index_prepare / the writer context; index_write is the SQL upsert.
-# total is the whole artifact step, including transaction commit.
+# index_prepare is the lookup + intent round trip (its acquire/connect are also counted under index_acquire /
+# index_connect); index_lock is BEGIN + hash lock, index_write the gated upsert plus COMMIT. total is the whole
+# artifact step.
 STAGES: tuple[str, ...] = (
     "hash",
     "upload",
@@ -49,7 +51,6 @@ STAGES: tuple[str, ...] = (
     "index_write",
     "total",
     "index_prepare",
-    "index_lookup",
     "index_lock",
 )
 

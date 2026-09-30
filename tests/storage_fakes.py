@@ -6,12 +6,12 @@ Fakes live in `tests/`, never in `src/` (coverage `source = ["src"]`).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from collections.abc import Callable
 import time
 from typing import Any
 
-from src.index.protocols import ContentRow, RecordResult, RequestRow
+from src.index.protocols import ContentRow, PreparedUpload, RecordResult, RequestRow
+from src.index.sql import RECORD, RECORD_UPLOAD
 from src.storage.protocols import ObjectStat, StorageNotFound, StorageTooLarge, StorageUnavailable, validate_object_key
 
 
@@ -116,7 +116,13 @@ class UndefinedColumnError(Exception):
 
 
 class FakeRenderIndex:
-    """Implements `RenderIndex` over a dict of content rows (the `RECORD` conflict rules); records every call."""
+    """Implements `RenderIndex` over dicts of content rows and intents (the `RECORD` / `RECORD_UPLOAD` rules).
+
+    `lookup_error` fails `prepare_upload` (the lookup + intent round trip), `record_error` fails the writes.
+    `expired_intents` holds (hash, path) intents GC may already have claimed: `record_upload` will not use them,
+    and an unrecorded uploaded path is (re-)queued in `intents`. Every call is recorded in `calls`; the write
+    transaction's lock/commit/rollback in `writer_events`.
+    """
 
     def __init__(
         self,
@@ -137,34 +143,39 @@ class FakeRenderIndex:
         self.connect_seconds = connect_seconds
         self.calls: list[tuple[str, object]] = []
         self.closed = False
-        self.writer_active = False
         self.writer_events: list[str] = []
         self.intents: set[tuple[str, str]] = set()
+        self.expired_intents: set[tuple[str, str]] = set()
 
-    async def prepare_upload(self, content_hash: str, cdn_path: str) -> None:
+    async def prepare_upload(self, content_hash: str, cdn_path: str) -> PreparedUpload:
+        self.calls.append(("prepare_upload", content_hash))
         self.writer_events.append("prepare_upload")
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        existing = self.content.get(content_hash)
+        if existing is not None and existing.storage_backend == "garage":
+            return PreparedUpload(existing.cdn_path, self.acquire_seconds, self.connect_seconds)
         self.intents.add((content_hash, cdn_path))
+        return PreparedUpload(None, self.acquire_seconds, self.connect_seconds)
 
-    async def finish_upload(self, cdn_path: str) -> None:
-        self.writer_events.append("finish_upload")
-        self.intents = {item for item in self.intents if item[1] != cdn_path}
-
-    async def upload_prepared(self, cdn_path: str) -> bool:
-        return any(path == cdn_path for _, path in self.intents)
-
-    @asynccontextmanager
-    async def content_writer(self, content_hash: str) -> AsyncIterator[FakeRenderIndex]:
-        self.writer_active = True
+    async def record_upload(self, content: ContentRow, request: RequestRow, *, uploaded: bool) -> RecordResult | None:
+        self.calls.append(("record_upload", (content, request, uploaded)))
         self.writer_events.append("lock")
-        try:
-            yield self
-        except BaseException:
+        if self.record_error is not None:
             self.writer_events.append("rollback")
-            raise
-        else:
-            self.writer_events.append("commit")
-        finally:
-            self.writer_active = False
+            raise self.record_error
+        intent = (content.hash, content.cdn_path)
+        existing = self.content.get(content.hash)
+        owned = intent in self.intents and intent not in self.expired_intents
+        result = None
+        if owned or (existing is not None and existing.storage_backend == "garage"):
+            result = self._upsert(content, request)
+        if result is not None and result.cdn_path == content.cdn_path:
+            self.intents.discard(intent)
+        elif uploaded:
+            self.intents.add(intent)  # an unrecorded upload always ends up queued for GC
+        self.writer_events.append("commit")
+        return result
 
     async def preflight(self) -> None:
         self.calls.append(("preflight", None))
@@ -181,6 +192,9 @@ class FakeRenderIndex:
         self.calls.append(("record", (content, request)))
         if self.record_error is not None:
             raise self.record_error
+        return self._upsert(content, request)
+
+    def _upsert(self, content: ContentRow, request: RequestRow) -> RecordResult:
         existing = self.content.get(content.hash)
         if existing is None or existing.storage_backend != "garage":
             self.content[content.hash] = content
@@ -193,6 +207,8 @@ class FakeRenderIndex:
             prior_backend=existing.storage_backend if existing is not None else None,
             acquire_seconds=self.acquire_seconds,
             connect_seconds=self.connect_seconds,
+            writer_node=stored.writer_node,
+            written_at=stored.written_at,
         )
 
     async def close(self) -> None:
@@ -215,10 +231,12 @@ class _AsyncContext:
 
 
 class FakeConn:
-    """Duck-typed asyncpg connection: `execute`, `fetchrow`, `transaction()`; records SQL text and args.
+    """Duck-typed asyncpg connection: `execute`, `fetchrow`, `fetchval`, `transaction()`; records SQL and args.
 
     `rows` maps the first positional argument of `fetchrow` to the returned row (a dict); an unknown key returns
-    `default_row`. `errors` maps an exact SQL text to the exception raised when that statement runs.
+    `default_row`, and when that is None a `RECORD` / `RECORD_UPLOAD` echoes its content arguments as the stored
+    row (a new hash) unless `echo_records` is off. `values` maps an SQL text to what `fetchval` returns (default None).
+    `errors` maps an exact SQL text to the exception raised when that statement runs.
     """
 
     def __init__(self, pool: FakePgPool) -> None:
@@ -230,11 +248,16 @@ class FakeConn:
 
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         self._pool.log("fetchrow", sql, args)
-        return self._pool.rows.get(args[0], self._pool.default_row) if args else None
+        row = self._pool.rows.get(args[0], self._pool.default_row) if args else None
+        if row is None and self._pool.echo_records and sql in (RECORD, RECORD_UPLOAD):
+            keys = ("cdn_path", "size_bytes", "media_type", "writer_node", "written_at")
+            row = dict(zip(keys, (args[2], args[3], args[4], args[6], args[7]), strict=True))
+            row["prior_backend"] = None
+        return row
 
     async def fetchval(self, sql: str, *args: Any) -> Any:
         self._pool.log("fetchval", sql, args)
-        return 1
+        return self._pool.values.get(sql)
 
     def transaction(self) -> _AsyncContext:
         self._pool.events.append(("transaction.begin", None, ()))
@@ -253,12 +276,16 @@ class FakePgPool:
         *,
         rows: dict[str, dict[str, Any]] | None = None,
         default_row: dict[str, Any] | None = None,
+        values: dict[str, Any] | None = None,
+        echo_records: bool = True,
         errors: dict[str, Exception] | None = None,
         acquire_error: Exception | None = None,
         close_error: Exception | None = None,
     ) -> None:
         self.rows: dict[str, dict[str, Any]] = dict(rows or {})
         self.default_row = default_row
+        self.values: dict[str, Any] = dict(values or {})
+        self.echo_records = echo_records
         self.errors: dict[str, Exception] = dict(errors or {})
         self.acquire_error = acquire_error
         self.close_error = close_error
@@ -273,7 +300,7 @@ class FakePgPool:
             raise error
 
     def statements(self) -> list[str]:
-        return [sql for kind, sql, _ in self.events if sql is not None and kind in ("execute", "fetchrow")]
+        return [sql for kind, sql, _ in self.events if sql is not None and kind in ("execute", "fetchrow", "fetchval")]
 
     @property
     def round_trips(self) -> int:
