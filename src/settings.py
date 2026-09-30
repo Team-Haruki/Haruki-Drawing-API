@@ -162,6 +162,8 @@ class AssetMirrorSettings(BaseModel):
     breaker_failures: int = 5
     breaker_open_seconds: float = 30.0
     tmp_max_age_seconds: int = 3600
+    # Hard-link a miss from an older revision directory when Cloud's per-region inventory proves it unchanged.
+    revision_carry_over: bool = True
 
     @field_validator("dir")
     @classmethod

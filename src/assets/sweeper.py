@@ -33,6 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover
 from uuid import uuid4
 
 from src.assets.request_context import active_asset_revisions, evict_asset_file, retire_asset_revision
+from src.assets.revision_index import SIDECAR_NAME
 
 logger = logging.getLogger("src.assets.sweeper")
 
@@ -106,7 +107,8 @@ class MirrorSweeper:
             current_dir = self._root / current
             cur_st = _lstat(current_dir)
             if cur_st is not None and stat_mod.S_ISDIR(cur_st.st_mode) and current not in ("", ".", "..", _TMP_DIR):
-                files = self._collect_files(current_dir)
+                sidecar = str(current_dir / SIDECAR_NAME)  # the revision inventory is not an evictable asset
+                files = [item for item in self._collect_files(current_dir) if item[2] != sidecar]
                 entries = len(files)
                 total_bytes = sum(size for _, size, _ in files)
                 if self._max_bytes > 0 or self._max_entries > 0:
