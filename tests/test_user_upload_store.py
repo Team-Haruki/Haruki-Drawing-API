@@ -82,6 +82,7 @@ def test_profile_bg_object_key_accepts_every_form_cloud_has_sent(img_path: str) 
         "user_upload/profile_bg/tw/binding_3_0badf00d.jpg",
         "user_upload/profile_bg/en/uid_42.jpg",
         "user_upload/profile_bg/cn/uid_1234567890123456_deadbeef.jpg",
+        "user_upload/profile_bg/jp/uid_1234567890123456_e9d11ea3c8931f5fd21080325ddf9c5d.jpg",
     ],
 )
 def test_profile_bg_object_key_keeps_every_filename_cloud_has_written(key: str) -> None:
@@ -735,3 +736,14 @@ async def test_bucket_background_renders_through_the_real_profile_paths(local_as
         assert payload is not None
         skia = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
         assert skia.getpixel((2, 2))[:3] == (200, 30, 40)
+
+
+def test_profile_bg_object_key_strips_the_asset_prefix_cloud_sends_for_long_tokens() -> None:
+    # Cloud sends the persisted path with its "asset/" prefix; the 32-hex token is the post-2026-09-30 format.
+    key = "user_upload/profile_bg/jp/uid_1234567890123456_e9d11ea3c8931f5fd21080325ddf9c5d.jpg"
+    assert profile_bg_object_key("asset/" + key) == key
+
+
+@pytest.mark.parametrize("suffix", ["_deadbee", "_0123456789abcdef", "_E9D11EA3C8931F5FD21080325DDF9C5D"])
+def test_profile_bg_object_key_rejects_token_shapes_cloud_never_writes(suffix: str) -> None:
+    assert profile_bg_object_key(f"user_upload/profile_bg/jp/uid_42{suffix}.jpg") is None
