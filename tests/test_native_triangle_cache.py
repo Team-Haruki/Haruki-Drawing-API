@@ -1,4 +1,4 @@
-"""Background tiles preserve the clock, clipping, content and bounded-cache semantics."""
+"""Background tiles preserve the clock, clipping, content and bounded-cache semantics, in their own pool."""
 
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -16,8 +16,8 @@ except ImportError:
     native = None
 
 pytestmark = pytest.mark.skipif(
-    native is None or "background_cache_hits" not in native.renderer_cache_stats(),
-    reason="native background tile cache required",
+    native is None or "background_cache_max_bytes" not in native.renderer_cache_stats(),
+    reason="native background tile pool required",
 )
 
 
@@ -104,7 +104,7 @@ def test_nested_clipped_background_never_aliases_full_background():
     assert native.renderer_cache_stats()["background_cache_hits"] == 0
     native.clear_renderer_caches()
     assert render(value) == result
-    assert native.renderer_cache_stats()["raster_cache_entries"] == 0
+    assert native.renderer_cache_stats()["background_cache_entries"] == 0
 
 
 def test_scaled_background_uses_original_path():
@@ -126,7 +126,7 @@ def test_tight_scene_budget_declines_optional_capture_without_failing():
     value["limits"] = {"max_scene_bytes": 180 * 1100 * 4, "max_node_pixels": 180 * 1100}
     assert render(value) == first
     stats = native.renderer_cache_stats()
-    assert stats["raster_cache_entries"] == 0
+    assert stats["background_cache_entries"] == 0
     assert stats["background_cache_hits"] == 0
 
 
@@ -147,7 +147,21 @@ def test_concurrent_foregrounds_and_eviction_do_not_mix_backgrounds():
             assert result == expected[i % len(expected)]
 
 
-def test_disabled_and_small_pool_match_and_respect_shared_capacity():
+def test_tiles_stay_out_of_the_asset_raster_pool():
+    native.clear_renderer_caches()
+    value = scene()
+    first = render(value)
+    assert render(value) == first
+    stats = native.renderer_cache_stats()
+    assert stats["background_cache_hits"] == 1
+    assert stats["background_cache_entries"] > 0
+    assert 0 < stats["background_cache_bytes"] <= stats["background_cache_max_bytes"]
+    # The scene draws no asset, so nothing may have landed in the asset pool.
+    assert stats["raster_cache_entries"] == 0
+    assert stats["raster_cache_bytes"] == 0
+
+
+def test_disabled_and_small_pool_match_and_respect_pool_capacity():
     values = [scene(hour=hour) for hour in (0, 3, 6, 9, 12, 15, 18, 21)]
     values += [deepcopy(value) for value in values]
     script = """
@@ -161,22 +175,32 @@ for value in values:
 print(json.dumps({'images':images,'stats':native.renderer_cache_stats()}))
 """
     results = []
-    for mb in (0, 4, 64):
+    # (background pool MiB, asset raster pool MiB): the asset pool no longer governs the tiles.
+    for background_mb, raster_mb in ((0, 64), (4, 64), (64, 64), (64, 0)):
+        env = {
+            **os.environ,
+            "HARUKI_SKIA_BACKGROUND_CACHE_MB": str(background_mb),
+            "HARUKI_SKIA_RASTER_CACHE_MB": str(raster_mb),
+            "HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB": "1",
+        }
         result = subprocess.run(
             [sys.executable, "-X", "gil=0", "-c", script],
             input=json.dumps(values),
             text=True,
             capture_output=True,
-            env={**os.environ, "HARUKI_SKIA_RASTER_CACHE_MB": str(mb), "HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB": "1"},
+            env=env,
             check=True,
             timeout=60,
         )
         value = json.loads(result.stdout)
-        assert value["stats"]["raster_cache_bytes"] <= mb * 1024 * 1024
+        assert value["stats"]["background_cache_max_bytes"] == background_mb * 1024 * 1024
+        assert value["stats"]["background_cache_bytes"] <= background_mb * 1024 * 1024
+        assert value["stats"]["raster_cache_bytes"] == 0
         results.append(value)
-    assert results[0]["images"] == results[1]["images"] == results[2]["images"]
+    assert all(result["images"] == results[0]["images"] for result in results)
     assert results[0]["stats"]["background_cache_hits"] == 0
     assert results[2]["stats"]["background_cache_hits"] >= 8
+    assert results[3]["stats"]["background_cache_hits"] >= 8
 
 
 def test_warm_hit_also_respects_scene_retention_budget():

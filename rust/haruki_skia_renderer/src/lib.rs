@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
+use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use mtpng::encoder::{Encoder as MtpngEncoder, Options as MtpngOptions};
 use mtpng::{ColorType as MtpngColorType, CompressionLevel, Header as MtpngHeader};
@@ -1483,9 +1484,64 @@ pub(crate) struct RasterCacheSnapshot {
     pub(crate) bytes: u64,
 }
 
+/// Process-wide outcomes of the asset raster pool, for `/cache/stats`. `NativeMetrics` only
+/// counts per scene, which hid a pool that sat full while almost nothing hit it.
+pub(crate) struct RasterCacheCounters {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    coalesced: AtomicU64,
+    oversize: AtomicU64,
+    evictions: AtomicU64,
+}
+
+impl RasterCacheCounters {
+    const fn new() -> Self {
+        Self {
+            hits: AtomicU64::new(0),
+            misses: AtomicU64::new(0),
+            coalesced: AtomicU64::new(0),
+            oversize: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, outcome: RasterCacheOutcome) {
+        let counter = match outcome {
+            RasterCacheOutcome::Hit => &self.hits,
+            RasterCacheOutcome::Miss => &self.misses,
+            RasterCacheOutcome::Coalesced => &self.coalesced,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// `(hits, misses, coalesced, oversize, evictions)`.
+    fn snapshot(&self) -> (u64, u64, u64, u64, u64) {
+        (
+            self.hits.load(Ordering::Relaxed),
+            self.misses.load(Ordering::Relaxed),
+            self.coalesced.load(Ordering::Relaxed),
+            self.oversize.load(Ordering::Relaxed),
+            self.evictions.load(Ordering::Relaxed),
+        )
+    }
+
+    fn clear(&self) {
+        for counter in [
+            &self.hits,
+            &self.misses,
+            &self.coalesced,
+            &self.oversize,
+            &self.evictions,
+        ] {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 static RASTER_CACHE_CONFIG: OnceLock<RasterCacheConfig> = OnceLock::new();
 static RASTER_IMAGE_CACHE: OnceLock<Option<Cache<RasterCacheKey, RasterCacheValue>>> =
     OnceLock::new();
+static RASTER_CACHE_COUNTERS: RasterCacheCounters = RasterCacheCounters::new();
 static IMAGE_DIMENSION_CACHE: OnceLock<Cache<AssetIdentity, [i32; 2]>> = OnceLock::new();
 
 fn env_mb(name: &str, default_mb: u64) -> u64 {
@@ -1511,16 +1567,32 @@ fn raster_cache_config() -> &'static RasterCacheConfig {
     })
 }
 
+/// A byte-weighted image pool that counts size-policy removals (not explicit clears) in `evictions`.
+///
+/// moka reports `RemovalCause::Size` both for an entry evicted to make room and for a new entry the
+/// TinyLFU admission policy declines to keep, so the counter is "evicted or not admitted", not only
+/// displaced entries.
+fn weighted_raster_pool(
+    max_bytes: u64,
+    evictions: &'static AtomicU64,
+) -> Cache<RasterCacheKey, RasterCacheValue> {
+    Cache::builder()
+        .max_capacity(max_bytes)
+        .weigher(|_, value: &RasterCacheValue| value.byte_size)
+        .eviction_listener(move |_, _, cause| {
+            if cause == RemovalCause::Size {
+                evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        })
+        .build()
+}
+
 fn raster_image_cache() -> Option<&'static Cache<RasterCacheKey, RasterCacheValue>> {
     RASTER_IMAGE_CACHE
         .get_or_init(|| {
             let config = raster_cache_config();
-            (config.max_bytes > 0).then(|| {
-                Cache::builder()
-                    .max_capacity(config.max_bytes)
-                    .weigher(|_, value: &RasterCacheValue| value.byte_size)
-                    .build()
-            })
+            (config.max_bytes > 0)
+                .then(|| weighted_raster_pool(config.max_bytes, &RASTER_CACHE_COUNTERS.evictions))
         })
         .as_ref()
 }
@@ -2054,6 +2126,9 @@ pub(crate) fn rasterize_asset_cached(
         return Ok(None);
     };
     if byte_size == 0 || byte_size > config.max_entry_bytes || byte_size > u32::MAX as u64 {
+        RASTER_CACHE_COUNTERS
+            .oversize
+            .fetch_add(1, Ordering::Relaxed);
         return Ok(None);
     }
 
@@ -2070,6 +2145,7 @@ pub(crate) fn rasterize_asset_cached(
         sampling: sampling_key,
     };
     if let Some(value) = cache.get(&key) {
+        RASTER_CACHE_COUNTERS.record(RasterCacheOutcome::Hit);
         return Ok(Some(RasterCacheResult {
             image: value.image,
             outcome: RasterCacheOutcome::Hit,
@@ -2094,13 +2170,15 @@ pub(crate) fn rasterize_asset_cached(
             })
         })
         .map_err(|err| err.as_ref().clone())?;
+    let outcome = if did_build.get() {
+        RasterCacheOutcome::Miss
+    } else {
+        RasterCacheOutcome::Coalesced
+    };
+    RASTER_CACHE_COUNTERS.record(outcome);
     Ok(Some(RasterCacheResult {
         image: value.image,
-        outcome: if did_build.get() {
-            RasterCacheOutcome::Miss
-        } else {
-            RasterCacheOutcome::Coalesced
-        },
+        outcome,
     }))
 }
 
@@ -2123,6 +2201,7 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     if let Some(cache) = raster_image_cache() {
         cache.run_pending_tasks();
     }
+    triangle_cache::run_pending_tasks();
     image_dimension_cache().run_pending_tasks();
     let snapshot = raster_cache_snapshot();
     let dict = PyDict::new(py);
@@ -2131,6 +2210,12 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     dict.set_item("raster_cache_oversample", snapshot.oversample)?;
     dict.set_item("raster_cache_entries", snapshot.entries)?;
     dict.set_item("raster_cache_bytes", snapshot.bytes)?;
+    let (hits, misses, coalesced, oversize, evictions) = RASTER_CACHE_COUNTERS.snapshot();
+    dict.set_item("raster_cache_hits", hits)?;
+    dict.set_item("raster_cache_misses", misses)?;
+    dict.set_item("raster_cache_coalesced", coalesced)?;
+    dict.set_item("raster_cache_oversize", oversize)?;
+    dict.set_item("raster_cache_evictions", evictions)?;
     let (sdf_max_bytes, sdf_max_entry_bytes, sdf_entries, sdf_bytes) =
         interp::sdf_font_cache_snapshot();
     dict.set_item("sdf_font_cache_max_bytes", sdf_max_bytes)?;
@@ -2145,6 +2230,11 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
     dict.set_item("background_cache_hits", backgrounds.0)?;
     dict.set_item("background_cache_misses", backgrounds.1)?;
     dict.set_item("background_cache_bypasses", backgrounds.2)?;
+    let pool = triangle_cache::pool_snapshot();
+    dict.set_item("background_cache_max_bytes", pool.max_bytes)?;
+    dict.set_item("background_cache_entries", pool.entries)?;
+    dict.set_item("background_cache_bytes", pool.bytes)?;
+    dict.set_item("background_cache_evictions", pool.evictions)?;
     // Font health: any non-zero count means some text rendered with sans-serif instead of the
     // configured face. `font_fallback_fonts` names them so a misconfigured deploy is actionable.
     dict.set_item("font_fallback_count", font_fallback_count())?;
@@ -2161,12 +2251,13 @@ fn renderer_cache_stats(py: Python<'_>) -> PyResult<Py<PyDict>> {
 
 #[pyfunction]
 fn clear_renderer_caches() {
-    triangle_cache::clear_stats();
+    triangle_cache::clear();
     basic_text::clear_text_mask_cache();
     if let Some(cache) = raster_image_cache() {
         cache.invalidate_all();
         cache.run_pending_tasks();
     }
+    RASTER_CACHE_COUNTERS.clear();
     let dimensions = image_dimension_cache();
     dimensions.invalidate_all();
     dimensions.run_pending_tasks();
@@ -2481,10 +2572,67 @@ mod tests {
         let cached_size = 16 * raster_cache_config().oversample;
         assert_eq!(first.image.dimensions(), (cached_size, cached_size).into());
 
+        let hits_before = RASTER_CACHE_COUNTERS.snapshot().0;
         let second = rasterize_asset_cached(&descriptor, None, src, 16, 16, linear_sampling(), 1)
             .expect("second raster")
             .expect("cache enabled");
         assert_eq!(second.outcome, RasterCacheOutcome::Hit);
+        // Process-wide, so other tests may add to it concurrently; this hit must be in it.
+        assert!(RASTER_CACHE_COUNTERS.snapshot().0 > hits_before);
+    }
+
+    fn test_raster_value(byte_size: u32) -> RasterCacheValue {
+        let mut surface = surfaces::raster_n32_premul((4, 4)).expect("surface");
+        surface.canvas().clear(Color::BLUE);
+        RasterCacheValue {
+            image: surface.image_snapshot(),
+            byte_size,
+        }
+    }
+
+    fn test_raster_key(index: u128) -> RasterCacheKey {
+        RasterCacheKey::Asset {
+            asset: AssetIdentity {
+                full_path: PathBuf::from(format!("/virtual/eviction-test-{index}.png")),
+                mtime_ns: index,
+                file_size: 1,
+            },
+            src_bits: [0; 4],
+            width: 4,
+            height: 4,
+            sampling: 0,
+        }
+    }
+
+    #[test]
+    fn raster_counters_record_each_outcome_and_clear() {
+        let counters = RasterCacheCounters::new();
+        counters.record(RasterCacheOutcome::Hit);
+        counters.record(RasterCacheOutcome::Miss);
+        counters.record(RasterCacheOutcome::Miss);
+        counters.record(RasterCacheOutcome::Coalesced);
+        counters.oversize.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(counters.snapshot(), (1, 2, 1, 1, 0));
+        counters.clear();
+        assert_eq!(counters.snapshot(), (0, 0, 0, 0, 0));
+    }
+
+    #[test]
+    fn raster_pool_counts_capacity_evictions_but_not_clears() {
+        static EVICTIONS: AtomicU64 = AtomicU64::new(0);
+        let pool = weighted_raster_pool(1024, &EVICTIONS);
+        for index in 0..8 {
+            pool.insert(test_raster_key(index), test_raster_value(512));
+            pool.run_pending_tasks();
+        }
+        assert!(pool.weighted_size() <= 1024);
+        let evicted = EVICTIONS.load(Ordering::Relaxed);
+        assert!(evicted >= 6, "evictions={evicted}");
+
+        pool.invalidate_all();
+        pool.run_pending_tasks();
+        assert_eq!(pool.entry_count(), 0);
+        assert_eq!(EVICTIONS.load(Ordering::Relaxed), evicted);
     }
 
     #[test]

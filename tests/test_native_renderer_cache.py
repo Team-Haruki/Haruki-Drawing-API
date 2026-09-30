@@ -72,3 +72,35 @@ def test_native_renderer_stats_include_text_cache_when_raster_is_disabled(monkey
     assert stats["available"] is True
     assert stats["enabled"] is enabled
     assert stats["text_mask_cache_max_bytes"] == text_bytes
+
+
+def test_native_renderer_stats_derive_hit_rates(monkeypatch):
+    native = _NativeRenderer()
+    monkeypatch.setattr(
+        native,
+        "renderer_cache_stats",
+        lambda: {
+            "raster_cache_max_bytes": 1024,
+            "raster_cache_hits": 6,
+            "raster_cache_coalesced": 1,
+            "raster_cache_misses": 3,
+            "background_cache_hits": 0,
+            "background_cache_misses": 0,
+        },
+    )
+    monkeypatch.setattr(canvas, "load_native_renderer", lambda: native)
+
+    stats = canvas.get_native_renderer_cache_stats()
+
+    assert stats["raster_cache_hit_rate"] == pytest.approx(0.7)
+    assert stats["background_cache_hit_rate"] is None  # no lookups yet
+
+
+def test_native_renderer_hit_rates_are_none_on_an_older_extension(monkeypatch):
+    native = _NativeRenderer()
+    monkeypatch.setattr(canvas, "load_native_renderer", lambda: native)
+
+    stats = canvas.get_native_renderer_cache_stats()
+
+    assert stats["raster_cache_hit_rate"] is None
+    assert stats["background_cache_hit_rate"] is None

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 import sys
+import threading
 
 import coloredlogs
 from fastapi import FastAPI
@@ -337,11 +338,44 @@ async def _stop_user_upload_store() -> None:
         logger.warning("user-upload store shutdown failed", exc_info=True)
 
 
+# Granian's free-threaded build runs each worker as a THREAD of one process, so `--workers N` runs N
+# lifespans at once against the same module state. Unserialised, concurrent `coloredlogs.install` calls
+# race on the root logger (each removes the stream handler it saw, then adds its own) and leave 2-4
+# handlers behind: every line, and every log-derived request count, came out doubled.
+_logging_install_lock = threading.Lock()
+_active_lifespans = 0
+_active_lifespans_lock = threading.Lock()
+
+
+def _install_logging() -> None:
+    with _logging_install_lock:
+        coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+
+
+def _enter_lifespan() -> None:
+    global _active_lifespans
+    with _active_lifespans_lock:
+        _active_lifespans += 1
+        active = _active_lifespans
+    if active > 1:
+        logger.warning(
+            "lifespan.shared_process active=%d: granian workers of a free-threaded build share this process "
+            "(and every cache, pool and mirror root); run with --workers 1",
+            active,
+        )
+
+
+def _exit_lifespan() -> None:
+    global _active_lifespans
+    with _active_lifespans_lock:
+        _active_lifespans = max(0, _active_lifespans - 1)
+
+
 async def _startup_runtime() -> list[asyncio.Task[None]]:
     from src.core.heavy_render_pool import startup_heavy_render_worker_pool
 
     _ensure_nogil_runtime()
-    coloredlogs.install(level="INFO", fmt=LOG_FORMAT, field_styles=FIELD_STYLE)
+    _install_logging()
     configure_runtime_diagnostics()
     _self_check_fonts()
     _start_asset_mirror()
@@ -379,7 +413,11 @@ async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
 
     cleanup_tasks = await _startup_runtime()
-    yield
+    _enter_lifespan()
+    try:
+        yield
+    finally:
+        _exit_lifespan()
     await _shutdown_runtime(cleanup_tasks)
 
 

@@ -559,3 +559,63 @@ def test_shutdown_asset_mirror_close_failure_is_logged(caplog) -> None:
         assert "mirror.shutdown_failed" in caplog.text
     finally:
         mirror_mod.set_asset_mirror(None)
+
+
+def test_concurrent_logging_installs_leave_one_stream_handler(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    import coloredlogs
+
+    root = logging.getLogger()
+    saved_handlers, saved_level = list(root.handlers), root.level
+
+    def installed() -> list[logging.Handler]:
+        return [h for h in root.handlers if isinstance(h, coloredlogs.StandardErrorHandler)]
+
+    try:
+        for _ in range(20):
+            for handler in installed():
+                root.removeHandler(handler)
+            barrier = threading.Barrier(4)
+
+            def worker() -> None:
+                barrier.wait()
+                main_mod._install_logging()
+
+            threads = [threading.Thread(target=worker) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            # Granian free-threaded workers are threads: four lifespans must still log each line once.
+            assert len(installed()) == 1
+    finally:
+        for handler in list(root.handlers):
+            if handler not in saved_handlers:
+                root.removeHandler(handler)
+        for handler in saved_handlers:
+            if handler not in root.handlers:
+                root.addHandler(handler)
+        root.setLevel(saved_level)
+
+
+def test_second_lifespan_in_one_process_warns(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
+    async def startup() -> list[Any]:
+        return []
+
+    async def shutdown(_received: list[Any]) -> None:
+        return None
+
+    monkeypatch.setattr(main_mod, "_startup_runtime", startup)
+    monkeypatch.setattr(main_mod, "_shutdown_runtime", shutdown)
+
+    async def exercise() -> None:
+        async with main_mod.lifespan(SimpleNamespace()):
+            assert "lifespan.shared_process" not in caplog.text
+            async with main_mod.lifespan(SimpleNamespace()):
+                pass
+        assert main_mod._active_lifespans == 0
+
+    with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
+        asyncio.run(exercise())
+    assert "lifespan.shared_process active=2" in caplog.text
