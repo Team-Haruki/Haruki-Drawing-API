@@ -280,11 +280,13 @@ async def test_wl_support_rows_keep_per_result_totals_and_compact_cards(monkeypa
     assert rendered.width > 0
     assert not any("支援配置" in text or "总支援加成" in text for text in texts)
     assert texts.count("12.75%") == support_count
+    # Column labels are drawn once for the list (plus the hero's own stat labels), never per result.
     assert texts.count("卡组") == 1
-    assert texts.count("加成") == 1
-    assert texts.count("综合力") == 1
+    assert texts.count("加成") == 2
+    assert texts.count("综合力") == 2
     assert sizes.count((52, 52)) == support_count + 1
-    assert sizes.count((None, 80)) == 2
+    assert sizes.count((None, drawer._HERO_THUMB)) == 1
+    assert sizes.count((None, drawer._LIST_THUMB)) == 1
 
 
 def test_support_card_assets_are_loaded_with_main_cards(monkeypatch):
