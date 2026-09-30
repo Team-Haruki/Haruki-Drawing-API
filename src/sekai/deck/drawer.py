@@ -1013,12 +1013,23 @@ async def _draw_deck_title_row(rqd: DeckRequest, assets: _DeckRecommendAssets, w
     )
     title_w = _deck_title_block_w(rqd)
     inline = bool(pills) and visual_w + 16 + title_w + 24 + pills_w <= width
-    with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0):
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(16).set_padding(0) as row:
         _draw_deck_header_visual(rqd, assets, banner)
         _draw_deck_title_block(rqd, width - visual_w - 16 - (pills_w + 16 if inline else 0))
         if inline:
-            Spacer(w=width - visual_w - title_w - pills_w - 3 * 16, h=1)
+            gap = Spacer(w=0, h=1)
             _draw_header_pills(pills, pills_w)
+    if inline:
+        # The widths above are layout-font estimates; the text boxes can measure wider (a fallback font,
+        # a glyph the estimate missed). Push the pills right by what is actually left, and drop them to
+        # their own line when nothing is.
+        built = sum(item._get_self_size()[0] for item in row.items if item is not gap)
+        left = width - built - 16 * (len(row.items) - 1)
+        if left >= 0:
+            gap.set_w(left)
+        else:
+            row.set_items(row.items[:2])
+            inline = False
     if pills and not inline:
         _draw_header_pills(pills, width)
 
