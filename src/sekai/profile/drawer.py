@@ -1038,10 +1038,14 @@ def _profile_card_data_source_label(name: str | None) -> str:
     return name
 
 
-def _profile_card_level_label(items: list[Widget], mysekai_level: int | None) -> str | None:
+def _profile_card_level_label(name: str | list[Widget], mysekai_level: int | None) -> str | None:
+    """``MySekai Lv.N``, or the compact ``MSLv.N`` next to a long name (its visible text, or its text items)."""
     if not mysekai_level:
         return None
-    name_length = sum(get_str_display_length(item.text) for item in items if isinstance(item, TextBox))
+    if isinstance(name, str):
+        name_length = get_str_display_length(name)
+    else:
+        name_length = sum(get_str_display_length(item.text) for item in name if isinstance(item, TextBox))
     return f"MySekai Lv.{mysekai_level}" if name_length <= 12 else f"MSLv.{mysekai_level}"
 
 
@@ -1118,6 +1122,8 @@ _CARD_AVATAR_WELL = _CARD_AVATAR + 12  # the avatar fills the well edge to edge 
 _CARD_AVATAR_RING = 2
 _CARD_TEXT_W = _CARD_INNER_W - _CARD_AVATAR_WELL - 14
 _CARD_ERROR_W = 300  # legacy width of the standalone error module
+# what a data-source row leaves for the relative age: padding, dot, name 106, time 112 and three 8 px gaps
+_CARD_SOURCE_AGE_W = _CARD_TEXT_W - 2 * 8 - 8 - 106 - 112 - 3 * 8
 
 
 def _profile_card_chip(text: str, fill: tuple[int, int, int, int], *, style: TextStyle = _CARD_CHIP_STYLE) -> TextBox:
@@ -1197,22 +1203,25 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
     return ret
 
 
-def _profile_card_name(nickname: str, rank: int | None, mysekai_level: int | None) -> list[Widget]:
-    """The name, kept inside the fixed text column next to the rank / level chips.
+def _profile_card_visible_name(nickname: str) -> str:
+    """The characters of the (truncated) nickname that are drawn, colour tags removed."""
+    return "".join(segment["text"] for segment in parse_colored_text_segments(truncate(nickname, 64)))
+
+
+def _profile_card_name(nickname: str, free: int) -> list[Widget]:
+    """The name, kept inside the ``free`` px the rank / level chips leave in the text column.
 
     A plain name shrinks to the free width. A colour-tagged name keeps its per-segment colours
     (``colored_text_box`` cannot shrink) while it fits; a long one falls back to the plain, shrinking
-    ink-coloured text of its visible characters. Returns the text items for the compact-level-label rule.
+    ink-coloured text of its visible characters. Returns the widgets for the name row; the caller sets
+    the row's items, so a measured-and-rejected colour box never stays in the row.
     """
-    free = _CARD_TEXT_W - (72 if rank else 0) - (118 if mysekai_level else 0)
     text = truncate(nickname, 64)
     segments = parse_colored_text_segments(text)
     if len(segments) > 1 or segments[0]["color"] is not None:
-        with HSplit().set_sep(0) as probe:
-            items = colored_text_box(text, _CARD_NAME_STYLE, padding=0).items
-        if probe._get_self_size()[0] <= free:
-            return items
-        probe.set_items([])
+        colored = colored_text_box(text, _CARD_NAME_STYLE, padding=0)
+        if colored._get_self_size()[0] <= free:
+            return [colored]
         text = "".join(segment["text"] for segment in segments)
     length = get_str_display_length(text)
     size = 24 if length <= 10 else (20 if length <= 16 else 18)
@@ -1234,27 +1243,35 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
     now = datetime_from_millis(rqd.dt, rqd.timezone) if rqd.dt else request_now(rqd.timezone)
 
     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4) as identity:
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
-            name_items = _profile_card_name(profile.nickname, rqd.rank, rqd.mysekai_level)
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(8) as name_row:
             chips = []
             if rank_text := _profile_card_rank_label(rqd.rank):
-                chips.append((rank_text, _CARD_RANK_CHIP))
-            if ms_lv_text := _profile_card_level_label(name_items, rqd.mysekai_level):
-                chips.append((ms_lv_text, _CARD_LEVEL_CHIP))
-            for text, fill in chips:
-                _profile_card_chip(text, fill)
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
+                chips.append(_profile_card_chip(rank_text, _CARD_RANK_CHIP))
+            visible_name = _profile_card_visible_name(profile.nickname)
+            if ms_lv_text := _profile_card_level_label(visible_name, rqd.mysekai_level):
+                chips.append(_profile_card_chip(ms_lv_text, _CARD_LEVEL_CHIP))
+            # The chips keep their measured width (it grows with the font's Latin/digit advances and the
+            # number of digits); the name gets whatever is left of the text column.
+            free = _CARD_TEXT_W - sum(chip._get_self_size()[0] + 8 for chip in chips)
+            name_row.set_items([*_profile_card_name(profile.nickname, free), *chips])
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(8) as id_row:
             region = profile.region.upper()
             chip = _profile_card_chip(region, _profile_card_region_chip_fill(region), style=_CARD_BADGE_STYLE)
             # The row must never outgrow the text column (an unmasked 19-digit ID plus a long timezone
-            # does): shrink the timezone first, then the ID itself.
+            # does): the timezone moves to its own line when it does not fit whole, the ID shrinks last.
             free = _CARD_TEXT_W - chip._get_self_size()[0] - 8
             uid = TextBox(_profile_card_uid_line(profile), _CARD_ID_STYLE, overflow="shrink")
             _fit_text_box_width(uid, free)
             room = free - uid._get_self_size()[0] - 8
-            if rqd.timezone and room >= 40:
-                tz = TextBox(f"· {rqd.timezone}", _CARD_ID_STYLE.replace(size=12), overflow="shrink")
-                _fit_text_box_width(tz, room)
+            tz_style = _CARD_ID_STYLE.replace(size=12)
+            wrap_tz = False
+            if rqd.timezone:
+                tz = TextBox(f"· {rqd.timezone}", tz_style, overflow="shrink")
+                if tz._get_self_size()[0] > room:
+                    id_row.set_items([chip, uid])
+                    wrap_tz = True
+        if wrap_tz:
+            _fit_text_box_width(TextBox(rqd.timezone, tz_style, overflow="shrink"), _CARD_TEXT_W)
         for name, local_time, age, color in _profile_card_source_rows(data_sources, rqd.timezone, now):
             with (
                 HSplit()
@@ -1266,10 +1283,11 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
                 .set_bg(RoundRectBg(_CARD_WELL_SOFT, 8, blur_glass=False))
             ):
                 Spacer(w=8, h=8).set_bg(RoundRectBg(color, 4, blur_glass=False))
-                # dot 8 + name 106 + time 112 + widest age ("12 小时前") stays inside the 332 px text column
+                # dot 8 + name 106 + time 112 + age; the age shrinks rather than outgrow the text column
                 TextBox(name, _CARD_SOURCE_STYLE, overflow="shrink").set_w(106)
                 TextBox(local_time, _CARD_LINE_STYLE).set_w(112)
-                TextBox(age, _CARD_AGE_STYLE.replace(color=color))
+                age_box = TextBox(age, _CARD_AGE_STYLE.replace(color=color), overflow="shrink")
+                _fit_text_box_width(age_box, _CARD_SOURCE_AGE_W)
 
     return identity
 
