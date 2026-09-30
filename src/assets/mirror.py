@@ -6,8 +6,15 @@ store is async, so the mirror owns a dedicated fetch-loop thread and submits wit
 loop (invariant I2) and goes straight to the local fallback instead.
 
 Degradation order after a miss of the mirrored file: loop-thread refusal -> negative memo (NotFound only,
-TTL + version scoped, addendum C-9) -> single-flight wait -> circuit breaker -> remote read -> atomic
-publish. Every failure branch ends in the local fallback (today's `<base>/asset/...` path) and a counter.
+TTL + version scoped, addendum C-9) -> single-flight wait -> carry-over from an older revision directory ->
+circuit breaker -> remote read -> atomic publish. Every failure branch ends in the local fallback (today's
+`<base>/asset/...` path) and a counter.
+
+Carry-over: Cloud's asset revision covers all five regions, so any publish moves every request into a new,
+empty directory. A miss first looks for the same object key in the other revision directories and hard-links
+it when it provably names the same bytes: for free when both revisions' inventories (`revision_index`) agree
+on the key's region or shard, otherwise after a remote `stat` whose size and last-modified match the local
+copy (which `_publish` stamped with the remote last-modified). Anything unproven is fetched as before.
 
 Nothing here touches the network or starts a thread at import time, and `get_asset_mirror()` returns a
 `NullMirror` (zero overhead, no thread, no operator) unless `assets.source == "mirror"`.
@@ -20,10 +27,12 @@ from collections.abc import Callable
 import concurrent.futures
 from dataclasses import dataclass, field, fields
 import hashlib
+import json
 import logging
 import os
 from pathlib import Path
-from stat import S_ISREG
+import shutil
+from stat import S_ISDIR, S_ISREG
 import sys
 import threading
 import time
@@ -31,6 +40,15 @@ from typing import TYPE_CHECKING, Any
 
 from src.assets.keymap import AssetKeyMap, MappedAsset
 from src.assets.request_context import current_asset_revision
+from src.assets.revision_index import (
+    POINTER_MAX_BYTES,
+    REGIONS,
+    SIDECAR_NAME,
+    RevisionIndex,
+    is_digest,
+    parse_region,
+    pointer_key,
+)
 from src.storage.protocols import StorageNotFound, StorageTooLarge
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -42,6 +60,8 @@ logger = logging.getLogger("src.assets.mirror")
 
 _WARNED_MAX = 4096
 _TMP_DIR = ".tmp"
+_INDEX_RETRY_SECONDS = 30.0  # an unresolvable revision inventory is retried at most this often
+_INDEX_MEMO_MAX = 64
 
 # Values `last_miss_reason()` can report; they match the missing-asset reasons of plan §5.3.
 REASON_NOT_FOUND = "mirror_not_found"
@@ -74,6 +94,11 @@ class MirrorStats:
     breaker_trips: int = 0
     breaker_skips: int = 0
     version_changes: int = 0
+    carried_by_index: int = 0
+    carried_by_stat: int = 0
+    carry_copies: int = 0
+    revision_indexes: int = 0
+    revision_index_failures: int = 0
     dir_entries: int = 0
     dir_bytes: int = 0
     sweeps: int = 0
@@ -104,6 +129,25 @@ def _stat_regular(path: Path) -> os.stat_result | None:
     except (OSError, ValueError):
         return None
     return st if S_ISREG(st.st_mode) else None
+
+
+def _lstat_regular(path: Path) -> os.stat_result | None:
+    """Like `_stat_regular` without following a symlink: a carry-over source must be a mirrored file itself."""
+    try:
+        st = os.lstat(path)
+    except (OSError, ValueError):
+        return None
+    return st if S_ISREG(st.st_mode) else None
+
+
+@dataclass(frozen=True, slots=True)
+class _CarrySource:
+    """The same object key in another revision directory, newest directory first."""
+
+    version: str
+    path: Path
+    size: int
+    mtime_ns: int
 
 
 def _on_running_loop() -> bool:
@@ -191,6 +235,11 @@ class AssetMirror:
 
         self._inflight: dict[str, threading.Event] = {}
         self._inflight_lock = threading.Lock()
+
+        self._indexes: dict[str, RevisionIndex] = {}
+        self._index_retry: dict[str, float] = {}
+        self._index_builds: dict[str, concurrent.futures.Future[RevisionIndex | None]] = {}
+        self._index_lock = threading.Lock()
         self._fetch_slots = threading.BoundedSemaphore(max(1, int(settings.fetch_concurrency)))
 
         self._breaker_lock = threading.Lock()
@@ -295,7 +344,12 @@ class AssetMirror:
             return self._fallback(mapped)
 
         try:
-            return self._lead_fetch(store, mapped, final, memo_key)
+            sources = self._carry_sources(key_map.version, mapped)
+            if sources:
+                carried = self._carry_by_index(key_map.version, mapped, final, sources)
+                if carried is not None:
+                    return carried
+            return self._lead_fetch(store, mapped, final, memo_key, sources)
         finally:
             with self._inflight_lock:
                 if self._inflight.get(disk_key) is event:
@@ -303,7 +357,12 @@ class AssetMirror:
             event.set()
 
     def _lead_fetch(
-        self, store: ObjectStore, mapped: MappedAsset, final: Path, memo_key: tuple[str, str, str]
+        self,
+        store: ObjectStore,
+        mapped: MappedAsset,
+        final: Path,
+        memo_key: tuple[str, str, str],
+        sources: list[_CarrySource] | None = None,
     ) -> Path | None:
         admission = self._breaker_admit()
         if admission is None:
@@ -321,6 +380,14 @@ class AssetMirror:
             try:
                 started = time.perf_counter()
                 try:
+                    if sources:
+                        remote = self._stat_remote(store, mapped.object_key)
+                        if remote is None:
+                            raise StorageNotFound(mapped.object_key)
+                        if self._carry_by_stat(mapped, final, sources, remote):
+                            self._breaker_success()
+                            outcome_recorded = True
+                            return final
                     data, stat = self._read_remote(store, mapped.object_key)
                 except StorageNotFound:
                     self._breaker_success()
@@ -366,6 +433,16 @@ class AssetMirror:
                     self._probe_in_flight = False
 
     # ------------------------------------------------------------------ remote read + publish
+    def _stat_remote(self, store: ObjectStore, key: str) -> Any:
+        loop = self._ensure_loop()
+        budget = float(self._settings.fetch_timeout_seconds)
+        future = asyncio.run_coroutine_threadsafe(asyncio.wait_for(store.stat(key), budget), loop)
+        try:
+            return future.result(timeout=budget + 1.0)
+        except concurrent.futures.TimeoutError:
+            future.cancel()
+            raise
+
     def _read_remote(self, store: ObjectStore, key: str) -> tuple[bytes, Any]:
         loop = self._ensure_loop()
         budget = float(self._settings.fetch_timeout_seconds)
@@ -396,6 +473,221 @@ class AssetMirror:
             except OSError:
                 pass
             raise
+
+    # ------------------------------------------------------------------ revision carry-over
+    def _carry_sources(self, version: str, mapped: MappedAsset) -> list[_CarrySource]:
+        """Regular files at `mapped.object_key` in the other revision directories, newest directory first.
+
+        Also starts recording `version`'s inventory: it can only be read while `version` is the bucket's
+        current publication, and a later revision needs it to prove anything about this directory.
+        """
+        if not self._settings.revision_carry_over:
+            return []
+        self._revision_index(version, wait=False)
+        found: list[tuple[int, _CarrySource]] = []
+        try:
+            with os.scandir(self._mirror_root) as it:
+                for entry in it:
+                    if entry.name == version or entry.name.startswith("."):
+                        continue
+                    try:
+                        dir_st = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if not S_ISDIR(dir_st.st_mode):
+                        continue
+                    path = Path(entry.path) / mapped.object_key
+                    st = _lstat_regular(path)
+                    if st is not None:
+                        found.append((dir_st.st_mtime_ns, _CarrySource(entry.name, path, st.st_size, st.st_mtime_ns)))
+        except OSError:
+            return []
+        found.sort(key=lambda item: item[0], reverse=True)
+        return [source for _, source in found]
+
+    def _carry_by_index(
+        self, version: str, mapped: MappedAsset, final: Path, sources: list[_CarrySource]
+    ) -> Path | None:
+        """Link a source whose revision inventory names the same bytes as `version`'s; no remote call."""
+        proven = [(source, index) for source in sources if (index := self._revision_index(source.version))]
+        if not proven:
+            return None
+        current = self._revision_index(version, wait=True)
+        if current is None:
+            return None
+        for source, index in proven:
+            if current.same_object(index, mapped.region, mapped.object_key) and self._carry(source, final, mapped):
+                self.stats.incr("carried_by_index")
+                return final
+        return None
+
+    def _carry_by_stat(self, mapped: MappedAsset, final: Path, sources: list[_CarrySource], remote: Any) -> bool:
+        """Link a source whose size and stamped mtime equal the remote object's (`_publish` stamps it)."""
+        if remote.last_modified_ns is None or remote.size > self._settings.fetch_max_bytes:
+            return False
+        for source in sources:
+            if source.size == remote.size and source.mtime_ns == remote.last_modified_ns:
+                if self._carry(source, final, mapped):
+                    self.stats.incr("carried_by_stat")
+                    return True
+                return False
+        return False
+
+    def _carry(self, source: _CarrySource, final: Path, mapped: MappedAsset) -> bool:
+        """Hard-link `source` at `final`; copy it when a link is impossible (e.g. another filesystem).
+
+        A hard link is its own directory entry for one inode, so the sweeper removing the old revision
+        directory (or evicting either name) never disturbs a reader of the other. mtime and size travel with
+        the inode, which keeps the `(path, mtime_ns, size)` image-cache identity and a later stat carry-over
+        valid. A source that vanished (its directory was just retired) returns `False`: the caller fetches.
+        """
+        try:
+            os.makedirs(final.parent, exist_ok=True)
+            os.link(source.path, final)
+            return True
+        except FileExistsError:
+            return _stat_regular(final) is not None
+        except FileNotFoundError:
+            return False
+        except OSError:
+            pass
+        tmp_dir = self._mirror_root / _TMP_DIR
+        digest = hashlib.sha256(str(mapped.mirror_rel).encode("utf-8")).hexdigest()[:16]
+        tmp = tmp_dir / f"{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+            shutil.copy2(source.path, tmp)  # copy2 keeps mtime_ns
+            os.replace(tmp, final)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            self._log_error(mapped, f"carry-over failed: {type(exc).__name__}: {exc}")
+            return False
+        self.stats.incr("carry_copies")
+        return True
+
+    def _revision_index(self, version: str, *, wait: bool | None = None) -> RevisionIndex | None:
+        """The inventory behind `version`: memo -> sidecar -> (when `wait` is not None) the bucket's pointers.
+
+        Only `version`'s own requests pass `wait`: its pointers are read while it is presumably still the
+        bucket's publication, and a mismatch (Cloud behind or ahead of the bucket, or a stale region) is
+        remembered for `_INDEX_RETRY_SECONDS`. `wait=False` starts that read without blocking the caller.
+        """
+        if not is_digest(version):
+            return None
+        now = self._clock()
+        with self._index_lock:
+            index = self._indexes.get(version)
+            if index is not None:
+                return index
+            if self._index_retry.get(version, now) > now:
+                return None
+        index = self._read_sidecar(version)
+        if index is not None:
+            self._remember_index(index)
+            return index
+        if wait is None or self._closed or self._open_until is not None:
+            # Another revision's directory without a sidecar (or the store is failing): don't re-read soon.
+            self._index_failed(version, counted=False)
+            return None
+        with self._index_lock:
+            future = self._index_builds.get(version)
+            started = future is None
+            if started:
+                try:
+                    loop = self._ensure_loop()
+                except RuntimeError:
+                    return None
+                future = asyncio.run_coroutine_threadsafe(self._build_index(version), loop)
+                self._index_builds[version] = future
+        if started:  # outside the lock: an already finished future runs the callback right here
+            future.add_done_callback(lambda done, version=version: self._index_built(version, done))
+        if not wait:
+            return None
+        try:
+            return future.result(timeout=float(self._settings.fetch_timeout_seconds) + 1.0)
+        except Exception:
+            return None
+
+    async def _build_index(self, version: str) -> RevisionIndex | None:
+        async def region_pointer(region: str) -> tuple[str, Any] | None:
+            try:
+                data, _ = await self.store_for(region).read(pointer_key(region), max_bytes=POINTER_MAX_BYTES)
+            except StorageNotFound:
+                return None
+            return region, parse_region(json.loads(data), region)
+
+        budget = float(self._settings.fetch_timeout_seconds)
+        pointers = await asyncio.wait_for(asyncio.gather(*(region_pointer(region) for region in REGIONS)), budget)
+        regions = dict(pointer for pointer in pointers if pointer is not None)
+        if not regions:
+            return None
+        index = RevisionIndex.build(regions)
+        if index.revision != version:
+            return None
+        self._write_sidecar(index)
+        return index
+
+    def _index_built(self, version: str, future: concurrent.futures.Future[RevisionIndex | None]) -> None:
+        with self._index_lock:
+            if self._index_builds.get(version) is future:
+                del self._index_builds[version]
+        try:
+            index = None if future.cancelled() else future.result()
+        except Exception as exc:
+            index = None
+            if self._error_log.first(f"index:{version}"):
+                logger.info("mirror.revision_index_failed version=%s error=%s: %s", version, type(exc).__name__, exc)
+        if index is None:
+            self._index_failed(version)
+        else:
+            self._remember_index(index)
+
+    def _remember_index(self, index: RevisionIndex) -> None:
+        with self._index_lock:
+            if index.revision in self._indexes:
+                return
+            if len(self._indexes) >= _INDEX_MEMO_MAX:
+                self._indexes.clear()
+            self._indexes[index.revision] = index
+            self._index_retry.pop(index.revision, None)
+        self.stats.incr("revision_indexes")
+
+    def _index_failed(self, version: str, *, counted: bool = True) -> None:
+        with self._index_lock:
+            if len(self._index_retry) >= _INDEX_MEMO_MAX:
+                self._index_retry.clear()
+            self._index_retry[version] = self._clock() + _INDEX_RETRY_SECONDS
+        if counted:
+            self.stats.incr("revision_index_failures")
+
+    def _read_sidecar(self, version: str) -> RevisionIndex | None:
+        try:
+            data = (self._mirror_root / version / SIDECAR_NAME).read_bytes()
+        except OSError:
+            return None
+        try:
+            return RevisionIndex.from_json(data, version)
+        except ValueError:
+            return None
+
+    def _write_sidecar(self, index: RevisionIndex) -> None:
+        """Atomically store `index` in its revision directory, so it outlives the process and goes with the dir."""
+        tmp_dir = self._mirror_root / _TMP_DIR
+        tmp = tmp_dir / f"index.{index.revision[:16]}.{os.getpid()}.{threading.get_ident()}.tmp"
+        try:
+            os.makedirs(tmp_dir, exist_ok=True)
+            os.makedirs(self._mirror_root / index.revision, exist_ok=True)
+            tmp.write_bytes(index.to_json())
+            os.replace(tmp, self._mirror_root / index.revision / SIDECAR_NAME)
+        except OSError as exc:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            logger.warning("mirror.revision_index_write_failed version=%s error=%s", index.revision, exc)
 
     def _fallback(self, mapped: MappedAsset) -> Path | None:
         if not self._settings.local_fallback:
@@ -576,6 +868,8 @@ class AssetMirror:
         """Clear the negative memo and release the single-flight table (waiters re-stat)."""
         with self._negative_lock:
             self._negative.clear()
+        with self._index_lock:
+            self._index_retry.clear()
         with self._inflight_lock:
             events = list(self._inflight.values())
             self._inflight.clear()
