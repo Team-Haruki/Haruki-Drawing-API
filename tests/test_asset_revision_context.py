@@ -81,6 +81,8 @@ def test_sweeper_preserves_active_old_revision_then_reclaims_it(tmp_path):
         assert path.exists()
     finally:
         end_asset_revision(token)
+    newer = begin_asset_revision("b" * 64)
+    end_asset_revision(newer)
     assert sweeper.sweep_once().versions_removed == 1
     assert not path.exists()
 
@@ -121,6 +123,8 @@ def test_new_request_after_retirement_rebuilds_original_namespace(tmp_path, monk
             end_asset_revision(token)
 
     monkeypatch.setattr(sweeper, "_remove_tree", recreate_then_delete)
+    newer = begin_asset_revision("b" * 64)
+    end_asset_revision(newer)
     assert sweeper.sweep_once().versions_removed == 1
     assert (original / "new.png").read_bytes() == b"new"
 
@@ -216,6 +220,8 @@ def test_cancelled_request_keeps_executing_pool_thread_namespace_leased(tmp_path
 
     with ThreadPoolExecutor(max_workers=1) as pool:
         asyncio.run(run(pool))
+    newer = begin_asset_revision("b" * 64)
+    end_asset_revision(newer)
     assert sweeper.sweep_once().versions_removed == 1
 
 
@@ -317,3 +323,12 @@ def test_legacy_local_fallback_marks_result_incomplete_for_new_remote_revision(t
         end_asset_revision(token)
         debug.pop_request_context(tokens)
         mirror.close()
+
+
+def test_latest_revision_cannot_retire_after_sweeper_enumeration(tmp_path):
+    path = tmp_path / "new"
+    path.mkdir()
+    token = begin_asset_revision("new")
+    end_asset_revision(token)
+    assert not request_context.retire_asset_revision("new", path, tmp_path / "retired")
+    assert path.is_dir()

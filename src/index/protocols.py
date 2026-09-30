@@ -66,6 +66,10 @@ class IndexUnavailable(Exception):  # names fixed by the plan (§9.1)
     """Connect / timeout / transport failure, or a backoff window after one."""
 
 
+class IndexContention(IndexUnavailable):
+    """A healthy database could not grant a content lock within this request budget."""
+
+
 class IndexSchemaError(Exception):
     """Cloud's schema migration for the render index has not shipped yet."""
 

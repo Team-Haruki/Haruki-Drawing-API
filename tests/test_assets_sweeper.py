@@ -343,3 +343,13 @@ def test_remove_tree_treats_unstatable_child_as_file(tmp_path: Path, monkeypatch
     monkeypatch.setattr(sweeper_mod.os, "scandir", fake_scandir)
     assert _sweeper(tmp_path)._remove_tree(target) is True
     assert not target.exists()
+
+
+def test_configured_default_survives_new_revision_without_active_requests(root: Path) -> None:
+    for name in ("default", "obsolete", "v3"):
+        _write(root / name / "jp-assets" / "icon.png", 4)
+    result = _sweeper(root, versions_keep=0, protected_versions=lambda: {"default"}).sweep_once()
+    assert result.versions_removed == 1
+    assert (root / "default" / "jp-assets" / "icon.png").exists()
+    assert (root / "v3").exists()
+    assert not (root / "obsolete").exists()

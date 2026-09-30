@@ -10,6 +10,8 @@ addendum A2), and `last_referenced_at` plus the NULL-is-infinite `expires_at` me
 A statement-level guard would freeze the retention clock of `garage` rows — do not "simplify" it.
 """
 
+import re
+
 LOCK_CONTENT = "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
 
 PREPARE_UPLOAD = (
@@ -80,14 +82,7 @@ RECORD = (
     "WITH existing AS (SELECT storage_backend FROM image_cache_entries WHERE hash = $1), upserted AS ("
     + UPSERT_CONTENT
     + " RETURNING cdn_path, media_type, size_bytes), indexed AS ("
-    + UPSERT_REQUEST.replace("$8", "$16")
-    .replace("$7", "$15")
-    .replace("$6", "$14")
-    .replace("$5", "$13")
-    .replace("$4", "$12")
-    .replace("$3", "$11")
-    .replace("$2", "$10")
-    .replace("$1,", "$9,")
+    + re.sub(r"\$(\d+)", lambda match: f"${int(match[1]) + 8}", UPSERT_REQUEST)
     + ") SELECT upserted.cdn_path, upserted.media_type, upserted.size_bytes, "
     "(SELECT storage_backend FROM existing) AS prior_backend FROM upserted"
 )

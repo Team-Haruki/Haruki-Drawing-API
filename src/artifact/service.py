@@ -29,7 +29,7 @@ from src.artifact.ref import (
     format_rfc3339,
     is_foreign_cdn_path,
 )
-from src.index.protocols import ContentRow, IndexSchemaError, IndexUnavailable, RequestRow
+from src.index.protocols import ContentRow, IndexContention, IndexSchemaError, IndexUnavailable, RequestRow
 from src.storage.protocols import StorageError
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -320,7 +320,10 @@ class ArtifactService:
                 if outcome.ref.index_written:
                     self._stats.incr("index_writes")
             return outcome
-        except (IndexUnavailable, IndexSchemaError, TimeoutError) as exc:
+        except (IndexContention, TimeoutError) as exc:
+            self._stats.record_error("contention_or_budget", exc)
+            return self._degraded("index_unavailable", stages)
+        except (IndexUnavailable, IndexSchemaError) as exc:
             self._mark_index_unusable("content_writer", exc)
             self._stats.record_error("content_writer", exc)
             return self._degraded("index_unavailable", stages)

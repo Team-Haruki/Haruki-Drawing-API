@@ -188,6 +188,7 @@ def _sweep_asset_mirror() -> None:
     result = MirrorSweeper(
         root=mirror.mirror_root,
         current_version=lambda: latest_asset_revision() or mirror.version,
+        protected_versions=lambda: {mirror.version, latest_asset_revision()},
         max_bytes=config.max_bytes,
         max_entries=config.max_entries,
         versions_keep=config.versions_keep,

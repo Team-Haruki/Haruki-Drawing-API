@@ -71,9 +71,11 @@ class MirrorSweeper:
         stats: MirrorStats,
         mirror_dir: str | None = None,
         clock: Callable[[], float] = time.time,
+        protected_versions: Callable[[], set[str]] = set,
     ) -> None:
         self._root = Path(root)
         self._current_version = current_version
+        self._protected_versions = protected_versions
         self._max_bytes = max(0, int(max_bytes))
         self._max_entries = max(0, int(max_entries))
         self._versions_keep = max(0, int(versions_keep))
@@ -121,7 +123,7 @@ class MirrorSweeper:
     # ------------------------------------------------------------------ steps
     def _remove_old_versions(self, current: str) -> int:
         candidates: list[tuple[int, str, Path]] = []
-        protected = active_asset_revisions()
+        protected = active_asset_revisions() | self._protected_versions()
         with os.scandir(self._root) as it:
             for entry in it:
                 if entry.name in (current, _TMP_DIR) or entry.name in protected or entry.name.startswith("."):

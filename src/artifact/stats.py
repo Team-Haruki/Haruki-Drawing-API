@@ -19,7 +19,6 @@ SIMPLE_COUNTERS: tuple[str, ...] = (
     "published",
     "reused",
     "reused_foreign",
-    "reused_unrecorded_objects",
     "uploads",
     "upload_bytes",
     "upload_failures",
@@ -42,7 +41,17 @@ DEGRADED_REASONS: tuple[str, ...] = (
 )
 # Connection timings are contained by index_prepare / the writer context; index_write is the SQL upsert.
 # total is the whole artifact step, including transaction commit.
-STAGES: tuple[str, ...] = ("hash", "upload", "index_connect", "index_acquire", "index_write", "total")
+STAGES: tuple[str, ...] = (
+    "hash",
+    "upload",
+    "index_connect",
+    "index_acquire",
+    "index_write",
+    "total",
+    "index_prepare",
+    "index_lookup",
+    "index_lock",
+)
 
 _node_name_lock = threading.Lock()
 _node_name: str | None = None

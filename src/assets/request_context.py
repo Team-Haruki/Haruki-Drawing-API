@@ -65,8 +65,9 @@ def active_asset_revisions() -> set[str]:
 def retire_asset_revision(revision: str, source: Path, retired: Path) -> bool:
     """Atomically detach an unused namespace; slow deletion happens outside the lease lock."""
     with _lock:
-        # An old client without a revision can still use the configured mirror version.
-        if _active.get(revision) or _active.get(""):
+        # The sweeper separately protects its configured fallback namespace.
+        # Recheck latest under the lease lock: it may have changed since enumeration.
+        if revision == _latest or _active.get(revision) or _active.get(""):
             return False
         try:
             source.rename(retired)

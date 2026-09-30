@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlsplit
 
 from src.index.protocols import (
     ContentRow,
+    IndexContention,
     IndexSchemaError,
     IndexUnavailable,
     IndexWriteFailed,
@@ -350,7 +351,10 @@ class AsyncpgRenderIndex:
                 acquire_seconds = time.perf_counter() - started
                 async with conn.transaction():
                     started = time.perf_counter()
-                    await conn.execute(LOCK_CONTENT, content_hash)
+                    try:
+                        await conn.execute(LOCK_CONTENT, content_hash)
+                    except TimeoutError as exc:
+                        raise IndexContention("content lock wait timed out") from exc
                     lock_seconds = time.perf_counter() - started
                     try:
                         yield _ContentWriter(self, conn, content_hash, acquire_seconds, connect_seconds, lock_seconds)

@@ -146,3 +146,34 @@ def test_new_generation_survives_late_delete_of_old_generation():
     assert first.object_key != second.object_key
     del store.objects[first.object_key]
     assert store.objects[second.object_key] == _payload().image_bytes
+
+
+def test_lock_timeout_does_not_disable_unrelated_writes():
+    pool = FakePgPool(errors={LOCK_CONTENT: TimeoutError()})
+
+    async def factory(*args, **kwargs):
+        return pool
+
+    index = AsyncpgRenderIndex("unused", IndexSettings(), pool_factory=factory)
+    service, store, _ = _service(index=index)
+    assert _run(service).ref is None
+    assert store.writes == []
+    assert pool.events[-1][0] == "transaction.rollback"
+    pool.errors.clear()
+    assert _run(service).ref is not None
+
+
+def test_request_budget_timeout_does_not_disable_index():
+    class SlowOnce(FakeRenderIndex):
+        slow = True
+
+        async def prepare_upload(self, content_hash, cdn_path):
+            if self.slow:
+                self.slow = False
+                raise TimeoutError()
+            await super().prepare_upload(content_hash, cdn_path)
+
+    service, store, _ = _service(index=SlowOnce())
+    assert _run(service).ref is None
+    assert store.writes == []
+    assert _run(service).ref is not None
