@@ -452,7 +452,8 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
             if rqd.profile:
                 await get_profile_card(rqd.profile)
 
-            bar_h, item_h, w = 200, 48, 48
+            # 52 px columns fit any three-digit count in bold 24 (digits are 16 px each in the widened-Latin font)
+            bar_h, item_h, w = 200, 48, 52
             font_sz = 24
 
             with (
@@ -467,7 +468,7 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
                 async def draw_icon(path):
                     path = await get_asset_image_ref(ASSETS_BASE_DIR, RESULT_ASSET_PATH + f"/{path}")
                     with Frame().set_size((w, item_h)).set_content_align("c"):
-                        ImageBox(path, size=(w // 2, w // 2))
+                        ImageBox(path, size=(item_h // 2, item_h // 2))
 
                 # 第一列：进度条的占位 难度占位 not_clear clear fc ap 图标
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(8):
@@ -510,9 +511,9 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
                         clear = c.clear - c.fc
                         total = c.total - c.clear
                         style = TextStyle(DEFAULT_BOLD_FONT, font_sz, color, use_shadow=False)
-                        TextBox(f"{total}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
-                            roundrect_bg(alpha=80)
-                        )
+                        TextBox(f"{total}", style, overflow="shrink").set_size((w, item_h)).set_content_align(
+                            "c"
+                        ).set_bg(roundrect_bg(alpha=80))
                         style = TextStyle(
                             DEFAULT_BOLD_FONT,
                             font_sz,
@@ -521,9 +522,9 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
                             shadow_color=PLAY_RESULT_COLORS["clear"],
                             shadow_offset=2,
                         )
-                        TextBox(f"{clear}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
-                            roundrect_bg(alpha=80)
-                        )
+                        TextBox(f"{clear}", style, overflow="shrink").set_size((w, item_h)).set_content_align(
+                            "c"
+                        ).set_bg(roundrect_bg(alpha=80))
                         style = TextStyle(
                             DEFAULT_BOLD_FONT,
                             font_sz,
@@ -532,7 +533,7 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
                             shadow_color=PLAY_RESULT_COLORS["fc"],
                             shadow_offset=2,
                         )
-                        TextBox(f"{fc}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                        TextBox(f"{fc}", style, overflow="shrink").set_size((w, item_h)).set_content_align("c").set_bg(
                             roundrect_bg(alpha=80)
                         )
                         style = TextStyle(
@@ -543,7 +544,7 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
                             shadow_color=PLAY_RESULT_COLORS["ap"],
                             shadow_offset=2,
                         )
-                        TextBox(f"{ap}", style, overflow="clip").set_size((w, item_h)).set_content_align("c").set_bg(
+                        TextBox(f"{ap}", style, overflow="shrink").set_size((w, item_h)).set_content_align("c").set_bg(
                             roundrect_bg(alpha=80)
                         )
 
@@ -1107,7 +1108,7 @@ class _MusicDetailRenderer:
         if not (self.rqd.leaderboard_matrix and self.rqd.leaderboard_live_types and self.rqd.leaderboard_targets):
             return
         live_types, targets = self._leaderboard_keys()
-        th_w, th_h = 60, 36
+        th_w, th_h = 64, 36  # 64 + 3 * (4 + 120) fills the 436 px content width of the append layout exactly
         tr_w, tr_h = 120, 36
         gap = 4
         with VSplit().set_sep(gap).set_padding(16).set_content_align("l").set_item_align("l").set_w(width).set_h(196):

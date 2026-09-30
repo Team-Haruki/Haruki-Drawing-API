@@ -39,7 +39,7 @@ PART_LABELS = {
 }
 PART_ORDER = ("body", "head", "hair")
 LIST_COL_COUNT = 12
-LIST_ITEM_WIDTH = 92
+LIST_ITEM_WIDTH = 100
 LIST_ITEM_HEIGHT = 106
 LIST_THUMB_SIZE = 34
 LIST_GRID_PADDING = 10
@@ -220,7 +220,7 @@ async def _build_costume_list_canvas(rqd: CostumeListRequest) -> Canvas:
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=BLACK)
     section_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=(55, 55, 55))
     name_style = TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=BLACK)
-    id_style = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=(55, 55, 55))
+    id_style = TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=(55, 55, 55))
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_sep(10).set_content_align("lt").set_item_align("lt"):
@@ -258,9 +258,11 @@ async def _build_costume_list_canvas(rqd: CostumeListRequest) -> Canvas:
                                         TextBox(item.name, name_style, line_count=2, overflow="shrink").set_w(
                                             LIST_ITEM_WIDTH - 12
                                         ).set_content_align("c")
+                                        # Fits an 8-digit ID; anything longer ends in "..." rather than losing digits.
                                         TextBox(
                                             _costume_lookup_text(item),
                                             id_style,
+                                            overflow="shrink",
                                         ).set_w(LIST_ITEM_WIDTH - 12).set_content_align("c")
 
     add_request_watermark(canvas, rqd)

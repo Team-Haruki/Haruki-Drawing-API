@@ -640,10 +640,12 @@ async def _draw_deck_header(rqd: DeckRequest, assets: _DeckRecommendAssets) -> N
 _DECK_ROW_HEIGHT = 120
 _DECK_VERTICAL_SEP = 12
 _DECK_VALUE_OFFSET = 18
-_DECK_SCORE_WIDTH = 112
-_DECK_BONUS_WIDTH = 102
-_DECK_SKILL_WIDTH = 92
-_DECK_POWER_WIDTH = 100
+# Value columns fit a 7-digit score, a 6-digit power and a three-digit percentage in DEFAULT_BOLD_FONT 24
+# even when digits render wider than CJK text; a longer value ends in "..." instead of losing digits.
+_DECK_SCORE_WIDTH = 120
+_DECK_BONUS_WIDTH = 108
+_DECK_SKILL_WIDTH = 108
+_DECK_POWER_WIDTH = 108
 _DECK_CARD_WIDTH = 96
 
 
@@ -774,9 +776,11 @@ def _draw_deck_score_column(
                     (0, -8 - _DECK_VALUE_OFFSET * 2 + algorithm_offset)
                 )
                 with Frame().set_content_align("c"):
-                    TextBox(str(_deck_score(rqd, deck, target_score, boost_bonus)), value_style).set_w(
-                        _DECK_SCORE_WIDTH
-                    ).set_h(_DECK_ROW_HEIGHT).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
+                    TextBox(
+                        str(_deck_score(rqd, deck, target_score, boost_bonus)), value_style, overflow="shrink"
+                    ).set_w(_DECK_SCORE_WIDTH).set_h(_DECK_ROW_HEIGHT).set_content_align("c").set_offset(
+                        (0, -_DECK_VALUE_OFFSET)
+                    )
 
 
 def _deck_card_is_fixed(rqd: DeckRequest, card_id: int, character_id: int) -> bool:
@@ -897,9 +901,9 @@ def _draw_deck_bonus_column(
                         TextStyle(font=DEFAULT_FONT, size=14, color=(150, 150, 150)),
                     ).set_w(_DECK_BONUS_WIDTH).set_content_align("c").set_offset((0, -6 - _DECK_VALUE_OFFSET * 2))
                 with Frame().set_content_align("c"):
-                    TextBox(total, value_style).set_w(_DECK_BONUS_WIDTH).set_h(_DECK_ROW_HEIGHT).set_content_align(
-                        "c"
-                    ).set_offset((0, -_DECK_VALUE_OFFSET))
+                    TextBox(total, value_style, overflow="shrink").set_w(_DECK_BONUS_WIDTH).set_h(
+                        _DECK_ROW_HEIGHT
+                    ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
 
 
 def _draw_deck_skill_column(
@@ -932,9 +936,9 @@ def _draw_deck_skill_column(
                         TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
                     ).set_w(_DECK_SKILL_WIDTH).set_content_align("c").set_offset((0, -8 - _DECK_VALUE_OFFSET * 2))
                 with Frame().set_content_align("c"):
-                    TextBox(f"{deck.multi_live_score_up:.1f}%", value_style).set_w(_DECK_SKILL_WIDTH).set_h(
-                        _DECK_ROW_HEIGHT
-                    ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
+                    TextBox(f"{deck.multi_live_score_up:.1f}%", value_style, overflow="shrink").set_w(
+                        _DECK_SKILL_WIDTH
+                    ).set_h(_DECK_ROW_HEIGHT).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
 
 
 def _draw_deck_power_column(
@@ -967,7 +971,7 @@ def _draw_deck_power_column(
                         TextStyle(font=DEFAULT_FONT, size=14, color=(125, 125, 125)),
                     ).set_w(_DECK_POWER_WIDTH).set_content_align("c").set_offset((0, -8 - _DECK_VALUE_OFFSET * 2))
                 with Frame().set_content_align("c"):
-                    TextBox(str(deck.total_power), value_style).set_w(_DECK_POWER_WIDTH).set_h(
+                    TextBox(str(deck.total_power), value_style, overflow="shrink").set_w(_DECK_POWER_WIDTH).set_h(
                         _DECK_ROW_HEIGHT
                     ).set_content_align("c").set_offset((0, -_DECK_VALUE_OFFSET))
 

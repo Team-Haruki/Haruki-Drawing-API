@@ -119,7 +119,7 @@ def _draw_custom_room_music_row(
             TextBox(" / ", style).set_padding(0)
         music_cover = cover_cache[music_info["music_cover"]]
         ImageBox(music_cover, size=(cover_size, cover_size), use_alpha_blend=False)
-        TextBox(str(music_info["music_title"]), style, line_count=1).set_w(title_width)
+        TextBox(str(music_info["music_title"]), style, line_count=1, overflow="shrink").set_w(title_width)
 
 
 # 合成控分图片
@@ -269,7 +269,7 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
 
             # 数据
             gh, vsep, hsep = 40, 6, 6
-            w1, w2, w3 = 140, 520, 100
+            w1, w2, w3 = 140, 560, 100
             music_row_padding = 8
             music_item_sep = 4
             cover_size = gh - 2
