@@ -42,7 +42,10 @@ PROFILE_BG_NAMESPACE = ("user_upload", "profile_bg")
 # Cloud's ProfileBGStore writes `uid_<userID>_<8 hex>.jpg`; rows from before April 2026 are
 # `binding_<id>.jpg` / `binding_<id>_<8 hex>.jpg`. Nothing else has ever been written under this prefix.
 _PROFILE_BG_SERVER = re.compile(r"[a-z]{2,4}\Z")
-_PROFILE_BG_FILENAME = re.compile(r"(?:uid_[A-Za-z0-9]{1,64}|binding_[0-9]{1,20})(?:_[0-9a-f]{8})?\.jpg\Z")
+# Cloud's writer suffixed 8 hex characters until 2026-09-30, then a 128-bit token (32 hex, Cloud #108).
+_PROFILE_BG_FILENAME = re.compile(
+    r"(?:uid_[A-Za-z0-9]{1,64}|binding_[0-9]{1,20})(?:_(?:[0-9a-f]{8}|[0-9a-f]{32}))?\.jpg\Z"
+)
 
 
 def profile_bg_object_key(img_path: str | None) -> str | None:
