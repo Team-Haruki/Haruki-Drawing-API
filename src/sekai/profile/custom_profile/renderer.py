@@ -3112,8 +3112,8 @@ class PNGRenderer:
 
         for path in self.general_font_candidates():
             try:
-                if path.exists():
-                    return ImageFont.truetype(str(path), size)
+                if (found := asset_file(path)) is not None:
+                    return ImageFont.truetype(str(found), size)
             except OSError:
                 continue
         return ImageFont.load_default()
@@ -4843,6 +4843,8 @@ class PNGRenderer:
             [Path("honor_word") / f"{name}.png", Path("honor_word") / name / f"{name}.png"]
         ):
             return path
+        # Disk-only: the mirror fetches keys, it cannot list a bundle directory. A mirror-mode node finds the
+        # bundle through the two exact names above; this glob only helps a local tree with another texture name.
         for directory in self.region_asset_candidate_paths([Path("honor_word") / name]):
             if directory.is_dir():
                 pngs = sorted(directory.glob("*.png"))
@@ -5327,48 +5329,11 @@ class PNGRenderer:
     def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         from src.sekai.profile.custom_profile.pillow_runtime import ImageFont
 
-        names = (
-            ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
-            if decorative
-            else [
-                "FOT-UDMinchoPro-B",
-                "FOT-RodinNTLGPro-DB",
-            ]
-        )
-        candidates: list[Path] = []
-        for name in names:
-            path = self.tmp_font_library.source_font_path(name)
-            if path is not None:
-                candidates.append(path)
-            candidates.append(self.fonts / f"{name}.otf")
-            candidates.append(self.fonts / f"{name}.ttf")
-        for base in self.data_root_candidates():
-            candidates.extend(
-                (
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / self.region
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "cn"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "kr"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                )
-            )
-        for path in candidates:
+        # Same candidates as the native path (omikuji_font_path), resolved through the asset mirror too.
+        for path in self.omikuji_font_candidates(decorative=decorative):
             try:
-                if path.exists():
-                    return ImageFont.truetype(str(path), size)
+                if (found := asset_file(path)) is not None:
+                    return ImageFont.truetype(str(found), size)
             except OSError:
                 continue
         return self.general_font(size, bold=not decorative)
