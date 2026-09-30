@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import emoji
@@ -107,4 +108,6 @@ def ink_centered_text_offset_y(font_path: str, font_size: int, text: str, box_he
     font = get_layout_font(font_path, font_size)
     _, top, _, bottom = _measure_bbox(font, text)
     ink_center = get_text_size(font, "哇")[1] + (top + bottom) / 2 - font.getmetrics()[0]
-    return round(box_height / 2 - ink_center)
+    # Round half up, not half to even: an exact .5 (common for caps-only Latin such as "JP")
+    # must not lift the ink a whole pixel above centre.
+    return math.floor(box_height / 2 - ink_center + 0.5)
