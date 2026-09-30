@@ -1567,7 +1567,11 @@ fn raster_cache_config() -> &'static RasterCacheConfig {
     })
 }
 
-/// A byte-weighted image pool that counts capacity evictions (not explicit clears) in `evictions`.
+/// A byte-weighted image pool that counts size-policy removals (not explicit clears) in `evictions`.
+///
+/// moka reports `RemovalCause::Size` both for an entry evicted to make room and for a new entry the
+/// TinyLFU admission policy declines to keep, so the counter is "evicted or not admitted", not only
+/// displaced entries.
 fn weighted_raster_pool(
     max_bytes: u64,
     evictions: &'static AtomicU64,

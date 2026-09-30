@@ -191,8 +191,9 @@ All tiles must be available before replay starts, and strong image references su
 Foreground widgets, glass, countdowns and watermarks are drawn afterward on every request.
 `/cache/stats` → `native_renderer_cache` exposes `background_cache_hits/misses/bypasses/entries/bytes/
 max_bytes/evictions` and `background_cache_hit_rate`; the existing runtime clear removes the tiles.
-The asset raster pool reports process-wide `raster_cache_hits/misses/coalesced/oversize/evictions` (capacity
-evictions only, not clears) and `raster_cache_hit_rate` next to its `entries/bytes`; the per-scene
+The asset raster pool reports process-wide `raster_cache_hits/misses/coalesced/oversize/evictions` (size-policy
+removals, not clears: moka's `RemovalCause::Size` counts both capacity evictions and new entries TinyLFU declines
+to admit, and the same holds for `background_cache_evictions`) and `raster_cache_hit_rate` next to its `entries/bytes`; the per-scene
 `native_metrics` counts are separate. A pool at `raster_cache_max_bytes` with a steady eviction count and a
 low hit rate is undersized.
 

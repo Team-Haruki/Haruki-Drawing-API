@@ -644,7 +644,9 @@ def get_image_asset_signature(base_path: Path, path: AssetKey | None) -> dict[st
     try:
         # Cache keys are mostly built on the event loop, where the mirror refuses to fetch anyway: skip it
         # there instead of paying its stats, its local-fallback telemetry and a `skipped_on_loop` count
-        # per cold asset. A pool-thread caller keeps the fetch.
+        # per cold asset. A pool-thread caller keeps the fetch. Skipping the mirror also skips its legacy
+        # `local_fallback` file, so an asset present only in the legacy tree signs as missing here; that only
+        # affects the cache key (stable until the mirror copy lands), never what is rendered.
         _full_path, full_path_str, stat = _resolve_and_stat(base_path, path, fetch=not _on_event_loop_thread())
     except (FileNotFoundError, OSError, ValueError):
         return {"source_path": path, "missing": True}

@@ -577,7 +577,8 @@ TMP 元数据只按需生成 7 个度量值。
 把会复用的素材挤掉。量化高度会改变散点和全部页面像素，因此改为独立池
 `HARUKI_SKIA_BACKGROUND_CACHE_MB`（默认 64，零即关闭，单背景准入不超过该池一半），素材池只放素材。
 `/cache/stats` 新增进程级 `raster_cache_hits/misses/coalesced/oversize/evictions` 与
-`raster_cache_hit_rate`、`background_cache_*` 池占用。
+`raster_cache_hit_rate`、`background_cache_*` 池占用。`evictions` 计的是 moka 的 `RemovalCause::Size`：
+既包括为腾空间被挤出的项，也包括 TinyLFU 准入策略拒收的新项，不含显式清空。
 
 `get_asset_image_refs` 原先在每个 16 键批次内串行 `ensure_local`，冷列表的拉取并发被
 `thread_pool_size` 封顶（CN01 为 4，`fetch_concurrency=32` 无效，load_batch p50 1.34 s、p90 6.5 s）。
