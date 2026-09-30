@@ -115,7 +115,22 @@ def get_native_renderer_cache_stats() -> dict[str, Any]:
         "available": True,
         "enabled": enabled,
         **stats,
+        # A coalesced wait reused another render's build, so it counts as a hit here.
+        "raster_cache_hit_rate": _hit_rate(stats, _RASTER_HIT_KEYS, "raster_cache_misses"),
+        "background_cache_hit_rate": _hit_rate(stats, ("background_cache_hits",), "background_cache_misses"),
     }
+
+
+_RASTER_HIT_KEYS = ("raster_cache_hits", "raster_cache_coalesced")
+
+
+def _hit_rate(stats: dict[str, Any], hit_keys: tuple[str, ...], miss_key: str) -> float | None:
+    """Hit share of the lookups since the last clear; `None` without lookups or on an older extension."""
+    if miss_key not in stats:
+        return None
+    hits = sum(int(stats.get(key) or 0) for key in hit_keys)
+    lookups = hits + int(stats.get(miss_key) or 0)
+    return hits / lookups if lookups else None
 
 
 def clear_native_renderer_caches() -> bool:

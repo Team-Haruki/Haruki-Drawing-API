@@ -173,10 +173,13 @@ or honor's footer is charged only to Skia and makes the comparison invalid.
 ### Native triangle background tiles
 
 Only a scene's top-level, full-size, untransformed `TriangleBg` may reuse immutable raster tiles.
-The tiles share the existing Rust raster pool with resized assets; there is no extra cache budget or
-response cache. `HARUKI_SKIA_RASTER_CACHE_MB` / `_MAX_ENTRY_MB` also govern these tiles, and zero disables
-reuse. Each tile is at most 512 rows and obeys the per-entry byte limit; admitting one background requires
-its pixels plus conservatively repeated key metadata to fit within one quarter of the shared pool.
+The tiles live in their **own** Rust pool, `HARUKI_SKIA_BACKGROUND_CACHE_MB` (default 64; zero disables
+reuse), never in the asset raster pool. They used to share it: the key carries the canvas height and page
+heights follow their content, so production hit about 1 background in 400 while every miss admitted up to a
+quarter of the asset pool and evicted resized assets that did repeat. Quantising the height would change
+the scatter and every page's pixels, so do not "fix" the hit rate that way. Each tile is at most 512 rows
+and obeys `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`; admitting one background requires its pixels plus
+conservatively repeated key metadata to fit within half of the background pool.
 Cached tile references also count against the current scene's remaining memory budget. Oversized,
 scaled, nested or clipped backgrounds use the original drawing path.
 
@@ -186,8 +189,12 @@ scatter changes invalidate whenever they change drawing inputs. Cache misses dra
 background, then capture tile snapshots from it; rendering translated tile gradients would change rounding.
 All tiles must be available before replay starts, and strong image references survive concurrent eviction.
 Foreground widgets, glass, countdowns and watermarks are drawn afterward on every request.
-`/cache/stats` → `native_renderer_cache` exposes `background_cache_hits/misses/bypasses`; tile entries and
-bytes are included in `raster_cache_entries/bytes`, and the existing runtime clear removes them.
+`/cache/stats` → `native_renderer_cache` exposes `background_cache_hits/misses/bypasses/entries/bytes/
+max_bytes/evictions` and `background_cache_hit_rate`; the existing runtime clear removes the tiles.
+The asset raster pool reports process-wide `raster_cache_hits/misses/coalesced/oversize/evictions` (capacity
+evictions only, not clears) and `raster_cache_hit_rate` next to its `entries/bytes`; the per-scene
+`native_metrics` counts are separate. A pool at `raster_cache_max_bytes` with a steady eviction count and a
+low hit rate is undersized.
 
 ### Native text and fallback SDF caches
 
@@ -290,6 +297,19 @@ is `user_upload/profile_bg/<server>/<file>`, which is both today's path under `a
 in the `user-upload` bucket (`src/assets/user_upload.py`; a miss falls back to the local file, then the default
 background). Provider blocks share one vocabulary (`StorageProviderSettings`) and `root` stays empty on every slot.
 
+`get_asset_image_refs` resolves warm keys in 16-key render-pool batches but defers every key whose first
+candidate is a bucket key not yet on disk to a separate lazy **asset fetch pool** sized by
+`assets.mirror.fetch_concurrency`, one key per task. Resolving cold keys inside the batch made each batch fetch
+serially and capped a cold list's fetch concurrency at `drawing.thread_pool_size`, however high
+`fetch_concurrency` was. `get_image_asset_signature` never calls the mirror on the event loop (cache keys are
+built there; the mirror would refuse anyway), so `asset_mirror.skipped_on_loop` counts only real misuse.
+
+Run exactly **one** Granian worker per container (`--workers 1`, the Docker default). The free-threaded Granian
+build runs workers as *threads of one process*, so `--workers N` starts N lifespans against the same module
+state: N event loops share one render thread pool and one mirror root. `lifespan.shared_process` is logged when that
+happens. Logging setup is serialised because concurrent `coloredlogs.install` calls used to leave duplicate root
+handlers and double every log line.
+
 ## Proprietary File: `src/sekai/mysekai/drawer.py`
 
 This file is a **public placeholder stub** in the open-source repository. It exports the same async function signatures consumed by `src/core/pjsk/mysekai.py` but raises `NotImplementedError` at runtime.
@@ -359,6 +379,7 @@ only Skia gate — the older per-endpoint gates (`use_skia_card_list`, `use_skia
 The service requires it to remain true; false refuses startup. Roll back to an earlier image to restore
 an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 `HARUKI_SKIA_RASTER_CACHE_MB`, `HARUKI_SKIA_RASTER_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_RASTER_CACHE_OVERSAMPLE`,
+`HARUKI_SKIA_BACKGROUND_CACHE_MB`,
 `HARUKI_SKIA_SDF_FONT_CACHE_MB`, `HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_TEXT_HINTING`,
 `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 

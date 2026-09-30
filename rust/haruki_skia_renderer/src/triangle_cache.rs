@@ -1,25 +1,64 @@
-//! Immutable background tiles in the existing bounded raster pool. Capture the pixels of
-//! an ordinary full background draw; never render cropped/translated gradients (rounding
-//! would differ). Keys carry resolved palette bytes and the exact caller-provided scatter,
-//! so the clock is neither frozen nor approximated. Page content is never cached here.
+//! Immutable background tiles in their own bounded pool. Capture the pixels of an ordinary
+//! full background draw; never render cropped/translated gradients (rounding would differ).
+//! Keys carry resolved palette bytes and the exact caller-provided scatter, so the clock is
+//! neither frozen nor approximated. Page content is never cached here.
+//!
+//! The tiles used to share the asset raster pool. The key must carry the canvas height (the
+//! scatter is generated for it) and page heights follow their content, so production hit about
+//! 1 background in 400 while each miss admitted up to a quarter of that pool and evicted resized
+//! assets that did repeat. Quantising the height would change the scatter and every page's
+//! pixels, so the tiles moved out instead: `HARUKI_SKIA_BACKGROUND_CACHE_MB` sizes this pool
+//! and zero disables it, leaving the asset pool to assets.
 
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicU64, Ordering},
 };
 
+use moka::sync::Cache;
 use skia_safe::{BlendMode, IRect, Paint, Surface};
 
 use crate::{
-    RasterCacheConfig, RasterCacheKey, RasterCacheValue, ir::TriangleBgNode, raster_cache_config,
-    raster_image_cache, triangle_palette,
+    RasterCacheConfig, RasterCacheKey, RasterCacheValue, env_mb, ir::TriangleBgNode,
+    raster_cache_config, triangle_palette, weighted_raster_pool,
 };
 
 const MAX_KEY_BYTES: usize = 64 * 1024;
 const TILE_ROWS: i32 = 512;
+const DEFAULT_BACKGROUND_CACHE_MB: u64 = 64;
 static HITS: AtomicU64 = AtomicU64::new(0);
 static MISSES: AtomicU64 = AtomicU64::new(0);
 static BYPASSES: AtomicU64 = AtomicU64::new(0);
+static EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static POOL_CONFIG: OnceLock<RasterCacheConfig> = OnceLock::new();
+static POOL: OnceLock<Option<Cache<RasterCacheKey, RasterCacheValue>>> = OnceLock::new();
+
+pub(crate) struct PoolSnapshot {
+    pub(crate) max_bytes: u64,
+    pub(crate) entries: u64,
+    pub(crate) bytes: u64,
+    pub(crate) evictions: u64,
+}
+
+/// Tiles keep the asset pool's per-entry limit; only the total budget is separate.
+fn pool_config() -> &'static RasterCacheConfig {
+    POOL_CONFIG.get_or_init(|| RasterCacheConfig {
+        max_bytes: env_mb(
+            "HARUKI_SKIA_BACKGROUND_CACHE_MB",
+            DEFAULT_BACKGROUND_CACHE_MB,
+        ),
+        max_entry_bytes: raster_cache_config().max_entry_bytes,
+        oversample: 1,
+    })
+}
+
+fn pool() -> Option<&'static Cache<RasterCacheKey, RasterCacheValue>> {
+    POOL.get_or_init(|| {
+        let config = pool_config();
+        (config.max_bytes > 0).then(|| weighted_raster_pool(config.max_bytes, &EVICTIONS))
+    })
+    .as_ref()
+}
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub(crate) struct BackgroundKey {
@@ -46,7 +85,7 @@ pub(crate) fn plan(
         bg,
         width,
         height,
-        raster_cache_config(),
+        pool_config(),
         available_scene_bytes,
     );
     if result.is_none() {
@@ -100,9 +139,8 @@ fn make_plan(
     let total_bytes = row_bytes
         .checked_mul(h as u64)?
         .checked_add(tile_count.checked_mul(key_bytes as u64)?)?;
-    // One long background must not evict the whole asset pool. This is a per-background
-    // admission bound; all backgrounds AND assets still share the existing hard capacity.
-    if total_bytes > config.max_bytes / 4 || total_bytes > available_scene_bytes as u64 {
+    // One long background must not flush every other background out of the pool.
+    if total_bytes > config.max_bytes / 2 || total_bytes > available_scene_bytes as u64 {
         return None;
     }
     let (g1, g2, a, b, white) = triangle_palette(bg.hour, bg.time_color, bg.main_hue);
@@ -140,7 +178,7 @@ fn make_plan(
 }
 
 pub(crate) fn draw_cached(surface: &mut Surface, plan: &Plan) -> bool {
-    let Some(cache) = raster_image_cache() else {
+    let Some(cache) = pool() else {
         return false;
     };
     // Resolve ALL tiles before touching the destination. Strong Image references survive
@@ -169,7 +207,7 @@ pub(crate) fn draw_cached(surface: &mut Surface, plan: &Plan) -> bool {
 }
 
 pub(crate) fn capture(surface: &mut Surface, plan: Plan) {
-    let Some(cache) = raster_image_cache() else {
+    let Some(cache) = pool() else {
         return;
     };
     for (key, bounds, byte_size) in plan.tiles {
@@ -192,8 +230,103 @@ pub(crate) fn stats() -> (u64, u64, u64) {
     )
 }
 
-pub(crate) fn clear_stats() {
+pub(crate) fn pool_snapshot() -> PoolSnapshot {
+    let (entries, bytes) = pool()
+        .map(|cache| (cache.entry_count(), cache.weighted_size()))
+        .unwrap_or_default();
+    PoolSnapshot {
+        max_bytes: pool_config().max_bytes,
+        entries,
+        bytes,
+        evictions: EVICTIONS.load(Ordering::Relaxed),
+    }
+}
+
+pub(crate) fn run_pending_tasks() {
+    if let Some(cache) = pool() {
+        cache.run_pending_tasks();
+    }
+}
+
+/// Drop every tile and reset the counters (the runtime cache clear).
+pub(crate) fn clear() {
+    if let Some(cache) = pool() {
+        cache.invalidate_all();
+        cache.run_pending_tasks();
+    }
     HITS.store(0, Ordering::Relaxed);
     MISSES.store(0, Ordering::Relaxed);
     BYPASSES.store(0, Ordering::Relaxed);
+    EVICTIONS.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use skia_safe::{Color, surfaces};
+
+    use super::*;
+
+    fn background(tris: usize) -> TriangleBgNode {
+        TriangleBgNode {
+            hour: 12.0,
+            time_color: true,
+            main_hue: 0.0,
+            tris: vec![[62.25, 120.5, 12.5, 50.0, 200.0, 220.0, 250.0, 143.0, 1.0]; tris],
+        }
+    }
+
+    fn config(max_mb: u64, max_entry_mb: u64) -> RasterCacheConfig {
+        RasterCacheConfig {
+            max_bytes: max_mb * 1024 * 1024,
+            max_entry_bytes: max_entry_mb * 1024 * 1024,
+            oversample: 1,
+        }
+    }
+
+    #[test]
+    fn admission_is_bounded_by_half_of_the_background_pool() {
+        let bg = background(1);
+        let mut surface = surfaces::raster_n32_premul((180, 1100)).expect("surface");
+        let plan = make_plan(&mut surface, &bg, 180.0, 1100.0, &config(4, 1), usize::MAX)
+            .expect("a 0.8 MiB background fits half of 4 MiB");
+        assert!(plan.retained_bytes <= 2 * 1024 * 1024);
+        assert!(
+            plan.tiles
+                .iter()
+                .all(|(_, _, bytes)| *bytes as u64 <= 1024 * 1024)
+        );
+        let rows: i32 = plan
+            .tiles
+            .iter()
+            .map(|(_, bounds, _)| bounds.height())
+            .sum();
+        assert_eq!(rows, 1100);
+
+        // 0.8 MiB is more than half of a 1 MiB pool, and a zero pool disables reuse.
+        assert!(make_plan(&mut surface, &bg, 180.0, 1100.0, &config(1, 1), usize::MAX).is_none());
+        assert!(make_plan(&mut surface, &bg, 180.0, 1100.0, &config(0, 1), usize::MAX).is_none());
+        // The scene's remaining budget still bounds a hit.
+        assert!(make_plan(&mut surface, &bg, 180.0, 1100.0, &config(4, 1), 1024).is_none());
+    }
+
+    #[test]
+    fn captured_tiles_never_enter_the_asset_raster_pool() {
+        if pool_config().max_bytes == 0 {
+            return;
+        }
+        let mut bg = background(1);
+        // A scatter no other test uses keeps this key private to this test.
+        bg.tris[0][0] = 17.125;
+        let mut surface = surfaces::raster_n32_premul((64, 96)).expect("surface");
+        surface.canvas().clear(Color::from_argb(255, 10, 20, 30));
+        let plan = make_plan(&mut surface, &bg, 64.0, 96.0, pool_config(), usize::MAX)
+            .expect("small background admitted");
+        let keys: Vec<RasterCacheKey> = plan.tiles.iter().map(|(key, _, _)| key.clone()).collect();
+        capture(&mut surface, plan);
+        let tiles = pool().expect("background pool enabled");
+        assert!(keys.iter().all(|key| tiles.contains_key(key)));
+        if let Some(assets) = crate::raster_image_cache() {
+            assert!(keys.iter().all(|key| !assets.contains_key(key)));
+        }
+    }
 }

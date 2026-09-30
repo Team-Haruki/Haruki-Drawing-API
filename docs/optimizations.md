@@ -568,3 +568,17 @@ TMP 元数据只按需生成 7 个度量值。
 相对修改前增加 4.13%，仍比 main 快 1.79×。最终 Python 1349 passed；严格冷 77 ok；
 严格热两侧各 76 ok、1 既有非确定性、2 无样本，零漂移/错误；公共 no-Pillow 服务门槛通过。
 范围、初版失败记录、最终数据和剩余差异见本地 out/main-text-parity/REPORT.md。
+
+
+### 2026-10-01：三角背景移出素材 raster 池；冷素材批量并行拉取
+
+线上三个渲染节点的素材 raster 池都常满（VM105 256 MiB 满载、5614 项），而三角背景命中率约
+1/424：key 必须带画布高度（散点按高度生成），页面高度随内容变化，每次未命中却可占用整池四分之一，
+把会复用的素材挤掉。量化高度会改变散点和全部页面像素，因此改为独立池
+`HARUKI_SKIA_BACKGROUND_CACHE_MB`（默认 64，零即关闭，单背景准入不超过该池一半），素材池只放素材。
+`/cache/stats` 新增进程级 `raster_cache_hits/misses/coalesced/oversize/evictions` 与
+`raster_cache_hit_rate`、`background_cache_*` 池占用。
+
+`get_asset_image_refs` 原先在每个 16 键批次内串行 `ensure_local`，冷列表的拉取并发被
+`thread_pool_size` 封顶（CN01 为 4，`fetch_concurrency=32` 无效，load_batch p50 1.34 s、p90 6.5 s）。
+现在批次只处理已在盘上的键，冷键逐个交给按 `fetch_concurrency` 定长的独立拉取线程池，不再占用渲染线程。
