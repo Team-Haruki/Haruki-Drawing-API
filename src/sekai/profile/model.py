@@ -7,6 +7,41 @@ from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
 
 
+class PlayerFramePaths(BaseModel):
+    r"""PlayerFramePaths
+
+    玩家头像框各部件路径
+
+    Attributes
+    ----------
+    base : str
+        frame_base.png 路径
+    centertop : str
+        frame_centertop.png 路径
+    leftbottom : str
+        frame_leftbottom.png 路径
+    lefttop : str
+        frame_lefttop.png 路径
+    rightbottom : str
+        frame_rightbottom.png 路径
+    righttop : str
+        frame_righttop.png 路径
+    """
+
+    base: str
+    centertop: str
+    leftbottom: str
+    lefttop: str
+    rightbottom: str
+    righttop: str
+
+    frame_type: Literal["single", "combination"] = "single"
+    side_left_top: str | None = None
+    side_right_top: str | None = None
+    side_left_bottom: str | None = None
+    side_right_bottom: str | None = None
+
+
 class DetailedProfileCardRequest(TimeZoneRequest):
     r"""DetailedProfileCardRequest
 
@@ -48,6 +83,7 @@ class DetailedProfileCardRequest(TimeZoneRequest):
     leader_image_path: str
     has_frame: bool = False
     frame_path: str | None = None
+    frame_paths: PlayerFramePaths | None = None
     user_cards: list[dict] | None = None
     rank: int | None = None
 
@@ -65,6 +101,7 @@ class DetailedProfileCardRequest(TimeZoneRequest):
                 leader_image_path=self.leader_image_path,
                 has_frame=self.has_frame,
                 frame_path=self.frame_path,
+                frame_paths=self.frame_paths,
             ),
             data_sources=[
                 ProfileDataSource(
@@ -107,35 +144,7 @@ class BasicProfile(BaseModel):
     leader_image_path: str
     has_frame: bool = False
     frame_path: str | None = None
-
-
-class PlayerFramePaths(BaseModel):
-    r"""PlayerFramePaths
-
-    玩家头像框各部件路径
-
-    Attributes
-    ----------
-    base : str
-        frame_base.png 路径
-    centertop : str
-        frame_centertop.png 路径
-    leftbottom : str
-        frame_leftbottom.png 路径
-    lefttop : str
-        frame_lefttop.png 路径
-    rightbottom : str
-        frame_rightbottom.png 路径
-    righttop : str
-        frame_righttop.png 路径
-    """
-
-    base: str
-    centertop: str
-    leftbottom: str
-    lefttop: str
-    rightbottom: str
-    righttop: str
+    frame_paths: PlayerFramePaths | None = None
 
 
 class ProfileDataSource(BaseModel):

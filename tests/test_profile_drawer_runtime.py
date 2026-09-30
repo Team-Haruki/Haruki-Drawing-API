@@ -131,7 +131,7 @@ async def test_profile_asset_layer_loaders_and_thumbnail_drawing_cover_optional_
 @pytest.mark.anyio
 async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) -> None:
     async def fake_asset(_root, path, **_kwargs):
-        return _image((24 if path == "base" else 10, 24 if path == "base" else 12))
+        return _image((132 if path == "base" else 10, 132 if path == "base" else 12))
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
 
@@ -149,10 +149,10 @@ async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) ->
     )
     layers = await drawer.get_player_frame_layers(paths)
     box = drawer.PlayerFrameBox(layers, 100)
-    assert box._get_content_size() == (140, 140)
+    assert box._get_content_size() == (100, 100)
     painter = _RecordingPainter()
     box._draw_content(painter)
-    assert len([name for name, _args, _kwargs in painter.calls if name == "paste_with_alpha_blend"]) == 13
+    assert len([name for name, _args, _kwargs in painter.calls if name == "paste_with_alpha_blend"]) == 14
 
     avatar = await drawer.get_avatar_widget_with_frame(True, paths, _image(), 80, [])
     assert isinstance(avatar, Frame)

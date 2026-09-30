@@ -28,6 +28,7 @@ from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 if TYPE_CHECKING:
     from src.sekai.base.painter import Painter
+from src.sekai.base.image_source import MissingImageRef
 from src.sekai.base.plot import (
     Canvas,
     CanvasImageBox,
@@ -300,104 +301,91 @@ class CardFullThumbnailBox(ImageBox):
         p.pop_clip()
 
 
+# JP 7.0 vertical prefab order; anchor and pivot coincide for every ornament.
+_FRAME_CORNERS = (
+    ("lefttop", 0, 1, -16, 32),
+    ("righttop", 1, 1, 16, 32),
+    ("centertop", 0.5, 1, 0, 32),
+    ("rightbottom", 1, 0, 16, -8),
+    ("leftbottom", 0, 0, -16, -8),
+)
+_FRAME_SIDES = (
+    ("side_right_bottom", 1, 0, 16, -8),
+    ("side_left_bottom", 0, 0, -16, -8),
+    ("side_right_top", 1, 1, 16, 32),
+    ("side_left_top", 0, 1, -16, 32),
+)
+
+
 @dataclass(slots=True)
 class PlayerFrameLayers:
-    """头像框六部件的 header-only 图源引用（缺文件时为占位 PIL 图）。"""
-
-    base: AssetImageRef | Image.Image
-    centertop: AssetImageRef | Image.Image
-    leftbottom: AssetImageRef | Image.Image
-    lefttop: AssetImageRef | Image.Image
-    rightbottom: AssetImageRef | Image.Image
-    righttop: AssetImageRef | Image.Image
+    base: ImageSource
+    ornaments: list[tuple[ImageSource, float, float, float, float]]
 
 
-async def get_player_frame_layers(frame_paths) -> PlayerFrameLayers:
-    r"""获取头像框六部件的图源引用（不解码像素）。
-
-    Args
-    ----
-    frame_paths : PlayerFramePaths
-        头像框各部件路径
-    """
-    base, ct, lb, lt, rb, rt = await asyncio.gather(
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.base),
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.centertop),
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.leftbottom),
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.lefttop),
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.rightbottom),
-        get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.righttop),
-    )
-    return PlayerFrameLayers(base=base, centertop=ct, leftbottom=lb, lefttop=lt, rightbottom=rb, righttop=rt)
+async def get_player_frame_layers(frame_paths) -> PlayerFrameLayers | None:
+    layout = _FRAME_CORNERS
+    if getattr(frame_paths, "frame_type", "single") == "combination":
+        layout = _FRAME_SIDES + layout
+    if not frame_paths.base or any(not getattr(frame_paths, part[0], None) for part in layout):
+        return None
+    try:
+        sources = await asyncio.gather(
+            get_asset_image_ref(ASSETS_BASE_DIR, frame_paths.base, on_missing="raise"),
+            *(
+                get_asset_image_ref(ASSETS_BASE_DIR, getattr(frame_paths, part[0]), on_missing="raise")
+                for part in layout
+            ),
+        )
+    except (OSError, ValueError):
+        return None
+    if any(isinstance(image, MissingImageRef) for image in sources):
+        return None
+    return PlayerFrameLayers(sources[0], [(image, *part[1:]) for image, part in zip(sources[1:], layout, strict=True)])
 
 
 class PlayerFrameBox(Widget):
-    """玩家头像框，两个后端经 Painter 原语原生绘制（旧 700×700 Pillow 预合成的子树化）。
+    """Square nine-slice base and isotropic ornaments on the original sprite canvases."""
 
-    复刻旧 ``get_player_frame_image`` 的几何：700×700 逻辑画布上，base 按源角 20px 做
-    9-slice 放大到 50px 铺满 border=100 内的 500×500 内框，角落/顶部装饰件按 1.5× 贴在
-    border2=80 处，整体按 ``frame_w/500`` 缩放。这里直接在最终尺寸下算整数几何——每个
-    部件只重采样一次（替代旧的先合成再整图缩放），base 切片经 ``src_rect`` 直达两后端，
-    Skia 路径零 Python 解码、切片栅格进 Rust Moka 缓存跨请求复用。
-    """
+    # All current vertical sprites have 50px borders. 672 leaves a 5% gap
+    # between the maximum top/bottom extents across single and combination art.
+    _REFERENCE = 672
+    _SRC_CORNER = 50
 
-    _SRC_CORNER = 20  # base 素材上的 9-slice 源角宽（像素，旧实现的 corner）
-
-    def __init__(self, layers: PlayerFrameLayers, frame_w: int) -> None:
+    def __init__(self, layers: PlayerFrameLayers, avatar_w: int) -> None:
         super().__init__()
         self.layers = layers
-        self._fscale = frame_w / 500  # 旧内框 inner_w=500 → 最终 frame_w
-        self.prefetch_image_sources = [
-            layers.base,
-            layers.centertop,
-            layers.leftbottom,
-            layers.lefttop,
-            layers.rightbottom,
-            layers.righttop,
-        ]
+        self.avatar_w = avatar_w
+        self.prefetch_image_sources = [layers.base, *(part[0] for part in layers.ornaments)]
+        self.set_allow_draw_outside(True)
 
     def _get_content_size(self) -> tuple[int, int]:
-        outer = max(1, round(700 * self._fscale))
-        return (outer, outer)
+        return self.avatar_w, self.avatar_w
 
     def _draw_content(self, p: Painter) -> None:
-        s = self._fscale
-        layers = self.layers
-        outer, _ = self._get_content_size()
-        border = round(100 * s)
-        inner = round(500 * s)
-        c2 = max(1, round(50 * s))
-        edge = max(1, inner - 2 * c2)
-        border2 = round(80 * s)
-
-        base = layers.base
-        bw, bh = base.size
-        c = max(1, min(self._SRC_CORNER, bw // 2, bh // 2))
-        far = border + inner - c2
-        # base 9-slice：四角 + 四边（拉伸）
-        p.paste_with_alpha_blend(base, (border, border), (c2, c2), src_rect=(0, 0, c, c))
-        p.paste_with_alpha_blend(base, (far, border), (c2, c2), src_rect=(bw - c, 0, bw, c))
-        p.paste_with_alpha_blend(base, (border, far), (c2, c2), src_rect=(0, bh - c, c, bh))
-        p.paste_with_alpha_blend(base, (far, far), (c2, c2), src_rect=(bw - c, bh - c, bw, bh))
-        p.paste_with_alpha_blend(base, (border, border + c2), (c2, edge), src_rect=(0, c, c, bh - c))
-        p.paste_with_alpha_blend(base, (far, border + c2), (c2, edge), src_rect=(bw - c, c, bw, bh - c))
-        p.paste_with_alpha_blend(base, (border + c2, border), (edge, c2), src_rect=(c, 0, bw - c, c))
-        p.paste_with_alpha_blend(base, (border + c2, far), (edge, c2), src_rect=(c, bh - c, bw - c, bh))
-
-        # 装饰件（旧实现先 1.5× 再整图 ×s，这里一步到位）
-        def dec_size(part) -> tuple[int, int]:
-            return (max(1, round(part.width * 1.5 * s)), max(1, round(part.height * 1.5 * s)))
-
-        lb_w, lb_h = dec_size(layers.leftbottom)
-        p.paste_with_alpha_blend(layers.leftbottom, (border2, outer - border2 - lb_h), (lb_w, lb_h))
-        rb_w, rb_h = dec_size(layers.rightbottom)
-        p.paste_with_alpha_blend(layers.rightbottom, (outer - border2 - rb_w, outer - border2 - rb_h), (rb_w, rb_h))
-        lt_w, lt_h = dec_size(layers.lefttop)
-        p.paste_with_alpha_blend(layers.lefttop, (border2, border2), (lt_w, lt_h))
-        rt_w, rt_h = dec_size(layers.righttop)
-        p.paste_with_alpha_blend(layers.righttop, (outer - border2 - rt_w, border2), (rt_w, rt_h))
-        ct_w, ct_h = dec_size(layers.centertop)
-        p.paste_with_alpha_blend(layers.centertop, ((outer - ct_w) // 2, border2 - ct_h // 2), (ct_w, ct_h))
+        side = self.avatar_w + 5
+        scale = side / self._REFERENCE
+        base = self.layers.base
+        width, height = base.size
+        corner = min(self._SRC_CORNER, width / 2, height / 2)
+        dest_corner = corner * scale
+        xs, ys = (0, corner, width - corner, width), (0, corner, height - corner, height)
+        dest = (0, dest_corner, side - dest_corner, side)
+        for y in range(3):
+            for x in range(3):
+                if xs[x + 1] <= xs[x] or ys[y + 1] <= ys[y]:
+                    continue
+                p.paste_with_alpha_blend(
+                    base,
+                    (dest[x] - 2.5, dest[y] - 2.5),
+                    (dest[x + 1] - dest[x], dest[y + 1] - dest[y]),
+                    src_rect=(xs[x], ys[y], xs[x + 1], ys[y + 1]),
+                )
+        for image, ax, ay, dx, dy in self.layers.ornaments:
+            width, height = image.width * scale, image.height * scale
+            x = -2.5 + ax * side + dx * scale - ax * width
+            y = -2.5 + side - (ay * side + dy * scale) - (1 - ay) * height
+            p.paste_with_alpha_blend(image, (x, y), (width, height))
 
 
 # 获取带框头像控件
@@ -411,7 +399,7 @@ async def get_avatar_widget_with_frame(
     with Frame().set_size((avatar_w, avatar_w)).set_content_align("c").set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
         if frame_layers is not None:
-            PlayerFrameBox(frame_layers, avatar_w + 5)
+            PlayerFrameBox(frame_layers, avatar_w)
     return ret
 
 
@@ -481,7 +469,7 @@ def _build_cached_profile_module_widget(image: Image.Image) -> Widget:
 async def _build_profile_avatar_module(ctx: _ProfileLayoutContext) -> Widget:
     return await get_avatar_widget_with_frame(
         is_frame=bool(ctx.request.profile.has_frame),
-        frame_paths=ctx.request.frame_paths,
+        frame_paths=ctx.request.frame_paths or ctx.request.profile.frame_paths,
         avatar_img=ctx.avatar_img,
         avatar_w=128,
         frame_data=[],
@@ -1184,7 +1172,11 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
     avatar_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
     if rqd.profile.has_frame:
         return await get_avatar_widget_with_frame(
-            is_frame=True, frame_paths=None, avatar_img=avatar_img, avatar_w=_CARD_AVATAR, frame_data=[]
+            is_frame=True,
+            frame_paths=rqd.profile.frame_paths,
+            avatar_img=avatar_img,
+            avatar_w=_CARD_AVATAR,
+            frame_data=[],
         )
     region = rqd.profile.region.upper()
     ring = _profile_card_region_chip_fill(region)
