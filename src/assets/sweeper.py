@@ -30,6 +30,10 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # pragma: no cover
     from src.assets.mirror import MirrorStats
 
+from uuid import uuid4
+
+from src.assets.request_context import active_asset_revisions, evict_asset_file, retire_asset_revision
+
 logger = logging.getLogger("src.assets.sweeper")
 
 _TMP_DIR = ".tmp"
@@ -90,6 +94,10 @@ class MirrorSweeper:
             root_st = _lstat(self._root)
             if root_st is None or not stat_mod.S_ISDIR(root_st.st_mode):
                 return SweepResult(0, 0, 0, 0, 0)
+            for retired in self._root.glob(".retired-*"):
+                retired_stat = _lstat(retired)
+                if retired_stat is not None and stat_mod.S_ISDIR(retired_stat.st_mode):
+                    self._remove_tree(retired)
             current = str(self._current_version())
             versions_removed = self._remove_old_versions(current)
             young_tmp = self._sweep_tmp()
@@ -103,7 +111,7 @@ class MirrorSweeper:
                     evicted_entries, evicted_bytes = self._evict(current, current_dir, files, young_tmp)
                     entries -= evicted_entries
                     total_bytes -= evicted_bytes
-                self._prune_empty_dirs(current_dir)
+                self._prune_empty_dirs(current, current_dir)
         except Exception:
             logger.warning("mirror.sweep_failed root=%s", self._root, exc_info=True)
         result = SweepResult(versions_removed, evicted_entries, evicted_bytes, entries, total_bytes)
@@ -113,9 +121,10 @@ class MirrorSweeper:
     # ------------------------------------------------------------------ steps
     def _remove_old_versions(self, current: str) -> int:
         candidates: list[tuple[int, str, Path]] = []
+        protected = active_asset_revisions()
         with os.scandir(self._root) as it:
             for entry in it:
-                if entry.name in (current, _TMP_DIR) or entry.name.startswith("."):
+                if entry.name in (current, _TMP_DIR) or entry.name in protected or entry.name.startswith("."):
                     continue
                 try:
                     if not entry.is_dir(follow_symlinks=False):
@@ -127,7 +136,8 @@ class MirrorSweeper:
         candidates.sort(reverse=True)  # newest first; the first `versions_keep` survive
         removed = 0
         for _, name, path in reversed(candidates[self._versions_keep :]):  # oldest first
-            if self._remove_tree(path):
+            retired = self._root / f".retired-{uuid4().hex}"
+            if retire_asset_revision(name, path, retired) and self._remove_tree(retired):
                 removed += 1
                 logger.info("mirror.version_removed root=%s version=%s", self._root, name)
         return removed
@@ -145,7 +155,9 @@ class MirrorSweeper:
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         continue
-                    age = now - entry.stat(follow_symlinks=False).st_mtime
+                    # _publish stamps the remote object's (possibly years-old)
+                    # mtime before rename; ctime tracks this local scratch write.
+                    age = now - entry.stat(follow_symlinks=False).st_ctime
                 except OSError:
                     continue
                 if age > self._tmp_max_age:
@@ -189,7 +201,7 @@ class MirrorSweeper:
                 break
             if young_tmp and self._tmp_digest(current, current_dir, path) in young_tmp:
                 continue
-            if self._unlink(path):
+            if evict_asset_file(current, lambda path=path: self._unlink(path)):
                 entries -= 1
                 total -= size
                 evicted_entries += 1
@@ -202,7 +214,7 @@ class MirrorSweeper:
         return hashlib.sha256(str(mirror_rel).encode("utf-8")).hexdigest()[:16]
 
     @staticmethod
-    def _prune_empty_dirs(directory: Path) -> None:
+    def _prune_empty_dirs(revision: str, directory: Path) -> None:
         """Remove empty sub-directories bottom-up (the version directory itself is kept).
 
         `os.rmdir` refuses a non-empty directory and a symlink, so neither is ever touched.
@@ -210,10 +222,15 @@ class MirrorSweeper:
         for dirpath, _dirnames, _filenames in os.walk(directory, topdown=False, followlinks=False):
             if Path(dirpath) == directory:
                 continue
-            try:
-                os.rmdir(dirpath)
-            except OSError:
-                pass
+
+            def remove(path=dirpath):
+                try:
+                    os.rmdir(path)
+                except OSError:
+                    return False
+                return True
+
+            evict_asset_file(revision, remove)
 
     # ------------------------------------------------------------------ primitives
     def _remove_tree(self, path: Path) -> bool:

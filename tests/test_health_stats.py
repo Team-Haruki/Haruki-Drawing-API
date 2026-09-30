@@ -57,6 +57,7 @@ def test_render_stats_has_artifacts_block_with_zero_counters() -> None:
         "upload_timeout",
         "unsupported_media",
         "internal",
+        "index_unavailable",
     }
     assert all(v == 0 for v in artifacts["degraded"].values())
     assert artifacts["directive_rejected"] == {}

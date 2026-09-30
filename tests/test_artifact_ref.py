@@ -26,7 +26,7 @@ from src.artifact.service import ArtifactService
 from src.artifact.stats import ArtifactStats
 from src.core.image_payload import EncodedImagePayload
 from src.settings import StorageSettings
-from tests.storage_fakes import FakeObjectStore
+from tests.storage_fakes import FakeObjectStore, FakeRenderIndex
 
 BRIEF_FIELDS = {
     "kind",
@@ -151,7 +151,7 @@ def test_fresh_key_ignores_group_and_non_empty_root() -> None:
     store = FakeObjectStore(bucket="image-cache")
     service = ArtifactService(
         store=store,
-        index=None,
+        index=FakeRenderIndex(),
         settings=settings,
         node_name="cn09",
         stats=ArtifactStats(),
@@ -161,7 +161,8 @@ def test_fresh_key_ignores_group_and_non_empty_root() -> None:
     outcome = asyncio.run(service.process(payload, _directive(ttl_seconds=3600)))
     ref = outcome.ref
     assert ref is not None
-    assert ref.object_key == f"pjsk/api/pjsk/honor/{digest}.png"
+    assert ref.object_key.startswith(f"pjsk/api/pjsk/honor/{digest}-")
+    assert ref.object_key.endswith(".png")
     assert ref.cdn_path == ref.object_key
     assert not ref.object_key.startswith("custom-group")
     assert "some/root" not in ref.object_key

@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 from pathlib import Path, PurePosixPath
+import time
 
 import pytest
 
@@ -38,7 +39,7 @@ def _sweeper(root: Path, stats: MirrorStats | None = None, **overrides) -> Mirro
         "versions_keep": 2,
         "tmp_max_age_seconds": 3600,
         "stats": stats or MirrorStats(),
-        "clock": lambda: NOW,
+        "clock": time.time,
     }
     options.update(overrides)
     return MirrorSweeper(**options)
@@ -92,10 +93,11 @@ def test_current_version_is_kept_even_when_oldest(root: Path) -> None:
 def test_stale_tmp_removed_young_tmp_kept(root: Path) -> None:
     tmp = root / ".tmp"
     old = _write(tmp / "aaaa.1.2.tmp", 3, mtime=NOW - 7200)
-    young = _write(tmp / "bbbb.1.2.tmp", 3, mtime=NOW - 10)
     (tmp / "subdir").mkdir()
-    _sweeper(root).sweep_once()
+    _sweeper(root, clock=lambda: old.stat().st_ctime + 7200).sweep_once()
     assert not old.exists()
+    young = _write(tmp / "bbbb.1.2.tmp", 3, mtime=NOW - 10)
+    _sweeper(root).sweep_once()
     assert young.exists()
     assert (tmp / "subdir").is_dir()
 
@@ -257,7 +259,7 @@ def test_filesystem_errors_are_tolerated(root: Path, monkeypatch: pytest.MonkeyP
         return real_unlink(path, *args, **kwargs)
 
     def flaky_rmdir(path, *args, **kwargs):
-        if str(path) == str(root / "v1"):
+        if Path(path).name.startswith(".retired-"):
             raise OSError("busy")
         return real_rmdir(path, *args, **kwargs)
 

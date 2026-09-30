@@ -20,6 +20,7 @@ import threading
 import time
 from typing import Any
 
+from src.core.missing_asset_telemetry import current_missing_asset_count
 from src.settings import (
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
     COMPOSED_IMAGE_CACHE_SIZE,
@@ -75,6 +76,10 @@ class _SkiaPayloadCache:
 
     def set(self, key: str, payload: Any, nbytes: int) -> None:
         if not self._enabled() or nbytes > self._max_bytes:
+            return
+        # An encoded page or native fragment containing placeholders must not
+        # become a clean-looking hit on the next request.
+        if current_missing_asset_count() > 0 or getattr(payload, "has_missing_resources", False):
             return
         now = time.monotonic()
         with self._lock:

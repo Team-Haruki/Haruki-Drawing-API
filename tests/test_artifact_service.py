@@ -1,4 +1,4 @@
-"""ArtifactService: hash -> upload -> one-statement index write (plan §8.4, addendum A2/A3)."""
+"""ArtifactService: hash -> lookup -> upload -> index write (plan §8.4, addendum A2/A3)."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 import hashlib
 import logging
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +24,12 @@ from tests.storage_fakes import FakeObjectStore, FakeRenderIndex
 NOW = datetime(2026, 9, 13, 12, 0, 0, tzinfo=UTC)
 DATA = b"\x89PNG\r\n\x1a\nrendered"
 DIGEST = hashlib.sha256(DATA).hexdigest()
+GENERATION = "1" * 32
+
+
+@pytest.fixture(autouse=True)
+def fixed_generation(monkeypatch):
+    monkeypatch.setattr(service_mod, "uuid4", lambda: SimpleNamespace(hex=GENERATION))
 
 
 class Clock:
@@ -73,7 +80,7 @@ def _service(
     stats = stats or ArtifactStats()
     svc = ArtifactService(
         store=store,
-        index=index,
+        index=index if index is not None else FakeRenderIndex(),
         settings=settings or StorageSettings(enabled=True),
         node_name="cn09",
         stats=stats,
@@ -103,14 +110,14 @@ def _row(**overrides: Any) -> ContentRow:
 
 
 def test_happy_path_field_by_field(stages: list[str]) -> None:
-    index = FakeRenderIndex(acquire_seconds=0.001)
+    index = FakeRenderIndex()
     svc, store, stats = _service(index=index, clock=Clock(step=0.5))
     outcome = _run(svc)
     assert outcome.degraded is False
     assert outcome.reason == "ok"
     ref = outcome.ref
     assert ref is not None
-    key = f"pjsk/api/pjsk/honor/{DIGEST}.png"
+    key = f"pjsk/api/pjsk/honor/{DIGEST}-{GENERATION}.png"
     assert ref.kind == "artifact_ref"
     assert ref.hash == DIGEST
     assert ref.cdn_path == key
@@ -130,37 +137,29 @@ def test_happy_path_field_by_field(stages: list[str]) -> None:
 
     assert store.writes == [(key, len(DATA), "image/png")]
     assert store.objects[key] == DATA
-    assert [c for c, _ in index.calls] == ["record"]
-    content, request = index.calls[0][1]  # type: ignore[misc]
-    assert content == ContentRow(DIGEST, "pjsk", key, "garage", "image/png", len(DATA), NOW + timedelta(seconds=600))
+    assert [c for c, _ in index.calls] == ["lookup_content", "record"]
+    content, request = index.calls[1][1]  # type: ignore[misc]
+    assert content == ContentRow(
+        DIGEST, "pjsk", key, "garage", "image/png", len(DATA), NOW + timedelta(seconds=600), "cn09", NOW
+    )
     assert request.request_key == "0123456789abcdef0123"
     assert request.content_hash == DIGEST
     assert request.api_path == "api/pjsk/honor"
     assert (request.user_id, request.group_name, request.key_version, request.ttl_seconds) == ("public", "pjsk", 3, 600)
     assert request.expires_at == NOW + timedelta(seconds=600)
 
-    assert stages == ["artifact:hash", "artifact:upload", "artifact:index_write"]
-    assert list(outcome.stages) == ["hash", "upload", "index_write", "index_acquire", "total"]
-    assert outcome.stages["index_acquire"] == 0.001
-    assert outcome.stages["total"] >= outcome.stages["hash"] + outcome.stages["upload"] + outcome.stages["index_write"]
+    assert stages == ["artifact:hash", "artifact:index_lookup", "artifact:upload", "artifact:index_write"]
     snap = stats.snapshot()
-    assert list(snap["stages"]) == ["hash", "upload", "index_connect", "index_acquire", "index_write", "total"]
-    assert {name: row["count"] for name, row in snap["stages"].items()} == {
-        "hash": 1,
-        "upload": 1,
-        "index_connect": 0,
-        "index_acquire": 1,
-        "index_write": 1,
-        "total": 1,
-    }
-    assert snap["stages"]["index_acquire"]["total"] == 0.001
+    for name in ("hash", "index_lookup", "upload", "index_write", "total", "index_prepare", "index_lock"):
+        assert snap["stages"][name]["count"] == 1
+        assert outcome.stages[name] >= 0
     assert snap["published"] == 1
     assert snap["reused"] == 0
-    assert snap["reused_unrecorded_objects"] == 0
     assert snap["uploads"] == 1
     assert snap["upload_bytes"] == len(DATA)
     assert snap["upload_elapsed_total"] > 0
-    assert "index_lookups" not in snap
+    assert snap["index_lookups"] == 1
+    assert snap["index_lookup_hits"] == 0
     assert snap["index_writes"] == 1
     assert snap["index"]["usable"] is True
     assert sum(snap["degraded"].values()) == 0
@@ -172,7 +171,7 @@ def test_infinite_ttl_gives_null_expiry(stages: list[str]) -> None:
     ref = _run(svc, ttl_seconds=0).ref
     assert ref is not None
     assert ref.expires_at is None
-    content, request = index.calls[0][1]  # type: ignore[misc]
+    content, request = index.calls[1][1]  # type: ignore[misc]
     assert content.expires_at is None
     assert request.expires_at is None
 
@@ -181,13 +180,13 @@ def test_group_never_reaches_the_key(stages: list[str]) -> None:
     svc, _, _ = _service()
     ref = _run(svc, group="other", api_path="api/pjsk/card/detail").ref
     assert ref is not None
-    assert ref.object_key == f"pjsk/api/pjsk/card/detail/{DIGEST}.png"
+    assert ref.object_key == f"pjsk/api/pjsk/card/detail/{DIGEST}-{GENERATION}.png"
 
 
 def test_reuse_returns_the_stored_row_and_never_recomputes(stages: list[str]) -> None:
-    stored = _row()  # the same bytes were first stored by another endpoint
+    stored = _row()
     index = FakeRenderIndex({DIGEST: stored})
-    svc, store, stats = _service(index=index, clock=Clock(step=0.5))
+    svc, store, stats = _service(index=index)
     outcome = _run(svc, api_path="api/pjsk/honor")
     ref = outcome.ref
     assert ref is not None
@@ -197,34 +196,19 @@ def test_reuse_returns_the_stored_row_and_never_recomputes(stages: list[str]) ->
     assert ref.object_key == stored.cdn_path
     assert ref.size_bytes == 999
     assert ref.media_type == "image/png"
-    assert ref.upload_elapsed > 0.0
+    assert ref.upload_elapsed == 0.0
     assert ref.index_written is True
-    own_key = f"pjsk/api/pjsk/honor/{DIGEST}.png"
-    assert store.writes == [(own_key, len(DATA), "image/png")]  # uploaded before the write saw the row
-    content, request = index.calls[0][1]  # type: ignore[misc]
-    assert content.cdn_path == own_key
-    assert index.content[DIGEST] == stored  # a garage row keeps its path
+    assert store.writes == []
+    content, request = index.calls[1][1]  # type: ignore[misc]
+    assert content.cdn_path == stored.cdn_path
     assert request.api_path == "api/pjsk/honor"
-    assert stages == ["artifact:hash", "artifact:upload", "artifact:index_write"]
+    assert stages == ["artifact:hash", "artifact:index_lookup", "artifact:index_write"]
     snap = stats.snapshot()
     assert snap["reused"] == 1
     assert snap["published"] == 0
     assert snap["reused_foreign"] == 0
-    assert snap["reused_unrecorded_objects"] == 1  # own_key is not in the index; GC will not delete it
-    assert snap["uploads"] == 1
-
-
-def test_reuse_under_the_same_key_leaves_nothing_unrecorded(stages: list[str]) -> None:
-    stored = _row(cdn_path=f"pjsk/api/pjsk/honor/{DIGEST}.png")
-    svc, store, stats = _service(index=FakeRenderIndex({DIGEST: stored}))
-    outcome = _run(svc)
-    assert outcome.reason == "reused"
-    assert outcome.ref is not None
-    assert outcome.ref.cdn_path == stored.cdn_path
-    assert store.writes == [(stored.cdn_path, len(DATA), "image/png")]
-    snap = stats.snapshot()
-    assert snap["reused"] == 1
-    assert snap["reused_unrecorded_objects"] == 0
+    assert snap["index_lookup_hits"] == 1
+    assert snap["uploads"] == 0
 
 
 def test_reuse_of_cloud_store_hashed_row_is_foreign(stages: list[str]) -> None:
@@ -234,10 +218,8 @@ def test_reuse_of_cloud_store_hashed_row_is_foreign(stages: list[str]) -> None:
     assert ref is not None
     assert ref.cdn_path == f"pjsk/{DIGEST}.jpg" == ref.object_key
     assert ref.media_type == "image/jpeg"
-    assert len(store.writes) == 1
-    snap = stats.snapshot()
-    assert snap["reused_foreign"] == 1
-    assert snap["reused_unrecorded_objects"] == 1
+    assert store.writes == []
+    assert stats.snapshot()["reused_foreign"] == 1
 
 
 def test_reuse_with_null_media_and_size_falls_back_to_payload(stages: list[str]) -> None:
@@ -256,53 +238,25 @@ def test_legacy_disk_row_is_not_reused(stages: list[str]) -> None:
     ref = _run(svc).ref
     assert ref is not None
     assert ref.reused is False
-    assert ref.object_key == f"pjsk/api/pjsk/honor/{DIGEST}.png"
+    assert ref.object_key == f"pjsk/api/pjsk/honor/{DIGEST}-{GENERATION}.png"
     assert len(store.writes) == 1
-    assert index.content[DIGEST].cdn_path == ref.object_key  # the legacy row is upgraded
-    snap = stats.snapshot()
-    assert snap["reused"] == 0
-    assert snap["published"] == 1
+    assert stats.snapshot()["index_lookup_hits"] == 0
 
 
-def test_first_write_on_a_loop_reports_index_connect(stages: list[str]) -> None:
-    index = FakeRenderIndex(acquire_seconds=0.002, connect_seconds=0.25)
-    svc, _, stats = _service(index=index)
-    outcome = _run(svc)
-    assert outcome.stages["index_connect"] == 0.25
-    assert outcome.stages["index_acquire"] == 0.002
-    snap = stats.snapshot()
-    assert snap["stages"]["index_connect"] == {"count": 1, "total": 0.25}
-
-
-def test_index_write_error_backs_off_and_recovers(stages: list[str]) -> None:
+def test_index_lookup_error_returns_bytes_without_an_unlocked_upload(stages: list[str]) -> None:
     clock = Clock()
-    index = FakeRenderIndex(record_error=IndexUnavailable("down"))
+    index = FakeRenderIndex(lookup_error=IndexUnavailable("down"))
     svc, store, stats = _service(index=index, clock=clock)
-    ref = _run(svc).ref
-    assert ref is not None
-    assert ref.reused is False
-    assert ref.index_written is False
-    assert len(store.writes) == 1
-    assert [c for c, _ in index.calls] == ["record"]
-    snap = stats.snapshot()
-    assert snap["index_write_failures"] == 1
-    assert snap["index"]["usable"] is False
-    assert snap["index"]["last_error"]["stage"] == "index_write"
-    assert snap["stages"]["index_write"]["count"] == 1
-    assert snap["stages"]["index_acquire"]["count"] == 0
-
-    ref = _run(svc).ref  # inside the backoff window: no PG call at all
-    assert ref is not None
-    assert ref.index_written is False
-    assert [c for c, _ in index.calls] == ["record"]
-    assert stats.snapshot()["index_skipped"]["unavailable"] == 1
-
-    clock.value += 31.0
-    index.record_error = None
-    ref = _run(svc).ref
-    assert ref is not None
-    assert ref.index_written is True
-    assert stats.snapshot()["index"]["usable"] is True
+    assert _run(svc).ref is None
+    assert store.writes == []
+    assert [c for c, _ in index.calls] == ["lookup_content"]
+    assert stats.snapshot()["index_lookup_errors"] == 1
+    assert _run(svc).ref is None
+    assert [c for c, _ in index.calls] == ["lookup_content"]
+    clock.value += 31
+    index.lookup_error = None
+    assert _run(svc).ref.index_written
+    assert stats.snapshot()["index"]["usable"]
 
 
 @pytest.mark.parametrize(
@@ -318,8 +272,7 @@ def test_upload_failure_degrades_without_index_write(stages, error, reason, coun
     svc, _, stats = _service(store=FakeObjectStore(fail=error), index=index)
     outcome = _run(svc)
     assert outcome == ArtifactOutcome(ref=None, degraded=True, reason=reason)
-    assert list(outcome.stages) == ["hash", "upload", "total"]
-    assert index.calls == []  # A3: no index write after a failed upload
+    assert [c for c, _ in index.calls] == ["lookup_content"]  # zero record calls
     snap = stats.snapshot()
     assert snap[counter] == 1
     assert snap["degraded"][reason] == 1
@@ -336,13 +289,13 @@ def test_upload_timeout_degrades_without_index_calls(stages: list[str]) -> None:
     assert outcome.reason == "upload_timeout"
     assert outcome.degraded
     assert outcome.ref is None
-    assert index.calls == []
+    assert [c for c, _ in index.calls] == ["lookup_content"]
     snap = stats.snapshot()
     assert snap["upload_timeouts"] == 1
     assert snap["degraded"]["upload_timeout"] == 1
 
 
-def test_index_write_failure_is_ref_with_rate_limited_error(stages, caplog: pytest.LogCaptureFixture) -> None:
+def test_index_write_failure_returns_bytes_with_rate_limited_error(stages, caplog: pytest.LogCaptureFixture) -> None:
     clock = Clock()
     settings = StorageSettings(enabled=True)
     settings.index.connect_retry_seconds = 0.0  # no backoff: every request retries the write
@@ -357,8 +310,7 @@ def test_index_write_failure_is_ref_with_rate_limited_error(stages, caplog: pyte
         index.record_error = IndexUnavailable("again")
         fourth = _run(svc).ref
     for ref in (first, second, third, fourth):
-        assert ref is not None
-        assert ref.index_written is False
+        assert ref is None
     messages = [r.getMessage() for r in caplog.records if "artifact.index_write_failed" in r.getMessage()]
     assert len(messages) == 3  # IndexUnavailable once, RuntimeError once, IndexUnavailable again after 60 s
     assert f"hash={DIGEST}" in messages[0]
@@ -366,14 +318,14 @@ def test_index_write_failure_is_ref_with_rate_limited_error(stages, caplog: pyte
     snap = stats.snapshot()
     assert snap["index_write_failures"] == 4
     assert snap["index_writes"] == 0
-    assert sum(snap["degraded"].values()) == 0
+    assert snap["degraded"]["index_unavailable"] == 4
 
 
 def test_schema_missing_write_marks_schema_reason(stages: list[str]) -> None:
     index = FakeRenderIndex(record_error=IndexSchemaError("no table"))
     svc, _, stats = _service(index=index)
-    assert _run(svc).ref is not None
-    assert _run(svc).ref is not None
+    assert _run(svc).ref is None
+    assert _run(svc).ref is None
     snap = stats.snapshot()
     assert snap["index_write_failures"] == 1
     assert snap["index_skipped"]["schema_missing"] == 1
@@ -436,15 +388,12 @@ def test_default_offload_uses_render_pool(monkeypatch: pytest.MonkeyPatch, stage
     assert used == [service_mod._sha256_hex]
 
 
-def test_store_false_uploads_but_writes_no_index(stages: list[str]) -> None:
+def test_store_false_never_uploads_or_writes_index(stages: list[str]) -> None:
     index = FakeRenderIndex()
-    svc, store, stats = _service(index=index)
-    ref = _run(svc, store=False).ref
-    assert ref is not None
-    assert ref.index_written is False
-    assert len(store.writes) == 1
+    svc, store, _ = _service(index=index)
+    assert _run(svc, store=False).ref is None
+    assert store.writes == []
     assert index.calls == []
-    assert sum(stats.snapshot()["index_skipped"].values()) == 0
 
 
 def test_index_disabled_setting_ignores_index(stages: list[str]) -> None:
@@ -453,8 +402,7 @@ def test_index_disabled_setting_ignores_index(stages: list[str]) -> None:
     index = FakeRenderIndex()
     svc, _, stats = _service(index=index, settings=settings)
     ref = _run(svc).ref
-    assert ref is not None
-    assert ref.index_written is False
+    assert ref is None
     assert index.calls == []
     assert stats.snapshot()["index_skipped"]["disabled"] == 1
 
@@ -469,7 +417,6 @@ def test_unexpected_exception_degrades_to_internal(stages, caplog: pytest.LogCap
         outcome = _run(svc)
     assert outcome.reason == "internal"
     assert outcome.degraded
-    assert list(outcome.stages) == ["hash", "upload", "total"]
     assert stats.snapshot()["degraded"]["internal"] == 1
     assert "artifact.internal_error" in caplog.text
 

@@ -43,6 +43,7 @@ class _WorkerTask:
     request_id: str
     request_path: str
     request_method: str
+    asset_revision: str = ""
 
 
 @dataclass(slots=True)
@@ -78,6 +79,7 @@ def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
     have to ride back on the payload. A drawer that goes through the shared helper already set
     a precise backend (skia / skia_cache); anything else that produced a payload came from Skia.
     """
+    from src.core.missing_asset_telemetry import current_missing_asset_count
     from src.core.pillow_telemetry import get_last_pillow_touch_snapshot
     from src.sekai.skia_renderer.render_stats import BACKEND_SKIA
 
@@ -85,6 +87,7 @@ def _stamp_skia_backend(payload: EncodedImagePayload) -> EncodedImagePayload:
         payload.backend = BACKEND_SKIA
     snapshot = get_last_pillow_touch_snapshot()
     payload.pillow_touch_counts = dict(snapshot.counts) if snapshot.scoped else None
+    payload.missing_asset_count = current_missing_asset_count()
     return payload
 
 
@@ -136,9 +139,12 @@ def _heavy_render_worker_main(
             logger.warning("heavy render worker got unknown task payload: name=%s type=%s", worker_name, type(task))
             continue
 
+        from src.assets.request_context import begin_asset_revision, end_asset_revision
         from src.core.debug import pop_request_context, push_request_context, set_request_stage
 
         tokens = push_request_context(task.request_id, task.request_path, task.request_method)
+        end_asset_revision(tokens.asset_revision)
+        tokens.asset_revision = begin_asset_revision(task.asset_revision)
         with heartbeat_at.get_lock():
             heartbeat_at.value = time.monotonic()
 
@@ -245,6 +251,7 @@ class HeavyRenderWorkerPool:
         logger.info("heavy render worker pool stopped")
 
     async def render(self, kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
+        from src.assets.request_context import current_asset_revision
         from src.core.debug import current_request_context
 
         request_ctx = current_request_context()
@@ -256,6 +263,7 @@ class HeavyRenderWorkerPool:
             request_id=request_ctx["request_id"],
             request_path=request_ctx["path"],
             request_method=request_ctx["method"],
+            asset_revision=current_asset_revision(),
         )
         slot.current_task_id = task.task_id
         slot.current_task_kind = kind

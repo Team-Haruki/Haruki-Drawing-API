@@ -34,6 +34,8 @@ CONTENT_COLUMNS = {
     "media_type",
     "expires_at",
     "last_referenced_at",
+    "writer_node",
+    "written_at",
 }
 
 
@@ -74,58 +76,31 @@ def test_no_update_of_render_cache_index_anywhere_in_src() -> None:
         assert not pattern.search(statement)
 
 
-# The two statements the index write used to run inside BEGIN/COMMIT (3.4.0), pinned verbatim. `RECORD` must keep
-# them byte for byte (request parameters renumbered), so the rows Cloud reads cannot drift.
-FORMER_UPSERT_CONTENT = (
-    "INSERT INTO image_cache_entries (hash, group_name, cdn_path, file_path, size_bytes, storage_backend, "
-    "media_type, expires_at, last_referenced_at, created_at) VALUES ($1, $2, $3, NULL, $4, 'garage', $5, $6, "
-    "now(), now()) ON CONFLICT (hash) DO UPDATE SET "
-    "cdn_path = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' THEN EXCLUDED.cdn_path "
-    "ELSE image_cache_entries.cdn_path END, "
-    "size_bytes = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
-    "THEN EXCLUDED.size_bytes ELSE image_cache_entries.size_bytes END, "
-    "media_type = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
-    "THEN EXCLUDED.media_type ELSE image_cache_entries.media_type END, "
-    "storage_backend = 'garage', file_path = NULL, last_referenced_at = now(), "
-    "expires_at = CASE WHEN image_cache_entries.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL "
-    "ELSE GREATEST(image_cache_entries.expires_at, EXCLUDED.expires_at) END"
-)
-FORMER_UPSERT_REQUEST = (
-    "INSERT INTO render_cache_index (request_key, content_hash, api_path, user_id, group_name, key_version, "
-    "ttl_seconds, expires_at, created_at, last_used_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now()) "
-    "ON CONFLICT (request_key) DO UPDATE SET content_hash = EXCLUDED.content_hash, api_path = EXCLUDED.api_path, "
-    "user_id = EXCLUDED.user_id, group_name = EXCLUDED.group_name, key_version = EXCLUDED.key_version, "
-    "ttl_seconds = EXCLUDED.ttl_seconds, expires_at = EXCLUDED.expires_at, last_used_at = now()"
-)
-
-
-def _record_parts() -> tuple[str, str, str, str]:
-    """(existing CTE, content upsert, request upsert, final SELECT) of `RECORD`."""
-    match = re.fullmatch(
-        r"WITH existing AS \((.*?)\), upserted AS \((.*?) RETURNING cdn_path, media_type, size_bytes\), "
-        r"indexed AS \((.*?)\) (SELECT .*)",
-        _norm(sql.RECORD),
-    )
-    assert match is not None
-    return match.group(1), match.group(2), match.group(3), match.group(4)
-
-
-def _shift_params(statement: str, offset: int) -> str:
-    return re.sub(r"\$(\d+)", lambda m: f"${int(m.group(1)) + offset}", statement)
-
-
-def test_statement_set_is_exactly_three() -> None:
-    assert set(sql.ALL_STATEMENTS) == {"PREFLIGHT_REQUEST", "PREFLIGHT_CONTENT", "RECORD"}
+def test_statement_set_includes_shared_content_lock() -> None:
+    assert set(sql.ALL_STATEMENTS) == {
+        "RECORD",
+        "LOCK_CONTENT",
+        "PREPARE_UPLOAD",
+        "FINISH_UPLOAD",
+        "CHECK_UPLOAD",
+        "PREFLIGHT_REQUEST",
+        "PREFLIGHT_CONTENT",
+        "SELECT_CONTENT",
+        "UPSERT_CONTENT",
+        "UPSERT_REQUEST",
+    }
     for statement in sql.ALL_STATEMENTS.values():
-        assert statement.split(" ", 1)[0] in {"SELECT", "WITH"}
-    assert not re.search(r"\b(BEGIN|COMMIT|ROLLBACK|DELETE)\b", sql.RECORD)
+        assert statement.split(" ", 1)[0] in {"SELECT", "INSERT", "DELETE", "WITH"}
 
 
 def test_parameter_counts() -> None:
     assert _param_count(sql.PREFLIGHT_REQUEST) == 0
     assert _param_count(sql.PREFLIGHT_CONTENT) == 0
-    assert _param_count(sql.RECORD) == 14
-    assert sorted({int(n) for n in re.findall(r"\$(\d+)", sql.RECORD)}) == list(range(1, 15))
+    assert _param_count(sql.SELECT_CONTENT) == 1
+    assert _param_count(sql.RECORD) == 16
+    assert _param_count(sql.UPSERT_CONTENT) == 8
+    assert sql.LOCK_CONTENT == "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))"
+    assert _param_count(sql.UPSERT_REQUEST) == 8
 
 
 def test_preflight_statements_name_only_canonical_columns() -> None:
@@ -138,33 +113,41 @@ def test_preflight_statements_name_only_canonical_columns() -> None:
     assert sql.PREFLIGHT_CONTENT.endswith("FROM image_cache_entries LIMIT 0")
 
 
-def test_record_content_upsert_is_the_former_statement_verbatim() -> None:
-    _, content, _, _ = _record_parts()
-    assert content == _norm(FORMER_UPSERT_CONTENT)
-
-
-def test_record_request_upsert_is_the_former_statement_renumbered() -> None:
-    _, _, request, _ = _record_parts()
-    assert request == _norm(_shift_params(FORMER_UPSERT_REQUEST, 6))
-
-
-def test_record_reads_the_prior_backend_and_returns_the_stored_row() -> None:
+def test_select_content_matches_content_row_fields() -> None:
     from dataclasses import fields
 
-    from src.index.protocols import RecordResult
+    from src.index.protocols import ContentRow
 
-    existing, _, _, final = _record_parts()
-    assert existing == "SELECT storage_backend FROM image_cache_entries WHERE hash = $1"
-    assert final == (
-        "SELECT upserted.cdn_path, upserted.media_type, upserted.size_bytes, "
-        "(SELECT storage_backend FROM existing) AS prior_backend FROM upserted"
+    assert _select_columns(sql.SELECT_CONTENT) == [f.name for f in fields(ContentRow)]
+    assert set(_select_columns(sql.SELECT_CONTENT)) <= CONTENT_COLUMNS
+    assert _norm(sql.SELECT_CONTENT).endswith("FROM image_cache_entries WHERE hash = $1")
+
+
+def test_upsert_content_text_is_pinned() -> None:
+    expected = (
+        "INSERT INTO image_cache_entries (hash, group_name, cdn_path, file_path, size_bytes, storage_backend, "
+        "media_type, expires_at, last_referenced_at, created_at, writer_node, written_at) "
+        "VALUES ($1, $2, $3, NULL, $4, 'garage', $5, $6, "
+        "now(), now(), $7, $8) ON CONFLICT (hash) DO UPDATE SET "
+        "cdn_path = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' THEN EXCLUDED.cdn_path "
+        "ELSE image_cache_entries.cdn_path END, "
+        "size_bytes = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
+        "THEN EXCLUDED.size_bytes ELSE image_cache_entries.size_bytes END, "
+        "media_type = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
+        "THEN EXCLUDED.media_type ELSE image_cache_entries.media_type END, "
+        "writer_node = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
+        "THEN EXCLUDED.writer_node ELSE image_cache_entries.writer_node END, "
+        "written_at = CASE WHEN image_cache_entries.storage_backend IS DISTINCT FROM 'garage' "
+        "THEN EXCLUDED.written_at ELSE image_cache_entries.written_at END, "
+        "storage_backend = 'garage', file_path = NULL, last_referenced_at = now(), "
+        "expires_at = CASE WHEN image_cache_entries.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL "
+        "ELSE GREATEST(image_cache_entries.expires_at, EXCLUDED.expires_at) END"
     )
-    returned = ["cdn_path", "media_type", "size_bytes", "prior_backend"]
-    assert [f.name for f in fields(RecordResult)][:4] == returned
+    assert _norm(sql.UPSERT_CONTENT) == _norm(expected)
 
 
-def test_record_content_upsert_guards_per_column_without_statement_where() -> None:
-    _, text, _, _ = _record_parts()
+def test_upsert_content_guards_per_column_without_statement_where() -> None:
+    text = _norm(sql.UPSERT_CONTENT)
     conflict_tail = text.split("DO UPDATE SET", 1)[1]
     assert "WHERE" not in conflict_tail
     for column in ("cdn_path", "size_bytes", "media_type"):
@@ -175,14 +158,14 @@ def test_record_content_upsert_guards_per_column_without_statement_where() -> No
     assert "last_referenced_at = now()," in conflict_tail
     assert "GREATEST(image_cache_entries.expires_at, EXCLUDED.expires_at)" in conflict_tail
     assert "image_cache_entries.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL" in conflict_tail
-    assert set(_insert_columns(text)) <= CONTENT_COLUMNS
+    assert set(_insert_columns(sql.UPSERT_CONTENT)) <= CONTENT_COLUMNS
 
 
-def test_record_request_upsert_lists_all_ten_columns() -> None:
-    _, _, text, _ = _record_parts()
-    columns = _insert_columns(text)
+def test_upsert_request_lists_all_ten_columns() -> None:
+    columns = _insert_columns(sql.UPSERT_REQUEST)
     assert len(columns) == 10
     assert set(columns) == REQUEST_COLUMNS
     assert "created_at" in columns
-    assert "VALUES ($7, $8, $9, $10, $11, $12, $13, $14, now(), now())" in text
+    text = _norm(sql.UPSERT_REQUEST)
+    assert "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())" in text
     assert text.endswith("last_used_at = now()")

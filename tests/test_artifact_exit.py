@@ -189,7 +189,16 @@ def test_degraded_line_carries_the_artifact_stages(caplog: pytest.LogCaptureFixt
     assert len(lines) == 1
     match = re.search(r" artifact=degraded reason=upload_failed stages=(\S+) ", lines[0])
     assert match is not None
-    assert [part.split(":")[0] for part in match.group(1).split(",")] == ["hash", "upload", "total"]
+    assert [part.split(":")[0] for part in match.group(1).split(",")] == [
+        "hash",
+        "index_prepare",
+        "index_acquire",
+        "index_connect",
+        "index_lock",
+        "index_lookup",
+        "upload",
+        "total",
+    ]
 
 
 def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCaptureFixture) -> None:
@@ -213,7 +222,7 @@ def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCap
     assert document["node_name"] == "cn-exit"
     assert document["object_key"].startswith("pjsk/api/pjsk/honor/")
     assert store.writes == [(document["object_key"], len(PNG_LIKE), "image/png")]
-    assert [name for name, _ in index.calls] == ["record"]
+    assert [name for name, _ in index.calls] == ["lookup_content", "record"]
     lines = _response_lines(caplog)
     assert len(lines) == 1
     assert f" artifact=1 hash={document['hash']} reused=0 index_written=1 upload=" in lines[0]
@@ -221,9 +230,13 @@ def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCap
     assert stages is not None
     assert [part.split(":")[0] for part in stages.group(1).split(",")] == [
         "hash",
+        "index_prepare",
+        "index_acquire",
+        "index_connect",
+        "index_lock",
+        "index_lookup",
         "upload",
         "index_write",
-        "index_acquire",
         "total",
     ]
     assert " missing_assets=0 " in lines[0]

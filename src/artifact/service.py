@@ -1,21 +1,8 @@
-"""`ArtifactService`: hash -> upload -> index write -> `ArtifactOutcome` (plan §8.4).
+"""`ArtifactService`: hash -> index lookup -> upload -> index write -> `ArtifactOutcome` (plan §8.4).
 
 Fail open (invariant I1): every failure that is not "the caller asked and storage succeeded" becomes a
-degraded outcome, and the exit returns image bytes. `index_written=False` is never an error: the object is
-durable in the bucket and the ref is valid; only the request-key mapping is missing.
-
-There is no content-hash lookup before the upload. Object keys are content-addressed
-(`pjsk/<api_path>/<sha256>.<ext>`), so re-putting bytes that are already stored rewrites the same object, and
-the lookup never hit in production (pages embed the render time) while it cost two round trips to PostgreSQL
-on every request. The dedup rule of addendum A2 now runs inside the one-statement index write: when the hash
-already had a `garage` row, that row keeps its `cdn_path`, the write returns it, and the ref carries it
-(`reused=true`). If that stored path names another endpoint's key (or a Cloud `pjsk/<sha256>.<ext>` row),
-the object just uploaded under this request's key is not recorded in the index; it is counted as
-`reused_unrecorded_objects` because Cloud's GC, which deletes only recorded paths, will not remove it.
-
-Every sub-stage is timed into `ArtifactStats` (`/render-stats`) and into `ArtifactOutcome.stages` (the
-`image.response` line): `hash`, `upload`, `index_write` (which contains `index_acquire`, and `index_connect`
-on a loop's first write), and `total`.
+degraded outcome, and the exit returns image bytes. A ref is returned only after the shared content lock,
+object write and both index rows have committed. A durable upload intent covers failures before commit.
 
 Neither `opendal` nor `asyncpg` is imported here; the store and index arrive already built.
 """
@@ -30,6 +17,7 @@ import hashlib
 import logging
 import time
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from src.artifact.ref import (
     ARTIFACT_KIND,
@@ -41,14 +29,14 @@ from src.artifact.ref import (
     format_rfc3339,
     is_foreign_cdn_path,
 )
-from src.index.protocols import ContentRow, IndexSchemaError, RequestRow
+from src.index.protocols import ContentRow, IndexSchemaError, IndexUnavailable, RequestRow
 from src.storage.protocols import StorageError
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.artifact.directive import RenderCacheDirective
     from src.artifact.stats import ArtifactStats
     from src.core.image_payload import EncodedImagePayload
-    from src.index.protocols import RecordResult, RenderIndex
+    from src.index.protocols import ContentWriter, RenderIndex
     from src.settings import StorageSettings
     from src.storage.protocols import ObjectStore
 
@@ -65,7 +53,6 @@ class ArtifactOutcome:
     degraded: bool
     reason: str  # "ok" | "reused" | "disabled" | "runtime_unavailable" | "upload_failed"
     # | "upload_timeout" | "unsupported_media" | "internal"
-    # Seconds per artifact sub-stage of this request, for the `image.response` line; not part of equality.
     stages: dict[str, float] = field(default_factory=dict, compare=False)
 
 
@@ -160,13 +147,12 @@ class ArtifactService:
 
     def _stage_done(self, stages: dict[str, float], name: str, started: float) -> float:
         elapsed = max(0.0, self._clock() - started)
-        stages[name] = elapsed
-        self._stats.record_stage(name, elapsed)
+        self._stage_value(stages, name, elapsed)
         return elapsed
 
     def _stage_value(self, stages: dict[str, float], name: str, elapsed: float) -> None:
         elapsed = max(0.0, float(elapsed))
-        stages[name] = elapsed
+        stages[name] = stages.get(name, 0.0) + elapsed
         self._stats.record_stage(name, elapsed)
 
     def _log_write_failure(self, content_hash: str, cache_key: str, exc: BaseException) -> None:
@@ -190,6 +176,28 @@ class ArtifactService:
             digest = _sha256_hex(self._hasher, view)
         self._stage_done(stages, "hash", started)
         return digest
+
+    async def _lookup(self, writer: ContentWriter, content_hash: str, stages: dict[str, float]) -> ContentRow | None:
+        assert self._index is not None
+        _set_stage("artifact:index_lookup")
+        started = self._clock()
+        self._stats.incr("index_lookups")
+        try:
+            row = await asyncio.wait_for(writer.lookup_content(content_hash), self._command_timeout())
+        except Exception as exc:
+            self._stats.incr("index_lookup_errors")
+            self._stats.record_error("index_lookup", exc)
+            self._mark_index_unusable("index_lookup", exc)
+            logger.warning("artifact.index_lookup_failed hash=%s exc=%s: %s", content_hash, type(exc).__name__, exc)
+            if isinstance(exc, (IndexUnavailable, IndexSchemaError)):
+                raise
+            raise IndexUnavailable("content lookup failed") from exc
+        else:
+            self._mark_index_usable()
+            if row is not None and row.storage_backend == STORAGE_BACKEND_GARAGE:
+                self._stats.incr("index_lookup_hits")
+        self._stage_done(stages, "index_lookup", started)
+        return row
 
     async def _upload(
         self, store: ObjectStore, object_key: str, payload: EncodedImagePayload, stages: dict[str, float]
@@ -222,26 +230,26 @@ class ArtifactService:
         self._stats.add_upload_elapsed(elapsed)
         return elapsed
 
-    async def _record(self, content: ContentRow, request: RequestRow, stages: dict[str, float]) -> RecordResult | None:
+    async def _record(
+        self, writer: ContentWriter, content: ContentRow, request: RequestRow, stages: dict[str, float]
+    ) -> bool:
         assert self._index is not None
         _set_stage("artifact:index_write")
         started = self._clock()
         try:
-            result = await asyncio.wait_for(self._index.record(content, request), self._command_timeout())
+            await asyncio.wait_for(writer.record(content, request), self._command_timeout())
         except Exception as exc:
             self._stats.incr("index_write_failures")
             self._stats.record_error("index_write", exc)
             self._mark_index_unusable("index_write", exc)
             self._log_write_failure(content.hash, request.request_key, exc)
-            return None
+            if isinstance(exc, (IndexUnavailable, IndexSchemaError)):
+                raise
+            raise IndexUnavailable("content write failed") from exc
         finally:
             self._stage_done(stages, "index_write", started)
-        self._stage_value(stages, "index_acquire", result.acquire_seconds)
-        if result.connect_seconds > 0.0:
-            self._stage_value(stages, "index_connect", result.connect_seconds)
-        self._stats.incr("index_writes")
         self._mark_index_usable()
-        return result
+        return True
 
     # ------------------------------------------------------------------ entry point
 
@@ -249,7 +257,7 @@ class ArtifactService:
         stages: dict[str, float] = {}
         started = self._clock()
         try:
-            outcome = await self._process(payload, directive, stages)
+            return await self._process(payload, directive, stages)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -257,13 +265,15 @@ class ArtifactService:
                 "artifact.internal_error api_path=%s exc=%s", directive.api_path, type(exc).__name__, exc_info=True
             )
             self._stats.record_error("internal", exc)
-            outcome = self._degraded("internal", stages)
-        self._stage_done(stages, "total", started)
-        return outcome
+            return self._degraded("internal", stages)
+        finally:
+            self._stage_done(stages, "total", started)
 
     async def _process(
         self, payload: EncodedImagePayload, directive: RenderCacheDirective, stages: dict[str, float]
     ) -> ArtifactOutcome:
+        if not directive.store:
+            return ArtifactOutcome(ref=None, degraded=False, reason="store_disabled", stages=stages)
         store = self._store
         if store is None:
             return self._degraded("runtime_unavailable", stages)
@@ -274,28 +284,97 @@ class ArtifactService:
             return self._degraded("unsupported_media", stages)
 
         content_hash = await self._hash(payload.image_bytes, stages)
-        object_key = build_object_key(directive.api_path, content_hash, payload.media_type)
-        uploaded = await self._upload(store, object_key, payload, stages)
-        if isinstance(uploaded, str):
-            return self._degraded(uploaded, stages)  # A3: no index write after a failed upload
 
-        cdn_path = object_key
-        media_type = payload.media_type
-        size_bytes = len(payload.image_bytes)
-        reused = False
-        index_written = False
+        state = self._index_state()
+        if state != "usable":
+            self._stats.index_skipped(state)
+            return self._degraded("index_unavailable", stages)
+        assert self._index is not None
+        candidate_key = build_object_key(directive.api_path, content_hash, payload.media_type, generation=uuid4().hex)
+        try:
+            # Bound queueing, locking, upload and commit together. The upload retains
+            # its own smaller I/O budget; cancellation rolls the transaction back.
+            budget = min(240.0, float(self._settings.upload_timeout_seconds) + 3 * self._command_timeout())
+            async with asyncio.timeout(budget):
+                # This separate committed intent must precede the writer transaction:
+                # acquiring another connection while holding its lock can exhaust the pool.
+                started = self._clock()
+                prepared = await asyncio.wait_for(
+                    self._index.prepare_upload(content_hash, candidate_key), self._command_timeout()
+                )
+                self._stage_done(stages, "index_prepare", started)
+                if prepared:
+                    for name, elapsed in prepared.items():
+                        self._stage_value(stages, name, elapsed)
+                async with self._index.content_writer(content_hash) as writer:
+                    self._stage_value(stages, "index_acquire", getattr(writer, "acquire_seconds", 0.0))
+                    self._stage_value(stages, "index_connect", getattr(writer, "connect_seconds", 0.0))
+                    self._stage_value(stages, "index_lock", getattr(writer, "lock_seconds", 0.0))
+                    outcome = await self._process_locked(
+                        payload, directive, content_hash, candidate_key, writer, stages
+                    )
+                    if outcome.ref is not None:
+                        await asyncio.wait_for(writer.finish_upload(candidate_key), self._command_timeout())
+            if outcome.ref is not None:
+                self._stats.incr("reused" if outcome.ref.reused else "published")
+                if outcome.ref.index_written:
+                    self._stats.incr("index_writes")
+            return outcome
+        except (IndexUnavailable, IndexSchemaError, TimeoutError) as exc:
+            self._mark_index_unusable("content_writer", exc)
+            self._stats.record_error("content_writer", exc)
+            return self._degraded("index_unavailable", stages)
+
+    async def _process_locked(
+        self,
+        payload: EncodedImagePayload,
+        directive: RenderCacheDirective,
+        content_hash: str,
+        candidate_key: str,
+        writer: ContentWriter,
+        stages: dict[str, float],
+    ) -> ArtifactOutcome:
+        store = self._store
+        assert store is not None
+        row = await self._lookup(writer, content_hash, stages)
+        if self._index_state() != "usable":
+            return self._degraded("index_unavailable", stages)
+
+        reused = row is not None and row.storage_backend == STORAGE_BACKEND_GARAGE
+        if reused:
+            assert row is not None
+            cdn_path = row.cdn_path
+            media_type = row.media_type or payload.media_type
+            size_bytes = row.size_bytes if row.size_bytes is not None else len(payload.image_bytes)
+            upload_elapsed = 0.0
+            if is_foreign_cdn_path(cdn_path):
+                self._stats.incr("reused_foreign")
+        else:
+            cdn_path = candidate_key
+            if not await asyncio.wait_for(writer.upload_prepared(cdn_path), self._command_timeout()):
+                raise IndexUnavailable("upload intent expired or already claimed by GC")
+            media_type = payload.media_type
+            size_bytes = len(payload.image_bytes)
+            uploaded = await self._upload(store, cdn_path, payload, stages)
+            if isinstance(uploaded, str):
+                return self._degraded(uploaded, stages)  # A3: no index write after a failed upload
+            upload_elapsed = uploaded
+
         expires = expires_at_for(self._now(), directive.ttl_seconds)
+        index_written = False
         if directive.store:
             state = self._index_state()
             if state == "usable":
                 content = ContentRow(
                     hash=content_hash,
                     group_name=directive.group,
-                    cdn_path=object_key,
+                    cdn_path=cdn_path,
                     storage_backend=STORAGE_BACKEND_GARAGE,
                     media_type=media_type,
                     size_bytes=size_bytes,
                     expires_at=expires,
+                    writer_node=row.writer_node if reused else self._node_name,
+                    written_at=row.written_at if reused else self._now(),
                 )
                 request = RequestRow(
                     request_key=directive.cache_key,
@@ -307,22 +386,13 @@ class ArtifactService:
                     ttl_seconds=directive.ttl_seconds,
                     expires_at=expires,
                 )
-                result = await self._record(content, request, stages)
-                index_written = result is not None
-                if result is not None and result.prior_backend == STORAGE_BACKEND_GARAGE:
-                    # A2: an existing garage row keeps its path; the ref names what the index names.
-                    reused = True
-                    cdn_path = result.cdn_path
-                    media_type = result.media_type or media_type
-                    size_bytes = result.size_bytes if result.size_bytes is not None else size_bytes
-                    if cdn_path != object_key:
-                        self._stats.incr("reused_unrecorded_objects")
-                    if is_foreign_cdn_path(cdn_path):
-                        self._stats.incr("reused_foreign")
+                index_written = await self._record(writer, content, request, stages)
+                if not index_written:
+                    return self._degraded("index_unavailable", stages)
             else:
                 self._stats.index_skipped(state)
+                return self._degraded("index_unavailable", stages)
 
-        self._stats.incr("reused" if reused else "published")
         ref = ArtifactRef(
             kind=ARTIFACT_KIND,
             hash=content_hash,
@@ -339,7 +409,14 @@ class ArtifactService:
             expires_at=format_rfc3339(expires),
             reused=reused,
             index_written=index_written,
-            upload_elapsed=uploaded,
-            node_name=self._node_name,
+            upload_elapsed=upload_elapsed,
+            node_name=(
+                row.writer_node
+                if reused
+                and row.writer_node
+                and row.written_at
+                and 0 <= (self._now() - row.written_at).total_seconds() <= 120
+                else self._node_name
+            ),
         )
         return ArtifactOutcome(ref=ref, degraded=False, reason="reused" if reused else "ok", stages=stages)

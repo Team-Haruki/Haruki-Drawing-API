@@ -63,7 +63,7 @@ def test_lazy_accessor_builds_disabled_runtime_without_lifespan(monkeypatch: pyt
     assert runtime.reason == "disabled"
 
 
-def test_enabled_without_dsn_uploads_only(caplog: pytest.LogCaptureFixture) -> None:
+def test_enabled_without_dsn_returns_bytes_without_upload(caplog: pytest.LogCaptureFixture) -> None:
     store = FakeObjectStore(bucket="image-cache")
     stats = ArtifactStats()
     with caplog.at_level(logging.WARNING, logger="src.artifact.runtime"):
@@ -74,10 +74,9 @@ def test_enabled_without_dsn_uploads_only(caplog: pytest.LogCaptureFixture) -> N
     assert runtime.index is None
     assert "artifact index disabled" in caplog.text
     outcome = asyncio.run(runtime.process(_payload(), _directive()))
-    assert outcome.ref is not None
-    assert outcome.ref.index_written is False
-    assert outcome.ref.node_name == "cn09"
-    assert len(store.writes) == 1
+    assert outcome.ref is None
+    assert outcome.reason == "index_unavailable"
+    assert store.writes == []
     snap = stats.snapshot()
     assert snap["enabled"] is True
     assert snap["bucket"] == "image-cache"

@@ -24,6 +24,9 @@ SIMPLE_COUNTERS: tuple[str, ...] = (
     "upload_bytes",
     "upload_failures",
     "upload_timeouts",
+    "index_lookups",
+    "index_lookup_hits",
+    "index_lookup_errors",
     "index_writes",
     "index_write_failures",
 )
@@ -31,13 +34,14 @@ INDEX_SKIP_REASONS: tuple[str, ...] = ("disabled", "schema_missing", "unavailabl
 DEGRADED_REASONS: tuple[str, ...] = (
     "disabled",
     "runtime_unavailable",
+    "index_unavailable",
     "upload_failed",
     "upload_timeout",
     "unsupported_media",
     "internal",
 )
-# `index_write` is the whole write and contains `index_acquire` (pool acquire) and, on an event loop's first
-# write, `index_connect` (pool creation + preflight). `total` is the whole artifact step of one request.
+# Connection timings are contained by index_prepare / the writer context; index_write is the SQL upsert.
+# total is the whole artifact step, including transaction commit.
 STAGES: tuple[str, ...] = ("hash", "upload", "index_connect", "index_acquire", "index_write", "total")
 
 _node_name_lock = threading.Lock()

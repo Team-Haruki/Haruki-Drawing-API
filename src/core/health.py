@@ -2,6 +2,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from src.artifact.stats import get_artifact_stats
+from src.core.cache_identity import renderer_epoch
 from src.core.debug import evaluate_runtime_readiness, get_http_request_stats, runtime_readiness_thresholds
 from src.sekai.base.utils import get_runtime_cache_stats
 from src.sekai.skia_renderer.payload_cache import get_skia_payload_cache_stats
@@ -61,3 +62,12 @@ async def render_stats():
         "skia_payload_cache": get_skia_payload_cache_stats(),
         "artifacts": get_artifact_stats(),
     }
+
+
+@router.get("/cache/identity")
+def cache_identity():
+    """Opaque renderer identity; absent identity disables persistent render-cache reuse."""
+    epoch = renderer_epoch()
+    if epoch is None:
+        return JSONResponse(status_code=503, content={"version": 1, "renderer_epoch": ""})
+    return {"version": 1, "renderer_epoch": epoch}
