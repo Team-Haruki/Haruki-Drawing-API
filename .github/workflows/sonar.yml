@@ -19,6 +19,7 @@ jobs:
   analyze:
     name: Analyze
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -32,9 +33,9 @@ jobs:
         run: uv python install cpython-3.14.3+freethreaded
 
       - name: Install Skia link dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable

@@ -5,6 +5,11 @@ name: Skia Renderer Wheels
 
 on:
   workflow_call:
+    inputs:
+      linux-only:
+        description: Build only the linux-x86_64 wheel
+        type: boolean
+        default: false
   push:
     branches:
       - main
@@ -24,24 +29,21 @@ jobs:
   build:
     name: Build wheel (${{ matrix.platform }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            platform: linux-x86_64
-          - os: macos-15
-            platform: macos-arm64
+        # `inputs` is empty outside workflow_call, so push and pull_request runs build both.
+        include: ${{ fromJSON(inputs.linux-only && '[{"os":"ubuntu-latest","platform":"linux-x86_64"}]' || '[{"os":"ubuntu-latest","platform":"linux-x86_64"},{"os":"macos-15","platform":"macos-arm64"}]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install skia-safe build dependencies (Linux)
         if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Select C++20-capable Xcode (macOS)
         if: runner.os == 'macOS'
