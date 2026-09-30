@@ -244,6 +244,30 @@ def test_deck_renderer_helpers_cover_story_and_score_defaults():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("size", [10, 11])
+@pytest.mark.parametrize("text", ["1418", "801", "264"])
+async def test_card_id_badge_centres_digit_ink(size, text):
+    """The thumbnail ID tag's digits used to sit on its bottom edge (3 px above, 0-1 px below)."""
+    style = drawer.TextStyle(font=drawer.DEFAULT_FONT, size=size, color=(0, 0, 0, 255))
+    # Padded so the rounded fill's inclusive far edge, one pixel past the widget, is on the canvas.
+    with drawer.Canvas(bg=None).set_padding(2) as canvas:
+        drawer._id_badge(text, (255, 255, 255, 255), style)
+    img = (await canvas.get_img()).convert("RGBA")
+    # The fill is every opaque pixel; the ink is every clearly dark one inside it.
+    opaque = [(x, y) for y in range(img.height) for x in range(img.width) if img.getpixel((x, y))[3] == 255]
+    ink = [(x, y) for x, y in opaque if sum(img.getpixel((x, y))[:3]) < 3 * 128]
+    assert ink
+    fill_top, fill_bottom = min(y for _, y in opaque), max(y for _, y in opaque)
+    fill_left, fill_right = min(x for x, _ in opaque), max(x for x, _ in opaque)
+    ink_top, ink_bottom = min(y for _, y in ink), max(y for _, y in ink)
+    ink_left, ink_right = min(x for x, _ in ink), max(x for x, _ in ink)
+    assert ink_top - fill_top == fill_bottom - ink_bottom
+    # Horizontal ink comes from the glyph mask; Pillow's in-memory fallback face (no bundled fonts) has none.
+    if isinstance(getattr(drawer.get_layout_font(style.font, size), "path", None), str):
+        assert abs((ink_left - fill_left) - (fill_right - ink_right)) <= 1
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("support_count", [12, 20, 25])
 async def test_wl_support_rows_keep_per_result_totals_and_compact_cards(monkeypatch, support_count):
     texts = []

@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING
 
@@ -34,6 +35,7 @@ from src.sekai.base.plot import (
 )
 from src.sekai.base.text_layout import get_layout_font, get_text_size, ink_centered_text_offset_y
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
+from src.sekai.profile.custom_profile.font_field import basic_text_field
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
     get_card_full_thumbnail_layers,
@@ -321,6 +323,67 @@ def _chip(text: str, fill, *, style: TextStyle = _CHIP_STYLE, radius: int = 9, p
         .set_h(height)
         .set_content_align("lt")
         .set_text_offset((0, (height - ink_h) // 2 - pad_y - ink_top))
+        .set_bg(RoundRectBg(fill, radius, blur_glass=False))
+    )
+
+
+# Mask columns fainter than this are anti-aliasing fringe the eye does not read as part of a digit.
+_INK_COLUMN_ALPHA = 32
+_ink_columns_cache: dict[tuple, tuple[int, int]] = {}
+
+
+def _ink_columns(style: TextStyle, text: str) -> tuple[int, int]:
+    """``text``'s visible ink as ``[left, right)`` columns from the pen origin, read off its BASIC glyph mask.
+
+    ``getbbox`` is ink-tight vertically but spans the advance horizontally: at 10 px the Source Han digits
+    leave their last column empty, so a number padded by its advance box sits a pixel left of centre."""
+    font = get_layout_font(style.font, style.size)
+    bbox = font.getbbox(text)
+    path = getattr(font, "path", None)
+    if not isinstance(path, str):
+        # Pillow's in-memory default face (CI bundles no fonts) has no file to rasterize; keep the advance box.
+        return bbox[0], bbox[2]
+    key = (path, style.size, text)
+    cached = _ink_columns_cache.get(key)
+    if cached is not None:
+        return cached
+    columns = bbox[0], bbox[2]
+    try:
+        field, field_bbox = basic_text_field(Path(path), text, style.size)
+    except (OSError, RuntimeError, ValueError):
+        field = None
+    if field is not None:
+        width = field.width
+        solid = [x for x in range(width) if max(field.pixels[x::width]) >= _INK_COLUMN_ALPHA]
+        if solid:
+            columns = field_bbox[0] + solid[0], field_bbox[0] + solid[-1] + 1
+    if len(_ink_columns_cache) >= 4096:
+        _ink_columns_cache.clear()
+    _ink_columns_cache[key] = columns
+    return columns
+
+
+def _id_badge(text: str, fill, style: TextStyle, *, radius: int = 4, gap=(4, 2)) -> TextBox:
+    """A small tag whose ink sits dead centre, ``gap`` pixels from each edge of the drawn fill.
+
+    Rounded rects are drawn Pillow-style with the far edges inclusive, one pixel wider and taller than the
+    widget, so the box is ``ink + 2 * gap - 1`` in each direction and the text is shifted so its ink starts
+    ``gap`` in from the near edges."""
+    gap_x, gap_y = gap
+    font = get_layout_font(style.font, style.size)
+    _, top, _, bottom = font.getbbox(text)
+    left, right = _ink_columns(style, text)
+    # Painter.text puts the baseline ink_height("哇") below the line top; getbbox is relative to the ascender top.
+    ink_top = get_text_size(font, "哇")[1] + top - font.getmetrics()[0]
+    natural_w = right - left + 2 * gap_x - 1
+    # Never narrower than the advance box, or TextBox would clip the line to fit.
+    width = max(natural_w, get_text_size(font, text)[0])
+    return (
+        TextBox(text, style)
+        .set_padding(0)
+        .set_size((width, bottom - top + 2 * gap_y - 1))
+        .set_content_align("lt")
+        .set_text_offset((gap_x - left + (width - natural_w) // 2, gap_y - ink_top))
         .set_bg(RoundRectBg(fill, radius, blur_glass=False))
     )
 
@@ -1245,9 +1308,7 @@ def _draw_deck_card(
             CardFullThumbnailBox(assets.card_layers[card_key], size=(None, thumb))
             fixed = _deck_card_is_fixed(rqd, card_id, card.chara_id)
             id_style = TextStyle(font=DEFAULT_FONT, size=10 if thumb < 90 else 11, color=WHITE if fixed else _TEXT)
-            TextBox(str(card_id), id_style).set_padding((3, 0)).set_bg(
-                RoundRectBg((214, 64, 84, 230) if fixed else (255, 255, 255, 215), 4, blur_glass=False)
-            ).set_offset((-2, 2))
+            _id_badge(str(card_id), (214, 64, 84, 230) if fixed else (255, 255, 255, 215), id_style).set_offset((-2, 2))
             if card.has_canvas_bonus:
                 icon = round(11 * scale)
                 ImageBox(assets.canvas_thumbnail, size=(icon, icon)).set_offset((round(-32 * scale), round(65 * scale)))
