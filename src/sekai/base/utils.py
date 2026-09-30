@@ -642,7 +642,10 @@ def get_image_asset_signature(base_path: Path, path: AssetKey | None) -> dict[st
         return None
 
     try:
-        _full_path, full_path_str, stat = _resolve_and_stat(base_path, path)
+        # Cache keys are mostly built on the event loop, where the mirror refuses to fetch anyway: skip it
+        # there instead of paying its stats, its local-fallback telemetry and a `skipped_on_loop` count
+        # per cold asset. A pool-thread caller keeps the fetch.
+        _full_path, full_path_str, stat = _resolve_and_stat(base_path, path, fetch=not _on_event_loop_thread())
     except (FileNotFoundError, OSError, ValueError):
         return {"source_path": path, "missing": True}
 
@@ -1116,26 +1119,37 @@ def _stat_regular_file(full_path: Path) -> os.stat_result | None:
     return st if S_ISREG(st.st_mode) else None
 
 
+def _on_event_loop_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
 def _resolve_and_stat(
-    base_path: Path, path: str, *, birthday_fallback: bool = True
+    base_path: Path, path: str, *, birthday_fallback: bool = True, fetch: bool = True
 ) -> tuple[Path, str, os.stat_result]:
     """解析路径并获取 stat，供 resize 和原始加载共用。
 
     Order: stat -> mirror `ensure_local` (fetch on a miss; `None` with NullMirror) -> birthday fallback ->
     `FileNotFoundError`. The raised error carries the §5.3 miss reason for the consumer to count.
-    ``birthday_fallback=False`` skips the fallback (a candidate list tries every candidate first).
+    ``birthday_fallback=False`` skips the fallback (a candidate list tries every candidate first);
+    ``fetch=False`` skips the mirror (a local-only answer).
     """
     resolved_base, full_path, full_path_str = _resolve_asset_path(base_path, path)
 
     st = _stat_regular_file(full_path)
     if st is None:
-        mirror = _asset_mirror()
-        fetched = mirror.ensure_local(path)
-        if fetched is not None:
-            fetched_st = _stat_regular_file(fetched)
-            if fetched_st is not None:
-                return fetched, str(fetched), fetched_st
-        miss_reason = mirror.last_miss_reason() or MISSING_LOCAL_NOT_FOUND
+        miss_reason = MISSING_LOCAL_NOT_FOUND
+        if fetch:
+            mirror = _asset_mirror()
+            fetched = mirror.ensure_local(path)
+            if fetched is not None:
+                fetched_st = _stat_regular_file(fetched)
+                if fetched_st is not None:
+                    return fetched, str(fetched), fetched_st
+            miss_reason = mirror.last_miss_reason() or MISSING_LOCAL_NOT_FOUND
         fallback_path = _resolve_birthday_year_fallback(full_path, resolved_base) if birthday_fallback else None
         if fallback_path is None:
             raise _missing_error(f"图片文件不存在: {full_path}", miss_reason)
@@ -1298,29 +1312,79 @@ async def get_asset_image_ref(
         raise
 
 
+_ASSET_REF_BATCH = 16
+# Sentinel for a batch slot whose first candidate must be fetched from the mirror first.
+_NEEDS_FETCH = object()
+
+
+def _needs_mirror_fetch(base_path: Path, key: AssetKey | None) -> bool:
+    """True when resolving `key` would fetch from the mirror: its first candidate is a bucket key not on disk.
+
+    Only the FIRST candidate decides: resolution tries candidates in order, so a later local candidate is
+    reached only after the first one's fetch. Traversal and empty keys return False and fail in the ordinary
+    path exactly as before.
+    """
+    label = _key_label(key)
+    if not label or not label.strip():
+        return False
+    mirror = _asset_mirror()
+    if mirror.local_path(label) is None:  # NullMirror or a non-bucket key: plain local disk
+        return False
+    try:
+        _resolved_base, full_path, _ = _resolve_asset_path(base_path, label)
+    except ValueError:
+        return False
+    return _stat_regular_file(full_path) is None
+
+
 async def get_asset_image_refs(base_path: Path, paths: list[AssetKey | None]) -> list[AssetImageRef | MissingImageRef]:
     """Batch header-only probes, retaining the global signature-keyed metadata pool.
 
     Tiny per-layer executor jobs cost more than a warm stat/header lookup. Independent
     batches still overlap I/O; this never creates a per-request decoded-image cache.
     A candidate-list element is one slot of a batch.
+
+    Cold mirror keys leave the render pool: a batch resolved them one after another, each
+    blocking a render thread on a remote read, so a cold list's fetch concurrency was the render
+    pool size (4 on a small node) however high ``fetch_concurrency`` was. They are deferred and
+    resolved one per task on the asset fetch pool, which ``fetch_concurrency`` sizes.
     """
 
-    def load_batch(batch):
-        result = []
-        for path in batch:
-            label = _key_label(path)
-            try:
-                if not candidates(path):
-                    raise _missing_error("empty-path", MISSING_EMPTY_PATH)
-                result.append(_load_asset_image_ref_sync(base_path, path))
-            except (FileNotFoundError, OSError) as exc:
-                _log_missing_image_once(label, exc)
-                result.append(missing_image_ref(_guess_missing_placeholder_variant(label)))
-        return result
+    def load_one(path):
+        label = _key_label(path)
+        try:
+            if not candidates(path):
+                raise _missing_error("empty-path", MISSING_EMPTY_PATH)
+            return _load_asset_image_ref_sync(base_path, path)
+        except (FileNotFoundError, OSError) as exc:
+            _log_missing_image_once(label, exc)
+            return missing_image_ref(_guess_missing_placeholder_variant(label))
 
-    batches = await asyncio.gather(*(run_in_pool(load_batch, paths[i : i + 16]) for i in range(0, len(paths), 16)))
-    return [ref for batch in batches for ref in batch]
+    def load_batch(batch):
+        return [_NEEDS_FETCH if _needs_mirror_fetch(base_path, path) else load_one(path) for path in batch]
+
+    batches = await asyncio.gather(
+        *(run_in_pool(load_batch, paths[i : i + _ASSET_REF_BATCH]) for i in range(0, len(paths), _ASSET_REF_BATCH))
+    )
+    refs = [ref for batch in batches for ref in batch]
+    deferred = [index for index, ref in enumerate(refs) if ref is _NEEDS_FETCH]
+    if deferred:
+        started = time.perf_counter()
+        pool = _asset_fetch_executor()
+        fetched = await asyncio.gather(*(run_in_pool(load_one, paths[i], pool=pool, log_slow=False) for i in deferred))
+        for index, ref in zip(deferred, fetched):
+            refs[index] = ref
+        elapsed = time.perf_counter() - started
+        if elapsed >= _SLOW_POOL_TASK_SECONDS:
+            request_ctx = current_request_context()
+            logger.info(
+                "asset.fetch_batch id=%s path=%s keys=%d elapsed=%.3fs",
+                request_ctx["request_id"],
+                request_ctx["path"],
+                len(deferred),
+                elapsed,
+            )
+    return refs
 
 
 def _load_image_resized_sync(
@@ -1734,9 +1798,40 @@ from concurrent.futures import ThreadPoolExecutor
 
 _default_pool_executor = ThreadPoolExecutor(max_workers=DEFAULT_THREAD_POOL_SIZE)
 _SLOW_POOL_TASK_SECONDS = 0.2
+_asset_fetch_pool: ThreadPoolExecutor | None = None
+_asset_fetch_pool_lock = threading.Lock()
 
 
-async def run_in_pool(func, *args, pool=None):
+def _asset_fetch_executor() -> ThreadPoolExecutor:
+    """Lazy pool for cold mirror fetches, sized by ``assets.mirror.fetch_concurrency``.
+
+    Its threads mostly wait on the network, so they must not come out of the render pool. The
+    mirror's own fetch slots bound the remote reads to the same number; this pool only lets
+    that many waits overlap. Nothing is created until the first cold key.
+    """
+    global _asset_fetch_pool
+    pool = _asset_fetch_pool
+    if pool is not None:
+        return pool
+    with _asset_fetch_pool_lock:
+        if _asset_fetch_pool is None:
+            from src.settings import settings
+
+            workers = max(1, int(settings.assets.mirror.fetch_concurrency))
+            _asset_fetch_pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="asset-fetch")
+        return _asset_fetch_pool
+
+
+def shutdown_asset_fetch_pool() -> None:
+    """Stop the fetch pool; the next cold key builds a new one (shutdown, tests)."""
+    global _asset_fetch_pool
+    with _asset_fetch_pool_lock:
+        pool, _asset_fetch_pool = _asset_fetch_pool, None
+    if pool is not None:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+async def run_in_pool(func, *args, pool=None, log_slow: bool = True):
     if pool is None:
         global _default_pool_executor
         pool = _default_pool_executor
@@ -1765,7 +1860,7 @@ async def run_in_pool(func, *args, pool=None):
         return await asyncio.get_running_loop().run_in_executor(pool, context.run, leased_call)
     finally:
         elapsed = time.perf_counter() - started
-        if elapsed >= _SLOW_POOL_TASK_SECONDS:
+        if log_slow and elapsed >= _SLOW_POOL_TASK_SECONDS:
             logger.log(
                 logging.WARNING if elapsed >= 1.0 else logging.INFO,
                 "pool.task id=%s path=%s method=%s func=%s elapsed=%.3fs metrics=%s",
@@ -1835,5 +1930,6 @@ def clear_runtime_memory_caches() -> None:
 def shutdown_utils() -> None:
     """关闭 utils 模块持有的全局资源（线程池、图片缓存、临时文件）"""
     _default_pool_executor.shutdown(wait=False)
+    shutdown_asset_fetch_pool()
     cleanup_expired_tmp_files()
     clear_runtime_memory_caches()
