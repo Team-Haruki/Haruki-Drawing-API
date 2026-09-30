@@ -22,6 +22,7 @@ from src.artifact.directive import (
     parse_render_cache_directive,
 )
 from src.artifact.stats import artifact_node_name, artifact_stats
+from src.assets.request_context import begin_asset_revision, end_asset_revision
 from src.core.missing_asset_telemetry import begin_missing_asset_scope, end_missing_asset_scope
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope
 from src.settings import (
@@ -174,6 +175,7 @@ class RequestContextTokens:
     pillow_telemetry: contextvars.Token | None = None
     missing_assets: object | None = None
     render_directive: contextvars.Token | None = None
+    asset_revision: object | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -195,10 +197,14 @@ def push_request_context(request_id: str, path: str, method: str) -> RequestCont
         render_backend=_render_backend_var.set(DEFAULT_RENDER_BACKEND),
         pillow_telemetry=begin_pillow_touch_scope(),
         missing_assets=begin_missing_asset_scope(),
+        asset_revision=begin_asset_revision(""),
     )
 
 
 def pop_request_context(tokens: RequestContextTokens) -> None:
+    if tokens.asset_revision is not None:
+        end_asset_revision(tokens.asset_revision)
+        tokens.asset_revision = None
     if tokens.missing_assets is not None:
         end_missing_asset_scope(tokens.missing_assets)
     if tokens.pillow_telemetry is not None:
@@ -793,6 +799,8 @@ def _bind_render_directive(request: Request, trace: _DebugRequestTrace) -> JSONR
         artifact_stats.incr("requests_with_directive")
         if trace.tokens is not None:
             trace.tokens.render_directive = _render_directive_var.set(directive)
+            end_asset_revision(trace.tokens.asset_revision)
+            trace.tokens.asset_revision = begin_asset_revision(directive.asset_revision)
     return None
 
 

@@ -4,7 +4,7 @@
 (`httpx.ASGITransport`, a subprocess `TestClient`, spawned heavy workers) still get a working — usually
 disabled — runtime. Building never raises for a bad remote: storage disabled yields a disabled runtime that
 never imports `opendal`; a provider validation or `opendal` import failure yields an unavailable runtime that
-is rebuilt after `index.connect_retry_seconds`; a missing DSN keeps uploads working with `index_written=false`.
+is rebuilt after `index.connect_retry_seconds`; a missing DSN returns image bytes without uncoordinated object uploads.
 `/ready` is never influenced by storage or index health.
 """
 
@@ -102,11 +102,11 @@ def _default_store_factory(storage: StorageSettings) -> ObjectStore:
 def _default_index_factory(storage: StorageSettings) -> RenderIndex | None:
     index_settings = storage.index
     if not index_settings.enabled:
-        logger.info("artifact index disabled by settings (storage.index.enabled=false); index_written=false")
+        logger.info("artifact index disabled by settings (storage.index.enabled=false); returning image bytes")
         return None
     dsn = index_settings.dsn.get_secret_value().strip() if index_settings.dsn is not None else ""
     if not dsn:
-        logger.warning("artifact index disabled: HARUKI_STORAGE__INDEX__DSN is not set; uploads only")
+        logger.warning("artifact index disabled: HARUKI_STORAGE__INDEX__DSN is not set; returning image bytes")
         return None
     from src.index.asyncpg_index import AsyncpgRenderIndex  # does not import asyncpg
 

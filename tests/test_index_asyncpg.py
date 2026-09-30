@@ -17,13 +17,18 @@ from src.index import (
     IndexSchemaError,
     IndexUnavailable,
     IndexWriteFailed,
-    RecordResult,
     RenderIndex,
     RequestRow,
     asyncpg_index as mod,
 )
 from src.index.asyncpg_index import AsyncpgRenderIndex, dsn_redacted
-from src.index.sql import PREFLIGHT_CONTENT, PREFLIGHT_REQUEST, RECORD
+from src.index.sql import (
+    LOCK_CONTENT,
+    PREFLIGHT_CONTENT,
+    PREFLIGHT_REQUEST,
+    RECORD,
+    SELECT_CONTENT,
+)
 from src.settings import IndexSettings
 from tests.storage_fakes import FakePgPool, FakeRenderIndex, UndefinedColumnError, UndefinedTableError
 
@@ -49,22 +54,6 @@ REQUEST = RequestRow(
     key_version=3,
     ttl_seconds=3600,
     expires_at=EXPIRES,
-)
-RECORD_ARGS = (
-    CONTENT.hash,
-    "pjsk",
-    CONTENT.cdn_path,
-    1234,
-    "image/png",
-    EXPIRES,
-    "rk-1",
-    CONTENT.hash,
-    "api/pjsk/honor",
-    "public",
-    "pjsk",
-    3,
-    3600,
-    EXPIRES,
 )
 
 
@@ -186,47 +175,6 @@ def test_pool_is_created_lazily_with_settings() -> None:
     assert idx.stats["preflight_ok"] == 1
 
 
-def test_default_pool_keeps_one_warm_connection_per_loop() -> None:
-    factory = Factory()
-    idx, _ = _index(factory)
-    _run(idx.preflight())
-    kwargs = factory.calls[0][1]
-    assert kwargs["min_size"] == 1
-    assert kwargs["max_size"] == 4
-    assert kwargs["max_inactive_connection_lifetime"] == 0.0  # asyncpg's own default (300 s) is overridden
-    assert kwargs["reset"] is mod._skip_session_reset
-
-
-def test_pool_idle_lifetime_is_configurable_and_never_negative() -> None:
-    factory = Factory()
-    idx, _ = _index(factory, pool_min_size=0, pool_max_inactive_seconds=300.0)
-    _run(idx.preflight())
-    assert factory.calls[0][1]["min_size"] == 0
-    assert factory.calls[0][1]["max_inactive_connection_lifetime"] == 300.0
-    factory = Factory()
-    idx, _ = _index(factory, pool_max_inactive_seconds=-1.0)
-    _run(idx.preflight())
-    assert factory.calls[0][1]["max_inactive_connection_lifetime"] == 0.0
-
-
-def test_skip_session_reset_sends_nothing() -> None:
-    class Conn:
-        def __getattr__(self, name: str) -> Any:
-            raise AssertionError(f"reset hook touched the connection: {name}")
-
-    assert _run(mod._skip_session_reset(Conn())) is None
-
-
-def test_create_pool_accepts_the_reset_hook() -> None:
-    """The pinned asyncpg (>=0.30) takes `reset=` and `max_inactive_connection_lifetime=`, without connecting."""
-    import inspect
-
-    asyncpg = pytest.importorskip("asyncpg")
-    parameters = inspect.signature(asyncpg.create_pool).parameters
-    assert "reset" in parameters
-    assert "max_inactive_connection_lifetime" in parameters
-
-
 def test_default_pool_factory_imports_asyncpg_lazily(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, Any] = {}
 
@@ -245,44 +193,65 @@ def test_default_pool_factory_imports_asyncpg_lazily(monkeypatch: pytest.MonkeyP
 # ------------------------------------------------------------------------------------------ lookup / record
 
 
-def test_record_is_one_statement_without_a_transaction() -> None:
-    row = {"cdn_path": "pjsk/api/pjsk/card/x.png", "media_type": None, "size_bytes": 99, "prior_backend": "garage"}
+def test_lookup_content_hit_and_miss() -> None:
+    row = {
+        "hash": CONTENT.hash,
+        "group_name": "pjsk",
+        "cdn_path": CONTENT.cdn_path,
+        "storage_backend": "garage",
+        "media_type": None,
+        "size_bytes": None,
+        "expires_at": None,
+        "writer_node": None,
+        "written_at": None,
+    }
     factory = Factory(FakePgPool(rows={CONTENT.hash: row}))
+    idx, _ = _index(factory)
+    got = _run(idx.lookup_content(CONTENT.hash))
+    assert got == ContentRow(CONTENT.hash, "pjsk", CONTENT.cdn_path, "garage", None, None, None)
+    assert _run(idx.lookup_content("cd" * 32)) is None
+    selects = [event for event in factory.pool.events if event[1] == SELECT_CONTENT]
+    assert [event[2] for event in selects] == [(CONTENT.hash,), ("cd" * 32,)]
+    assert idx.stats["lookups"] == 2
+
+
+def test_record_locks_before_single_statement_in_one_transaction() -> None:
+    factory = Factory()
     idx, _ = _index(factory)
     _run(idx.preflight())
     factory.pool.events.clear()
-    result = _run(idx.record(CONTENT, REQUEST))
-    assert factory.pool.events == [("fetchrow", RECORD, RECORD_ARGS)]
-    assert factory.pool.round_trips == 1
-    assert result.cdn_path == "pjsk/api/pjsk/card/x.png"
-    assert (result.media_type, result.size_bytes, result.prior_backend) == (None, 99, "garage")
-    assert result.acquire_seconds >= 0.0
-    assert result.connect_seconds == 0.0  # the loop was already ready
+    _run(idx.record(CONTENT, REQUEST))
+    assert factory.pool.events == [
+        ("transaction.begin", None, ()),
+        ("execute", LOCK_CONTENT, (CONTENT.hash,)),
+        (
+            "fetchrow",
+            RECORD,
+            (
+                CONTENT.hash,
+                "pjsk",
+                CONTENT.cdn_path,
+                1234,
+                "image/png",
+                EXPIRES,
+                None,
+                None,
+                "rk-1",
+                CONTENT.hash,
+                "api/pjsk/honor",
+                "public",
+                "pjsk",
+                3,
+                3600,
+                EXPIRES,
+            ),
+        ),
+        ("transaction.commit", None, ()),
+    ]
     assert idx.stats["records"] == 1
-    assert "lookups" not in idx.stats
 
 
-def test_first_record_on_a_loop_reports_connect_time() -> None:
-    row = {"cdn_path": "k", "media_type": "image/png", "size_bytes": 1, "prior_backend": None}
-    factory = Factory(FakePgPool(default_row=row))
-    idx, _ = _index(factory)
-    first = _run(idx.record(CONTENT, REQUEST))
-    assert first.connect_seconds > 0.0
-    assert first.prior_backend is None
-    assert factory.pool.statements() == [PREFLIGHT_REQUEST, PREFLIGHT_CONTENT, RECORD]
-    second = _run(idx.record(CONTENT, REQUEST))
-    assert second.connect_seconds == 0.0
-
-
-def test_record_without_a_returned_row_falls_back_to_the_sent_values() -> None:
-    idx, _ = _index(Factory())
-    result = _run(idx.record(CONTENT, REQUEST))
-    assert result == RecordResult(
-        CONTENT.cdn_path, "image/png", 1234, None, result.acquire_seconds, result.connect_seconds
-    )
-
-
-def test_record_failure_raises_write_failed_without_backoff(caplog: pytest.LogCaptureFixture) -> None:
+def test_record_failure_rolls_back_and_raises_write_failed(caplog: pytest.LogCaptureFixture) -> None:
     class ForeignKeyViolationError(Exception):
         pass
 
@@ -291,7 +260,7 @@ def test_record_failure_raises_write_failed_without_backoff(caplog: pytest.LogCa
     with caplog.at_level(logging.WARNING, logger="src.index.asyncpg_index"):
         with pytest.raises(IndexWriteFailed):
             _run(idx.record(CONTENT, REQUEST))
-    assert not [event for event in pool.events if event[0].startswith("transaction")]
+    assert pool.events[-1] == ("transaction.rollback", None, ())
     assert idx.stats["write_failures"] == 1
     # A statement-level failure is not a transport failure: no backoff window.
     assert not idx.in_backoff()
@@ -316,11 +285,20 @@ def test_record_transport_failure_is_write_failed_with_backoff(caplog: pytest.Lo
     assert idx.stats["backoff_skips"] == 1
 
 
-def test_record_timeout_starts_backoff() -> None:
-    pool = FakePgPool(errors={RECORD: TimeoutError()})
+def test_lookup_non_transport_failure_is_unavailable_without_backoff() -> None:
+    pool = FakePgPool(errors={SELECT_CONTENT: RuntimeError("boom")})
     idx, _ = _index(Factory(pool))
-    with pytest.raises(IndexWriteFailed):
-        _run(idx.record(CONTENT, REQUEST))
+    with pytest.raises(IndexUnavailable) as info:
+        _run(idx.lookup_content("x"))
+    assert not isinstance(info.value, IndexWriteFailed)
+    assert not idx.in_backoff()
+
+
+def test_lookup_timeout_starts_backoff() -> None:
+    pool = FakePgPool(errors={SELECT_CONTENT: TimeoutError()})
+    idx, _ = _index(Factory(pool))
+    with pytest.raises(IndexUnavailable):
+        _run(idx.lookup_content("x"))
     assert idx.in_backoff()
     assert not idx.ready
 
@@ -329,9 +307,9 @@ def test_schema_error_after_preflight_is_schema_error() -> None:
     pool = FakePgPool()
     idx, _ = _index(Factory(pool), connect_retry_seconds=10)
     _run(idx.preflight())
-    pool.errors[RECORD] = UndefinedColumnError("column expires_at does not exist")
+    pool.errors[SELECT_CONTENT] = UndefinedColumnError("column expires_at does not exist")
     with pytest.raises(IndexSchemaError):
-        _run(idx.record(CONTENT, REQUEST))
+        _run(idx.lookup_content("x"))
     with pytest.raises(IndexSchemaError):
         _run(idx.record(CONTENT, REQUEST))
     assert idx.stats["backoff_skips"] == 1
@@ -354,9 +332,11 @@ def test_preflight_schema_missing_logs_once_and_backs_off(
         # Inside the backoff window: no round trip at all, same error class.
         for _ in range(3):
             with pytest.raises(IndexSchemaError):
+                _run(idx.lookup_content("x"))
+            with pytest.raises(IndexSchemaError):
                 _run(idx.record(CONTENT, REQUEST))
         assert pool.round_trips == trips
-        assert idx.stats["backoff_skips"] == 3
+        assert idx.stats["backoff_skips"] == 6
         # After the window, preflight is retried; still missing -> no second ERROR.
         clock.now += 31
         with pytest.raises(IndexSchemaError):
@@ -385,14 +365,14 @@ def test_connect_failure_is_unavailable_with_backoff(error: Exception, caplog: p
         with pytest.raises(IndexUnavailable):
             _run(idx.preflight())
         with pytest.raises(IndexUnavailable):
-            _run(idx.record(CONTENT, REQUEST))
+            _run(idx.lookup_content("x"))
     assert len(factory.calls) == 1
     assert idx.stats["unavailable"] == 1
     assert not [r for r in caplog.records if r.levelno == logging.ERROR]
     _assert_no_password(caplog)
     clock.now += 6
     factory.error = None
-    assert isinstance(_run(idx.record(CONTENT, REQUEST)), RecordResult)
+    assert _run(idx.lookup_content("x")) is None
     assert len(factory.calls) == 2
 
 
@@ -444,7 +424,7 @@ def test_concurrent_first_calls_preflight_once() -> None:
     idx, _ = _index(factory)
 
     async def main() -> None:
-        await asyncio.gather(*(idx.record(CONTENT, REQUEST) for _ in range(8)))
+        await asyncio.gather(*(idx.lookup_content("x") for _ in range(8)))
 
     _run(main())
     assert len(factory.calls) == 1
@@ -494,8 +474,8 @@ def test_each_event_loop_gets_its_own_pool_and_preflight() -> None:
 
     idx = AsyncpgRenderIndex(DSN, IndexSettings(), pool_factory=factory, clock=Clock())
     _run(idx.preflight())  # the lifespan loop
-    assert isinstance(_run_in_thread_loop(lambda: idx.record(CONTENT, REQUEST)), RecordResult)  # a worker loop
-    assert isinstance(_run(idx.record(CONTENT, REQUEST)), RecordResult)  # back on the first loop: pool reused
+    assert _run_in_thread_loop(lambda: idx.lookup_content("x")) is None  # a worker loop
+    assert _run(idx.lookup_content("x")) is None  # back on the first loop: pool reused
     assert len(pools) == 2
     assert pools[0].loop is not pools[1].loop
     assert idx.stats["pool_created"] == 2
@@ -504,13 +484,13 @@ def test_each_event_loop_gets_its_own_pool_and_preflight() -> None:
 
 
 def test_backoff_is_shared_across_loops() -> None:
-    pool = FakePgPool(errors={RECORD: TimeoutError()})
+    pool = FakePgPool(errors={SELECT_CONTENT: TimeoutError()})
     idx, _ = _index(Factory(pool), connect_retry_seconds=30)
     with pytest.raises(IndexUnavailable):
-        _run(idx.record(CONTENT, REQUEST))
+        _run(idx.lookup_content("x"))
     trips = pool.round_trips
     with pytest.raises(IndexUnavailable):
-        _run_in_thread_loop(lambda: idx.record(CONTENT, REQUEST))
+        _run_in_thread_loop(lambda: idx.lookup_content("x"))
     assert pool.round_trips == trips
     assert idx.stats["backoff_skips"] == 1
     assert not idx.ready
@@ -589,7 +569,7 @@ def test_close_is_idempotent_and_never_raises(caplog: pytest.LogCaptureFixture) 
     assert pool.closed
     assert not idx2.ready
     with pytest.raises(IndexUnavailable):
-        _run(idx2.record(CONTENT, REQUEST))
+        _run(idx2.lookup_content("x"))
     _assert_no_password(caplog)
 
 
@@ -601,20 +581,23 @@ def test_fake_render_index_implements_protocol() -> None:
     fake = FakeRenderIndex({CONTENT.hash: legacy})
     assert isinstance(fake, RenderIndex)
     _run(fake.preflight())
-    upgraded = _run(fake.record(CONTENT, REQUEST))
-    assert upgraded == RecordResult(CONTENT.cdn_path, "image/png", 1234, "legacy_disk")
+    assert _run(fake.lookup_content(CONTENT.hash)) == legacy
+    _run(fake.record(CONTENT, REQUEST))
     assert fake.content[CONTENT.hash] == CONTENT
     other = ContentRow(CONTENT.hash, "pjsk", "pjsk/other.png", "garage", None, None, None)
-    kept = _run(fake.record(other, REQUEST))
-    assert kept == RecordResult(CONTENT.cdn_path, "image/png", 1234, "garage")  # a garage row keeps its path
-    assert fake.content[CONTENT.hash] == CONTENT
+    _run(fake.record(other, REQUEST))
+    assert fake.content[CONTENT.hash] == CONTENT  # a garage row keeps its path
     assert fake.requests["rk-1"] == REQUEST
     _run(fake.close())
     assert fake.closed
-    assert [name for name, _ in fake.calls] == ["preflight", "record", "record", "close"]
+    assert [name for name, _ in fake.calls] == ["preflight", "lookup_content", "record", "record", "close"]
 
-    failing = FakeRenderIndex(preflight_error=IndexSchemaError("x"), record_error=IndexWriteFailed("z"))
+    failing = FakeRenderIndex(
+        preflight_error=IndexSchemaError("x"), lookup_error=IndexUnavailable("y"), record_error=IndexWriteFailed("z")
+    )
     with pytest.raises(IndexSchemaError):
         _run(failing.preflight())
+    with pytest.raises(IndexUnavailable):
+        _run(failing.lookup_content("h"))
     with pytest.raises(IndexWriteFailed):
         _run(failing.record(CONTENT, REQUEST))

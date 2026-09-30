@@ -1,6 +1,6 @@
 """`ArtifactRef`: the JSON document Drawing returns instead of image bytes in artifact mode (plan §8.3).
 
-Key derivation on a miss is frozen and caller-independent (C5): `pjsk/<api_path>/<sha256>.<ext>`. The first
+New object generations use `pjsk/<api_path>/<sha256>-<uuid>.<ext>`. The first
 segment is the literal `OBJECT_KEY_PREFIX`, never the cache group, and the provider `root` is never joined in.
 On a reuse the stored row's `cdn_path` is returned verbatim (addendum A2), so a ref may carry a path whose
 `api_path` segment differs from the request's, or Cloud's own `pjsk/<sha256>.<ext>` shape. Ops tooling that
@@ -31,13 +31,14 @@ def extension_for_media_type(media_type: str | None) -> str | None:
     return _EXT_BY_MEDIA_TYPE.get(media_type.split(";", 1)[0].strip().lower())
 
 
-def build_object_key(api_path: str, content_hash: str, media_type: str) -> str:
-    """The C5 key for a freshly uploaded artifact: `pjsk/<api_path>/<sha256>.<ext>`."""
+def build_object_key(api_path: str, content_hash: str, media_type: str, *, generation: str = "") -> str:
+    """Build an object path; new uploads supply a unique generation, legacy readers keep recorded paths."""
     ext = extension_for_media_type(media_type)
     if ext is None:
         raise UnsupportedMediaType(media_type)
     path = api_path.strip("/")
-    return f"{OBJECT_KEY_PREFIX}/{path}/{content_hash}.{ext}"
+    suffix = f"-{generation}" if generation else ""
+    return f"{OBJECT_KEY_PREFIX}/{path}/{content_hash}{suffix}.{ext}"
 
 
 def is_foreign_cdn_path(cdn_path: str) -> bool:

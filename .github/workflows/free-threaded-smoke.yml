@@ -172,9 +172,9 @@ jobs:
           PY
 
       # Optional and additive: the three bytes-mode runs above stay the gate. This boots a second server with
-      # the artifact runtime on an in-memory object store (no Garage, no PostgreSQL, so index_written=false)
-      # and requires every honor request to come back as an artifact_ref JSON document.
-      - name: Artifact memory-provider smoke
+      # the artifact runtime on an in-memory object store without PostgreSQL. The service must
+      # safely return image bytes; an upload without the shared index lock is forbidden.
+      - name: Artifact missing-index degradation smoke
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -208,7 +208,12 @@ jobs:
             --requests 20 \
             --concurrency 4 \
             --timeout 60 \
-            --expect artifact \
+            --expect image \
+            --header X-Haruki-Artifact:1 \
+            --header X-Haruki-Cache-Key:0123456789abcdef \
+            --header X-Haruki-Cache-Key-Version:3 \
+            --header X-Haruki-Cache-TTL:600 \
+            --header X-Haruki-Api-Path:api/pjsk/honor \
             --output-dir out/ci-artifact-honor \
             --save-errors
 
@@ -217,9 +222,9 @@ jobs:
 
           with open("out/ci-artifact-honor/summary.json", encoding="utf-8") as f:
               summary = json.load(f)
-          assert summary["expect"] == "artifact", summary
+          assert summary["expect"] == "image", summary
           assert summary["ok_images"] == summary["requests"], summary
-          print("artifact memory-provider smoke passed")
+          print("artifact missing-index bytes smoke passed")
           PY
 
       - name: GIL vs noGIL benchmark compare

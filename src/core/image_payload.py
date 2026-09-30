@@ -21,6 +21,12 @@ class EncodedImagePayload:
     # ``None`` means telemetry was unavailable, ``{}`` proves native-pure, and a non-empty
     # mapping classifies the render as native-hybrid in the parent process.
     pillow_touch_counts: dict[str, int] | None = None
+    # Missing asset count survives the isolated heavy-worker boundary.
+    missing_asset_count: int = 0
+
+    @property
+    def has_missing_resources(self) -> bool:
+        return self.missing_asset_count > 0 or bool((self.native_metrics or {}).get("font_fallbacks"))
 
 
 class NativeRenderRequiredError(RuntimeError):

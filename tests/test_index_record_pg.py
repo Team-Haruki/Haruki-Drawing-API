@@ -19,8 +19,13 @@ from typing import Any
 
 import pytest
 
-from src.index.sql import PREFLIGHT_CONTENT, PREFLIGHT_REQUEST, RECORD
-from tests.test_index_sql import FORMER_UPSERT_CONTENT, FORMER_UPSERT_REQUEST
+from src.index.sql import (
+    PREFLIGHT_CONTENT,
+    PREFLIGHT_REQUEST,
+    RECORD,
+    UPSERT_CONTENT as FORMER_UPSERT_CONTENT,
+    UPSERT_REQUEST as FORMER_UPSERT_REQUEST,
+)
 
 DSN = os.environ.get("HARUKI_TEST_PG_DSN", "")
 pytestmark = pytest.mark.skipif(not DSN, reason="HARUKI_TEST_PG_DSN not set")
@@ -35,6 +40,8 @@ CLOUD_DDL = (
     "ALTER TABLE image_cache_entries ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ NULL",
     "ALTER TABLE image_cache_entries ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
     "ALTER TABLE image_cache_entries ALTER COLUMN file_path DROP NOT NULL",
+    "ALTER TABLE image_cache_entries ADD COLUMN writer_node TEXT",
+    "ALTER TABLE image_cache_entries ADD COLUMN written_at TIMESTAMPTZ",
     """CREATE TABLE render_cache_index (
         request_key TEXT PRIMARY KEY, content_hash TEXT NOT NULL REFERENCES image_cache_entries(hash),
         api_path TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'public', group_name TEXT NOT NULL DEFAULT 'pjsk',
@@ -60,7 +67,7 @@ def _args(
     size: int = 1234,
 ) -> tuple[Any, ...]:
     cdn_path = f"pjsk/{api_path}/{content_hash}.png"
-    content = (content_hash, "pjsk", cdn_path, size, "image/png", expires)
+    content = (content_hash, "pjsk", cdn_path, size, "image/png", expires, "node-a", T0)
     request = (request_key, content_hash, api_path, "public", "pjsk", 3, ttl, expires)
     return content + request
 
@@ -80,8 +87,8 @@ async def _schema(conn: Any, name: str) -> None:
 async def _write_former(conn: Any, args: tuple[Any, ...]) -> datetime:
     async with conn.transaction():
         now = await conn.fetchval("SELECT now()")
-        await conn.execute(FORMER_UPSERT_CONTENT, *args[:6])
-        await conn.execute(FORMER_UPSERT_REQUEST, *args[6:])
+        await conn.execute(FORMER_UPSERT_CONTENT, *args[:8])
+        await conn.execute(FORMER_UPSERT_REQUEST, *args[8:])
     return now
 
 

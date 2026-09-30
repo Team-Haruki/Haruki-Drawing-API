@@ -365,9 +365,9 @@ class DrawingSettings(BaseModel):
 
 
 class IndexSettings(BaseModel):
-    """PostgreSQL render index (INSERT/SELECT only; Cloud owns the DDL)."""
+    """PostgreSQL render index and upload intents; Cloud owns the DDL."""
 
-    enabled: bool = True  # empty dsn == disabled (uploads still happen)
+    enabled: bool = True  # empty dsn == disabled (return bytes without uploading)
     dsn: SecretStr | None = None  # ENV ONLY — from_yaml drops a YAML value with a WARNING
     # Per event loop. One warm connection saves the ~4-RTT connect on the first write after an idle gap.
     pool_min_size: int = 1

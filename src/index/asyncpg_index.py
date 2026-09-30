@@ -9,17 +9,14 @@ An asyncpg pool belongs to the loop that created it, and one process runs severa
 the request loops), so each running loop gets its own pool, lock and preflight. The backoff window and the
 stats stay shared across loops.
 
-A write is one round trip on a warm pool: `RECORD` is a single statement (no BEGIN/COMMIT), the pool keeps
-`pool_min_size` connections open for `pool_max_inactive_seconds` (0 = forever), and a released connection is
-not sent asyncpg's session-reset query (see `_skip_session_reset`).
-
 The DSN password never reaches a log record or a `repr`: every rendering goes through `dsn_redacted()`.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 import logging
 import threading
@@ -29,13 +26,23 @@ from urllib.parse import unquote, urlsplit
 
 from src.index.protocols import (
     ContentRow,
+    IndexContention,
     IndexSchemaError,
     IndexUnavailable,
     IndexWriteFailed,
     RecordResult,
     RequestRow,
 )
-from src.index.sql import PREFLIGHT_CONTENT, PREFLIGHT_REQUEST, RECORD
+from src.index.sql import (
+    CHECK_UPLOAD,
+    FINISH_UPLOAD,
+    LOCK_CONTENT,
+    PREFLIGHT_CONTENT,
+    PREFLIGHT_REQUEST,
+    PREPARE_UPLOAD,
+    RECORD,
+    SELECT_CONTENT,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from src.settings import IndexSettings
@@ -105,13 +112,10 @@ def dsn_redacted(dsn: str) -> str:
 
 
 async def _skip_session_reset(connection: Any) -> None:
-    """The pool's `reset=` hook: nothing to undo, so no round trip on release.
+    """No session state: transaction locks release on commit/rollback.
 
-    asyncpg's default reset sends `SELECT pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;` every time
-    a connection goes back to the pool — one extra round trip (~50 ms to CN08) inside every `async with acquire()`.
-    Drawing's connections never take advisory locks, DECLARE cursors, LISTEN or SET anything: they only run the
-    `LIMIT 0` preflights and `RECORD`, each an autocommit statement. asyncpg still rolls back a transaction left
-    open (a cancelled statement) before calling this hook, and still terminates the connection if that fails.
+    asyncpg still rolls back interrupted transactions before invoking this hook.
+    No session advisory locks, cursors, LISTEN or SET statements are used.
     """
     return None
 
@@ -160,6 +164,7 @@ class AsyncpgRenderIndex:
             "schema_missing": 0,
             "unavailable": 0,
             "backoff_skips": 0,
+            "lookups": 0,
             "records": 0,
             "write_failures": 0,
         }
@@ -307,7 +312,6 @@ class AsyncpgRenderIndex:
         self.stats["preflight_ok"] += 1
 
     async def _ensure_ready(self) -> tuple[Any, float]:
-        """The loop's pool, and the seconds spent creating it and running the preflight (`0.0` when ready)."""
         self._check_backoff()
         slot = self._loop_slot()
         if slot.ready:
@@ -324,44 +328,102 @@ class AsyncpgRenderIndex:
 
     # ------------------------------------------------------------------ protocol
 
-    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
+    async def prepare_upload(self, content_hash: str, cdn_path: str) -> dict[str, float]:
+        """Commit cleanup intent before taking the writer lock or starting any PUT."""
         pool, connect_seconds = await self._ensure_ready()
-        self.stats["records"] += 1
         try:
             started = time.perf_counter()
             async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
                 acquire_seconds = time.perf_counter() - started
-                row = await conn.fetchrow(
-                    RECORD,
-                    content.hash,
-                    content.group_name,
-                    content.cdn_path,
-                    content.size_bytes,
-                    content.media_type,
-                    content.expires_at,
-                    request.request_key,
-                    request.content_hash,
-                    request.api_path,
-                    request.user_id,
-                    request.group_name,
-                    request.key_version,
-                    request.ttl_seconds,
-                    request.expires_at,
-                )
+                await conn.execute(PREPARE_UPLOAD, content_hash, cdn_path)
+            return {"index_connect": connect_seconds, "index_acquire": acquire_seconds}
         except Exception as exc:
-            raise self._classify(exc, "record", write=True) from None
-        if row is None:  # not reached: ON CONFLICT DO UPDATE returns the row; fall back to what was sent
-            return RecordResult(
-                content.cdn_path, content.media_type, content.size_bytes, None, acquire_seconds, connect_seconds
-            )
-        return RecordResult(
+            raise self._classify(exc, "prepare_upload", write=True) from None
+
+    @asynccontextmanager
+    async def content_writer(self, content_hash: str) -> AsyncIterator[_ContentWriter]:
+        """Hold Cloud's per-content transaction lock through upload and index commit."""
+        pool, connect_seconds = await self._ensure_ready()
+        body_failed = False
+        try:
+            started = time.perf_counter()
+            async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
+                acquire_seconds = time.perf_counter() - started
+                async with conn.transaction():
+                    started = time.perf_counter()
+                    try:
+                        await conn.execute(LOCK_CONTENT, content_hash)
+                    except TimeoutError as exc:
+                        raise IndexContention("content lock wait timed out") from exc
+                    lock_seconds = time.perf_counter() - started
+                    try:
+                        yield _ContentWriter(self, conn, content_hash, acquire_seconds, connect_seconds, lock_seconds)
+                    except BaseException:
+                        body_failed = True
+                        raise
+        except IndexUnavailable:
+            raise
+        except Exception as exc:
+            if body_failed:
+                raise
+            raise self._classify(exc, "content_writer", write=True) from None
+
+    async def lookup_content(self, content_hash: str) -> ContentRow | None:
+        pool, _ = await self._ensure_ready()
+        try:
+            async with pool.acquire(timeout=self._settings.connect_timeout_seconds) as conn:
+                return await self._lookup_content(conn, content_hash)
+        except Exception as exc:
+            raise self._classify(exc, "lookup", write=False) from None
+
+    async def _lookup_content(self, conn: Any, content_hash: str) -> ContentRow | None:
+        self.stats["lookups"] += 1
+        row = await conn.fetchrow(SELECT_CONTENT, content_hash)
+        if row is None:
+            return None
+        return ContentRow(
+            hash=row["hash"],
+            group_name=row["group_name"],
             cdn_path=row["cdn_path"],
+            storage_backend=row["storage_backend"],
             media_type=row["media_type"],
             size_bytes=row["size_bytes"],
-            prior_backend=row["prior_backend"],
-            acquire_seconds=acquire_seconds,
-            connect_seconds=connect_seconds,
+            expires_at=row["expires_at"],
+            writer_node=row["writer_node"],
+            written_at=row["written_at"],
         )
+
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
+        async with self.content_writer(content.hash) as writer:
+            return await writer.record(content, request)
+
+    async def _record(self, conn: Any, content: ContentRow, request: RequestRow) -> RecordResult:
+        self.stats["records"] += 1
+        try:
+            row = await conn.fetchrow(
+                RECORD,
+                content.hash,
+                content.group_name,
+                content.cdn_path,
+                content.size_bytes,
+                content.media_type,
+                content.expires_at,
+                content.writer_node,
+                content.written_at,
+                request.request_key,
+                request.content_hash,
+                request.api_path,
+                request.user_id,
+                request.group_name,
+                request.key_version,
+                request.ttl_seconds,
+                request.expires_at,
+            )
+        except Exception as exc:
+            raise self._classify(exc, "record", write=True) from None
+        if row is None:
+            return RecordResult(content.cdn_path, content.media_type, content.size_bytes, None)
+        return RecordResult(row["cdn_path"], row["media_type"], row["size_bytes"], row["prior_backend"])
 
     async def close(self) -> None:
         self._closed = True
@@ -387,3 +449,54 @@ class AsyncpgRenderIndex:
                     pool.terminate()
             except Exception as exc:  # shutdown never raises
                 logger.warning("render index close failed (%s) dsn=%s", type(exc).__name__, self._redacted)
+
+
+class _ContentWriter:
+    def __init__(
+        self,
+        index: AsyncpgRenderIndex,
+        conn: Any,
+        content_hash: str,
+        acquire_seconds: float = 0.0,
+        connect_seconds: float = 0.0,
+        lock_seconds: float = 0.0,
+    ) -> None:
+        self._index = index
+        self._conn = conn
+        self._hash = content_hash
+        self.acquire_seconds = acquire_seconds
+        self.connect_seconds = connect_seconds
+        self.lock_seconds = lock_seconds
+
+    async def upload_prepared(self, cdn_path: str) -> bool:
+        try:
+            return await self._conn.fetchval(CHECK_UPLOAD, self._hash, cdn_path) == 1
+        except Exception as exc:
+            raise self._index._classify(exc, "check_upload", write=True) from None
+
+    async def lookup_content(self, content_hash: str) -> ContentRow | None:
+        if content_hash != self._hash:
+            raise ValueError("content writer hash mismatch")
+        try:
+            return await self._index._lookup_content(self._conn, content_hash)
+        except Exception as exc:
+            raise self._index._classify(exc, "lookup", write=False) from None
+
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
+        if content.hash != self._hash or request.content_hash != self._hash:
+            raise ValueError("content writer hash mismatch")
+        result = await self._index._record(self._conn, content, request)
+        return RecordResult(
+            result.cdn_path,
+            result.media_type,
+            result.size_bytes,
+            result.prior_backend,
+            self.acquire_seconds,
+            self.connect_seconds,
+        )
+
+    async def finish_upload(self, cdn_path: str) -> None:
+        try:
+            await self._conn.execute(FINISH_UPLOAD, self._hash, cdn_path)
+        except Exception as exc:
+            raise self._index._classify(exc, "finish_upload", write=True) from None

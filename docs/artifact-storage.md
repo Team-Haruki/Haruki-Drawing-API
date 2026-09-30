@@ -11,7 +11,8 @@ now carries one extra header, `X-Haruki-Node`.
 | User-upload store (read side, 3.3.0) | `HARUKI_ASSETS__USER_UPLOAD__ENABLED` | `false` | Reads a profile background whose `bg_settings.img_path` is `user_upload/profile_bg/<server>/<file>` from the `user-upload` bucket (the key Cloud's `ProfileBGStore` writes) instead of `<base_dir>/user_upload/...`; a miss falls back to the local file, then to the default background. |
 
 Haruki-Cloud owns the PostgreSQL schema, the garbage collector and the choice of which node's public
-hostname goes into a URL. Drawing only uploads objects, INSERTs/SELECTs index rows and returns refs.
+hostname goes into a URL. Drawing uploads objects, coordinates index writes with Cloud through per-content transaction locks,
+registers/removes durable upload intents, and returns refs only after index commit. Drawing never deletes bucket objects.
 
 ## 1. Request headers (the render cache directive)
 
@@ -28,6 +29,8 @@ read**. When it is `1`, every directive header is validated strictly.
 | `X-Haruki-Cache-Store` | no, default `1` | `0` or `1`. `0` = render and return bytes, store nothing. |
 | `X-Haruki-Cache-Group` | no, default `pjsk` | `^[A-Za-z0-9._-]{1,64}$`; index metadata only, never part of an object key |
 | `X-Haruki-User-Id` | no, default `public` | `^[A-Za-z0-9._-]{1,128}$`; index metadata only, never part of an object key |
+| `X-Haruki-Asset-Revision` | no | 64 lowercase hex characters; global game-asset revision, used as the mirror namespace |
+| `X-Haruki-Renderer-Epoch` | no | 64 lowercase hex characters; expected backend identity from `/cache/identity` |
 
 Cloud always sends the **full** directive in artifact mode, including for endpoints it deliberately does
 not cache (those carry `X-Haruki-Cache-Store: 0`). There is no `Accept` negotiation and no
@@ -53,8 +56,8 @@ Every response path leaves through one exit and is always **one** body.
 | branch | when | status / body | headers added |
 | --- | --- | --- | --- |
 | bytes | no directive | 200, `image/png` or `image/jpeg`, identical to 3.1.0 | `X-Haruki-Node` |
-| store 0 | artifact mode, `X-Haruki-Cache-Store: 0` | 200, image bytes; nothing uploaded, no index write | `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
-| artifact | artifact mode, store 1, upload succeeded | 200, `application/json` `artifact_ref` | `X-Haruki-Artifact: 1`, `X-Haruki-Node` |
+| store 0 | explicitly disabled, missing assets (including bytes mode), or mismatched renderer epoch | 200, image bytes; nothing uploaded, no index write | `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
+| artifact | artifact mode, store 1, upload and index transaction committed | 200, `application/json` `artifact_ref` | `X-Haruki-Artifact: 1`, `X-Haruki-Node` |
 | degraded | artifact mode, store 1, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
 | rejected | invalid directive | 400 JSON (above) | `X-Haruki-Directive-Error`, `X-Haruki-Node` |
 
@@ -71,15 +74,17 @@ row is written, and one counter under `artifacts.degraded` is incremented:
 | --- | --- |
 | `disabled` | `HARUKI_STORAGE__ENABLED=false` but the caller asked for an artifact |
 | `runtime_unavailable` | provider config invalid or the `opendal` operator could not be built; retried after `storage.index.connect_retry_seconds` without a restart |
+| `index_unavailable` | missing/disabled index, lock/intent failure, or index transaction failure; no unlocked upload is attempted |
 | `upload_failed` | the object store rejected the write, or it was unreachable |
 | `upload_timeout` | the write exceeded `storage.upload_timeout_seconds` |
 | `unsupported_media` | the payload media type is not `image/png` or `image/jpeg` |
 | `internal` | an unexpected exception inside the artifact service (logged with a traceback) |
 
-Index trouble is **not** a degradation. If the upload succeeded the ref is returned with
-`index_written=false`, and the reason goes into `artifacts.index_skipped` (`disabled`, `schema_missing`,
-`unavailable`) or `index_write_failures`. The object is durable. Only the request-key → hash mapping is
-missing, so Cloud re-renders on its next miss.
+Index trouble degrades to bytes. An object write requires a durable upload intent and the shared PostgreSQL
+content lock. No ref is returned until both index rows commit; failed/aborted writes retain their cleanup intent
+for Cloud GC. `index_written=false` remains accepted by older consumers but is not emitted by this writer.
+Missing assets and renderer-epoch mismatches return bytes with `X-Haruki-Cache-Store: 0`, including images
+returned without an artifact directive. Callers must not cache those bytes or a derived ref.
 
 `/ready` is never influenced by storage or index health.
 
@@ -101,7 +106,7 @@ missing, so Cloud re-renders on its next miss.
   "ttl_seconds": 3600,
   "expires_at": "2026-09-14T07:55:22Z",
   "reused": false,
-  "index_written": false,
+  "index_written": true,
   "upload_elapsed": 0.0052,
   "node_name": "cn09"
 }
@@ -114,19 +119,19 @@ missing, so Cloud re-renders on its next miss.
 | `cdn_path` | object key, identical to `object_key`; the path Cloud appends to a node's public `image-cache` host |
 | `storage_backend` | always `garage` from Drawing (`legacy_disk` exists only in Cloud's own rows) |
 | `bucket` | the configured image-cache bucket |
-| `object_key` | on a miss, `pjsk/<api_path>/<sha256>.<ext>`; on a reuse, the stored row's `cdn_path` |
+| `object_key` | on a miss, `pjsk/<api_path>/<sha256>-<generation>.<ext>`; on a reuse, the stored row's `cdn_path` |
 | `size_bytes`, `media_type` | from the payload on a miss; from the stored row on a reuse when non-NULL |
 | `width`, `height` | may be `null` (Cloud reads null as 0) |
 | `cache_key`, `ttl_seconds` | echoed from the directive |
 | `expires_at` | RFC 3339 UTC (`…Z`), or JSON `null` when `ttl_seconds == 0` (infinite) |
-| `reused` | `true` when the index write found an existing `garage` row with the same hash (the ref then carries that row's path) |
+| `reused` | `true` when an existing `garage` row with the same hash was found and the upload was skipped |
 | `index_written` | `true` only when both index rows were written |
-| `upload_elapsed` | seconds spent in the upload step (every ref uploads, reused or not) |
-| `node_name` | the rendering node, the same value as `X-Haruki-Node` |
+| `upload_elapsed` | seconds spent in the upload step; `0.0` when reused |
+| `node_name` | original writer when its persisted `written_at` is within 120 seconds; otherwise the rendering node |
 
 ### Object keys, the reuse rule, and the `pjsk/api/` ops prefix
 
-- **Fresh upload (miss):** the key is `pjsk/<api_path>/<sha256>.<ext>`. The first segment is the literal
+- **Fresh upload (miss):** the key is `pjsk/<api_path>/<sha256>-<generation>.<ext>`. The first segment is the literal
   `pjsk` (not the cache group), and `user_id` and `cache_key` never appear in it. Because Cloud's API paths
   start with `api/`, Drawing-written keys start with `pjsk/api/`.
 - **Reuse (hit):** Drawing dedups by `image_cache_entries.hash`. For a hit whose `storage_backend` is
@@ -136,16 +141,8 @@ missing, so Cloud re-renders on its next miss.
      name a different `api_path` than the request did.
   2. Cloud's own `imagecache.storeHashed` rows (`pjsk/<sha256>.<ext>`) share the table and the bucket and may be
      reused by Drawing. Such hits are counted `reused_foreign`.
-- **The hit is detected by the index write, not by a lookup before the upload.** A pre-upload lookup cost two
-  PostgreSQL round trips per request and never hit in production (pages embed the render time: `reused=0` over
-  532 requests), so the bytes are always uploaded under the request's own key first, and the one-statement write
-  then returns the stored row. For a hit under the **same** key (same endpoint, same bytes) the upload rewrote the
-  same content-addressed object: nothing changes. For a hit whose stored `cdn_path` is a **different** key (cases 1
-  and 2 above) the object just uploaded is not recorded in the index; it is counted as
-  `reused_unrecorded_objects`, and GC — which deletes only recorded paths — will not remove it. That is at most one
-  object per `(api_path, hash)` pair (re-uploads overwrite it). Ops can list such keys under `pjsk/api/` and
-  delete those with no `image_cache_entries.cdn_path` pointing at them.
-- GC deletes only the recorded `cdn_path`.
+- A new random generation protects a replacement from a delayed DELETE of an older object with the same content hash.
+- GC deletes only recorded paths. A separately committed upload intent covers objects left behind by interrupted writes.
 - **Ops tooling that must target only Drawing artifacts uses the prefix `pjsk/api/`, never `pjsk/`.**
   `pjsk/` also matches Cloud's own `pjsk/<sha256>.<ext>` objects.
 
@@ -207,9 +204,9 @@ Unknown keys in a provider block log `settings.provider_unknown_key` at WARNING 
 | `HARUKI_STORAGE__UPLOAD_RETRIES` | `1` | transport retry only; a render is never retried |
 | `HARUKI_STORAGE__UPLOAD_CONCURRENCY` | `4` | concurrent uploads, separate from the render pool |
 | `HARUKI_STORAGE__HASH_IN_POOL_MIN_BYTES` | `262144` | sha256 runs on the thread pool above this size |
-| `HARUKI_STORAGE__INDEX__ENABLED` | `true` | sub-switch; an empty DSN also disables the index (uploads still happen) |
+| `HARUKI_STORAGE__INDEX__ENABLED` | `true` | sub-switch; an empty DSN also disables the index (requests return image bytes without uploading) |
 | `HARUKI_STORAGE__INDEX__DSN` | — | **env only**; a YAML value is dropped with `settings.index_dsn_ignored` |
-| `HARUKI_STORAGE__INDEX__POOL_MIN_SIZE` / `__POOL_MAX_SIZE` | `1` / `4` | per event loop (each worker process runs its own pool) |
+| `HARUKI_STORAGE__INDEX__POOL_MIN_SIZE` / `__POOL_MAX_SIZE` | `1` / `4` | per event loop |
 | `HARUKI_STORAGE__INDEX__POOL_MAX_INACTIVE_SECONDS` | `0` | idle time after which a pooled connection is closed; `0` = never. asyncpg's own default is 300 s, which made a quiet worker reconnect (~4 round trips) on its next write. It applies to every pooled connection, so an idle loop keeps as many connections as its peak concurrent writes, at most `POOL_MAX_SIZE` |
 | `HARUKI_STORAGE__INDEX__CONNECT_TIMEOUT_SECONDS` | `2.0` | |
 | `HARUKI_STORAGE__INDEX__COMMAND_TIMEOUT_SECONDS` | `2.0` | |
@@ -320,14 +317,14 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 | `requests_with_directive` | requests that bound a valid directive |
 | `bytes_no_directive` | image responses sent without a directive |
 | `store_skipped` | artifact-mode requests with `Cache-Store: 0` |
-| `published`, `reused`, `reused_foreign` | refs returned; hash hits (found by the index write); hits on a row not under `pjsk/api/` |
-| `reused_unrecorded_objects` | hits whose stored `cdn_path` differs from the key just uploaded: that object is not in the index and GC will not delete it |
+| `published`, `reused`, `reused_foreign` | refs returned; hash hits; hits on a row not under `pjsk/api/` |
 | `uploads`, `upload_bytes`, `upload_elapsed_total`, `upload_failures`, `upload_timeouts` | object writes |
-| `index_writes`, `index_write_failures` | two-row index writes (one statement) |
-| `index_skipped.{disabled,schema_missing,unavailable}` | refs returned with `index_written=false` |
+| `index_lookups`, `index_lookup_hits`, `index_lookup_errors` | content-hash lookups |
+| `index_writes`, `index_write_failures` | two-row index writes |
+| `index_skipped.{disabled,schema_missing,unavailable}` | index disabled/backoff decisions before safe artifact publication |
 | `degraded.{disabled,runtime_unavailable,upload_failed,upload_timeout,unsupported_media,internal}` | bytes returned instead of a ref |
 | `directive_rejected.<header>` | 400s by offending header |
-| `stages.{hash,upload,index_connect,index_acquire,index_write,total}.{count,total}` | per-stage timing in seconds. `index_write` is the whole write and contains `index_acquire` (pool acquire) and, on an event loop's first write, `index_connect` (pool creation + preflight); `total` is the whole artifact step. The former `index_lookup` stage and `index_lookup*` counters are gone with the lookup |
+| `stages.{hash,index_prepare,index_lookup,index_lock,upload,index_connect,index_acquire,index_write,total}.{count,total}` | seconds per stage; connect/acquire timings are contained by their parent operation, and total is the whole artifact step |
 | `last_error` | last artifact error `{ts, stage, exc}` |
 
 `GET /cache/stats` → `asset_mirror`: `enabled`, `source`, `disabled_reason`, `manifest_version`, `provider`,
@@ -340,9 +337,7 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 mirror_fetch_error, mirror_breaker_open, candidates_exhausted, birthday_fallback, vanished}`.
 
 Every image response also logs one `image.response` line with `artifact=0|1|store0|degraded`,
-`missing_assets=N`, and, depending on the branch, `hash= reused= index_written= upload=` or `reason=`. Artifact
-and degraded lines also carry `stages=hash:0.0006,upload:0.0213,index_write:0.0588,index_acquire:0.0000,total:0.0815`
-(seconds per sub-stage of that request, same names as `stages` above).
+`missing_assets=N`, and, depending on the branch, `hash= reused= index_written= upload=` or `reason=`. Artifact and degraded lines include a `stages=` breakdown for the request.
 
 ## 6. Index (PostgreSQL) — Cloud owns the DDL
 
@@ -352,36 +347,40 @@ Drawing never ships or runs schema changes. Cloud's `renderIndexDDL` is the cano
 `content_hash` FK to `image_cache_entries(hash)`, `api_path`, `user_id`, `group_name`, `key_version`,
 `ttl_seconds`, `expires_at`, `created_at`, `last_used_at`).
 
-Drawing runs exactly three statements (`src/index/sql.py`): two `LIMIT 0` preflights (once per event loop) and
-`RECORD`, the whole index write as **one** statement: a CTE that upserts the `image_cache_entries` row and a CTE
-that upserts the `render_cache_index` row, atomic without BEGIN/COMMIT and one round trip on a warm pool. The two
-CTEs are the former `UPSERT_CONTENT` and `UPSERT_REQUEST` statements verbatim, so the rows are identical to what the
-two-statement transaction wrote (pinned by `tests/test_index_sql.py`, and checked against a real PostgreSQL by
-`tests/test_index_record_pg.py` with `HARUKI_TEST_PG_DSN`). The content upsert never changes the `cdn_path`,
-`size_bytes` or `media_type` of an existing `garage` row. It always sets `last_referenced_at = now()`, and merges
-`expires_at` as `GREATEST` with NULL meaning infinite. `RECORD` returns the stored row and its prior
-`storage_backend`, which is how a dedup hit is detected. Pooled connections skip asyncpg's per-release session
-reset (`pg_advisory_unlock_all(); CLOSE ALL; UNLISTEN *; RESET ALL;`): Drawing never sets session state, and an
-open transaction is still rolled back by asyncpg. If the schema is missing, preflight classifies it as
-`schema_missing`, backs off for `connect_retry_seconds`, and uploads continue with `index_written=false`.
+The schema also contains `image_cache_entries.writer_node`, `written_at` (both nullable) and
+`image_cache_object_deletions(content_hash, cdn_path, queued_at, attempts, next_attempt_at)`, keyed by
+`(content_hash, cdn_path)`. The test-only schema fixture mirrors Cloud's canonical DDL; Drawing runtime only
+checks/uses the schema. Missing columns/tables cause bytes degradation and bounded reconnect backoff.
+
+The writer performs these steps in order:
+
+1. Generate a unique candidate object key and independently commit an upload cleanup intent with
+   `next_attempt_at = now() + interval '5 minutes'` (`ON CONFLICT DO NOTHING`). This does not borrow a
+   second pool connection while another transaction is open, so a pool of size one works.
+2. Begin one transaction and execute
+   `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, where `$1` is the lowercase SHA-256 content hash.
+3. Look up the hash under that lock. Reuse an existing Garage row's recorded path and original writer/time.
+   On a miss, lock/check the candidate intent is unclaimed (`attempts=0`) and unexpired before uploading.
+4. Upsert content and request rows in one `RECORD` statement, remove the candidate intent, then commit before returning a ref.
+   Failures/cancellation roll back the index transaction and leave the independently committed intent.
+
+Pooled connections retain the warm minimum and skip session reset: only transaction-scoped locks are used, and asyncpg still rolls back interrupted transactions. The single-statement write is checked against the equivalent two-upsert transaction by `test_index_record_pg.py`. Unlike the earlier uncoordinated writer, the complete operation now includes lock, lookup and durable intent round trips; its latency must be measured after rollout.
+
+The complete transaction budget is capped at four minutes, below the five-minute intent grace period.
+The content upsert preserves an existing Garage row's path, media, size and writer/time, while refreshing
+`last_referenced_at` and merging `expires_at` with NULL meaning infinite.
 
 ## 7. Garbage collection — owned by Cloud
 
-Drawing never deletes anything. Cloud runs GC with `image_cache.gc_enabled` (default `false`),
-`image_cache.gc_dry_run` (default `true`), `image_cache.gc_interval`, `image_cache.gc_batch` and
-`image_cache.gc_object_retention_days` (default `30`). The env names are `HARUKI_PJSK_RENDER_IMAGE_CACHE_GC_*`.
+Cloud expires request keys, then finds unreferenced content beyond the configured retention window.
+It uses the same per-hash advisory lock as Drawing. In one transaction it rechecks references, removes the
+content row and queues its recorded path durably. In a later transaction it rechecks the live path under the
+same lock before deleting the object and acknowledging the queue entry. Failed deletion stays in the queue
+for retry, including after a process restart. Upload intents use this same queue after their grace period.
 
-1. **Phase 1:** delete `render_cache_index` rows where `expires_at IS NOT NULL AND expires_at < now()`.
-   Infinite-TTL rows (`expires_at IS NULL`) are never collected.
-2. **Phase 2:** delete `image_cache_entries` rows, **then** their objects (rows before objects), where
-   `storage_backend = 'garage'` **and** no `render_cache_index` row references the hash **and**
-   `last_referenced_at < now() - gc_object_retention_days`. The retention window keeps already-sent message
-   links alive after a render key expires.
-
-`image_cache_entries.expires_at` is **not** a lifetime signal. `last_referenced_at`, bumped by Drawing on every
-upsert (reuse included), is the retention clock. Objects referenced by an infinite-TTL render row are kept forever.
-A failed object delete is counted (`ObjectLeaks`) and retried next cycle from a pending list. Only the recorded
-`cdn_path` is ever deleted.
+`image_cache_entries.expires_at` is not the object lifetime signal: `last_referenced_at` is the retention clock,
+and a live render-key reference protects the content. Cloud's object-deletion switch must remain disabled
+until every object writer uses this lock/intent protocol. Drawing itself never deletes remote objects.
 
 ## 8. Release order (hard)
 
@@ -390,9 +389,9 @@ A failed object delete is counted (`ObjectLeaks`) and retried next cycle from a 
 2. **Cloud DDL** ships and runs.
 3. **Drawing:** set `HARUKI_STORAGE__ENABLED=true` with the `image-cache` provider and the index DSN.
 
-Before step 2, keep `enabled=false`. If a DSN is configured early, Drawing still uploads and returns refs with
-`index_written=false` (`index_skipped.schema_missing`). Rolling back is `HARUKI_STORAGE__ENABLED=false` on the
-node. Cloud already handles the bytes response.
+Before step 2, keep `enabled=false`. A missing/old schema returns bytes without an unsafe upload.
+Rolling back is `HARUKI_STORAGE__ENABLED=false`; Cloud handles the bytes response. Enable Cloud object deletion
+only after all Cloud and Drawing writers have upgraded to the shared lock/intent protocol.
 
 Birthday candidate lists (`[Y, Y-1, Y-2, Y+1]`) and other `str | list[str]` asset fields shipped in this release.
 Cloud may start emitting lists once every Drawing node runs 3.2.0.
@@ -422,7 +421,8 @@ Cloud may start emitting lists once every Drawing node runs 3.2.0.
 
 ## 10. Smoke checks
 
-A local artifact round trip without Garage or PostgreSQL (in-memory object store, `index_written=false`):
+A local artifact round trip can use an in-memory object store, but still needs a test PostgreSQL database
+with Cloud’s schema and `HARUKI_STORAGE__INDEX__DSN` configured. Without the index it returns bytes:
 
 ```bash
 HARUKI_STORAGE__ENABLED=true HARUKI_STORAGE__PROVIDER__SCHEME=memory HARUKI_STORAGE__NODE_NAME=local \
@@ -438,3 +438,34 @@ python scripts/concurrent_fetch_images.py --base-url http://127.0.0.1:8000 \
 `<base>/<cdn_path>` for every ref and requires the size to match `size_bytes`. Use it against a real node's
 public `image-cache` host. The default `--expect image` is unchanged.
 The free-threaded smoke workflow runs this as an optional step after the three bytes-mode runs.
+
+## 11. Renderer and asset generations
+
+`GET /cache/identity` returns `{"version":1,"renderer_epoch":"<64 lowercase hex>"}`. If identity cannot be
+computed, it returns HTTP 503 with an empty epoch. The fingerprint includes Python/native renderer contents,
+selected font and local-template contents, and output-affecting settings. Node names, mount locations, pool
+sizes, cache budgets and timeouts do not participate. Native builds for different architectures can have
+different identities; consumers track each backend and include the backend set in their cache generation.
+
+Identity is computed once per process, matching process-loaded fonts and templates. Replace local fonts or
+templates through a restart/deploy. The remote game-asset revision is independent: Cloud passes a global
+revision digest in the directive and incorporates payload-specific shard digests in its own request key.
+Drawing uses the revision as a separate mirror directory, including negative memoization and heavy-worker
+requests; it does not parse the manifest itself. No directive means the configured mirror version is used.
+
+In-flight requests lease their namespace until response completion. The sweeper skips leased versions and
+files; old unleased directories are atomically renamed before slow removal, so a later request can rebuild
+the original path without being deleted by the previous sweep. Interrupted retirements are reclaimed later.
+Missing-resource images are never admitted to the encoded-page/native-fragment caches or persistent artifact
+store, and the response carries `X-Haruki-Cache-Store: 0` even for a bytes-only request.
+
+Optional loopback PostgreSQL checks can be run with `HARUKI_TEST_INDEX_DSN` and
+`pytest -q tests/test_index_postgres_integration.py`. They create and remove only a random test schema and
+verify lock exclusion, single-connection operation, dedup, rollback and expired-intent rejection.
+
+The supported service layout uses one ASGI worker per mirror directory (the Docker command uses
+`--workers 1`). Separate ASGI processes must have separate mirror roots: in-process leases do not coordinate
+independent ASGI processes. Managed heavy-worker children remain covered by their parent's request lease,
+and executor threads retain a separate lease until their actual work ends, including after request cancellation.
+Background sweeps carry no request lease. Temporary-file age uses local ctime, never the remote object's mtime;
+a legacy local fallback is rendered but marked no-store because its remote revision cannot be established.

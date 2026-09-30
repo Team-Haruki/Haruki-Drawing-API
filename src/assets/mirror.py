@@ -30,6 +30,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from src.assets.keymap import AssetKeyMap, MappedAsset
+from src.assets.request_context import current_asset_revision
 from src.storage.protocols import StorageNotFound, StorageTooLarge
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -214,7 +215,13 @@ class AssetMirror:
     # ------------------------------------------------------------------ properties
     @property
     def version(self) -> str:
-        return self._map.version
+        return current_asset_revision() or self._map.version
+
+    def _request_key_map(self) -> AssetKeyMap:
+        revision = current_asset_revision()
+        if revision:
+            return AssetKeyMap(mirror_dir=self._map.mirror_dir, version=revision)
+        return self._map
 
     @property
     def mirror_root(self) -> Path:
@@ -237,7 +244,7 @@ class AssetMirror:
     # ------------------------------------------------------------------ sync API
     def local_path(self, logical: str) -> tuple[Path, MappedAsset] | None:
         """Pure mapping, no I/O: `(<base_dir>/<mirror_rel>, mapped)` or `None` for a non-bucket key."""
-        mapped = self._map.map(logical)
+        mapped = self._request_key_map().map(logical)
         if mapped is None:
             return None
         return self._base_dir / mapped.mirror_rel, mapped
@@ -245,7 +252,7 @@ class AssetMirror:
     def ensure_local(self, logical: str) -> Path | None:
         """Return a local regular file for `logical`, fetching it on a miss; `None` when unresolvable."""
         self._tls.reason = None
-        key_map = self._map
+        key_map = self._request_key_map()
         mapped = key_map.map(logical)
         if mapped is None:
             return None
@@ -396,6 +403,10 @@ class AssetMirror:
         legacy = self._base_dir / mapped.legacy_rel
         if _stat_regular(legacy) is None:
             return None
+        from src.core.missing_asset_telemetry import MISSING_MIRROR_LOCAL_FALLBACK, record_missing_asset
+
+        # The legacy tree cannot prove it contains the requested remote revision.
+        record_missing_asset(MISSING_MIRROR_LOCAL_FALLBACK)
         self.stats.incr("local_fallback_hits")
         if self._fallback_log.first(str(mapped.legacy_rel)):
             logger.warning("mirror.local_fallback key=%s", mapped.legacy_rel)

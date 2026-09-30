@@ -57,10 +57,11 @@ def test_render_stats_has_artifacts_block_with_zero_counters() -> None:
         "upload_timeout",
         "unsupported_media",
         "internal",
+        "index_unavailable",
     }
     assert all(v == 0 for v in artifacts["degraded"].values())
     assert artifacts["directive_rejected"] == {}
-    assert set(artifacts["stages"]) == {"hash", "upload", "index_connect", "index_acquire", "index_write", "total"}
+    assert set(artifacts["stages"]) == set(artifact_stats_mod.STAGES)
     assert artifacts["last_error"] is None
 
 

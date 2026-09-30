@@ -6,7 +6,8 @@ Fakes live in `tests/`, never in `src/` (coverage `source = ["src"]`).
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 import time
 from typing import Any
 
@@ -122,23 +123,59 @@ class FakeRenderIndex:
         content: dict[str, ContentRow] | None = None,
         *,
         preflight_error: Exception | None = None,
+        lookup_error: Exception | None = None,
         record_error: Exception | None = None,
         acquire_seconds: float = 0.0,
         connect_seconds: float = 0.0,
     ) -> None:
         self.content: dict[str, ContentRow] = dict(content or {})
         self.requests: dict[str, RequestRow] = {}
+        self.lookup_error = lookup_error
         self.preflight_error = preflight_error
         self.record_error = record_error
         self.acquire_seconds = acquire_seconds
         self.connect_seconds = connect_seconds
         self.calls: list[tuple[str, object]] = []
         self.closed = False
+        self.writer_active = False
+        self.writer_events: list[str] = []
+        self.intents: set[tuple[str, str]] = set()
+
+    async def prepare_upload(self, content_hash: str, cdn_path: str) -> None:
+        self.writer_events.append("prepare_upload")
+        self.intents.add((content_hash, cdn_path))
+
+    async def finish_upload(self, cdn_path: str) -> None:
+        self.writer_events.append("finish_upload")
+        self.intents = {item for item in self.intents if item[1] != cdn_path}
+
+    async def upload_prepared(self, cdn_path: str) -> bool:
+        return any(path == cdn_path for _, path in self.intents)
+
+    @asynccontextmanager
+    async def content_writer(self, content_hash: str) -> AsyncIterator[FakeRenderIndex]:
+        self.writer_active = True
+        self.writer_events.append("lock")
+        try:
+            yield self
+        except BaseException:
+            self.writer_events.append("rollback")
+            raise
+        else:
+            self.writer_events.append("commit")
+        finally:
+            self.writer_active = False
 
     async def preflight(self) -> None:
         self.calls.append(("preflight", None))
         if self.preflight_error is not None:
             raise self.preflight_error
+
+    async def lookup_content(self, content_hash: str) -> ContentRow | None:
+        self.calls.append(("lookup_content", content_hash))
+        if self.lookup_error is not None:
+            raise self.lookup_error
+        return self.content.get(content_hash)
 
     async def record(self, content: ContentRow, request: RequestRow) -> RecordResult:
         self.calls.append(("record", (content, request)))
@@ -194,6 +231,10 @@ class FakeConn:
     async def fetchrow(self, sql: str, *args: Any) -> Any:
         self._pool.log("fetchrow", sql, args)
         return self._pool.rows.get(args[0], self._pool.default_row) if args else None
+
+    async def fetchval(self, sql: str, *args: Any) -> Any:
+        self._pool.log("fetchval", sql, args)
+        return 1
 
     def transaction(self) -> _AsyncContext:
         self._pool.events.append(("transaction.begin", None, ()))

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:  # pragma: no cover
+    from contextlib import AbstractAsyncContextManager
     from datetime import datetime
 
 
@@ -25,6 +26,8 @@ class ContentRow:
     media_type: str | None
     size_bytes: int | None
     expires_at: datetime | None
+    writer_node: str | None = None
+    written_at: datetime | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +66,10 @@ class IndexUnavailable(Exception):  # names fixed by the plan (§9.1)
     """Connect / timeout / transport failure, or a backoff window after one."""
 
 
+class IndexContention(IndexUnavailable):
+    """A healthy database could not grant a content lock within this request budget."""
+
+
 class IndexSchemaError(Exception):
     """Cloud's schema migration for the render index has not shipped yet."""
 
@@ -71,8 +78,22 @@ class IndexWriteFailed(IndexUnavailable):
     """`record` did not commit."""
 
 
+class ContentWriter(Protocol):
+    async def upload_prepared(self, cdn_path: str) -> bool: ...
+
+    async def lookup_content(self, content_hash: str) -> ContentRow | None: ...
+
+    async def record(self, content: ContentRow, request: RequestRow) -> RecordResult: ...
+
+    async def finish_upload(self, cdn_path: str) -> None: ...
+
+
 @runtime_checkable
 class RenderIndex(Protocol):
+    async def prepare_upload(self, content_hash: str, cdn_path: str) -> dict[str, float] | None: ...
+
+    def content_writer(self, content_hash: str) -> AbstractAsyncContextManager[ContentWriter]: ...
+
     async def preflight(self) -> None: ...  # raises IndexSchemaError / IndexUnavailable
 
     async def record(self, content: ContentRow, request: RequestRow) -> RecordResult: ...  # ONE statement

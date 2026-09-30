@@ -178,6 +178,7 @@ async def _periodic_pool_task(interval_seconds: float, func: Callable[[], object
 def _sweep_asset_mirror() -> None:
     """One mirror sweep (version dirs, stale `.tmp`, byte/entry caps); a disabled mirror is skipped."""
     from src.assets.mirror import AssetMirror, get_asset_mirror
+    from src.assets.request_context import latest_asset_revision
     from src.assets.sweeper import MirrorSweeper
 
     mirror = get_asset_mirror()
@@ -186,7 +187,8 @@ def _sweep_asset_mirror() -> None:
     config = settings.assets.mirror
     result = MirrorSweeper(
         root=mirror.mirror_root,
-        current_version=lambda: mirror.version,
+        current_version=lambda: latest_asset_revision() or mirror.version,
+        protected_versions=lambda: {mirror.version, latest_asset_revision()},
         max_bytes=config.max_bytes,
         max_entries=config.max_entries,
         versions_keep=config.versions_keep,

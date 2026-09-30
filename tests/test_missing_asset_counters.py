@@ -31,6 +31,7 @@ EXPECTED_REASONS = (
     "mirror_not_found",
     "mirror_fetch_error",
     "mirror_breaker_open",
+    "mirror_local_fallback",
     "candidates_exhausted",
     "birthday_fallback",
     "vanished",
@@ -77,7 +78,7 @@ def _mirror(tmp_path: Path, store: FakeObjectStore, **overrides) -> AssetMirror:
     return mirror
 
 
-def test_the_reason_vocabulary_is_exactly_the_eight_plan_reasons() -> None:
+def test_reason_vocabulary_includes_legacy_mirror_fallback() -> None:
     assert telemetry.MISSING_ASSET_REASONS == EXPECTED_REASONS
     assert utils.MISSING_ASSET_REASONS == EXPECTED_REASONS
     stats = telemetry.get_missing_asset_stats()

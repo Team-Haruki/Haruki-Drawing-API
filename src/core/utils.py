@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse, Response
 
 from src.artifact.runtime import get_artifact_runtime
 from src.artifact.stats import artifact_node_name, artifact_stats
+from src.core.cache_identity import renderer_epoch
 from src.core.debug import (
     current_render_backend,
     current_render_directive,
@@ -132,11 +133,15 @@ def encoded_image_payload_to_bytes_response(
     extra_headers: Mapping[str, str] | None = None,
 ) -> Response:
     """Today's bytes body, verbatim, plus optional extra headers (ONE body message, `Content-Length` set)."""
+    missing = current_missing_asset_count() + payload.missing_asset_count
+    headers = dict(extra_headers or {})
+    if missing or payload.has_missing_resources:
+        headers[CACHE_STORE_HEADER] = "0"
     return _log_and_return_bytes(
         payload,
         artifact="0",
-        missing=current_missing_asset_count(),
-        headers=extra_headers,
+        missing=missing,
+        headers=headers,
     )
 
 
@@ -149,13 +154,16 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
     `X-Haruki-Artifact-Degraded: 1` (invariant I1).
     """
     directive = current_render_directive()
-    missing = current_missing_asset_count()
+    missing = current_missing_asset_count() + payload.missing_asset_count
     node = {NODE_HEADER: artifact_node_name()}
     if directive is None:
         artifact_stats.incr("bytes_no_directive")
+        if missing or payload.has_missing_resources:
+            node[CACHE_STORE_HEADER] = "0"
         return _log_and_return_bytes(payload, artifact="0", missing=missing, headers=node)
     # `requests_with_directive` is counted once by the debug middleware when it binds the directive.
-    if not directive.store:
+    stale_renderer = bool(directive.renderer_epoch) and directive.renderer_epoch != renderer_epoch()
+    if not directive.store or missing > 0 or payload.has_missing_resources or stale_renderer:
         artifact_stats.incr("store_skipped")
         return _log_and_return_bytes(
             payload,

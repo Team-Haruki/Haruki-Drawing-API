@@ -1742,9 +1742,27 @@ async def run_in_pool(func, *args, pool=None):
         pool = _default_pool_executor
     request_ctx = current_request_context()
     context = contextvars.copy_context()
+
+    def leased_call():
+        from src.assets.request_context import (
+            begin_asset_revision,
+            current_asset_revision,
+            end_asset_revision,
+            has_asset_revision_scope,
+        )
+
+        # Cancelling the await does not stop an already-running executor thread.
+        # Keep its lazy file reads protected after the request releases its lease.
+        token = begin_asset_revision(current_asset_revision()) if has_asset_revision_scope() else None
+        try:
+            return func(*args)
+        finally:
+            if token is not None:
+                end_asset_revision(token)
+
     started = time.perf_counter()
     try:
-        return await asyncio.get_running_loop().run_in_executor(pool, context.run, func, *args)
+        return await asyncio.get_running_loop().run_in_executor(pool, context.run, leased_call)
     finally:
         elapsed = time.perf_counter() - started
         if elapsed >= _SLOW_POOL_TASK_SECONDS:

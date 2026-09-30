@@ -19,6 +19,8 @@ HEADER_API_PATH = "X-Haruki-Api-Path"
 HEADER_CACHE_STORE = "X-Haruki-Cache-Store"
 HEADER_CACHE_GROUP = "X-Haruki-Cache-Group"
 HEADER_USER_ID = "X-Haruki-User-Id"
+HEADER_ASSET_REVISION = "X-Haruki-Asset-Revision"
+HEADER_RENDERER_EPOCH = "X-Haruki-Renderer-Epoch"
 
 DEFAULT_GROUP = "pjsk"
 DEFAULT_USER_ID = "public"
@@ -26,6 +28,7 @@ KEY_VERSION_MAX = 10_000
 API_PATH_MAX_CHARS = 128
 
 _CACHE_KEY_RE = re.compile(r"[0-9a-f]{16,128}")
+_DIGEST_RE = re.compile(r"[0-9a-f]{64}")
 _UINT_RE = re.compile(r"[0-9]{1,19}")
 _API_PATH_RE = re.compile(r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+){0,15}")
 _GROUP_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
@@ -41,6 +44,8 @@ class RenderCacheDirective:
     group: str
     api_path: str
     user_id: str
+    asset_revision: str = ""
+    renderer_epoch: str = ""
 
 
 class DirectiveError(ValueError):
@@ -139,4 +144,6 @@ def parse_render_cache_directive(headers: Mapping[str, str], *, ttl_max: int) ->
         group=group,
         api_path=api_path,
         user_id=user_id,
+        asset_revision=_optional_token(headers, HEADER_ASSET_REVISION, _DIGEST_RE, ""),
+        renderer_epoch=_optional_token(headers, HEADER_RENDERER_EPOCH, _DIGEST_RE, ""),
     )

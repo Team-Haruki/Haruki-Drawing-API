@@ -1,4 +1,4 @@
-"""PostgreSQL render index: SELECT/INSERT only — Haruki-Cloud owns and runs the schema migrations.
+"""PostgreSQL render index: coordinated content writes — Haruki-Cloud owns and runs the schema migrations.
 
 Importing this package never imports `asyncpg`; `src.index.asyncpg_index` imports it lazily, on first use,
 inside the running event loop.
