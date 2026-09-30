@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import sys
 
 from PIL import Image
 import pytest
@@ -282,8 +283,11 @@ async def test_card_id_badge_centres_digit_ink_on_skia(size, text):
     pytest.importorskip("haruki_skia_renderer")
     top, bottom, left, right = await _card_id_badge_gaps(text, size, "skia")
     assert top == bottom, (top, bottom)
-    # Horizontal ink comes from the glyph mask; Pillow's in-memory fallback face (no bundled fonts) has none.
-    if isinstance(getattr(drawer.get_layout_font(drawer.DEFAULT_FONT, size), "path", None), str):
+    # Horizontal ink comes from the FreeType glyph mask, which only Linux Skia (FreeType font manager, as in
+    # production) matches; macOS Skia rasterizes through CoreText. Pillow's in-memory fallback face has no mask.
+    if sys.platform.startswith("linux") and isinstance(
+        getattr(drawer.get_layout_font(drawer.DEFAULT_FONT, size), "path", None), str
+    ):
         assert abs(left - right) <= 1, (left, right)
 
 
