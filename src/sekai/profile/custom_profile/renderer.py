@@ -69,6 +69,12 @@ from src.sekai.profile.custom_profile.general_prefab import (
 )
 from src.sekai.profile.custom_profile.honor_deck_prefab import build_honor_deck_plan
 from src.sekai.profile.custom_profile.limits import RasterSizeLimitError, ensure_raster_size
+from src.sekai.profile.custom_profile.resource_paths import (
+    asset_file,
+    bucket_asset_key,
+    first_asset_file,
+    mirror_asset_file,
+)
 from src.sekai.profile.custom_profile.tmp_sdf_text import (
     TMPTextBoxLayout,
     TMPFallbackMetrics,
@@ -1355,12 +1361,11 @@ class TMPFontLibrary:
             if lower not in base_names:
                 base_names.append(lower)
 
-        for name in base_names:
-            for suffix in (".otf", ".ttf", _ALT_OTF_SUFFIX):
-                candidate = self.runtime_fonts_dir / f"{name}{suffix}"
-                if candidate.exists():
-                    return candidate
-        return None
+        return first_asset_file(
+            self.runtime_fonts_dir / f"{name}{suffix}"
+            for name in base_names
+            for suffix in (".otf", ".ttf", _ALT_OTF_SUFFIX)
+        )
 
     def source_asset_candidates(self, font_name: str, include_fallback: bool) -> list[TMPFontAsset]:
         if self.source_assets is self.assets:
@@ -2044,11 +2049,10 @@ def font_file(fonts: Path, font_name: str, rodin_font: str = "ttf") -> Path:
             suffixes = (".ttf", ".otf", _ALT_OTF_SUFFIX)
     else:
         suffixes = (".otf", ".ttf", _ALT_OTF_SUFFIX)
-    for suffix in suffixes:
-        candidate = fonts / (font_name + suffix)
-        if candidate.exists():
-            return candidate
-    return fonts / _DEFAULT_FONT_FILENAME
+    if candidate := first_asset_file(fonts / (font_name + suffix) for suffix in suffixes):
+        return candidate
+    default = fonts / _DEFAULT_FONT_FILENAME
+    return asset_file(default) or default
 
 
 def sharp_triangle_alpha(size: tuple[int, int]) -> Image.Image:
@@ -2558,10 +2562,7 @@ class PNGRenderer:
         return candidates
 
     def first_region_asset(self, rels: list[Path] | tuple[Path, ...]) -> Path | None:
-        for path in self.region_asset_candidate_paths(rels):
-            if path.exists():
-                return path
-        return None
+        return first_asset_file(self.region_asset_candidate_paths(rels))
 
     def static_image_path(self, *parts: str) -> Path | None:
         path = self.static_images.joinpath(*parts)
@@ -2667,6 +2668,13 @@ class PNGRenderer:
             rejected_existing = resolved
         if rejected_existing is not None:
             raise ValueError(f"custom profile asset path is outside configured data roots: {raw!r}")
+        # Not on disk: a bucket key (``asset/<cc>-assets/...`` or ``<cc>-assets/...``) is fetched through the
+        # asset mirror, which lands it under ``<base_dir>/<mirror.dir>``. A key merely embedded deeper in a
+        # path is not one; that stays a miss exactly as before.
+        clean = raw.strip("/")
+        key = None if Path(raw).is_absolute() else bucket_asset_key(clean)
+        if key is not None and key in {clean, f"asset/{clean}"}:
+            return mirror_asset_file(key)
         return None
 
     def open_request_rgba(self, raw_path: AssetKey | None) -> Image.Image | None:
@@ -2691,10 +2699,7 @@ class PNGRenderer:
     def stamp_resource_path(self, resource: dict[str, Any]) -> Path | None:
         if self.masterdata is None:
             return None
-        for path in self.stamp_resource_candidates(resource):
-            if path.exists():
-                return path
-        return None
+        return first_asset_file(self.stamp_resource_candidates(resource))
 
     def stamp_resource_candidates(self, resource: dict[str, Any]) -> list[Path]:
         assetbundle_name = str(resource.get("assetbundleName", "")).strip("/")
@@ -2715,8 +2720,7 @@ class PNGRenderer:
         if not file_name.lower().endswith(".png"):
             file_name += ".png"
         if self.shape_sprite_dir is not None:
-            candidate = self.shape_sprite_dir / file_name
-            if candidate.exists():
+            if candidate := asset_file(self.shape_sprite_dir / file_name):
                 return candidate
         return self.resource_path(resource, "shape")
 
@@ -3097,8 +3101,8 @@ class PNGRenderer:
 
         for path in self.general_font_candidates():
             try:
-                if path.is_file():
-                    return path
+                if (found := asset_file(path)) is not None and found.is_file():
+                    return found
             except OSError:
                 continue
         return None
@@ -3108,8 +3112,8 @@ class PNGRenderer:
 
         for path in self.general_font_candidates():
             try:
-                if path.exists():
-                    return ImageFont.truetype(str(path), size)
+                if (found := asset_file(path)) is not None:
+                    return ImageFont.truetype(str(found), size)
             except OSError:
                 continue
         return ImageFont.load_default()
@@ -4839,6 +4843,8 @@ class PNGRenderer:
             [Path("honor_word") / f"{name}.png", Path("honor_word") / name / f"{name}.png"]
         ):
             return path
+        # Disk-only: the mirror fetches keys, it cannot list a bundle directory. A mirror-mode node finds the
+        # bundle through the two exact names above; this glob only helps a local tree with another texture name.
         for directory in self.region_asset_candidate_paths([Path("honor_word") / name]):
             if directory.is_dir():
                 pngs = sorted(directory.glob("*.png"))
@@ -5323,48 +5329,11 @@ class PNGRenderer:
     def omikuji_font(self, size: int, *, decorative: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         from src.sekai.profile.custom_profile.pillow_runtime import ImageFont
 
-        names = (
-            ["FOT-Omikuji", "FOT-UDMinchoPro-B", "FOT-RodinNTLGPro-DB"]
-            if decorative
-            else [
-                "FOT-UDMinchoPro-B",
-                "FOT-RodinNTLGPro-DB",
-            ]
-        )
-        candidates: list[Path] = []
-        for name in names:
-            path = self.tmp_font_library.source_font_path(name)
-            if path is not None:
-                candidates.append(path)
-            candidates.append(self.fonts / f"{name}.otf")
-            candidates.append(self.fonts / f"{name}.ttf")
-        for base in self.data_root_candidates():
-            candidates.extend(
-                (
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / self.region
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "cn"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                    base
-                    / "custom_profile"
-                    / "tmp-font-assets"
-                    / "kr"
-                    / "source-fonts"
-                    / "FOT-Omikuji_4956192661917990345.otf",
-                )
-            )
-        for path in candidates:
+        # Same candidates as the native path (omikuji_font_path), resolved through the asset mirror too.
+        for path in self.omikuji_font_candidates(decorative=decorative):
             try:
-                if path.exists():
-                    return ImageFont.truetype(str(path), size)
+                if (found := asset_file(path)) is not None:
+                    return ImageFont.truetype(str(found), size)
             except OSError:
                 continue
         return self.general_font(size, bold=not decorative)
@@ -5797,10 +5766,7 @@ class PNGRenderer:
         return self.region_asset_candidate_paths(rels)
 
     def card_member_image_path(self, item: dict[str, Any]) -> Path | None:
-        for path in self.card_member_image_candidates(item):
-            if path.exists():
-                return path
-        return None
+        return first_asset_file(self.card_member_image_candidates(item))
 
     def compose_card_member_image(
         self, path: Path, target_size: tuple[float, float], contain: bool = False
@@ -12532,8 +12498,8 @@ class PNGRenderer:
     def omikuji_font_path(self, *, decorative: bool = False) -> Path | None:
         for path in self.omikuji_font_candidates(decorative=decorative):
             try:
-                if path.is_file():
-                    return path
+                if (found := asset_file(path)) is not None and found.is_file():
+                    return found
             except OSError:
                 continue
         return self.general_font_path()
@@ -12792,12 +12758,7 @@ class PNGRenderer:
         roots = [self.assets]
         if self.game_assets != self.assets:
             roots.append(self.game_assets)
-        for root in roots:
-            for rel in rels:
-                path = root / rel / file_name
-                if path.exists():
-                    return path
-        return None
+        return first_asset_file(root / rel / file_name for root in roots for rel in rels)
 
     @staticmethod
     def _resource_relative_dirs(resource: dict[str, Any], fallback_dir: str | None) -> list[Path]:

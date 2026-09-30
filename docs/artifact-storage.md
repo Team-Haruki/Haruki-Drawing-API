@@ -256,8 +256,13 @@ tree and every fragment and raster key that names a mirrored asset. Producing th
 follow-up. Until that exists, it is a static env value, and a bump needs a restart on each node. Two nodes can
 briefly sit on different versions during a rollout.
 
-Custom-profile directories (`<base>/asset/<cc>-assets/startapp/custom_profile`) are **never** mirrored and must
-stay rsynced. With `source=mirror`, startup logs a WARNING that names every missing one.
+Custom-profile files under `<cc>-assets/<mode>/` (the `custom_profile/` fonts, backgrounds and shapes, plus the
+card, honor and stamp images a request references) resolve like every other asset: a local file wins, otherwise
+the mirror fetches the same key, per candidate and in candidate order, so a node needs no rsynced
+`<base>/asset/<cc>-assets/startapp/custom_profile` tree and picks the same file as one that has it. Only
+`custom_profile_unity_ui_sprite_dir` (static images) and `data/custom_profile/tmp-font-assets` stay local. With
+`source=mirror`, startup logs a WARNING naming every missing directory the bucket cannot serve (all of them when
+the mirror is disabled).
 
 ### User-upload store (profile backgrounds)
 
