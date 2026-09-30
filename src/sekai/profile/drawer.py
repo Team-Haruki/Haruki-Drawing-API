@@ -1114,7 +1114,8 @@ _CARD_W = 470
 _CARD_PAD_X, _CARD_PAD_Y = 16, 12
 _CARD_INNER_W = _CARD_W - 2 * _CARD_PAD_X
 _CARD_AVATAR = 80
-_CARD_AVATAR_WELL = _CARD_AVATAR + 12  # 6 px of white around the avatar inside the 2 px ring
+_CARD_AVATAR_WELL = _CARD_AVATAR + 12  # the avatar fills the well edge to edge inside the 2 px region ring
+_CARD_AVATAR_RING = 2
 _CARD_TEXT_W = _CARD_INNER_W - _CARD_AVATAR_WELL - 14
 _CARD_ERROR_W = 300  # legacy width of the standalone error module
 
@@ -1188,19 +1189,11 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
     region = rqd.profile.region.upper()
     ring = _profile_card_region_chip_fill(region)
     well = _CARD_AVATAR_WELL
-    # outer frame only positions the badge; the well centres the clipped avatar with even padding
-    with Frame().set_size((well, well)).set_content_align("lt") as ret:
-        with (
-            Frame()
-            .set_size((well, well))
-            .set_content_align("c")
-            .set_bg(RoundRectBg(_CARD_WELL, 18, stroke=ring, stroke_width=2, blur_glass=False))
-        ):
-            with RoundClipFrame(12).set_size((_CARD_AVATAR, _CARD_AVATAR)).set_content_align("c"):
-                ImageBox(avatar_img, size=(_CARD_AVATAR, _CARD_AVATAR), use_alpha_blend=False).set_content_align("c")
-        _profile_card_chip(region, ring, style=_CARD_BADGE_STYLE).set_offset((well - 2, well - 2)).set_offset_anchor(
-            "rb"
-        )
+    inner = well - 2 * _CARD_AVATAR_RING
+    # the avatar fills the well up to the region-coloured ring; the region chip sits on the ID line
+    with Frame().set_size((well, well)).set_content_align("c").set_bg(RoundRectBg(ring, 18, blur_glass=False)) as ret:
+        with RoundClipFrame(18 - _CARD_AVATAR_RING).set_size((inner, inner)).set_content_align("c"):
+            ImageBox(avatar_img, size=(inner, inner), use_alpha_blend=False).set_content_align("c")
     return ret
 
 
@@ -1243,6 +1236,8 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
             for text, fill in chips:
                 _profile_card_chip(text, fill)
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
+            region = profile.region.upper()
+            _profile_card_chip(region, _profile_card_region_chip_fill(region), style=_CARD_BADGE_STYLE)
             TextBox(_profile_card_uid_line(profile), _CARD_ID_STYLE)
             if rqd.timezone:
                 TextBox(f"· {rqd.timezone}", _CARD_ID_STYLE.replace(size=12))
