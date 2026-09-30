@@ -4,9 +4,9 @@ Opt-in: set `HARUKI_TEST_PG_DSN` to a throwaway database (the test creates and d
 `postgresql://bench:bench@127.0.0.1:55432/haruki_cloud`. Without it every test here is skipped.
 
 Each scenario runs the same inputs through the former `BEGIN; UPSERT_CONTENT; UPSERT_REQUEST; COMMIT` in one
-schema and through `RECORD` in another, both built from Cloud's canonical DDL, then compares every column of both
-tables. Timestamps are compared as "set to this write's now()" versus "kept", since the two writes run at
-different instants.
+schema, through `RECORD` in another and through the writer's `PREPARE_UPLOAD` + `RECORD_UPLOAD` in a third, all
+built from Cloud's canonical DDL, then compares every column of both tables. Timestamps are compared as "set to
+this write's now()" versus "kept", since the writes run at different instants.
 """
 
 from __future__ import annotations
@@ -22,7 +22,9 @@ import pytest
 from src.index.sql import (
     PREFLIGHT_CONTENT,
     PREFLIGHT_REQUEST,
+    PREPARE_UPLOAD,
     RECORD,
+    RECORD_UPLOAD,
     UPSERT_CONTENT as FORMER_UPSERT_CONTENT,
     UPSERT_REQUEST as FORMER_UPSERT_REQUEST,
 )
@@ -47,6 +49,10 @@ CLOUD_DDL = (
         api_path TEXT NOT NULL, user_id TEXT NOT NULL DEFAULT 'public', group_name TEXT NOT NULL DEFAULT 'pjsk',
         key_version INT NOT NULL DEFAULT 3, ttl_seconds BIGINT NOT NULL DEFAULT 0, expires_at TIMESTAMPTZ NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""",
+    """CREATE TABLE image_cache_object_deletions (
+        content_hash TEXT NOT NULL, cdn_path TEXT NOT NULL, queued_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        attempts INT NOT NULL DEFAULT 0, next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (content_hash, cdn_path))""",
 )
 CONTENT_TIMESTAMPS = ("created_at", "last_referenced_at")
 REQUEST_TIMESTAMPS = ("created_at", "last_used_at")
@@ -100,6 +106,16 @@ async def _write_record(conn: Any, args: tuple[Any, ...]) -> tuple[datetime, Any
     return now, row
 
 
+async def _write_gated(conn: Any, args: tuple[Any, ...]) -> tuple[datetime, Any]:
+    # The writer's path: PREPARE_UPLOAD commits the candidate's intent (on a miss), the PUT would run here, then
+    # RECORD_UPLOAD under the lock. A hit registers no intent and passes uploaded=false, as the service does.
+    existing = await conn.fetchval(PREPARE_UPLOAD, args[0], args[2])
+    async with conn.transaction():
+        now = await conn.fetchval("SELECT now()")
+        row = await conn.fetchrow(RECORD_UPLOAD, *args, existing is None)
+    return now, row
+
+
 def _normalise(rows: list[Any], timestamps: tuple[str, ...], stamps: dict[datetime, int]) -> list[dict[str, Any]]:
     out = []
     for row in rows:
@@ -128,18 +144,20 @@ def test_record_rows_match_the_former_two_statement_transaction() -> None:
             ("finite after infinite stays infinite", _args(h1, "k5", expires=T0 + timedelta(9))),
             ("legacy_disk row is upgraded", _args(h3, "k6")),
         ]
-        former, record = await _connect(), await _connect()
+        former, record, gated = await _connect(), await _connect(), await _connect()
         try:
             await _schema(former, "drawing_record_former")
             await _schema(record, "drawing_record_single")
+            await _schema(gated, "drawing_record_gated")
             legacy = (
                 "INSERT INTO image_cache_entries (hash, group_name, cdn_path, file_path, size_bytes, storage_backend,"
                 " media_type) VALUES ($1, 'pjsk', $2, '/cache/x.png', 5, 'legacy_disk', 'image/png')"
             )
-            for conn in (former, record):
+            for conn in (former, record, gated):
                 await conn.execute(legacy, h3, f"pjsk/{h3}.png")
             former_stamps: dict[datetime, int] = {}
             record_stamps: dict[datetime, int] = {}
+            gated_stamps: dict[datetime, int] = {}
             returned = []
             for index, (label, args) in enumerate(steps):
                 former_stamps[await _write_former(former, args)] = index
@@ -147,6 +165,12 @@ def test_record_rows_match_the_former_two_statement_transaction() -> None:
                 record_stamps[now] = index
                 returned.append((label, dict(row)))
                 assert await _snapshot(record, record_stamps) == await _snapshot(former, former_stamps), label
+                now, gated_row = await _write_gated(gated, args)
+                gated_stamps[now] = index
+                assert {key: gated_row[key] for key in row.keys()} == dict(row), label
+                assert await _snapshot(gated, gated_stamps) == await _snapshot(former, former_stamps), label
+                # Every recorded candidate's intent is gone; no hit ever queued one.
+                assert await gated.fetchval("SELECT count(*) FROM image_cache_object_deletions") == 0, label
             prior = [(label, row["prior_backend"], row["cdn_path"]) for label, row in returned]
             assert prior == [
                 ("new hash, new key", None, f"pjsk/api/pjsk/honor/{h1}.png"),
@@ -166,7 +190,11 @@ def test_record_rows_match_the_former_two_statement_transaction() -> None:
             assert tuple(await record.fetchrow(lookup, "k2")) == (h2, f"pjsk/api/pjsk/honor/{h2}.png", "garage")
             assert tuple(await record.fetchrow(lookup, "k6")) == (h3, f"pjsk/api/pjsk/honor/{h3}.png", "garage")
         finally:
-            for conn, name in ((former, "drawing_record_former"), (record, "drawing_record_single")):
+            for conn, name in (
+                (former, "drawing_record_former"),
+                (record, "drawing_record_single"),
+                (gated, "drawing_record_gated"),
+            ):
                 await conn.execute(f"DROP SCHEMA IF EXISTS {name} CASCADE")
                 await conn.close()
 

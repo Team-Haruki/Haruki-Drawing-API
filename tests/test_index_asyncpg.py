@@ -23,11 +23,15 @@ from src.index import (
 )
 from src.index.asyncpg_index import AsyncpgRenderIndex, dsn_redacted
 from src.index.sql import (
-    LOCK_CONTENT,
+    COMMIT,
     PREFLIGHT_CONTENT,
     PREFLIGHT_REQUEST,
+    PREPARE_UPLOAD,
     RECORD,
+    RECORD_UPLOAD,
+    ROLLBACK,
     SELECT_CONTENT,
+    begin_and_lock,
 )
 from src.settings import IndexSettings
 from tests.storage_fakes import FakePgPool, FakeRenderIndex, UndefinedColumnError, UndefinedTableError
@@ -215,6 +219,26 @@ def test_lookup_content_hit_and_miss() -> None:
     assert idx.stats["lookups"] == 2
 
 
+RECORD_ARGS = (
+    CONTENT.hash,
+    "pjsk",
+    CONTENT.cdn_path,
+    1234,
+    "image/png",
+    EXPIRES,
+    None,
+    None,
+    "rk-1",
+    CONTENT.hash,
+    "api/pjsk/honor",
+    "public",
+    "pjsk",
+    3,
+    3600,
+    EXPIRES,
+)
+
+
 def test_record_locks_before_single_statement_in_one_transaction() -> None:
     factory = Factory()
     idx, _ = _index(factory)
@@ -222,33 +246,50 @@ def test_record_locks_before_single_statement_in_one_transaction() -> None:
     factory.pool.events.clear()
     _run(idx.record(CONTENT, REQUEST))
     assert factory.pool.events == [
-        ("transaction.begin", None, ()),
-        ("execute", LOCK_CONTENT, (CONTENT.hash,)),
-        (
-            "fetchrow",
-            RECORD,
-            (
-                CONTENT.hash,
-                "pjsk",
-                CONTENT.cdn_path,
-                1234,
-                "image/png",
-                EXPIRES,
-                None,
-                None,
-                "rk-1",
-                CONTENT.hash,
-                "api/pjsk/honor",
-                "public",
-                "pjsk",
-                3,
-                3600,
-                EXPIRES,
-            ),
-        ),
-        ("transaction.commit", None, ()),
+        ("execute", begin_and_lock(CONTENT.hash), ()),
+        ("fetchrow", RECORD, RECORD_ARGS),
+        ("execute", COMMIT, ()),
     ]
     assert idx.stats["records"] == 1
+
+
+def test_prepare_upload_is_one_autocommit_statement() -> None:
+    factory = Factory(FakePgPool(values={PREPARE_UPLOAD: "pjsk/stored.png"}))
+    idx, _ = _index(factory)
+    _run(idx.preflight())
+    factory.pool.events.clear()
+    prepared = _run(idx.prepare_upload(CONTENT.hash, CONTENT.cdn_path))
+    assert prepared.existing_path == "pjsk/stored.png"
+    assert factory.pool.events == [("fetchval", PREPARE_UPLOAD, (CONTENT.hash, CONTENT.cdn_path))]
+    factory.pool.values.clear()
+    assert _run(idx.prepare_upload(CONTENT.hash, CONTENT.cdn_path)).existing_path is None
+
+
+@pytest.mark.parametrize("uploaded", [True, False])
+def test_record_upload_is_lock_gated_write_commit(uploaded: bool) -> None:
+    factory = Factory()
+    idx, _ = _index(factory)
+    _run(idx.preflight())
+    factory.pool.events.clear()
+    result = _run(idx.record_upload(CONTENT, REQUEST, uploaded=uploaded))
+    assert factory.pool.events == [
+        ("execute", begin_and_lock(CONTENT.hash), ()),
+        ("fetchrow", RECORD_UPLOAD, (*RECORD_ARGS, uploaded)),
+        ("execute", COMMIT, ()),
+    ]
+    assert factory.pool.round_trips == 3
+    assert result is not None
+    assert result.cdn_path == CONTENT.cdn_path
+
+
+def test_record_upload_without_a_row_still_commits_and_returns_none() -> None:
+    # Nothing recorded, but the statement may have re-queued the candidate's intent: that must persist.
+    factory = Factory(FakePgPool(echo_records=False))
+    idx, _ = _index(factory)
+    assert _run(idx.record_upload(CONTENT, REQUEST, uploaded=True)) is None
+    assert factory.pool.events[-1] == ("execute", COMMIT, ())
+    assert idx.ready
+    assert not idx.in_backoff()
 
 
 def test_record_failure_rolls_back_and_raises_write_failed(caplog: pytest.LogCaptureFixture) -> None:
@@ -260,12 +301,21 @@ def test_record_failure_rolls_back_and_raises_write_failed(caplog: pytest.LogCap
     with caplog.at_level(logging.WARNING, logger="src.index.asyncpg_index"):
         with pytest.raises(IndexWriteFailed):
             _run(idx.record(CONTENT, REQUEST))
-    assert pool.events[-1] == ("transaction.rollback", None, ())
+    assert pool.events[-1] == ("execute", ROLLBACK, ())
     assert idx.stats["write_failures"] == 1
     # A statement-level failure is not a transport failure: no backoff window.
     assert not idx.in_backoff()
     assert idx.ready
     _assert_no_password(caplog)
+
+
+def test_record_rejects_a_hash_it_would_have_to_quote() -> None:
+    factory = Factory()
+    idx, _ = _index(factory)
+    bad = ContentRow("x'; SELECT 1; --", "pjsk", "p", "garage", None, None, None)
+    with pytest.raises(ValueError, match="64 lowercase hex"):
+        _run(idx.record(bad, RequestRow("rk", bad.hash, "api", "public", "pjsk", 3, 0, None)))
+    assert factory.pool.round_trips == 0
 
 
 def test_record_transport_failure_is_write_failed_with_backoff(caplog: pytest.LogCaptureFixture) -> None:

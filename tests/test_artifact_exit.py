@@ -194,8 +194,6 @@ def test_degraded_line_carries_the_artifact_stages(caplog: pytest.LogCaptureFixt
         "index_prepare",
         "index_acquire",
         "index_connect",
-        "index_lock",
-        "index_lookup",
         "upload",
         "total",
     ]
@@ -222,7 +220,7 @@ def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCap
     assert document["node_name"] == "cn-exit"
     assert document["object_key"].startswith("pjsk/api/pjsk/honor/")
     assert store.writes == [(document["object_key"], len(PNG_LIKE), "image/png")]
-    assert [name for name, _ in index.calls] == ["lookup_content", "record"]
+    assert [name for name, _ in index.calls] == ["prepare_upload", "record_upload"]
     lines = _response_lines(caplog)
     assert len(lines) == 1
     assert f" artifact=1 hash={document['hash']} reused=0 index_written=1 upload=" in lines[0]
@@ -233,9 +231,8 @@ def test_artifact_ref_is_one_json_body_with_content_length(caplog: pytest.LogCap
         "index_prepare",
         "index_acquire",
         "index_connect",
-        "index_lock",
-        "index_lookup",
         "upload",
+        "index_lock",
         "index_write",
         "total",
     ]
