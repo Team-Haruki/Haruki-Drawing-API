@@ -38,3 +38,4 @@ tests/
 
 # Cargo outputs are platform-specific build caches, not renderer source.
 rust/**/target/
+rust/**/target-test/

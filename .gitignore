@@ -74,6 +74,8 @@ docs/_build/
 # PyBuilder
 .pybuilder/
 target/
+# cargo test builds into its own dir (different RUSTFLAGS) so it does not invalidate target/
+target-test/
 
 # Jupyter Notebook
 .ipynb_checkpoints

@@ -481,13 +481,29 @@ rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 ## CI
 
-GitHub Actions workflow `.github/workflows/free-threaded-smoke.yml` runs on every push/PR: installs 3.14t, verifies no-GIL imports, compiles all source, runs concurrency smoke tests, and compares GIL vs no-GIL benchmark throughput.
+`quick-check.yml` and `free-threaded-smoke.yml` run on pull requests and on push to `main` only (not on
+other branch pushes or release tags), with per-PR/per-ref `concurrency` so a newer commit cancels the older run.
+Every job has a 20 min timeout and installs its apt build dependencies through `awalsh128/cache-apt-pkgs-action`.
 
-`quick-check.yml` also runs on every push/PR and has two jobs:
-- `lint-test` — `ruff check` + `ruff format --check` + `compileall` over **`src tests scripts`**, a config/repo guard (both YAML configs must validate; `drawer.real.py` must stay untracked), `docker compose config`, then `pytest -q` (Skia-native tests skip, no extension).
-- `native-tests` — builds `haruki_skia_renderer` with maturin, asserts the `IR_CAPABILITY` handshake, and re-runs pytest so the native tests actually execute.
+`free-threaded-smoke.yml` installs 3.14t, verifies no-GIL imports, compiles all source, runs concurrency smoke
+tests, and compares GIL vs no-GIL benchmark throughput.
 
-`skia-wheels.yml` builds the release wheels; `docker.yml` builds the image with the wheel baked in (and stays green without one).
+`quick-check.yml` has two jobs:
+- `lint-test` — `ruff check` + `ruff format --check` + `compileall` over **`src tests scripts`**, a config/repo guard (both YAML configs must validate; `drawer.real.py` must stay untracked), `docker compose config`, then `pytest -q -n auto --dist loadfile` (pytest-xdist; Skia-native tests skip, no extension).
+- `native-tests` — builds `haruki_skia_renderer` with maturin, asserts the `IR_CAPABILITY` handshake, runs `cargo test`, and re-runs pytest under xdist so the native tests actually execute.
+
+Rust caches (`Swatinem/rust-cache`) use **one `shared-key` per job** (`native-tests`, `free-threaded-smoke`, `skia-renderer` for
+the wheel jobs, `sonar-skia-renderer`): the jobs build against different interpreters, and a shared key made each restore rebuild
+pyo3 and everything above it. `native-tests` runs `cargo test` with `CARGO_TARGET_DIR=rust/haruki_skia_renderer/target-test`
+because its libpython `RUSTFLAGS` change every crate fingerprint; keep it out of `target/` or it invalidates the
+maturin build. `native-tests` only saves its cache on `main`; PRs restore main's copy.
+
+`skia-wheels.yml` builds the release wheels (linux-x86_64 + macos-arm64 on push to main/tags; `docker.yml` calls it
+with `linux-only: true` because the image only ships the Linux wheel). `docker.yml` builds and pushes the image with
+`docker/build-push-action` (`provenance: false`, so tags stay single-platform manifests) and the `type=gha` layer
+cache with `mode=max`. `mode=max` also exports the intermediate builder-stage layers, so each tag writes a large
+cache entry into the repo's Actions cache quota; GitHub scopes it per tag, so it only speeds up re-runs of the same
+tag. The image build stays green without a wheel.
 
 ## Code Style
 
