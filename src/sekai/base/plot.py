@@ -1779,6 +1779,20 @@ class PreResizedImageBox(CanvasImageBox):
         super().__init__(intermediate, size=size, sampling="pillow_bicubic", **kwargs)
 
 
+class RoundClipFrame(Frame):
+    """A frame whose children are clipped to a rounded rectangle; both backends share the clip."""
+
+    def __init__(self, radius: int, items: list[Widget] | None = None) -> None:
+        super().__init__(items)
+        self.radius = radius
+
+    def draw(self, p: Painter) -> None:
+        size = self._get_self_size()
+        p.push_clip_roundrect((0, 0), size, self.radius)
+        super().draw(p)
+        p.pop_clip()
+
+
 class Spacer(Widget):
     def __init__(self, w: int = 1, h: int = 1) -> None:
         super().__init__()

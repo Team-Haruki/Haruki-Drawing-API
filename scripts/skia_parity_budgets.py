@@ -4,6 +4,9 @@ The ordinary budgets were derived from ``out/parity-sweep-real/results.json`` (t
 MySekai views — shop, bulk harvest, blueprint term — from ``out/parity-sweep-jp700``):
 
 * mean: ``max(0.25, accepted_mean * 1.15 + 0.1)``
+
+The MySekai resource / map / door-upgrade rows were re-derived from ``out/parity-sweep-mysekai-ui``
+after the 2026-09 MySekai UI refresh (marker collision leaders on the maps, chip-heavy gate table).
 * p99: ``min(255, accepted_p99 * 1.05 + 2)``
 
 Values are rounded upward (mean to 0.001, p99 to 0.1). Custom-profile variants
@@ -52,12 +55,12 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "music_progress": (2.870, 44.0),
     "music_rewards_detail": (2.874, 46.1),
     "music_rewards_basic": (5.505, 128.0),
-    "mysekai_resource": (2.680, 33.5),
-    "mysekai_map": (1.460, 13.6),
-    "mysekai_map_multi": (1.444, 15.7),
+    "mysekai_resource": (2.680, 38.8),
+    "mysekai_map": (1.822, 23.0),
+    "mysekai_map_multi": (1.986, 29.3),
     "mysekai_fixture_list": (5.677, 116.5),
     "mysekai_fixture_detail": (4.512, 104.9),
-    "mysekai_door_upgrade": (3.557, 43.0),
+    "mysekai_door_upgrade": (4.690, 112.3),
     "mysekai_music_record": (6.432, 119.6),
     "mysekai_talk_list": (3.675, 76.6),
     "mysekai_housing_competition": (1.912, 40.9),
