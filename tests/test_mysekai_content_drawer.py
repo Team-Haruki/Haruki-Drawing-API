@@ -353,6 +353,10 @@ def test_bulk_harvest_canvas_texts() -> None:
     texts = _texts(canvas)
     for expected in ("さいしょの原っぱ", "木", "オノ", "x12", "已勾选", "未勾选", "石", "没有可一键采集的对象"):
         assert expected in texts
+    assert "2 组" in texts
+    assert "3 种" in texts
+    assert "1 个地点" in texts
+    assert "已勾选 1 种" in texts
 
 
 def test_blueprint_term_canvas_texts() -> None:
@@ -363,12 +367,38 @@ def test_blueprint_term_canvas_texts() -> None:
         )
     )
     texts = _texts(canvas)
-    assert "誕生日・周年 (1)" in texts
-    assert "期间限定 (0)" in texts
+    assert "誕生日・周年" in texts
+    assert "期间限定" in texts
+    assert "1 件" in texts
+    assert "0 件" in texts
+    assert "共 1 件" in texts
+    assert "进行中 1 件" in texts
     assert "バースデーケーキ" in texts
-    assert "制作次数 0/1" in texts
+    assert "进行中" in texts
+    assert "制作 0/1" in texts
     assert "10/3" in texts
     assert "2026-09-30 00:00 ~ 2026-10-23 23:59" in texts
+    assert "暂无蓝图" in texts
+
+
+def test_blueprint_state_helpers() -> None:
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    entry = MysekaiBlueprintTermEntry(id=1, name="n", image_path="x.png", start_at=1_000, end_at=2_000)
+    assert drawer.blueprint_period_state(entry, "UTC", now) == ("已结束", drawer.CHIP_GREY)
+    future = entry.model_copy(update={"start_at": 4_000_000_000_000, "end_at": 4_100_000_000_000})
+    assert drawer.blueprint_period_state(future, "UTC", now) == ("未开始", drawer.CHIP_BLUE)
+    assert (
+        drawer.blueprint_period_state(entry.model_copy(update={"start_at": None, "end_at": None}), "UTC", now) is None
+    )
+    assert drawer.blueprint_craft_chip(entry) is None
+    assert drawer.blueprint_craft_chip(entry.model_copy(update={"craft_limit": 2, "craft_count": 2})) == (
+        "已达上限",
+        drawer.CHIP_RED,
+    )
+    assert drawer.blueprint_craft_chip(entry.model_copy(update={"craft_limit": 2, "craft_count": 1})) == (
+        "制作 1/2",
+        drawer.CHIP_GREEN,
+    )
 
 
 # ---------------------------------------------------------------------------

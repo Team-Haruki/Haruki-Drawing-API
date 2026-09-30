@@ -49,12 +49,14 @@ class DetailedProfileCardRequest(TimeZoneRequest):
     has_frame: bool = False
     frame_path: str | None = None
     user_cards: list[dict] | None = None
+    rank: int | None = None
 
     def to_profile_card_request(self) -> "ProfileCardRequest":
         """转换为 ProfileCardRequest"""
         return ProfileCardRequest(
             timezone=self.timezone,
             bg_alpha=80,
+            rank=self.rank,
             profile=BasicProfile(
                 id=self.id,
                 region=self.region,
@@ -172,6 +174,8 @@ class ProfileCardRequest(TimeZoneRequest):
         数据源信息
     mysekai_level : Optional[int] = None
         MySekai 等级
+    rank : Optional[int] = None
+        游戏账号等级（userGamedata.rank）
     bg_alpha : Optional[int] = None
         小卡背景透明度覆盖值
     error_message : Optional[str] = None
@@ -181,6 +185,7 @@ class ProfileCardRequest(TimeZoneRequest):
     profile: BasicProfile | None = None
     data_sources: list[ProfileDataSource] = Field(default_factory=list)
     mysekai_level: int | None = None
+    rank: int | None = None
     bg_alpha: int | None = None
     error_message: str | None = None
 

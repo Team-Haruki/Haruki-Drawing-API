@@ -363,17 +363,29 @@ def shop_title(shop: MysekaiShop) -> str:
     return shop.title or SHOP_TYPE_LABELS.get(shop.shop_type, shop.shop_type)
 
 
+def _section_header(
+    title: str, accent: Color, *, chips: list[tuple[str, Color]] = (), captions: list[str] = ()
+) -> None:
+    """Accent bar + title + status chips + dim captions: the header of every panel on these pages."""
+
+    with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+        Spacer(w=6, h=26).set_bg(RoundRectBg(accent, 3, blur_glass=False))
+        TextBox(title, SECTION_STYLE)
+        for text, fill in chips:
+            _chip(text, fill)
+        for caption in captions:
+            if caption:
+                TextBox(caption, CAPTION_STYLE)
+
+
 def _draw_shop_header(shop: MysekaiShop, pass_active: bool | None) -> None:
     accent = SHOP_TYPE_ACCENTS.get(shop.shop_type, SHOP_ACCENT_FALLBACK)
     purchasable = sum(1 for item in shop.items if shop_item_state(item, pass_active).available)
-    with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
-        Spacer(w=6, h=26).set_bg(RoundRectBg(accent, 3, blur_glass=False))
-        TextBox(shop_title(shop), SECTION_STYLE)
-        _chip(f"{len(shop.items)} 件", accent)
-        if shop.items and purchasable != len(shop.items):
-            TextBox(f"可购买 {purchasable} 件", CAPTION_STYLE)
-        if caption := SHOP_TYPE_CAPTIONS.get(shop.shop_type):
-            TextBox(caption, CAPTION_STYLE)
+    captions = []
+    if shop.items and purchasable != len(shop.items):
+        captions.append(f"可购买 {purchasable} 件")
+    captions.append(SHOP_TYPE_CAPTIONS.get(shop.shop_type, ""))
+    _section_header(shop_title(shop), accent, chips=[(f"{len(shop.items)} 件", accent)], captions=captions)
 
 
 def _draw_shop(shop: MysekaiShop, images: ImageMap, pass_active: bool | None) -> None:
@@ -461,15 +473,42 @@ async def try_render_mysekai_shop_payload(rqd: MysekaiShopRequest) -> EncodedIma
 
 BULK_TARGET_COL_COUNT = 4
 BULK_TARGET_WIDTH = (PANEL_INNER_WIDTH - 24 - (BULK_TARGET_COL_COUNT - 1) * 8) // BULK_TARGET_COL_COUNT
+BULK_ACCENT: Color = (102, 204, 92, 255)
+BULK_GROUP_ACCENT: Color = (96, 104, 124, 255)
 
 
 def bulk_target_state_text(checked: bool | None) -> tuple[str, tuple[int, ...]] | None:
     if checked is None:
         return None
-    return ("已勾选", GREEN) if checked else ("未勾选", DIM)
+    return ("已勾选", CHIP_GREEN) if checked else ("未勾选", CHIP_GREY)
+
+
+def _draw_bulk_target(target, images: ImageMap) -> None:
+    dim = target.checked is False
+    tile_fill = (206, 208, 216, 125) if dim else (255, 255, 255, 125)
+    with (
+        HSplit()
+        .set_w(BULK_TARGET_WIDTH)
+        .set_content_align("l")
+        .set_item_align("c")
+        .set_sep(8)
+        .set_padding(8)
+        .set_bg(RoundRectBg(tile_fill, 10, blur_glass=False))
+    ):
+        _icon_well(images, target.image_path, 48, dim=dim)
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
+            TextBox(target.name, NAME_STYLE.replace(color=DIM if dim else NAME_STYLE.color), overflow="shrink").set_w(
+                BULK_TARGET_WIDTH - 80
+            )
+            with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                if target.fixture_count is not None:
+                    _chip(f"x{target.fixture_count}", CHIP_BLUE)
+                if state := bulk_target_state_text(target.checked):
+                    _chip(*state)
 
 
 def _draw_bulk_group(group: MysekaiBulkHarvestTargetGroup, images: ImageMap) -> None:
+    checked = sum(1 for target in group.targets if target.checked)
     with (
         VSplit()
         .set_w(PANEL_INNER_WIDTH)
@@ -481,47 +520,48 @@ def _draw_bulk_group(group: MysekaiBulkHarvestTargetGroup, images: ImageMap) -> 
     ):
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
             TextBox(group.name, NAME_STYLE)
+            _chip(f"{len(group.targets)} 种", BULK_GROUP_ACCENT)
+            if group.targets and checked:
+                TextBox(f"已勾选 {checked} 种", CAPTION_STYLE)
             if group.required_tool_name or group.required_tool_image_path:
-                TextBox("所需道具:", INFO_STYLE)
-                if group.required_tool_image_path:
-                    _icon(images, group.required_tool_image_path, 32)
-                if group.required_tool_name:
-                    TextBox(group.required_tool_name, INFO_STYLE)
+                TextBox("所需道具", CAPTION_STYLE)
+                with (
+                    HSplit()
+                    .set_content_align("l")
+                    .set_item_align("c")
+                    .set_sep(4)
+                    .set_padding((6, 2))
+                    .set_bg(RoundRectBg((255, 255, 255, 170), 8, blur_glass=False))
+                ):
+                    if group.required_tool_image_path:
+                        _icon(images, group.required_tool_image_path, 26)
+                    if group.required_tool_name:
+                        TextBox(group.required_tool_name, INFO_STYLE)
         if not group.targets:
             _empty_hint("没有可一键采集的对象")
             return
         with Grid(col_count=BULK_TARGET_COL_COUNT).set_sep(8, 8).set_item_align("lt"):
             for target in group.targets:
-                with (
-                    HSplit()
-                    .set_w(BULK_TARGET_WIDTH)
-                    .set_content_align("l")
-                    .set_item_align("c")
-                    .set_sep(6)
-                    .set_padding(6)
-                    .set_bg(roundrect_bg(fill=(255, 255, 255, 110), radius=6))
-                ):
-                    if target.image_path:
-                        _icon(images, target.image_path, 40)
-                    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(2):
-                        TextBox(target.name, INFO_STYLE, overflow="shrink").set_w(BULK_TARGET_WIDTH - 64)
-                        details = []
-                        if target.fixture_count is not None:
-                            details.append((f"x{target.fixture_count}", GRAY))
-                        if state := bulk_target_state_text(target.checked):
-                            details.append(state)
-                        if details:
-                            with HSplit().set_content_align("l").set_item_align("c").set_sep(6):
-                                for text, color in details:
-                                    TextBox(text, TextStyle(font=SMALL_STYLE.font, size=SMALL_STYLE.size, color=color))
+                _draw_bulk_target(target, images)
 
 
 def _draw_bulk_site(site: MysekaiBulkHarvestSite, images: ImageMap) -> None:
+    targets = sum(len(group.targets) for group in site.groups)
     with _panel():
         with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+            Spacer(w=6, h=26).set_bg(RoundRectBg(BULK_ACCENT, 3, blur_glass=False))
             if site.image_path:
-                _icon(images, site.image_path, (96, 56))
+                with (
+                    Frame()
+                    .set_size((104, 62))
+                    .set_content_align("c")
+                    .set_bg(RoundRectBg((255, 255, 255, 150), 10, blur_glass=False))
+                ):
+                    _icon(images, site.image_path, (96, 56))
             TextBox(site.name, SECTION_STYLE)
+            _chip(f"{len(site.groups)} 组", BULK_ACCENT)
+            if targets:
+                TextBox(f"{targets} 种采集对象", CAPTION_STYLE)
         if not site.groups:
             _empty_hint("该地点没有一键采集对象")
         for group in site.groups:
@@ -545,7 +585,11 @@ async def _build_mysekai_bulk_harvest_canvas(rqd: MysekaiBulkHarvestRequest) -> 
             if rqd.profile is not None:
                 await get_profile_card(rqd.profile)
             with _panel():
-                TextBox("一键采集对象", TITLE_STYLE)
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+                    TextBox("一键采集对象", TITLE_STYLE)
+                    if rqd.sites:
+                        _chip(f"{len(rqd.sites)} 个地点", BULK_ACCENT)
+                TextBox("灰色为未勾选的对象；x 数字为该对象在地图上的数量", CAPTION_STYLE)
             if not rqd.sites:
                 with _panel():
                     _empty_hint("暂无一键采集数据")
@@ -571,6 +615,11 @@ async def try_render_mysekai_bulk_harvest_payload(rqd: MysekaiBulkHarvestRequest
 
 BLUEPRINT_COL_COUNT = 2
 BLUEPRINT_TILE_WIDTH = (PANEL_INNER_WIDTH - (BLUEPRINT_COL_COUNT - 1) * 10) // BLUEPRINT_COL_COUNT
+BLUEPRINT_TAB_ACCENTS: dict[str, Color] = {
+    "limited_term": (255, 170, 0, 255),
+    "birthday_anniversary": (150, 110, 230, 255),
+}
+BLUEPRINT_ACCENT_FALLBACK: Color = (58, 140, 220, 255)
 
 
 def blueprint_period_text(entry: MysekaiBlueprintTermEntry, timezone: str, now: datetime) -> tuple[str, tuple]:
@@ -586,6 +635,20 @@ def blueprint_period_text(entry: MysekaiBlueprintTermEntry, timezone: str, now: 
     return text, GRAY
 
 
+def blueprint_period_state(entry: MysekaiBlueprintTermEntry, timezone: str, now: datetime) -> tuple[str, Color] | None:
+    """``(chip label, chip fill)`` for the entry's period, or None when it carries no period."""
+
+    if entry.start_at is None and entry.end_at is None:
+        return None
+    end = datetime_from_millis(entry.end_at, timezone) if entry.end_at is not None else None
+    start = datetime_from_millis(entry.start_at, timezone) if entry.start_at is not None else None
+    if end is not None and end < now:
+        return "已结束", CHIP_GREY
+    if start is not None and start > now:
+        return "未开始", CHIP_BLUE
+    return "进行中", CHIP_GREEN
+
+
 def blueprint_craft_text(entry: MysekaiBlueprintTermEntry) -> tuple[str, tuple] | None:
     if entry.craft_limit is None and entry.craft_count is None:
         return None
@@ -598,27 +661,66 @@ def blueprint_craft_text(entry: MysekaiBlueprintTermEntry) -> tuple[str, tuple] 
     return f"制作次数 {progress}", GREEN
 
 
+def blueprint_craft_chip(entry: MysekaiBlueprintTermEntry) -> tuple[str, Color] | None:
+    craft = blueprint_craft_text(entry)
+    if craft is None:
+        return None
+    text, color = craft
+    if color == RED:
+        return "已达上限", CHIP_RED
+    if color == GREEN:
+        return text.replace("制作次数 ", "制作 "), CHIP_GREEN
+    return text, CHIP_GREY
+
+
 def _draw_blueprint(entry: MysekaiBlueprintTermEntry, images: ImageMap, timezone: str, now: datetime) -> None:
-    with _tile(BLUEPRINT_TILE_WIDTH):
-        with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
-            _icon(images, entry.image_path, 80)
+    state = blueprint_period_state(entry, timezone, now)
+    ended = state is not None and state[0] == "已结束"
+    tile_fill = (206, 208, 216, 125) if ended else (255, 255, 255, 125)
+    name_color = DIM if ended else NAME_STYLE.color
+    with (
+        VSplit()
+        .set_w(BLUEPRINT_TILE_WIDTH)
+        .set_content_align("lt")
+        .set_item_align("lt")
+        .set_sep(6)
+        .set_padding(SHOP_TILE_PADDING)
+        .set_bg(RoundRectBg(tile_fill, 10, blur_glass=False))
+    ):
+        with HSplit().set_content_align("l").set_item_align("t").set_sep(10):
+            _icon_well(images, entry.image_path, 80, dim=ended)
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
-                width = BLUEPRINT_TILE_WIDTH - 116
-                TextBox(entry.name, NAME_STYLE, line_count=2, use_real_line_count=True, overflow="shrink").set_w(width)
-                period, color = blueprint_period_text(entry, timezone, now)
+                width = BLUEPRINT_TILE_WIDTH - 2 * SHOP_TILE_PADDING - 90
+                TextBox(
+                    entry.name,
+                    NAME_STYLE.replace(color=name_color),
+                    line_count=2,
+                    use_real_line_count=True,
+                    overflow="shrink",
+                ).set_w(width)
+                period, _color = blueprint_period_text(entry, timezone, now)
                 if period:
-                    TextBox(period, TextStyle(font=SMALL_STYLE.font, size=SMALL_STYLE.size, color=color)).set_w(width)
-                if craft := blueprint_craft_text(entry):
-                    text, craft_color = craft
-                    TextBox(text, TextStyle(font=SMALL_STYLE.font, size=SMALL_STYLE.size, color=craft_color))
+                    for suffix in (" (已结束)", " (未开始)"):
+                        period = period.removesuffix(suffix)
+                    TextBox(period, SMALL_STYLE.replace(color=DIM)).set_w(width)
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(4):
+                    if state is not None:
+                        _chip(*state)
+                    if craft := blueprint_craft_chip(entry):
+                        _chip(*craft)
         if entry.cost_materials:
             _cost_row(images, entry.cost_materials, icon_size=32)
 
 
 def _draw_blueprint_tab(tab: MysekaiBlueprintTermTab, images: ImageMap, timezone: str, now: datetime) -> None:
+    accent = BLUEPRINT_TAB_ACCENTS.get(tab.tab_type, BLUEPRINT_ACCENT_FALLBACK)
+    active = sum(
+        1 for entry in tab.blueprints if (blueprint_period_state(entry, timezone, now) or ("", None))[0] == "进行中"
+    )
     with _panel():
         title = tab.title or BLUEPRINT_TAB_LABELS.get(tab.tab_type, tab.tab_type)
-        TextBox(f"{title} ({len(tab.blueprints)})", SECTION_STYLE)
+        captions = [f"进行中 {active} 件"] if tab.blueprints and active != len(tab.blueprints) else []
+        _section_header(title, accent, chips=[(f"{len(tab.blueprints)} 件", accent)], captions=captions)
         if not tab.blueprints:
             _empty_hint("暂无蓝图")
             return
@@ -640,12 +742,21 @@ async def _build_mysekai_blueprint_term_canvas(rqd: MysekaiBlueprintTermRequest,
     images = await _load_images(_blueprint_image_paths(rqd))
     if now is None:
         now = request_now(rqd.timezone)
+    entries = [entry for tab in rqd.tabs for entry in tab.blueprints]
+    active = sum(
+        1 for entry in entries if (blueprint_period_state(entry, rqd.timezone, now) or ("", None))[0] == "进行中"
+    )
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if rqd.profile is not None:
                 await get_profile_card(rqd.profile)
             with _panel():
-                TextBox("期间限定蓝图", TITLE_STYLE)
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(10):
+                    TextBox("期间限定蓝图", TITLE_STYLE)
+                    if entries:
+                        _chip(f"共 {len(entries)} 件", BLUEPRINT_ACCENT_FALLBACK)
+                        _chip(f"进行中 {active} 件", CHIP_GREEN if active else CHIP_GREY)
+                TextBox("材料为「已有/所需」，绿色表示足够；灰色为已结束的蓝图", CAPTION_STYLE)
             if not rqd.tabs:
                 with _panel():
                     _empty_hint("暂无期间限定蓝图")

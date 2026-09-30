@@ -22,9 +22,9 @@ from src.sekai.base.draw import (
     roundrect_bg,
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
-from src.sekai.base.paint_types import ADAPTIVE_SHADOW, ADAPTIVE_WB, BLACK, RED, WHITE, get_font_desc
-from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size
-from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT
+from src.sekai.base.paint_types import ADAPTIVE_WB, WHITE, get_font_desc
+from src.sekai.base.text_layout import ascender_top_to_painter_y, get_text_size, ink_centered_text_offset_y
+from src.settings import DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
 if TYPE_CHECKING:
     from src.sekai.base.painter import Painter
@@ -37,6 +37,7 @@ from src.sekai.base.plot import (
     HSplit,
     ImageBg,
     ImageBox,
+    RoundClipFrame,
     RoundRectBg,
     Spacer,
     TextBox,
@@ -44,8 +45,9 @@ from src.sekai.base.plot import (
     VSplit,
     Widget,
     colored_text_box,
+    parse_colored_text_segments,
 )
-from src.sekai.base.timezone import datetime_from_millis
+from src.sekai.base.timezone import datetime_from_millis, request_now
 from src.sekai.base.utils import (
     AssetImageRef,
     EncodedImageRef,
@@ -1070,44 +1072,194 @@ def _profile_card_update_lines(data_sources: list[ProfileDataSource], timezone_n
     return update_lines
 
 
+# ---------------------------------------------------------------------------
+# Profile card look ("信息条式"): a fixed-width card, the avatar in a white well ringed in the region
+# colour with a region badge, the name with the game rank and MySekai level chips, a masked UID line
+# (timezone once), one soft well per data source (age dot · source · time · relative age) and, when the
+# caller sent an error message, a notice strip across the card. Same information as the old card.
+# ---------------------------------------------------------------------------
+
+_CARD_INK = (40, 44, 64, 255)
+_CARD_INK_SOFT = (70, 74, 92, 255)
+_CARD_DIM = (120, 124, 138, 255)
+_CARD_WELL = (255, 255, 255, 200)
+_CARD_WELL_SOFT = (255, 255, 255, 120)
+_CARD_CHIP_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=WHITE)
+_CARD_BADGE_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=12, color=WHITE)
+_CARD_NAME_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=_CARD_INK)
+_CARD_LINE_STYLE = TextStyle(font=DEFAULT_FONT, size=14, color=_CARD_INK_SOFT)
+_CARD_ID_STYLE = TextStyle(font=DEFAULT_FONT, size=14, color=_CARD_DIM)
+_CARD_SOURCE_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=_CARD_INK_SOFT)
+_CARD_AGE_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=_CARD_DIM)
+_CARD_NOTICE_STYLE = TextStyle(font=DEFAULT_FONT, size=14, color=(176, 84, 24, 255))
+_CARD_NOTICE_FILL = (255, 234, 216, 235)
+_CARD_NOTICE_INK = (176, 84, 24, 255)
+_CARD_RANK_CHIP = (58, 140, 220, 255)
+_CARD_LEVEL_CHIP = (51, 190, 178, 255)
+_CARD_REGION_CHIPS: dict[str, tuple[int, int, int, int]] = {
+    "JP": (226, 76, 96, 255),
+    "CN": (232, 130, 40, 255),
+    "EN": (58, 140, 220, 255),
+    "TW": (52, 168, 96, 255),
+    "KR": (150, 72, 210, 255),
+}
+_CARD_REGION_CHIP_FALLBACK = (120, 126, 140, 255)
+# relative age colour: fresh (< 1 day) stays neutral, then amber, then red
+_CARD_AGE_WARN_DAYS = 1
+_CARD_AGE_STALE_DAYS = 7
+_CARD_AGE_FRESH = (140, 144, 156, 255)
+_CARD_AGE_WARN = (214, 140, 40, 255)
+_CARD_AGE_STALE = (214, 84, 96, 255)
+_CARD_W = 470
+_CARD_PAD_X, _CARD_PAD_Y = 16, 12
+_CARD_INNER_W = _CARD_W - 2 * _CARD_PAD_X
+_CARD_AVATAR = 80
+_CARD_AVATAR_WELL = _CARD_AVATAR + 12  # 6 px of white around the avatar inside the 2 px ring
+_CARD_TEXT_W = _CARD_INNER_W - _CARD_AVATAR_WELL - 14
+_CARD_ERROR_W = 300  # legacy width of the standalone error module
+
+
+def _profile_card_chip(text: str, fill: tuple[int, int, int, int], *, style: TextStyle = _CARD_CHIP_STYLE) -> TextBox:
+    offset_y = ink_centered_text_offset_y(style.font, style.size, text, style.size)
+    return (
+        TextBox(text, style)
+        .set_padding((8, 3) if style is _CARD_CHIP_STYLE else (6, 2))
+        .set_text_offset((0, offset_y))
+        .set_bg(RoundRectBg(fill, 9 if style is _CARD_CHIP_STYLE else 8, blur_glass=False))
+    )
+
+
+def _profile_card_region_chip_fill(region: str) -> tuple[int, int, int, int]:
+    return _CARD_REGION_CHIPS.get(region.strip().upper(), _CARD_REGION_CHIP_FALLBACK)
+
+
+def _profile_card_uid_line(profile: BasicProfile) -> str:
+    return f"ID {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}"
+
+
+def _profile_card_rank_label(rank: int | None) -> str | None:
+    """The game account rank (``userGamedata.rank``) as ``Lv.N``; None when the caller sent none."""
+    return f"Lv.{rank}" if rank else None
+
+
+def _profile_card_age_text(update_time, now) -> tuple[str, tuple[int, int, int, int]]:
+    """Relative age of ``update_time`` against ``now`` (both aware datetimes) and its hint colour.
+
+    Hour granularity under a day and day granularity beyond it, so a cached image only drifts at
+    those boundaries; the colour warns after :data:`_CARD_AGE_WARN_DAYS` / :data:`_CARD_AGE_STALE_DAYS`.
+    """
+    seconds = max(0.0, (now - update_time).total_seconds())
+    days = int(seconds // 86400)
+    if days >= _CARD_AGE_STALE_DAYS:
+        return f"{days} 天前", _CARD_AGE_STALE
+    if days >= _CARD_AGE_WARN_DAYS:
+        return ("昨天" if days == 1 else f"{days} 天前"), _CARD_AGE_WARN
+    hours = int(seconds // 3600)
+    return (f"{hours} 小时前" if hours >= 1 else "1 小时内"), _CARD_AGE_FRESH
+
+
+def _profile_card_source_rows(
+    data_sources: list[ProfileDataSource], timezone_name: str | None, now
+) -> list[tuple[str, str, str, tuple[int, int, int, int]]]:
+    """``(source name, local time, relative age, age colour)`` per timestamped source.
+
+    The first source alone, or the first two when several were sent — exactly the sources the old card
+    listed. The timezone is not repeated per row; the card prints it once on the UID line.
+    """
+    rows = []
+    sources = data_sources[:1] if len(data_sources) <= 1 else data_sources[:2]
+    for data_source in sources:
+        if not data_source.update_time:
+            continue
+        update_time = datetime_from_millis(data_source.update_time, timezone_name)
+        age, color = _profile_card_age_text(update_time, now)
+        rows.append((data_source.name or "数据", update_time.strftime("%m-%d %H:%M:%S"), age, color))
+    return rows
+
+
 async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget | None:
     if not rqd.profile:
         return None
     avatar_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
-    return await get_avatar_widget_with_frame(
-        is_frame=bool(rqd.profile.has_frame),
-        frame_paths=None,
-        avatar_img=avatar_img,
-        avatar_w=80,
-        frame_data=[],
-    )
+    if rqd.profile.has_frame:
+        return await get_avatar_widget_with_frame(
+            is_frame=True, frame_paths=None, avatar_img=avatar_img, avatar_w=_CARD_AVATAR, frame_data=[]
+        )
+    region = rqd.profile.region.upper()
+    ring = _profile_card_region_chip_fill(region)
+    well = _CARD_AVATAR_WELL
+    # outer frame only positions the badge; the well centres the clipped avatar with even padding
+    with Frame().set_size((well, well)).set_content_align("lt") as ret:
+        with (
+            Frame()
+            .set_size((well, well))
+            .set_content_align("c")
+            .set_bg(RoundRectBg(_CARD_WELL, 18, stroke=ring, stroke_width=2, blur_glass=False))
+        ):
+            with RoundClipFrame(12).set_size((_CARD_AVATAR, _CARD_AVATAR)).set_content_align("c"):
+                ImageBox(avatar_img, size=(_CARD_AVATAR, _CARD_AVATAR), use_alpha_blend=False).set_content_align("c")
+        _profile_card_chip(region, ring, style=_CARD_BADGE_STYLE).set_offset((well - 2, well - 2)).set_offset_anchor(
+            "rb"
+        )
+    return ret
+
+
+def _profile_card_name(nickname: str, rank: int | None, mysekai_level: int | None) -> list[Widget]:
+    """The name, kept inside the fixed text column next to the rank / level chips.
+
+    A plain name shrinks to the free width. A colour-tagged name keeps its per-segment colours
+    (``colored_text_box`` cannot shrink) while it fits; a long one falls back to the plain, shrinking
+    ink-coloured text of its visible characters. Returns the text items for the compact-level-label rule.
+    """
+    free = _CARD_TEXT_W - (72 if rank else 0) - (118 if mysekai_level else 0)
+    text = truncate(nickname, 64)
+    segments = parse_colored_text_segments(text)
+    if len(segments) > 1 or segments[0]["color"] is not None:
+        with HSplit().set_sep(0) as probe:
+            items = colored_text_box(text, _CARD_NAME_STYLE, padding=0).items
+        if probe._get_self_size()[0] <= free:
+            return items
+        probe.set_items([])
+        text = "".join(segment["text"] for segment in segments)
+    length = get_str_display_length(text)
+    size = 24 if length <= 10 else (20 if length <= 16 else 18)
+    return [TextBox(text, _CARD_NAME_STYLE.replace(size=size), overflow="shrink").set_w(free)]
 
 
 def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: list) -> Widget | None:
     profile = rqd.profile
     if not profile:
         return None
+    now = datetime_from_millis(rqd.dt, rqd.timezone) if rqd.dt else request_now(rqd.timezone)
 
-    with VSplit().set_content_align("c").set_item_align("l").set_sep(5) as identity:
-        with HSplit().set_content_align("lb").set_item_align("lb").set_sep(5):
-            hs = colored_text_box(
-                truncate(profile.nickname, 64),
-                TextStyle(
-                    font=DEFAULT_BOLD_FONT,
-                    size=24,
-                    color=BLACK,
-                    use_shadow=True,
-                    shadow_offset=2,
-                    shadow_color=ADAPTIVE_SHADOW,
-                ),
-            )
-            ms_lv_text = _profile_card_level_label(hs.items, rqd.mysekai_level)
-            if ms_lv_text:
-                TextBox(ms_lv_text, TextStyle(font=DEFAULT_FONT, size=18, color=BLACK))
-
-        TextBox(_profile_card_summary_line(profile, data_sources), TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
-        for update_line in _profile_card_update_lines(data_sources, rqd.timezone):
-            TextBox(update_line, TextStyle(font=DEFAULT_FONT, size=16, color=BLACK))
+    with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4) as identity:
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
+            name_items = _profile_card_name(profile.nickname, rqd.rank, rqd.mysekai_level)
+            chips = []
+            if rank_text := _profile_card_rank_label(rqd.rank):
+                chips.append((rank_text, _CARD_RANK_CHIP))
+            if ms_lv_text := _profile_card_level_label(name_items, rqd.mysekai_level):
+                chips.append((ms_lv_text, _CARD_LEVEL_CHIP))
+            for text, fill in chips:
+                _profile_card_chip(text, fill)
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
+            TextBox(_profile_card_uid_line(profile), _CARD_ID_STYLE)
+            if rqd.timezone:
+                TextBox(f"· {rqd.timezone}", _CARD_ID_STYLE.replace(size=12))
+        for name, local_time, age, color in _profile_card_source_rows(data_sources, rqd.timezone, now):
+            with (
+                HSplit()
+                .set_w(_CARD_TEXT_W)
+                .set_content_align("l")
+                .set_item_align("c")
+                .set_sep(8)
+                .set_padding((8, 3))
+                .set_bg(RoundRectBg(_CARD_WELL_SOFT, 8, blur_glass=False))
+            ):
+                Spacer(w=8, h=8).set_bg(RoundRectBg(color, 4, blur_glass=False))
+                TextBox(name, _CARD_SOURCE_STYLE, overflow="shrink").set_w(100)
+                TextBox(local_time, _CARD_LINE_STYLE).set_w(118)
+                TextBox(age, _CARD_AGE_STYLE.replace(color=color))
 
     return identity
 
@@ -1115,7 +1267,21 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
 def _build_profile_card_error_module(rqd: ProfileCardRequest) -> Widget | None:
     if not rqd.error_message:
         return None
-    return TextBox(rqd.error_message, TextStyle(font=DEFAULT_FONT, size=20, color=RED), line_count=3).set_w(300)
+    width = _CARD_INNER_W if rqd.profile else _CARD_ERROR_W
+    with (
+        HSplit()
+        .set_w(width)
+        .set_content_align("l")
+        .set_item_align("t")
+        .set_sep(8)
+        .set_padding((10, 6))
+        .set_bg(RoundRectBg(_CARD_NOTICE_FILL, 8, blur_glass=False))
+    ) as notice:
+        TextBox("!", TextStyle(font=DEFAULT_HEAVY_FONT, size=13, color=WHITE)).set_padding((7, 1)).set_bg(
+            RoundRectBg(_CARD_NOTICE_INK, 8, blur_glass=False)
+        )
+        TextBox(rqd.error_message, _CARD_NOTICE_STYLE, line_count=3, use_real_line_count=True).set_w(width - 64)
+    return notice
 
 
 async def _build_profile_card_modules(rqd: ProfileCardRequest) -> list[Widget]:
@@ -1150,10 +1316,15 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     """
     bg_alpha = rqd.bg_alpha if rqd.bg_alpha is not None else 150
 
-    # Widgets auto-attach to the current active container on construction.
-    # Build the card within nested contexts so the modules attach exactly once
-    # to the inner row instead of being added both implicitly and manually.
-    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding(16) as f:
-        with HSplit().set_content_align("c").set_item_align("c").set_sep(14):
-            await _build_profile_card_modules(rqd)
+    # Widgets auto-attach to the current active container on construction; the modules are built
+    # detached and placed explicitly: avatar | identity on one row, the notice strip below.
+    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding((_CARD_PAD_X, _CARD_PAD_Y)) as f:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8) as column:
+            if rqd.profile:
+                column.set_w(_CARD_INNER_W)
+            with HSplit().set_content_align("lt").set_item_align("t").set_sep(14) as row:
+                modules = await _build_profile_card_modules(rqd)
+            row.set_items([m for m in modules if m is not modules[-1] or not rqd.error_message])
+            if rqd.error_message and modules:
+                column.add_item(modules[-1])
     return f
