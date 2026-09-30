@@ -2,11 +2,19 @@ name: Free Threaded Smoke
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+
+# Same trigger shape as quick-check: no duplicate push run per PR commit, no run per release tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   free-threaded-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -35,18 +43,20 @@ jobs:
           .venv314t/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(Drawing.jpg)"
 
       - name: Install native renderer build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Not shared with the wheel jobs: they build against setup-python's interpreter, this job
+      # against the uv venv, and the mismatch rebuilt pyo3 and its dependents on every restore.
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust/haruki_skia_renderer
-          shared-key: skia-renderer
+          shared-key: free-threaded-smoke
 
       - name: Build required native renderer
         env:

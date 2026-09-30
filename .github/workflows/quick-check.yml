@@ -2,10 +2,18 @@ name: Quick Checks
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
+
+# Branch pushes used to run this twice (push + pull_request) and again on every release tag.
+# A newer commit supersedes the older run of the same PR or ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint-test:
@@ -82,22 +90,22 @@ jobs:
         run: docker compose config >/dev/null
 
       - name: Run pytest
-        run: .venv314t/bin/python -m pytest -q
+        run: .venv314t/bin/python -m pytest -q -n auto --dist loadfile
 
   # Builds the haruki_skia_renderer extension in-place so the native Skia tests
   # (ir_painter / skia_safety / font-only parity cases) actually run instead of
   # skipping. Parity cases that need synced game assets still skip cleanly.
   native-tests:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
       - name: Install skia-safe build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          packages: build-essential clang libclang-dev ninja-build pkg-config libfontconfig1-dev libfreetype6-dev
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v7
@@ -108,11 +116,18 @@ jobs:
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable
 
+      # Its own key: the wheel/smoke jobs build against a different interpreter, so a shared cache
+      # rebuilt pyo3 and everything above it here. `cargo test` links libpython through RUSTFLAGS,
+      # which changes every crate's fingerprint, so it builds into target-test instead of
+      # invalidating the maturin build in target. Only main saves; PRs restore main's copy.
       - name: Rust build cache
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: rust/haruki_skia_renderer
-          shared-key: skia-renderer
+          workspaces: |
+            rust/haruki_skia_renderer -> target
+            rust/haruki_skia_renderer -> target-test
+          shared-key: native-tests
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Fonts are OFL/CC licensed and too large to vendor; download once and cache.
       - name: Cache CI fonts
@@ -170,10 +185,11 @@ jobs:
           set -euo pipefail
           pylib="$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")"
           RUSTFLAGS="-L ${pylib} -C link-arg=-lpython3.14t" \
+          CARGO_TARGET_DIR=rust/haruki_skia_renderer/target-test \
             cargo test --release --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
       - name: Run pytest with native renderer
         env:
           # Linux FreeType renders COLR natively; the repo default (OT-SVG) is macOS-only.
           HARUKI_FONT__EMOJI: TwemojiMozilla
-        run: uv run pytest tests/ -q
+        run: uv run pytest tests/ -q -n auto --dist loadfile
