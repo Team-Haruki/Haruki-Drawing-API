@@ -366,22 +366,23 @@ def _ink_columns(style: TextStyle, text: str) -> tuple[int, int]:
 def _id_badge(text: str, fill, style: TextStyle, *, radius: int = 4, gap=(4, 2)) -> TextBox:
     """A small tag whose ink sits dead centre, ``gap`` pixels from each edge of the drawn fill.
 
-    Rounded rects are drawn Pillow-style with the far edges inclusive, one pixel wider and taller than the
-    widget, so the box is ``ink + 2 * gap - 1`` in each direction and the text is shifted so its ink starts
-    ``gap`` in from the near edges."""
+    Sized for the Skia backend deck pages render through, which fills a rounded rect at exactly the widget
+    size, so the box is ``ink + 2 * gap`` in each direction and the text is shifted so its ink starts ``gap``
+    in from the near edges. The Pillow fallback draws its fill one pixel past the far edges, leaving one extra
+    pixel below and to the right there."""
     gap_x, gap_y = gap
     font = get_layout_font(style.font, style.size)
     _, top, _, bottom = font.getbbox(text)
     left, right = _ink_columns(style, text)
     # Painter.text puts the baseline ink_height("哇") below the line top; getbbox is relative to the ascender top.
     ink_top = get_text_size(font, "哇")[1] + top - font.getmetrics()[0]
-    natural_w = right - left + 2 * gap_x - 1
+    natural_w = right - left + 2 * gap_x
     # Never narrower than the advance box, or TextBox would clip the line to fit.
     width = max(natural_w, get_text_size(font, text)[0])
     return (
         TextBox(text, style)
         .set_padding(0)
-        .set_size((width, bottom - top + 2 * gap_y - 1))
+        .set_size((width, bottom - top + 2 * gap_y))
         .set_content_align("lt")
         .set_text_offset((gap_x - left + (width - natural_w) // 2, gap_y - ink_top))
         .set_bg(RoundRectBg(fill, radius, blur_glass=False))
