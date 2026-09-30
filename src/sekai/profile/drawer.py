@@ -1219,6 +1219,14 @@ def _profile_card_name(nickname: str, rank: int | None, mysekai_level: int | Non
     return [TextBox(text, _CARD_NAME_STYLE.replace(size=size), overflow="shrink").set_w(free)]
 
 
+def _fit_text_box_width(box: TextBox, max_w: int) -> None:
+    """Shrink a one-line ``TextBox`` so its outer width (padding included) is at most ``max_w``."""
+    if box._get_self_size()[0] <= max_w:
+        return
+    box.set_w(max_w)  # the outer width, padding included
+    box._calc_w = box._calc_h = None  # _get_self_size caches the natural size measured above
+
+
 def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: list) -> Widget | None:
     profile = rqd.profile
     if not profile:
@@ -1237,10 +1245,16 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
                 _profile_card_chip(text, fill)
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8):
             region = profile.region.upper()
-            _profile_card_chip(region, _profile_card_region_chip_fill(region), style=_CARD_BADGE_STYLE)
-            TextBox(_profile_card_uid_line(profile), _CARD_ID_STYLE)
-            if rqd.timezone:
-                TextBox(f"· {rqd.timezone}", _CARD_ID_STYLE.replace(size=12))
+            chip = _profile_card_chip(region, _profile_card_region_chip_fill(region), style=_CARD_BADGE_STYLE)
+            # The row must never outgrow the text column (an unmasked 19-digit ID plus a long timezone
+            # does): shrink the timezone first, then the ID itself.
+            free = _CARD_TEXT_W - chip._get_self_size()[0] - 8
+            uid = TextBox(_profile_card_uid_line(profile), _CARD_ID_STYLE, overflow="shrink")
+            _fit_text_box_width(uid, free)
+            room = free - uid._get_self_size()[0] - 8
+            if rqd.timezone and room >= 40:
+                tz = TextBox(f"· {rqd.timezone}", _CARD_ID_STYLE.replace(size=12), overflow="shrink")
+                _fit_text_box_width(tz, room)
         for name, local_time, age, color in _profile_card_source_rows(data_sources, rqd.timezone, now):
             with (
                 HSplit()
