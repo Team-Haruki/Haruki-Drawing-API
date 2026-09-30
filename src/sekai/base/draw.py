@@ -259,7 +259,8 @@ def add_watermark(canvas: Canvas, text: str = DEFAULT_WATERMARK, size=12):
     content_w, content_h = get_watermark_content_size(canvas)
     original_h_padding = canvas.h_padding
     original_v_padding = canvas.v_padding
-    text_box_w = max_text_width + WATERMARK_SHADOW_OFFSET
+    # never wider than the page it sits under (a 1 px page would otherwise gain the shadow pixel)
+    text_box_w = max(1, min(max_text_width + WATERMARK_SHADOW_OFFSET, content_w))
     text_box_h = text_h + WATERMARK_SHADOW_OFFSET
 
     items = list(canvas.items)
