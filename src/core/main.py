@@ -268,9 +268,13 @@ _CUSTOM_PROFILE_DIR_FIELDS = (
 )
 
 
-def _missing_custom_profile_dirs() -> list[str]:
-    """Custom-profile directories (expanded per region) that do not exist; they are local-only by contract."""
-    from src.sekai.profile.custom_profile.resource_paths import REGION_CODES
+def _missing_custom_profile_dirs(*, mirrored: bool = False) -> list[str]:
+    """Custom-profile directories (expanded per region) that do not exist.
+
+    ``mirrored`` skips bucket-backed ones (``<cc>-assets/<mode>/...``): the renderer fetches their files through
+    the asset mirror, so only directories the bucket cannot serve (the unity UI sprites) still need a local copy.
+    """
+    from src.sekai.profile.custom_profile.resource_paths import REGION_CODES, bucket_asset_key
 
     missing: list[str] = []
     for name in _CUSTOM_PROFILE_DIR_FIELDS:
@@ -279,26 +283,30 @@ def _missing_custom_profile_dirs() -> list[str]:
             continue
         raw = str(configured)
         paths = [raw.replace("{region}", region) for region in sorted(REGION_CODES)] if "{region}" in raw else [raw]
-        missing.extend(f"{name}={path}" for path in paths if not Path(path).is_dir())
+        missing.extend(
+            f"{name}={path}"
+            for path in paths
+            if not Path(path).is_dir() and not (mirrored and bucket_asset_key(path) is not None)
+        )
     return missing
 
 
 def _start_asset_mirror() -> None:
-    """Start the asset mirror (never fatal) and warn when mirror mode runs without the local-only dirs."""
-    from src.assets.mirror import start_asset_mirror
+    """Start the asset mirror (never fatal) and warn when mirror mode runs without the dirs it cannot serve."""
+    from src.assets.mirror import NullMirror, start_asset_mirror
 
-    start_asset_mirror()
+    mirror = start_asset_mirror()
     if settings.assets.source != "mirror":
         return
     try:
-        missing = _missing_custom_profile_dirs()
+        missing = _missing_custom_profile_dirs(mirrored=not isinstance(mirror, NullMirror))
     except Exception:
         logger.warning("custom-profile directory check failed", exc_info=True)
         return
     if missing:
         logger.warning(
-            "assets.source=mirror but custom-profile directories are missing (they are never mirrored; "
-            "keep rsyncing them): %s",
+            "assets.source=mirror but custom-profile directories are missing and cannot be fetched "
+            "from the bucket (custom-profile cards will fail until they exist): %s",
             ", ".join(missing),
         )
 

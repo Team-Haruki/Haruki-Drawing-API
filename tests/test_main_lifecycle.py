@@ -453,7 +453,7 @@ def test_start_asset_mirror_local_source_warns_nothing(monkeypatch, caplog) -> N
     calls: list[str] = []
     monkeypatch.setattr(settings.assets, "source", "local")
     monkeypatch.setattr(mirror_mod, "start_asset_mirror", lambda: calls.append("start"))
-    monkeypatch.setattr(main_mod, "_missing_custom_profile_dirs", lambda: pytest.fail("checked dirs in local mode"))
+    monkeypatch.setattr(main_mod, "_missing_custom_profile_dirs", lambda **_: pytest.fail("checked dirs in local mode"))
     with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
         main_mod._start_asset_mirror()
     assert calls == ["start"]
@@ -482,17 +482,44 @@ def test_start_asset_mirror_warns_on_missing_custom_profile_dirs(tmp_path, monke
     assert "custom-profile directories are missing" in caplog.text
 
     caplog.clear()
-    monkeypatch.setattr(main_mod, "_missing_custom_profile_dirs", lambda: [])
+    monkeypatch.setattr(main_mod, "_missing_custom_profile_dirs", lambda **_: [])
     with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
         main_mod._start_asset_mirror()
     assert not caplog.records
+
+
+def test_start_asset_mirror_skips_bucket_backed_dirs_the_mirror_serves(tmp_path, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(settings.assets, "source", "mirror")
+    bucket_dir = tmp_path / "asset" / "{region}-assets" / "startapp" / "custom_profile"
+    monkeypatch.setattr(settings.drawing, "custom_profile_assets_dir", bucket_dir)
+    monkeypatch.setattr(settings.drawing, "custom_profile_fonts_dir", bucket_dir / "font")
+    monkeypatch.setattr(settings.drawing, "custom_profile_shape_sprite_dir", bucket_dir / "shape")
+    monkeypatch.setattr(settings.drawing, "custom_profile_unity_ui_sprite_dir", tmp_path / "ui")
+
+    assert main_mod._missing_custom_profile_dirs(mirrored=True) == [
+        f"custom_profile_unity_ui_sprite_dir={tmp_path / 'ui'}"
+    ]
+    # Without a working mirror every bucket-backed directory is reported again (3 fields x 5 regions + ui).
+    assert len(main_mod._missing_custom_profile_dirs(mirrored=False)) == 16
+
+    monkeypatch.setattr(mirror_mod, "start_asset_mirror", lambda: object())
+    with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
+        main_mod._start_asset_mirror()
+    assert "custom_profile_unity_ui_sprite_dir" in caplog.text
+    assert "custom_profile_assets_dir" not in caplog.text
+
+    caplog.clear()
+    monkeypatch.setattr(mirror_mod, "start_asset_mirror", lambda: NullMirror(source="mirror", disabled_reason="x"))
+    with caplog.at_level(logging.WARNING, logger=main_mod.__name__):
+        main_mod._start_asset_mirror()
+    assert "custom_profile_assets_dir" in caplog.text
 
 
 def test_start_asset_mirror_dir_check_failure_is_not_fatal(monkeypatch, caplog) -> None:
     monkeypatch.setattr(settings.assets, "source", "mirror")
     monkeypatch.setattr(mirror_mod, "start_asset_mirror", lambda: None)
 
-    def broken() -> list[str]:
+    def broken(**_) -> list[str]:
         raise RuntimeError("stat failed")
 
     monkeypatch.setattr(main_mod, "_missing_custom_profile_dirs", broken)
