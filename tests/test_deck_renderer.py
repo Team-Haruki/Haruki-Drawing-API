@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import sys
 
 from PIL import Image
 import pytest
@@ -241,6 +243,60 @@ def test_deck_renderer_helpers_cover_story_and_score_defaults():
     assert drawer._story_read_color(True) == (50, 150, 50, 255)
     assert drawer._story_read_color(False) == (150, 50, 50, 255)
     assert drawer._deck_card_is_fixed(request, 101, 999)
+
+
+async def _card_id_badge_gaps(text: str, size: int, backend: str) -> tuple[int, int, int, int]:
+    """Top, bottom, left and right gaps between a black-lettered badge's opaque fill and its dark ink."""
+    style = drawer.TextStyle(font=drawer.DEFAULT_FONT, size=size, color=(0, 0, 0, 255))
+    # Padded so the Pillow fill's inclusive far edge, one pixel past the widget, is on the canvas.
+    with drawer.Canvas(bg=None).set_padding(2) as canvas:
+        drawer._id_badge(text, (255, 255, 255, 255), style)
+    if backend == "skia":
+        from src.sekai.skia_renderer.canvas import render_canvas_payload
+
+        payload = await render_canvas_payload(canvas, endpoint="deck")
+        assert payload is not None
+        img = Image.open(io.BytesIO(payload.image_bytes)).convert("RGBA")
+    else:
+        img = (await canvas.get_img()).convert("RGBA")
+    # The fill is every opaque pixel; the ink is every visibly grey one inside it. Skia antialiases the flat
+    # digit tops at 10 px into a light grey row that still reads as part of the glyph.
+    opaque = [(x, y) for y in range(img.height) for x in range(img.width) if img.getpixel((x, y))[3] == 255]
+    ink = [(x, y) for x, y in opaque if sum(img.getpixel((x, y))[:3]) < 3 * 224]
+    assert ink
+    return (
+        min(y for _, y in ink) - min(y for _, y in opaque),
+        max(y for _, y in opaque) - max(y for _, y in ink),
+        min(x for x, _ in ink) - min(x for x, _ in opaque),
+        max(x for x, _ in opaque) - max(x for x, _ in ink),
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("size", [10, 11])
+@pytest.mark.parametrize("text", ["1418", "801", "264"])
+async def test_card_id_badge_centres_digit_ink_on_skia(size, text):
+    """The thumbnail ID tag's digits used to sit on its bottom edge (3 px above, 0-1 px below).
+
+    Deck pages render through Skia, whose rounded fill covers exactly the widget, so that is where the
+    ink must be centred."""
+    pytest.importorskip("haruki_skia_renderer")
+    top, bottom, left, right = await _card_id_badge_gaps(text, size, "skia")
+    assert top == bottom, (top, bottom)
+    # Horizontal ink comes from the FreeType glyph mask, which only Linux Skia (FreeType font manager, as in
+    # production) matches; macOS Skia rasterizes through CoreText. Pillow's in-memory fallback face has no mask.
+    if sys.platform.startswith("linux") and isinstance(
+        getattr(drawer.get_layout_font(drawer.DEFAULT_FONT, size), "path", None), str
+    ):
+        assert abs(left - right) <= 1, (left, right)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("size", [10, 11])
+async def test_card_id_badge_pillow_fallback_keeps_inclusive_far_edge(size):
+    """The Pillow fallback fills one pixel past the widget's far edges, so its badge has one spare row below."""
+    top, bottom, _, _ = await _card_id_badge_gaps("1418", size, "pillow")
+    assert bottom - top == 1, (top, bottom)
 
 
 @pytest.mark.anyio
