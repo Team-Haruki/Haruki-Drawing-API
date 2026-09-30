@@ -1266,8 +1266,9 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
                 .set_bg(RoundRectBg(_CARD_WELL_SOFT, 8, blur_glass=False))
             ):
                 Spacer(w=8, h=8).set_bg(RoundRectBg(color, 4, blur_glass=False))
-                TextBox(name, _CARD_SOURCE_STYLE, overflow="shrink").set_w(100)
-                TextBox(local_time, _CARD_LINE_STYLE).set_w(118)
+                # dot 8 + name 106 + time 112 + widest age ("12 小时前") stays inside the 332 px text column
+                TextBox(name, _CARD_SOURCE_STYLE, overflow="shrink").set_w(106)
+                TextBox(local_time, _CARD_LINE_STYLE).set_w(112)
                 TextBox(age, _CARD_AGE_STYLE.replace(color=color))
 
     return identity

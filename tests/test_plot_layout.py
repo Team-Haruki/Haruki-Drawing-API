@@ -98,9 +98,18 @@ def unit_text_metrics(monkeypatch):
 
 
 def test_text_box_wraps_and_applies_suffix_only_to_the_final_line(unit_text_metrics):
-    text = TextBox("abcdef", line_count=2, wrap=True, overflow="shrink").set_padding(0).set_w(4)
+    text = TextBox("abcdefghi", line_count=2, wrap=True, overflow="shrink").set_padding(0).set_w(4)
 
     assert text._get_lines() == ["abcd", "e..."]
+
+
+@pytest.mark.parametrize(("wrap", "expected"), [(False, ["abcd"]), (True, ["abcd", "ef"])])
+def test_text_box_shrink_keeps_text_that_fits_without_the_suffix(unit_text_metrics, wrap: bool, expected: list[str]):
+    # "abcd" / "ef" fit the 4-unit width as-is; only a real cut earns the "..." suffix.
+    text = "abcdef" if wrap else "abcd"
+    box = TextBox(text, line_count=2, wrap=wrap, overflow="shrink").set_padding(0).set_w(4)
+
+    assert box._get_lines() == expected
 
 
 @pytest.mark.parametrize(

@@ -198,11 +198,14 @@ async def _build_gacha_list_canvas(rqd: GachaListRequest) -> Canvas:
                                 ImageBox(list_image, size=(160, 60), image_size_mode="fit").set_content_align("c")
                             else:
                                 ImageBox(list_image, size=GACHA_LIST_LOGO_BOX_SIZE)
+                            # Three lines: long names that wrapped into two lines before need a third once
+                            # Latin and digits render wider; anything longer still ends in "...".
                             title_box = TextBox(
                                 f"【{g.id}】{g.name}",
                                 style1,
-                                line_count=2,
+                                line_count=3,
                                 use_real_line_count=False,
+                                overflow="shrink",
                             )
                             title_box.set_w(130)
                             TextBox(f"S {g.start_at.strftime('%Y-%m-%d %H:%M')}", style2)

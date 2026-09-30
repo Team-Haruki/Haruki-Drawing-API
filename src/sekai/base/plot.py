@@ -1204,7 +1204,8 @@ class TextBox(Widget):
 
     def _get_clip_text_to_width_idx(self, text: str, width: int, suffix: str = "") -> tuple[int, int] | None:
         font = self._get_pil_font()
-        w, _ = get_text_size(font, text + suffix)
+        # The suffix only marks a cut: text that already fits is never shortened to make room for it.
+        w, _ = get_text_size(font, text)
         if w <= width:
             return None
         left_idx, right_idx = 0, len(text)

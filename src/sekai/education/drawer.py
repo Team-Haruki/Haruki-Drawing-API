@@ -547,7 +547,8 @@ def _build_area_level_row(
         TextBox(
             f"+{level_info.bonus:.1f}%",
             TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color),
-        ).set_w(64)
+            overflow="shrink",
+        ).set_w(76)
     )
     multi_unit_bonus = getattr(level_info, "multi_unit_bonus", None)
     if multi_unit_bonus is not None:
