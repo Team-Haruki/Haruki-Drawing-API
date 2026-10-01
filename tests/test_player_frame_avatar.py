@@ -62,11 +62,12 @@ async def test_cloud_vertical_paths_resolve_to_horizontal_row_sprites(monkeypatc
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
     single = await drawer.get_player_frame_layers(_single())
+    # FriendListCell prefab sibling order: TL, TR, BR, BL, then the crown on top
     assert requested == [
         f"{ROOT}/frame_0001/10001/horizontal/frame_{name}.png"
-        for name in ("base", "lefttop", "righttop", "centertop", "leftbottom", "rightbottom")
+        for name in ("base", "lefttop", "righttop", "rightbottom", "leftbottom", "centertop")
     ]
-    assert [slot for _, slot in single.ornaments] == ["tl", "tr", "tc", "bl", "br"]
+    assert [slot for _, slot in single.ornaments] == ["tl", "tr", "br", "bl", "tc"]
 
     requested.clear()
     combo = await drawer.get_player_frame_layers(_combo())
@@ -85,7 +86,7 @@ async def test_cloud_vertical_paths_resolve_to_horizontal_row_sprites(monkeypatc
         "20001:frame_parts6_top.png",
         "20001:frame_parts6_bottom.png",
     }
-    assert [slot for _, slot in combo.ornaments] == ["tl", "bl", "tl", "bl", "tr", "br", "tr", "br", "tc"]
+    assert [slot for _, slot in combo.ornaments] == ["br", "bl", "tr", "tl", "tl", "tr", "br", "bl", "tc"]
 
     vertical = await drawer.get_player_frame_layers(_single(), "vertical")
     assert vertical.cell == "vertical"
@@ -202,3 +203,75 @@ async def test_framed_card_renders_on_both_backends_with_parts_on_their_sides(
     assert reds
     assert blues
     assert max(reds) <= w // 2 + 1 < min(blues) + 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+async def test_framed_card_keeps_the_avatar_well(tmp_path, monkeypatch, real_fonts, backend):
+    if backend == "skia":
+        pytest.importorskip("haruki_skia_renderer")
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    Image.new("RGBA", (128, 128), (20, 40, 60, 255)).save(tmp_path / "avatar.png")
+    _write_sprites(tmp_path, _single(), {})
+    framed = await drawer._build_profile_card_avatar_module(_card_request(_single()))
+    plain = await drawer._build_profile_card_avatar_module(_card_request(None))
+    well = drawer._CARD_AVATAR_WELL
+    assert framed._get_self_size() == plain._get_self_size() == (well, well)
+
+
+def _write_vertical_sprites(tmp_path, paths: PlayerFramePaths, color=(220, 40, 40, 255)):
+    dirs = drawer._frame_part_dirs(paths)
+    sizes = {"base": (132, 132), "centertop": (108, 90), "parts1_center": (108, 90)}
+    for part, name, _slot in [(1, "base", None), *drawer._FRAME_SPRITES[paths.frame_type]["vertical"]]:
+        target = tmp_path / f"{dirs[part]}/vertical/frame_{name}.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        size = sizes.get(name, (130, 352))
+        if name == "base":
+            image = Image.new("RGBA", size, (0, 0, 0, 0))
+            for box in ((0, 0, 132, 8), (0, 124, 132, 132), (0, 0, 8, 132), (124, 0, 132, 132)):
+                image.paste((200, 200, 200, 255), box)
+        else:
+            image = Image.new("RGBA", size, color)
+        image.save(target)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind", ["single", "combination"])
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+async def test_profile_page_avatar_frame_on_both_backends(tmp_path, monkeypatch, real_fonts, kind, backend):
+    """/profile keeps the vertical sprites around the 128 px avatar; scale 1.5 is the page's."""
+    if backend == "skia":
+        pytest.importorskip("haruki_skia_renderer")
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+    Image.new("RGBA", (128, 128), (20, 40, 60, 255)).save(tmp_path / "avatar.png")
+    paths = _single() if kind == "single" else _combo()
+    _write_vertical_sprites(tmp_path, paths)
+
+    async def render(p, scale=1.5):
+        async def build():
+            avatar = await drawer.get_asset_image_ref(tmp_path, "avatar.png")
+            with Canvas().set_padding(16) as canvas:
+                await drawer.get_avatar_widget_with_frame(p is not None, p, avatar, 128, [])
+            return canvas
+
+        if backend == "skia":
+            payload = await canvas_mod.render_canvas_payload(await build(), export_format="png", scale=scale)
+            assert payload is not None
+            return Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+        return (await (await build()).get_img(scale)).convert("RGBA")
+
+    framed, plain = await render(paths), await render(None)
+    assert framed.size == plain.size == (240, 240)
+    # ornaments overhang the avatar (outset + the prefab's +32 / -16 offsets) but stay in the padding
+    bounds = framed.getchannel("A").getbbox()
+    assert 0 < bounds[0] < 24
+    assert 0 < bounds[1] < 24
+    assert 216 < bounds[2] <= 240
+    assert 216 < bounds[3] <= 240
+    assert framed.getpixel((120, 120)) == plain.getpixel((120, 120)) == (20, 40, 60, 255)
+    assert ImageChops.difference(framed, plain).getbbox() is not None
+
+    # a missing sprite silently leaves the bare avatar
+    (tmp_path / drawer._frame_part_dirs(paths)[1] / "vertical" / "frame_base.png").unlink()
+    assert (await render(paths)).tobytes() == plain.tobytes()

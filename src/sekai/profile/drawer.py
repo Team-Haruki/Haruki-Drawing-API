@@ -338,40 +338,47 @@ _FRAME_SLOTS: dict[str, dict[str, tuple[float, float, float, float]]] = {
 # Reference cell sizes in UI units (prefab sizeDelta of the PlayerFrame*Cell roots).
 FRAME_REFERENCE_CELL = {"horizontal": (1542, 146), "vertical": (340, 748)}
 
-# (part number, sprite name, slot) per frame kind; part 1 also carries frame_base.
+# (part number, sprite name, slot) per frame kind, in the prefab's sibling (= draw) order; part 1
+# also carries frame_base, which sits under everything.
 _FRAME_SPRITES: dict[str, dict[str, tuple[tuple[int, str, str], ...]]] = {
-    "single": dict.fromkeys(
-        ("horizontal", "vertical"),
-        (
+    "single": {
+        "horizontal": (
+            (1, "lefttop", "tl"),
+            (1, "righttop", "tr"),
+            (1, "rightbottom", "br"),
+            (1, "leftbottom", "bl"),
+            (1, "centertop", "tc"),
+        ),
+        "vertical": (
             (1, "lefttop", "tl"),
             (1, "righttop", "tr"),
             (1, "centertop", "tc"),
-            (1, "leftbottom", "bl"),
             (1, "rightbottom", "br"),
+            (1, "leftbottom", "bl"),
         ),
-    ),
+    },
     "combination": {
         "horizontal": (
-            (1, "parts1_top", "tl"),
-            (1, "parts1_bottom", "bl"),
-            (2, "parts2_top", "tl"),
+            (5, "parts5_bottom", "br"),
             (3, "parts3_bottom", "bl"),
             (4, "parts4_top", "tr"),
-            (5, "parts5_bottom", "br"),
+            (2, "parts2_top", "tl"),
+            (1, "parts1_top", "tl"),
             (6, "parts6_top", "tr"),
             (6, "parts6_bottom", "br"),
+            (1, "parts1_bottom", "bl"),
             (1, "parts1_center", "tc"),
         ),
         "vertical": (
+            (5, "parts5_right", "br"),
+            (4, "parts4_left", "bl"),
+            (3, "parts3_right", "tr"),
+            (2, "parts2_left", "tl"),
             (1, "parts1_left", "tl"),
             (1, "parts1_right", "tr"),
-            (6, "parts6_left", "bl"),
-            (6, "parts6_right", "br"),
-            (2, "parts2_left", "tl"),
-            (3, "parts3_right", "tr"),
-            (4, "parts4_left", "bl"),
-            (5, "parts5_right", "br"),
             (1, "parts1_center", "tc"),
+            (6, "parts6_right", "br"),
+            (6, "parts6_left", "bl"),
         ),
     },
 }
@@ -451,20 +458,32 @@ class PlayerFrameBox(Widget):
     ``scale`` converts UI units to pixels: ornaments keep their native aspect at ``sprite * scale``,
     offsets scale with them and the base is 9-sliced over the rect. When the rect is narrower than
     the client cell the left- and right-anchored strips would overlap; ``split`` crops them at the
-    vertical centre line instead (the client never needs to).
+    vertical centre line instead (the client never needs to). ``outset`` grows the framed rect past
+    the widget box on every side (the widget still lays out at ``size``). Every pixel position and
+    size is integral, so the Pillow fallback never sees fractional geometry.
     """
 
-    def __init__(self, layers: PlayerFrameLayers, size: tuple[int, int], scale: float, *, split: bool = True) -> None:
+    def __init__(
+        self,
+        layers: PlayerFrameLayers,
+        size: tuple[int, int],
+        scale: float,
+        *,
+        split: bool = True,
+        outset: float = 0,
+    ) -> None:
         super().__init__()
         self.layers = layers
-        self.frame_size = (max(1, int(size[0])), max(1, int(size[1])))
+        self.box_size = (max(1, int(size[0])), max(1, int(size[1])))
+        self.outset = outset
+        self.frame_size = (max(1, round(size[0] + 2 * outset)), max(1, round(size[1] + 2 * outset)))
         self.frame_scale = scale
         self.split = split
         self.prefetch_image_sources = [layers.base, *(image for image, _ in layers.ornaments)]
         self.set_allow_draw_outside(True)
 
     def _get_content_size(self) -> tuple[int, int]:
-        return self.frame_size
+        return self.box_size
 
     def _draw_base(self, p: Painter) -> None:
         w, h = self.frame_size
@@ -473,7 +492,9 @@ class PlayerFrameBox(Widget):
         src = max(1, min(round(min(bw, bh) * _FRAME_BASE_BORDER), (bw - 1) // 2, (bh - 1) // 2))
         dst = max(1, min(round(src * self.frame_scale), w // 2, h // 2))
         xs, ys = (0, src, bw - src, bw), (0, src, bh - src, bh)
-        dx, dy = (0, dst, w - dst, w), (0, dst, h - dst, h)
+        o = -self.outset
+        dx = tuple(round(o + v) for v in (0, dst, w - dst, w))
+        dy = tuple(round(o + v) for v in (0, dst, h - dst, h))
         for j in range(3):
             for i in range(3):
                 if dx[i + 1] <= dx[i] or dy[j + 1] <= dy[j]:
@@ -490,13 +511,14 @@ class PlayerFrameBox(Widget):
         s = self.frame_scale
         slots = _FRAME_SLOTS[self.layers.cell]
         self._draw_base(p)
-        mid = w / 2
+        o = -self.outset
+        mid = o + w / 2
         for image, slot in self.layers.ornaments:
             ax, ay, ox, oy = slots[slot]
             iw, ih = image.size
             dw, dh = max(1, round(iw * s)), max(1, round(ih * s))
-            x = round(ax * w + ox * s - ax * dw)
-            y = round(h - dh - oy * s) if ay else round(-oy * s)
+            x = round(o + ax * w + ox * s - ax * dw)
+            y = round(o + h - dh - oy * s) if ay else round(o - oy * s)
             src = (0, 0, iw, ih)
             if self.split and slot != "tc":
                 # left-anchored strips stop at the centre line, right-anchored ones start there
@@ -557,12 +579,28 @@ async def wrap_with_player_frame(
     return ret
 
 
-# 获取带框头像控件（兼容旧调用：头像本身不再叠框，框画在整张玩家卡片上）
+# The /profile page keeps its framed avatar: the vertical (player cell) sprites around a square
+# avatar on a 672-unit reference square, the layout that page has always used.
+_AVATAR_FRAME_REFERENCE = 672
+_AVATAR_FRAME_OUTSET = 2.5
+
+
+# 获取带框头像控件
 async def get_avatar_widget_with_frame(
     is_frame: bool, frame_paths, avatar_img: ImageSource, avatar_w: int, frame_data: list[dict]
 ) -> Frame:
-    with Frame().set_size((avatar_w, avatar_w)).set_content_align("c") as ret:
+    layers = await get_player_frame_layers(frame_paths, "vertical") if is_frame and frame_paths else None
+    with Frame().set_size((avatar_w, avatar_w)).set_content_align("c").set_allow_draw_outside(True) as ret:
         ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
+        if layers is not None:
+            side = avatar_w + 2 * _AVATAR_FRAME_OUTSET
+            PlayerFrameBox(
+                layers,
+                (avatar_w, avatar_w),
+                side / _AVATAR_FRAME_REFERENCE,
+                split=False,
+                outset=_AVATAR_FRAME_OUTSET,
+            )
     return ret
 
 
@@ -687,17 +725,11 @@ async def _build_profile_identity_module(ctx: _ProfileLayoutContext) -> Widget:
             _build_profile_avatar_module(ctx),
             _build_profile_rank_badge_module(ctx),
         )
-        frame_paths = ctx.request.frame_paths or ctx.request.profile.frame_paths
-        framed = bool(ctx.request.profile.has_frame and frame_paths)
-        root = HSplit().set_content_align("c").set_item_align("c").set_sep(32)
-        root.set_padding((32, 24) if framed else (32, 0))
+        root = HSplit().set_content_align("c").set_item_align("c").set_sep(32).set_padding((32, 0))
         root.add_item(avatar_module)
         text_col = _build_profile_identity_text_module(ctx)
         text_col.add_item(rank_badge_module)
         root.add_item(text_col)
-        if framed:
-            # the identity row is the player's list row (leader icon | name / ID / rank)
-            return await wrap_with_player_frame(root, frame_paths, cell="horizontal")
         return root
 
     # Adaptive text colors must be evaluated on the final painted background.

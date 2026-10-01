@@ -145,7 +145,7 @@ async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) ->
     )
     layers = await drawer.get_player_frame_layers(paths)
     assert layers.cell == "horizontal"
-    assert [slot for _image, slot in layers.ornaments] == ["tl", "tr", "tc", "bl", "br"]
+    assert [slot for _image, slot in layers.ornaments] == ["tl", "tr", "br", "bl", "tc"]
     box = drawer.PlayerFrameBox(layers, (400, 100), 0.5)
     assert box._get_content_size() == (400, 100)
     painter = _RecordingPainter()
@@ -154,7 +154,11 @@ async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) ->
 
     avatar = await drawer.get_avatar_widget_with_frame(True, paths, _image(), 80, [])
     assert isinstance(avatar, Frame)
-    assert len(avatar.items) == 1  # the frame decorates the whole card, never the bare avatar
+    assert isinstance(avatar.items[1], drawer.PlayerFrameBox)
+    assert avatar.items[1].layers.cell == "vertical"
+    assert avatar._get_self_size() == (80, 80)
+    no_frame = await drawer.get_avatar_widget_with_frame(False, paths, _image(), 80, [])
+    assert len(no_frame.items) == 1
 
 
 @pytest.mark.anyio
