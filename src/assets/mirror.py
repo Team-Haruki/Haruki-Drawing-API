@@ -49,6 +49,7 @@ from src.assets.revision_index import (
     parse_region,
     pointer_key,
 )
+from src.core.render_force import render_forced
 from src.storage.protocols import StorageNotFound, StorageTooLarge
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -746,7 +747,8 @@ class AssetMirror:
 
     # ------------------------------------------------------------------ negative memo
     def _negative_hit(self, memo_key: tuple[str, str, str]) -> bool:
-        if self._settings.negative_ttl_seconds <= 0:
+        # A forced render re-asks the store: "the asset has landed since" is a reason to force.
+        if self._settings.negative_ttl_seconds <= 0 or render_forced():
             return False
         now = self._clock()
         with self._negative_lock:

@@ -21,6 +21,7 @@ HEADER_CACHE_GROUP = "X-Haruki-Cache-Group"
 HEADER_USER_ID = "X-Haruki-User-Id"
 HEADER_ASSET_REVISION = "X-Haruki-Asset-Revision"
 HEADER_RENDERER_EPOCH = "X-Haruki-Renderer-Epoch"
+HEADER_RENDER_FORCE = "X-Haruki-Render-Force"
 
 DEFAULT_GROUP = "pjsk"
 DEFAULT_USER_ID = "public"
@@ -46,6 +47,8 @@ class RenderCacheDirective:
     user_id: str
     asset_revision: str = ""
     renderer_epoch: str = ""
+    # The caller wants a fresh render: Drawing's own result caches miss (see src.core.render_force).
+    force: bool = False
 
 
 class DirectiveError(ValueError):
@@ -102,13 +105,17 @@ def _optional_token(headers: Mapping[str, str], name: str, pattern: re.Pattern[s
     return value
 
 
-def _store(headers: Mapping[str, str]) -> bool:
-    value = _get(headers, HEADER_CACHE_STORE)
+def _flag(headers: Mapping[str, str], name: str, default: bool) -> bool:
+    value = _get(headers, name)
     if value is None or value == "":
-        return True
+        return default
     if value not in {"0", "1"}:
-        raise DirectiveError(HEADER_CACHE_STORE, "malformed")
+        raise DirectiveError(name, "malformed")
     return value == "1"
+
+
+def _store(headers: Mapping[str, str]) -> bool:
+    return _flag(headers, HEADER_CACHE_STORE, True)
 
 
 def is_artifact_requested(headers: Mapping[str, str]) -> bool:
@@ -146,4 +153,5 @@ def parse_render_cache_directive(headers: Mapping[str, str], *, ttl_max: int) ->
         user_id=user_id,
         asset_revision=_optional_token(headers, HEADER_ASSET_REVISION, _DIGEST_RE, ""),
         renderer_epoch=_optional_token(headers, HEADER_RENDERER_EPOCH, _DIGEST_RE, ""),
+        force=_flag(headers, HEADER_RENDER_FORCE, False),
     )
