@@ -7,6 +7,17 @@ from src.sekai.base.timezone import TimeZoneRequest
 from src.sekai.honor.drawer import HonorRequest
 
 
+class PlayerFrameParts(BaseModel):
+    """Explicit sprite paths supplied by Cloud's operator-only file configuration."""
+
+    base: str
+    centertop: str
+    leftbottom: str
+    lefttop: str
+    rightbottom: str
+    righttop: str
+
+
 class PlayerFramePaths(BaseModel):
     r"""PlayerFramePaths
 
@@ -36,6 +47,7 @@ class PlayerFramePaths(BaseModel):
     righttop: str
 
     frame_type: Literal["single", "combination"] = "single"
+    horizontal: PlayerFrameParts | None = None
     side_left_top: str | None = None
     side_right_top: str | None = None
     side_left_bottom: str | None = None

@@ -275,3 +275,29 @@ async def test_profile_page_avatar_frame_on_both_backends(tmp_path, monkeypatch,
     # a missing sprite silently leaves the bare avatar
     (tmp_path / drawer._frame_part_dirs(paths)[1] / "vertical" / "frame_base.png").unlink()
     assert (await render(paths)).tobytes() == plain.tobytes()
+
+
+@pytest.mark.anyio
+async def test_explicit_local_parts_load_independently_without_bundle_derivation(monkeypatch):
+    fields = ("base", "lefttop", "righttop", "rightbottom", "leftbottom", "centertop")
+    paths = {field: f"static_images/mixed/{i}/chosen.png" for i, field in enumerate(fields)}
+    request = _single().model_copy(update={"horizontal": None})
+    request = PlayerFramePaths.model_validate({**request.model_dump(), "horizontal": paths})
+    requested = []
+
+    async def asset(_root, path, **_kwargs):
+        requested.append(path)
+        return Image.new("RGBA", (60, 60))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
+    layers = await drawer.get_player_frame_layers(request)
+    assert requested == [paths[field] for field in fields]
+    assert [slot for _, slot in layers.ornaments] == ["tl", "tr", "br", "bl", "tc"]
+
+    async def missing(_root, path, **_kwargs):
+        if path == paths["rightbottom"]:
+            raise FileNotFoundError(path)
+        return Image.new("RGBA", (60, 60))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", missing)
+    assert await drawer.get_player_frame_layers(request) is None

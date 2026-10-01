@@ -431,14 +431,19 @@ async def get_player_frame_layers(frame_paths, cell: str = "horizontal") -> Play
     if frame_paths is None or cell not in _FRAME_SLOTS:
         return None
     kind = getattr(frame_paths, "frame_type", None) or "single"
-    dirs = _frame_part_dirs(frame_paths)
-    if dirs is None:
-        return None
-    sprites = _FRAME_SPRITES[kind][cell]
-    paths = [
-        f"{dirs[1]}/{cell}/frame_base.png",
-        *(f"{dirs[part]}/{cell}/frame_{name}.png" for part, name, _ in sprites),
-    ]
+    explicit = getattr(frame_paths, "horizontal", None) if cell == "horizontal" else None
+    if explicit is not None:
+        sprites = _FRAME_SPRITES["single"][cell]
+        paths = [explicit.base, *(getattr(explicit, name) for _, name, _ in sprites)]
+    else:
+        dirs = _frame_part_dirs(frame_paths)
+        if dirs is None:
+            return None
+        sprites = _FRAME_SPRITES[kind][cell]
+        paths = [
+            f"{dirs[1]}/{cell}/frame_base.png",
+            *(f"{dirs[part]}/{cell}/frame_{name}.png" for part, name, _ in sprites),
+        ]
     try:
         sources = await asyncio.gather(
             *(get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise") for path in paths)
