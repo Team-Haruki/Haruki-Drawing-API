@@ -79,24 +79,30 @@ def test_alias_flow_rows_and_width_choice_follow_measured_chips() -> None:
     assert drawer._alias_width_without_trim(["a very long alias text"] * 200) == drawer._ALIAS_WIDTHS[-1]
 
 
-def test_alias_trim_metrics_keep_the_picture_beside_the_column() -> None:
+def test_alias_trim_metrics_anchor_a_large_picture_to_the_page_bottom() -> None:
     tall = drawer._prepare_alias_trim_image(_encoded(_image((100, 800))))
     wide = drawer._prepare_alias_trim_image(_encoded(_image((1200, 200))))
+    hang = drawer._ALIAS_TRIM_BOTTOM_HANG
 
     frame_w, frame_h, display_h = drawer._resolve_alias_trim_metrics(tall, 600)
-    assert display_h == 600
+    assert display_h == 600 + drawer._ALIAS_TRIM_EXTRA_H
     assert frame_h == 600
-    assert frame_w == round(600 * 100 / 800) - drawer._ALIAS_TRIM_OVERLAP
+    assert frame_w == round(display_h * 100 / 800) - drawer._ALIAS_TRIM_OVERLAP
 
     frame_w, frame_h, display_h = drawer._resolve_alias_trim_metrics(wide, 600)
     assert frame_w == drawer._ALIAS_TRIM_MAX_W - drawer._ALIAS_TRIM_OVERLAP
     assert display_h == round(drawer._ALIAS_TRIM_MAX_W / 6)
     assert frame_h == 600
 
-    # A short column still gets a picture of the minimum height.
+    # A short column still gets a picture of the minimum height, and the frame keeps its head on the page.
     _, frame_h, display_h = drawer._resolve_alias_trim_metrics(tall, 100)
     assert display_h == drawer._ALIAS_TRIM_MIN_H
-    assert frame_h == drawer._ALIAS_TRIM_MIN_H
+    assert frame_h == drawer._ALIAS_TRIM_MIN_H - hang
+
+    # A very tall column caps the picture.
+    _, frame_h, display_h = drawer._resolve_alias_trim_metrics(tall, 2000)
+    assert display_h == drawer._ALIAS_TRIM_MAX_H
+    assert frame_h == 2000
 
 
 def test_alias_column_and_trim_panel_build_detached(monkeypatch) -> None:
@@ -118,6 +124,7 @@ def test_alias_column_and_trim_panel_build_detached(monkeypatch) -> None:
     assert isinstance(trim, Frame)
     assert len(trim.items) == 1
     assert trim.parent is None
+    assert trim.items[0].offset == (0, drawer._ALIAS_TRIM_BOTTOM_HANG)
 
     heights = iter([900, 600])
     monkeypatch.setattr(drawer, "_build_alias_column", lambda *_args, **_kwargs: Frame().set_size((10, next(heights))))

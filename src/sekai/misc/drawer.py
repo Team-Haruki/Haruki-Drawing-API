@@ -51,6 +51,7 @@ from src.sekai.base.plot import (
     Flow,
     Frame,
     HSplit,
+    ImageBg,
     ImageBox,
     RoundClipFrame,
     RoundRectBg,
@@ -488,9 +489,7 @@ def _deep(accent) -> Color:
 # --------------------------- 角色生日 --------------------------- #
 
 _BIRTHDAY_W = 900
-_BIRTHDAY_ART_H = 300
-_BIRTHDAY_ART_MISSING_H = 160
-_BIRTHDAY_ART_FOCUS = 0.42  # vertical centre of the crop, as a fraction of the art height (faces sit high)
+_BIRTHDAY_PANEL_ALPHA = 150  # panels sit on the card art, so they are more opaque than on the triangle background
 _BIRTHDAY_SD_WELL = 72
 _BIRTHDAY_SD = 64
 _BIRTHDAY_LABEL_H = 40
@@ -576,16 +575,6 @@ def _birthday_calendar_cells(all_characters: list[CharaBirthdayData]) -> list[li
     return list(cells.values())
 
 
-def _cover_rect(size: tuple[int, int], target: tuple[int, int], focus: float) -> tuple[float, float, float, float]:
-    """The source crop that covers ``target`` at the image's aspect, centred horizontally, ``focus`` down."""
-    src_w, src_h = max(1, size[0]), max(1, size[1])
-    scale = max(target[0] / src_w, target[1] / src_h)
-    crop_w, crop_h = target[0] / scale, target[1] / scale
-    x0 = (src_w - crop_w) / 2
-    y0 = min(max(0.0, src_h * focus - crop_h / 2), src_h - crop_h)
-    return (x0, y0, x0 + crop_w, y0 + crop_h)
-
-
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
 ) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, ImageSource], float]:
@@ -626,7 +615,7 @@ def _draw_birthday_header(rqd: CharaBirthdayRequest, sd_image, title_image, acce
     text_w_budget = width - 2 * PANEL_PAD - _BIRTHDAY_SD_WELL - 14
     label_w = round(title_image.size[0] * _BIRTHDAY_LABEL_H / max(1, title_image.size[1]))
     label_w = max(40, min(label_w, text_w_budget - chips_w))
-    with panel(width):
+    with panel(width, alpha=_BIRTHDAY_PANEL_ALPHA):
         with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
             with (
                 Frame()
@@ -648,23 +637,6 @@ def _draw_birthday_header(rqd: CharaBirthdayRequest, sd_image, title_image, acce
                         ink(TextBox(f"· {tz}", SUBTITLE_STYLE))
 
 
-def _draw_birthday_art(card_image, accent: Color, width: int) -> None:
-    """The newest birthday card's full art as a banner; a tinted band with the placeholder when it is missing."""
-    missing = isinstance(card_image, MissingImageRef)
-    height = _BIRTHDAY_ART_MISSING_H if missing else _BIRTHDAY_ART_H
-    with RoundClipFrame(14).set_size((width, height)).set_content_align("c"):
-        if missing:
-            Spacer(w=width, h=height).set_bg(RoundRectBg(_with_alpha(accent, 48), 14, blur_glass=False))
-            ImageBox(card_image, size=(120, 120), image_size_mode="fit")
-            return
-        ImageBox(
-            card_image,
-            size=(width, height),
-            image_size_mode="fill",
-            source_rect=_cover_rect(card_image.size, (width, height), _BIRTHDAY_ART_FOCUS),
-        )
-
-
 def _draw_birthday_events(rqd: CharaBirthdayRequest, accent: Color, width: int) -> None:
     rows = _birthday_event_rows(rqd)
     spans = [
@@ -673,7 +645,7 @@ def _draw_birthday_events(rqd: CharaBirthdayRequest, accent: Color, width: int) 
     ]
     tz_label = _birthday_timezone_label(spans[0][0], spans[0][1], rqd.timezone) if spans else ""
     label_w = max(text_w(_BIRTHDAY_EVENT_LABEL_STYLE, row.label) for row in rows) + 4 + 20
-    with panel(width):
+    with panel(width, alpha=_BIRTHDAY_PANEL_ALPHA):
         section_header(
             "生日活动",
             accent,
@@ -698,7 +670,7 @@ def _draw_birthday_events(rqd: CharaBirthdayRequest, accent: Color, width: int) 
 
 
 def _draw_birthday_cards(rqd: CharaBirthdayRequest, card_thumbs, accent: Color, width: int) -> None:
-    with panel(width):
+    with panel(width, alpha=_BIRTHDAY_PANEL_ALPHA):
         section_header("生日卡牌", accent, soft_chips=[(f"{len(rqd.cards)} 张", _deep(accent))])
         size = _BIRTHDAY_CARD_THUMB_SIZE
         with Flow().set_w(width - 2 * PANEL_PAD).set_sep(12, 10).set_content_align("lt").set_item_align("lt"):
@@ -711,7 +683,7 @@ def _draw_birthday_cards(rqd: CharaBirthdayRequest, card_thumbs, accent: Color, 
 
 def _draw_birthday_calendar(rqd: CharaBirthdayRequest, calendar_icons, accent: Color, width: int) -> None:
     icon = _BIRTHDAY_CALENDAR_ICON_SIZE
-    with panel(width):
+    with panel(width, alpha=_BIRTHDAY_PANEL_ALPHA):
         section_header("生日日历", accent, captions=["按下次生日先后排列"])
         with Flow().set_w(width - 2 * PANEL_PAD).set_sep(6, 6).set_content_align("lt").set_item_align("c"):
             for group in _birthday_calendar_cells(rqd.all_characters):
@@ -741,16 +713,18 @@ def _draw_birthday_calendar(rqd: CharaBirthdayRequest, calendar_icons, accent: C
 async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     r"""_build_chara_birthday_canvas
 
-    合成角色生日图片: 头部(SD + 名字标签 + 服务器/日期/倒计时) → 生日卡牌立绘横幅 → 活动时间 → 生日卡牌 → 生日日历
+    合成角色生日图片: 生日卡面作全页背景; 头部(SD + 名字标签 + 服务器/日期/倒计时) → 活动时间 → 生日卡牌 → 生日日历
     """
     card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
     accent = _birthday_accent(rqd.color_code)
     width = _BIRTHDAY_W
 
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+    # The newest birthday card's art is the page background, as before; a missing art falls back to the
+    # plain triangle background rather than a full-page placeholder.
+    background = SEKAI_BLUE_BG if isinstance(card_image, MissingImageRef) else ImageBg(card_image)
+    with Canvas(bg=background).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(_PAGE_SEP).set_padding(_PAGE_PAD):
             _draw_birthday_header(rqd, sd_image, title_image, accent, width)
-            _draw_birthday_art(card_image, accent, width)
             _draw_birthday_events(rqd, accent, width)
             if rqd.cards:
                 _draw_birthday_cards(rqd, card_thumbs, accent, width)
@@ -776,7 +750,7 @@ async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> Encode
 # --------------------------- 别名列表 --------------------------- #
 
 _ALIAS_WIDTHS = (600, 680, 760, 840, 920, 1000)
-_ALIAS_TARGET_H = 620  # with a standing picture: the narrowest column no taller than this
+_ALIAS_TARGET_H = 720  # with a standing picture: the narrowest column no taller than this
 _ALIAS_MAX_ROWS = 8  # without one: the narrowest width that keeps the chips within this many rows
 _ALIAS_CHIP_STYLE = TextStyle(font=DEFAULT_FONT, size=18, color=TEXT)
 _ALIAS_CHIP_PAD = (12, 6)
@@ -784,10 +758,14 @@ _ALIAS_CHIP_SEP = 8
 _ALIAS_JACKET_WELL = 64
 _ALIAS_JACKET = 54
 _ALIAS_TRIM_ALPHA_FLOOR = 36
-_ALIAS_TRIM_MAX_W = 760
-_ALIAS_TRIM_MIN_H = 320
+_ALIAS_TRIM_MAX_W = 920
+_ALIAS_TRIM_MIN_H = 500
+_ALIAS_TRIM_MAX_H = 920
+_ALIAS_TRIM_EXTRA_H = 24  # the picture stands this much taller than the column it is drawn beside
 # The picture may lean this far over the column: no more than the panel padding, so hair never covers a chip.
 _ALIAS_TRIM_OVERLAP = 12
+# The picture's feet sit on the page's bottom edge: it hangs below its frame by the page and canvas padding.
+_ALIAS_TRIM_BOTTOM_HANG = _PAGE_PAD + BG_PADDING
 _ALIAS_TITLE_MIN_SIZE = 24
 _ALIAS_TITLE_LINES = 2
 _ALIAS_MUSIC_ACCENT: Color = (64, 132, 226, 255)
@@ -924,16 +902,19 @@ def _resolve_alias_column_width(
 
 
 def _resolve_alias_trim_metrics(trim_img: AlphaTrimImageBox, column_h: int) -> tuple[int, int, int]:
-    """``(frame_w, frame_h, display_h)``: the picture stands as tall as the column (at least the minimum), its
-    width capped; the frame is narrower than the picture by the overlap, so the picture leans over the column."""
+    """``(frame_w, frame_h, display_h)``: the picture is large (at least the minimum height, a little taller than
+    the column, capped), bottom-aligned so its feet touch the page's bottom edge, and the frame is narrower than
+    the picture only by the overlap, so it leans over the column's padding but never over a chip. The frame is
+    tall enough for the picture's head to stay on the page when the column is short."""
     width, height = trim_img.natural_size
     aspect = width / max(1, height)
-    display_h = max(column_h, _ALIAS_TRIM_MIN_H)
+    display_h = max(_ALIAS_TRIM_MIN_H, min(_ALIAS_TRIM_MAX_H, column_h + _ALIAS_TRIM_EXTRA_H))
     rendered_w = max(1, round(display_h * aspect))
     if rendered_w > _ALIAS_TRIM_MAX_W:
         rendered_w = _ALIAS_TRIM_MAX_W
         display_h = max(1, round(rendered_w / max(aspect, 1e-6)))
-    return rendered_w - _ALIAS_TRIM_OVERLAP, max(column_h, display_h), display_h
+    frame_h = max(column_h, display_h - _ALIAS_TRIM_BOTTOM_HANG)
+    return rendered_w - _ALIAS_TRIM_OVERLAP, frame_h, display_h
 
 
 def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, column_h: int) -> Frame:
@@ -942,7 +923,7 @@ def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, column_h: int) -> Frame
         frame_w, frame_h, display_h = _resolve_alias_trim_metrics(trim_img, column_h)
         trim_panel = Frame().set_size((frame_w, frame_h)).set_content_align("rb").set_allow_draw_outside(True)
         trim_img.image_size_mode = "fit"
-        trim_panel.add_item(trim_img.set_size((None, display_h)))
+        trim_panel.add_item(trim_img.set_size((None, display_h)).set_offset((0, _ALIAS_TRIM_BOTTOM_HANG)))
         return trim_panel
     finally:
         Widget._thread_local.reset(token)

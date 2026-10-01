@@ -136,7 +136,7 @@ def soft_chip(text: str, color, *, size: int = 12, radius: int = 5, padding=(4, 
     return chip(text, _with_alpha(color, alpha), style=style, radius=radius, padding=padding)
 
 
-def panel(width: int) -> VSplit:
+def panel(width: int, *, alpha: int = 80) -> VSplit:
     return (
         VSplit()
         .set_w(width)
@@ -144,7 +144,7 @@ def panel(width: int) -> VSplit:
         .set_item_align("lt")
         .set_sep(PANEL_SEP)
         .set_padding(PANEL_PAD)
-        .set_bg(roundrect_bg(alpha=80))
+        .set_bg(roundrect_bg(alpha=alpha))
     )
 
 

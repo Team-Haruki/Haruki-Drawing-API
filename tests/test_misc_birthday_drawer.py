@@ -71,6 +71,7 @@ def test_chara_birthday_canvas_covers_standard_and_anniversary_sections(is_fifth
 
     assert image.width > 0
     assert image.height > 0
+    assert isinstance(canvas.bg, misc_drawer.ImageBg)
 
 
 def test_chara_birthday_canvas_survives_missing_art_and_empty_lists(monkeypatch) -> None:
@@ -83,8 +84,10 @@ def test_chara_birthday_canvas_survives_missing_art_and_empty_lists(monkeypatch)
     image = asyncio.run(canvas.get_img())
 
     assert image.width > 0
-    # Without cards and a calendar only the header, the art band and the event panel remain.
-    assert len(canvas.items[0].items) == 3
+    # Missing art: the plain triangle background instead of a full-page placeholder.
+    assert canvas.bg is misc_drawer.SEKAI_BLUE_BG
+    # Without cards and a calendar only the header and the event panel remain.
+    assert len(canvas.items[0].items) == 2
 
 
 def test_birthday_event_rows_follow_the_anniversary_flag() -> None:
@@ -122,24 +125,6 @@ def test_birthday_span_text_and_length() -> None:
     assert misc_drawer._birthday_span_length(start, start + timedelta(days=1) - timedelta(minutes=1)) == "1 天"
     assert misc_drawer._birthday_span_length(start, start + timedelta(hours=6)) == "6 小时"
     assert misc_drawer._birthday_span_length(start, start) == "1 小时"
-
-
-def test_cover_rect_covers_the_target_with_the_focus_clamped() -> None:
-    rect = misc_drawer._cover_rect((2520, 1440), (900, 300), 0.42)
-    crop_h = 300 / (900 / 2520)
-    assert rect[0] == 0
-    assert rect[2] == 2520
-    assert rect[3] - rect[1] == pytest.approx(crop_h)
-    assert rect[1] == pytest.approx(1440 * 0.42 - crop_h / 2)
-
-    # A focus near the bottom keeps the crop inside the image.
-    rect = misc_drawer._cover_rect((100, 100), (100, 50), 0.95)
-    assert rect[1] == 50
-    assert rect[3] == 100
-    # A portrait source is cropped horizontally, centred.
-    rect = misc_drawer._cover_rect((100, 400), (100, 50), 0.5)
-    assert (rect[0], rect[2]) == (0, 100)
-    assert rect[1] == 175
 
 
 def test_birthday_timezone_label_prefers_explicit_then_datetime_zone() -> None:
