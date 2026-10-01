@@ -492,8 +492,17 @@ selected font and local-template contents, and output-affecting settings. Node n
 sizes, cache budgets and timeouts do not participate. Native builds for different architectures can have
 different identities; consumers track each backend and include the backend set in their cache generation.
 
-Identity is computed once per process, matching process-loaded fonts and templates. Replace local fonts or
-templates through a restart/deploy. The remote game-asset revision is independent: Cloud passes a global
+The process part (code, native library, fonts, custom-profile material, settings) is computed once per
+process, matching process-loaded fonts; replace those through a restart/deploy. The local static tree
+(`assets.base_dir/assets.result_asset_path`, i.e. `static_images/`) is a separate part: image loads key on
+`(path, mtime_ns, size)`, so files replaced on disk are used without a restart, and the identity follows —
+every 10 s a stat walk is compared with the previous one and the tree is re-hashed only when it changed. The
+digest is content-only, so nodes with identical files agree whatever their mtimes.
+
+Only pixel-relevant static files count: extensions `.png .jpg .jpeg .webp .gif .bmp .svg .css`, outside
+directories named `*-candidate` or starting with `.`/`_` (hidden files are skipped too). Keep scratch material
+(redraw candidates, manifests, archives, audio) under those names so editing it does not invalidate render
+caches. The remote game-asset revision is independent: Cloud passes a global
 revision digest in the directive and incorporates payload-specific shard digests in its own request key.
 Drawing uses the revision as a separate mirror directory, including negative memoization and heavy-worker
 requests; it does not parse the manifest itself. No directive means the configured mirror version is used.
