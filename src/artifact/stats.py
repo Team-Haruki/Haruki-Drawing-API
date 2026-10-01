@@ -14,6 +14,7 @@ from typing import Any
 
 SIMPLE_COUNTERS: tuple[str, ...] = (
     "requests_with_directive",
+    "requests_forced",
     "bytes_no_directive",
     "store_skipped",
     "published",

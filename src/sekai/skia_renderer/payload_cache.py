@@ -21,6 +21,7 @@ import time
 from typing import Any
 
 from src.core.missing_asset_telemetry import current_missing_asset_count
+from src.core.render_force import render_forced
 from src.settings import (
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
     COMPOSED_IMAGE_CACHE_SIZE,
@@ -57,7 +58,7 @@ class _SkiaPayloadCache:
         self._total_bytes -= entry[1]
 
     def get(self, key: str) -> Any | None:
-        if not self._enabled():
+        if not self._enabled() or render_forced():
             return None
         now = time.monotonic()
         with self._lock:

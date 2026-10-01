@@ -44,6 +44,7 @@ class _WorkerTask:
     request_path: str
     request_method: str
     asset_revision: str = ""
+    force: bool = False
 
 
 @dataclass(slots=True)
@@ -141,10 +142,13 @@ def _heavy_render_worker_main(
 
         from src.assets.request_context import begin_asset_revision, end_asset_revision
         from src.core.debug import pop_request_context, push_request_context, set_request_stage
+        from src.core.render_force import begin_render_force
 
         tokens = push_request_context(task.request_id, task.request_path, task.request_method)
         end_asset_revision(tokens.asset_revision)
         tokens.asset_revision = begin_asset_revision(task.asset_revision)
+        if task.force:
+            tokens.render_force = begin_render_force(True)
         with heartbeat_at.get_lock():
             heartbeat_at.value = time.monotonic()
 
@@ -253,6 +257,7 @@ class HeavyRenderWorkerPool:
     async def render(self, kind: HeavyTaskKind, payload: dict[str, Any]) -> EncodedImagePayload:
         from src.assets.request_context import current_asset_revision
         from src.core.debug import current_request_context
+        from src.core.render_force import render_forced
 
         request_ctx = current_request_context()
         slot = await self._acquire_slot(kind, request_ctx)
@@ -264,6 +269,7 @@ class HeavyRenderWorkerPool:
             request_path=request_ctx["path"],
             request_method=request_ctx["method"],
             asset_revision=current_asset_revision(),
+            force=render_forced(),
         )
         slot.current_task_id = task.task_id
         slot.current_task_kind = kind

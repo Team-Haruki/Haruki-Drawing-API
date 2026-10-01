@@ -25,6 +25,7 @@ from src.artifact.stats import artifact_node_name, artifact_stats
 from src.assets.request_context import begin_asset_revision, end_asset_revision
 from src.core.missing_asset_telemetry import begin_missing_asset_scope, end_missing_asset_scope
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope
+from src.core.render_force import begin_render_force, end_render_force
 from src.settings import (
     OVERLOAD_MAX_INFLIGHT_REQUESTS,
     OVERLOAD_RETRY_AFTER_SECONDS,
@@ -176,6 +177,7 @@ class RequestContextTokens:
     missing_assets: object | None = None
     render_directive: contextvars.Token | None = None
     asset_revision: object | None = None
+    render_force: contextvars.Token | None = None
 
 
 def current_request_context() -> dict[str, str]:
@@ -213,6 +215,9 @@ def pop_request_context(tokens: RequestContextTokens) -> None:
     _request_path_var.reset(tokens.path)
     _request_method_var.reset(tokens.method)
     _request_stage_var.reset(tokens.stage)
+    if tokens.render_force is not None:
+        end_render_force(tokens.render_force)
+        tokens.render_force = None
     if tokens.render_directive is not None:
         _render_directive_var.reset(tokens.render_directive)
         tokens.render_directive = None
@@ -801,6 +806,9 @@ def _bind_render_directive(request: Request, trace: _DebugRequestTrace) -> JSONR
             trace.tokens.render_directive = _render_directive_var.set(directive)
             end_asset_revision(trace.tokens.asset_revision)
             trace.tokens.asset_revision = begin_asset_revision(directive.asset_revision)
+            if directive.force:
+                artifact_stats.incr("requests_forced")
+                trace.tokens.render_force = begin_render_force(True)
     return None
 
 

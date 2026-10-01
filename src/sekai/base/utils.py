@@ -40,6 +40,7 @@ from src.core.pillow_telemetry import (
     PILLOW_TOUCH_PLACEHOLDER,
     record_pillow_touch,
 )
+from src.core.render_force import render_forced
 from src.sekai.base.asset_key import AssetKey, candidates, first_candidate
 from src.sekai.base.image_info import probe_asset, probe_encoded
 from src.sekai.base.image_source import (
@@ -696,6 +697,8 @@ def collect_asset_signatures(base_path: Path, material: Any) -> dict[str, Any]:
 
 
 def get_composed_image_cached(cache_key: str) -> Image.Image | None:
+    if render_forced():
+        return None
     return _composed_image_cache.get(cache_key)
 
 
@@ -704,6 +707,8 @@ def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
 
 
 def get_composed_image_disk_cached(namespace: str, cache_key: str) -> Image.Image | None:
+    if render_forced():
+        return None
     return _composed_image_disk_cache.get(namespace, cache_key)
 
 
