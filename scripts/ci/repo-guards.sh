@@ -7,7 +7,7 @@ if git ls-files --error-unmatch src/sekai/mysekai/drawer.real.py >/dev/null 2>&1
   echo "::error file=src/sekai/mysekai/drawer.real.py::drawer.real.py must stay untracked"
   exit 1
 fi
-uv run --no-sync python - <<'PY'
+uv run --no-sync --no-build python - <<'PY'
 from pathlib import Path
 
 from src.settings import Settings
