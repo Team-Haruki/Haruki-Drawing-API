@@ -133,3 +133,18 @@ def test_birthday_timezone_label_prefers_explicit_then_datetime_zone() -> None:
     assert misc_drawer._birthday_timezone_label(aware, aware, "Asia/Shanghai") == " (Asia/Shanghai)"
     assert misc_drawer._birthday_timezone_label(aware, aware, None) == " (UTC)"
     assert misc_drawer._birthday_timezone_label(None, None, None) == ""
+
+
+def test_birthday_page_width_follows_the_content_within_bounds() -> None:
+    title = Image.new("RGBA", (208, 72))
+    accent = misc_drawer._birthday_accent("#33dd99")
+    five = _birthday_request(True, cards=[CharaBirthdayCard(id=i, thumbnail_path="t.png") for i in range(5)])
+    one = _birthday_request(False)
+    wide = misc_drawer._birthday_page_width(five, title, accent)
+    narrow = misc_drawer._birthday_page_width(one, title, accent)
+    assert misc_drawer._BIRTHDAY_MIN_W <= narrow <= wide <= misc_drawer._BIRTHDAY_MAX_W
+    # Five thumbnails set the width when they are the widest row; the calendar never does.
+    cards_row = 5 * misc_drawer._BIRTHDAY_CARD_THUMB_SIZE + 4 * misc_drawer._BIRTHDAY_CARD_SEP
+    assert wide >= cards_row + 2 * misc_drawer.PANEL_PAD
+    many = _birthday_request(True, cards=[CharaBirthdayCard(id=i, thumbnail_path="t.png") for i in range(40)])
+    assert misc_drawer._birthday_page_width(many, title, accent) == wide

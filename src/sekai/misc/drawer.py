@@ -488,7 +488,10 @@ def _deep(accent) -> Color:
 
 # --------------------------- 角色生日 --------------------------- #
 
-_BIRTHDAY_W = 900
+_BIRTHDAY_MIN_W = 440  # the page is as wide as its header / event rows / card row need, within these bounds
+_BIRTHDAY_MAX_W = 900
+_BIRTHDAY_CARDS_PER_ROW = 5
+_BIRTHDAY_CARD_SEP = 12
 _BIRTHDAY_PANEL_ALPHA = 150  # panels sit on the card art, so they are more opaque than on the triangle background
 _BIRTHDAY_SD_WELL = 72
 _BIRTHDAY_SD = 64
@@ -603,14 +606,54 @@ async def _load_chara_birthday_assets(
     return card_image, sd_image, title_image, card_thumbs, calendar_icons, elapsed
 
 
-def _draw_birthday_header(rqd: CharaBirthdayRequest, sd_image, title_image, accent: Color, width: int) -> None:
-    """SD chibi in a white well, the name label with region / date / countdown chips, a cheer-colour subtitle."""
+def _birthday_header_chips(rqd: CharaBirthdayRequest, accent: Color) -> list[tuple[str, Color, TextStyle]]:
     countdown, countdown_fill = _birthday_countdown(rqd.days_until_birthday)
-    chips = [
+    return [
         (rqd.region_name, SLATE, _TITLE_CHIP_STYLE),
         (f"{rqd.month}月{rqd.day}日", accent, _ADAPTIVE_CHIP_STYLE),
         (countdown, countdown_fill, _TITLE_CHIP_STYLE),
     ]
+
+
+def _birthday_page_width(rqd: CharaBirthdayRequest, title_image, accent: Color) -> int:
+    """The content width the header, the event rows and a row of card thumbnails need: most users read the
+    page on a portrait phone, so the calendar wraps into more rows instead of setting the page width."""
+    chips_w = sum(text_w(style, text) + 4 + 16 + 10 for text, _, style in _birthday_header_chips(rqd, accent))
+    label_w = round(title_image.size[0] * _BIRTHDAY_LABEL_H / max(1, title_image.size[1]))
+    subtitle_w = (
+        text_w(SUBTITLE_STYLE, "角色生日 · 应援色")
+        + 6
+        + text_w(_ADAPTIVE_CHIP_STYLE.replace(size=13), rqd.color_code)
+        + 4
+        + 12
+    )
+    if rqd.timezone:
+        subtitle_w += 6 + text_w(SUBTITLE_STYLE, f"· {rqd.timezone}") + 4
+    header_w = _BIRTHDAY_SD_WELL + 14 + max(label_w + chips_w, subtitle_w)
+
+    rows = _birthday_event_rows(rqd)
+    events_w = 0
+    if rows:
+        label_col = max(text_w(_BIRTHDAY_EVENT_LABEL_STYLE, row.label) for row in rows) + 4 + 20
+        spans = [
+            (datetime_from_millis(r.time.start_at, rqd.timezone), datetime_from_millis(r.time.end_at, rqd.timezone))
+            for r in rows
+        ]
+        span_w = max(text_w(_BIRTHDAY_SPAN_STYLE, _birthday_span_text(a, b)) for a, b in spans) + 4
+        length_style = TextStyle(font=DEFAULT_BOLD_FONT, size=13)
+        length_w = max(text_w(length_style, _birthday_span_length(a, b)) for a, b in spans) + 4 + 12
+        events_w = label_col + 12 + span_w + 12 + length_w
+
+    per_row = min(len(rqd.cards), _BIRTHDAY_CARDS_PER_ROW)
+    cards_w = per_row * _BIRTHDAY_CARD_THUMB_SIZE + max(0, per_row - 1) * _BIRTHDAY_CARD_SEP
+
+    content = max(header_w, events_w, cards_w)
+    return max(_BIRTHDAY_MIN_W, min(_BIRTHDAY_MAX_W, content + 2 * PANEL_PAD))
+
+
+def _draw_birthday_header(rqd: CharaBirthdayRequest, sd_image, title_image, accent: Color, width: int) -> None:
+    """SD chibi in a white well, the name label with region / date / countdown chips, a cheer-colour subtitle."""
+    chips = _birthday_header_chips(rqd, accent)
     chips_w = sum(text_w(style, text) + 4 + 16 + 10 for text, _, style in chips)
     text_w_budget = width - 2 * PANEL_PAD - _BIRTHDAY_SD_WELL - 14
     label_w = round(title_image.size[0] * _BIRTHDAY_LABEL_H / max(1, title_image.size[1]))
@@ -673,7 +716,13 @@ def _draw_birthday_cards(rqd: CharaBirthdayRequest, card_thumbs, accent: Color, 
     with panel(width, alpha=_BIRTHDAY_PANEL_ALPHA):
         section_header("生日卡牌", accent, soft_chips=[(f"{len(rqd.cards)} 张", _deep(accent))])
         size = _BIRTHDAY_CARD_THUMB_SIZE
-        with Flow().set_w(width - 2 * PANEL_PAD).set_sep(12, 10).set_content_align("lt").set_item_align("lt"):
+        with (
+            Flow()
+            .set_w(width - 2 * PANEL_PAD)
+            .set_sep(_BIRTHDAY_CARD_SEP, 10)
+            .set_content_align("lt")
+            .set_item_align("lt")
+        ):
             for card, thumb in zip(rqd.cards, card_thumbs, strict=False):
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0):
                     with RoundClipFrame(10).set_size((size, size)).set_content_align("c"):
@@ -717,7 +766,7 @@ async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     """
     card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
     accent = _birthday_accent(rqd.color_code)
-    width = _BIRTHDAY_W
+    width = _birthday_page_width(rqd, title_image, accent)
 
     # The newest birthday card's art is the page background, as before; a missing art falls back to the
     # plain triangle background rather than a full-page placeholder.
