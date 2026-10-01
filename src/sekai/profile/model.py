@@ -48,6 +48,7 @@ class PlayerFramePaths(BaseModel):
 
     frame_type: Literal["single", "combination"] = "single"
     horizontal: PlayerFrameParts | None = None
+    vertical: PlayerFrameParts | None = None
     side_left_top: str | None = None
     side_right_top: str | None = None
     side_left_bottom: str | None = None
