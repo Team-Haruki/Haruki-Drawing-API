@@ -11,6 +11,28 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.chrome import (
+    AMBER,
+    CHIP_STYLE,
+    DIM,
+    INK,
+    PANEL_PAD,
+    RED,
+    SLATE,
+    SUBTITLE_STYLE,
+    TEXT,
+    TITLE_STYLE,
+    Color,
+    alpha as chrome_alpha,
+    chip,
+    fit_style,
+    ink,
+    mix,
+    panel,
+    section_header,
+    soft_chip,
+    text_w,
+)
 from src.sekai.base.draw import (
     BG_PADDING,
     CHARACTER_COLOR_CODE,
@@ -18,21 +40,19 @@ from src.sekai.base.draw import (
     Canvas,
     TextBox,
     add_request_watermark,
-    roundrect_bg,
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.image_info import probe_alpha_bounds
+from src.sekai.base.image_source import MissingImageRef
 from src.sekai.base.paint_types import ADAPTIVE_WB, WHITE, color_code_to_rgb, get_font_desc
 from src.sekai.base.plot import (
     AlphaTrimImageBox,
     CanvasImageBox,
     Flow,
     Frame,
-    Grid,
     HSplit,
-    ImageBg,
     ImageBox,
-    PreResizedImageBox,
+    RoundClipFrame,
     RoundRectBg,
     Spacer,
     TextStyle,
@@ -44,7 +64,6 @@ from src.sekai.base.timezone import datetime_from_millis
 from src.sekai.base.utils import (
     ImageSource,
     get_asset_image_ref,
-    get_str_display_length,
     run_in_pool,
 )
 from src.sekai.skia_renderer.canvas import (
@@ -59,7 +78,13 @@ from src.settings import (
 )
 
 # =========================== 从.model导入数据类型 =========================== #
-from .model import AliasListRequest, BirthdayEventTime, CharaBirthdayRequest, CommandHelpRenderRequest
+from .model import (
+    AliasListRequest,
+    BirthdayEventTime,
+    CharaBirthdayData,
+    CharaBirthdayRequest,
+    CommandHelpRenderRequest,
+)
 
 logger = logging.getLogger(__name__)
 _birthday_perf_logger = logging.getLogger("misc.birthday.perf")
@@ -72,15 +97,6 @@ _HELP_MARGIN = 62
 _HELP_CARD_MARGIN = 28
 _HELP_MAX_TEXT_WIDTH = _HELP_IMAGE_WIDTH - _HELP_MARGIN * 2
 _HELP_LINK_RE = re.compile(r"\[([^\]]+)]\([^)]+\)")
-_ALIAS_TRIM_ALPHA_FLOOR = 36
-_ALIAS_TRIM_MIN_FRAME_W = 260
-_ALIAS_TRIM_MAX_FRAME_W = 920
-_ALIAS_TRIM_MIN_OVERLAP = 32
-_ALIAS_TRIM_MAX_OVERLAP = 128
-_ALIAS_TRIM_MIN_DISPLAY_H = 460
-_ALIAS_TRIM_BOTTOM_OVERFLOW = 24
-_BIRTHDAY_CARD_THUMB_SIZE = 80
-_BIRTHDAY_CALENDAR_ICON_SIZE = 40
 
 
 @dataclass(frozen=True)
@@ -451,54 +467,129 @@ async def try_render_command_help_payload(rqd: CommandHelpRenderRequest) -> Enco
     return await render_canvas_payload(canvas, endpoint="command_help", export_format="png")
 
 
-def _with_alpha(color: tuple[int, int, int], alpha: int) -> tuple[int, int, int, int]:
-    return (color[0], color[1], color[2], alpha)
+# =========================== 角色生日 / 别名列表 =========================== #
+
+_PAGE_PAD = 16  # inner page padding on top of BG_PADDING, as on the deck pages
+_PAGE_SEP = 14
+_WELL_FILL = (255, 255, 255, 200)
+_TITLE_CHIP_STYLE = CHIP_STYLE.replace(size=15)
+_ADAPTIVE_CHIP_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=ADAPTIVE_WB)
 
 
-def _resolve_alias_accent(entity_label: str, entity_id: int) -> tuple[int, int, int]:
-    if "角色" in entity_label:
-        if color_code := CHARACTER_COLOR_CODE.get(entity_id):
-            return tuple(color_code_to_rgb(color_code))
-        return (255, 204, 170)
-    return (110, 180, 255)
+def _with_alpha(color, alpha: int) -> Color:
+    return chrome_alpha(color, alpha)
 
 
-def _resolve_alias_name_box_width(
-    name: str,
-    has_jacket: bool,
-    has_trim: bool = False,
-    panel_w: int | None = None,
-) -> int:
-    display_len = max(1, get_str_display_length(name.strip()))
-    estimated = 112 + display_len * 14
-    if has_trim:
-        max_w = panel_w - (214 if has_jacket else 146) if panel_w is not None else None
-        if has_jacket:
-            return max(220, min(max_w or 420, estimated))
-        return max(260, min(max_w or 500, estimated + 24))
-    if has_jacket:
-        return max(240, min(648, estimated))
-    return max(280, min(760, estimated))
+def _deep(accent) -> Color:
+    """``accent`` darkened enough to letter with: pale cheer colours (#ffee11) are unreadable as text."""
+    return mix(accent, INK, 0.45)
 
 
-def _resolve_alias_trim_path(rqd: AliasListRequest) -> str | None:
-    if rqd.character_silhouette_path and rqd.character_silhouette_path.strip():
-        return rqd.character_silhouette_path.strip()
-    if rqd.character_trim_path and rqd.character_trim_path.strip():
-        return rqd.character_trim_path.strip()
-    return None
+# --------------------------- 角色生日 --------------------------- #
+
+_BIRTHDAY_W = 900
+_BIRTHDAY_ART_H = 300
+_BIRTHDAY_ART_MISSING_H = 160
+_BIRTHDAY_ART_FOCUS = 0.42  # vertical centre of the crop, as a fraction of the art height (faces sit high)
+_BIRTHDAY_SD_WELL = 72
+_BIRTHDAY_SD = 64
+_BIRTHDAY_LABEL_H = 40
+_BIRTHDAY_CARD_THUMB_SIZE = 96
+_BIRTHDAY_CALENDAR_ICON_SIZE = 40
+_BIRTHDAY_EVENT_COLORS: dict[str, Color] = {
+    "gacha": (146, 84, 222, 255),
+    "live": (64, 132, 226, 255),
+    "drop": (30, 168, 190, 255),
+    "flower": (44, 170, 110, 255),
+    "party": (228, 84, 110, 255),
+}
+_BIRTHDAY_EVENT_LABEL_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=WHITE)
+_BIRTHDAY_SPAN_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=INK)
+_BIRTHDAY_ID_STYLE = TextStyle(font=DEFAULT_FONT, size=13, color=DIM)
+_BIRTHDAY_DATE_STYLE = TextStyle(font=DEFAULT_FONT, size=12, color=DIM)
 
 
-def _prepare_alias_trim_image(img: ImageSource) -> AlphaTrimImageBox:
-    bounds = probe_alpha_bounds(img) or (0, 0, img.width, img.height)
-    return AlphaTrimImageBox(img, bounds, _ALIAS_TRIM_ALPHA_FLOOR, use_alpha_blend=True)
+@dataclass(frozen=True)
+class _BirthdayEventRow:
+    key: str
+    label: str
+    time: BirthdayEventTime
+
+
+def _birthday_event_rows(rqd: CharaBirthdayRequest) -> list[_BirthdayEventRow]:
+    rows = [
+        _BirthdayEventRow("gacha", "卡池开放", rqd.gacha_time),
+        _BirthdayEventRow("live", "虚拟LIVE", rqd.live_time),
+    ]
+    if rqd.is_fifth_anniv:
+        for key, label, span in (
+            ("drop", "露滴掉落", rqd.drop_time),
+            ("flower", "浇水开放", rqd.flower_time),
+            ("party", "派对开放", rqd.party_time),
+        ):
+            if span is not None:
+                rows.append(_BirthdayEventRow(key, label, span))
+    return rows
+
+
+def _birthday_accent(color_code: str) -> Color:
+    try:
+        return tuple(color_code_to_rgb(color_code))
+    except ValueError:
+        return SLATE
+
+
+def _birthday_countdown(days: int) -> tuple[str, Color]:
+    if days <= 0:
+        return "今天生日", RED
+    if days == 1:
+        return "明天生日", RED
+    return f"还有 {days} 天", AMBER if days <= 7 else SLATE
+
+
+def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
+    timezone_label = timezone or ""
+    if not timezone_label and start_at and start_at.tzinfo:
+        timezone_label = start_at.tzname() or ""
+    if not timezone_label and end_at and end_at.tzinfo:
+        timezone_label = end_at.tzname() or ""
+    return f" ({timezone_label})" if timezone_label else ""
+
+
+def _birthday_span_text(start, end) -> str:
+    return f"{start.strftime('%m-%d %H:%M')} ~ {end.strftime('%m-%d %H:%M')}"
+
+
+def _birthday_span_length(start, end) -> str:
+    """``7 天`` / ``36 小时``: the display end is one minute before the real end, so round up to it."""
+    minutes = max(0, round((end - start).total_seconds() / 60)) + 1
+    if minutes >= 24 * 60:
+        return f"{round(minutes / (24 * 60))} 天"
+    return f"{max(1, round(minutes / 60))} 小时"
+
+
+def _birthday_calendar_cells(all_characters: list[CharaBirthdayData]) -> list[list[CharaBirthdayData]]:
+    """Characters sharing a date (Rin and Len) form one cell; the order is the caller's (next birthday first)."""
+    cells: dict[tuple[int, int], list[CharaBirthdayData]] = {}
+    for chara in all_characters:
+        cells.setdefault((chara.month, chara.day), []).append(chara)
+    return list(cells.values())
+
+
+def _cover_rect(size: tuple[int, int], target: tuple[int, int], focus: float) -> tuple[float, float, float, float]:
+    """The source crop that covers ``target`` at the image's aspect, centred horizontally, ``focus`` down."""
+    src_w, src_h = max(1, size[0]), max(1, size[1])
+    scale = max(target[0] / src_w, target[1] / src_h)
+    crop_w, crop_h = target[0] / scale, target[1] / scale
+    x0 = (src_w - crop_w) / 2
+    y0 = min(max(0.0, src_h * focus - crop_h / 2), src_h - crop_h)
+    return (x0, y0, x0 + crop_w, y0 + crop_h)
 
 
 async def _load_chara_birthday_assets(
     rqd: CharaBirthdayRequest,
 ) -> tuple[ImageSource, ImageSource, ImageSource, list[ImageSource], dict[int, ImageSource], float]:
     tasks = [
-        # ImageBg keeps this lazy through the Skia path; Pillow resolves it during replay.
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.card_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.sd_image_path),
         get_asset_image_ref(ASSETS_BASE_DIR, rqd.title_image_path),
@@ -523,421 +614,148 @@ async def _load_chara_birthday_assets(
     return card_image, sd_image, title_image, card_thumbs, calendar_icons, elapsed
 
 
-def _resolve_alias_trim_metrics(
-    trim_img: AlphaTrimImageBox, left_panel_w: int, left_panel_h: int
-) -> tuple[int, int, int, tuple[int, int]]:
-    trim_display_h = max(500, min(920, left_panel_h + _ALIAS_TRIM_BOTTOM_OVERFLOW))
-    width, height = trim_img.natural_size
-    aspect_ratio = width / max(1, height)
-    max_allowed_overlap = max(_ALIAS_TRIM_MIN_OVERLAP, min(_ALIAS_TRIM_MAX_OVERLAP, int(left_panel_w * 0.18)))
-    max_rendered_w = _ALIAS_TRIM_MAX_FRAME_W + max_allowed_overlap
-    rendered_w = max(1, int(trim_display_h * aspect_ratio))
+def _draw_birthday_header(rqd: CharaBirthdayRequest, sd_image, title_image, accent: Color, width: int) -> None:
+    """SD chibi in a white well, the name label with region / date / countdown chips, a cheer-colour subtitle."""
+    countdown, countdown_fill = _birthday_countdown(rqd.days_until_birthday)
+    chips = [
+        (rqd.region_name, SLATE, _TITLE_CHIP_STYLE),
+        (f"{rqd.month}月{rqd.day}日", accent, _ADAPTIVE_CHIP_STYLE),
+        (countdown, countdown_fill, _TITLE_CHIP_STYLE),
+    ]
+    chips_w = sum(text_w(style, text) + 4 + 16 + 10 for text, _, style in chips)
+    text_w_budget = width - 2 * PANEL_PAD - _BIRTHDAY_SD_WELL - 14
+    label_w = round(title_image.size[0] * _BIRTHDAY_LABEL_H / max(1, title_image.size[1]))
+    label_w = max(40, min(label_w, text_w_budget - chips_w))
+    with panel(width):
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
+            with (
+                Frame()
+                .set_size((_BIRTHDAY_SD_WELL, _BIRTHDAY_SD_WELL))
+                .set_content_align("c")
+                .set_bg(RoundRectBg(_WELL_FILL, 14, blur_glass=False))
+            ):
+                ImageBox(sd_image, size=(_BIRTHDAY_SD, _BIRTHDAY_SD), image_size_mode="fit")
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(0):
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(10).set_padding(0):
+                    ImageBox(title_image, size=(label_w, _BIRTHDAY_LABEL_H), image_size_mode="fit")
+                    for text, fill, style in chips:
+                        chip(text, fill, style=style, radius=11, padding=(8, 3))
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(6).set_padding(0):
+                    ink(TextBox("角色生日 · 应援色", SUBTITLE_STYLE))
+                    chip(rqd.color_code, accent, style=_ADAPTIVE_CHIP_STYLE.replace(size=13), radius=7, padding=(6, 2))
+                    tz = (rqd.timezone or "").strip()
+                    if tz:
+                        ink(TextBox(f"· {tz}", SUBTITLE_STYLE))
 
-    if rendered_w > max_rendered_w:
-        trim_display_h = max(_ALIAS_TRIM_MIN_DISPLAY_H, int(max_rendered_w / max(aspect_ratio, 1e-6)))
-        rendered_w = max(1, int(trim_display_h * aspect_ratio))
 
-    desired_overlap = max(
-        _ALIAS_TRIM_MIN_OVERLAP,
-        min(
-            max_allowed_overlap,
-            int(rendered_w * 0.10) + max(0, int((aspect_ratio - 1.0) * 28)),
-        ),
-    )
-    trim_frame_w = max(_ALIAS_TRIM_MIN_FRAME_W, min(_ALIAS_TRIM_MAX_FRAME_W, rendered_w - desired_overlap))
-    trim_frame_w = min(trim_frame_w, rendered_w)
-    trim_frame_h = left_panel_h
-    trim_offset = (0, _ALIAS_TRIM_BOTTOM_OVERFLOW)
-    return trim_frame_w, trim_frame_h, trim_display_h, trim_offset
-
-
-def _build_alias_info_panel(
-    rqd: AliasListRequest,
-    accent: tuple[int, int, int],
-    jacket_img: ImageSource | None,
-    aliases_count: int,
-    panel_w: int,
-    name_box_w: int,
-    style_name: TextStyle,
-    style_meta: TextStyle,
-    style_id: TextStyle,
-    style_badge: TextStyle,
-):
-    info_panel = (
-        HSplit()
-        .set_content_align("lt")
-        .set_item_align("t")
-        .set_sep(16)
-        .set_padding(18)
-        .set_bg(roundrect_bg(alpha=86, blur_glass_kwargs={"blur": 8}))
-    )
-
-    id_block = (
-        VSplit()
-        .set_content_align("c")
-        .set_item_align("c")
-        .set_sep(8)
-        .set_padding((18, 16))
-        .set_bg(RoundRectBg(fill=_with_alpha(accent, 205), radius=14))
-    )
-    id_block.add_item(TextBox(rqd.entity_label, TextStyle(DEFAULT_BOLD_FONT, 18, WHITE)))
-    id_block.add_item(TextBox(str(rqd.entity_id), style_id))
-
-    detail_row = HSplit().set_content_align("lt").set_item_align("t").set_sep(16)
-    text_col = VSplit().set_content_align("l").set_item_align("l").set_sep(10)
-    text_col.add_item(TextBox(rqd.entity_name, style_name, use_real_line_count=True).set_w(name_box_w))
-    text_col.add_item(TextBox("下列结果为已审核通过的别名展示", style_meta))
-    badge_row = HSplit().set_content_align("l").set_item_align("c").set_sep(10)
-    badge_row.add_item(
-        TextBox(f"已审核别名 {aliases_count} 条", style_badge)
-        .set_padding((14, 8))
-        .set_bg(
-            RoundRectBg(
-                fill=(255, 255, 255, 128),
-                radius=10,
-                stroke=_with_alpha(accent, 96),
-                stroke_width=1,
-            )
-        )
-    )
-    badge_row.add_item(
-        TextBox("过多时自动转为图片返回", style_meta)
-        .set_padding((14, 8))
-        .set_bg(
-            RoundRectBg(
-                fill=(255, 255, 255, 128),
-                radius=10,
-                stroke=_with_alpha(accent, 96),
-                stroke_width=1,
-            )
-        )
-    )
-    text_col.add_item(badge_row)
-    detail_row.add_item(text_col)
-
-    if jacket_img is not None:
-        detail_row.add_item(
-            PreResizedImageBox(jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True)
-            .set_bg(
-                RoundRectBg(
-                    fill=(255, 255, 255, 128),
-                    radius=12,
-                    stroke=_with_alpha(accent, 96),
-                    stroke_width=1,
-                )
-            )
-            .set_padding(4)
+def _draw_birthday_art(card_image, accent: Color, width: int) -> None:
+    """The newest birthday card's full art as a banner; a tinted band with the placeholder when it is missing."""
+    missing = isinstance(card_image, MissingImageRef)
+    height = _BIRTHDAY_ART_MISSING_H if missing else _BIRTHDAY_ART_H
+    with RoundClipFrame(14).set_size((width, height)).set_content_align("c"):
+        if missing:
+            Spacer(w=width, h=height).set_bg(RoundRectBg(_with_alpha(accent, 48), 14, blur_glass=False))
+            ImageBox(card_image, size=(120, 120), image_size_mode="fit")
+            return
+        ImageBox(
+            card_image,
+            size=(width, height),
+            image_size_mode="fill",
+            source_rect=_cover_rect(card_image.size, (width, height), _BIRTHDAY_ART_FOCUS),
         )
 
-    info_panel.add_item(id_block)
-    info_panel.add_item(detail_row)
-    return info_panel
 
-
-def _build_alias_list_panel(
-    aliases: list[str],
-    accent: tuple[int, int, int],
-    panel_w: int,
-    flow_w: int,
-    style_label: TextStyle,
-    style_badge: TextStyle,
-    style_chip: TextStyle,
-):
-    alias_panel = (
-        VSplit()
-        .set_w(panel_w)
-        .set_content_align("lt")
-        .set_item_align("lt")
-        .set_sep(12)
-        .set_padding(18)
-        .set_bg(roundrect_bg(alpha=84, blur_glass_kwargs={"blur": 8}))
-    )
-    header_row = HSplit().set_content_align("l").set_item_align("c").set_sep(12)
-    header_row.add_item(TextBox("已审核别名", style_label))
-    header_row.add_item(
-        TextBox(f"{len(aliases)}", style_badge)
-        .set_padding((12, 6))
-        .set_bg(
-            RoundRectBg(
-                fill=(255, 255, 255, 128),
-                radius=9,
-                stroke=_with_alpha(accent, 96),
-                stroke_width=1,
-            )
-        )
-    )
-    alias_panel.add_item(header_row)
-
-    flow = Flow().set_w(flow_w).set_content_align("lt").set_item_align("lt").set_sep(10, 10)
-    for alias in aliases:
-        flow.add_item(
-            TextBox(alias, style_chip)
-            .set_bg(
-                RoundRectBg(
-                    fill=(255, 255, 255, 136),
-                    radius=11,
-                    stroke=_with_alpha(accent, 108),
-                    stroke_width=1,
-                )
-            )
-            .set_padding((14, 9))
-        )
-    alias_panel.add_item(flow)
-    return alias_panel
-
-
-def _build_alias_left_panel(
-    rqd: AliasListRequest,
-    aliases: list[str],
-    accent: tuple[int, int, int],
-    jacket_img: ImageSource | None,
-    panel_w: int,
-    flow_w: int,
-    name_box_w: int,
-    style_name: TextStyle,
-    style_meta: TextStyle,
-    style_id: TextStyle,
-    style_badge: TextStyle,
-    style_label: TextStyle,
-    style_chip: TextStyle,
-) -> VSplit:
-    token = Widget._thread_local.set(None)
-    try:
-        left_panel = VSplit().set_w(panel_w).set_content_align("lt").set_item_align("lt").set_sep(16)
-        left_panel.add_item(
-            _build_alias_info_panel(
-                rqd,
-                accent,
-                jacket_img,
-                len(aliases),
-                panel_w,
-                name_box_w,
-                style_name,
-                style_meta,
-                style_id,
-                style_badge,
-            )
-        )
-        left_panel.add_item(
-            _build_alias_list_panel(
-                aliases,
-                accent,
-                panel_w,
-                flow_w,
-                style_label,
-                style_badge,
-                style_chip,
-            )
-        )
-        return left_panel
-    finally:
-        Widget._thread_local.reset(token)
-
-
-def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, left_panel_size: tuple[int, int]) -> Frame:
-    token = Widget._thread_local.set(None)
-    try:
-        left_panel_w, left_panel_h = left_panel_size
-        trim_frame_w, trim_frame_h, trim_display_h, trim_offset = _resolve_alias_trim_metrics(
-            trim_img, left_panel_w, left_panel_h
-        )
-        trim_panel = Frame().set_size((trim_frame_w, trim_frame_h)).set_content_align("rb").set_allow_draw_outside(True)
-        trim_img.image_size_mode = "fit"
-        trim_panel.add_item(trim_img.set_size((None, trim_display_h)).set_offset(trim_offset))
-        return trim_panel
-    finally:
-        Widget._thread_local.reset(token)
-
-
-def _resolve_alias_panel_widths(
-    rqd: AliasListRequest,
-    aliases: list[str],
-    accent: tuple[int, int, int],
-    jacket_img: ImageSource | None,
-    target_h: int,
-    style_name: TextStyle,
-    style_meta: TextStyle,
-    style_id: TextStyle,
-    style_badge: TextStyle,
-    style_label: TextStyle,
-    style_chip: TextStyle,
-) -> tuple[int, int, int]:
-    candidate_widths = [700, 780, 860, 940, 1020, 1100]
-    best_fit: tuple[int, int, int] | None = None
-    best_overflow: tuple[int, int, int, int] | None = None
-
-    for panel_w in candidate_widths:
-        flow_w = panel_w - 80
-        name_box_w = _resolve_alias_name_box_width(rqd.entity_name, jacket_img is not None, True, panel_w)
-        temp_left_panel = _build_alias_left_panel(
-            rqd,
-            aliases,
+def _draw_birthday_events(rqd: CharaBirthdayRequest, accent: Color, width: int) -> None:
+    rows = _birthday_event_rows(rqd)
+    spans = [
+        (datetime_from_millis(row.time.start_at, rqd.timezone), datetime_from_millis(row.time.end_at, rqd.timezone))
+        for row in rows
+    ]
+    tz_label = _birthday_timezone_label(spans[0][0], spans[0][1], rqd.timezone) if spans else ""
+    label_w = max(text_w(_BIRTHDAY_EVENT_LABEL_STYLE, row.label) for row in rows) + 4 + 20
+    with panel(width):
+        section_header(
+            "生日活动",
             accent,
-            jacket_img,
-            panel_w,
-            flow_w,
-            name_box_w,
-            style_name,
-            style_meta,
-            style_id,
-            style_badge,
-            style_label,
-            style_chip,
+            chips=[("五周年形式", AMBER)] if rqd.is_fifth_anniv else (),
+            captions=[f"时区{tz_label}" if tz_label else ""],
         )
-        left_h = temp_left_panel._get_self_size()[1]
-        if left_h <= target_h:
-            best_fit = (panel_w, flow_w, name_box_w)
-            break
-        overflow = left_h - target_h
-        if best_overflow is None or overflow < best_overflow[0]:
-            best_overflow = (overflow, panel_w, flow_w, name_box_w)
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(0):
+            for row, (start, end) in zip(rows, spans, strict=True):
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(12).set_padding(0):
+                    # Chips are natural width; a fixed-width frame lines the time column up across rows.
+                    with Frame().set_content_align("c") as cell:
+                        label = chip(
+                            row.label,
+                            _BIRTHDAY_EVENT_COLORS[row.key],
+                            style=_BIRTHDAY_EVENT_LABEL_STYLE,
+                            radius=8,
+                            padding=(10, 4),
+                        )
+                    cell.set_size((label_w, label._get_self_size()[1]))
+                    ink(TextBox(_birthday_span_text(start, end), _BIRTHDAY_SPAN_STYLE))
+                    soft_chip(_birthday_span_length(start, end), DIM, size=13, radius=7, padding=(6, 2), alpha=28)
 
-    if best_fit is not None:
-        return best_fit
-    assert best_overflow is not None
-    return best_overflow[1], best_overflow[2], best_overflow[3]
+
+def _draw_birthday_cards(rqd: CharaBirthdayRequest, card_thumbs, accent: Color, width: int) -> None:
+    with panel(width):
+        section_header("生日卡牌", accent, soft_chips=[(f"{len(rqd.cards)} 张", _deep(accent))])
+        size = _BIRTHDAY_CARD_THUMB_SIZE
+        with Flow().set_w(width - 2 * PANEL_PAD).set_sep(12, 10).set_content_align("lt").set_item_align("lt"):
+            for card, thumb in zip(rqd.cards, card_thumbs, strict=False):
+                with VSplit().set_content_align("c").set_item_align("c").set_sep(4).set_padding(0):
+                    with RoundClipFrame(10).set_size((size, size)).set_content_align("c"):
+                        ImageBox(thumb, size=(size, size), image_size_mode="fill", sampling="linear")
+                    ink(TextBox(str(card.id), _BIRTHDAY_ID_STYLE))
+
+
+def _draw_birthday_calendar(rqd: CharaBirthdayRequest, calendar_icons, accent: Color, width: int) -> None:
+    icon = _BIRTHDAY_CALENDAR_ICON_SIZE
+    with panel(width):
+        section_header("生日日历", accent, captions=["按下次生日先后排列"])
+        with Flow().set_w(width - 2 * PANEL_PAD).set_sep(6, 6).set_content_align("lt").set_item_align("c"):
+            for group in _birthday_calendar_cells(rqd.all_characters):
+                selected = any(chara.cid == rqd.cid for chara in group)
+                fill = _with_alpha(accent, 96) if selected else (255, 255, 255, 110)
+                with (
+                    VSplit()
+                    .set_content_align("c")
+                    .set_item_align("c")
+                    .set_sep(2)
+                    .set_padding((6, 4))
+                    .set_bg(RoundRectBg(fill, 10, blur_glass=False))
+                ):
+                    with HSplit().set_content_align("c").set_item_align("c").set_sep(2).set_padding(0):
+                        for chara in group:
+                            ImageBox(
+                                calendar_icons[chara.cid], size=(icon, icon), image_size_mode="fill", sampling="linear"
+                            )
+                    style = (
+                        _BIRTHDAY_DATE_STYLE.replace(font=DEFAULT_BOLD_FONT, color=_deep(accent))
+                        if selected
+                        else _BIRTHDAY_DATE_STYLE
+                    )
+                    ink(TextBox(f"{group[0].month}/{group[0].day}", style))
 
 
 async def _build_chara_birthday_canvas(rqd: CharaBirthdayRequest) -> Canvas:
     r"""_build_chara_birthday_canvas
 
-    合成角色生日图片
-
-    Args
-    ----
-    rqd : CharaBirthdayRequest
-        绘制角色生日图片所必须的数据
-
-    Returns
-    -------
-    Canvas
+    合成角色生日图片: 头部(SD + 名字标签 + 服务器/日期/倒计时) → 生日卡牌立绘横幅 → 活动时间 → 生日卡牌 → 生日日历
     """
-    cid = rqd.cid
-    month = rqd.month
-    day = rqd.day
-    region_name = rqd.region_name
-    days_until_birthday = rqd.days_until_birthday
-    color_code = rqd.color_code
-    cards = rqd.cards
-    all_characters = rqd.all_characters
-
-    is_fifth_anniv = rqd.is_fifth_anniv
-
-    style1 = TextStyle(DEFAULT_BOLD_FONT, 24, BLACK)
-    style2 = TextStyle(DEFAULT_FONT, 20, BLACK)
-
     card_image, sd_image, title_image, card_thumbs, calendar_icons, _ = await _load_chara_birthday_assets(rqd)
+    accent = _birthday_accent(rqd.color_code)
+    width = _BIRTHDAY_W
 
-    # 绘制时间范围的辅助函数
-    def draw_time_range(label: str, tr: BirthdayEventTime):
-        start_at = datetime_from_millis(tr.start_at, rqd.timezone)
-        end_at = datetime_from_millis(tr.end_at, rqd.timezone)
-        timezone_label = rqd.timezone or ""
-        if timezone_label == "" and (start_at and start_at.tzinfo):
-            timezone_label = start_at.tzname() or ""
-        if timezone_label == "" and (end_at and end_at.tzinfo):
-            timezone_label = end_at.tzname() or ""
-        if timezone_label:
-            timezone_label = f" ({timezone_label})"
-        with HSplit().set_sep(8).set_content_align("l").set_item_align("l"):
-            TextBox(f"{label} ", style1)
-            TextBox(
-                (f"{start_at.strftime('%m-%d %H:%M')} ~ {end_at.strftime('%m-%d %H:%M')}{timezone_label}"),
-                style2,
-            )
-
-    with Canvas(bg=ImageBg(card_image)).set_padding(BG_PADDING) as canvas:
-        with (
-            VSplit()
-            .set_content_align("c")
-            .set_item_align("c")
-            .set_padding(16)
-            .set_sep(8)
-            .set_item_bg(roundrect_bg(alpha=80))
-            .set_bg(roundrect_bg(alpha=80))
-        ):
-            # 角色信息头部
-            with HSplit().set_sep(16).set_padding(16).set_content_align("c").set_item_align("c"):
-                ImageBox(sd_image, size=(None, 80), shadow=True)
-                ImageBox(title_image, size=(None, 60))
-                TextBox(
-                    f"{month}月{day}日",
-                    TextStyle(
-                        DEFAULT_HEAVY_FONT,
-                        32,
-                        (100, 100, 100),
-                        use_shadow=True,
-                        shadow_offset=2,
-                        shadow_color=tuple(color_code_to_rgb(color_code)),
-                    ),
-                )
-
-            # 基本信息
-            with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-                with HSplit().set_sep(8).set_padding(0).set_content_align("l").set_item_align("l"):
-                    TextBox(f"({region_name}) 距离下次生日还有{days_until_birthday}天", style1)
-                    Spacer(w=16)
-                    TextBox("应援色", style1)
-                    TextBox(color_code, TextStyle(DEFAULT_FONT, 20, ADAPTIVE_WB)).set_bg(
-                        RoundRectBg(tuple(color_code_to_rgb(color_code)), radius=4)
-                    ).set_padding(8)
-
-                # 时间范围 - 固定绘制
-                draw_time_range("🎰卡池开放时间", rqd.gacha_time)
-                draw_time_range("🎤虚拟LIVE时间", rqd.live_time)
-
-            # 五周年特殊时间范围
-            if is_fifth_anniv:
-                with VSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-                    if rqd.drop_time:
-                        draw_time_range("💧露滴掉落时间", rqd.drop_time)
-                    if rqd.flower_time:
-                        draw_time_range("🌱浇水开放时间", rqd.flower_time)
-                    if rqd.party_time:
-                        draw_time_range("🎂派对开放时间", rqd.party_time)
-
-            # 卡牌列表
-            with HSplit().set_sep(4).set_padding(16).set_content_align("l").set_item_align("l"):
-                TextBox("卡牌", style1)
-                Spacer(w=8)
-                with Grid(col_count=6).set_sep(4, 4):
-                    for i, thumb in enumerate(card_thumbs):
-                        with VSplit().set_sep(2).set_content_align("c").set_item_align("c"):
-                            ImageBox(
-                                thumb,
-                                image_size_mode="fill",
-                                size=(_BIRTHDAY_CARD_THUMB_SIZE, _BIRTHDAY_CARD_THUMB_SIZE),
-                                shadow=True,
-                                sampling="linear",
-                            )
-                            TextBox(f"{cards[i].id}", TextStyle(DEFAULT_FONT, 16, (50, 50, 50)))
-
-            # 底部角色生日日历
-            with Grid(col_count=13).set_sep(2, 2).set_padding(16).set_content_align("c").set_item_align("c"):
-                # 找到起始角色（从小豆沙开始，ID=6）
-                idx = 0
-                start_cid = 6
-                for i, item in enumerate(all_characters):
-                    if item.cid == start_cid:
-                        idx = i
-                        break
-
-                for _ in range(len(all_characters)):
-                    chara = all_characters[idx % len(all_characters)]
-                    idx += 1
-
-                    with VSplit().set_sep(0).set_content_align("c").set_item_align("c"):
-                        # 使用model中传入的icon_path
-                        chara_icon = calendar_icons[chara.cid]
-
-                        b = PreResizedImageBox(
-                            chara_icon,
-                            pre_size=(_BIRTHDAY_CALENDAR_ICON_SIZE, _BIRTHDAY_CALENDAR_ICON_SIZE),
-                            size=(40, 40),
-                        ).set_padding(4)
-                        if chara.cid == cid:
-                            b.set_bg(roundrect_bg(radius=8, alpha=80))
-                        TextBox(f"{chara.month}/{chara.day}", TextStyle(DEFAULT_FONT, 14, (50, 50, 80)))
+    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(_PAGE_SEP).set_padding(_PAGE_PAD):
+            _draw_birthday_header(rqd, sd_image, title_image, accent, width)
+            _draw_birthday_art(card_image, accent, width)
+            _draw_birthday_events(rqd, accent, width)
+            if rqd.cards:
+                _draw_birthday_cards(rqd, card_thumbs, accent, width)
+            if rqd.all_characters:
+                _draw_birthday_calendar(rqd, calendar_icons, accent, width)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -955,6 +773,181 @@ async def try_render_chara_birthday_payload(rqd: CharaBirthdayRequest) -> Encode
     return await render_canvas_payload(await _build_chara_birthday_canvas(rqd), endpoint="chara_birthday")
 
 
+# --------------------------- 别名列表 --------------------------- #
+
+_ALIAS_WIDTHS = (600, 680, 760, 840, 920, 1000)
+_ALIAS_TARGET_H = 620  # with a standing picture: the narrowest column no taller than this
+_ALIAS_MAX_ROWS = 8  # without one: the narrowest width that keeps the chips within this many rows
+_ALIAS_CHIP_STYLE = TextStyle(font=DEFAULT_FONT, size=18, color=TEXT)
+_ALIAS_CHIP_PAD = (12, 6)
+_ALIAS_CHIP_SEP = 8
+_ALIAS_JACKET_WELL = 64
+_ALIAS_JACKET = 54
+_ALIAS_TRIM_ALPHA_FLOOR = 36
+_ALIAS_TRIM_MAX_W = 760
+_ALIAS_TRIM_MIN_H = 320
+# The picture may lean this far over the column: no more than the panel padding, so hair never covers a chip.
+_ALIAS_TRIM_OVERLAP = 12
+_ALIAS_TITLE_MIN_SIZE = 24
+_ALIAS_TITLE_LINES = 2
+_ALIAS_MUSIC_ACCENT: Color = (64, 132, 226, 255)
+_ALIAS_CHARA_FALLBACK_ACCENT: Color = (112, 122, 146, 255)
+
+
+def _resolve_alias_accent(entity_label: str, entity_id: int) -> Color:
+    if "角色" in entity_label:
+        if color_code := CHARACTER_COLOR_CODE.get(entity_id):
+            return tuple(color_code_to_rgb(color_code))
+        return _ALIAS_CHARA_FALLBACK_ACCENT
+    return _ALIAS_MUSIC_ACCENT
+
+
+def _resolve_alias_trim_path(rqd: AliasListRequest) -> str | None:
+    if rqd.character_silhouette_path and rqd.character_silhouette_path.strip():
+        return rqd.character_silhouette_path.strip()
+    if rqd.character_trim_path and rqd.character_trim_path.strip():
+        return rqd.character_trim_path.strip()
+    return None
+
+
+def _prepare_alias_trim_image(img: ImageSource) -> AlphaTrimImageBox:
+    bounds = probe_alpha_bounds(img) or (0, 0, img.width, img.height)
+    return AlphaTrimImageBox(img, bounds, _ALIAS_TRIM_ALPHA_FLOOR, use_alpha_blend=True)
+
+
+def _alias_chip_w(alias: str) -> int:
+    return text_w(_ALIAS_CHIP_STYLE, alias) + 4 + 2 * _ALIAS_CHIP_PAD[0]
+
+
+def _alias_flow_rows(aliases: list[str], flow_w: int) -> int:
+    """How many rows the chips take at ``flow_w`` (a chip wider than the row is capped to it)."""
+    rows, used = 0, None
+    for alias in aliases:
+        w = min(_alias_chip_w(alias), flow_w)
+        if used is None or used + _ALIAS_CHIP_SEP + w > flow_w:
+            rows += 1
+            used = w
+        else:
+            used += _ALIAS_CHIP_SEP + w
+    return rows
+
+
+def _alias_width_without_trim(aliases: list[str]) -> int:
+    for width in _ALIAS_WIDTHS:
+        if _alias_flow_rows(aliases, width - 2 * PANEL_PAD) <= _ALIAS_MAX_ROWS:
+            return width
+    return _ALIAS_WIDTHS[-1]
+
+
+def _draw_alias_name(name: str, budget: int) -> None:
+    """The entity name on one line, stepping down to the minimum size; a longer name wraps onto a second line."""
+    style = fit_style(name, TITLE_STYLE, budget, min_size=_ALIAS_TITLE_MIN_SIZE)
+    if text_w(style, name) + 4 <= budget:
+        ink(TextBox(name, style).set_w(max(60, min(text_w(style, name) + 4, budget))))
+        return
+    TextBox(name, style, line_count=_ALIAS_TITLE_LINES, overflow="shrink").set_w(max(60, budget))
+
+
+def _draw_alias_header(rqd: AliasListRequest, accent: Color, jacket_img, alias_count: int, width: int) -> None:
+    """Jacket well (songs) or accent bar, the entity name with its ID chip, and a dim subtitle."""
+    id_chip_text = f"{rqd.entity_label} {rqd.entity_id}"
+    visual_w = _ALIAS_JACKET_WELL if jacket_img is not None else 6
+    text_budget = width - 2 * PANEL_PAD - visual_w - 14
+    title_budget = text_budget - (text_w(_TITLE_CHIP_STYLE, id_chip_text) + 4 + 16 + 10)
+    subtitle = f"{rqd.title} · 已审核通过 {alias_count} 条 · 过多时自动转为图片返回"
+    with panel(width):
+        with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
+            if jacket_img is not None:
+                with (
+                    Frame()
+                    .set_size((_ALIAS_JACKET_WELL, _ALIAS_JACKET_WELL))
+                    .set_content_align("c")
+                    .set_bg(RoundRectBg(_WELL_FILL, 14, blur_glass=False))
+                ):
+                    with RoundClipFrame(8).set_size((_ALIAS_JACKET, _ALIAS_JACKET)).set_content_align("c"):
+                        ImageBox(jacket_img, size=(_ALIAS_JACKET, _ALIAS_JACKET), image_size_mode="fill")
+            else:
+                Spacer(w=6, h=48).set_bg(RoundRectBg(accent, 3, blur_glass=False))
+            with VSplit().set_content_align("lt").set_item_align("lt").set_sep(2).set_padding(0):
+                with HSplit().set_content_align("l").set_item_align("c").set_sep(10).set_padding(0):
+                    _draw_alias_name(rqd.entity_name.strip() or "-", title_budget)
+                    chip(id_chip_text, accent, style=_ADAPTIVE_CHIP_STYLE, radius=11, padding=(8, 3))
+                TextBox(subtitle, SUBTITLE_STYLE, overflow="shrink").set_w(
+                    max(40, min(text_w(SUBTITLE_STYLE, subtitle) + 4, text_budget))
+                )
+
+
+def _draw_alias_chips(aliases: list[str], accent: Color, width: int) -> None:
+    flow_w = width - 2 * PANEL_PAD
+    with panel(width):
+        section_header("别名列表", accent, soft_chips=[(f"{len(aliases)} 条", _deep(accent))])
+        with (
+            Flow().set_w(flow_w).set_sep(_ALIAS_CHIP_SEP, _ALIAS_CHIP_SEP).set_content_align("lt").set_item_align("lt")
+        ):
+            for alias in aliases:
+                chip(
+                    alias,
+                    (255, 255, 255, 200),
+                    style=_ALIAS_CHIP_STYLE,
+                    radius=10,
+                    padding=_ALIAS_CHIP_PAD,
+                    stroke=_with_alpha(accent, 120),
+                    max_w=flow_w,
+                )
+
+
+def _build_alias_column(rqd: AliasListRequest, aliases: list[str], accent: Color, jacket_img, width: int) -> VSplit:
+    """The header + chips column, built detached so it can be measured before the page is laid out."""
+    token = Widget._thread_local.set(None)
+    try:
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(_PAGE_SEP).set_padding(0) as column:
+            _draw_alias_header(rqd, accent, jacket_img, len(aliases), width)
+            _draw_alias_chips(aliases, accent, width)
+        return column
+    finally:
+        Widget._thread_local.reset(token)
+
+
+def _resolve_alias_column_width(
+    rqd: AliasListRequest, aliases: list[str], accent: Color, jacket_img
+) -> tuple[int, int]:
+    """With a standing picture: the narrowest width whose column is no taller than the target, else the least over."""
+    best: tuple[int, int, int] | None = None
+    for width in _ALIAS_WIDTHS:
+        height = _build_alias_column(rqd, aliases, accent, jacket_img, width)._get_self_size()[1]
+        if height <= _ALIAS_TARGET_H:
+            return width, height
+        if best is None or height < best[0]:
+            best = (height, width, height)
+    assert best is not None
+    return best[1], best[2]
+
+
+def _resolve_alias_trim_metrics(trim_img: AlphaTrimImageBox, column_h: int) -> tuple[int, int, int]:
+    """``(frame_w, frame_h, display_h)``: the picture stands as tall as the column (at least the minimum), its
+    width capped; the frame is narrower than the picture by the overlap, so the picture leans over the column."""
+    width, height = trim_img.natural_size
+    aspect = width / max(1, height)
+    display_h = max(column_h, _ALIAS_TRIM_MIN_H)
+    rendered_w = max(1, round(display_h * aspect))
+    if rendered_w > _ALIAS_TRIM_MAX_W:
+        rendered_w = _ALIAS_TRIM_MAX_W
+        display_h = max(1, round(rendered_w / max(aspect, 1e-6)))
+    return rendered_w - _ALIAS_TRIM_OVERLAP, max(column_h, display_h), display_h
+
+
+def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, column_h: int) -> Frame:
+    token = Widget._thread_local.set(None)
+    try:
+        frame_w, frame_h, display_h = _resolve_alias_trim_metrics(trim_img, column_h)
+        trim_panel = Frame().set_size((frame_w, frame_h)).set_content_align("rb").set_allow_draw_outside(True)
+        trim_img.image_size_mode = "fit"
+        trim_panel.add_item(trim_img.set_size((None, display_h)))
+        return trim_panel
+    finally:
+        Widget._thread_local.reset(token)
+
+
 async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     aliases = [alias.strip() for alias in rqd.aliases if alias and alias.strip()]
     accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
@@ -970,142 +963,23 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
         except (FileNotFoundError, OSError, ValueError):
             trim_img = None
 
-    style_title = TextStyle(
-        DEFAULT_HEAVY_FONT,
-        30,
-        BLACK,
-        use_shadow=True,
-        shadow_offset=2,
-        shadow_color=_with_alpha(accent, 180),
-    )
-    style_name = TextStyle(DEFAULT_HEAVY_FONT, 28, BLACK)
-    style_label = TextStyle(DEFAULT_BOLD_FONT, 20, (60, 60, 80))
-    style_meta = TextStyle(DEFAULT_FONT, 17, (78, 78, 98))
-    style_id = TextStyle(DEFAULT_HEAVY_FONT, 34, WHITE)
-    style_badge = TextStyle(DEFAULT_BOLD_FONT, 18, (66, 66, 86))
-    style_chip = TextStyle(DEFAULT_FONT, 18, (48, 48, 64))
+    if trim_img is None:
+        width = _alias_width_without_trim(aliases)
+        column = _build_alias_column(rqd, aliases, accent, jacket_img, width)
+        trim_panel = None
+    else:
+        width, column_h = _resolve_alias_column_width(rqd, aliases, accent, jacket_img)
+        column = _build_alias_column(rqd, aliases, accent, jacket_img, width)
+        trim_panel = _build_alias_trim_panel(trim_img, column_h)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            TextBox(rqd.title, style_title).set_padding((20, 16)).set_bg(
-                roundrect_bg(alpha=88, blur_glass_kwargs={"blur": 8})
-            )
-
-            if trim_img is not None:
-                panel_w, flow_w, name_box_w = _resolve_alias_panel_widths(
-                    rqd,
-                    aliases,
-                    accent,
-                    jacket_img,
-                    760,
-                    style_name,
-                    style_meta,
-                    style_id,
-                    style_badge,
-                    style_label,
-                    style_chip,
-                )
-                left_panel = _build_alias_left_panel(
-                    rqd,
-                    aliases,
-                    accent,
-                    jacket_img,
-                    panel_w,
-                    flow_w,
-                    name_box_w,
-                    style_name,
-                    style_meta,
-                    style_id,
-                    style_badge,
-                    style_label,
-                    style_chip,
-                )
-                trim_panel = _build_alias_trim_panel(trim_img, left_panel._get_self_size())
-                HSplit().set_content_align("lt").set_item_align("t").set_sep(0).add_item(left_panel).add_item(
-                    trim_panel
-                )
+        with VSplit().set_content_align("lt").set_item_align("lt").set_sep(_PAGE_SEP).set_padding(_PAGE_PAD) as root:
+            if trim_panel is None:
+                root.add_item(column)
             else:
-                name_box_w = _resolve_alias_name_box_width(rqd.entity_name, jacket_img is not None)
-                with (
-                    HSplit()
-                    .set_content_align("t")
-                    .set_item_align("t")
-                    .set_sep(16)
-                    .set_padding(18)
-                    .set_bg(roundrect_bg(alpha=86, blur_glass_kwargs={"blur": 8}))
-                ):
-                    with (
-                        VSplit()
-                        .set_content_align("c")
-                        .set_item_align("c")
-                        .set_sep(8)
-                        .set_padding((18, 16))
-                        .set_bg(RoundRectBg(fill=_with_alpha(accent, 205), radius=14))
-                    ):
-                        TextBox(rqd.entity_label, TextStyle(DEFAULT_BOLD_FONT, 18, WHITE))
-                        TextBox(str(rqd.entity_id), style_id)
-
-                    with HSplit().set_content_align("t").set_item_align("t").set_sep(16):
-                        with VSplit().set_content_align("l").set_item_align("l").set_sep(10):
-                            TextBox(rqd.entity_name, style_name, use_real_line_count=True).set_w(name_box_w)
-                            TextBox("下列结果为已审核通过的别名展示", style_meta)
-                            with HSplit().set_content_align("c").set_item_align("c").set_sep(10):
-                                TextBox(f"已审核别名 {len(aliases)} 条", style_badge).set_padding((14, 8)).set_bg(
-                                    RoundRectBg(
-                                        fill=(255, 255, 255, 128),
-                                        radius=10,
-                                        stroke=_with_alpha(accent, 96),
-                                        stroke_width=1,
-                                    )
-                                )
-                                TextBox("过多时自动转为图片返回", style_meta).set_padding((14, 8)).set_bg(
-                                    RoundRectBg(
-                                        fill=(255, 255, 255, 128),
-                                        radius=10,
-                                        stroke=_with_alpha(accent, 96),
-                                        stroke_width=1,
-                                    )
-                                )
-                        if jacket_img is not None:
-                            PreResizedImageBox(
-                                jacket_img, pre_size=(92, 92), size=(92, 92), use_alpha_blend=True, shadow=True
-                            ).set_bg(
-                                RoundRectBg(
-                                    fill=(255, 255, 255, 128),
-                                    radius=12,
-                                    stroke=_with_alpha(accent, 96),
-                                    stroke_width=1,
-                                )
-                            ).set_padding(4)
-
-                with (
-                    VSplit()
-                    .set_content_align("lt")
-                    .set_item_align("lt")
-                    .set_sep(12)
-                    .set_padding(18)
-                    .set_bg(roundrect_bg(alpha=84, blur_glass_kwargs={"blur": 8}))
-                ):
-                    with HSplit().set_content_align("c").set_item_align("c").set_sep(12):
-                        TextBox("已审核别名", style_label)
-                        TextBox(f"{len(aliases)}", style_badge).set_padding((12, 6)).set_bg(
-                            RoundRectBg(
-                                fill=(255, 255, 255, 128),
-                                radius=9,
-                                stroke=_with_alpha(accent, 96),
-                                stroke_width=1,
-                            )
-                        )
-                    with Flow().set_w(980).set_content_align("lt").set_item_align("lt").set_sep(10, 10):
-                        for alias in aliases:
-                            TextBox(alias, style_chip).set_bg(
-                                RoundRectBg(
-                                    fill=(255, 255, 255, 136),
-                                    radius=11,
-                                    stroke=_with_alpha(accent, 108),
-                                    stroke_width=1,
-                                )
-                            ).set_padding((14, 9))
+                with HSplit().set_content_align("lt").set_item_align("t").set_sep(0).set_padding(0) as row:
+                    row.add_item(column)
+                    row.add_item(trim_panel)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -1133,22 +1007,6 @@ async def try_render_alias_list_payload(rqd: AliasListRequest) -> EncodedImagePa
         return None
     canvas = await _build_alias_list_canvas(rqd)
     return await render_canvas_payload(canvas, endpoint="alias_list")
-
-
-def _birthday_calendar_start_index(all_characters, start_cid: int = 6) -> int:
-    for index, item in enumerate(all_characters):
-        if item.cid == start_cid:
-            return index
-    return 0
-
-
-def _birthday_timezone_label(start_at, end_at, timezone: str | None) -> str:
-    timezone_label = timezone or ""
-    if not timezone_label and start_at and start_at.tzinfo:
-        timezone_label = start_at.tzname() or ""
-    if not timezone_label and end_at and end_at.tzinfo:
-        timezone_label = end_at.tzname() or ""
-    return f" ({timezone_label})" if timezone_label else ""
 
 
 def _append_command_help_body_line(

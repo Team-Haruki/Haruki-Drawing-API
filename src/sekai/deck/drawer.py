@@ -13,6 +13,35 @@ if TYPE_CHECKING:
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.asset_key import AssetKey, legacy_key
+from src.sekai.base.chrome import (
+    AMBER as _AMBER,
+    CAPTION_STYLE as _CAPTION_STYLE,
+    CHIP_STYLE as _CHIP_STYLE,
+    DIM as _DIM,
+    FAINT as _FAINT,
+    GREEN as _GREEN,
+    GREY as _GREY,
+    INK as _INK,
+    NOTE_STYLE as _NOTE_STYLE,
+    PANEL_PAD as _PANEL_PAD,
+    PILL_STYLE as _PILL_STYLE,
+    RED as _RED,
+    SUBTITLE_STYLE as _SUBTITLE_STYLE,
+    TEXT as _TEXT,
+    TITLE_STYLE as _TITLE_STYLE,
+    Color,
+    alpha as _alpha,
+    chip as _chip,
+    fit_style as _fit_style,
+    fitted as _fitted,
+    ink as _ink,
+    mix as _mix,
+    panel as _panel,
+    pill as _pill,
+    section_header as _section_header,
+    soft_chip as _soft_chip,
+    text_w as _text_w,
+)
 from src.sekai.base.draw import (
     BG_PADDING,
     DIFF_COLORS,
@@ -20,7 +49,6 @@ from src.sekai.base.draw import (
     Canvas,
     TextBox,
     add_request_watermark,
-    roundrect_bg,
 )
 from src.sekai.base.paint_types import WHITE, ImageTint
 from src.sekai.base.plot import (
@@ -197,16 +225,7 @@ def _planner_rows(planner: DeckPlannerInfo) -> list[tuple[DeckPlannerSong, DeckP
 # Page styles: glass section panels with accent bars, white result tiles, ink-centred chips
 # ---------------------------------------------------------------------------
 
-Color = tuple[int, int, int, int]
-
-_INK: Color = (34, 36, 50, 255)
-_TEXT: Color = (62, 64, 80, 255)
-_DIM: Color = (116, 118, 134, 255)
-_FAINT: Color = (158, 160, 174, 255)
-_RED: Color = (214, 64, 84, 255)
-_GREEN: Color = (38, 150, 90, 255)
-_AMBER: Color = (205, 120, 10, 255)
-_GREY: Color = (140, 144, 156, 255)
+# Shared house style (chips, panels, section headers) lives in src/sekai/base/chrome.py.
 _BONUS_ORANGE: Color = (226, 112, 36, 255)
 
 # One accent per recommendation type: the title bar, the hero band and the sort-target values.
@@ -223,68 +242,15 @@ _DECK_ACCENTS: dict[str, Color] = {
 }
 _DECK_ACCENT_FALLBACK: Color = (64, 132, 226, 255)
 
-_TITLE_STYLE = TextStyle(font=DEFAULT_HEAVY_FONT, size=30, color=_INK)
-_SUBTITLE_STYLE = TextStyle(font=DEFAULT_FONT, size=16, color=_DIM)
-_SECTION_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=(40, 44, 64, 255))
-_CAPTION_STYLE = TextStyle(font=DEFAULT_FONT, size=15, color=_DIM)
-_PILL_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=17, color=_TEXT)
-_CHIP_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=13, color=WHITE)
 _COL_LABEL_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=_DIM)
 _VALUE_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=_INK)
-_NOTE_STYLE = TextStyle(font=DEFAULT_FONT, size=15, color=_DIM)
 
-_PANEL_PAD = 14
-_PANEL_SEP = 12
 _TILE_RADIUS = 12
 _MIN_TILE_W = 860
 
 
 def _deck_accent(rqd: DeckRequest) -> Color:
     return _DECK_ACCENTS.get(rqd.recommend_type, _DECK_ACCENT_FALLBACK)
-
-
-def _alpha(color, alpha: int) -> Color:
-    return (color[0], color[1], color[2], alpha)
-
-
-def _mix(color, other, t: float) -> Color:
-    """``color`` moved ``t`` of the way towards ``other`` (alpha from ``color``)."""
-    return (
-        round(color[0] + (other[0] - color[0]) * t),
-        round(color[1] + (other[1] - color[1]) * t),
-        round(color[2] + (other[2] - color[2]) * t),
-        color[3] if len(color) > 3 else 255,
-    )
-
-
-def _text_w(style: TextStyle, text: str) -> int:
-    return get_text_size(get_layout_font(style.font, style.size), text)[0]
-
-
-def _ink(box: TextBox) -> TextBox:
-    """Centre a one-line box's ink (not its em box) vertically, so every text in a chip row shares one axis.
-
-    CJK ink hangs ~2 px below the em-box centre while digits and Latin caps sit higher, so a plain
-    ``TextBox`` next to an ink-centred chip looks low; measure the real glyph bounds instead."""
-    style = box.style
-    # Thousands separators hang below the baseline; measuring them would lift a number above its neighbours.
-    measured = box.text.replace(",", "") or box.text
-    return box.set_text_offset((0, ink_centered_text_offset_y(style.font, style.size, measured, style.size)))
-
-
-def _fit_style(text: str, style: TextStyle, width: int, min_size: int = 10) -> TextStyle:
-    """Step the font size down until ``text`` fits ``width`` on one line: numbers shrink, never lose digits."""
-    size = style.size
-    while size > min_size and _text_w(style.replace(size=size), text) + 4 > width:
-        size -= 1
-    return style.replace(size=size) if size != style.size else style
-
-
-def _fitted(text: str, style: TextStyle, width: int, *, align: str = "c", min_size: int = 10) -> TextBox:
-    """A fixed-width one-line value; past ``min_size`` it ends in "..." rather than overflowing."""
-    return _ink(
-        TextBox(text, _fit_style(text, style, width, min_size), overflow="shrink").set_w(width)
-    ).set_content_align(align)
 
 
 def format_deck_int(value: float | None) -> str:
@@ -300,31 +266,6 @@ def format_deck_percent(value: float | None, *, digits: int = 2) -> str:
         return "-"
     text = f"{value:,.{digits}f}".rstrip("0").rstrip(".")
     return f"{text}%"
-
-
-def _chip(text: str, fill, *, style: TextStyle = _CHIP_STYLE, radius: int = 9, padding=(8, 3)) -> TextBox:
-    """A rounded label chip whose ink sits exactly in the middle of the fill.
-
-    Ink centring alone leaves half a pixel over whenever the chip and the ink differ in height parity
-    (a 13 px tall "组" in a 20 px chip), and the rounding pushes CJK a pixel low. Such chips grow by
-    1 px so the gaps above and below the tallest glyph are equal; digits then sit at most 0.5 px high."""
-    pad_x, pad_y = padding
-    font = get_layout_font(style.font, style.size)
-    # Thousands separators hang below the baseline; measuring them would lift a number above its neighbours.
-    _, top, _, bottom = font.getbbox(text.replace(",", "") or text)
-    ink_h = bottom - top
-    height = style.size + 2 * pad_y
-    height += (height - ink_h) % 2
-    # Painter.text puts the baseline ink_height("哇") below the line top; getbbox is relative to the ascender top.
-    ink_top = get_text_size(font, "哇")[1] + top - font.getmetrics()[0]
-    return (
-        TextBox(text, style)
-        .set_padding((pad_x, pad_y))
-        .set_h(height)
-        .set_content_align("lt")
-        .set_text_offset((0, (height - ink_h) // 2 - pad_y - ink_top))
-        .set_bg(RoundRectBg(fill, radius, blur_glass=False))
-    )
 
 
 # Mask columns fainter than this are anti-aliasing fringe the eye does not read as part of a digit.
@@ -387,38 +328,6 @@ def _id_badge(text: str, fill, style: TextStyle, *, radius: int = 4, gap=(4, 2))
         .set_text_offset((gap_x - left + (width - natural_w) // 2, gap_y - ink_top))
         .set_bg(RoundRectBg(fill, radius, blur_glass=False))
     )
-
-
-def _soft_chip(text: str, color, *, size: int = 12, radius: int = 5, padding=(4, 1), alpha: int = 34) -> TextBox:
-    """A pale chip tinted with ``color`` and lettered in it."""
-    style = TextStyle(font=DEFAULT_BOLD_FONT, size=size, color=color)
-    return _chip(text, _alpha(color, alpha), style=style, radius=radius, padding=padding)
-
-
-def _panel(width: int) -> VSplit:
-    return (
-        VSplit()
-        .set_w(width)
-        .set_content_align("lt")
-        .set_item_align("lt")
-        .set_sep(_PANEL_SEP)
-        .set_padding(_PANEL_PAD)
-        .set_bg(roundrect_bg(alpha=80))
-    )
-
-
-def _section_header(title: str, accent, *, chips=(), soft_chips=(), captions=()) -> None:
-    """Accent bar + title + chips + dim captions: the header of every panel on this page."""
-    with HSplit().set_content_align("l").set_item_align("c").set_sep(10).set_padding(0):
-        Spacer(w=6, h=24).set_bg(RoundRectBg(accent, 3, blur_glass=False))
-        _ink(TextBox(title, _SECTION_STYLE))
-        for text, fill in chips:
-            _chip(text, fill)
-        for text, color in soft_chips:
-            _soft_chip(text, color, size=14, radius=9, padding=(8, 2), alpha=40)
-        for caption in captions:
-            if caption:
-                _ink(TextBox(caption, _CAPTION_STYLE))
 
 
 def _circle_badge(text: str, fill, diameter: int, style: TextStyle) -> None:
@@ -857,9 +766,7 @@ def _deck_page_width(rqd: DeckRequest) -> int:
 
 _BANNER_H = 64
 _HEADER_ICON = 64
-_PILL_H = 48
 _PILL_ICON = 36
-_PILL_FILL: Color = (255, 255, 255, 185)
 _TITLE_CHIP_STYLE = _CHIP_STYLE.replace(size=15)
 
 
@@ -934,18 +841,6 @@ def _deck_shows_music(rqd: DeckRequest, assets: _DeckRecommendAssets) -> bool:
     if rqd.recommend_type in {"bonus", "wl_bonus", "mysekai"} or rqd.music_compare or rqd.event_planner:
         return False
     return bool(rqd.music_title or assets.music_cover)
-
-
-def _pill() -> HSplit:
-    return (
-        HSplit()
-        .set_h(_PILL_H)
-        .set_content_align("l")
-        .set_item_align("c")
-        .set_sep(8)
-        .set_padding((10, 0))
-        .set_bg(RoundRectBg(_PILL_FILL, 12, blur_glass=False))
-    )
 
 
 def _diff_fill(diff: str | None) -> Color | None:

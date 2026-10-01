@@ -7,7 +7,7 @@ import pytest
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.image_source import EncodedImageRef
-from src.sekai.base.plot import Canvas, Frame, HSplit, TextStyle, VSplit
+from src.sekai.base.plot import Canvas, Frame, HSplit, VSplit
 from src.sekai.misc import drawer
 from src.sekai.misc.model import AliasListRequest
 
@@ -38,22 +38,18 @@ async def _async_value(value):
     return value
 
 
-def _styles():
-    style = TextStyle(drawer.DEFAULT_FONT, 12, drawer.BLACK)
-    return (style,) * 6
+def _walk(widget):
+    yield widget
+    for item in getattr(widget, "items", []):
+        yield from _walk(item)
 
 
-def test_alias_accent_width_trim_path_and_image_preparation_cover_variants(monkeypatch) -> None:
+def test_alias_accent_trim_path_and_image_preparation_cover_variants(monkeypatch) -> None:
     monkeypatch.setitem(drawer.CHARACTER_COLOR_CODE, 1, "#112233")
     assert drawer._with_alpha((1, 2, 3), 4) == (1, 2, 3, 4)
     assert drawer._resolve_alias_accent("角色ID", 1) == (17, 34, 51, 255)
-    assert drawer._resolve_alias_accent("角色ID", 999) == (255, 204, 170)
-    assert drawer._resolve_alias_accent("歌曲ID", 1) == (110, 180, 255)
-
-    assert drawer._resolve_alias_name_box_width("x", True) == 240
-    assert drawer._resolve_alias_name_box_width("x", False) == 280
-    assert drawer._resolve_alias_name_box_width("x" * 100, True, True, 500) == 286
-    assert drawer._resolve_alias_name_box_width("x" * 100, False, True, 500) == 354
+    assert drawer._resolve_alias_accent("角色ID", 999) == drawer._ALIAS_CHARA_FALLBACK_ACCENT
+    assert drawer._resolve_alias_accent("歌曲ID", 1) == drawer._ALIAS_MUSIC_ACCENT
 
     assert drawer._resolve_alias_trim_path(_request()) is None
     assert drawer._resolve_alias_trim_path(_request(character_trim_path=" trim.png ")) == "trim.png"
@@ -72,50 +68,74 @@ def test_alias_accent_width_trim_path_and_image_preparation_cover_variants(monke
     assert drawer._prepare_alias_trim_image(_encoded(Image.new("RGB", (2, 2), "white"))).natural_size == (2, 2)
 
 
-def test_alias_trim_metrics_and_panels_cover_wide_tall_jacket_and_plain_layouts(monkeypatch) -> None:
+def test_alias_flow_rows_and_width_choice_follow_measured_chips() -> None:
+    aliases = ["a"] * 5
+    assert drawer._alias_flow_rows(aliases, 10_000) == 1
+    # A chip wider than the row is capped to the row, so every alias gets its own row and none overflows.
+    assert drawer._alias_flow_rows(aliases, 1) == 5
+    assert drawer._alias_flow_rows([], 500) == 0
+
+    assert drawer._alias_width_without_trim(["短"]) == drawer._ALIAS_WIDTHS[0]
+    assert drawer._alias_width_without_trim(["a very long alias text"] * 200) == drawer._ALIAS_WIDTHS[-1]
+
+
+def test_alias_trim_metrics_keep_the_picture_beside_the_column() -> None:
     tall = drawer._prepare_alias_trim_image(_encoded(_image((100, 800))))
     wide = drawer._prepare_alias_trim_image(_encoded(_image((1200, 200))))
-    tall_metrics = drawer._resolve_alias_trim_metrics(tall, 700, 600)
-    wide_metrics = drawer._resolve_alias_trim_metrics(wide, 700, 600)
-    assert tall_metrics[1] == 600
-    assert wide_metrics[0] <= drawer._ALIAS_TRIM_MAX_FRAME_W
 
-    styles = _styles()
+    frame_w, frame_h, display_h = drawer._resolve_alias_trim_metrics(tall, 600)
+    assert display_h == 600
+    assert frame_h == 600
+    assert frame_w == round(600 * 100 / 800) - drawer._ALIAS_TRIM_OVERLAP
+
+    frame_w, frame_h, display_h = drawer._resolve_alias_trim_metrics(wide, 600)
+    assert frame_w == drawer._ALIAS_TRIM_MAX_W - drawer._ALIAS_TRIM_OVERLAP
+    assert display_h == round(drawer._ALIAS_TRIM_MAX_W / 6)
+    assert frame_h == 600
+
+    # A short column still gets a picture of the minimum height.
+    _, frame_h, display_h = drawer._resolve_alias_trim_metrics(tall, 100)
+    assert display_h == drawer._ALIAS_TRIM_MIN_H
+    assert frame_h == drawer._ALIAS_TRIM_MIN_H
+
+
+def test_alias_column_and_trim_panel_build_detached(monkeypatch) -> None:
     request = _request()
-    info_plain = drawer._build_alias_info_panel(request, (1, 2, 3), None, 2, 700, 300, *styles[:4])
-    info_jacket = drawer._build_alias_info_panel(request, (1, 2, 3), _image(), 2, 700, 300, *styles[:4])
-    assert len(info_plain.items[1].items) == 1
-    assert len(info_jacket.items[1].items) == 2
-
     aliases = ["one", "two"]
-    alias_panel = drawer._build_alias_list_panel(aliases, (1, 2, 3), 700, 620, styles[4], styles[3], styles[5])
-    assert len(alias_panel.items[1].items) == 2
-    left = drawer._build_alias_left_panel(
-        request,
-        aliases,
-        (1, 2, 3),
-        None,
-        700,
-        620,
-        300,
-        *styles,
-    )
-    assert isinstance(left, VSplit)
-    assert len(left.items) == 2
-    trim = drawer._build_alias_trim_panel(tall, (700, 600))
+    column = drawer._build_alias_column(request, aliases, (1, 2, 3, 255), None, 700)
+    assert isinstance(column, VSplit)
+    assert column.parent is None
+    assert len(column.items) == 2
+    assert column._get_self_size()[0] == 700
+
+    with_jacket = drawer._build_alias_column(request, aliases, (1, 2, 3, 255), _image(), 700)
+    # The header row gains the jacket well in front of the title block.
+    assert len(with_jacket.items[0].items[0].items) == 2
+    assert len(column.items[0].items[0].items) == 2  # accent bar + title block
+
+    tall = drawer._prepare_alias_trim_image(_encoded(_image((100, 800))))
+    trim = drawer._build_alias_trim_panel(tall, 600)
     assert isinstance(trim, Frame)
     assert len(trim.items) == 1
+    assert trim.parent is None
 
-    heights = iter([900, 700])
+    heights = iter([900, 600])
+    monkeypatch.setattr(drawer, "_build_alias_column", lambda *_args, **_kwargs: Frame().set_size((10, next(heights))))
+    assert drawer._resolve_alias_column_width(request, aliases, (1, 2, 3, 255), None) == (drawer._ALIAS_WIDTHS[1], 600)
 
-    def fake_left(*_args, **_kwargs):
-        return Frame().set_size((10, next(heights)))
+    monkeypatch.setattr(drawer, "_build_alias_column", lambda *_args, **_kwargs: Frame().set_size((10, 900)))
+    assert drawer._resolve_alias_column_width(request, aliases, (1, 2, 3, 255), None) == (drawer._ALIAS_WIDTHS[0], 900)
 
-    monkeypatch.setattr(drawer, "_build_alias_left_panel", fake_left)
-    assert drawer._resolve_alias_panel_widths(request, aliases, (1, 2, 3), None, 760, *styles)[:2] == (780, 700)
 
-    monkeypatch.setattr(drawer, "_build_alias_left_panel", lambda *_args, **_kwargs: Frame().set_size((10, 900)))
-    assert drawer._resolve_alias_panel_widths(request, aliases, (1, 2, 3), None, 760, *styles)[0] == 700
+def test_alias_name_wraps_past_the_minimum_size() -> None:
+    with VSplit() as box:
+        drawer._draw_alias_name("short", 600)
+        drawer._draw_alias_name("a" * 400, 300)
+    one_line, two_lines = box.items
+    assert one_line.line_count == 1
+    assert two_lines.line_count == drawer._ALIAS_TITLE_LINES
+    assert two_lines.w == 300
+    assert two_lines.style.size == drawer._ALIAS_TITLE_MIN_SIZE
 
 
 @pytest.mark.anyio
@@ -135,18 +155,15 @@ async def test_alias_canvas_builds_plain_jacket_trim_and_missing_trim_paths(monk
     assert isinstance(jacket, Canvas)
     missing = await drawer._build_alias_list_canvas(_request(character_trim_path="missing.png"))
     assert isinstance(missing, Canvas)
+    assert not any(isinstance(item, HSplit) and len(item.items) == 2 and item.sep == 0 for item in _walk(missing))
 
-    monkeypatch.setattr(drawer, "_resolve_alias_panel_widths", lambda *_args, **_kwargs: (700, 620, 300))
-    monkeypatch.setattr(drawer, "_build_alias_left_panel", lambda *_args, **_kwargs: VSplit().set_size((700, 600)))
-    monkeypatch.setattr(drawer, "_build_alias_trim_panel", lambda *_args, **_kwargs: Frame().set_size((200, 600)))
     trimmed = await drawer._build_alias_list_canvas(_request(character_silhouette_path="trim.png"))
-    assert any(isinstance(item, HSplit) for item in _walk(trimmed))
-
-
-def _walk(widget):
-    yield widget
-    for item in getattr(widget, "items", []):
-        yield from _walk(item)
+    rows = [item for item in _walk(trimmed) if isinstance(item, HSplit) and item.sep == 0 and len(item.items) == 2]
+    assert len(rows) == 1
+    column, trim_panel = rows[0].items
+    assert isinstance(column, VSplit)
+    assert isinstance(trim_panel, Frame)
+    assert (await trimmed.get_img()).width > 0
 
 
 @pytest.mark.anyio
