@@ -1,11 +1,12 @@
 """Player frames: Cloud path transport, client prefab geometry, silent fallback and both backends."""
 
 from io import BytesIO
+from types import SimpleNamespace
 
 from PIL import Image, ImageChops
 import pytest
 
-from src.sekai.base.plot import Canvas, Spacer
+from src.sekai.base.plot import Canvas, FillBg, Frame, HSplit, Spacer
 from src.sekai.profile import drawer
 from src.sekai.profile.model import DetailedProfileCardRequest, PlayerFramePaths, ProfileCardRequest
 from src.sekai.skia_renderer import canvas as canvas_mod
@@ -219,40 +220,52 @@ async def test_framed_card_keeps_the_avatar_well(tmp_path, monkeypatch, real_fon
     assert framed._get_self_size() == plain._get_self_size() == (well, well)
 
 
-def _write_vertical_sprites(tmp_path, paths: PlayerFramePaths, color=(220, 40, 40, 255)):
-    dirs = drawer._frame_part_dirs(paths)
-    sizes = {"base": (132, 132), "centertop": (108, 90), "parts1_center": (108, 90)}
-    for part, name, _slot in [(1, "base", None), *drawer._FRAME_SPRITES[paths.frame_type]["vertical"]]:
-        target = tmp_path / f"{dirs[part]}/vertical/frame_{name}.png"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        size = sizes.get(name, (130, 352))
-        if name == "base":
-            image = Image.new("RGBA", size, (0, 0, 0, 0))
-            for box in ((0, 0, 132, 8), (0, 124, 132, 132), (0, 0, 8, 132), (124, 0, 132, 132)):
-                image.paste((200, 200, 200, 255), box)
-        else:
-            image = Image.new("RGBA", size, color)
-        image.save(target)
+def _panel_ctx(paths):
+    profile = SimpleNamespace(has_frame=paths is not None, frame_paths=paths)
+    return SimpleNamespace(request=SimpleNamespace(profile=profile, frame_paths=None))
+
+
+@pytest.mark.anyio
+async def test_profile_info_panel_frame_takes_the_panel_slot_at_card_thickness(tmp_path, monkeypatch):
+    """/profile frames the whole info panel with the row sprites, scaled as on the profile card."""
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    paths = _combo()
+    _write_sprites(tmp_path, paths, {})
+    with HSplit() as row:
+        panel = Spacer(600, 700)
+        other = Spacer(100, 100)
+    framed = await drawer._frame_profile_info_panel(_panel_ctx(paths), panel)
+    assert row.items == [framed, other]
+    assert framed.items[0] is panel
+    box = framed.items[1]
+    assert isinstance(box, drawer.PlayerFrameBox)
+    assert box.layers.cell == "horizontal"
+    assert framed._get_self_size() == (600, 700)
+    card_scale = drawer.frame_scale_for(box.layers, (drawer._CARD_W, drawer._PROFILE_PANEL_FRAME_REFERENCE_H))
+    assert box.frame_scale == pytest.approx(card_scale)
+    # no frame, or no readable frame: the panel stays where it was
+    plain = Spacer(600, 700)
+    assert await drawer._frame_profile_info_panel(_panel_ctx(None), plain) is plain
+    (tmp_path / drawer._frame_part_dirs(paths)[1] / "horizontal" / "frame_base.png").unlink()
+    assert await drawer._frame_profile_info_panel(_panel_ctx(paths), plain) is plain
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("kind", ["single", "combination"])
 @pytest.mark.parametrize("backend", ["skia", "pillow"])
-async def test_profile_page_avatar_frame_on_both_backends(tmp_path, monkeypatch, real_fonts, kind, backend):
-    """/profile keeps the vertical sprites around the 128 px avatar; scale 1.5 is the page's."""
+async def test_profile_info_panel_frame_on_both_backends(tmp_path, monkeypatch, real_fonts, kind, backend):
     if backend == "skia":
         pytest.importorskip("haruki_skia_renderer")
     monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
     monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
-    Image.new("RGBA", (128, 128), (20, 40, 60, 255)).save(tmp_path / "avatar.png")
     paths = _single() if kind == "single" else _combo()
-    _write_vertical_sprites(tmp_path, paths)
+    _write_sprites(tmp_path, paths, {})
 
     async def render(p, scale=1.5):
         async def build():
-            avatar = await drawer.get_asset_image_ref(tmp_path, "avatar.png")
             with Canvas().set_padding(16) as canvas:
-                await drawer.get_avatar_widget_with_frame(p is not None, p, avatar, 128, [])
+                panel = Frame().set_size((400, 300)).set_bg(FillBg((20, 40, 60, 255)))
+            await drawer._frame_profile_info_panel(_panel_ctx(p), panel)
             return canvas
 
         if backend == "skia":
@@ -262,19 +275,11 @@ async def test_profile_page_avatar_frame_on_both_backends(tmp_path, monkeypatch,
         return (await (await build()).get_img(scale)).convert("RGBA")
 
     framed, plain = await render(paths), await render(None)
-    assert framed.size == plain.size == (240, 240)
-    # ornaments overhang the avatar (outset + the prefab's +32 / -16 offsets) but stay in the padding
-    bounds = framed.getchannel("A").getbbox()
-    assert 0 < bounds[0] < 24
-    assert 0 < bounds[1] < 24
-    assert 216 < bounds[2] <= 240
-    assert 216 < bounds[3] <= 240
-    assert framed.getpixel((120, 120)) == plain.getpixel((120, 120)) == (20, 40, 60, 255)
-    assert ImageChops.difference(framed, plain).getbbox() is not None
-
-    # a missing sprite silently leaves the bare avatar
-    (tmp_path / drawer._frame_part_dirs(paths)[1] / "vertical" / "frame_base.png").unlink()
-    assert (await render(paths)).tobytes() == plain.tobytes()
+    assert framed.size == plain.size == (648, 498)
+    # the base ring runs along all four panel edges; the panel centre is untouched
+    assert framed.getpixel((324, 249)) == plain.getpixel((324, 249)) == (20, 40, 60, 255)
+    for edge in ((324, 25), (324, 472), (25, 249), (622, 249)):
+        assert framed.getpixel(edge) != plain.getpixel(edge), edge
 
 
 @pytest.mark.anyio

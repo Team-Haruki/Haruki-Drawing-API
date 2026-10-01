@@ -8,8 +8,8 @@ from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SER
 from src.core.image_payload import require_native_payload
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
-from src.sekai.profile.drawer import try_render_profile_payload
-from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileRequest
+from src.sekai.profile.drawer import try_render_info_panel_payload, try_render_profile_payload
+from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileCardRequest, ProfileRequest
 from src.settings import (
     CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS,
     CUSTOM_PROFILE_MAX_ELEMENTS,
@@ -68,6 +68,24 @@ async def profile(request: ProfileRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/info-panel",
+    summary="Generate standalone info panel image",
+    responses=INTERNAL_SERVER_ERROR_RESPONSES,
+)
+async def info_panel(request: ProfileCardRequest):
+    """
+    Generate the profile card ("info panel") on its own: transparent background, always PNG.
+    """
+    try:
+        set_request_stage("info_panel:compose_image")
+        payload = require_native_payload(await try_render_info_panel_payload(request))
+        set_request_stage("info_panel:image_to_response")
+        return await encoded_image_payload_to_response(payload)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.post(

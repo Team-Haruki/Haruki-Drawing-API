@@ -271,6 +271,7 @@ CASES: tuple[Case, ...] = (
     ),
     # ---- profile ----
     _case("profile", "profile", "profile", "ProfileRequest"),
+    _case("profile_info_panel", "profile", "info_panel", "ProfileCardRequest"),
     # ---- custom profile (progressive native scene; visible missing/unresolved content declines
     #      the whole scene before Rust, and native_metrics distinguishes pure from hybrid).
     #      Payloads are built by scripts/parity_payloads/gen_custom_profile.py from a real profile response

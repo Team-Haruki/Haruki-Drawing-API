@@ -24,7 +24,7 @@ import common
 
 from src.sekai.honor.model import HonorRequest
 from src.sekai.inventory.model import InventoryListRequest
-from src.sekai.profile.model import ProfileRequest
+from src.sekai.profile.model import ProfileCardRequest, ProfileRequest
 
 _WORD_TAG = re.compile(r"<#.*?>")  # profile/controller.go:15
 
@@ -644,6 +644,15 @@ def build_profile_body() -> dict:
     return body
 
 
+def build_info_panel_body(profile_body: dict) -> dict:
+    """/api/pjsk/profile/info-panel: Cloud's suite info panel (snapshot ProfileCard plus the Suite source)."""
+    return {
+        "profile": profile_body["profile"],
+        "rank": profile_body["rank"],
+        "data_sources": [{"name": "Suite数据", "update_time": profile_body["update_time"]}],
+    }
+
+
 def build_honor_body() -> dict:
     """Standalone /api/pjsk/honor payload: the fixture user's main honor (first buildable userHonors entry)."""
     suite = common.load_suite()
@@ -1081,6 +1090,11 @@ def generate() -> list[str]:
     ProfileRequest.model_validate(profile_body)
     common.write_payload("profile", profile_body)
     written.append("profile")
+
+    info_panel_body = build_info_panel_body(profile_body)
+    ProfileCardRequest.model_validate(info_panel_body)
+    common.write_payload("profile_info_panel", info_panel_body)
+    written.append("profile_info_panel")
 
     honor_body = build_honor_body()
     HonorRequest.model_validate(honor_body)
