@@ -269,6 +269,9 @@ class ServerSettings(BaseModel):
 
     host: str = "0.0.0.0"
     port: int = 8000
+    # Byte limit for a request body after zstd decoding (Content-Encoding: zstd);
+    # the compressed body is held to the same limit.
+    max_decoded_body_bytes: int = Field(default=64 * 1024 * 1024, ge=1)
 
 
 class LoggingSettings(BaseModel):

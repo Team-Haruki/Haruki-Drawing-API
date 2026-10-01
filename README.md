@@ -58,6 +58,8 @@ Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配�
 
 所有绘图端点都经由异步出口 `encoded_image_payload_to_response`（`src/core/utils.py`）返回**单条响应 body**：默认是图片字节；请求带 `X-Haruki-Artifact: 1` 及合法缓存指令且存储开启时，改为上传对象存储并返回 `artifact_ref` JSON（失败时回退图片字节并加 `X-Haruki-Artifact-Degraded: 1`）。每个响应都带 `X-Haruki-Node`。
 
+请求体可以用 zstd 压缩：每个响应都带 `Accept-Encoding: zstd`（RFC 7694），Cloud 只在看到这个声明后才对该节点发送 `Content-Encoding: zstd` 的 JSON 请求体，所以新旧节点可以混跑。解码在最外层中间件（`src/core/content_encoding.py`）完成，日志、缓存指令和渲染都只看到明文 JSON；解码后与压缩体都受 `HARUKI_SERVER__MAX_DECODED_BODY_BYTES`（默认 64 MiB）限制，超出返回 413，帧损坏返回 400，其他编码返回 415。响应（图片或 `artifact_ref`）不压缩。
+
 对象存储制品输出（`HARUKI_STORAGE__*`）、按需素材镜像（`HARUKI_ASSETS__SOURCE=mirror`）与用户上传读取（`HARUKI_ASSETS__USER_UPLOAD__ENABLED`，个人信息背景从 `user-upload` 桶按 `user_upload/profile_bg/...` 键读取；单次读取受总超时约束，连续失败后熔断跳过桶，未命中或失败回退本地文件再回退默认背景；未开启时仍读本地磁盘）默认关闭；请求头、`artifact_ref` 字段、降级规则、环境变量、计数器、发布顺序与上线步骤见 [`docs/artifact-storage.md`](./docs/artifact-storage.md)。
 
 `HARUKI_DRAWING__USE_SKIA_PLOT` 必须保持 `true`；设为 `false` 会拒绝启动。需要恢复旧 Pillow 服务时，应回滚至此前包含旧后端的镜像。

@@ -22,6 +22,7 @@ from fastapi import FastAPI
 from granian import Granian
 
 from src.core import health
+from src.core.content_encoding import ZstdRequestBodyMiddleware
 from src.core.debug import install_debug_middleware
 from src.core.diagnostics import configure_runtime_diagnostics, dump_runtime_diagnostics
 from src.core.pjsk import router as pjsk_router
@@ -455,6 +456,8 @@ app = FastAPI(
 )
 
 install_debug_middleware(app)
+# Added last, so outermost: zstd bodies are decoded before the debug logger reads them.
+app.add_middleware(ZstdRequestBodyMiddleware, max_decoded_body_bytes=settings.server.max_decoded_body_bytes)
 
 
 # ======================= Include Routers =======================
