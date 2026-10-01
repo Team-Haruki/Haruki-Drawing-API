@@ -1,31 +1,62 @@
 version: 2
 updates:
-  - package-ecosystem: "uv"
+  - package-ecosystem: uv
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Shanghai"
+      interval: weekly
+      day: wednesday
+      time: "10:30"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "docker"
+    cooldown:
+      default-days: 3
+    groups:
+      uv-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: cargo
+    directory: "/rust/haruki_skia_renderer"
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "10:30"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "[Chore] "
+    cooldown:
+      default-days: 3
+    groups:
+      cargo-minor-patch:
+        update-types: ["minor", "patch"]
+  - package-ecosystem: docker
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Shanghai"
+      interval: weekly
+      day: wednesday
+      time: "10:30"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
-
-  - package-ecosystem: "github-actions"
+    cooldown:
+      default-days: 3
+    groups:
+      docker:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: "weekly"
-      day: "monday"
-      time: "09:00"
-      timezone: "Asia/Shanghai"
+      interval: weekly
+      day: wednesday
+      time: "10:30"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
     commit-message:
       prefix: "[Chore] "
+    cooldown:
+      default-days: 3
+    groups:
+      github-actions:
+        patterns: ["*"]

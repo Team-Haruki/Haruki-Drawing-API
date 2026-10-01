@@ -11,8 +11,9 @@ legacy composers. Missing/stale native wheels or unresolved text fonts fail star
 Legacy compose functions remain for pixel-reference tools, not service recovery. References to fail-open
 below describe the earlier migration and must not be reintroduced into production routes.
 
-Release: tag publishing calls `.github/workflows/skia-wheels.yml` on GitHub-hosted runners and uses
-the same wheel that passed ABI, capability and native codec smoke checks. Full Linux cold/pure-service
+Release: CI (`.github/workflows/ci.yml`, job `renderer`) builds the renderer wheel once per commit on
+GitHub-hosted runners; `main` builds the image from that same wheel after ABI, capability and native codec
+smoke checks, and a tag re-tags that image (`release.yml`). Full Linux cold/pure-service
 and strict warm parity remain manual acceptance via `scripts/skia_release_gate.py` or the optional
 `renderer-release.yml` workflow; only that manual workflow requires a configured fixture runner/paths. Private MySekai and uncaptured symbol/stamps are
 user-excluded diagnostic cases, not release blockers. The private real file was explicitly authorized
@@ -386,12 +387,12 @@ an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 
 **Capability handshake.** The extension exports `IR_CAPABILITY` (currently **29**) and `RAW_BUFFER_CAPABILITY`;
 `src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 29). A too-old
-extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides and the two CI smoke
-assertions** (`.github/workflows/quick-check.yml`, `.github/workflows/skia-wheels.yml`). The Docker build's
+extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides.** The CI smoke checks
+(`scripts/ci/repair-freetype.sh`, `scripts/skia_codec_smoke.py`) read `REQUIRED_NATIVE_IR_CAPABILITY`. The Docker build's
 self-check needs **no** edit: it calls `load_native_renderer()`, which compares the installed
 wheel against `REQUIRED_NATIVE_IR_CAPABILITY` (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
-the image self-check and then silently fell back to Pillow at runtime). Four hardcoded copies of the
-number already exist (Rust, canvas.py, and the two CI assertions) — do not add a fifth.
+the image self-check and then silently fell back to Pillow at runtime). Two hardcoded copies of the
+number exist (Rust, canvas.py) — do not add a third.
 
 **Observability.** `GET /render-stats` reports, per endpoint, how many requests were served
 `skia` / `cache_hit` / `fallback` / `disabled` / `error` (`src/sekai/skia_renderer/render_stats.py`), plus the
@@ -459,9 +460,9 @@ shared Rust raster pool). It excludes the ~10 endpoints that draw a live countdo
 collision between two *different* payloads (there is one payload per endpoint) — for those you have to
 read the key material.
 
-Wheels are built by `.github/workflows/skia-wheels.yml` (linux-x86_64 + macos-arm64 artifacts, not published to
-an index). Docker requires exactly one matching wheel. Tag releases use the wheel produced and smoke-tested by the reusable
-`skia-wheels.yml` workflow on GitHub-hosted runners. Wheels are Python-version-specific: **upgrading Python means
+Wheels are built by `.github/workflows/ci.yml` (job `renderer`: linux-x86_64 artifact `renderer-wheel`, which the
+image installs; job `renderer-macos` on `main` pushes: `haruki-skia-renderer-macos-arm64`; never published to an index).
+Docker requires exactly one matching wheel. Tag releases promote the image `main` built from the smoke-tested wheel. Wheels are Python-version-specific: **upgrading Python means
 rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 **Traps that have already cost real debugging time:**
@@ -503,29 +504,44 @@ rebuilding wheels first**; an absent/incompatible wheel is a build failure.
 
 ## CI
 
-`quick-check.yml` and `free-threaded-smoke.yml` run on pull requests and on push to `main` only (not on
-other branch pushes or release tags), with per-PR/per-ref `concurrency` so a newer commit cancels the older run.
-Every job has a 20 min timeout and installs its apt build dependencies through `awalsh128/cache-apt-pkgs-action`.
+The workflows are thin callers of the shared templates in
+[`seiunx-dev/ci-templates`](https://github.com/seiunx-dev/ci-templates) at `@v1`. Reuse the templates
+first; add custom jobs or steps only when a template genuinely cannot meet the project's needs, keep them in
+the caller files with a comment saying why, and fix template bugs upstream (new `v1.x.y` tag) instead of
+working around them here. The aggregate job **`CI OK`** is the only required status check.
 
-`free-threaded-smoke.yml` installs 3.14t, verifies no-GIL imports, compiles all source, runs concurrency smoke
-tests, and compares GIL vs no-GIL benchmark throughput.
+`ci.yml` (`CI`: pushes to `main`, PRs to `main`, manual dispatch) compiles the Skia renderer **once** per
+commit and reuses that wheel everywhere:
+- `renderer` (custom: no template builds a maturin wheel whose Rust tests link libpython):
+  `scripts/ci/build-renderer.sh` runs `cargo test --release` (libpython `RUSTFLAGS`, so it builds into
+  `rust/haruki_skia_renderer/target-test` and does not invalidate `target/`) and then one cp314t wheel with the
+  interpreter pinned in `.python-version` and the maturin version locked in `uv.lock`; artifact `renderer-wheel`.
+  Its rust-cache covers both target dirs and is saved only from `main`.
+- `Python` (`python-uv-ci`): ruff check + format check (the locked ruff), `compileall` and
+  `scripts/ci/repo-guards.sh` (both YAML configs validate, `drawer.real.py` stays untracked,
+  `docker compose config`), then the test job installs `renderer-wheel`, repairs the bundled FreeType
+  (`scripts/ci/repair-freetype.sh`, which also checks `IR_CAPABILITY` against
+  `REQUIRED_NATIVE_IR_CAPABILITY`), downloads the OFL/CC fonts (`scripts/ci/fetch-fonts.sh`), runs the native
+  codec smoke and one pytest run under `coverage` (90% floor from `[tool.coverage.report]`), uploaded for
+  `Sonar`.
+- `Free-threaded smoke` (custom): `scripts/ci/free-threaded-smoke.sh` — no-GIL imports, storage imports under
+  `-W error`, three bytes-mode granian load runs (the gate), the optional artifact-mode degradation run, and the
+  GIL vs no-GIL benchmark.
+- `Docker` (`docker.yml`) builds the image from `renderer-wheel` (`docker/skia-wheels/`), in parallel with the
+  tests. PRs build only; on `main` it pushes `ghcr.io/team-haruki/haruki-drawing-api:sha-<sha>` right away and
+  `Docker tags` moves `:main` to it after `CI OK`. Registry `:buildcache` keeps the layer cache.
+- `Skia renderer wheel (macOS)` (custom, not on PRs): the macos-arm64 developer wheel, artifact
+  `haruki-skia-renderer-macos-arm64`.
+- `Workflow lint` runs actionlint.
 
-`quick-check.yml` has two jobs:
-- `lint-test` — `ruff check` + `ruff format --check` + `compileall` over **`src tests scripts`**, a config/repo guard (both YAML configs must validate; `drawer.real.py` must stay untracked), `docker compose config`, then `pytest -q -n auto --dist loadfile` (pytest-xdist; Skia-native tests skip, no extension).
-- `native-tests` — builds `haruki_skia_renderer` with maturin, asserts the `IR_CAPABILITY` handshake, runs `cargo test`, and re-runs pytest under xdist so the native tests actually execute.
+`release.yml` (`Release`): bump `version` in `pyproject.toml` in a PR → merge and wait for `CI OK` on `main` →
+push the tag `v<version>`. `release-gate` refuses a tag that differs from `pyproject.toml` and waits for
+`CI OK` on the tagged commit; the image `main` built for that commit is then re-tagged (not rebuilt) to
+`:v<version>` (the tag deployments pull), `:<version>`, `:<major>.<minor>` and, for the highest stable tag,
+`:latest`. A pre-release never moves `:latest`. The image label keeps the main build's version
+(`main-<sha7>`). Manual dispatch is a dry run.
 
-Rust caches (`Swatinem/rust-cache`) use **one `shared-key` per job** (`native-tests`, `free-threaded-smoke`, `skia-renderer` for
-the wheel jobs, `sonar-skia-renderer`): the jobs build against different interpreters, and a shared key made each restore rebuild
-pyo3 and everything above it. `native-tests` runs `cargo test` with `CARGO_TARGET_DIR=rust/haruki_skia_renderer/target-test`
-because its libpython `RUSTFLAGS` change every crate fingerprint; keep it out of `target/` or it invalidates the
-maturin build. `native-tests` only saves its cache on `main`; PRs restore main's copy.
-
-`skia-wheels.yml` builds the release wheels (linux-x86_64 + macos-arm64 on push to main/tags; `docker.yml` calls it
-with `linux-only: true` because the image only ships the Linux wheel). `docker.yml` builds and pushes the image with
-`docker/build-push-action` (`provenance: false`, so tags stay single-platform manifests) and the `type=gha` layer
-cache with `mode=max`. `mode=max` also exports the intermediate builder-stage layers, so each tag writes a large
-cache entry into the repo's Actions cache quota; GitHub scopes it per tag, so it only speeds up re-runs of the same
-tag. The image build stays green without a wheel.
+`renderer-release.yml` stays a manual full-asset validation on a configured fixture runner (see README).
 
 ## Code Style
 

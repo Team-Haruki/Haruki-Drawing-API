@@ -46,7 +46,7 @@ Compose 默认把 `./data` 挂载到容器内 `/pjskdata/Data`，并把 `configs
 
 公开仓库中的 `src/sekai/mysekai/drawer.py` 只是接口占位文件。生产环境必须将真实实现 bind-mount 到同一路径；不要把 `drawer.real.py` 复制进镜像或提交到仓库。
 
-Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。标签发布使用 GitHub 托管 runner 构建并通过 ABI、能力握手和原生编解码检查的同一个 wheel。
+Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。CI 在 GitHub 托管 runner 上每个 commit 只构建一次 wheel，通过 ABI、能力握手和原生编解码检查后用于测试和 main 镜像；打标签只把该 commit 的 main 镜像重打标签。
 
 ## 运维端点
 
@@ -85,7 +85,7 @@ uv run python -X gil=0 scripts/skia_release_gate.py --out-dir out/release-gate
 
 该命令要求完整资产和 `out/parity-payloads/`，串联冷像素、禁止 Pillow 的绘图入口/完整服务、双后端热缓存检查。私有 MySekai 与尚未捕获的 symbol/stamps 按约定仅作诊断，不阻塞发布。
 
-标签工作流复用 `.github/workflows/skia-wheels.yml`，在 GitHub 托管 runner 上构建并检查 wheel；镜像作业下载同一次工作流中通过检查的 Linux wheel，保留生产依赖无 Pillow 检查和实际编解码自检。发布不需要自建 runner 或私有素材。
+`.github/workflows/ci.yml` 在 GitHub 托管 runner 上构建并检查 wheel（复用共享模板 `seiunx-dev/ci-templates`）；镜像作业下载同一次运行中通过检查的 Linux wheel，保留生产依赖无 Pillow 检查和实际编解码自检。`release.yml` 在 tag 上等待该 commit 的 `CI OK` 后重打镜像标签。发布不需要自建 runner 或私有素材。
 
 完整素材对拍保留为手动验收：渲染或缓存逻辑变化时，在具备资产和样本的 Linux 环境运行上述命令。也可手动触发 `.github/workflows/renderer-release.yml`；只有该可选工作流需要配置 `RENDER_VALIDATION_RUNNER`、`RENDER_ASSETS_DIR`、`RENDER_PAYLOAD_DIR`、`RENDER_CONFIG_PATH`。路径必须位于 runner checkout 之外；请求样本与图片不上传为工作流诊断产物。
 

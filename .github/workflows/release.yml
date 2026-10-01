@@ -1,0 +1,39 @@
+name: Release
+# Tags re-tag the image built from main (no third wheel build, no cold docker build).
+# The image label keeps the main build's version (main-<sha7>): imagetools cannot relabel.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: # dry run: builds everything, publishes nothing
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    name: Gate
+    permissions:
+      contents: read
+      checks: read
+    uses: seiunx-dev/ci-templates/.github/workflows/release-gate.yml@v1
+    with:
+      version-source: pyproject
+
+  docker:
+    name: Docker
+    needs: gate
+    if: needs.gate.outputs.is-tag == 'true' # dry runs never push images
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      promote-on-tag: true
+      latest: auto # :latest only for the highest stable semver tag
+      extra-tags: type=ref,event=tag # keep the :vX.Y.Z tag the old docker.yml published (next to :X.Y.Z)
