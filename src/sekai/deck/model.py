@@ -86,6 +86,12 @@ class DeckData(BaseModel):
         支援卡组加成率
     multi_live_score_up : Optional[float]
         多人Live分数提升率
+    challenge_character_id : Optional[int]
+        全角色挑战组卡中该卡组所属的挑战角色ID
+    chara_icon_path : Optional[str]
+        全角色挑战组卡中该卡组所属角色的头像路径
+    chara_name : Optional[str]
+        全角色挑战组卡中该卡组所属角色的名字
     """
 
     card_data: list[DeckCardData]
@@ -107,6 +113,9 @@ class DeckData(BaseModel):
     mysekai_event_point: int | None = None
     support_deck_bonus_rate: float | None = None
     multi_live_score_up: float | None = None
+    challenge_character_id: int | None = None
+    chara_icon_path: AssetKey | None = None
+    chara_name: str | None = None
 
 
 class DeckPlannerBoostRow(BaseModel):
