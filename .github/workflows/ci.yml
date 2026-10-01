@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# PRs: one group per PR, newer pushes cancel older runs. Everything else: one group per
+# event and commit, so a queued main run is never replaced by a newer one (every commit keeps
+# its "CI OK" and :sha-<sha> image for the release gate and promote-on-tag).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.event_name, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Replaces quick-check.yml, free-threaded-smoke.yml, skia-wheels.yml, sonar.yml and the
+  # build half of docker.yml: the Skia renderer (skia-safe from source) is compiled ONCE per
+  # commit, as a cp314t wheel with the interpreter pinned in .python-version; the tests, the
+  # smoke run and the image install that wheel instead of rebuilding Skia in every job. No
+  # template builds a maturin wheel with Rust tests linked against libpython, so this job and
+  # the smoke job are written here; the old workflow steps live in scripts/ci/.
+  renderer:
+    name: Skia renderer wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: seiunx-dev/ci-templates/actions/apt-install@v1
+        with:
+          packages: clang libclang-dev ninja-build libfontconfig1-dev libfreetype-dev
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          working-directory: rust/haruki_skia_renderer # stable, as before
+          cache-key: skia-renderer
+          cache-workspaces: |
+            rust/haruki_skia_renderer -> target
+            rust/haruki_skia_renderer -> target-test
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - name: cargo test + maturin build (cp314t)
+        run: ./scripts/ci/build-renderer.sh dist-renderer # cargo test --release, then maturin build -i <uv 3.14t>
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: renderer-wheel
+          path: dist-renderer/*.whl
+          retention-days: 3
+
+  python:
+    name: Python
+    needs: [renderer]
+    uses: seiunx-dev/ci-templates/.github/workflows/python-uv-ci.yml@v1
+    with:
+      python-versions: '[""]' # .python-version: cpython-3.14.3+freethreaded, as the renderer wheel
+      sync-args: --frozen --all-groups
+      timeout-minutes: 30
+      download-artifact: renderer-wheel
+      env: HARUKI_FONT__EMOJI=TwemojiMozilla # Linux FreeType renders COLR; the repo default (OT-SVG) is macOS-only
+      setup-command: >-
+        uv pip install ci-artifacts/*.whl && ./scripts/ci/repair-freetype.sh .venv &&
+        ./scripts/ci/fetch-fonts.sh &&
+        uv run --no-sync python -X gil=0 scripts/skia_codec_smoke.py
+      lint-command: uv run --no-sync python -m compileall -q src tests scripts && ./scripts/ci/repo-guards.sh
+      # One pytest run under coverage (as the old sonar.yml did; pytest-cov is not a dependency,
+      # so this run is not xdist-parallel). Fails under 90% via [tool.coverage.report] fail_under.
+      test-command: >-
+        uv run --no-sync python -X gil=0 -m coverage run -m pytest -q &&
+        uv run --no-sync python -m coverage xml --fail-under=0 -o coverage/python.xml &&
+        uv run --no-sync python -m coverage report
+      coverage-path: coverage/python.xml
+
+  smoke:
+    name: Free-threaded smoke
+    needs: [renderer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: renderer-wheel
+          path: ci-artifacts
+      - name: Boot granian and render concurrently with the GIL off
+        run: |
+          uv sync --frozen
+          uv pip install ci-artifacts/*.whl
+          ./scripts/ci/repair-freetype.sh .venv
+          ./scripts/ci/fetch-fonts.sh
+          ./scripts/ci/free-threaded-smoke.sh smoke-logs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: failure()
+        with:
+          name: smoke-logs
+          path: smoke-logs/
+          retention-days: 7
+
+  # The macOS arm64 wheel developers install locally (skia-wheels.yml built it on main and
+  # tags). Not on PRs: Linux is what ships, and the extra Skia build would be on the PR path.
+  renderer-macos:
+    name: Skia renderer wheel (macOS)
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Select C++20-capable Xcode
+        run: sudo xcode-select --switch /Applications/Xcode_16.4.app/Contents/Developer
+      - uses: seiunx-dev/ci-templates/actions/setup-rust@v1
+        with:
+          working-directory: rust/haruki_skia_renderer
+          cache-key: skia-renderer-macos
+          cache-workspaces: rust/haruki_skia_renderer -> target
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+      - name: maturin build (cp314t) + smoke
+        run: |
+          py_request="$(cat .python-version)"
+          uv python install "$py_request"
+          py="$(uv python find "$py_request")"
+          maturin_version="$(awk '/^name = "maturin"$/ { getline; gsub(/version = |"/, ""); print; exit }' uv.lock)"
+          uvx "maturin==${maturin_version}" build --release --manifest-path rust/haruki_skia_renderer/Cargo.toml -i "$py" --out dist-renderer
+          uv venv --python "$py" .venv-smoke
+          uv pip install --python .venv-smoke/bin/python dist-renderer/*.whl
+          .venv-smoke/bin/python -X gil=0 -c "import haruki_skia_renderer as m; print('IR_CAPABILITY =', m.IR_CAPABILITY)"
+          .venv-smoke/bin/python -X gil=0 scripts/skia_codec_smoke.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: haruki-skia-renderer-macos-arm64
+          path: dist-renderer/*.whl
+          retention-days: 7
+
+  sonar:
+    name: Sonar
+    needs: [python]
+    uses: seiunx-dev/ci-templates/.github/workflows/sonar.yml@v1
+    with:
+      project-version: auto
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  docker:
+    name: Docker
+    needs: [renderer] # the image installs the renderer wheel; not on the python tests
+    permissions:
+      contents: read
+      packages: write
+      pull-requests: read
+    uses: seiunx-dev/ci-templates/.github/workflows/docker.yml@v1
+    with:
+      defer-moving-tags: true # push :sha-* right away; :main moves after CI OK (docker-tags)
+      artifact-name: renderer-wheel
+      artifact-path: docker/skia-wheels
+      version-build-arg: VERSION
+      cache-backend: registry # tag-scoped gha caches were never reusable
+      cache-mode: max
+
+  workflows:
+    name: Workflow lint
+    uses: seiunx-dev/ci-templates/.github/workflows/actionlint.yml@v1
+
+  ci-ok:
+    name: CI OK # the only required status check
+    if: always()
+    needs: [renderer, renderer-macos, python, smoke, sonar, docker, workflows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
+
+  docker-tags:
+    name: Docker tags # :main follows only commits whose CI OK passed
+    needs: [docker, ci-ok]
+    # Explicit result check: the implicit success() also fails when any job upstream of ci-ok was
+    # skipped (e.g. a PR-only job), which silently skipped this job on main.
+    if: ${{ !cancelled() && needs.ci-ok.result == 'success' && needs.docker.outputs.deferred-tags != '' }}
+    permissions:
+      contents: read
+      packages: write
+    uses: seiunx-dev/ci-templates/.github/workflows/docker-retag.yml@v1
+    with:
+      image: ${{ needs.docker.outputs.image }}
+      digest: ${{ needs.docker.outputs.digest }}
+      tags: ${{ needs.docker.outputs.deferred-tags }}

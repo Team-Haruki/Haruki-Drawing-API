@@ -70,6 +70,8 @@ def test_dockerfile_self_check_imports_storage_packages():
 
 
 def test_free_threaded_smoke_asserts_storage_imports():
-    workflow = (REPOSITORY_ROOT / ".github/workflows/free-threaded-smoke.yml").read_text(encoding="utf-8")
+    workflow = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    smoke = (REPOSITORY_ROOT / "scripts/ci/free-threaded-smoke.sh").read_text(encoding="utf-8")
 
-    assert '-X gil=0 -W error::RuntimeWarning -c "import opendal, asyncpg; import src.core.main"' in workflow
+    assert "./scripts/ci/free-threaded-smoke.sh" in workflow
+    assert '-X gil=0 -W error::RuntimeWarning -c "import opendal, asyncpg; import src.core.main"' in smoke
