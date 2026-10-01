@@ -808,7 +808,7 @@ _ALIAS_JACKET_WELL = 64
 _ALIAS_JACKET = 54
 _ALIAS_TRIM_ALPHA_FLOOR = 36
 _ALIAS_TRIM_MAX_W = 920
-_ALIAS_TRIM_MIN_H = 500
+_ALIAS_TRIM_MIN_H = 380
 _ALIAS_TRIM_MAX_H = 920
 _ALIAS_TRIM_EXTRA_H = 24  # the picture stands this much taller than the column it is drawn beside
 # The picture may lean this far over the column: no more than the panel padding, so hair never covers a chip.
@@ -904,9 +904,9 @@ def _draw_alias_header(rqd: AliasListRequest, accent: Color, jacket_img, alias_c
                 )
 
 
-def _draw_alias_chips(aliases: list[str], accent: Color, width: int) -> None:
+def _draw_alias_chips(aliases: list[str], accent: Color, width: int, extra_h: int = 0) -> None:
     flow_w = width - 2 * PANEL_PAD
-    with panel(width):
+    with panel(width) as box:
         section_header("别名列表", accent, soft_chips=[(f"{len(aliases)} 条", _deep(accent))])
         with (
             Flow().set_w(flow_w).set_sep(_ALIAS_CHIP_SEP, _ALIAS_CHIP_SEP).set_content_align("lt").set_item_align("lt")
@@ -921,15 +921,22 @@ def _draw_alias_chips(aliases: list[str], accent: Color, width: int) -> None:
                     stroke=_with_alpha(accent, 120),
                     max_w=flow_w,
                 )
+    if extra_h > 0:
+        # Stretch down to the standing picture's frame so the column and the picture end together;
+        # the chips keep flowing from the top.
+        box.set_h(box._get_self_size()[1] + extra_h)
+        box._calc_w = box._calc_h = None
 
 
-def _build_alias_column(rqd: AliasListRequest, aliases: list[str], accent: Color, jacket_img, width: int) -> VSplit:
+def _build_alias_column(
+    rqd: AliasListRequest, aliases: list[str], accent: Color, jacket_img, width: int, extra_h: int = 0
+) -> VSplit:
     """The header + chips column, built detached so it can be measured before the page is laid out."""
     token = Widget._thread_local.set(None)
     try:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(_PAGE_SEP).set_padding(0) as column:
             _draw_alias_header(rqd, accent, jacket_img, len(aliases), width)
-            _draw_alias_chips(aliases, accent, width)
+            _draw_alias_chips(aliases, accent, width, extra_h)
         return column
     finally:
         Widget._thread_local.reset(token)
@@ -999,7 +1006,8 @@ async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
         trim_panel = None
     else:
         width, column_h = _resolve_alias_column_width(rqd, aliases, accent, jacket_img)
-        column = _build_alias_column(rqd, aliases, accent, jacket_img, width)
+        _, frame_h, _ = _resolve_alias_trim_metrics(trim_img, column_h)
+        column = _build_alias_column(rqd, aliases, accent, jacket_img, width, extra_h=frame_h - column_h)
         trim_panel = _build_alias_trim_panel(trim_img, column_h)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:

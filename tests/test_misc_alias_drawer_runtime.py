@@ -114,6 +114,11 @@ def test_alias_column_and_trim_panel_build_detached(monkeypatch) -> None:
     assert len(column.items) == 2
     assert column._get_self_size()[0] == 700
 
+    # Stretched to a taller standing picture: the chip panel grows, the header does not.
+    stretched = drawer._build_alias_column(request, aliases, (1, 2, 3, 255), None, 700, extra_h=120)
+    assert stretched._get_self_size()[1] == column._get_self_size()[1] + 120
+    assert stretched.items[0]._get_self_size()[1] == column.items[0]._get_self_size()[1]
+
     with_jacket = drawer._build_alias_column(request, aliases, (1, 2, 3, 255), _image(), 700)
     # The header row gains the jacket well in front of the title block.
     assert len(with_jacket.items[0].items[0].items) == 2
@@ -170,6 +175,8 @@ async def test_alias_canvas_builds_plain_jacket_trim_and_missing_trim_paths(monk
     column, trim_panel = rows[0].items
     assert isinstance(column, VSplit)
     assert isinstance(trim_panel, Frame)
+    # The column ends where the picture's frame ends.
+    assert column._get_self_size()[1] == trim_panel._get_self_size()[1]
     assert (await trimmed.get_img()).width > 0
 
 
