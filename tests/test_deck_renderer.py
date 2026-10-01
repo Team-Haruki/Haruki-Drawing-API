@@ -7,6 +7,7 @@ import sys
 from PIL import Image
 import pytest
 
+from src.sekai.base import chrome
 from src.sekai.deck import drawer
 from src.sekai.deck.model import (
     DeckCardData,
@@ -319,6 +320,8 @@ async def test_wl_support_rows_keep_per_result_totals_and_compact_cards(monkeypa
 
     monkeypatch.setattr(drawer, "_load_deck_recommend_assets", load_assets)
     monkeypatch.setattr(drawer, "TextBox", text_box)
+    # The support chips are built by the shared chrome helpers, which have their own TextBox name.
+    monkeypatch.setattr(chrome, "TextBox", text_box)
     monkeypatch.setattr(drawer, "CardFullThumbnailBox", thumbnail)
     request = _request(
         is_wl=True,
