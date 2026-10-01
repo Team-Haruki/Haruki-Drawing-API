@@ -242,7 +242,9 @@ async def test_profile_info_panel_frame_takes_the_panel_slot_at_card_thickness(t
     assert box.layers.cell == "horizontal"
     assert framed._get_self_size() == (600, 700)
     card_scale = drawer.frame_scale_for(box.layers, (drawer._CARD_W, drawer._PROFILE_PANEL_FRAME_REFERENCE_H))
-    assert box.frame_scale == pytest.approx(card_scale)
+    # the card's proportions, enlarged uniformly: ring, corners and ornaments share one scale
+    assert drawer._PROFILE_PANEL_FRAME_SCALE_FACTOR > 1
+    assert box.frame_scale == pytest.approx(card_scale * drawer._PROFILE_PANEL_FRAME_SCALE_FACTOR)
     # no frame, or no readable frame: the panel stays where it was
     plain = Spacer(600, 700)
     assert await drawer._frame_profile_info_panel(_panel_ctx(None), plain) is plain
@@ -306,3 +308,15 @@ async def test_explicit_local_parts_load_independently_without_bundle_derivation
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", missing)
     assert await drawer.get_player_frame_layers(request) is None
+
+
+@pytest.mark.anyio
+async def test_wrap_scale_factor_multiplies_whatever_scale_was_chosen(tmp_path, monkeypatch):
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    paths = _single()
+    _write_sprites(tmp_path, paths, {})
+    plain = await drawer.wrap_with_player_frame(Spacer(400, 300), paths, scale_reference=(470, 126))
+    bigger = await drawer.wrap_with_player_frame(Spacer(400, 300), paths, scale_reference=(470, 126), scale_factor=2)
+    fixed = await drawer.wrap_with_player_frame(Spacer(400, 300), paths, scale=0.3, scale_factor=2)
+    assert bigger.items[1].frame_scale == pytest.approx(2 * plain.items[1].frame_scale)
+    assert fixed.items[1].frame_scale == pytest.approx(0.6)

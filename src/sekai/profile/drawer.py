@@ -566,12 +566,14 @@ async def wrap_with_player_frame(
     cell: str = "horizontal",
     scale: float | None = None,
     scale_reference: tuple[int, int] | None = None,
+    scale_factor: float = 1.0,
     split: bool = True,
 ) -> Widget:
     """``widget`` with the equipped frame drawn over its whole box; ``widget`` itself when there is none.
 
     The frame is scaled for ``widget``'s own box unless ``scale`` fixes it or ``scale_reference``
     names another box to size it for, so differently shaped panels can share one frame thickness.
+    ``scale_factor`` then enlarges the whole frame uniformly (ring, corners and ornaments alike).
     """
     layers = await get_player_frame_layers(frame_paths, cell) if frame_paths else None
     if layers is None:
@@ -581,6 +583,7 @@ async def wrap_with_player_frame(
         s = scale
     else:
         s = frame_scale_for(layers, scale_reference or size)
+    s *= scale_factor
     # Widgets attach to the active container on construction; build the wrapper detached and put
     # it where ``widget`` was so neither is drawn twice.
     ret = Frame()
@@ -671,6 +674,9 @@ async def _build_profile_avatar_module(ctx: _ProfileLayoutContext) -> Widget:
 # pages) gives it: a card-sized box (_CARD_W wide, a two-source card tall) decides the scale,
 # whatever the panel's own shape.
 _PROFILE_PANEL_FRAME_REFERENCE_H = 126
+# ...enlarged uniformly, because the /profile panel is far bigger than a card: the same proportions
+# as the card's frame, every part (ring, corners, ornaments) at this multiple of its size.
+_PROFILE_PANEL_FRAME_SCALE_FACTOR = 1.5
 
 
 async def _frame_profile_info_panel(ctx: _ProfileLayoutContext, panel: Widget) -> Widget:
@@ -680,7 +686,11 @@ async def _frame_profile_info_panel(ctx: _ProfileLayoutContext, panel: Widget) -
     if not profile.has_frame or frame_paths is None:
         return panel
     return await wrap_with_player_frame(
-        panel, frame_paths, cell="horizontal", scale_reference=(_CARD_W, _PROFILE_PANEL_FRAME_REFERENCE_H)
+        panel,
+        frame_paths,
+        cell="horizontal",
+        scale_reference=(_CARD_W, _PROFILE_PANEL_FRAME_REFERENCE_H),
+        scale_factor=_PROFILE_PANEL_FRAME_SCALE_FACTOR,
     )
 
 
