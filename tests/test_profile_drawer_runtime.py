@@ -152,14 +152,6 @@ async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) ->
     box._draw_content(painter)
     assert len([name for name, _args, _kwargs in painter.calls if name == "paste_with_alpha_blend"]) == 14
 
-    avatar = await drawer.get_avatar_widget_with_frame(True, paths, _image(), 80, [])
-    assert isinstance(avatar, Frame)
-    assert isinstance(avatar.items[1], drawer.PlayerFrameBox)
-    assert avatar.items[1].layers.cell == "vertical"
-    assert avatar._get_self_size() == (80, 80)
-    no_frame = await drawer.get_avatar_widget_with_frame(False, paths, _image(), 80, [])
-    assert len(no_frame.items) == 1
-
 
 @pytest.mark.anyio
 async def test_cached_profile_module_uses_memory_disk_and_render_paths(monkeypatch) -> None:

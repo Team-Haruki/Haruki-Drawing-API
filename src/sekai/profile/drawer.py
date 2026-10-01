@@ -19,6 +19,8 @@ from src.sekai.base.draw import (
     PLAY_RESULT_COLORS,
     SEKAI_BLUE_BG,
     add_request_watermark,
+    add_watermark,
+    build_request_dt_watermark_text,
     roundrect_bg,
 )
 from src.sekai.base.font_metrics import get_layout_font as get_font
@@ -558,14 +560,30 @@ def frame_scale_for(layers: PlayerFrameLayers, size: tuple[int, int]) -> float:
 
 
 async def wrap_with_player_frame(
-    widget: Widget, frame_paths, *, cell: str = "horizontal", scale: float | None = None, split: bool = True
+    widget: Widget,
+    frame_paths,
+    *,
+    cell: str = "horizontal",
+    scale: float | None = None,
+    scale_reference: tuple[int, int] | None = None,
+    scale_factor: float = 1.0,
+    split: bool = True,
 ) -> Widget:
-    """``widget`` with the equipped frame drawn over its whole box; ``widget`` itself when there is none."""
+    """``widget`` with the equipped frame drawn over its whole box; ``widget`` itself when there is none.
+
+    The frame is scaled for ``widget``'s own box unless ``scale`` fixes it or ``scale_reference``
+    names another box to size it for, so differently shaped panels can share one frame thickness.
+    ``scale_factor`` then enlarges the whole frame uniformly (ring, corners and ornaments alike).
+    """
     layers = await get_player_frame_layers(frame_paths, cell) if frame_paths else None
     if layers is None:
         return widget
     size = widget._get_self_size()
-    s = scale if scale is not None else frame_scale_for(layers, size)
+    if scale is not None:
+        s = scale
+    else:
+        s = frame_scale_for(layers, scale_reference or size)
+    s *= scale_factor
     # Widgets attach to the active container on construction; build the wrapper detached and put
     # it where ``widget`` was so neither is drawn twice.
     ret = Frame()
@@ -581,31 +599,6 @@ async def wrap_with_player_frame(
         parent.items[parent.items.index(widget)] = ret
         ret.set_parent(parent)
     widget.set_parent(ret)
-    return ret
-
-
-# The /profile page keeps its framed avatar: the vertical (player cell) sprites around a square
-# avatar on a 672-unit reference square, the layout that page has always used.
-_AVATAR_FRAME_REFERENCE = 672
-_AVATAR_FRAME_OUTSET = 2.5
-
-
-# 获取带框头像控件
-async def get_avatar_widget_with_frame(
-    is_frame: bool, frame_paths, avatar_img: ImageSource, avatar_w: int, frame_data: list[dict]
-) -> Frame:
-    layers = await get_player_frame_layers(frame_paths, "vertical") if is_frame and frame_paths else None
-    with Frame().set_size((avatar_w, avatar_w)).set_content_align("c").set_allow_draw_outside(True) as ret:
-        ImageBox(avatar_img, size=(avatar_w, avatar_w), use_alpha_blend=False)
-        if layers is not None:
-            side = avatar_w + 2 * _AVATAR_FRAME_OUTSET
-            PlayerFrameBox(
-                layers,
-                (avatar_w, avatar_w),
-                side / _AVATAR_FRAME_REFERENCE,
-                split=False,
-                outset=_AVATAR_FRAME_OUTSET,
-            )
     return ret
 
 
@@ -673,12 +666,31 @@ def _build_cached_profile_module_widget(image: Image.Image) -> Widget:
 
 
 async def _build_profile_avatar_module(ctx: _ProfileLayoutContext) -> Widget:
-    return await get_avatar_widget_with_frame(
-        is_frame=bool(ctx.request.profile.has_frame),
-        frame_paths=ctx.request.frame_paths or ctx.request.profile.frame_paths,
-        avatar_img=ctx.avatar_img,
-        avatar_w=128,
-        frame_data=[],
+    # The equipped frame goes around the whole info panel (see _frame_profile_info_panel), not the avatar.
+    return ImageBox(ctx.avatar_img, size=(128, 128), use_alpha_blend=False)
+
+
+# The info panel wears the frame at the thickness the profile card (the "info panel" atop other
+# pages) gives it: a card-sized box (_CARD_W wide, a two-source card tall) decides the scale,
+# whatever the panel's own shape.
+_PROFILE_PANEL_FRAME_REFERENCE_H = 126
+# ...enlarged uniformly, because the /profile panel is far bigger than a card: the same proportions
+# as the card's frame, every part (ring, corners, ornaments) at this multiple of its size.
+_PROFILE_PANEL_FRAME_SCALE_FACTOR = 1.5
+
+
+async def _frame_profile_info_panel(ctx: _ProfileLayoutContext, panel: Widget) -> Widget:
+    """Frame the placed info panel in place, the way the profile card frames its card."""
+    profile = ctx.request.profile
+    frame_paths = ctx.request.frame_paths or profile.frame_paths
+    if not profile.has_frame or frame_paths is None:
+        return panel
+    return await wrap_with_player_frame(
+        panel,
+        frame_paths,
+        cell="horizontal",
+        scale_reference=(_CARD_W, _PROFILE_PANEL_FRAME_REFERENCE_H),
+        scale_factor=_PROFILE_PANEL_FRAME_SCALE_FACTOR,
     )
 
 
@@ -1193,6 +1205,15 @@ async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
             module.set_bg(None)
             root.add_item(module)
         canvas.add_item(root)
+        # The shared item bg spans the column; widen the info panel to it so its frame does too.
+        # Sizes are cached on first measure, so the panel's own width is read from its content.
+        if rqd.profile.has_frame:
+            info = modules["info"]
+            natural = info._get_content_size()[0] + 2 * info.h_padding
+            column = max(module._get_self_size()[0] for key, module in modules.items() if key != "info")
+            info.set_w(max(natural, column))
+    # after placement (and the vertical layout's bg swap) so the wrapper takes the panel's slot
+    await _frame_profile_info_panel(layout_ctx, modules["info"])
 
     add_request_watermark(
         canvas,
@@ -1519,7 +1540,7 @@ async def _build_profile_card_modules(rqd: ProfileCardRequest) -> list[Widget]:
 
 
 # 获取玩家个人信息的简单卡片控件
-async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
+async def get_profile_card(rqd: ProfileCardRequest, *, blur_glass: bool = True) -> Frame:
     r"""get_profile_card
 
     获取玩家个人信息的简单卡片控件
@@ -1527,6 +1548,8 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     Args
     ----
         rqd : ProfileCardRequest
+        blur_glass : bool
+            毛玻璃背景（含阴影）；独立信息面板没有可模糊的底图，传 False 只画纯色圆角矩形
 
     Returns
     -------
@@ -1536,7 +1559,9 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
 
     # Widgets auto-attach to the current active container on construction; the modules are built
     # detached and placed explicitly: avatar | identity on one row, the notice strip below.
-    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding((_CARD_PAD_X, _CARD_PAD_Y)) as f:
+    with (
+        Frame().set_bg(roundrect_bg(alpha=bg_alpha, blur_glass=blur_glass)).set_padding((_CARD_PAD_X, _CARD_PAD_Y)) as f
+    ):
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8) as column:
             if rqd.profile:
                 column.set_w(_CARD_INNER_W)
@@ -1549,3 +1574,40 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
         # The card is the player's list row: frame it the way the friend list / ranking rows are.
         return await wrap_with_player_frame(f, rqd.profile.frame_paths, cell="horizontal")
     return f
+
+
+# ---------------------------------------------------------------------------
+# Standalone info panel (/信息面板): the profile card on its own, always PNG. Nothing but the card, its
+# frame and a two-line watermark (the request DT, then the credit) is drawn: no page background, and the
+# card is a plain rounded rectangle without the glass blur or its shadow, so every other pixel is clear.
+# ---------------------------------------------------------------------------
+
+_INFO_PANEL_ENDPOINT = "profile_info_panel"
+_INFO_PANEL_SCALE = 2.0
+# room for the frame's ornaments, which overhang the card by up to 16 UI units at card scale
+_INFO_PANEL_PADDING = 16
+# Opaque enough to read over any chat background; the embedded card's 150 assumes a page behind it.
+_INFO_PANEL_BG_ALPHA = 235
+
+
+async def _build_info_panel_canvas(rqd: ProfileCardRequest) -> Canvas:
+    card = rqd if rqd.bg_alpha is not None else rqd.model_copy(update={"bg_alpha": _INFO_PANEL_BG_ALPHA})
+    with Canvas(bg=None).set_padding(_INFO_PANEL_PADDING) as canvas:
+        await get_profile_card(card, blur_glass=False)
+    add_watermark(canvas, build_request_dt_watermark_text(rqd))
+    return canvas
+
+
+async def compose_info_panel_image(rqd: ProfileCardRequest) -> Image.Image:
+    """Pillow reference for the standalone info panel."""
+    return await (await _build_info_panel_canvas(rqd)).get_img(_INFO_PANEL_SCALE)
+
+
+async def try_render_info_panel_payload(rqd: ProfileCardRequest) -> EncodedImagePayload | None:
+    """Skia path; PNG regardless of the global export format, because the background is transparent."""
+    if not skia_plot_enabled():
+        return None
+    canvas = await _build_info_panel_canvas(rqd)
+    return await render_canvas_payload(
+        canvas, endpoint=_INFO_PANEL_ENDPOINT, scale=_INFO_PANEL_SCALE, export_format="png"
+    )
