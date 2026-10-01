@@ -438,7 +438,9 @@ def _build_frame_paths(suite: dict) -> dict | None:
     """controller_helpers.go:166-196 (fixture has no equipped frame; paths are literal joins in Go)."""
     equipped_id = 0
     for item in suite.get("userPlayerFrames") or []:
-        if str(item.get("playerFrameAttachStatus", "")).strip().lower() == "equipped":
+        # The game sends "first" for the frame on display and "none" (or nothing) otherwise.
+        status = str(item.get("playerFrameAttachStatus", "")).strip().lower()
+        if status and status != "none":
             equipped_id = item.get("playerFrameId", 0)
             break
     if not equipped_id:
