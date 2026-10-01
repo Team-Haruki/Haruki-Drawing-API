@@ -1,6 +1,7 @@
 """Player frames: Cloud path transport, client prefab geometry, silent fallback and both backends."""
 
 from io import BytesIO
+import math
 from types import SimpleNamespace
 
 from PIL import Image, ImageChops
@@ -46,6 +47,17 @@ def _combo(parts=(20021, 20017, 20013, 20009, 20005, 20001)):
 
 def _sprite_size(path: str) -> tuple[int, int]:
     name = path.rsplit("/", 1)[-1]
+    if "/vertical/" in path:
+        # PlayerFrameCell sprites: 132 base, 108x90 crown, 352-tall side strips
+        if name == "frame_base.png":
+            return (132, 132)
+        if "center" in name:
+            return (108, 90)
+        if name in ("frame_leftbottom.png", "frame_parts4_left.png", "frame_parts6_left.png"):
+            return (226, 352)
+        if name in ("frame_rightbottom.png", "frame_parts5_right.png", "frame_parts6_right.png"):
+            return (72, 352)
+        return (130, 352)
     if name == "frame_base.png":
         return (60, 60)
     if "center" in name:
@@ -134,9 +146,11 @@ async def test_unreadable_frame_silently_keeps_the_card_and_recovers(tmp_path, m
     assert framed._get_self_size() == (200, 60)
 
 
-def _write_sprites(tmp_path, paths: PlayerFramePaths, colors: dict[str, tuple[int, int, int, int]]):
+def _write_sprites(
+    tmp_path, paths: PlayerFramePaths, colors: dict[str, tuple[int, int, int, int]], cells=("horizontal",)
+):
     """Solid sprites in their real sizes; ``colors`` maps a part directory to its fill."""
-    for kind in ("horizontal",):
+    for kind in cells:
         dirs = drawer._frame_part_dirs(paths)
         for part, name, _slot in [(1, "base", None), *drawer._FRAME_SPRITES[paths.frame_type][kind]]:
             target = tmp_path / f"{dirs[part]}/{kind}/frame_{name}.png"
@@ -144,11 +158,12 @@ def _write_sprites(tmp_path, paths: PlayerFramePaths, colors: dict[str, tuple[in
             color = colors.get(dirs[part].rsplit("/", 1)[-1], (0, 0, 0, 0))
             if name == "base":
                 color = (200, 200, 200, 255)
-                image = Image.new("RGBA", (60, 60), (0, 0, 0, 0))
-                image.paste(color, (0, 0, 60, 4))
-                image.paste(color, (0, 56, 60, 60))
-                image.paste(color, (0, 0, 4, 60))
-                image.paste(color, (56, 0, 60, 60))
+                n = _sprite_size(str(target))[0]
+                image = Image.new("RGBA", (n, n), (0, 0, 0, 0))
+                image.paste(color, (0, 0, n, 4))
+                image.paste(color, (0, n - 4, n, n))
+                image.paste(color, (0, 0, 4, n))
+                image.paste(color, (n - 4, 0, n, n))
             else:
                 image = Image.new("RGBA", _sprite_size(target.name), color)
             image.save(target)
@@ -226,11 +241,11 @@ def _panel_ctx(paths):
 
 
 @pytest.mark.anyio
-async def test_profile_info_panel_frame_takes_the_panel_slot_at_card_thickness(tmp_path, monkeypatch):
-    """/profile frames the whole info panel with the row sprites, scaled as on the profile card."""
+async def test_profile_info_panel_wears_the_player_cell_frame(tmp_path, monkeypatch):
+    """/profile frames the whole info panel with the vertical (player-cell) sprites, fitted to the panel."""
     monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
     paths = _combo()
-    _write_sprites(tmp_path, paths, {})
+    _write_sprites(tmp_path, paths, {}, cells=("horizontal", "vertical"))
     with HSplit() as row:
         panel = Spacer(600, 700)
         other = Spacer(100, 100)
@@ -239,17 +254,36 @@ async def test_profile_info_panel_frame_takes_the_panel_slot_at_card_thickness(t
     assert framed.items[0] is panel
     box = framed.items[1]
     assert isinstance(box, drawer.PlayerFrameBox)
-    assert box.layers.cell == "horizontal"
+    assert box.layers.cell == "vertical"
     assert framed._get_self_size() == (600, 700)
-    card_scale = drawer.frame_scale_for(box.layers, (drawer._CARD_W, drawer._PROFILE_PANEL_FRAME_REFERENCE_H))
-    # the card's proportions, enlarged uniformly: ring, corners and ornaments share one scale
-    assert drawer._PROFILE_PANEL_FRAME_SCALE_FACTOR > 1
-    assert box.frame_scale == pytest.approx(card_scale * drawer._PROFILE_PANEL_FRAME_SCALE_FACTOR)
+    fitted = drawer.frame_scale_for(box.layers, (600, 700))
+    assert box.frame_scale == pytest.approx(fitted * drawer._PROFILE_PANEL_FRAME_SCALE_FACTOR)
+    # combination parts 2-5 run down the sides in the player cell: left strips on the left, right on the right
+    slots = [slot for _, slot in box.layers.ornaments]
+    assert slots == ["br", "bl", "tr", "tl", "tl", "tr", "tc", "br", "bl"]
+    # the crown and top strips stand 32 units above the cell
+    assert drawer._player_frame_rise(framed) == math.ceil(32 * box.frame_scale)
+    assert drawer._player_frame_rise(Spacer(10, 10)) == 0
     # no frame, or no readable frame: the panel stays where it was
     plain = Spacer(600, 700)
     assert await drawer._frame_profile_info_panel(_panel_ctx(None), plain) is plain
     (tmp_path / drawer._frame_part_dirs(paths)[1] / "horizontal" / "frame_base.png").unlink()
+    (tmp_path / drawer._frame_part_dirs(paths)[1] / "vertical" / "frame_base.png").unlink()
     assert await drawer._frame_profile_info_panel(_panel_ctx(paths), plain) is plain
+
+
+@pytest.mark.anyio
+async def test_profile_info_panel_falls_back_to_row_frame_at_card_thickness(tmp_path, monkeypatch):
+    """A frame without vertical sprites still frames /profile, with the row sprites at the card's thickness."""
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    paths = _combo()
+    _write_sprites(tmp_path, paths, {})  # horizontal only
+    panel = Spacer(600, 700)
+    framed = await drawer._frame_profile_info_panel(_panel_ctx(paths), panel)
+    box = framed.items[1]
+    assert box.layers.cell == "horizontal"
+    card_scale = drawer.frame_scale_for(box.layers, (drawer._CARD_W, drawer._PROFILE_PANEL_FRAME_REFERENCE_H))
+    assert box.frame_scale == pytest.approx(card_scale * drawer._PROFILE_PANEL_ROW_FRAME_SCALE_FACTOR)
 
 
 @pytest.mark.anyio
@@ -261,7 +295,7 @@ async def test_profile_info_panel_frame_on_both_backends(tmp_path, monkeypatch, 
     monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
     monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
     paths = _single() if kind == "single" else _combo()
-    _write_sprites(tmp_path, paths, {})
+    _write_sprites(tmp_path, paths, {}, cells=("horizontal", "vertical"))
 
     async def render(p, scale=1.5):
         async def build():
@@ -320,3 +354,31 @@ async def test_wrap_scale_factor_multiplies_whatever_scale_was_chosen(tmp_path, 
     fixed = await drawer.wrap_with_player_frame(Spacer(400, 300), paths, scale=0.3, scale_factor=2)
     assert bigger.items[1].frame_scale == pytest.approx(2 * plain.items[1].frame_scale)
     assert fixed.items[1].frame_scale == pytest.approx(0.6)
+
+
+@pytest.mark.anyio
+async def test_explicit_parts_serve_only_the_cells_they_supply(monkeypatch):
+    fields = ("base", "lefttop", "righttop", "centertop", "rightbottom", "leftbottom")
+    vertical = {field: f"static_images/custom/v/{field}.png" for field in fields}
+    horizontal = {field: f"static_images/custom/h/{field}.png" for field in fields}
+    both = PlayerFramePaths.model_validate({**horizontal, "horizontal": horizontal, "vertical": vertical})
+    row_only = PlayerFramePaths.model_validate({**horizontal, "horizontal": horizontal})
+    requested = []
+
+    async def asset(_root, path, **_kwargs):
+        requested.append(path)
+        return Image.new("RGBA", (60, 60))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
+    layers = await drawer.get_player_frame_layers(both, "vertical")
+    # PlayerFrameCell sibling order: TL, TR, crown, BR, BL
+    assert requested == [vertical[field] for field in fields]
+    assert layers.cell == "vertical"
+    assert [slot for _, slot in layers.ornaments] == ["tl", "tr", "tc", "br", "bl"]
+    requested.clear()
+    assert (await drawer.get_player_frame_layers(both, "horizontal")).cell == "horizontal"
+    assert set(requested) == set(horizontal.values())
+    # an override's top-level paths are local sprites, never bundle paths to derive another cell from
+    requested.clear()
+    assert await drawer.get_player_frame_layers(row_only, "vertical") is None
+    assert requested == []

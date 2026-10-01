@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import math
 import time
 from typing import TYPE_CHECKING
 
@@ -433,10 +434,15 @@ async def get_player_frame_layers(frame_paths, cell: str = "horizontal") -> Play
     if frame_paths is None or cell not in _FRAME_SLOTS:
         return None
     kind = getattr(frame_paths, "frame_type", None) or "single"
-    explicit = getattr(frame_paths, "horizontal", None) if cell == "horizontal" else None
-    if explicit is not None:
+    explicit = {name: getattr(frame_paths, name, None) for name in ("horizontal", "vertical")}
+    if explicit.get(cell) is not None:
+        parts = explicit[cell]
         sprites = _FRAME_SPRITES["single"][cell]
-        paths = [explicit.base, *(getattr(explicit, name) for _, name, _ in sprites)]
+        paths = [parts.base, *(getattr(parts, name) for _, name, _ in sprites)]
+    elif any(parts is not None for parts in explicit.values()):
+        # An operator override replaces the game frame; its top-level paths are local sprites, not
+        # game bundles, so a cell it does not supply has no frame rather than a derived guess.
+        return None
     else:
         dirs = _frame_part_dirs(frame_paths)
         if dirs is None:
@@ -670,27 +676,53 @@ async def _build_profile_avatar_module(ctx: _ProfileLayoutContext) -> Widget:
     return ImageBox(ctx.avatar_img, size=(128, 128), use_alpha_blend=False)
 
 
-# The info panel wears the frame at the thickness the profile card (the "info panel" atop other
-# pages) gives it: a card-sized box (_CARD_W wide, a two-source card tall) decides the scale,
-# whatever the panel's own shape.
+# The /profile info panel is a tall player cell, so it wears the frame the client gives its tall
+# cells (the multi-live room / frame-setting preview): the ``vertical`` sprites, whose combination
+# parts 2-5 run down the sides and whose crown sits on top. Their scale fits the panel the way
+# ``frame_scale_for`` fits any box (the 340x748 reference cell's height onto the panel, capped so
+# the side strips never meet), times this factor.
+_PROFILE_PANEL_FRAME_SCALE_FACTOR = 1.0
+# Page pixels kept between the crown's tip and the page edge.
+_PROFILE_PANEL_FRAME_CLEARANCE = 4
+# A frame without vertical sprites (an operator override that only supplies the row sprites) falls
+# back to the row (``horizontal``) sprites at the thickness the profile card gives them: a
+# card-sized box (_CARD_W wide, a two-source card tall) decides the scale, enlarged uniformly
+# because the panel is far bigger than a card.
 _PROFILE_PANEL_FRAME_REFERENCE_H = 126
-# ...enlarged uniformly, because the /profile panel is far bigger than a card: the same proportions
-# as the card's frame, every part (ring, corners, ornaments) at this multiple of its size.
-_PROFILE_PANEL_FRAME_SCALE_FACTOR = 1.5
+_PROFILE_PANEL_ROW_FRAME_SCALE_FACTOR = 1.5
+
+
+def _player_frame_rise(framed: Widget) -> int:
+    """Pixels a frame's top strips and crown stand above the framed box (0 when it is not framed).
+
+    The client pins the vertical cell's top ornaments 32 units above the cell, so on the /profile
+    panel they reach into the page padding."""
+    items = getattr(framed, "items", ())
+    box = items[1] if len(items) > 1 else None
+    if not isinstance(box, PlayerFrameBox):
+        return 0
+    slots = _FRAME_SLOTS[box.layers.cell]
+    top_offsets = [slots[slot][3] for _, slot in box.layers.ornaments if not slots[slot][1]]
+    return math.ceil(max(top_offsets, default=0) * box.frame_scale)
 
 
 async def _frame_profile_info_panel(ctx: _ProfileLayoutContext, panel: Widget) -> Widget:
-    """Frame the placed info panel in place, the way the profile card frames its card."""
+    """Frame the placed info panel in place with the player-cell frame, else the row frame."""
     profile = ctx.request.profile
     frame_paths = ctx.request.frame_paths or profile.frame_paths
     if not profile.has_frame or frame_paths is None:
         return panel
+    framed = await wrap_with_player_frame(
+        panel, frame_paths, cell="vertical", scale_factor=_PROFILE_PANEL_FRAME_SCALE_FACTOR
+    )
+    if framed is not panel:
+        return framed
     return await wrap_with_player_frame(
         panel,
         frame_paths,
         cell="horizontal",
         scale_reference=(_CARD_W, _PROFILE_PANEL_FRAME_REFERENCE_H),
-        scale_factor=_PROFILE_PANEL_FRAME_SCALE_FACTOR,
+        scale_factor=_PROFILE_PANEL_ROW_FRAME_SCALE_FACTOR,
     )
 
 
@@ -1213,7 +1245,11 @@ async def _build_profile_canvas(rqd: ProfileRequest) -> Canvas:
             column = max(module._get_self_size()[0] for key, module in modules.items() if key != "info")
             info.set_w(max(natural, column))
     # after placement (and the vertical layout's bg swap) so the wrapper takes the panel's slot
-    await _frame_profile_info_panel(layout_ctx, modules["info"])
+    framed_info = await _frame_profile_info_panel(layout_ctx, modules["info"])
+    # the info panel sits at the top of the page in both layouts: keep its crown off the edge
+    rise = _player_frame_rise(framed_info) + _PROFILE_PANEL_FRAME_CLEARANCE
+    if rise > BG_PADDING:
+        canvas.set_padding((BG_PADDING, rise))
 
     add_request_watermark(
         canvas,
