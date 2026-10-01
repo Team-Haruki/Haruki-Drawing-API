@@ -1,135 +1,204 @@
-"""Frame transport, native outsets and per-slot asset/cache behavior."""
+"""Player frames: Cloud path transport, client prefab geometry, silent fallback and both backends."""
 
 from io import BytesIO
 
-from PIL import Image, ImageChops, ImageDraw
+from PIL import Image, ImageChops
 import pytest
 
-from src.sekai.base.image_source import MissingImageRef
-from src.sekai.base.plot import Canvas
+from src.sekai.base.plot import Canvas, Spacer
 from src.sekai.profile import drawer
-from src.sekai.profile.model import DetailedProfileCardRequest, PlayerFramePaths
+from src.sekai.profile.model import DetailedProfileCardRequest, PlayerFramePaths, ProfileCardRequest
 from src.sekai.skia_renderer import canvas as canvas_mod
 
+ROOT = "asset/jp-assets/startapp/player_frame"
 
-def _paths(kind="single"):
+
+def _single(fid=10001):
+    # exactly what Cloud sends today: the vertical cell's sprites
+    r = f"{ROOT}/frame_0001/{fid}/vertical/frame_"
     return PlayerFramePaths(
-        frame_type=kind,
-        base="base.png",
-        centertop="center.png",
-        lefttop="corner.png",
-        righttop="corner.png",
-        leftbottom="corner.png",
-        rightbottom="corner.png",
-        side_left_top="side.png",
-        side_right_top="side.png",
-        side_left_bottom="side.png",
-        side_right_bottom="side.png",
+        base=r + "base.png",
+        centertop=r + "centertop.png",
+        lefttop=r + "lefttop.png",
+        righttop=r + "righttop.png",
+        leftbottom=r + "leftbottom.png",
+        rightbottom=r + "rightbottom.png",
     )
 
 
+def _combo(parts=(20021, 20017, 20013, 20009, 20005, 20001)):
+    p = lambda i, name: f"{ROOT}/frame_0002/20001/{parts[i - 1]}/vertical/frame_{name}.png"  # noqa: E731
+    return PlayerFramePaths(
+        frame_type="combination",
+        base=p(1, "base"),
+        lefttop=p(1, "parts1_left"),
+        righttop=p(1, "parts1_right"),
+        centertop=p(1, "parts1_center"),
+        side_left_top=p(2, "parts2_left"),
+        side_right_top=p(3, "parts3_right"),
+        side_left_bottom=p(4, "parts4_left"),
+        side_right_bottom=p(5, "parts5_right"),
+        leftbottom=p(6, "parts6_left"),
+        rightbottom=p(6, "parts6_right"),
+    )
+
+
+def _sprite_size(path: str) -> tuple[int, int]:
+    name = path.rsplit("/", 1)[-1]
+    if name == "frame_base.png":
+        return (60, 60)
+    if "center" in name:
+        return (62, 36)
+    return (536, 82)
+
+
 @pytest.mark.anyio
-async def test_embedded_profile_carries_all_frame_parts_and_ignores_missing_art(monkeypatch):
-    detail = DetailedProfileCardRequest(
-        id="123",
+async def test_cloud_vertical_paths_resolve_to_horizontal_row_sprites(monkeypatch):
+    requested = []
+
+    async def asset(_root, path, **_kwargs):
+        requested.append(path)
+        return Image.new("RGBA", _sprite_size(path))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
+    single = await drawer.get_player_frame_layers(_single())
+    assert requested == [
+        f"{ROOT}/frame_0001/10001/horizontal/frame_{name}.png"
+        for name in ("base", "lefttop", "righttop", "centertop", "leftbottom", "rightbottom")
+    ]
+    assert [slot for _, slot in single.ornaments] == ["tl", "tr", "tc", "bl", "br"]
+
+    requested.clear()
+    combo = await drawer.get_player_frame_layers(_combo())
+    # PlayerFrameCombination6PartsView.LoadPartSpritesHorizontal: part2/3 on the left strips,
+    # part4/5 on the right ones, part6 owns the right corners, part1 the base, left corners and crown.
+    by_sprite = {path.rsplit("/", 3)[-3] + ":" + path.rsplit("/", 1)[-1]: path for path in requested}
+    assert set(by_sprite) == {
+        "20021:frame_base.png",
+        "20021:frame_parts1_top.png",
+        "20021:frame_parts1_bottom.png",
+        "20021:frame_parts1_center.png",
+        "20017:frame_parts2_top.png",
+        "20013:frame_parts3_bottom.png",
+        "20009:frame_parts4_top.png",
+        "20005:frame_parts5_bottom.png",
+        "20001:frame_parts6_top.png",
+        "20001:frame_parts6_bottom.png",
+    }
+    assert [slot for _, slot in combo.ornaments] == ["tl", "bl", "tl", "bl", "tr", "br", "tr", "br", "tc"]
+
+    vertical = await drawer.get_player_frame_layers(_single(), "vertical")
+    assert vertical.cell == "vertical"
+    # a path that does not end in <bundle>/<cell>/<sprite> or a missing part is no frame, not a guess
+    assert await drawer.get_player_frame_layers(_single().model_copy(update={"base": "frame_base.png"})) is None
+    assert await drawer.get_player_frame_layers(_combo().model_copy(update={"side_left_top": None})) is None
+
+
+@pytest.mark.anyio
+async def test_frame_scale_never_lets_the_row_strips_overlap(monkeypatch):
+    async def asset(_root, path, **_kwargs):
+        return Image.new("RGBA", _sprite_size(path))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
+    layers = await drawer.get_player_frame_layers(_combo())
+    # the client row (1542x146) maps 1:1
+    assert drawer.frame_scale_for(layers, (1542, 146)) == pytest.approx(1.0)
+    # a narrow card is limited by width: 536-8 per side must fit
+    s = drawer.frame_scale_for(layers, (470, 120))
+    assert s == pytest.approx(470 / (2 * (536 - 8)))
+    assert 2 * (536 - 8) * s <= 470 + 1e-6
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("broken", ["missing", "corrupt"])
+async def test_unreadable_frame_silently_keeps_the_card_and_recovers(tmp_path, monkeypatch, caplog, broken):
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    paths = _single()
+    for name in ("base", "lefttop", "righttop", "leftbottom", "rightbottom"):
+        target = tmp_path / f"{ROOT}/frame_0001/10001/horizontal/frame_{name}.png"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGBA", _sprite_size(target.name)).save(target)
+    center = tmp_path / f"{ROOT}/frame_0001/10001/horizontal/frame_centertop.png"
+    if broken == "corrupt":
+        center.write_bytes(b"not an image")
+
+    card = Spacer(200, 60)
+    assert await drawer.wrap_with_player_frame(card, paths) is card
+    assert not [record for record in caplog.records if record.levelno >= 30]
+
+    Image.new("RGBA", (62, 36)).save(center)
+    framed = await drawer.wrap_with_player_frame(Spacer(200, 60), paths)
+    assert isinstance(framed.items[1], drawer.PlayerFrameBox)
+    assert framed._get_self_size() == (200, 60)
+
+
+def _write_sprites(tmp_path, paths: PlayerFramePaths, colors: dict[str, tuple[int, int, int, int]]):
+    """Solid sprites in their real sizes; ``colors`` maps a part directory to its fill."""
+    for kind in ("horizontal",):
+        dirs = drawer._frame_part_dirs(paths)
+        for part, name, _slot in [(1, "base", None), *drawer._FRAME_SPRITES[paths.frame_type][kind]]:
+            target = tmp_path / f"{dirs[part]}/{kind}/frame_{name}.png"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            color = colors.get(dirs[part].rsplit("/", 1)[-1], (0, 0, 0, 0))
+            if name == "base":
+                color = (200, 200, 200, 255)
+                image = Image.new("RGBA", (60, 60), (0, 0, 0, 0))
+                image.paste(color, (0, 0, 60, 4))
+                image.paste(color, (0, 56, 60, 60))
+                image.paste(color, (0, 0, 4, 60))
+                image.paste(color, (56, 0, 60, 60))
+            else:
+                image = Image.new("RGBA", _sprite_size(target.name), color)
+            image.save(target)
+
+
+def _card_request(paths) -> ProfileCardRequest:
+    return DetailedProfileCardRequest(
+        id="123456789",
         region="jp",
         nickname="Frame",
         source="suite",
         update_time=0,
         leader_image_path="avatar.png",
-        has_frame=True,
-        frame_paths=_paths("combination"),
-    )
-    request = detail.to_profile_card_request()
-    assert request.profile.frame_paths == detail.frame_paths
-    received = []
-
-    async def asset(_root, path, **_kwargs):
-        received.append(path)
-        return Image.new("RGBA", (132, 132))
-
-    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
-    avatar = await drawer._build_profile_card_avatar_module(request)
-    assert isinstance(avatar.items[1], drawer.PlayerFrameBox)
-    assert len(avatar.items[1].layers.ornaments) == 9
-    assert received.count("side.png") == 4
-
-    async def missing(_root, path, **_kwargs):
-        return MissingImageRef() if path == "side.png" else Image.new("RGBA", (132, 132))
-
-    monkeypatch.setattr(drawer, "get_asset_image_ref", missing)
-    avatar = await drawer._build_profile_card_avatar_module(request)
-    assert len(avatar.items) == 1  # Preserve the avatar; no placeholder ornaments.
-    assert (
-        await drawer.get_player_frame_layers(_paths("combination").model_copy(update={"side_left_top": None})) is None
-    )
+        has_frame=paths is not None,
+        frame_paths=paths,
+    ).to_profile_card_request()
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("kind", ["single", "combination"])
-@pytest.mark.parametrize("broken", ["missing", "corrupt"])
-async def test_unreadable_frame_silently_preserves_avatar_and_recovers(tmp_path, monkeypatch, caplog, kind, broken):
-    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
-    paths = _paths(kind)
-    for name in ("base.png", "corner.png", "side.png"):
-        Image.new("RGBA", (132, 132)).save(tmp_path / name)
-    if broken == "corrupt":
-        (tmp_path / "center.png").write_bytes(b"not an image")
-    avatar = Image.new("RGBA", (80, 80), "blue")
-
-    widget = await drawer.get_avatar_widget_with_frame(True, paths, avatar, 80, [])
-    assert len(widget.items) == 1
-    assert widget._get_self_size() == (80, 80)
-    assert not [record for record in caplog.records if record.levelno >= 30]
-
-    Image.new("RGBA", (108, 90)).save(tmp_path / "center.png")
-    recovered = await drawer.get_avatar_widget_with_frame(True, paths, avatar, 80, [])
-    assert isinstance(recovered.items[1], drawer.PlayerFrameBox)
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize("kind", ["single", "combination"])
-@pytest.mark.parametrize("size", [80, 128])
-async def test_native_frame_keeps_outsets_and_slot_colors(tmp_path, monkeypatch, real_fonts, kind, size):
-    pytest.importorskip("haruki_skia_renderer")
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+async def test_framed_card_renders_on_both_backends_with_parts_on_their_sides(
+    tmp_path, monkeypatch, real_fonts, backend
+):
+    if backend == "skia":
+        pytest.importorskip("haruki_skia_renderer")
     monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
     monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
-    specs = {
-        "avatar.png": ((128, 128), (20, 40, 60, 255)),
-        "corner.png": ((90, 150), (200, 90, 70, 255)),
-        "center.png": ((80, 64), (220, 180, 60, 255)),
-        "side.png": ((32, 260), (40, 160, 80, 255)),
-        "other-side.png": ((32, 260), (140, 40, 220, 255)),
-    }
-    for name, (dimensions, color) in specs.items():
-        Image.new("RGBA", dimensions, color).save(tmp_path / name)
-    base = Image.new("RGBA", (132, 132))
-    ImageDraw.Draw(base).rectangle((0, 0, 131, 131), outline=(200, 200, 200, 255), width=12)
-    base.save(tmp_path / "base.png")
+    Image.new("RGBA", (128, 128), (20, 40, 60, 255)).save(tmp_path / "avatar.png")
+    paths = _combo()
+    left, right = (220, 40, 40, 255), (40, 40, 220, 255)
+    # parts 2/3 dress the left strips, 4/5 the right ones (horizontal cell)
+    _write_sprites(tmp_path, paths, {"20017": left, "20013": left, "20009": right, "20005": right})
 
-    async def render(paths):
-        avatar = await drawer.get_asset_image_ref(tmp_path, "avatar.png")
-        with Canvas().set_padding(16) as canvas:
-            await drawer.get_avatar_widget_with_frame(True, paths, avatar, size, [])
-        payload = await canvas_mod.render_canvas_payload(canvas, export_format="png")
-        assert payload is not None
-        return Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    async def render(p, scale=1.5):
+        async def build():
+            with Canvas().set_padding(16) as canvas:
+                await drawer.get_profile_card(_card_request(p))
+            return canvas
 
-    paths = _paths(kind)
-    first = await render(paths)
-    assert first.size == (size + 32, size + 32)
-    bounds = first.getchannel("A").getbbox()
-    assert 0 < bounds[0] < 16
-    assert 0 < bounds[1] < 16
-    assert size + 16 < bounds[2] < size + 32
-    assert size + 16 < bounds[3] < size + 32
-    assert first.getpixel((16 + size // 2, 16 + size // 2)) == (20, 40, 60, 255)
-    assert first.tobytes() == (await render(paths)).tobytes()
-    fallback = await render(paths.model_copy(update={"centertop": "missing.png"}))
-    assert fallback.tobytes() == (await render(None)).tobytes()
-    if kind == "combination":
-        changed = await render(paths.model_copy(update={"side_right_top": "other-side.png"}))
-        delta = ImageChops.difference(first, changed).convert("RGB").getbbox()
-        assert delta is not None
-        assert delta[0] > size // 2 + 16
-        assert delta[3] < size // 2 + 16
+        if backend == "skia":
+            payload = await canvas_mod.render_canvas_payload(await build(), export_format="png", scale=scale)
+            assert payload is not None
+            return Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+        return (await (await build()).get_img(scale)).convert("RGBA")  # must not trip on fractional sizes
+
+    framed, plain = await render(paths), await render(None)
+    assert framed.size == plain.size  # the frame never changes the card's layout
+    delta = ImageChops.difference(framed, plain).getbbox()
+    assert delta is not None
+    w = framed.width
+    reds = [x for x in range(w) if framed.getpixel((x, 16 * 3 // 2))[:3] == left[:3]]
+    blues = [x for x in range(w) if framed.getpixel((x, 16 * 3 // 2))[:3] == right[:3]]
+    assert reds
+    assert blues
+    assert max(reds) <= w // 2 + 1 < min(blues) + 2

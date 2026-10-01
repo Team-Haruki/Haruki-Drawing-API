@@ -131,34 +131,30 @@ async def test_profile_asset_layer_loaders_and_thumbnail_drawing_cover_optional_
 @pytest.mark.anyio
 async def test_player_frame_loader_widget_and_nine_slice_drawing(monkeypatch) -> None:
     async def fake_asset(_root, path, **_kwargs):
-        return _image((132 if path == "base" else 10, 132 if path == "base" else 12))
+        return _image((60, 60) if path.endswith("frame_base.png") else (536, 82))
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
-
-    async def fake_assets(root, paths, **kwargs):
-        return [await fake_asset(root, path, **kwargs) for path in paths]
-
-    monkeypatch.setattr(drawer, "get_asset_image_refs", fake_assets)
+    root = "asset/jp-assets/startapp/player_frame/frame_0001/10001/vertical/frame_"
     paths = SimpleNamespace(
-        base="base",
-        centertop="ct",
-        leftbottom="lb",
-        lefttop="lt",
-        rightbottom="rb",
-        righttop="rt",
+        base=root + "base.png",
+        centertop=root + "centertop.png",
+        leftbottom=root + "leftbottom.png",
+        lefttop=root + "lefttop.png",
+        rightbottom=root + "rightbottom.png",
+        righttop=root + "righttop.png",
     )
     layers = await drawer.get_player_frame_layers(paths)
-    box = drawer.PlayerFrameBox(layers, 100)
-    assert box._get_content_size() == (100, 100)
+    assert layers.cell == "horizontal"
+    assert [slot for _image, slot in layers.ornaments] == ["tl", "tr", "tc", "bl", "br"]
+    box = drawer.PlayerFrameBox(layers, (400, 100), 0.5)
+    assert box._get_content_size() == (400, 100)
     painter = _RecordingPainter()
     box._draw_content(painter)
     assert len([name for name, _args, _kwargs in painter.calls if name == "paste_with_alpha_blend"]) == 14
 
     avatar = await drawer.get_avatar_widget_with_frame(True, paths, _image(), 80, [])
     assert isinstance(avatar, Frame)
-    assert len(avatar.items) == 2
-    no_frame = await drawer.get_avatar_widget_with_frame(False, paths, _image(), 80, [])
-    assert len(no_frame.items) == 1
+    assert len(avatar.items) == 1  # the frame decorates the whole card, never the bare avatar
 
 
 @pytest.mark.anyio
