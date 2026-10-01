@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field as dataclass_field
 import logging
 from pathlib import Path
 import time
@@ -535,6 +535,7 @@ class _DeckRecommendAssets:
     card_layers: dict[tuple, object]
     compare_music_imgs: dict[str, ImageSource]
     planner_music_imgs: dict[str, ImageSource]
+    deck_chara_icons: dict[str, ImageSource] = dataclass_field(default_factory=dict)
 
 
 def _deck_optional_asset_tasks(rqd: DeckRequest) -> dict[str, object]:
@@ -589,9 +590,16 @@ async def _load_deck_recommend_assets(rqd: DeckRequest) -> _DeckRecommendAssets:
 
     compare_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in compare_cover_paths]
     planner_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in planner_cover_paths]
+    deck_chara_paths: list[AssetKey] = []
+    for deck in rqd.deck_data:
+        if deck.chara_icon_path and deck.chara_icon_path not in deck_chara_paths:
+            deck_chara_paths.append(deck.chara_icon_path)
+    deck_chara_tasks = [get_asset_image_ref(ASSETS_BASE_DIR, path) for path in deck_chara_paths]
     deck_keys = list(deck_tasks)
     started_at = time.perf_counter()
-    results = await asyncio.gather(*deck_tasks.values(), *card_thumb_tasks, *compare_tasks, *planner_tasks)
+    results = await asyncio.gather(
+        *deck_tasks.values(), *card_thumb_tasks, *compare_tasks, *planner_tasks, *deck_chara_tasks
+    )
     logger.debug(
         "[perf] compose_deck_recommend_image preload %d items: %.3fs",
         len(deck_keys) + len(card_thumb_tasks) + len(compare_tasks) + len(planner_tasks),
@@ -603,7 +611,9 @@ async def _load_deck_recommend_assets(rqd: DeckRequest) -> _DeckRecommendAssets:
     thumbnail_results = results[len(deck_keys) : thumbnail_end]
     compare_end = thumbnail_end + len(compare_tasks)
     compare_results = results[thumbnail_end:compare_end]
-    planner_results = results[compare_end:]
+    planner_end = compare_end + len(planner_tasks)
+    planner_results = results[compare_end:planner_end]
+    deck_chara_results = results[planner_end:]
     return _DeckRecommendAssets(
         chara_icon=chara_icon,
         wl_chara_icon=deck_images.get("wl_chara"),
@@ -614,6 +624,7 @@ async def _load_deck_recommend_assets(rqd: DeckRequest) -> _DeckRecommendAssets:
         card_layers=dict(zip(card_thumb_keys, thumbnail_results)),
         compare_music_imgs={legacy_key(path): img for path, img in zip(compare_cover_paths, compare_results)},
         planner_music_imgs={legacy_key(path): img for path, img in zip(planner_cover_paths, planner_results)},
+        deck_chara_icons={legacy_key(path): img for path, img in zip(deck_chara_paths, deck_chara_results)},
     )
 
 
@@ -641,6 +652,9 @@ def _deck_live_label(rqd: DeckRequest) -> str:
 # ---------------------------------------------------------------------------
 
 _RANK_W = 34
+# All-character challenge rows carry the deck's character beside the rank badge.
+_ROW_CHARA_ICON = 34
+_RANK_CHARA_W = _RANK_W + 6 + _ROW_CHARA_ICON
 _MUSIC_W = 176
 _SCORE_W = 124
 _BONUS_W = 112
@@ -692,18 +706,19 @@ class _DeckLayout:
     primary: str | None
     card_slots: int
     tile_w: int
+    rank_w: int = _RANK_W
 
     @property
     def stats(self) -> tuple[str, ...]:
         return tuple(key for key in self.metrics if key != self.primary)
 
     def list_fixed_w(self) -> int:
-        widths = [_RANK_W, *([_MUSIC_W] if self.music else []), *(_METRIC_WIDTHS[key] for key in self.metrics)]
+        widths = [self.rank_w, *([_MUSIC_W] if self.music else []), *(_METRIC_WIDTHS[key] for key in self.metrics)]
         return sum(widths) + len(widths) * _COL_SEP + 2 * _ROW_PAD[0]
 
     def list_widths(self) -> dict[str, int]:
         """Column widths of a list row; spare tile width is shared by the value columns and the cards."""
-        widths = {"rank": _RANK_W, **({"music": _MUSIC_W} if self.music else {})}
+        widths = {"rank": self.rank_w, **({"music": _MUSIC_W} if self.music else {})}
         widths.update((key, _METRIC_WIDTHS[key]) for key in self.metrics)
         cards = _cards_w(_LIST_CELL_W, _LIST_CARD_SEP, self.card_slots)
         extra = max(0, self.tile_w - self.list_fixed_w() - cards)
@@ -727,6 +742,11 @@ class _DeckLayout:
         return self.tile_w - self.hero_fixed_w()
 
 
+def _deck_rows_carry_character(rqd: DeckRequest) -> bool:
+    """All-character challenge results: one deck per character, each labelled with its character."""
+    return any(deck.chara_icon_path or deck.chara_name for deck in rqd.deck_data)
+
+
 def _deck_layout(rqd: DeckRequest) -> _DeckLayout:
     metrics = tuple(
         key
@@ -744,7 +764,8 @@ def _deck_layout(rqd: DeckRequest) -> _DeckLayout:
     target = _TARGET_METRIC.get(rqd.target or "")
     primary = target if target in metrics else (metrics[0] if metrics else None)
     slots = max([5, *(len(deck.card_data) for deck in rqd.deck_data)])
-    probe = _DeckLayout(rqd.music_compare, metrics, primary, slots, 0)
+    rank_w = _RANK_CHARA_W if _deck_rows_carry_character(rqd) else _RANK_W
+    probe = _DeckLayout(rqd.music_compare, metrics, primary, slots, 0, rank_w)
     tile_w = max(
         _MIN_TILE_W,
         probe.hero_fixed_w() + _cards_w(_HERO_CELL_W, _HERO_CARD_SEP, slots),
@@ -753,7 +774,7 @@ def _deck_layout(rqd: DeckRequest) -> _DeckLayout:
     )
     if rqd.event_planner:
         tile_w = max(tile_w, 300 + sum(w for _, w in _PLANNER_COLS) + _PLANNER_COL_SEP * len(_PLANNER_COLS) + 24)
-    return _DeckLayout(rqd.music_compare, metrics, primary, slots, tile_w)
+    return _DeckLayout(rqd.music_compare, metrics, primary, slots, tile_w, rank_w)
 
 
 def _deck_page_width(rqd: DeckRequest) -> int:
@@ -779,6 +800,8 @@ def _deck_subtitle(rqd: DeckRequest) -> str:
         return rqd.event_name
     if rqd.recommend_type in {"challenge", "challenge_all"} and rqd.chara_name:
         return rqd.chara_name
+    if rqd.recommend_type == "challenge_all":
+        return "全部角色 · 每个角色的最佳卡组"
     return ""
 
 
@@ -1326,7 +1349,7 @@ def _algorithm_chip(algorithm: str | None, width: int, *, size: int = 11, paddin
             _chip(label, _alpha(_GREY, 36), style=style, radius=radius, padding=padding)
 
 
-def _hero_band(rqd: DeckRequest, width: int, rank_label: str) -> None:
+def _hero_band(rqd: DeckRequest, width: int, rank_label: str, chara_icon: ImageSource | None = None) -> None:
     """A flat tinted strip on top of the hero tile: rank badge + label in the recommendation accent."""
     accent = _deck_accent(rqd)
     with (
@@ -1341,6 +1364,8 @@ def _hero_band(rqd: DeckRequest, width: int, rank_label: str) -> None:
         )
     ):
         _circle_badge("1", accent, 26, TextStyle(font=DEFAULT_HEAVY_FONT, size=15, color=WHITE))
+        if chara_icon is not None:
+            ImageBox(chara_icon, size=(30, 30), image_size_mode="fit")
         _ink(TextBox(rank_label, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=_mix(accent, _INK, 0.35))))
 
 
@@ -1409,7 +1434,8 @@ def _draw_hero_tile(
     width = layout.tile_w
     body_fill = (255, 255, 255, 205)
     with VSplit().set_w(width).set_content_align("lt").set_item_align("lt").set_sep(0).set_padding(0):
-        _hero_band(rqd, width, "最佳卡组")
+        label = f"最佳卡组 · {deck.chara_name}" if deck.chara_name else "最佳卡组"
+        _hero_band(rqd, width, label, _deck_chara_icon(assets, deck))
         with (
             VSplit()
             .set_w(width)
@@ -1433,7 +1459,7 @@ def _draw_list_header(rqd: DeckRequest, layout: _DeckLayout) -> None:
     accent = _deck_accent(rqd)
     widths = layout.list_widths()
     with HSplit().set_content_align("l").set_item_align("c").set_sep(_COL_SEP).set_padding((_ROW_PAD[0], 0)):
-        TextBox("#", _COL_LABEL_STYLE).set_w(_RANK_W).set_content_align("c")
+        TextBox("#", _COL_LABEL_STYLE).set_w(layout.rank_w).set_content_align("c")
         if layout.music:
             TextBox("歌曲", _COL_LABEL_STYLE).set_w(_MUSIC_W).set_content_align("c")
 
@@ -1468,6 +1494,10 @@ def _draw_list_value(rqd: DeckRequest, deck, key: str, layout: _DeckLayout, algo
             _algorithm_chip(algorithm, width)
 
 
+def _deck_chara_icon(assets: _DeckRecommendAssets, deck) -> ImageSource | None:
+    return assets.deck_chara_icons.get(legacy_key(deck.chara_icon_path)) if deck.chara_icon_path else None
+
+
 def _rank_fill(rqd: DeckRequest, rank: int) -> Color:
     accent = _deck_accent(rqd)
     return _mix(accent, WHITE, 0.25) if rank <= 3 else _alpha(_GREY, 200)
@@ -1486,10 +1516,16 @@ def _draw_list_row(
         .set_bg(RoundRectBg((255, 255, 255, 135), _TILE_RADIUS, blur_glass=False))
     ):
         with HSplit().set_content_align("l").set_item_align("c").set_sep(_COL_SEP).set_padding(0):
-            with Frame().set_w(_RANK_W).set_content_align("c"):
+            with HSplit().set_w(layout.rank_w).set_content_align("c").set_item_align("c").set_sep(6).set_padding(0):
                 _circle_badge(
                     str(rank), _rank_fill(rqd, rank), 30, TextStyle(font=DEFAULT_HEAVY_FONT, size=16, color=WHITE)
                 )
+                if layout.rank_w != _RANK_W:
+                    chara_icon = _deck_chara_icon(assets, deck)
+                    if chara_icon is not None:
+                        ImageBox(chara_icon, size=(_ROW_CHARA_ICON, _ROW_CHARA_ICON), image_size_mode="fit")
+                    else:
+                        Spacer(w=_ROW_CHARA_ICON, h=_ROW_CHARA_ICON)
             if layout.music:
                 _draw_compare_music(deck, assets, _MUSIC_W, compact=True)
             if "score" in layout.metrics:
