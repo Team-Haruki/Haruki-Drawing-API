@@ -68,8 +68,10 @@ PARITY_BUDGETS: dict[str, tuple[float, float]] = {
     "mysekai_bulk_harvest": (3.480, 74.5),
     "mysekai_blueprint_term": (3.653, 94.4),
     "profile": (2.514, 32.5),
-    # transparent canvas: anti-aliased text edges differ in alpha as well as colour
-    "profile_info_panel": (6.077, 140.0),
+    # Fully transparent canvas: the shadowed white watermark has nothing under it, so the two
+    # backends' anti-aliased text edges differ in alpha as well as colour (p99 is all watermark;
+    # flattened over white the page is mean 3.8 / p99 94).
+    "profile_info_panel": (7.839, 255.0),
     "custom_profile_card": (2.000, 25.0),
     "custom_profile_card_collections": (2.000, 40.9),
     "custom_profile_card_symbol": (2.000, 25.0),

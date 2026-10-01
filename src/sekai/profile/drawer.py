@@ -1530,7 +1530,7 @@ async def _build_profile_card_modules(rqd: ProfileCardRequest) -> list[Widget]:
 
 
 # 获取玩家个人信息的简单卡片控件
-async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
+async def get_profile_card(rqd: ProfileCardRequest, *, blur_glass: bool = True) -> Frame:
     r"""get_profile_card
 
     获取玩家个人信息的简单卡片控件
@@ -1538,6 +1538,8 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
     Args
     ----
         rqd : ProfileCardRequest
+        blur_glass : bool
+            毛玻璃背景（含阴影）；独立信息面板没有可模糊的底图，传 False 只画纯色圆角矩形
 
     Returns
     -------
@@ -1547,7 +1549,9 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
 
     # Widgets auto-attach to the current active container on construction; the modules are built
     # detached and placed explicitly: avatar | identity on one row, the notice strip below.
-    with Frame().set_bg(roundrect_bg(alpha=bg_alpha)).set_padding((_CARD_PAD_X, _CARD_PAD_Y)) as f:
+    with (
+        Frame().set_bg(roundrect_bg(alpha=bg_alpha, blur_glass=blur_glass)).set_padding((_CARD_PAD_X, _CARD_PAD_Y)) as f
+    ):
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8) as column:
             if rqd.profile:
                 column.set_w(_CARD_INNER_W)
@@ -1563,8 +1567,9 @@ async def get_profile_card(rqd: ProfileCardRequest) -> Frame:
 
 
 # ---------------------------------------------------------------------------
-# Standalone info panel (/信息面板): the profile card on its own, on a transparent canvas, always PNG,
-# with a two-line watermark (the request DT, then the credit) in the bottom-right corner.
+# Standalone info panel (/信息面板): the profile card on its own, always PNG. Nothing but the card, its
+# frame and a two-line watermark (the request DT, then the credit) is drawn: no page background, and the
+# card is a plain rounded rectangle without the glass blur or its shadow, so every other pixel is clear.
 # ---------------------------------------------------------------------------
 
 _INFO_PANEL_ENDPOINT = "profile_info_panel"
@@ -1578,7 +1583,7 @@ _INFO_PANEL_BG_ALPHA = 235
 async def _build_info_panel_canvas(rqd: ProfileCardRequest) -> Canvas:
     card = rqd if rqd.bg_alpha is not None else rqd.model_copy(update={"bg_alpha": _INFO_PANEL_BG_ALPHA})
     with Canvas(bg=None).set_padding(_INFO_PANEL_PADDING) as canvas:
-        await get_profile_card(card)
+        await get_profile_card(card, blur_glass=False)
     add_watermark(canvas, build_request_dt_watermark_text(rqd))
     return canvas
 
