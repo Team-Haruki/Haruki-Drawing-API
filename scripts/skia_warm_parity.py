@@ -74,11 +74,12 @@ from PIL import Image
 
 from scripts.skia_parity_sweep import (
     CASES,
-    MYSEKAI_REAL,
     Case,
     _build_model,
     _load_mysekai_real,
     _load_payload,
+    _private_drawer_absent,
+    _resolve_drawer,
     setup,
 )
 from src.core.path_safety import resolve_cli_path
@@ -121,9 +122,9 @@ def _bind(case: Case, mysekai_real):
     raw = _load_payload(case.name)
     if raw is None:
         return None, "no-payload"
-    if case.drawer == MYSEKAI_REAL and mysekai_real is None:
+    if _private_drawer_absent(case, mysekai_real):
         return None, "skipped"
-    drawer = mysekai_real if case.drawer == MYSEKAI_REAL else importlib.import_module(case.drawer)
+    drawer = _resolve_drawer(case, mysekai_real)
     tr_mod = importlib.import_module(case.try_render_module) if case.try_render_module else drawer
     model_cls = getattr(importlib.import_module(case.model_module), case.model_cls)
     req = _build_model(model_cls, raw, case.is_list)

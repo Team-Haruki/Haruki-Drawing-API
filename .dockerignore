@@ -31,6 +31,7 @@ dist/
 # The production MySekai implementation is proprietary and must only be bind-mounted
 # over the public stub at runtime. It must never enter a Docker build context.
 src/sekai/mysekai/drawer.real.py
+src/sekai/mysekai/content_drawer.real.py
 
 # Runtime images do not need repository-only material.
 docs/

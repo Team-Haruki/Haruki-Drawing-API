@@ -83,7 +83,7 @@ import numpy as np
 from PIL import Image, ImageChops
 
 from scripts.parity_payloads.retirement_fixture_contract import validate_retirement_branch
-from scripts.skia_no_pillow import run_clean_case
+from scripts.skia_no_pillow import PRIVATE_DRAWER_FILES, run_clean_case
 from scripts.skia_parity_budgets import PARITY_BUDGETS
 from scripts.skia_service_no_pillow import run_service_case
 from src.core.path_safety import resolve_cli_path
@@ -93,9 +93,11 @@ PAYLOAD_DIR = REPO_ROOT / "out" / "parity-payloads"
 DEFAULT_OUT_DIR = REPO_ROOT / "out" / "parity-sweep-real"
 SAVE_IMAGES = False  # CLI-only output option; preserve raw RGBA references for HTTP/release checks.
 
-# Sentinel drawer module: resolved at runtime from the gitignored drawer.real.py.
-MYSEKAI_REAL = "mysekai-real"
-MYSEKAI_CONTENT = "src.sekai.mysekai.content_drawer"  # public JP 7.0.0 views (shop, bulk harvest, blueprint term)
+# Sentinel drawer modules: resolved at runtime from the gitignored private implementations
+# (PRIVATE_DRAWER_FILES); the public modules at those paths are placeholder stubs.
+MYSEKAI_REAL = "mysekai-real"  # drawer.real.py
+MYSEKAI_CONTENT_REAL = "mysekai-content-real"  # content_drawer.real.py: shop, bulk harvest, blueprint term
+MYSEKAI_DIR = REPO_ROOT / "src" / "sekai" / "mysekai"
 CUSTOM_PROFILE_DRAWER = "src.sekai.profile.custom_profile.drawer"
 
 # Every cache getter a drawer module may consult before rebuilding. All are
@@ -127,6 +129,11 @@ class Case:
     budget: tuple[float, float] | None = None  # None is tolerated only outside --strict.
     release_required: bool = True  # Proprietary MySekai is migrated/audited separately, per release scope.
 
+    @property
+    def private_file(self) -> str | None:
+        """The gitignored implementation this case renders through, or None for a public drawer."""
+        return PRIVATE_DRAWER_FILES.get(self.drawer)
+
 
 def _case(
     name: str,
@@ -154,7 +161,7 @@ def _case(
         route_watermark=route_watermark,
         note=note,
         budget=PARITY_BUDGETS.get(name),
-        release_required=release_required and drawer != MYSEKAI_REAL,
+        release_required=release_required and drawer not in PRIVATE_DRAWER_FILES,
     )
 
 
@@ -230,7 +237,7 @@ CASES: tuple[Case, ...] = (
     _case("music_progress", "music", "play_progress", "PlayProgressRequest"),
     _case("music_rewards_detail", "music", "detail_music_rewards", "DetailMusicRewardsRequest"),
     _case("music_rewards_basic", "music", "basic_music_rewards", "BasicMusicRewardsRequest"),
-    # ---- mysekai (drawer.real.py; housing-competition lives in the public housing_drawer) ----
+    # ---- mysekai (private drawer.real.py / content_drawer.real.py; housing-competition is public) ----
     _case("mysekai_resource", "mysekai", "mysekai_resource", "MysekaiResourceRequest", drawer=MYSEKAI_REAL),
     _case("mysekai_map", "mysekai", "mysekai_msr_map", "MysekaiMsrMapRequest", drawer=MYSEKAI_REAL),
     _case("mysekai_map_multi", "mysekai", "mysekai_msr_map", "MysekaiMsrMapRequest", drawer=MYSEKAI_REAL),
@@ -253,21 +260,21 @@ CASES: tuple[Case, ...] = (
         "MysekaiHousingCompetitionRequest",
         drawer="src.sekai.mysekai.housing_drawer",
     ),
-    # JP 7.0.0 public views (content_drawer): shop / bulk harvest / blueprint term tabs.
-    _case("mysekai_shop", "mysekai", "mysekai_shop", "MysekaiShopRequest", drawer=MYSEKAI_CONTENT),
+    # JP 7.0.0 views (private content_drawer.real.py): shop / bulk harvest / blueprint term tabs.
+    _case("mysekai_shop", "mysekai", "mysekai_shop", "MysekaiShopRequest", drawer=MYSEKAI_CONTENT_REAL),
     _case(
         "mysekai_bulk_harvest",
         "mysekai",
         "mysekai_bulk_harvest",
         "MysekaiBulkHarvestRequest",
-        drawer=MYSEKAI_CONTENT,
+        drawer=MYSEKAI_CONTENT_REAL,
     ),
     _case(
         "mysekai_blueprint_term",
         "mysekai",
         "mysekai_blueprint_term",
         "MysekaiBlueprintTermRequest",
-        drawer=MYSEKAI_CONTENT,
+        drawer=MYSEKAI_CONTENT_REAL,
     ),
     # ---- profile ----
     _case("profile", "profile", "profile", "ProfileRequest"),
@@ -514,13 +521,14 @@ def _build_model(model_cls, raw, is_list: bool):
     return model_cls.model_validate(raw)
 
 
-def _load_mysekai_real():
-    """Load the proprietary drawer.real.py under the real package name so its
+def _load_private_drawer(sentinel: str):
+    """Load a proprietary ``*.real.py`` drawer under the real package name so its
     relative imports (``from .model import ...``) resolve. Returns None when absent."""
-    path = REPO_ROOT / "src" / "sekai" / "mysekai" / "drawer.real.py"
+    filename = PRIVATE_DRAWER_FILES[sentinel]
+    path = MYSEKAI_DIR / filename
     if not path.exists():
         return None
-    mod_name = "src.sekai.mysekai._drawer_real_parity"
+    mod_name = f"src.sekai.mysekai._{filename.removesuffix('.real.py')}_real_parity"
     if mod_name in sys.modules:
         return sys.modules[mod_name]
     spec = importlib.util.spec_from_file_location(mod_name, path)
@@ -529,6 +537,29 @@ def _load_mysekai_real():
     sys.modules[mod_name] = mod
     spec.loader.exec_module(mod)
     return mod
+
+
+def _load_mysekai_real():
+    """drawer.real.py, the original private MySekai views. Returns None when absent."""
+    return _load_private_drawer(MYSEKAI_REAL)
+
+
+def _private_drawer_absent(case: Case, mysekai_real) -> bool:
+    """Whether the case renders through a private implementation that is not available locally.
+
+    ``mysekai_real`` is drawer.real.py as the caller loaded it once (None when absent or broken)."""
+    if case.drawer == MYSEKAI_REAL:
+        return mysekai_real is None
+    return case.private_file is not None and not (MYSEKAI_DIR / case.private_file).exists()
+
+
+def _resolve_drawer(case: Case, mysekai_real):
+    """The module a case renders through: a private ``*.real.py`` or an importable public drawer."""
+    if case.drawer == MYSEKAI_REAL:
+        return mysekai_real
+    if case.private_file is not None:
+        return _load_private_drawer(case.drawer)
+    return importlib.import_module(case.drawer)
 
 
 # ---------------------------------------------------------------------------
@@ -613,11 +644,11 @@ async def _run_one(case: Case, mysekai_real, out_dir: Path) -> dict:
     raw = _load_payload(case.name)
     if raw is None:
         return {"endpoint": case.name, "status": "no-payload"}
-    if case.drawer == MYSEKAI_REAL and mysekai_real is None:
-        return {"endpoint": case.name, "status": "skipped", "note": "drawer.real.py not present locally"}
+    if _private_drawer_absent(case, mysekai_real):
+        return {"endpoint": case.name, "status": "skipped", "note": f"{case.private_file} not present locally"}
     try:
         validate_retirement_branch(case.name, raw)
-        drawer = mysekai_real if case.drawer == MYSEKAI_REAL else importlib.import_module(case.drawer)
+        drawer = _resolve_drawer(case, mysekai_real)
         tr_mod = importlib.import_module(case.try_render_module) if case.try_render_module else drawer
         bypass_caches(drawer, tr_mod)
         compose = getattr(drawer, case.compose)

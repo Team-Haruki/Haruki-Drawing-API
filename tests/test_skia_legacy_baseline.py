@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from PIL import Image
 
 import scripts.skia_legacy_baseline as legacy
+from scripts.skia_parity_sweep import MYSEKAI_CONTENT_REAL, MYSEKAI_REAL
 
 
 def _case(*, name: str = "fixture", drawer: str = "drawer"):
@@ -44,11 +45,17 @@ def test_preflight_case_classifies_missing_and_unavailable_baselines(tmp_path, m
     assert legacy._preflight_case(tmp_path, case, payload) == {"case": "fixture", "status": "no-payload"}
 
     payload.write_text("{}", encoding="utf-8")
-    mysekai = _case(drawer=legacy.MYSEKAI_REAL)
+    mysekai = _case(drawer=MYSEKAI_REAL)
     assert legacy._preflight_case(tmp_path, mysekai, payload) == {
         "case": "fixture",
         "status": "no-baseline",
         "detail": "mysekai drawer.real.py",
+    }
+    content = _case(drawer=MYSEKAI_CONTENT_REAL)
+    assert legacy._preflight_case(tmp_path, content, payload) == {
+        "case": "fixture",
+        "status": "no-baseline",
+        "detail": "mysekai content_drawer.real.py",
     }
 
     monkeypatch.setattr(legacy, "_exists_on_baseline", lambda *_args: False)

@@ -17,4 +17,5 @@ def test_docker_context_excludes_runtime_data_and_private_drawer():
         "data/",
         "out/",
         "src/sekai/mysekai/drawer.real.py",
+        "src/sekai/mysekai/content_drawer.real.py",
     } <= patterns

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 import sys
 
@@ -135,10 +136,42 @@ def test_missing_no_pillow_evidence_cannot_pass():
     assert sweep_mod._is_failure({"status": "ok"}, strict=True)
 
 
+@pytest.mark.parametrize("private", ["mysekai_map", "mysekai_shop", "mysekai_bulk_harvest", "mysekai_blueprint_term"])
 @pytest.mark.parametrize("status", ["skipped", "no-payload", "pillow-error", "ok"])
-def test_private_mysekai_is_diagnostic_but_public_housing_remains_required(status):
-    assert not sweep_mod._is_failure({"endpoint": "mysekai_map", "status": status}, strict=True)
+def test_private_mysekai_is_diagnostic_but_public_housing_remains_required(status, private):
+    assert not sweep_mod._is_failure({"endpoint": private, "status": status}, strict=True)
     assert sweep_mod._is_failure({"endpoint": "mysekai_housing_competition", "status": status}, strict=True)
+
+
+def test_private_content_cases_skip_without_the_real_file(monkeypatch, tmp_path):
+    case = next(case for case in sweep_mod.CASES if case.name == "mysekai_shop")
+    assert case.drawer == sweep_mod.MYSEKAI_CONTENT_REAL
+    assert case.private_file == "content_drawer.real.py"
+    monkeypatch.setattr(sweep_mod, "MYSEKAI_DIR", tmp_path)
+    monkeypatch.setattr(sweep_mod, "_load_payload", lambda _name: {})
+
+    row = asyncio.run(sweep_mod._run_one(case, None, tmp_path))
+
+    assert row == {
+        "endpoint": "mysekai_shop",
+        "status": "skipped",
+        "note": "content_drawer.real.py not present locally",
+    }
+    assert sweep_mod._load_private_drawer(sweep_mod.MYSEKAI_CONTENT_REAL) is None
+
+
+def test_private_drawers_resolve_by_sentinel(monkeypatch, tmp_path):
+    marker = object()
+    original = next(case for case in sweep_mod.CASES if case.name == "mysekai_map")
+    content = next(case for case in sweep_mod.CASES if case.name == "mysekai_shop")
+    public = next(case for case in sweep_mod.CASES if case.name == "mysekai_housing_competition")
+    assert public.private_file is None
+    assert sweep_mod._private_drawer_absent(original, None)
+    assert not sweep_mod._private_drawer_absent(original, marker)
+    assert sweep_mod._resolve_drawer(original, marker) is marker
+    monkeypatch.setattr(sweep_mod, "_load_private_drawer", lambda sentinel: (sentinel, marker))
+    assert sweep_mod._resolve_drawer(content, None) == (sweep_mod.MYSEKAI_CONTENT_REAL, marker)
+    assert sweep_mod._resolve_drawer(public, None).__name__ == "src.sekai.mysekai.housing_drawer"
 
 
 def test_report_row_cannot_opt_a_public_case_out_of_release_acceptance():
