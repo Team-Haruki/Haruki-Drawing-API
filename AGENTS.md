@@ -312,16 +312,17 @@ state: N event loops share one render thread pool and one mirror root. `lifespan
 happens. Logging setup is serialised because concurrent `coloredlogs.install` calls used to leave duplicate root
 handlers and double every log line.
 
-## Proprietary File: `src/sekai/mysekai/drawer.py`
+## Proprietary Files: `src/sekai/mysekai/drawer.py` and `src/sekai/mysekai/content_drawer.py`
 
-This file is a **public placeholder stub** in the open-source repository. It exports the same async function signatures consumed by `src/core/pjsk/mysekai.py` but raises `NotImplementedError` at runtime.
+Both files are **public placeholder stubs** in the open-source repository. They export the same async function signatures consumed by `src/core/pjsk/mysekai.py` (and by the parity scripts) but raise `NotImplementedError` at runtime. `content_drawer.py` covers the JP 7.0.0 shop / bulk harvest / blueprint term views; its `try_render_*` stubs raise too (rather than returning `None`), so an unmounted deployment answers 500 naming the placeholder. `housing_drawer.py` and every request model in `model.py` stay public.
 
 For deployment:
-- The real implementation lives locally as `src/sekai/mysekai/drawer.real.py` (gitignored).
-- For bare-metal: rename `drawer.real.py` → `drawer.py` before launching.
-- For Docker: bind-mount the real file over the stub (see commented-out volume in `docker-compose.yaml`).
+- The real implementations live locally as `src/sekai/mysekai/drawer.real.py` and `src/sekai/mysekai/content_drawer.real.py` (both gitignored, excluded from the Docker context, and guarded untracked by `scripts/ci/repo-guards.sh`).
+- For bare-metal: rename `drawer.real.py` → `drawer.py` and `content_drawer.real.py` → `content_drawer.py` before launching.
+- For Docker: bind-mount each real file over its stub (see the commented-out volumes in `docker-compose.yaml`).
+- Tests that exercise the real implementations are not in this repository either; public tests cover the models, the route contract and the stubs. The parity scripts treat both as private, non-release-blocking cases (`mysekai-real`, `mysekai-content-real`) that skip when the `.real.py` file is absent.
 
-**Do not delete or rewrite `drawer.real.py` if it exists locally** — it is the production implementation. Only modify `drawer.py` (the stub) when the public API surface needs to change.
+**Do not delete or rewrite `drawer.real.py` / `content_drawer.real.py` if they exist locally** — they are the production implementations. Only modify the stubs when the public API surface needs to change.
 
 ## Skia Backend (`rust/haruki_skia_renderer` + `src/sekai/skia_renderer/`)
 
@@ -518,7 +519,7 @@ commit and reuses that wheel everywhere:
   interpreter pinned in `.python-version` and the maturin version locked in `uv.lock`; artifact `renderer-wheel`.
   Its rust-cache covers both target dirs and is saved only from `main`.
 - `Python` (`python-uv-ci`): ruff check + format check (the locked ruff), `compileall` and
-  `scripts/ci/repo-guards.sh` (both YAML configs validate, `drawer.real.py` stays untracked,
+  `scripts/ci/repo-guards.sh` (both YAML configs validate, `drawer.real.py` and `content_drawer.real.py` stay untracked,
   `docker compose config`), then the test job installs `renderer-wheel`, repairs the bundled FreeType
   (`scripts/ci/repair-freetype.sh`, which also checks `IR_CAPABILITY` against
   `REQUIRED_NATIVE_IR_CAPABILITY`), downloads the OFL/CC fonts (`scripts/ci/fetch-fonts.sh`), runs the native

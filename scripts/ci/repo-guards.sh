@@ -3,10 +3,12 @@
 # from quick-check.yml. Runs in the synced project venv.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-if git ls-files --error-unmatch src/sekai/mysekai/drawer.real.py >/dev/null 2>&1; then
-  echo "::error file=src/sekai/mysekai/drawer.real.py::drawer.real.py must stay untracked"
-  exit 1
-fi
+for private in drawer.real.py content_drawer.real.py; do
+  if git ls-files --error-unmatch "src/sekai/mysekai/${private}" >/dev/null 2>&1; then
+    echo "::error file=src/sekai/mysekai/${private}::${private} must stay untracked"
+    exit 1
+  fi
+done
 uv run --no-sync --no-build python - <<'PY'
 from pathlib import Path
 

@@ -26,6 +26,12 @@ if str(ROOT) not in sys.path:
 
 from src.core.path_safety import resolve_cli_path
 
+# Parity-case drawer sentinels -> the gitignored private MySekai implementation each one loads.
+PRIVATE_DRAWER_FILES = {
+    "mysekai-real": "drawer.real.py",
+    "mysekai-content-real": "content_drawer.real.py",
+}
+
 
 class _NoPillow(importlib.abc.MetaPathFinder):
     def __init__(self):
@@ -62,10 +68,10 @@ def _worker(spec: dict) -> dict:
     native.render_scene = counted_render
     case = spec["case"]
     module_name = case.get("try_render_module") or case["drawer"]
-    if module_name == "mysekai-real":
-        path = ROOT / "src/sekai/mysekai/drawer.real.py"
+    if module_name in PRIVATE_DRAWER_FILES:
+        path = ROOT / "src/sekai/mysekai" / PRIVATE_DRAWER_FILES[module_name]
         if not path.is_file():
-            raise RuntimeError("private MySekai implementation is absent")
+            raise RuntimeError(f"private MySekai implementation is absent: {path.name}")
         module_spec = importlib.util.spec_from_file_location("src.sekai.mysekai._native_retirement", path)
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[module_spec.name] = module

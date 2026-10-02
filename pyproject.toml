@@ -34,7 +34,7 @@ Issues = "https://github.com/Team-Haruki/Haruki-Drawing-API/issues"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-extend-exclude = ["src/sekai/mysekai/drawer.real.py"]
+extend-exclude = ["src/sekai/mysekai/drawer.real.py", "src/sekai/mysekai/content_drawer.real.py"]
 
 [tool.ruff.format]
 line-ending = "lf"

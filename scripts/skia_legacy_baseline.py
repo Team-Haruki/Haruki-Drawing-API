@@ -36,7 +36,7 @@ from PIL import Image, ImageChops
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.skia_parity_sweep import CASES, MYSEKAI_REAL, PAYLOAD_DIR, _load_payload
+from scripts.skia_parity_sweep import CASES, PAYLOAD_DIR, PRIVATE_DRAWER_FILES, _load_payload
 
 # The baseline renders in a worktree that has no copy of the untracked config/assets.
 _UNTRACKED_NEEDED = ("configs.yaml",)
@@ -228,9 +228,10 @@ def _parse_args():
 def _preflight_case(tree: Path, case, payload_file: Path) -> dict | None:
     if not payload_file.exists():
         return {"case": case.name, "status": "no-payload"}
-    if case.drawer == MYSEKAI_REAL:
-        # drawer.real.py is gitignored, so the baseline worktree only has the stub.
-        return {"case": case.name, "status": "no-baseline", "detail": "mysekai drawer.real.py"}
+    private_file = PRIVATE_DRAWER_FILES.get(case.drawer)
+    if private_file is not None:
+        # The *.real.py files are gitignored, so the baseline worktree only has the stubs.
+        return {"case": case.name, "status": "no-baseline", "detail": f"mysekai {private_file}"}
     if not _exists_on_baseline(tree, case):
         # The endpoint did not exist on the baseline ref — nothing to drift from.
         return {"case": case.name, "status": "no-baseline", "detail": "endpoint is new"}
