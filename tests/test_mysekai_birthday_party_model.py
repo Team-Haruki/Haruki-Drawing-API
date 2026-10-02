@@ -38,13 +38,22 @@ def test_parses_parties_and_keeps_levels_above_the_target() -> None:
 
 def test_defaults_and_candidate_icon_lists() -> None:
     minimal = MysekaiBirthdayPartyProgress.model_validate({"birthday_party_id": 1, "character_unit_id": 6})
-    assert (minimal.level, minimal.max_level, minimal.character_icon_path, minimal.character_color) == (
-        0,
-        400,
-        None,
-        None,
-    )
+    assert (
+        minimal.level,
+        minimal.max_level,
+        minimal.character_icon_path,
+        minimal.character_color,
+        minimal.drop_end_at,
+        minimal.watering_end_at,
+    ) == (0, 400, None, None, None, None)
     candidates = MysekaiBirthdayPartyProgress.model_validate(
         {"birthday_party_id": 1, "character_unit_id": 6, "character_icon_path": ["a.png", "b.png"]}
     )
     assert candidates.character_icon_path == ["a.png", "b.png"]
+
+
+def test_parses_drop_and_watering_end_times() -> None:
+    party = MysekaiBirthdayPartyProgress.model_validate(
+        PARTY | {"drop_end_at": 1791126000000, "watering_end_at": 1791385199000}
+    )
+    assert (party.drop_end_at, party.watering_end_at) == (1791126000000, 1791385199000)

@@ -123,6 +123,10 @@ class MysekaiBirthdayPartyProgress(BaseModel):
         当前等级（obtainedMysekaiMaterialCount，可以超过 max_level）
     max_level : int = 400
         累计奖励的最高要求等级
+    drop_end_at : Optional[ int ] = None
+        露滴停止掉落的时间（birthdayStartAt，毫秒时间戳）
+    watering_end_at : Optional[ int ] = None
+        浇水结束的时间（closedAt，毫秒时间戳）
     """
 
     birthday_party_id: int
@@ -132,6 +136,8 @@ class MysekaiBirthdayPartyProgress(BaseModel):
     character_color: str | None = None
     level: int = 0
     max_level: int = 400
+    drop_end_at: int | None = None
+    watering_end_at: int | None = None
 
 
 class MysekaiResourceRequest(TimeZoneRequest):
