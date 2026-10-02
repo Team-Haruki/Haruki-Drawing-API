@@ -102,6 +102,38 @@ class MysekaiSiteResourceNumber(BaseModel):
     resource_numbers: list[MysekaiResourceNumber]
 
 
+class MysekaiBirthdayPartyProgress(BaseModel):
+    r"""MysekaiBirthdayPartyProgress
+
+    正在进行的生日派对进度
+
+    Attributes
+    ----------
+    birthday_party_id : int
+        生日派对id
+    character_unit_id : int
+        角色队伍id
+    character_name : Optional[ str ] = None
+        角色名
+    character_icon_path : Optional[ AssetKey ] = None
+        角色图标路径
+    character_color : Optional[ str ] = None
+        角色代表色（#rrggbb）
+    level : int = 0
+        当前等级（obtainedMysekaiMaterialCount，可以超过 max_level）
+    max_level : int = 400
+        累计奖励的最高要求等级
+    """
+
+    birthday_party_id: int
+    character_unit_id: int
+    character_name: str | None = None
+    character_icon_path: AssetKey | None = None
+    character_color: str | None = None
+    level: int = 0
+    max_level: int = 400
+
+
 class MysekaiResourceRequest(TimeZoneRequest):
     r"""MysekaiResourceRequest
 
@@ -121,6 +153,8 @@ class MysekaiResourceRequest(TimeZoneRequest):
         大门等级
     visit_characters: List[ MysekaiVisitCharacter ]
         到访的角色列表
+    birthday_parties: Optional[ List[ MysekaiBirthdayPartyProgress ] ] = None
+        正在进行的生日派对进度；为空时不绘制
     site_resource_numbers: Optional[ List[ MysekaiSiteResourceNumber ] ] = None
         每个地区的资源数量列表
     """
@@ -132,6 +166,7 @@ class MysekaiResourceRequest(TimeZoneRequest):
     gate_level: int
     gate_icon_path: str
     visit_characters: list[MysekaiVisitCharacter]
+    birthday_parties: list[MysekaiBirthdayPartyProgress] | None = None
     site_resource_numbers: list[MysekaiSiteResourceNumber] | None = None
 
     def model_post_init(self, __context, /) -> None:
