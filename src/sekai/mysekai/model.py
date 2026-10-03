@@ -246,6 +246,10 @@ class MysekaiMsrMapHarvestPoint(BaseModel):
         额外Z偏移
     alpha : float = 1.0
         图标透明度倍率
+    outline_color : Optional[ Color ] = None
+        采集点图标描边颜色（如含稀有掉落时为红色）
+    outline_width : Optional[ int ] = None
+        采集点图标描边宽度
     """
 
     id: int | None = None
@@ -258,6 +262,8 @@ class MysekaiMsrMapHarvestPoint(BaseModel):
     offset_x: float = 0.0
     offset_z: float = 0.0
     alpha: float = 1.0
+    outline_color: Color | None = None
+    outline_width: int | None = None
 
 
 class MysekaiMsrMapResourceDrop(BaseModel):
