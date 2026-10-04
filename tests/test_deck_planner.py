@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 
 from PIL import Image
+import pytest
 
-from src.sekai.base.plot import Canvas
-from src.sekai.deck.drawer import _planner_rows, draw_event_planner_block
+from src.sekai.base.plot import Canvas, TextStyle, VSplit
+from src.sekai.deck.drawer import _draw_planner_number_cell, _planner_rows, draw_event_planner_block
 from src.sekai.deck.model import DeckPlannerBoostRow, DeckPlannerInfo, DeckPlannerSong
 
 
@@ -60,3 +61,12 @@ def test_draw_event_planner_block_renders_rows_placeholders_and_empty_state() ->
     assert populated_image.width > 0
     assert populated_image.height > empty_image.height
     assert empty_image.width > 0
+
+
+@pytest.mark.parametrize("text", ["12,345,678", "1,234,567,890", "9,223,372,036,854,775,807", "-"])
+def test_planner_daily_point_preserves_all_digits(text: str) -> None:
+    with VSplit() as container:
+        _draw_planner_number_cell(text, "pt/日", 140, TextStyle(size=22))
+    number = container.items[0].items[0]
+    assert number._get_lines() == [text]
+    assert number._get_clip_text_to_width_idx(text, 136) is None

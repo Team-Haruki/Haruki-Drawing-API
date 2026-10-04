@@ -421,7 +421,9 @@ def _draw_planner_number_cell(
     color: tuple[int, int, int] | Color = _INK,
 ) -> None:
     with VSplit().set_w(width).set_h(_PLANNER_ROW_H).set_content_align("c").set_item_align("c").set_sep(0):
-        _fitted(text, style.replace(color=color), width)
+        _ink(
+            TextBox(text, _fit_style(text, style.replace(color=color), width, min_size=1)).set_w(width)
+        ).set_content_align("c")
         TextBox(sub_text, TextStyle(font=DEFAULT_FONT, size=13, color=_DIM)).set_w(width).set_content_align("c")
 
 
