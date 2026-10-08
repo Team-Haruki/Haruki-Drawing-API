@@ -62,9 +62,15 @@ ARTIFACT_REF_SCHEMA: Final = {
             "description": "RFC3339 UTC; null when ttl_seconds is 0",
         },
         "reused": {"type": "boolean"},
-        "index_written": {"type": "boolean"},
+        "index_written": {
+            "type": "boolean",
+            "description": "false for X-Haruki-Artifact-Mode: store-ref (no index row; the caller records it)",
+        },
         "upload_elapsed": {"type": "number"},
-        "node_name": {"type": "string"},
+        "node_name": {
+            "type": "string",
+            "description": "fresh writer: the rendering node, or in store-ref mode the storage.writer_node gateway",
+        },
     },
 }
 

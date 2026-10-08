@@ -3,6 +3,12 @@
 Invariant I4: when `X-Haruki-Artifact` is absent or `0`, no other `X-Haruki-*` header is read at all.
 When it is `1`, every directive header is validated strictly and a violation raises `DirectiveError`,
 which the debug middleware turns into a 400 before the route runs.
+
+`X-Haruki-Artifact-Mode` is the one exception to strict validation: it selects an optional output mode
+(`store-ref`, docs/artifact-storage.md §12) and an unknown value is ignored rather than rejected, so a caller
+can introduce a new mode without a node that predates it answering 400. The mode travels in its own header
+because a Drawing that predates it rejects any `X-Haruki-Artifact` value other than `0`/`1`, while it
+ignores an unknown header and answers `Cache-Store: 0` with bytes — the fallback the caller relies on.
 """
 
 from __future__ import annotations
@@ -22,6 +28,10 @@ HEADER_USER_ID = "X-Haruki-User-Id"
 HEADER_ASSET_REVISION = "X-Haruki-Asset-Revision"
 HEADER_RENDERER_EPOCH = "X-Haruki-Renderer-Epoch"
 HEADER_RENDER_FORCE = "X-Haruki-Render-Force"
+HEADER_ARTIFACT_MODE = "X-Haruki-Artifact-Mode"
+
+# Upload the bytes to the image-cache bucket and return a ref, writing no index row (the caller records it).
+MODE_STORE_REF = "store-ref"
 
 DEFAULT_GROUP = "pjsk"
 DEFAULT_USER_ID = "public"
@@ -49,6 +59,8 @@ class RenderCacheDirective:
     renderer_epoch: str = ""
     # The caller wants a fresh render: Drawing's own result caches miss (see src.core.render_force).
     force: bool = False
+    # `X-Haruki-Artifact-Mode: store-ref`; honoured only together with `X-Haruki-Cache-Store: 0`.
+    store_ref: bool = False
 
 
 class DirectiveError(ValueError):
@@ -118,6 +130,11 @@ def _store(headers: Mapping[str, str]) -> bool:
     return _flag(headers, HEADER_CACHE_STORE, True)
 
 
+def _store_ref(headers: Mapping[str, str]) -> bool:
+    value = _get(headers, HEADER_ARTIFACT_MODE)
+    return value is not None and value.lower() == MODE_STORE_REF
+
+
 def is_artifact_requested(headers: Mapping[str, str]) -> bool:
     """True only for `X-Haruki-Artifact: 1`; reads that one header and nothing else."""
     return _get(headers, HEADER_ARTIFACT) == "1"
@@ -154,4 +171,5 @@ def parse_render_cache_directive(headers: Mapping[str, str], *, ttl_max: int) ->
         asset_revision=_optional_token(headers, HEADER_ASSET_REVISION, _DIGEST_RE, ""),
         renderer_epoch=_optional_token(headers, HEADER_RENDERER_EPOCH, _DIGEST_RE, ""),
         force=_flag(headers, HEADER_RENDER_FORCE, False),
+        store_ref=_store_ref(headers),
     )

@@ -69,6 +69,14 @@ class ArtifactRuntime:
             return ArtifactOutcome(ref=None, degraded=True, reason=self.reason)
         return await self.service.process(payload, directive)
 
+    async def process_store_ref(self, payload: EncodedImagePayload, directive: RenderCacheDirective) -> ArtifactOutcome:
+        """Upload-only store-ref; needs the object store but never the index."""
+        if self.service is None:
+            self.stats.store_ref_incr("requests")
+            self.stats.store_ref_degraded(self.reason)
+            return ArtifactOutcome(ref=None, degraded=True, reason=self.reason)
+        return await self.service.process_store_ref(payload, directive)
+
     async def close(self) -> None:
         """Close the index pool and the store. Idempotent, never raises."""
         if self.closed:

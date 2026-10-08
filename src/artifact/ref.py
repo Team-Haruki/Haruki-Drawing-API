@@ -5,12 +5,17 @@ segment is the literal `OBJECT_KEY_PREFIX`, never the cache group, and the provi
 On a reuse the stored row's `cdn_path` is returned verbatim (addendum A2), so a ref may carry a path whose
 `api_path` segment differs from the request's, or Cloud's own `pjsk/<sha256>.<ext>` shape. Ops tooling that
 must target only Drawing-written artifacts uses the prefix `pjsk/api/`, never `pjsk/`.
+
+Store-ref mode writes Cloud's own image-cache layout instead, `pjsk/<sha256>-<generation>.<ext>` with a
+26-character base32 generation, and returns a ref with `index_written=false`: Cloud records the row.
 """
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass, fields
 from datetime import UTC, datetime, timedelta
+import secrets
 from typing import Any
 
 OBJECT_KEY_PREFIX = "pjsk"  # C5, FROZEN — not a setting, not caller-controlled
@@ -39,6 +44,19 @@ def build_object_key(api_path: str, content_hash: str, media_type: str, *, gener
     path = api_path.strip("/")
     suffix = f"-{generation}" if generation else ""
     return f"{OBJECT_KEY_PREFIX}/{path}/{content_hash}{suffix}.{ext}"
+
+
+def new_store_ref_generation() -> str:
+    """26 random base32 characters, the shape of Go's `crypto/rand.Text()` that Cloud's own writer uses."""
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii")[:26]
+
+
+def build_store_ref_key(content_hash: str, media_type: str, *, generation: str) -> str:
+    """`pjsk/<sha256>-<generation>.<ext>`: the key layout of Cloud's own image-cache writes (store-ref mode)."""
+    ext = extension_for_media_type(media_type)
+    if ext is None:
+        raise UnsupportedMediaType(media_type)
+    return f"{OBJECT_KEY_PREFIX}/{content_hash}-{generation}.{ext}"
 
 
 def is_foreign_cdn_path(cdn_path: str) -> bool:
