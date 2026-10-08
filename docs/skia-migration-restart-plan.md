@@ -10,9 +10,10 @@
 
 ## 现状一句话
 
-**迁移本体已完成并已默认开启**:除 custom profile card 外全部绘图端点默认走 Rust Skia,对拍
-**63 用例 / 63 ok / 0 失败**(honor 亦已迁移,无 pillow-only 端点),实测普遍 ~2× 提速。唯一 Skia
-门控是 `use_skia_plot`,**代码默认 true**(`use_skia_card_list` / `use_skia_card_box` /
+**迁移本体已完成**:全部绘图端点(含 custom profile card、honor)都走 Rust Skia,服务只用原生渲染,
+渲染失败不再回退 Pillow(Pillow 退役见 [`pillow-retirement-status.md`](./pillow-retirement-status.md))。对拍
+用例见 `scripts/skia_parity_sweep.py` 的 `CASES`(84 个)。`use_skia_plot` 保留为配置项,**默认 true,设为
+false 会让服务拒绝启动**(`use_skia_card_list` / `use_skia_card_box` /
 `skia_card_list_fallback_to_pillow` 均已随影子层收敛而删除)。
 
 但**"全部端点共用一份 widget 树"是不成立的**,别把"全量迁完"读成"单布局":
@@ -20,11 +21,13 @@
 - **绝大多数端点**(profile、card/list、card/box、card/detail、event、music、gacha、score、sk、mysekai …)
   走同一份 plot.py widget 树,经 IRPainter 输出 Render-IR 交 Rust Skia 解释器渲染——改一处两个后端同时生效。
   card/list 与 card/box **没有**专用 scene builder,同样画 widget 树。
-- **两处直接用 `IRBuilder`,但性质不同**(`tests/test_route_render_contract.py` 的 `_MAY_HAND_BUILD_IR` 就列这两个):
+- **三处直接用 `IRBuilder`,但性质不同**(`tests/test_route_render_contract.py` 的 `_MAY_HAND_BUILD_IR` 列出这三个端点文件):
   - `src/sekai/chart/drawer.py` —— **整个场景**都是手写的(全文件不出现 plot/Canvas/IRPainter)。有正当理由:
     图表像素来自 `pjsekai_scores_rs`,IR 只在外面加水印外壳。
   - `src/sekai/honor/skia.py` —— **只有水印页脚外壳**是手写的(`b.group` / `b.self_image` / 两行 `b.text`),
     徽章本体是 `splice_root_children(badge)` 拼进来的 **widget 树 IR**。**不是第二套布局。**
+  - `src/sekai/profile/custom_profile/skia.py` —— 没有 plot.py 树可降级,布局载体是 Unity 卡片 JSON;
+    详见 `AGENTS.md` 的 Skia Backend 一节。
 - **honor 已经不是双布局了**(2026-07-14 起,本条曾长期写反)。布局只有**一份**:
   `src/sekai/honor/widget.py::HonorBadgeBox`,由 `build_honor_badge_canvas()` 产出,**两个后端共用**——
   Pillow 走 `drawer.py` 的 `get_img_sync()`,Skia 走 `skia.py` 的 `splice_root_children()` 把同一棵树的 IR
@@ -32,8 +35,8 @@
   > ⚠️ 本条的旧文字("honor 是当前唯一实打实的双布局漂移风险")在 2026-07-15 被当成**删掉 honor Skia 路径的
   > 理由**引用过。过期的文档不是无害的,它会被照着执行。
 
-生产化链路已就位:CI 构 cp314t wheel(`skia-wheels.yml`)、native 测试进 CI(`quick-check.yml`)、
-Docker 条件安装 wheel + 构建期 IR capability 自检、扩展缺失时 fail-open 回退 Pillow 并打 ERROR、
+生产化链路已就位:`ci.yml` 每次提交构建一次 cp314t wheel 并跑 native 测试,Docker 镜像安装该 wheel 并在
+构建期做 IR capability 自检;原生扩展缺失或过旧、字体无法解析时服务拒绝启动(不再 fail-open 回退 Pillow);
 `/render-stats` 逐端点计数 + image.response `backend=` 字段。
 
 PR #33 已于 2026-07-15 合并；主云 `v3.0.0-rc2` 又在 2026-07-21 完成超过 48 小时的真实流量

@@ -9,7 +9,7 @@
 ## 当前状态（2026-09-07）
 
 生产仅使用原生 Skia，Pillow/Matplotlib/Pilmoji 已转为开发对照依赖。启动必须通过原生能力与字体
-检查，路由和重任务没有 Pillow 恢复路径。当前 IR 能力号为 28；69 个公共必验样本通过 Linux
+检查，路由和重任务没有 Pillow 恢复路径。当时 IR 能力号为 28（现为 29，见 `rust/haruki_skia_renderer/src/lib.rs` 的 `IR_CAPABILITY`）；69 个公共必验样本通过 Linux
 冷/热门槛，私有 MySekai 与 symbol/stamps 按用户要求仅作诊断。完整记录见上述退役审计。
 
 ## 早期全端点迁移完成时的状态快照

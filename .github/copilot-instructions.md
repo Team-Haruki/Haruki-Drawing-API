@@ -1,6 +1,6 @@
 # Repository Guide for AI Coding Agents
 
-This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is mirrored as `CLAUDE.md`, `AGENTS.md`, and `.github/copilot-instructions.md`.
+This file provides guidance for AI coding assistants (Claude Code, GitHub Copilot, Codex, etc.) working in this repository. It is the single source of truth and is mirrored as `.github/copilot-instructions.md`.
 
 ## Native-only service (2026-09-07)
 
@@ -95,9 +95,10 @@ Skia chapter), and every other endpoint re-renders.
    is a **mounted volume** in Docker and outlives a deploy: without it, a new build cheerfully served the *old* pixels
    off the volume for up to the 7-day TTL. Reproduced across two processes with the volume kept between them.
 2. **Asset signatures, which are yours to pass.** Either `collect_asset_signatures(ASSETS_BASE_DIR, material)`, which
-   stats every path-shaped string in the key material (what `event/drawer.py` does), or a hand-listed dict of
-   `get_image_asset_signature()` calls (what `honor/drawer.py` does — fourteen paths by name, correct today and
-   silently wrong the day someone adds a fifteenth; **prefer the collector**). Without them, an asset **replaced** at a
+   stats every path-shaped string in the key material (what `event/drawer.py` does), or a dict of
+   `get_image_asset_signature()` calls built from a manifest the loader also uses (what `honor/drawer.py` does — it
+   iterates `HONOR_ASSET_MANIFEST` in `honor/assets.py`, so a new image field added there is keyed automatically; a
+   path list written out by hand would drift silently, so **prefer the collector or a shared manifest**). Without them, an asset **replaced** at a
    path the request already names — or one that finally **arrives** after a `?` placeholder was cached in its place —
    does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` keys on the JSON request, collected asset signatures, and the exact displayed
    start/end/status strings. Its native preparation lookup reuses a fragment before asset loading/layout;
@@ -118,8 +119,8 @@ Beyond these three there are two disk tiers, both swept periodically by the life
 in `src/core/main.py`): the composed-image disk cache (`data/utils/composed_image_disk_cache`, TTL-based) and
 `Painter`'s own disk cache (`PAINTER_CACHE_DIR`, swept via `Painter.cleanup_old_disk_cache()`).
 
-Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns exactly
-what `get_runtime_cache_stats()` builds, which is eight keys: `image_cache`, `thumbnail_cache`,
+Sweeping is where the symmetry ends — **the two tiers are not both observable.** `GET /cache/stats` returns
+`{"status": "healthy", "caches": get_runtime_cache_stats()}`, and that dict has ten keys: `image_cache`, `thumbnail_cache`,
 `composed_image_cache`, `composed_image_disk_cache`, `native_fragment_cache` (bounded native sub-page rasters; see below), and
 `skia_payload_cache` (another in-memory pool, owned by
 the Skia chapter below — the three caches in the table above are not the whole dump), `native_renderer_cache`
@@ -128,7 +129,9 @@ the Skia chapter below — the three caches in the table above are not the whole
 `src/sekai/profile/custom_profile/cache.py`: parsed TMP metadata tables, glyph SDF/contours, sprite/atlas decodes —
 keyed with file signatures like everything else, sized by `custom_profile_glyph_cache_*` /
 `custom_profile_sprite_cache_*`, and unlike the other cache knobs **on by default**: the renderer's 1.5s+ cold path
-*was* these caches dying with each request). The `Painter` disk cache has no
+*was* these caches dying with each request), plus two that are not caches: `asset_mirror` (the asset mirror's
+counters, `enabled=false` unless `assets.source` is `mirror`) and `missing_assets` (`{"total", "by_reason"}` from
+`src/core/missing_asset_telemetry.py`). The `Painter` disk cache has no
 `stats()` and appears nowhere in `src/core/health.py`; to size it you have to look at the directory.
 
 ### Native fragment cache
@@ -246,7 +249,7 @@ loop on already flattened FontTools contours. It does not substitute Skia/FreeTy
 It uses separate float32 operations, wrapping int16 winding and ties-to-even gray8 quantization.
 Inputs are bounded to 16,777,216 pixels, 262,144 points, 500,000,000 point-pixel operations and
 finite coordinates within 1e9; oversized/unsupported Python calls retain the original NumPy path.
-There is no new cache or IR node, so IR capability stays 28. Rebuild the wheel to get this helper;
+This helper added no cache or IR node and did not change the IR capability (now 29; see below). Rebuild the wheel to get this helper;
 older extensions keep the NumPy calculation. Cold/warm parity AND before/after PNG checks are
 required: current Pillow and Skia share this arithmetic helper, so their agreement alone is insufficient.
 
@@ -420,18 +423,19 @@ PYLIB=$(uv run python -c "import sysconfig; print(sysconfig.get_config_var('LIBD
 RUSTFLAGS="-L $PYLIB -C link-arg=-lpython3.14t" cargo test --release \
   --manifest-path rust/haruki_skia_renderer/Cargo.toml
 
-# Parity sweep over 66 renderable payloads — the regression gate for ANY rendering change
-# (+4 custom_profile cases: 2 native-capable with fixtures generated by
-#  scripts/parity_payloads/gen_custom_profile.py from response.json + local masterdata —
-#  verified byte-identical to the masterdata-mode CLI baseline — and 2 no-payload
-#  [symbol/stamps] awaiting a captured card that uses those buckets)
-uv run python -X gil=0 scripts/skia_parity_sweep.py            # baseline: 66 ok + 2 no-payload, 0 failures
+# Parity sweep over the 84 cases in CASES — the regression gate for ANY rendering change
+# (12 are custom_profile_card_*: fixtures generated by scripts/parity_payloads/ from
+#  response.json + local masterdata; symbol/stamps have try_render=None and no captured
+#  card yet, so they report no-payload and are not release-required)
+# Pass condition: exit 0 ("failures (development mode): 0" on stdout). ok/no-payload/skipped counts depend on which
+# payloads exist under out/parity-payloads/ and whether the private MySekai drawers are present.
+uv run python -X gil=0 scripts/skia_parity_sweep.py
 
 # Pillow-vs-Pillow against a baseline ref — catches the drift BOTH backends share (see traps)
 uv run python -X gil=0 scripts/skia_legacy_baseline.py --ref main [--only profile,card_list]
 
 # Warm-cache parity — the ONLY gate that renders with the caches ON. Run it on any cache change.
-uv run python -X gil=0 scripts/skia_warm_parity.py --backend both  # each: 65 ok + 1 nondeterministic + 2 no-payload; 0 drift
+uv run python -X gil=0 scripts/skia_warm_parity.py --backend both  # pass: "CACHE-DRIFT + errors: 0" (nondeterministic/no-payload rows are not failures)
 
 # Pillow vs Skia timings. NOT the parity sweep — see below.
 uv run python -X gil=0 scripts/skia_bench.py [--cold]         # warm: 3.65x overall; honor is the one loser
@@ -509,7 +513,8 @@ The workflows are thin callers of the shared templates in
 [`seiunx-dev/ci-templates`](https://github.com/seiunx-dev/ci-templates) at `@v1`. Reuse the templates
 first; add custom jobs or steps only when a template genuinely cannot meet the project's needs, keep them in
 the caller files with a comment saying why, and fix template bugs upstream (new `v1.x.y` tag) instead of
-working around them here. The aggregate job **`CI OK`** is the only required status check.
+working around them here. The aggregate job **`CI OK`** is the one status to gate on. `main` has no branch
+protection or ruleset, so GitHub does not enforce it: check that it is green before merging.
 
 `ci.yml` (`CI`: pushes to `main`, PRs to `main`, manual dispatch) compiles the Skia renderer **once** per
 commit and reuses that wheel everywhere:
@@ -553,7 +558,7 @@ Ruff with `line-length = 120`. See `pyproject.toml [tool.ruff]` for the full rul
 - **Run `uv run ruff check src tests scripts` and `uv run ruff format src tests scripts`** before committing — CI checks all three trees, not just `src/`. Only fix new violations you introduce, not pre-existing ones unrelated to your task.
 - **Don't introduce per-request resize/load caches** — use the global pool in `src/sekai/base/utils.py`.
 - **Use `asyncio.gather`** when loading multiple images; never serialize independent I/O in async contexts.
-- **Performance-sensitive paths** should use the existing `*.perf` loggers (e.g. `mysekai.endpoint.perf`, `mysekai.map.perf`) — see `docs/optimizations.md` §4.
+- **Performance-sensitive paths** should use the existing `*.perf` loggers (e.g. `card.endpoint.perf`, `honor.draw.perf`, `plot.draw.perf`) — see `docs/optimizations.md` §4.
 - **Refer to `docs/optimizations.md`** for the full history of memory, concurrency, and caching work — it documents the rationale behind current patterns.
 
 ## Git Commit Format

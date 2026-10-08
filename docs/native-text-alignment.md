@@ -22,11 +22,11 @@ Reference implementation: [Pillow's FreeType driver](https://github.com/python-p
   mask allocation remain bounded; errors propagate through the normal fail-open path.
 - `measure_text_batch(..., engine="freetype_basic")` exposes BASIC-compatible
   advance/bbox/anchor metrics. The default `engine="skia"` retains the previous API
-  behavior for custom-profile callers. `TEXT_METRICS_CAPABILITY` is now 2.
+  behavior for custom-profile callers. This change raised `TEXT_METRICS_CAPABILITY` to 2 (currently 3).
 - `Text.engine="freetype_basic"` produces an A8 mask natively, then Skia applies
   the paint/shader, scene transform, clip, and final composition. This is native
   FreeType + Skia, not a call back to Pillow and not CoreText glyph rasterization.
-  `IR_CAPABILITY` is now 18 on both sides and in both CI smoke checks.
+  This change raised `IR_CAPABILITY` to 18 on both sides; it has moved on since (currently 29).
 - IRPainter selects this mode for BASIC non-emoji, non-adaptive text. The CJK
   reference baseline is then measured natively; IRBuilder does not call Pillow to
   normalize that node's baseline. Explicit PIL font inputs retain their actual

@@ -271,16 +271,17 @@ logging.getLogger("src.sekai.card.drawer").setLevel(logging.DEBUG)
 | Logger                                                                                 | 位置                                  |
 |----------------------------------------------------------------------------------------|-------------------------------------|
 | `card.draw.perf` / `card.endpoint.perf`                                                  | `src/sekai/card/drawer.py`、`src/core/pjsk/card.py` |
-| `event.draw.perf`                                                                        | `src/sekai/event/drawer.py`         |
-| `vlive.draw.perf`                                                                        | `src/sekai/vlive/drawer.py`         |
 | `honor.draw.perf`                                                                        | `src/sekai/honor/skia.py`           |
 | `chart.draw.perf`                                                                        | `src/sekai/chart/drawer.py`         |
-| `plot.draw.perf`（**不输出计时**，只在 Skia 回退/异常时告警）                                | `src/sekai/skia_renderer/`（canvas / render_stats） |
-| `mysekai.endpoint.perf` / `mysekai.map.perf` / `mysekai.fixture_list.perf` / `mysekai.musicrecord.perf` / `mysekai.talk_list.perf` | `src/core/pjsk/mysekai.py`、`src/sekai/mysekai/drawer.real.py` |
+| `plot.draw.perf`（**不输出计时**，只在原生渲染被拒绝/失败时告警）                            | `src/sekai/skia_renderer/`（canvas / render_stats） |
+| `custom_profile.draw.perf`                                                               | `src/sekai/profile/custom_profile/skia.py` |
+| `mysekai.map.perf` / `mysekai.fixture_list.perf` / `mysekai.musicrecord.perf` / `mysekai.talk_list.perf` | `src/sekai/mysekai/drawer.real.py`（私有文件，已 gitignore，公开仓库中无法核对） |
 
-上表只列**真正会出日志**的 logger。另有一个 `misc.birthday.perf`（`_birthday_perf_logger`，
-定义在 `src/sekai/misc/drawer.py:58`）：它在整个 `src/` 里**没有任何调用点**，因此不输出任何东西，
-调它的日志级别也不会有效果——想要生日端点的耗时，得先给它补上调用。
+上表只列**真正会出日志**的 logger。另有三个已定义但在整个 `src/` 里**没有任何调用点**的 logger：
+`misc.birthday.perf`（`_birthday_perf_logger`，定义在 `src/sekai/misc/drawer.py:91`）、
+`event.draw.perf`（`src/sekai/event/drawer.py:64`）和 `vlive.draw.perf`（`src/sekai/vlive/drawer.py:44`）；
+后两者的最后一处调用在 #77 中移除。它们不输出任何东西，调它们的日志级别也不会有效果——
+想要这些端点的耗时，得先给它们补上调用。
 
 新增性能敏感路径时沿用同一命名（`<模块>.<场景>.perf`），不要另起 logger 体系。
 
