@@ -4,6 +4,7 @@ import logging
 
 from fastapi.responses import JSONResponse, Response
 
+from src.artifact.directive import HEADER_ARTIFACT_MODE, MODE_STORE_REF, RenderCacheDirective
 from src.artifact.runtime import get_artifact_runtime
 from src.artifact.stats import artifact_node_name, artifact_stats
 from src.core.cache_identity import renderer_epoch
@@ -151,7 +152,8 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
     Every branch carries `X-Haruki-Node` (addendum A1) and emits exactly one `image.response` line. A request
     without a directive gets today's bytes response plus that one header. In artifact mode `Cache-Store: 0`
     returns bytes and stores nothing (E2/A3); any storage failure degrades to bytes with
-    `X-Haruki-Artifact-Degraded: 1` (invariant I1).
+    `X-Haruki-Artifact-Degraded: 1` (invariant I1). `Cache-Store: 0` with `X-Haruki-Artifact-Mode: store-ref`
+    uploads without any index write and returns the ref (docs/artifact-storage.md §12).
     """
     directive = current_render_directive()
     missing = current_missing_asset_count() + payload.missing_asset_count
@@ -162,6 +164,8 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
             node[CACHE_STORE_HEADER] = "0"
         return _log_and_return_bytes(payload, artifact="0", missing=missing, headers=node)
     # `requests_with_directive` is counted once by the debug middleware when it binds the directive.
+    if directive.store_ref and not directive.store:
+        return await _store_ref_response(payload, directive, missing=missing, node=node)
     stale_renderer = bool(directive.renderer_epoch) and directive.renderer_epoch != renderer_epoch()
     if not directive.store or missing > 0 or payload.has_missing_resources or stale_renderer:
         artifact_stats.incr("store_skipped")
@@ -192,4 +196,41 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
         reason=f"{outcome.reason}{_format_artifact_stages(outcome.stages)}",
         missing=missing,
         headers={**node, DEGRADED_HEADER: "1"},
+    )
+
+
+async def _store_ref_response(
+    payload: EncodedImagePayload, directive: RenderCacheDirective, *, missing: int, node: Mapping[str, str]
+) -> Response:
+    """Store-ref branch: the ref JSON, or the bytes with `Degraded: 1`. Always `Cache-Store: 0`.
+
+    The caller asked not to cache this render (`Cache-Store: 0`); it only wants the image delivered without
+    carrying the bytes back. So missing assets and a stale renderer epoch still upload: the bytes are what the
+    user is shown either way, and `Cache-Store: 0` keeps the caller from keying them under the render request.
+    """
+    if missing or payload.has_missing_resources:
+        artifact_stats.store_ref_incr("missing_assets")
+    headers = {**node, CACHE_STORE_HEADER: "0"}
+    outcome = await get_artifact_runtime().process_store_ref(payload, directive)
+    ref = outcome.ref
+    if ref is not None:
+        _log_image_response(
+            payload,
+            artifact="store_ref",
+            missing=missing,
+            detail=(
+                f" hash={ref.hash} writer={ref.node_name} upload={ref.upload_elapsed:.3f}"
+                f"{_format_artifact_stages(outcome.stages)}"
+            ),
+        )
+        set_request_stage("send_response")
+        return JSONResponse(
+            ref.to_json(), headers={ARTIFACT_HEADER: "1", HEADER_ARTIFACT_MODE: MODE_STORE_REF, **headers}
+        )
+    return _log_and_return_bytes(
+        payload,
+        artifact="store_ref_degraded",
+        reason=f"{outcome.reason}{_format_artifact_stages(outcome.stages)}",
+        missing=missing,
+        headers={**headers, DEGRADED_HEADER: "1"},
     )

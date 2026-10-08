@@ -6,6 +6,9 @@ index rows have committed under the shared content lock. The PUT itself runs out
 covered by a committed, unexpired upload intent that GC cannot act on, and the locked write re-checks that
 intent before it records the path (docs/artifact-storage.md §6).
 
+`process_store_ref` is the upload-only variant (`X-Haruki-Artifact-Mode: store-ref`): hash, PUT under Cloud's
+own image-cache key layout, ref. It touches no index; the caller records the row (docs/artifact-storage.md §12).
+
 Neither `opendal` nor `asyncpg` is imported here; the store and index arrive already built.
 """
 
@@ -26,10 +29,12 @@ from src.artifact.ref import (
     STORAGE_BACKEND_GARAGE,
     ArtifactRef,
     build_object_key,
+    build_store_ref_key,
     expires_at_for,
     extension_for_media_type,
     format_rfc3339,
     is_foreign_cdn_path,
+    new_store_ref_generation,
 )
 from src.index.protocols import ContentRow, IndexContention, IndexSchemaError, IndexUnavailable, RequestRow
 from src.storage.protocols import StorageError
@@ -47,6 +52,7 @@ logger = logging.getLogger("src.artifact.service")
 INDEX_WRITE_LOG_INTERVAL_SECONDS = 60.0
 
 Offload = Callable[..., Awaitable[Any]]
+StageRecorder = Callable[[str, float], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +91,7 @@ class ArtifactService:
         settings: StorageSettings,
         node_name: str,
         stats: ArtifactStats,
+        writer_node: str | None = None,
         hasher: Callable[..., Any] = hashlib.sha256,
         clock: Callable[[], float] = time.perf_counter,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
@@ -94,6 +101,8 @@ class ArtifactService:
         self._index = index if settings.index.enabled else None
         self._settings = settings
         self._node_name = node_name
+        configured_writer = writer_node if writer_node is not None else getattr(settings, "writer_node", "")
+        self._writer_node = (configured_writer or "").strip() or node_name
         self._stats = stats
         self._hasher = hasher
         self._clock = clock
@@ -147,15 +156,19 @@ class ArtifactService:
         self._stats.degraded(reason)
         return ArtifactOutcome(ref=None, degraded=True, reason=reason, stages=stages)
 
-    def _stage_done(self, stages: dict[str, float], name: str, started: float) -> float:
+    def _stage_done(
+        self, stages: dict[str, float], name: str, started: float, record: StageRecorder | None = None
+    ) -> float:
         elapsed = max(0.0, self._clock() - started)
-        self._stage_value(stages, name, elapsed)
+        self._stage_value(stages, name, elapsed, record)
         return elapsed
 
-    def _stage_value(self, stages: dict[str, float], name: str, elapsed: float) -> None:
+    def _stage_value(
+        self, stages: dict[str, float], name: str, elapsed: float, record: StageRecorder | None = None
+    ) -> None:
         elapsed = max(0.0, float(elapsed))
         stages[name] = stages.get(name, 0.0) + elapsed
-        self._stats.record_stage(name, elapsed)
+        (record or self._stats.record_stage)(name, elapsed)
 
     def _log_write_failure(self, content_hash: str, cache_key: str, exc: BaseException) -> None:
         name = type(exc).__name__
@@ -168,7 +181,7 @@ class ArtifactService:
 
     # ------------------------------------------------------------------ steps
 
-    async def _hash(self, data: bytes, stages: dict[str, float]) -> str:
+    async def _hash(self, data: bytes, stages: dict[str, float], record: StageRecorder | None = None) -> str:
         _set_stage("artifact:hash")
         started = self._clock()
         view = memoryview(data)
@@ -176,7 +189,7 @@ class ArtifactService:
             digest = await self._offload(_sha256_hex, self._hasher, view)
         else:
             digest = _sha256_hex(self._hasher, view)
-        self._stage_done(stages, "hash", started)
+        self._stage_done(stages, "hash", started, record)
         return digest
 
     async def _prepare(self, content_hash: str, candidate_key: str, stages: dict[str, float]) -> PreparedUpload:
@@ -209,7 +222,12 @@ class ArtifactService:
         return prepared
 
     async def _upload(
-        self, store: ObjectStore, object_key: str, payload: EncodedImagePayload, stages: dict[str, float]
+        self,
+        store: ObjectStore,
+        object_key: str,
+        payload: EncodedImagePayload,
+        stages: dict[str, float],
+        record: StageRecorder | None = None,
     ) -> float | str:
         """Elapsed seconds on success, else the degraded reason."""
         _set_stage("artifact:upload")
@@ -233,7 +251,7 @@ class ArtifactService:
             )
             return "upload_failed"
         finally:
-            elapsed = self._stage_done(stages, "upload", started)
+            elapsed = self._stage_done(stages, "upload", started, record)
         self._stats.incr("uploads")
         self._stats.incr("upload_bytes", len(payload.image_bytes))
         self._stats.add_upload_elapsed(elapsed)
@@ -422,3 +440,73 @@ class ArtifactService:
             ),
         )
         return ArtifactOutcome(ref=ref, degraded=False, reason="reused" if reused else "ok", stages=stages)
+
+    # ------------------------------------------------------------------ store-ref (upload only)
+
+    def _store_ref_degraded(self, reason: str, stages: dict[str, float]) -> ArtifactOutcome:
+        self._stats.store_ref_degraded(reason)
+        return ArtifactOutcome(ref=None, degraded=True, reason=reason, stages=stages)
+
+    async def process_store_ref(self, payload: EncodedImagePayload, directive: RenderCacheDirective) -> ArtifactOutcome:
+        """Upload the bytes under Cloud's image-cache key layout and return a ref; never touch the index."""
+        stages: dict[str, float] = {}
+        started = self._clock()
+        self._stats.store_ref_incr("requests")
+        try:
+            return await self._process_store_ref(payload, directive, stages)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(
+                "artifact.store_ref_internal_error api_path=%s exc=%s",
+                directive.api_path,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            self._stats.record_error("store_ref", exc)
+            return self._store_ref_degraded("internal", stages)
+        finally:
+            self._stage_done(stages, "total", started, self._stats.record_store_ref_stage)
+
+    async def _process_store_ref(
+        self, payload: EncodedImagePayload, directive: RenderCacheDirective, stages: dict[str, float]
+    ) -> ArtifactOutcome:
+        store = self._store
+        if store is None:
+            return self._store_ref_degraded("runtime_unavailable", stages)
+        if extension_for_media_type(payload.media_type) is None:
+            logger.warning(
+                "artifact.unsupported_media media_type=%s api_path=%s", payload.media_type, directive.api_path
+            )
+            return self._store_ref_degraded("unsupported_media", stages)
+        record = self._stats.record_store_ref_stage
+        content_hash = await self._hash(payload.image_bytes, stages, record)
+        # A fresh generation per write, like Cloud's own writer: the key is never reused, so a delayed DELETE of
+        # an older object with the same content can never remove this one.
+        object_key = build_store_ref_key(content_hash, payload.media_type, generation=new_store_ref_generation())
+        put = await self._upload(store, object_key, payload, stages, record)
+        if isinstance(put, str):
+            return self._store_ref_degraded(put, stages)
+        self._stats.store_ref_incr("published")
+        self._stats.store_ref_incr("upload_bytes", len(payload.image_bytes))
+        ref = ArtifactRef(
+            kind=ARTIFACT_KIND,
+            hash=content_hash,
+            cdn_path=object_key,
+            storage_backend=STORAGE_BACKEND_GARAGE,
+            bucket=store.bucket,
+            object_key=object_key,
+            size_bytes=len(payload.image_bytes),
+            media_type=payload.media_type,
+            width=payload.image_width,
+            height=payload.image_height,
+            cache_key=directive.cache_key,
+            ttl_seconds=directive.ttl_seconds,
+            expires_at=format_rfc3339(expires_at_for(self._now(), directive.ttl_seconds)),
+            reused=False,
+            index_written=False,
+            upload_elapsed=put,
+            # The Garage node that accepted the PUT, so Cloud's URL prefers a host that already holds the object.
+            node_name=self._writer_node,
+        )
+        return ArtifactOutcome(ref=ref, degraded=False, reason="ok", stages=stages)

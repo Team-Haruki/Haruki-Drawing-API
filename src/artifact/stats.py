@@ -55,6 +55,20 @@ STAGES: tuple[str, ...] = (
     "index_lock",
 )
 
+# Store-ref mode (`X-Haruki-Artifact-Mode: store-ref`) is upload-only: it has no index stages and its own
+# counters, so the artifact-mode averages above stay comparable. Its object writes are also counted in the
+# shared `uploads` / `upload_bytes` / `upload_failures` / `upload_timeouts` / `upload_elapsed_total`.
+STORE_REF_COUNTERS: tuple[str, ...] = ("requests", "published", "missing_assets", "upload_bytes")
+STORE_REF_DEGRADED_REASONS: tuple[str, ...] = (
+    "disabled",
+    "runtime_unavailable",
+    "upload_failed",
+    "upload_timeout",
+    "unsupported_media",
+    "internal",
+)
+STORE_REF_STAGES: tuple[str, ...] = ("hash", "upload", "total")
+
 _node_name_lock = threading.Lock()
 _node_name: str | None = None
 
@@ -109,6 +123,10 @@ class ArtifactStats:
         self._index_configured = False
         self._index_usable = False
         self._index_last_error: dict[str, Any] | None = None
+        self._store_ref: Counter[str] = Counter()
+        self._store_ref_degraded: Counter[str] = Counter()
+        self._store_ref_stage_counts: Counter[str] = Counter()
+        self._store_ref_stage_totals: dict[str, float] = {}
 
     def incr(self, name: str, amount: int = 1) -> None:
         if name not in SIMPLE_COUNTERS:
@@ -136,6 +154,23 @@ class ArtifactStats:
         with self._lock:
             self._stage_counts[stage] += 1
             self._stage_totals[stage] = self._stage_totals.get(stage, 0.0) + max(0.0, float(elapsed))
+
+    def store_ref_incr(self, name: str, amount: int = 1) -> None:
+        if name not in STORE_REF_COUNTERS:
+            raise KeyError(name)
+        with self._lock:
+            self._store_ref[name] += amount
+
+    def store_ref_degraded(self, reason: str) -> None:
+        with self._lock:
+            self._store_ref_degraded[reason] += 1
+
+    def record_store_ref_stage(self, stage: str, elapsed: float) -> None:
+        with self._lock:
+            self._store_ref_stage_counts[stage] += 1
+            self._store_ref_stage_totals[stage] = self._store_ref_stage_totals.get(stage, 0.0) + max(
+                0.0, float(elapsed)
+            )
 
     def record_error(self, stage: str, exc: BaseException | str) -> None:
         with self._lock:
@@ -194,6 +229,18 @@ class ArtifactStats:
                 for stage in stage_names
             }
             payload["last_error"] = dict(self._last_error) if self._last_error else None
+            store_ref: dict[str, Any] = {name: self._store_ref.get(name, 0) for name in STORE_REF_COUNTERS}
+            store_ref["degraded"] = {
+                reason: self._store_ref_degraded.get(reason, 0) for reason in STORE_REF_DEGRADED_REASONS
+            }
+            store_ref["stages"] = {
+                stage: {
+                    "count": self._store_ref_stage_counts.get(stage, 0),
+                    "total": round(self._store_ref_stage_totals.get(stage, 0.0), 6),
+                }
+                for stage in STORE_REF_STAGES
+            }
+            payload["store_ref"] = store_ref
         return payload
 
     def reset(self) -> None:
@@ -211,6 +258,10 @@ class ArtifactStats:
             self._index_configured = False
             self._index_usable = False
             self._index_last_error = None
+            self._store_ref.clear()
+            self._store_ref_degraded.clear()
+            self._store_ref_stage_counts.clear()
+            self._store_ref_stage_totals.clear()
 
 
 artifact_stats = ArtifactStats()

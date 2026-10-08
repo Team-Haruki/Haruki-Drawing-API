@@ -121,6 +121,8 @@ logging:
 # storage:
 #   enabled: false
 #   node_name: ""                    # "" -> hostname; reported as ArtifactRef.node_name and X-Haruki-Node
+#   writer_node: ""                  # image-host name of the Garage node behind provider.endpoint; "" -> node_name.
+#                                    # Named as the fresh writer in store-ref refs (X-Haruki-Artifact-Mode: store-ref)
 #   provider:
 #     provider: garage
 #     scheme: s3

@@ -391,6 +391,9 @@ class StorageSettings(BaseModel):
 
     enabled: bool = False
     node_name: str = ""  # "" -> socket.gethostname() at runtime
+    # Public image-host name of the Garage node behind provider.endpoint; a store-ref names it as the fresh
+    # writer so Cloud's URL prefers a host that already holds the object. "" -> node_name.
+    writer_node: str = ""
     provider: ArtifactProviderSettings = ArtifactProviderSettings()
     index: IndexSettings = IndexSettings()
     ttl_max_seconds: int = 30 * 86400  # X-Haruki-Cache-TTL cap; Cloud clamps to the same value
