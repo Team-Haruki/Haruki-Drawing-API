@@ -97,6 +97,8 @@ _HELP_IMAGE_WIDTH = 1080
 _HELP_MARGIN = 62
 _HELP_CARD_MARGIN = 28
 _HELP_MAX_TEXT_WIDTH = _HELP_IMAGE_WIDTH - _HELP_MARGIN * 2
+# Minimum space between a definition label and its value; a wider label goes on its own line.
+_HELP_LABEL_GAP = 8
 _HELP_LINK_RE = re.compile(r"\[([^\]]+)]\([^)]+\)")
 
 
@@ -214,33 +216,67 @@ def _append_command_help_wrapped_line(
         )
 
 
+def _split_command_help_definition(bullet: str) -> tuple[str, str] | None:
+    """Split a list item into (label, value) at its first "：" (else ":") outside code spans and links.
+
+    A colon inside `code` is part of what users type (``qq:123``, ``14:05``) and a link target holds
+    ``https:``, so neither makes the item a definition row. Returns None when the item is not one.
+    """
+    text = _HELP_LINK_RE.sub(r"\1", bullet)
+    for sep in ("：", ":"):
+        in_code = False
+        for idx, char in enumerate(text):
+            if char == "`":
+                in_code = not in_code
+            elif char == sep and not in_code:
+                label = _clean_command_help_inline(text[:idx])
+                description = _clean_command_help_inline(text[idx + 1 :])
+                return (label, description) if label and description else None
+    return None
+
+
 def _append_command_help_definition_line(
     lines: list[_CommandHelpLine],
-    text: str,
+    label: str,
+    description: str,
     *,
     size: int = 21,
     indent: int = 24,
     label_width: int = 190,
     gap_before: int = 7,
 ) -> None:
-    label, sep, description = text.partition("：")
-    if not sep:
-        label, sep, description = text.partition(":")
-    label = label.strip()
-    description = description.strip()
-    if not label or not description:
-        _append_command_help_wrapped_line(
-            lines,
-            text,
-            font_name=DEFAULT_FONT,
-            size=size,
-            indent=indent,
-            fill=(50, 61, 78, 255),
-            gap_before=gap_before,
-        )
+    label_fill = (30, 45, 66, 255)
+    wrapped = _wrap_command_help_text(DEFAULT_FONT, size, description, _HELP_MAX_TEXT_WIDTH - indent - label_width)
+    if get_text_size(get_font(DEFAULT_BOLD_FONT, size), label)[0] > label_width - _HELP_LABEL_GAP:
+        # The label column neither wraps nor clips: a wider label would be drawn over its value, so
+        # it gets its own line(s) and the value starts below it, still in the value column.
+        for idx, part in enumerate(
+            _wrap_command_help_text(DEFAULT_BOLD_FONT, size, label, _HELP_MAX_TEXT_WIDTH - indent)
+        ):
+            lines.append(
+                _CommandHelpLine(
+                    text=part,
+                    font_name=DEFAULT_BOLD_FONT,
+                    size=size,
+                    indent=indent,
+                    fill=label_fill,
+                    gap_before=gap_before if idx == 0 else 2,
+                )
+            )
+        for part in wrapped:
+            lines.append(
+                _CommandHelpLine(
+                    text=part,
+                    font_name=DEFAULT_FONT,
+                    size=size,
+                    indent=indent,
+                    fill=(50, 61, 78, 255),
+                    gap_before=2,
+                    label_width=label_width,
+                )
+            )
         return
 
-    wrapped = _wrap_command_help_text(DEFAULT_FONT, size, description, _HELP_MAX_TEXT_WIDTH - indent - label_width)
     for idx, part in enumerate(wrapped):
         lines.append(
             _CommandHelpLine(
@@ -1074,13 +1110,13 @@ def _append_command_help_body_line(
 
     bullet = _command_help_bullet(trimmed)
     if bullet is not None:
-        cleaned = _clean_command_help_inline(bullet)
-        if "：" in cleaned or ":" in cleaned:
-            _append_command_help_definition_line(lines, cleaned)
+        definition = _split_command_help_definition(bullet)
+        if definition is not None:
+            _append_command_help_definition_line(lines, *definition)
         else:
             _append_command_help_wrapped_line(
                 lines,
-                cleaned,
+                _clean_command_help_inline(bullet),
                 font_name=DEFAULT_FONT,
                 size=21,
                 indent=34,
