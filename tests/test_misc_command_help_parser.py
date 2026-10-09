@@ -1,11 +1,13 @@
 import pytest
 
+from src.sekai.misc import drawer
 from src.sekai.misc.drawer import (
     _command_help_bullet,
     _command_help_heading,
     _command_help_numbered,
     _compose_command_help_image_sync,
     _layout_command_help_markdown,
+    _split_command_help_definition,
 )
 from src.sekai.misc.model import CommandHelpRenderRequest
 
@@ -118,3 +120,45 @@ const hidden = true
     assert any(line.text == "引用" and line.bg is not None for line in advanced)
     assert any(line.text == "| 列 | 值 |" and line.size == 18 for line in advanced)
     assert any(line.text == "1) 步骤" and line.indent == 36 for line in advanced)
+
+
+@pytest.mark.parametrize(
+    ("bullet", "expected"),
+    [
+        ("`event123`、`活动123` 或活动 ID：指定活动", ("event123、活动123 或活动 ID", "指定活动")),
+        ("**查询**：查看资料", ("查询", "查看资料")),
+        ("参数: 参数说明", ("参数", "参数说明")),
+        # A colon inside a code span is input syntax, not a separator.
+        ("`/禁止别名提交 qq:123456789`", None),
+        ("提交者的写法：`平台:用户 ID`，可以直接使用", ("提交者的写法", "平台:用户 ID，可以直接使用")),
+        ("`a：b` 和 c: d", ("a：b 和 c", "d")),
+        # A link target is not a separator either.
+        ("详见 [文档](https://example.com/help)", None),
+        ("：没有标签", None),
+        ("没有说明：", None),
+        ("普通项目", None),
+    ],
+)
+def test_split_command_help_definition(bullet: str, expected: tuple[str, str] | None) -> None:
+    assert _split_command_help_definition(bullet) == expected
+
+
+def test_wide_definition_label_gets_its_own_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One em per character, like the CJK glyphs of the production font (tests may run without it).
+    monkeypatch.setattr(drawer, "get_text_size", lambda font, text: (len(text) * 21, 21))
+    wide = "歌曲、Live 类型、目标、演出能量（火）、卡组来源、固定与排除"
+    _, sections = _layout_command_help_markdown(f"## 参数\n- {wide}：和 `/组卡` 相同\n- 短：值\n")
+
+    lines = [line for line in sections[0].lines if line.text]
+    label_line, value_line, short_line = lines
+    # The wide label is its own bold line, never drawn in the fixed label column over its value.
+    assert label_line.text == wide
+    assert label_line.label == ""
+    assert label_line.label_width == 0
+    assert label_line.font_name != value_line.font_name
+    # The value follows below, still aligned with the other values.
+    assert value_line.text == "和 /组卡 相同"
+    assert value_line.label == ""
+    assert value_line.label_width == short_line.label_width == 190
+    assert short_line.label == "短"
+    assert short_line.text == "值"

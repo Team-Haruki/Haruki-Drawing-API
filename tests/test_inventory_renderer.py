@@ -35,7 +35,7 @@ def _item(**overrides) -> InventoryItem:
         ({"resource_type": "coin"}, "金币"),
         ({"resource_type": "jewel"}, "水晶"),
         ({"resource_type": "virtual_coin"}, "虚拟币"),
-        ({"resource_type": "boost_item"}, "火罐"),
+        ({"resource_type": "boost_item"}, "演出能量道具"),
         ({"resource_type": "event_item"}, "活动"),
         ({"resource_type": "gacha_ticket"}, "招募"),
         ({"resource_type": "gacha_ceil_item"}, "招募"),

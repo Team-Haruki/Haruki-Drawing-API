@@ -45,7 +45,7 @@ RESOURCE_TYPE_DESCRIPTIONS = {
     "coin": "金币",
     "jewel": "水晶",
     "virtual_coin": "虚拟币",
-    "boost_item": "火罐",
+    "boost_item": "演出能量道具",
     "event_item": "活动",
     "gacha_ticket": "招募",
     "gacha_ceil_item": "招募",
