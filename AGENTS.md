@@ -549,6 +549,16 @@ push the tag `v<version>`. `release-gate` refuses a tag that differs from `pypro
 
 `renderer-release.yml` stays a manual full-asset validation on a configured fixture runner (see README).
 
+## Release notes
+
+Every tag gets a GitHub release, written in English to the org standard
+[`RELEASE_NOTES.md`](https://github.com/seiunx-dev/ci-templates/blob/main/RELEASE_NOTES.md):
+- The release title is the tag only (`v3.7.0`), with no product name or subtitle.
+- Tags with an `-alpha`, `-beta` or `-rc` suffix are pre-releases; every other tag is a regular release.
+- Omit empty sections, and end every item with its PR number `(#123)` (short commit SHA when there is no PR).
+- `release.yml` only promotes the image and does not create the GitHub release: once it has published, create
+  the release for the tag with notes written to the standard (rewrite any auto-generated notes to it).
+
 ## Code Style
 
 Ruff with `line-length = 120`. See `pyproject.toml [tool.ruff]` for the full ruleset. Notable: isort via ruff, pyupgrade rules enabled, `RUF001-003` (ambiguous unicode) ignored since the codebase contains CJK text.
