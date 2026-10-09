@@ -64,7 +64,7 @@ jobs:
       download-artifact: renderer-wheel
       env: HARUKI_FONT__EMOJI=TwemojiMozilla # Linux FreeType renders COLR; the repo default (OT-SVG) is macOS-only
       setup-command: >-
-        uv pip install ci-artifacts/*.whl && ./scripts/ci/repair-freetype.sh .venv &&
+        uv pip install ci-artifacts/*.whl && ./scripts/ci/check-native-wheels.sh .venv &&
         ./scripts/ci/fetch-fonts.sh &&
         uv run --no-sync python -X gil=0 scripts/skia_codec_smoke.py
       lint-command: uv run --no-sync python -m compileall -q src tests scripts && ./scripts/ci/repo-guards.sh
@@ -96,7 +96,7 @@ jobs:
         run: |
           uv sync --frozen
           uv pip install ci-artifacts/*.whl
-          ./scripts/ci/repair-freetype.sh .venv
+          ./scripts/ci/check-native-wheels.sh .venv
           ./scripts/ci/fetch-fonts.sh
           ./scripts/ci/free-threaded-smoke.sh smoke-logs
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
