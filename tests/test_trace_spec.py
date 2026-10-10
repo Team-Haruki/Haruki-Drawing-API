@@ -82,7 +82,7 @@ def test_reference_history_controls_bounds_and_suppresses_latest_line():
     request = _player(compare_rank_trace=[_rank(180, 500, rank=50)], compare_rank_line_score=9000)
     spec = build_player_trace_spec(request)
     assert spec.horizontal_lines == ()
-    assert spec.series[1].label == "T50分数线"
+    assert spec.series[1].label == "T50 榜线"
     assert spec.series[1].dashed
     assert spec.score_limits == (95, 525)
     assert spec.end == request.compare_rank_trace[0].time

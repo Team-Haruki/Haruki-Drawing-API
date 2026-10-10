@@ -55,6 +55,7 @@ from src.sekai.base.image_source import (
 )
 from src.sekai.base.paint_types import RasterResample
 from src.sekai.base.placeholder import placeholder_variant as _guess_missing_placeholder_variant
+from src.sekai.base.timezone import format_user_time
 from src.settings import (
     ASSETS_BASE_DIR,
     COMPOSED_IMAGE_CACHE_MAX_BYTES,
@@ -1586,7 +1587,7 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
         text = f"{diff.days}{day_unit}"
     text += suffix
     if show_original_time:
-        text = f"{t.strftime('%Y-%m-%d %H:%M:%S')} ({text})"
+        text = f"{format_user_time(t, seconds=True)}（{text}）"
     return text
 
 

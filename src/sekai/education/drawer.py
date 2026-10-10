@@ -178,7 +178,7 @@ def _build_challenge_live_header(
     header.add_item(TextBox("角色", header_style).set_w(w1).set_content_align("c"))
     header.add_item(TextBox("等级", header_style).set_w(w2).set_content_align("c"))
     header.add_item(TextBox("分数", header_style).set_w(w3).set_content_align("c"))
-    header.add_item(TextBox(f"进度(上限{max_score // 10000}w)", header_style).set_w(w4).set_content_align("c"))
+    header.add_item(TextBox(f"进度（上限 {max_score // 10000}w）", header_style).set_w(w4).set_content_align("c"))
     for width, icon in ((w5, jewel_icon), (w6, shard_icon)):
         icon_frame = Frame().set_w(width).set_content_align("c")
         if icon:
@@ -355,9 +355,9 @@ async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canv
                                     "r"
                                 ).set_overflow("clip")
                                 detail = (
-                                    f"区域道具{bonus.area_item:.1f}%"
-                                    f" + 角色等级{bonus.rank:.1f}%"
-                                    f" + 烤森玩偶{bonus.fixture:.1f}%"
+                                    f"区域道具 {bonus.area_item:.1f}%"
+                                    f" + 角色等级 {bonus.rank:.1f}%"
+                                    f" + 烤森玩偶 {bonus.fixture:.1f}%"
                                 )
                                 TextBox(detail, text_style)
 
@@ -370,7 +370,7 @@ async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canv
                             TextBox(f"{bonus.total:.1f}%", header_style).set_w(100).set_content_align("r").set_overflow(
                                 "clip"
                             )
-                            detail = f"区域道具{bonus.area_item:.1f}% + 烤森门{bonus.gate:.1f}%"
+                            detail = f"区域道具 {bonus.area_item:.1f}% + 烤森门 {bonus.gate:.1f}%"
                             TextBox(detail, text_style)
 
                 # 属性加成
@@ -394,7 +394,7 @@ async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canv
 
 
 def _power_bonus_multi_unit_text(bonus: float) -> str:
-    return f"混合编成(2种以上组合) +{bonus:.1f}%"
+    return f"混合编成（2 种以上组合）+{bonus:.1f}%"
 
 
 async def compose_power_bonus_detail_image(rqd: PowerBonusDetailRequest) -> Image.Image:
@@ -520,7 +520,7 @@ def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profi
 
 
 def _area_multi_unit_text(bonus: float) -> str:
-    return f"多团+{bonus:.1f}%"
+    return f"多团 +{bonus:.1f}%"
 
 
 def _build_area_level_row(
@@ -726,7 +726,7 @@ async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
     table = (
         VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
-    labels = ["角色", "角色等级", "羁绊等级", f"进度(上限{rqd.max_level}级)", "升级经验"]
+    labels = ["角色", "角色等级", "羁绊等级", f"进度（上限 {rqd.max_level} 级）", "升级经验"]
     table.add_item(_build_education_table_header(labels, widths, header_style))
     for index, bond in enumerate(rqd.bonds):
         icon_pair = (bond_icons[index * 2], bond_icons[index * 2 + 1])
@@ -816,7 +816,7 @@ async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
     table = (
         VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
-    labels = ["角色", "队长次数", "EX等级", "EX次数", f"进度(上限{rqd.max_play_count})"]
+    labels = ["角色", "队长次数", "EX 等级", "EX 次数", f"进度（上限 {rqd.max_play_count}）"]
     table.add_item(_build_education_table_header(labels, widths, header_style))
     for index, (info, icon) in enumerate(zip(rqd.leader_counts, leader_icons, strict=True)):
         table.add_item(_build_leader_count_row(info, icon, index, rqd.max_play_count, text_style, widths))
@@ -912,7 +912,7 @@ def _draw_character_mission_progress(
         exp_text = "?" if next_exp is None else str(next_exp)
         info_row.add_item(
             TextBox(
-                f"下一档{current:,}/{next_need:,} EXP+{exp_text}",
+                f"下一档 {current:,}/{next_need:,} EXP+{exp_text}",
                 TextStyle(font=DEFAULT_FONT, size=14, color=(80, 80, 80, 255)),
             )
         )
@@ -967,7 +967,7 @@ def _build_character_mission_dual_card(
     )
     content.add_item(
         _draw_character_mission_progress(
-            "EX任务",
+            "EX 任务",
             ex_row.current,
             ex_row.upper,
             ex_row.ratio,
@@ -1057,7 +1057,7 @@ def _build_character_mission_note_panel(note_style: TextStyle) -> VSplit:
     )
     panel.add_item(
         TextBox(
-            "各任务上限为MasterData中所规定的上限，并不一定是当前已实装资源总数",
+            "各任务上限为游戏数据中规定的上限，不一定是当前已实装的资源总数",
             note_style,
             use_real_line_count=True,
         )
@@ -1082,8 +1082,8 @@ def _build_character_mission_summary_panel(
     header_row.add_item(ImageBox(chara_icon, size=(48, 48)))
     header_row.add_item(
         TextBox(
-            f"{rqd.character_name} 当前Lv.{rqd.current_level} EXP×{rqd.current_exp} + "
-            f"未领取EXP×{rqd.pending_exp} = 总计Lv.{rqd.final_level} EXP×{rqd.final_exp}",
+            f"{rqd.character_name} 当前 Lv.{rqd.current_level} EXP×{rqd.current_exp} + "
+            f"未领取 EXP×{rqd.pending_exp} = 总计 Lv.{rqd.final_level} EXP×{rqd.final_exp}",
             header_style,
             use_real_line_count=True,
         )
@@ -1142,7 +1142,7 @@ _MISSION_TABLE_COLUMNS = (
     ("需求", 96, "requirement", ""),
     ("累计需求", 128, "acc_requirement", ""),
     ("EXP", 72, "exp", ""),
-    ("累计EXP", 116, "acc_exp", ""),
+    ("累计 EXP", 116, "acc_exp", ""),
 )
 
 
@@ -1213,7 +1213,7 @@ def _build_character_mission_section_header(
     progress_style: TextStyle,
 ) -> HSplit:
     header = HSplit().set_content_align("lb").set_item_align("lb").set_sep(8)
-    header.add_item(TextBox("当前进度:", header_style))
+    header.add_item(TextBox("当前进度：", header_style))
     header.add_item(TextBox(str(section.current_total), progress_style))
     if section.is_ex and section.current_round_no is not None:
         header.add_item(TextBox(f"当前回目 EX {section.current_round_no}", cell_style))
@@ -1235,7 +1235,7 @@ def _build_character_mission_section_table(section, target_col_count: int | None
         .set_padding(8)
         .set_bg(_character_mission_panel_bg())
     )
-    root.add_item(TextBox("EX任务" if section.is_ex else "普通任务", title_style))
+    root.add_item(TextBox("EX 任务" if section.is_ex else "普通任务", title_style))
     root.add_item(_build_character_mission_section_header(section, header_style, cell_style, progress_style))
     root.add_item(
         _draw_character_mission_progress(
@@ -1289,7 +1289,7 @@ async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -
     title_row.add_item(ImageBox(chara_icon, size=(48, 48)))
     title_row.add_item(TextBox(f"{rqd.character_name} {rqd.title} 任务详览", title_style))
     header.add_item(title_row)
-    header.add_item(TextBox("普通任务高亮栏为已达成的最近档位，EX任务高亮栏为当前进行中的档位", style2))
+    header.add_item(TextBox("普通任务高亮栏为已达成的最近档位，EX 任务高亮栏为当前进行中的档位", style2))
     root.add_item(header)
 
     normal_col_count = _character_mission_normal_column_count(rqd.sections)

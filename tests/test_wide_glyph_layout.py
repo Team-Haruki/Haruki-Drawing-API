@@ -61,7 +61,7 @@ def _watermark_lines(canvas: Canvas) -> list[TextBox]:
 def test_request_watermark_fits_any_page_width(wide_glyphs: float, content_w: int) -> None:
     request = SimpleNamespace(timezone=LONG_TIMEZONE, dt=WIDE_DT)
     text = draw.build_request_watermark_text(request, extra_suffix="Region: EN  Event 12345")
-    assert "2026-12-28 23:58:59 (America/Argentina/Buenos_Aires)" in text
+    assert "DT: 2026-12-28 23:58:59 (UTC-3)" in text
 
     canvas = Canvas().set_padding(8)
     canvas.add_item(Frame().set_size((content_w, 30)))
@@ -100,7 +100,7 @@ def _card_request(nickname: str, *, uid: str, timezone: str, rank: int, mysekai_
 @pytest.mark.parametrize(
     "nickname",
     [
-        "ab",  # short plain name: the full "MySekai Lv.NN" chip, name box sized to what the chips leave
+        "ab",  # short plain name: the "烤森 Lv.NN" chip, name box sized to what the chips leave
         "星雲夏希",
         "WWWWMMMMWWWWMMMMWWWW",
         "<#DAC>星<#B68>雲<#9CF>夏<#FCA>希",  # colour-tagged name that fits
@@ -120,10 +120,10 @@ def test_profile_card_name_row_never_outgrows_the_card(
     assert card._get_self_size()[0] <= profile_drawer._CARD_W
 
 
-def test_profile_card_level_label_accepts_the_visible_name() -> None:
-    assert profile_drawer._profile_card_level_label("Short", 42) == "MySekai Lv.42"
-    assert profile_drawer._profile_card_level_label("abcdefghijklmnop", 42) == "MSLv.42"
-    assert profile_drawer._profile_card_visible_name("<#F00>abc<#0F0>def") == "abcdef"
+def test_profile_card_level_label_uses_the_caller_label() -> None:
+    assert profile_drawer._profile_card_level_label(42) == "烤森 Lv.42"
+    labelled = SimpleNamespace(labels={"profile.mysekai_level": "MySekai Lv.{level}"})
+    assert profile_drawer._profile_card_level_label(42, labelled) == "MySekai Lv.42"
 
 
 @pytest.mark.parametrize("timezone", ["Asia/Shanghai", LONG_TIMEZONE])

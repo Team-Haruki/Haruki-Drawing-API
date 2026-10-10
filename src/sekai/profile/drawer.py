@@ -51,7 +51,7 @@ from src.sekai.base.plot import (
     colored_text_box,
     parse_colored_text_segments,
 )
-from src.sekai.base.timezone import datetime_from_millis, region_display, request_now
+from src.sekai.base.timezone import caller_label, datetime_from_millis, region_display, request_now
 from src.sekai.base.utils import (
     AssetImageRef,
     EncodedImageRef,
@@ -1038,8 +1038,8 @@ def _build_profile_multi_live_module(
     if side_panel_w is not None:
         module.set_w(side_panel_w)
     module.add_item(_build_profile_stats_badge("MULTI LIVE"))
-    module.add_item(_build_profile_stats_badge(f"MVP {multi_live.mvp}次", width=stats_w))
-    module.add_item(_build_profile_stats_badge(f"SUPERSTAR {multi_live.super_star}次", font_size=17, width=stats_w))
+    module.add_item(_build_profile_stats_badge(f"MVP {multi_live.mvp} 次", width=stats_w))
+    module.add_item(_build_profile_stats_badge(f"SUPERSTAR {multi_live.super_star} 次", font_size=17, width=stats_w))
     return module
 
 
@@ -1103,8 +1103,8 @@ async def _build_profile_growth_content_module(ctx: _ProfileLayoutContext) -> Wi
     if ctx.multi_live is not None:
         multi_live_stats_w = max(
             solo_live_score_w or 0,
-            _profile_stats_badge_width(f"MVP {ctx.multi_live.mvp}次"),
-            _profile_stats_badge_width(f"SUPERSTAR {ctx.multi_live.super_star}次", font_size=17),
+            _profile_stats_badge_width(f"MVP {ctx.multi_live.mvp} 次"),
+            _profile_stats_badge_width(f"SUPERSTAR {ctx.multi_live.super_star} 次", font_size=17),
         )
         multi_live_content_w = max(
             _profile_stats_badge_width("MULTI LIVE"),
@@ -1294,15 +1294,11 @@ async def try_render_profile_payload(rqd: ProfileRequest) -> EncodedImagePayload
     return await render_canvas_payload(canvas, endpoint=_PROFILE_ENDPOINT, scale=_PROFILE_SCALE)
 
 
-def _profile_card_level_label(name: str | list[Widget], mysekai_level: int | None) -> str | None:
-    """``MySekai Lv.N``, or the compact ``MSLv.N`` next to a long name (its visible text, or its text items)."""
+def _profile_card_level_label(mysekai_level: int | None, request=None) -> str | None:
+    """The MySekai level chip, ``烤森 Lv.N`` (the caller's ``profile.mysekai_level`` label when sent)."""
     if not mysekai_level:
         return None
-    if isinstance(name, str):
-        name_length = get_str_display_length(name)
-    else:
-        name_length = sum(get_str_display_length(item.text) for item in name if isinstance(item, TextBox))
-    return f"MySekai Lv.{mysekai_level}" if name_length <= 12 else f"MSLv.{mysekai_level}"
+    return caller_label(request, "profile.mysekai_level", "烤森 Lv.{level}", level=mysekai_level)
 
 
 # ---------------------------------------------------------------------------
@@ -1373,9 +1369,9 @@ def _profile_card_uid_line(profile: BasicProfile) -> str:
     return f"ID {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}"
 
 
-def _profile_card_rank_label(rank: int | None) -> str | None:
+def _profile_card_rank_label(rank: int | None, request=None) -> str | None:
     """The game account rank (``userGamedata.rank``) as ``Lv.N``; None when the caller sent none."""
-    return f"Lv.{rank}" if rank else None
+    return caller_label(request, "profile.rank_level", "Lv.{level}", level=rank) if rank else None
 
 
 def _profile_card_age_text(update_time, now) -> tuple[str, tuple[int, int, int, int]]:
@@ -1427,11 +1423,6 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
     return ret
 
 
-def _profile_card_visible_name(nickname: str) -> str:
-    """The characters of the (truncated) nickname that are drawn, colour tags removed."""
-    return "".join(segment["text"] for segment in parse_colored_text_segments(truncate(nickname, 64)))
-
-
 def _profile_card_name(nickname: str, free: int) -> list[Widget]:
     """The name, kept inside the ``free`` px the rank / level chips leave in the text column.
 
@@ -1469,10 +1460,9 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4) as identity:
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8) as name_row:
             chips = []
-            if rank_text := _profile_card_rank_label(rqd.rank):
+            if rank_text := _profile_card_rank_label(rqd.rank, rqd):
                 chips.append(_profile_card_chip(rank_text, _CARD_RANK_CHIP))
-            visible_name = _profile_card_visible_name(profile.nickname)
-            if ms_lv_text := _profile_card_level_label(visible_name, rqd.mysekai_level):
+            if ms_lv_text := _profile_card_level_label(rqd.mysekai_level, rqd):
                 chips.append(_profile_card_chip(ms_lv_text, _CARD_LEVEL_CHIP))
             # The chips keep their measured width (it grows with the font's Latin/digit advances and the
             # number of digits); the name gets whatever is left of the text column.

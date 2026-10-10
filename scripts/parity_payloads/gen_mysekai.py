@@ -231,11 +231,11 @@ def _profile_card(merged: dict, *, include_suite: bool, suite_name: bool = False
     if include_suite:
         # Merged path keeps the suite entry first; its update_time is the merged
         # `now`, which the mysekai delta overrides (local_helpers.go:38-66).
-        profile["data_sources"] = [{"name": "Suite数据", "update_time": int(merged.get("now", 0))}, mysekai_entry]
+        profile["data_sources"] = [{"name": "抓包数据", "update_time": int(merged.get("now", 0))}, mysekai_entry]
     else:
         profile["data_sources"] = [mysekai_entry]
         if suite_name:  # door-upgrade rename (door_upgrade_builder.go:168-171)
-            profile["data_sources"][0]["name"] = "Suite数据"
+            profile["data_sources"][0]["name"] = "抓包数据"
     rank = int((merged.get("userMysekaiGamedata") or {}).get("mysekaiRank", 0))
     if rank > 0:
         profile["mysekai_level"] = rank

@@ -11,7 +11,7 @@ import math
 from typing import Literal
 
 from src.sekai.base.paint_types import lerp_color, rgb_to_color_code
-from src.sekai.base.timezone import region_tag
+from src.sekai.base.timezone import caller_label, region_tag
 from src.sekai.base.utils import truncate
 
 from .model import PlayerTraceRequest, RankTraceRequest
@@ -36,7 +36,7 @@ def event_title(region: str, event_id: int, event_name: str = "", region_label: 
     if event_id < 1000:
         return f"【{region_tag(region, region_label, event_id)}】{event_name}"
     chapter, event = divmod(event_id, 1000)
-    return f"【{region_tag(region, region_label, event)}-第{chapter}章单榜】{event_name}"
+    return f"【{region_tag(region, region_label, event)}-第 {chapter} 章单榜】{event_name}"
 
 
 def _request_event_title(request: PlayerTraceRequest | RankTraceRequest) -> str:
@@ -152,12 +152,23 @@ def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
     names = [truncate(rows[-1].name, 40) for rows, _, _ in players]
     for name, (rows, color, _) in zip(names, players):
         series.append(
-            TraceSeries("score", tuple(r.time for r in rows), tuple(r.score for r in rows), name + "分数", color, 1)
+            TraceSeries(
+                "score",
+                tuple(r.time for r in rows),
+                tuple(r.score for r in rows),
+                caller_label(request, "sk.trace.player_score", "{name} 分数", name=name),
+                color,
+                1,
+            )
         )
         last = rows[-1]
         annotations.append(TraceAnnotation("score", last.time, last.score, score_text(last.score), color))
     if reference:
-        label = f"T{compare_rank}分数线" if compare_rank else "参考分数线"
+        label = (
+            caller_label(request, "sk.trace.compare_line", "T{rank} 榜线", rank=compare_rank)
+            if compare_rank
+            else caller_label(request, "sk.trace.reference_line", "参考榜线")
+        )
         series.append(
             TraceSeries(
                 "score",
@@ -175,14 +186,18 @@ def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
             TraceAnnotation("score", last.time, last.score, f"{label} {score_text(last.score)}", "dimgray")
         )
     elif line_score is not None:
-        label = f"T{compare_rank}当前" if compare_rank else "参考当前"
+        label = (
+            caller_label(request, "sk.trace.compare_current", "T{rank} 当前", rank=compare_rank)
+            if compare_rank
+            else caller_label(request, "sk.trace.reference_current", "参考当前")
+        )
         lines.append(TraceHorizontalLine(line_score, "gray", ":", 0.8, 0.9, label))
         annotations.append(
             TraceAnnotation(
                 "score",
                 line_time,
                 line_score,
-                f"{label}: {score_text(line_score)}",
+                f"{label}：{score_text(line_score)}",
                 "gray",
                 vertical_alignment="bottom",
                 annotation=False,
@@ -191,13 +206,19 @@ def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
     for name, (rows, _, color) in zip(names, players):
         series.append(
             TraceSeries(
-                "secondary", tuple(r.time for r in rows), tuple(r.rank for r in rows), name + "排名", color, 0.7
+                "secondary",
+                tuple(r.time for r in rows),
+                tuple(r.rank for r in rows),
+                caller_label(request, "sk.trace.player_rank", "{name} 排名", name=name),
+                color,
+                0.7,
             )
         )
         last = rows[-1]
         annotations.append(TraceAnnotation("secondary", last.time, last.rank * 1.02, str(int(last.rank)), color))
     return TraceSpec(
-        title=f"{_request_event_title(request)} 玩家: {' vs '.join(names)}",
+        title=f"{_request_event_title(request)} "
+        + caller_label(request, "sk.trace.player_title", "玩家：{names}", names=" vs ".join(names)),
         start=min(r.time for r in all_rows),
         end=max(r.time for r in all_rows),
         series=tuple(series),
@@ -229,8 +250,16 @@ def build_rank_trace_spec(request: RankTraceRequest) -> TraceSpec:
     colors = dict(zip(unique_names, SCORE_COLORS)) if len(unique_names) <= len(SCORE_COLORS) else {}
     point_colors = tuple(colors.get(r.name, SCORE_COLORS[0]) for r in rows)
     series = (
-        TraceSeries("score", times, scores, "分数线", SCORE_COLORS[0], 3, scatter_colors=point_colors),
-        TraceSeries("secondary", times, tuple(speeds), "时速", "green", 0.5),
+        TraceSeries(
+            "score",
+            times,
+            scores,
+            caller_label(request, "sk.trace.score_line", "榜线"),
+            SCORE_COLORS[0],
+            3,
+            scatter_colors=point_colors,
+        ),
+        TraceSeries("secondary", times, tuple(speeds), caller_label(request, "sk.trace.speed", "时速"), "green", 0.5),
     )
     last = rows[-1]
     annotations = [TraceAnnotation("score", last.time, last.score, score_text(last.score), point_colors[-1])]
@@ -243,7 +272,7 @@ def build_rank_trace_spec(request: RankTraceRequest) -> TraceSpec:
                 "score",
                 last.time,
                 score * 1.02,
-                f"预测最终: {score_text(score)}",
+                caller_label(request, "sk.trace.predicted_final", "预测最终：{score}", score=score_text(score)),
                 "red",
                 outline=False,
                 annotation=False,
@@ -251,7 +280,8 @@ def build_rank_trace_spec(request: RankTraceRequest) -> TraceSpec:
         )
     valid_speeds = [v for v in speeds if v >= 0]
     return TraceSpec(
-        title=f"{_request_event_title(request)} T{request.target_rank} 分数线",
+        title=f"{_request_event_title(request)} "
+        + caller_label(request, "sk.trace.rank_title", "T{rank} 榜线", rank=request.target_rank),
         start=times[0],
         end=times[-1],
         series=series,

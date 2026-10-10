@@ -35,16 +35,16 @@ async def _async_value(value):
 
 def test_vlive_time_status_window_and_cache_key_helpers_cover_all_states(monkeypatch) -> None:
     assert drawer._format_time(None) == "-"
-    assert drawer._format_time(NOW) == "2026-01-02 12:00:00"
+    assert drawer._format_time(NOW) == "2026-01-02 12:00:00 (UTC+0)"
     assert drawer._format_relative(None, NOW) == "-"
     assert drawer._format_relative(NOW + timedelta(seconds=20), NOW) == "刚刚"
     assert drawer._format_relative(NOW + timedelta(days=2), NOW) == "2天后"
     assert drawer._format_relative(NOW - timedelta(days=2), NOW) == "2天前"
     assert drawer._format_relative(NOW + timedelta(hours=2), NOW).endswith("后")
     assert drawer._format_relative(NOW - timedelta(minutes=2), NOW).endswith("前")
-    assert drawer._build_vlive_time_text("开始", None, NOW) == "开始 - (-)"
+    assert drawer._build_vlive_time_text("开始", None, NOW) == "开始 -（-）"
 
-    assert drawer._build_vlive_status_text(_live(living=True), NOW) == "当前Live进行中!"
+    assert drawer._build_vlive_status_text(_live(living=True), NOW) == "当前 Live 进行中"
     assert "下一场" in drawer._build_vlive_status_text(_live(current_start_at=NOW + timedelta(hours=1)), NOW)
     assert drawer._build_vlive_status_text(_live(), NOW) == "已结束"
     current = _live(current_start_at=NOW, current_end_at=NOW + timedelta(minutes=1))
@@ -54,7 +54,10 @@ def test_vlive_time_status_window_and_cache_key_helpers_cover_all_states(monkeyp
     monkeypatch.setattr(drawer, "build_rendered_image_cache_key", lambda *args, **kwargs: (args, kwargs))
     args, kwargs = drawer._build_vlive_entry_cache_key(_live(living=True), NOW)
     assert args[0] == "vlive_list_entry"
-    assert kwargs["extra"] == {"time_texts": drawer._vlive_entry_time_texts(_live(living=True), NOW)}
+    assert kwargs["extra"] == {
+        "time_texts": drawer._vlive_entry_time_texts(_live(living=True), NOW),
+        "type_label": None,
+    }
 
 
 @pytest.mark.anyio

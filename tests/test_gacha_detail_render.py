@@ -122,14 +122,14 @@ def test_detail_renders_rates_costs_pickups_and_time_state(
     finally:
         end_pillow_touch_scope(token)
     assert state in texts
-    assert "月卡每日/单抽(限1次)" in texts
+    assert "月卡每日/单抽（限 1 次）" in texts
     assert "每周/十连" in texts
-    assert "(付费)" in texts
+    assert "（付费）" in texts
     assert "免费" in texts
     assert "x3000" in texts
-    assert "1.5% / 5% (保底)" in texts
-    assert "6% / 20% (保底)" in texts
-    assert "70% / 80% (保底)" in texts
+    assert "1.5% / 5%（保底）" in texts
+    assert "6% / 20%（保底）" in texts
+    assert "70% / 80%（保底）" in texts
     output = Image.open(BytesIO(result["image_bytes"]))
     assert output.width >= 600
     assert output.height >= 500

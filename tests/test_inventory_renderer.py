@@ -31,7 +31,7 @@ def _item(**overrides) -> InventoryItem:
     ("overrides", "expected"),
     [
         ({"description": "  第一行\n 第二行  "}, "第一行 第二行"),
-        ({"recovery_value": 10}, "+10 能量"),
+        ({"recovery_value": 10}, "+10 演出能量"),
         ({"resource_type": "coin"}, "金币"),
         ({"resource_type": "jewel"}, "水晶"),
         ({"resource_type": "virtual_coin"}, "虚拟币"),
@@ -41,7 +41,7 @@ def _item(**overrides) -> InventoryItem:
         ({"resource_type": "gacha_ceil_item"}, "招募"),
         ({"resource_type": "practice_ticket"}, "育成"),
         ({"resource_type": "skill_practice_ticket"}, "育成"),
-        ({"resource_type": "mysekai_material"}, "MySekai"),
+        ({"resource_type": "mysekai_material"}, "烤森"),
         ({"resource_type": "honor_background"}, "称号背景"),
         ({"resource_type": "honor_word"}, "称号文字"),
         ({"resource_type": "virtual_item"}, "虚拟道具"),
@@ -115,7 +115,9 @@ def test_build_inventory_canvas_coordinates_sections(monkeypatch):
     monkeypatch.setattr(drawer, "_load_inventory_icons", load_icons)
     monkeypatch.setattr(drawer, "get_profile_card", profile)
     monkeypatch.setattr(drawer, "_draw_header", lambda: events.append("header"))
-    monkeypatch.setattr(drawer, "_draw_section", lambda section, icons, _now: events.append((section.title, icons)))
+    monkeypatch.setattr(
+        drawer, "_draw_section", lambda section, icons, _now, _request=None: events.append((section.title, icons))
+    )
     monkeypatch.setattr(drawer, "add_request_watermark", lambda canvas, received: events.append((canvas, received)))
 
     canvas = asyncio.run(drawer._build_inventory_canvas(request))

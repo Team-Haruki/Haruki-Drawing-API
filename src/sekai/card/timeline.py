@@ -57,7 +57,7 @@ def draw_timeline(renderer: Any, columns: list[tuple[str, list[dict]]]) -> None:
         with HSplit().set_sep(20).set_item_align("c"):
             TextBox("卡牌一览", TextStyle(font=DEFAULT_BOLD_FONT, size=26, color=(45, 52, 62)))
             total = sum(len(cards) for _, cards in columns)
-            TextBox(f"获取时间 · {total}张", TextStyle(font=DEFAULT_FONT, size=17, color=(88, 97, 116)))
+            TextBox(f"获取时间 · {total} 张", TextStyle(font=DEFAULT_FONT, size=17, color=(88, 97, 116)))
         if not columns:
             TextBox("没有可展示的已拥有卡牌", TextStyle(font=DEFAULT_FONT, size=18, color=(88, 97, 116)))
         with HSplit().set_sep(MONTH_GAP).set_content_align("lt").set_item_align("lt"):
@@ -81,7 +81,7 @@ def _draw_month(renderer: Any, label: str, records: list[dict]) -> None:
         with Frame().set_size((width, 18)).set_content_align("c"):
             Spacer(w=width, h=2).set_bg(FillBg((109, 129, 152, 115)))
             Spacer(w=8, h=8).set_bg(RoundRectBg((100, 126, 150, 230), 4))
-        TextBox(f"{len(records)}张", TextStyle(font=DEFAULT_FONT, size=12, color=(103, 112, 128))).set_w(
+        TextBox(f"{len(records)} 张", TextStyle(font=DEFAULT_FONT, size=12, color=(103, 112, 128))).set_w(
             width
         ).set_content_align("c")
         with Grid(col_count=count).set_sep(gap, gap).set_content_align("lt"):

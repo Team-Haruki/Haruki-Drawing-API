@@ -169,7 +169,7 @@ def _owner_line(entry: MysekaiHousingCompetitionEntry) -> str:
 
 def _work_line(entry: MysekaiHousingCompetitionEntry) -> str:
     name = str(entry.name or "").strip() or "未命名投稿"
-    return f"作品: {name}"
+    return f"作品：{name}"
 
 
 def _neighbor_text(label: str, score: int | None, delta: int | None, verb: str) -> str:

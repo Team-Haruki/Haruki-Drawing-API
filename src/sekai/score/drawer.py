@@ -30,6 +30,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_text_size
+from src.sekai.base.timezone import caller_label
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
@@ -158,18 +159,21 @@ async def _build_score_control_canvas(
                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(4):
                     music_cover = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_cover_path)
                     ImageBox(music_cover, size=(20, 20), use_alpha_blend=False)
-                    TextBox(f"【{rqd.music_id}】{rqd.music_title} (任意难度)", style1)
+                    TextBox(f"【{rqd.music_id}】{rqd.music_title}（任意难度）", style1)
                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(4):
-                    TextBox(f"歌曲基础分 {rqd.music_basic_point}   目标PT: ", style1)
+                    TextBox(
+                        f"歌曲基础分 {rqd.music_basic_point}   " + caller_label(rqd, "score.target_pt", "目标 PT："),
+                        style1,
+                    )
                     TextBox(f" {rqd.target_point}", style3)
                 if rqd.music_basic_point != 100 and rqd.target_point > 1000:
-                    TextBox("基础分非100有误差风险，不推荐控较大PT", style3)
+                    TextBox("基础分不是 100 时有误差风险，不推荐控较大的 PT", style3)
                 if rqd.target_point > 3000:
-                    TextBox("目标PT过大可能存在误差，推荐以多次控分", style3)
-                TextBox("控分教程：选取表中一个活动加成和体力", style1)
+                    TextBox("目标 PT 过大时可能有误差，推荐分多次控分", style3)
+                TextBox("控分教程：选取表中一组活动加成和演出能量", style1)
                 TextBox("游玩歌曲到对应分数范围内放置", style1)
-                TextBox("友情提醒：控分前请核对加成和体力设置", style3)
-                TextBox("特别注意核对加成是否多了0.5", style3)
+                TextBox("友情提醒：控分前请核对加成和演出能量设置", style3)
+                TextBox("特别注意核对加成是否多了 0.5", style3)
 
             # 数据
             with (
@@ -182,20 +186,20 @@ async def _build_score_control_canvas(
             ):
                 for i in range(0, len(rqd.valid_scores), SHOW_SEG_LEN):
                     scores = rqd.valid_scores[i : i + SHOW_SEG_LEN]
-                    gh, gw1, gw2, gw3, gw4 = 20, 54, 48, 90, 90
+                    gh, gw1, gw2, gw3, gw4 = 20, 54, 72, 90, 90
                     bg1 = FillBg((255, 255, 255, 200))
                     bg2 = FillBg((255, 255, 255, 100))
                     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(4).set_padding(8):
                         with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
                             TextBox("加成", style1).set_bg(bg1).set_size((gw1, gh)).set_content_align("c")
-                            TextBox("火", style1).set_bg(bg1).set_size((gw2, gh)).set_content_align("c")
+                            TextBox("演出能量", style1).set_bg(bg1).set_size((gw2, gh)).set_content_align("c")
                             TextBox("分数下限", style1).set_bg(bg1).set_size((gw3, gh)).set_content_align("c")
                             TextBox("分数上限", style1).set_bg(bg1).set_size((gw4, gh)).set_content_align("c")
                         for row_index, item in enumerate(scores):
                             bg = bg2 if row_index % 2 == 0 else bg1
                             score_min = get_score_str(item.score_min)
                             if score_min == "0":
-                                score_min = "0 (放置)"
+                                score_min = "0（放置）"
                             score_max = get_score_str(item.score_max)
                             with HSplit().set_content_align("lt").set_item_align("lt").set_sep(4):
                                 TextBox(f"{item.event_bonus}", style2).set_bg(bg).set_size((gw1, gh)).set_content_align(
@@ -244,13 +248,13 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
             # 标题
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8):
                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(4):
-                    TextBox("自定义房间控分 目标PT: ", style1)
+                    TextBox("自定义房间控分 " + caller_label(rqd, "score.target_pt", "目标 PT："), style1)
                     TextBox(f" {rqd.target_point}", style3)
                 TextBox(
                     """
-该方法用于距离目标PT不足100时补救，使用方式:
+该方法用于距离目标 PT 不足 100 时补救，使用方式：
 1. 选定表格中的一组歌曲和活动加成
-2. 自己配置好活动加成（注意检查小数），并将体力设置为0
+2. 自己配置好活动加成（注意检查小数），并将演出能量设置为 0
 3. 创建自定义房间，邀请另一个玩家进入房间
 4. 选择该歌曲（任意难度），两个人均放置整首歌
 """.strip(),
@@ -259,9 +263,9 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
                 )
                 TextBox(
                     """
-若有上传Suite抓包，使用"/控分组卡"可以更快配出队伍
-可用同PT系数的歌曲替代表中歌曲
-数据来自x@SYLVIA0x0，目前验证不足仅供参考
+上传过抓包数据（Suite）时，使用“/控分组卡”可以更快配出卡组
+可用同 PT 系数的歌曲替代表中歌曲
+数据来自 x@SYLVIA0x0，目前验证不足，仅供参考
 """.strip(),
                     style2,
                     use_real_line_count=True,
@@ -312,7 +316,7 @@ async def _build_custom_room_score_control_canvas(rqd: CustomRoomScoreRequest) -
                             )
                 # PT系数
                 with VSplit().set_content_align("c").set_item_align("c").set_sep(vsep):
-                    TextBox("PT系数", style1).set_size((w3, gh)).set_content_align("c").set_bg(bg_fn(0))
+                    TextBox("PT 系数", style1).set_size((w3, gh)).set_content_align("c").set_bg(bg_fn(0))
                     for i, (event_rate, _) in enumerate(rqd.candidate_pairs):
                         bg = bg_fn(i + 1)
                         TextBox(f"{event_rate}", style2).set_size((w3, gh)).set_content_align("c").set_padding(
@@ -367,7 +371,7 @@ async def _build_music_meta_canvas(requests: list[MusicMetaRequest]) -> Canvas:
                             TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
                         )
                     TextBox(
-                        "以日服为准，参考分数使用5张技能加分100%，数据来源：33Kit",
+                        "以日服为准，参考分数按 5 张技能加分 100% 计算，数据来源：33Kit",
                         TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=BLACK),
                     )
 
@@ -423,9 +427,9 @@ async def _build_music_meta_canvas(requests: list[MusicMetaRequest]) -> Canvas:
                                     TextBox("  （AUTO）", style1)
                                     TextBox(f" {meta.base_score_auto * 100:.1f}%", style2)
                                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(0):
-                                    TextBox("Fever分数", style1)
+                                    TextBox("Fever 分数", style1)
                                     TextBox(f" {meta.fever_score * 100:.1f}%", style2)
-                                    TextBox("  活动PT系数", style1)
+                                    TextBox("  活动 PT 系数", style1)
                                     TextBox(f" {meta.event_rate:.0f}", style2)
                                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(0):
                                     TextBox("技能分数（单人）", style1)
@@ -440,7 +444,7 @@ async def _build_music_meta_canvas(requests: list[MusicMetaRequest]) -> Canvas:
                                     for s in meta.skill_score_auto:
                                         TextBox(f"  {s * 100:.1f}%", style2)
                                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(0):
-                                    TextBox("单人最优技能顺序（1-5代表强到弱的卡牌）", style1)
+                                    TextBox("单人最优技能顺序（1~5 代表强到弱的卡牌）", style1)
                                     for idx in best_skill_order_solo_idx:
                                         TextBox(f" {idx + 1}", style2)
                                 with HSplit().set_content_align("lb").set_item_align("lb").set_sep(0):
@@ -469,14 +473,14 @@ def _music_board_columns(target: str) -> list[tuple[str, float, str]]:
     if target == "score":
         columns.append(("分数", 2.0, "c"))
     elif target in ("pt", _POINTS_PER_TIME_TARGET):
-        columns.extend((("PT", 2.0, "c"), ("LIVE分数", 2.0, "c")))
+        columns.extend((("PT", 2.0, "c"), ("Live 分数", 2.0, "c")))
     if target == _POINTS_PER_TIME_TARGET:
         columns.append(("PT/h", 2.0, "c"))
     columns.append(("技能占比", 2.0, "c"))
     if target in (_POINTS_PER_TIME_TARGET, "time"):
         columns.append(("周回/h", 2.0, "c"))
     if target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
-        columns.append(("PT系数", 1.5, "c"))
+        columns.append(("PT 系数", 1.5, "c"))
     columns.extend((("时长", 1.5, "c"), ("每秒点击", 1.5, "c")))
     return columns
 
@@ -592,14 +596,14 @@ def _draw_music_board_dynamic_columns(
         add_column("分数", lambda row: f"{(row.live_type_score or 0) * 100:.1f}%")
     elif rqd.target in ("pt", _POINTS_PER_TIME_TARGET):
         add_column("PT", lambda row: f"{row.live_type_pt or 0}")
-        add_column("LIVE分数", lambda row: f"{(row.live_type_real_score or 0):.0f}")
+        add_column("Live 分数", lambda row: f"{(row.live_type_real_score or 0):.0f}")
     if rqd.target == _POINTS_PER_TIME_TARGET:
         add_column("PT/h", lambda row: f"{(row.live_type_pt_per_hour or 0):.0f}")
     add_column("技能占比", lambda row: f"{(row.live_type_skill_account or 0) * 100:.1f}%")
     if rqd.target in (_POINTS_PER_TIME_TARGET, "time"):
         add_column("周回/h", lambda row: f"{(row.play_count_per_hour or 0):.1f}")
     if rqd.target in ("pt", _POINTS_PER_TIME_TARGET, "time"):
-        add_column("PT系数", lambda row: f"{row.event_rate:.0f}")
+        add_column("PT 系数", lambda row: f"{row.event_rate:.0f}")
     add_column("时长", lambda row: f"{row.music_time:.1f}")
     add_column("每秒点击", lambda row: f"{row.tps:.1f}")
 

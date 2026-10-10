@@ -536,7 +536,7 @@ def _profile_card(*, bg_alpha: int | None = 80, error_message: str | None = None
         },
         "data_sources": [
             {
-                "name": "Suite数据",
+                "name": "抓包数据",
                 "source": detail["source"],
                 "update_time": detail["update_time"],
                 "mode": detail.get("mode"),

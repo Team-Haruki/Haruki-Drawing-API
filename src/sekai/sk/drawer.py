@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from itertools import pairwise
 from typing import TYPE_CHECKING
@@ -11,19 +10,9 @@ from src.sekai.base.plot import TextStyle
 StyledText = tuple[str, TextStyle]
 
 _EVENT_ENDED_TEXT = "活动已结束"
-_DEFAULT_PREDICTION_NOTICE = "预测数据仅供参考，请以实际为准规划好冲榜计划"
-RANK_TRACE_SCORE_COLORS = [
-    "#1d4ed8",
-    "#dc2626",
-    "#7c3aed",
-    "#d97706",
-    "#0891b2",
-    "#c026d3",
-    "#15803d",
-    "#be123c",
-    "#4b5563",
-    "#a16207",
-]
+_TIME_TO_END_TEXT = "距离活动结束还有 {duration}"
+_DEFAULT_PREDICTION_NOTICE = "预测数据仅供参考，请以实际榜线为准安排冲榜计划"
+_SINGLE_CHAPTER_TEXT = "单榜"
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -48,7 +37,13 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.timezone import (
+    caller_label,
+    datetime_from_millis,
+    format_user_time,
+    format_user_time_range,
+    request_now,
+)
 from src.sekai.base.utils import (
     get_asset_image_ref,
     get_readable_datetime,
@@ -126,7 +121,7 @@ async def _build_skl_canvas(rqd: SklRequest) -> Canvas:
     forecast_columns = list(rqd.forecast_columns or [])
     prediction_notice = rqd.prediction_notice
     if forecast_columns and not prediction_notice:
-        prediction_notice = _DEFAULT_PREDICTION_NOTICE
+        prediction_notice = caller_label(rqd, "sk.prediction_notice", _DEFAULT_PREDICTION_NOTICE)
     current_ranks = list(rqd.current_ranks or rqd.ranks)
     ranks = _collect_skl_display_ranks(current_ranks, forecast_columns)
 
@@ -183,7 +178,7 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
             dlt_score = prev_rank.score - rank.score
             texts.append(
                 (
-                    f"{prev_rank.rank}名分数: {get_board_score_str(prev_rank.score)}  "
+                    f"第 {prev_rank.rank} 名分数：{get_board_score_str(prev_rank.score)}  "
                     f"↑{get_board_score_str(dlt_score)}",
                     style2,
                 )
@@ -192,7 +187,7 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
             dlt_score = rank.score - next_rank.score
             texts.append(
                 (
-                    f"{next_rank.rank}名分数: {get_board_score_str(next_rank.score)}  "
+                    f"第 {next_rank.rank} 名分数：{get_board_score_str(next_rank.score)}  "
                     f"↓{get_board_score_str(dlt_score)}",
                     style2,
                 )
@@ -213,12 +208,10 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
                         get_event_id_and_name_text(rqd.region, eid, truncate(title, 20), rqd.region_label),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - now
-                    if time_to_end.total_seconds() <= 0:
-                        time_to_end = _EVENT_ENDED_TEXT
-                    else:
-                        time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
-                    TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox(
+                        _time_to_event_end_text(rqd, event_end, now),
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
+                    )
                 if rqd.wl_chara_icon_path is not None:
                     ImageBox(wl_chara_img, size=(None, 50))
 
@@ -269,6 +262,7 @@ async def _build_cf_canvas(rqd: CFRequest) -> Canvas:
                 wl_chara_img,
                 show_icon=bool(rqd.wl_chara_icon_path),
                 region_label=rqd.region_label,
+                request=rqd,
             )
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(16):
                 for text, style in texts:
@@ -321,7 +315,7 @@ async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
         style2,
     )
     update_text = get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)
-    update_line = ((f"数据更新于: {update_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)),)
+    update_line = ((f"数据更新于：{update_text}", TextStyle(font=DEFAULT_FONT, size=16, color=BLACK)),)
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(roundrect_bg(alpha=80)):
@@ -335,6 +329,7 @@ async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
                 show_icon=bool(rqd.wl_chara_icon_path),
                 region_label=rqd.region_label,
                 extra_lines=update_line,
+                request=rqd,
             )
             _draw_csb_heatmap(
                 latest_rank,
@@ -388,15 +383,13 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     TextBox(
-                        f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
+                        format_user_time_range(event_start, event_end),
                         TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - now
-                    if time_to_end.total_seconds() <= 0:
-                        time_to_end = _EVENT_ENDED_TEXT
-                    else:
-                        time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
-                    TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
+                    TextBox(
+                        _time_to_event_end_text(rqd, event_end, now),
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
+                    )
                 with Frame().set_content_align("r"):
                     if banner_img:
                         ImageBox(banner_img, size=(140, None))
@@ -410,7 +403,7 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
                 title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK)
                 item_style = TextStyle(font=DEFAULT_FONT, size=20, color=BLACK)
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(8):
-                    TextBox(f"近{get_readable_timedelta(period)}换算{unit_text}速", title_style).set_size(
+                    TextBox(f"近 {get_readable_timedelta(period)} 换算{unit_text}速", title_style).set_size(
                         (420, None)
                     ).set_padding((8, 8))
 
@@ -477,7 +470,10 @@ async def _build_player_trace_canvas(rqd: PlayerTraceRequest) -> Canvas:
                 .set_padding(8)
             ):
                 ImageBox(wl_chara_icon, size=(None, 50))
-                TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
+                TextBox(
+                    caller_label(rqd, "sk.single_chapter", _SINGLE_CHAPTER_TEXT),
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
+                )
     add_request_watermark(canvas, rqd)
     return canvas
 
@@ -514,7 +510,10 @@ async def _build_rank_trace_canvas(rqd: RankTraceRequest) -> Canvas:
                 .set_padding(8)
             ):
                 ImageBox(wl_chara_icon, size=(None, 50))
-                TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
+                TextBox(
+                    caller_label(rqd, "sk.single_chapter", _SINGLE_CHAPTER_TEXT),
+                    TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK),
+                )
     add_request_watermark(canvas, rqd)
     return canvas
 
@@ -562,21 +561,19 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     TextBox(
-                        f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
+                        format_user_time_range(event_start, event_end),
                         TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
                     )
-                    time_to_end = event_end - now
-                    if time_to_end.total_seconds() <= 0:
-                        time_to_end = _EVENT_ENDED_TEXT
-                    else:
-                        time_to_end = f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
-                    TextBox(time_to_end, TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK))
                     TextBox(
-                        f"预测更新时间: {rqd.updated_at.strftime('%m-%d %H:%M:%S')} "
-                        f"({get_readable_datetime(rqd.updated_at, show_original_time=False)})",
+                        _time_to_event_end_text(rqd, event_end, now),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
-                    TextBox("数据来源: 3-3.dev", TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50, 255)))
+                    TextBox(
+                        f"预测更新时间：{format_user_time(rqd.updated_at, seconds=True)}"
+                        f"（{get_readable_datetime(rqd.updated_at, show_original_time=False)}）",
+                        TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
+                    )
+                    TextBox("数据来源：3-3.dev", TextStyle(font=DEFAULT_FONT, size=12, color=(50, 50, 50, 255)))
                 if banner_img:
                     ImageBox(banner_img, size=(140, None))
 
@@ -598,7 +595,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
                                 use_real_line_count=True,
                             ).set_w(400)
                             with HSplit().set_content_align("lb").set_item_align("lb").set_sep(8).set_padding(0):
-                                TextBox("预测胜率: ", TextStyle(font=DEFAULT_FONT, size=28, color=(75, 75, 75, 255)))
+                                TextBox("预测胜率：", TextStyle(font=DEFAULT_FONT, size=28, color=(75, 75, 75, 255)))
                                 TextBox(
                                     f"{teams[i].win_rate * 100.0:.1f}%",
                                     TextStyle(
@@ -624,207 +621,6 @@ async def try_render_winrate_predict_payload(rqd: WinRateRequest) -> EncodedImag
     if not skia_plot_enabled():
         return None
     return await render_canvas_payload(await _build_winrate_predict_canvas(rqd), endpoint="sk_winrate", scale=2.0)
-
-
-def _draw_rank_trace_prediction(ax, times: list[datetime], final_score: int) -> None:
-    ax.axhline(y=final_score, color="red", linestyle="--", linewidth=0.5)
-    ax.text(
-        times[-1],
-        final_score * 1.02,
-        f"预测最终: {get_board_score_str(final_score)}",
-        color="red",
-        fontsize=12,
-        ha="right",
-    )
-
-
-def _rank_trace_point_colors(ranks: list[RankInfo]) -> list[str]:
-    original_names = [rank.name for rank in ranks]
-    unique_names = list(dict.fromkeys(original_names))
-    if len(unique_names) > len(RANK_TRACE_SCORE_COLORS):
-        return [RANK_TRACE_SCORE_COLORS[0] for _ in ranks]
-    name_to_color = {name: RANK_TRACE_SCORE_COLORS[index] for index, name in enumerate(unique_names)}
-    return [name_to_color[name] for name in original_names]
-
-
-def _draw_trace_canvas(img: Image.Image, wl_chara_icon, *, show_icon: bool) -> Canvas:
-    with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
-        ImageBox(img).set_bg(roundrect_bg(fill=(255, 255, 255, 200)))
-        if show_icon:
-            with (
-                VSplit()
-                .set_content_align("c")
-                .set_item_align("c")
-                .set_sep(4)
-                .set_bg(roundrect_bg(alpha=80))
-                .set_padding(8)
-            ):
-                ImageBox(wl_chara_icon, size=(None, 50))
-                TextBox("单榜", TextStyle(font=DEFAULT_BOLD_FONT, size=24, color=BLACK))
-    return canvas
-
-
-def _player_trace_title(
-    rqd: PlayerTraceRequest,
-    primary: _PlayerTraceSeries,
-    secondary: _PlayerTraceSeries | None,
-) -> str:
-    prefix = get_event_id_and_name_text(rqd.region, rqd.event_id, "", rqd.region_label)
-    if secondary is None:
-        return f"{prefix} 玩家: {primary.name}"
-    return f"{prefix} 玩家: {primary.name} vs {secondary.name}"
-
-
-def _draw_player_rank_series(ax, series: _PlayerTraceSeries, color: str, lines: list) -> None:
-    from .matplotlib_backend import PLOT_LABEL_PATH_EFFECTS
-
-    (line_rank,) = ax.plot(
-        series.times,
-        series.ranks,
-        "o",
-        label=f"{series.name}排名",
-        color=color,
-        markersize=0.7,
-        linewidth=0.5,
-    )
-    lines.append(line_rank)
-    ax.annotate(
-        str(int(series.ranks[-1])),
-        xy=(series.times[-1], series.ranks[-1] * 1.02),
-        xytext=(series.times[-1], series.ranks[-1] * 1.02),
-        color=color,
-        fontsize=12,
-        ha="right",
-        path_effects=PLOT_LABEL_PATH_EFFECTS,
-    )
-
-
-def _draw_player_reference_line(
-    ax,
-    compare_rank: int | None,
-    compare_line_score: int,
-    compare_line_time: datetime,
-    lines: list,
-) -> None:
-    from .matplotlib_backend import PLOT_LABEL_PATH_EFFECTS
-
-    line_label = f"T{compare_rank}当前" if compare_rank else "参考当前"
-    line_latest = ax.axhline(
-        y=compare_line_score,
-        color="gray",
-        linestyle=":",
-        linewidth=0.8,
-        alpha=0.9,
-        label=line_label,
-    )
-    lines.append(line_latest)
-    ax.text(
-        compare_line_time,
-        compare_line_score,
-        f"{line_label}: {get_board_score_str(compare_line_score)}",
-        color="gray",
-        fontsize=12,
-        ha="right",
-        va="bottom",
-        path_effects=PLOT_LABEL_PATH_EFFECTS,
-    )
-
-
-def _draw_compare_score_series(
-    ax,
-    series: _ScoreTraceSeries,
-    compare_rank: int | None,
-    lines: list,
-) -> None:
-    from .matplotlib_backend import PLOT_LABEL_PATH_EFFECTS
-
-    compare_label = f"T{compare_rank}分数线" if compare_rank else "参考分数线"
-    (line_compare_score,) = ax.plot(
-        series.times,
-        series.scores,
-        "o",
-        label=compare_label,
-        color="dimgray",
-        markersize=1,
-        linewidth=0.5,
-        linestyle="--",
-        alpha=0.85,
-    )
-    lines.append(line_compare_score)
-    ax.annotate(
-        f"{compare_label} {get_board_score_str(series.scores[-1])}",
-        xy=(series.times[-1], series.scores[-1]),
-        xytext=(series.times[-1], series.scores[-1]),
-        color="dimgray",
-        fontsize=12,
-        ha="right",
-        path_effects=PLOT_LABEL_PATH_EFFECTS,
-    )
-
-
-def _draw_player_score_series(ax, series: _PlayerTraceSeries, colors: tuple[str, str], lines: list) -> None:
-    from .matplotlib_backend import PLOT_LABEL_PATH_EFFECTS
-
-    (line_score,) = ax.plot(
-        series.times,
-        series.scores,
-        "o",
-        label=f"{series.name}分数",
-        color=colors[0],
-        markersize=1,
-        linewidth=0.5,
-    )
-    lines.append(line_score)
-    ax.annotate(
-        get_board_score_str(series.scores[-1]),
-        xy=(series.times[-1], series.scores[-1]),
-        xytext=(series.times[-1], series.scores[-1]),
-        color=colors[0],
-        fontsize=12,
-        ha="right",
-        path_effects=PLOT_LABEL_PATH_EFFECTS,
-    )
-
-
-def _prepare_score_trace_series(ranks: list[RankInfo] | None) -> tuple[_ScoreTraceSeries | None, int | None]:
-    score_ranks = [rank for rank in ranks or [] if rank.score is not None]
-    if not score_ranks:
-        return None, None
-    score_ranks.sort(key=lambda rank: rank.time)
-    return (
-        _ScoreTraceSeries(
-            times=[rank.time for rank in score_ranks],
-            scores=[rank.score for rank in score_ranks],
-        ),
-        score_ranks[-1].rank,
-    )
-
-
-def _prepare_player_trace_series(ranks: list[RankInfo] | None) -> _PlayerTraceSeries | None:
-    visible_ranks = [rank for rank in ranks or [] if rank.rank <= 100]
-    if not visible_ranks:
-        return None
-    visible_ranks.sort(key=lambda rank: rank.time)
-    return _PlayerTraceSeries(
-        name=truncate(visible_ranks[-1].name, 40),
-        times=[rank.time for rank in visible_ranks],
-        scores=[rank.score for rank in visible_ranks],
-        ranks=[rank.rank for rank in visible_ranks],
-    )
-
-
-@dataclass(frozen=True)
-class _ScoreTraceSeries:
-    times: list[datetime]
-    scores: list[int]
-
-
-@dataclass(frozen=True)
-class _PlayerTraceSeries:
-    name: str
-    times: list[datetime]
-    scores: list[int]
-    ranks: list[int]
 
 
 def _draw_csb_stop_panel(stop_texts: list[StyledText]) -> None:
@@ -853,7 +649,7 @@ def _draw_csb_heatmap(
     heat_hint_style: TextStyle,
 ) -> None:
     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(16):
-        TextBox(f'T{latest_rank.rank} "{latest_name}" 各小时Pt变化次数', heat_title_style)
+        TextBox(f"T{latest_rank.rank}“{latest_name}”各小时 PT 变化次数", heat_title_style)
         TextBox("标注*号的小时存在停车区间", heat_hint_style)
         with Grid(col_count=24).set_sep(1, 1):
             for hour in range(24):
@@ -893,7 +689,7 @@ def _build_csb_stop_texts(
     style1: TextStyle,
     style2: TextStyle,
 ) -> list[StyledText]:
-    stop_texts: list[StyledText] = [(f'T{latest_rank.rank} "{latest_name}" 的停车区间', style1)]
+    stop_texts: list[StyledText] = [(f"T{latest_rank.rank}“{latest_name}”的停车区间", style1)]
     for left_rank, right_rank in stop_segments:
         duration = right_rank.time - left_rank.time
         if left_rank == right_rank or duration < SK_CSB_STOP_THRESHOLD:
@@ -970,6 +766,7 @@ def _draw_query_header(
     show_icon: bool,
     extra_lines: tuple[StyledText, ...] = (),
     region_label: str | None = None,
+    request=None,
 ) -> None:
     with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
@@ -978,7 +775,7 @@ def _draw_query_header(
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
             TextBox(
-                _time_to_event_end_text(event_end, now),
+                _time_to_event_end_text(request, event_end, now),
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
             for text, style in extra_lines:
@@ -1011,11 +808,11 @@ def _build_cf_multi_rank_texts(
         (player_title, style1),
         (f"当前排名 {get_board_rank_str(rank.rank)} - 当前分数 {get_board_score_str(rank.score)}", style2),
         (
-            f"时速: {get_board_score_str(rank.speed)} - "
-            f"近{average_round}次平均Pt: {_optional_text(rank.average_pt, format_spec='.1f')}",
+            f"时速：{get_board_score_str(rank.speed)} - "
+            f"近 {average_round} 次平均 PT：{_optional_text(rank.average_pt, format_spec='.1f')}",
             style2,
         ),
-        (f"本小时周回数: {_optional_text(rank.hour_round)}", style2),
+        (f"本小时周回数：{_optional_text(rank.hour_round)}", style2),
         (
             f"RT: {_cf_record_start_text(rank)} ~ "
             f"{get_readable_datetime(rqd.update_at, show_original_time=False, use_en_unit=False)}",
@@ -1044,18 +841,18 @@ def _build_cf_single_texts(
         texts.append((_cf_neighbor_text(rank, rqd.next_rank, "↓"), style3))
     texts.extend(
         [
-            (f"近{average_round}次平均Pt: {_optional_text(rank.average_pt, format_spec='.1f')}", style2),
-            (f"最近一次Pt: {_optional_text(rank.latest_pt)}", style2),
-            (f"时速: {get_board_score_str(rank.speed)}", style2),
+            (f"近 {average_round} 次平均 PT：{_optional_text(rank.average_pt, format_spec='.1f')}", style2),
+            (f"最近一次 PT：{_optional_text(rank.latest_pt)}", style2),
+            (f"时速：{get_board_score_str(rank.speed)}", style2),
         ]
     )
     if rank.min20_times_3_speed is not None:
-        texts.append((f"20min×3时速: {get_board_score_str(rank.min20_times_3_speed)}", style2))
+        texts.append((f"20min×3 时速：{get_board_score_str(rank.min20_times_3_speed)}", style2))
     texts.extend(
         [
-            (f"本小时周回数: {_optional_text(rank.hour_round)}", style2),
-            (f"数据开始于: {_cf_record_start_text(rank)}", style2),
-            (f"数据更新于: {get_readable_datetime(rqd.update_at, show_original_time=False)}", style2),
+            (f"本小时周回数：{_optional_text(rank.hour_round)}", style2),
+            (f"数据开始于：{_cf_record_start_text(rank)}", style2),
+            (f"数据更新于：{get_readable_datetime(rqd.update_at, show_original_time=False)}", style2),
         ]
     )
     return texts
@@ -1069,7 +866,7 @@ def _cf_neighbor_text(rank: RankInfo, neighbor: RankInfo, direction: str) -> str
         score_gap = get_board_score_str(neighbor.score - rank.score)
     else:
         score_gap = get_board_score_str(rank.score - neighbor.score)
-    return f"{neighbor.rank}名分数: {neighbor_score}  {direction}{score_gap}"
+    return f"第 {neighbor.rank} 名分数：{neighbor_score}  {direction}{score_gap}"
 
 
 def _cf_record_start_text(rank: RankInfo) -> str:
@@ -1252,11 +1049,11 @@ def _draw_skl_header(
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
             TextBox(
-                f"{event_start.strftime('%Y-%m-%d %H:%M')} ~ {event_end.strftime('%Y-%m-%d %H:%M')}",
+                format_user_time_range(event_start, event_end),
                 TextStyle(font=DEFAULT_FONT, size=18, color=BLACK),
             )
             TextBox(
-                _time_to_event_end_text(event_end, now),
+                _time_to_event_end_text(rqd, event_end, now),
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
         with Frame().set_content_align("r"):
@@ -1278,8 +1075,8 @@ def _readable_datetime_or_dash(value: datetime | None) -> str:
     return get_readable_datetime(value, show_original_time=False, use_en_unit=False)
 
 
-def _time_to_event_end_text(event_end: datetime, now: datetime) -> str:
+def _time_to_event_end_text(rqd, event_end: datetime, now: datetime) -> str:
     time_to_end = event_end - now
     if time_to_end.total_seconds() <= 0:
-        return _EVENT_ENDED_TEXT
-    return f"距离活动结束还有{get_readable_timedelta(time_to_end)}"
+        return caller_label(rqd, "sk.event_ended", _EVENT_ENDED_TEXT)
+    return caller_label(rqd, "sk.time_to_end", _TIME_TO_END_TEXT, duration=get_readable_timedelta(time_to_end))

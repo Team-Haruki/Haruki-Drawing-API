@@ -538,7 +538,7 @@ class _BirthdayEventRow:
 def _birthday_event_rows(rqd: CharaBirthdayRequest) -> list[_BirthdayEventRow]:
     rows = [
         _BirthdayEventRow("gacha", "卡池开放", rqd.gacha_time),
-        _BirthdayEventRow("live", "虚拟LIVE", rqd.live_time),
+        _BirthdayEventRow("live", "虚拟 Live", rqd.live_time),
     ]
     if rqd.is_fifth_anniv:
         for key, label, span in (
@@ -906,7 +906,7 @@ def _draw_alias_header(rqd: AliasListRequest, accent: Color, jacket_img, alias_c
     visual_w = _ALIAS_JACKET_WELL if jacket_img is not None else 6
     text_budget = width - 2 * PANEL_PAD - visual_w - 14
     title_budget = text_budget - (text_w(_TITLE_CHIP_STYLE, id_chip_text) + 4 + 16 + 10)
-    subtitle = f"{rqd.title} · 已审核通过 {alias_count} 条 · 过多时自动转为图片返回"
+    subtitle = f"{rqd.title} · 已审核 {alias_count} 条 · 过多时自动转为图片返回"
     with panel(width):
         with HSplit().set_content_align("l").set_item_align("c").set_sep(14).set_padding(0):
             if jacket_img is not None:
