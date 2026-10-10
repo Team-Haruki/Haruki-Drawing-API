@@ -146,6 +146,8 @@ def test_cheer_reward_state_and_live_texts() -> None:
     first, second = request.lives
     assert drawer._detail_live_name(first, request.title) == "【491】（一歌）"
     assert drawer._detail_live_name(first.model_copy(update={"name": "Solo Live"}), request.title) == "【491】Solo Live"
+    # The caller's short_name wins: no comparison of the two names.
+    assert drawer._detail_live_name(first.model_copy(update={"short_name": "一歌"}), "unrelated") == "【491】一歌"
     assert drawer._detail_live_count_text(first) == "剩余 10/12 场"
     assert drawer._detail_live_count_text(second) == "剩余 3 场"
     assert drawer._detail_live_status_text(second, NOW) == "当前Live进行中!"

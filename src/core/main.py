@@ -26,6 +26,7 @@ from src.core.content_encoding import ZstdRequestBodyMiddleware
 from src.core.debug import install_debug_middleware
 from src.core.diagnostics import configure_runtime_diagnostics, dump_runtime_diagnostics
 from src.core.pjsk import router as pjsk_router
+from src.core.render_errors import RenderHTTPException, render_http_exception_handler
 from src.settings import (
     FIELD_STYLE,
     LOG_FORMAT,
@@ -455,6 +456,7 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+app.add_exception_handler(RenderHTTPException, render_http_exception_handler)
 install_debug_middleware(app)
 # Added last, so outermost: zstd bodies are decoded before the debug logger reads them.
 app.add_middleware(ZstdRequestBodyMiddleware, max_decoded_body_bytes=settings.server.max_decoded_body_bytes)

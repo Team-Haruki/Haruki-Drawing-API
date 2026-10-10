@@ -33,7 +33,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.timezone import datetime_from_millis, id_with_region, request_now
 from src.sekai.base.utils import (
     ImageSource,
     get_asset_image_ref,
@@ -324,7 +324,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                 ).set_content_align("c")
                 with HSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
                     TextBox("ID", label_style)
-                    TextBox(f"{rqd.gacha.id} ({rqd.region.upper()})", text_style)
+                    TextBox(id_with_region(rqd.gacha.id, rqd.region, rqd.region_label), text_style)
                     Spacer(w=24)
                     TextBox("类型", label_style)
                     TextBox(GACHA_TYPE_NAMES.get(rqd.gacha.gacha_type, rqd.gacha.gacha_type), text_style)

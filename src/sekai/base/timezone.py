@@ -72,9 +72,37 @@ def datetime_from_millis(value: float | str | None, timezone_name: str | None) -
     return localize_datetime(value, timezone_name)
 
 
+def region_display(region: str | None, region_label: str | None = None) -> str:
+    """The region as drawn: the caller's localized ``region_label`` (e.g. ``日服(JP)``), else the upper-cased code.
+
+    Only text uses this. Colours, assets and every other behaviour stay keyed on the raw region code.
+    """
+    label = (region_label or "").strip()
+    return label or (region or "").strip().upper()
+
+
+def id_with_region(item_id: object, region: str | None, region_label: str | None = None) -> str:
+    """``123 · 日服(JP)`` with a region label, else the legacy ``123 (JP)``."""
+    label = (region_label or "").strip()
+    if label:
+        return f"{item_id} · {label}"
+    return f"{item_id} ({(region or '').strip().upper()})"
+
+
+def region_tag(region: str | None, region_label: str | None, suffix: object) -> str:
+    """A title tag such as ``日服(JP) 123`` with a region label, else the legacy ``JP-123``."""
+    label = (region_label or "").strip()
+    if label:
+        return f"{label} {suffix}"
+    return f"{(region or '').strip().upper()}-{suffix}"
+
+
 class TimeZoneRequest(BaseModel):
     timezone: str = Field(default=DEFAULT_TIMEZONE)
     dt: int | None = Field(default=None)
+    # Localized display name of the request's region code, sent by the caller (Cloud). Optional: without it the
+    # drawers fall back to the upper-cased code (see region_display).
+    region_label: str | None = Field(default=None)
 
     def model_post_init(self, __context, /) -> None:
         self.timezone = normalize_timezone(self.timezone)

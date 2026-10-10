@@ -100,7 +100,7 @@ const hidden = true
 ```
 
 ## 输出
-不应出现
+不再按标题文字删除
 ## 进阶
 > 引用
 | 列 | 值 |
@@ -110,13 +110,14 @@ const hidden = true
     )
 
     assert title == "完整帮助"
-    assert [section.title for section in sections] == ["基础", "进阶"]
+    # Sections are never dropped by their (localized) heading text.
+    assert [section.title for section in sections] == ["基础", "输出", "进阶"]
     basic = sections[0].lines
     assert any(line.text == "小节" and line.font_name for line in basic)
     assert any(line.text == "普通项目" and line.indent == 34 for line in basic)
     assert any(line.label == "参数" and line.text == "参数说明" for line in basic)
     assert any(line.text == "raw code" and line.bg is not None for line in basic)
-    advanced = sections[1].lines
+    advanced = sections[2].lines
     assert any(line.text == "引用" and line.bg is not None for line in advanced)
     assert any(line.text == "| 列 | 值 |" and line.size == 18 for line in advanced)
     assert any(line.text == "1) 步骤" and line.indent == 36 for line in advanced)

@@ -6,14 +6,13 @@ from src.sekai.profile.drawer import (
     _CARD_AGE_FRESH,
     _CARD_AGE_STALE,
     _CARD_AGE_WARN,
+    _profile_account_line,
     _profile_card_age_text,
     _profile_card_level_label,
     _profile_card_rank_label,
     _profile_card_region_chip_fill,
     _profile_card_source_rows,
-    _profile_card_summary_line,
     _profile_card_uid_line,
-    _profile_card_update_lines,
 )
 from src.sekai.profile.model import BasicProfile, ProfileDataSource
 
@@ -37,28 +36,17 @@ def test_profile_card_level_label_uses_compact_form_for_long_names() -> None:
     assert _profile_card_level_label(long, 42) == "MSLv.42"
 
 
-def test_profile_card_summary_handles_hidden_uid_and_single_source() -> None:
-    source = ProfileDataSource(name="Suite数据")
-
-    assert _profile_card_summary_line(_profile(), []) == "JP: 1234567890123456"
-    assert _profile_card_summary_line(_profile(hidden=True), [source]) == "JP: **********123456 Suite数据"
-
-
-def test_profile_card_update_lines_cover_single_and_multiple_sources() -> None:
-    suite = ProfileDataSource(name="Suite数据", update_time=1000)
-    empty = ProfileDataSource(name="No timestamp")
-    secondary = ProfileDataSource(name="Secondary数据", update_time=2000)
-
-    assert _profile_card_update_lines([], "UTC") == []
-    assert _profile_card_update_lines([empty], "UTC") == []
-    assert _profile_card_update_lines([suite], "UTC") == ["更新时间: 01-01 00:16:40 (UTC)"]
-    assert _profile_card_update_lines([suite, empty, secondary], "UTC") == [
-        "Suite更新时间: 01-01 00:16:40 (UTC)",
-    ]
-    assert _profile_card_update_lines([suite, secondary], "UTC") == [
-        "Suite更新时间: 01-01 00:16:40 (UTC)",
-        "Secondary更新时间: 01-01 00:33:20 (UTC)",
-    ]
+def test_profile_account_line_prefers_caller_labels() -> None:
+    # No labels: the legacy line, UID hidden by the renderer.
+    assert _profile_account_line(_profile()) == "JP: 1234567890123456"
+    assert _profile_account_line(_profile(hidden=True)) == "JP: **********123456"
+    # A region label (on the profile or the request) keeps the renderer's UID hiding.
+    labelled = _profile(hidden=True).model_copy(update={"region_label": "日服(JP)"})
+    assert _profile_account_line(labelled) == "[日服(JP)] **********123456"
+    assert _profile_account_line(_profile(), "日服(JP)") == "[日服(JP)] 1234567890123456"
+    # The caller's account line is drawn verbatim: it already hid the UID.
+    account = _profile(hidden=True).model_copy(update={"account_label": "[日服(JP)] 123***456"})
+    assert _profile_account_line(account, "ignored") == "[日服(JP)] 123***456"
 
 
 def test_profile_card_uid_line_and_region_chip() -> None:

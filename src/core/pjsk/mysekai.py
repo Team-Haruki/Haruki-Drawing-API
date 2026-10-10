@@ -1,9 +1,10 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.mysekai.content_drawer import (
     try_render_mysekai_blueprint_term_payload,
@@ -48,7 +49,7 @@ async def mysekai_resource(request: MysekaiResourceRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_resource render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -68,7 +69,7 @@ async def mysekai_msr_map(request: MysekaiMsrMapRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_msr_map render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -87,7 +88,7 @@ async def mysekai_fixture_list(request: MysekaiFixtureListRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -106,7 +107,7 @@ async def mysekai_fixture_detail(request: list[MysekaiFixtureDetailRequest]):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -125,7 +126,7 @@ async def mysekai_door_upgrade(request: MysekaiDoorUpgradeRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -144,7 +145,7 @@ async def mysekai_music_record(request: MysekaiMusicrecordRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -163,7 +164,7 @@ async def mysekai_talk_list(request: MysekaiTalkListRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -179,7 +180,7 @@ async def mysekai_housing_competition(request: MysekaiHousingCompetitionRequest)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_housing_competition render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -195,7 +196,7 @@ async def mysekai_shop(request: MysekaiShopRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_shop render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -211,7 +212,7 @@ async def mysekai_bulk_harvest(request: MysekaiBulkHarvestRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_bulk_harvest render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -227,4 +228,4 @@ async def mysekai_blueprint_term(request: MysekaiBlueprintTermRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         _logger.exception("mysekai_blueprint_term render failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

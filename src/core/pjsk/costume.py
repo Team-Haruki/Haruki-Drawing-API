@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.costume.drawer import (
     try_render_costume_detail_payload,
@@ -23,7 +24,7 @@ async def costume_list(request: CostumeListRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -37,4 +38,4 @@ async def costume_detail(request: CostumeDetailRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

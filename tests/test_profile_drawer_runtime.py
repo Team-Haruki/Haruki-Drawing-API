@@ -335,9 +335,6 @@ async def test_profile_card_modules_cover_absent_complete_and_error_cases(monkey
     modules = await drawer._build_profile_card_modules(complete)
     assert len(modules) == 3
     assert isinstance(await drawer.get_profile_card(complete), Frame)
-    assert drawer._profile_card_data_source_label(None) == "数据"
-    assert drawer._profile_card_data_source_label("Suite数据") == "Suite"
-    assert drawer._profile_card_data_source_label("Toolbox") == "Toolbox"
 
     assert drawer.process_hide_uid(True, "1234") == "*" * 16
     assert drawer.process_hide_uid(False, "1234") == "1234"

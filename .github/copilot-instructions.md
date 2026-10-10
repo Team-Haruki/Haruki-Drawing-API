@@ -553,6 +553,31 @@ push the tag `v<version>`. `release-gate` refuses a tag that differs from `pypro
 
 Ruff with `line-length = 120`. See `pyproject.toml [tool.ruff]` for the full ruleset. Notable: isort via ruff, pyupgrade rules enabled, `RUF001-003` (ambiguous unicode) ignored since the codebase contains CJK text.
 
+## Caller labels and raw keys
+
+Callers (Haruki-Cloud) send display text already localized. **Drawing never decides anything from that text.**
+Every behaviour (icons, backgrounds, colours, assets, which line or section to draw) is keyed on a raw machine
+key sent next to the label; the label is only drawn. When the key is absent, fall back to the old behaviour so
+either side can deploy first.
+
+| Display text | Raw key that decides |
+|---|---|
+| `CardBasic.supply_type` | `supply_type_key` (`normal`, `term_limited`, `colorful_festival_limited`, `bloom_festival_limited`, `unit_event_limited`, `collaboration_limited`, `birthday`; birthday is not limited) |
+| `AliasListRequest.entity_label` | `entity_type` (`music`, `character`) |
+| `ProfileDataSource.name` | `kind` (`suite`, `mysekai`, `public`) |
+| `DeckRequest.live_name` | `live_type` (drawn for every live type; the renderer's own label only when `live_name` is empty) |
+| `VLiveDetailLive.name` | `short_name` (the caller picks the distinguishing part; no comparison with the group title) |
+| `region_label` (`TimeZoneRequest`, `BasicProfile`), `BasicProfile.account_label` | the raw `region` code (chip/ring colours, assets) |
+
+`region_display` / `id_with_region` / `region_tag` in `src/sekai/base/timezone.py` draw the label and fall back
+to the upper-cased code. Do not add new comparisons against caller text; add a key.
+
+Failed renders answer `{"detail": "<text>", "code": "<code>"}` (`src/core/render_errors.py`): `detail` is the
+unchanged text, `code` is one of `RENDER_ERROR_CODES` in `src/sekai/base/render_errors.py` (`asset_missing`,
+`asset_broken`, `data_insufficient`, `content_too_large`) and is present only when the reason is known. Routes
+raise `render_http_exception(exc)`; the heavy pool carries the worker's code across the process boundary.
+Callers classify by `code`, so codes are API: add new ones, never rename.
+
 ## When Making Changes
 
 - **Run `uv run ruff check src tests scripts` and `uv run ruff format src tests scripts`** before committing — CI checks all three trees, not just `src/`. Only fix new violations you introduce, not pre-existing ones unrelated to your task.

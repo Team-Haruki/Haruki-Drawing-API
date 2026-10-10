@@ -62,6 +62,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_layout_font, get_text_size, ink_centered_text_offset_y
+from src.sekai.base.timezone import region_display
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.custom_profile.font_field import basic_text_field
 from src.sekai.profile.drawer import (
@@ -489,28 +490,45 @@ def draw_event_planner_block(
 _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX = {"mysekai", "challenge", "challenge_all", "bonus", "wl_bonus"}
 
 
-def _recommend_type_title(recommend_type: str, event_id: int | None, wl_chara_name: str | None) -> str:
+_DECK_NOUN = "组卡"
+_PLANNER_NOUN = "规划"
+
+
+def _recommend_type_title(
+    recommend_type: str, event_id: int | None, wl_chara_name: str | None, noun: str = _DECK_NOUN
+) -> str:
+    """The title of a recommend type; ``noun`` is what the page is (a deck recommendation or a plan)."""
     if recommend_type == "mysekai":
-        return f"烤森活动#{event_id}组卡" if event_id else "烤森模拟活动组卡"
+        return f"烤森活动#{event_id}{noun}" if event_id else f"烤森模拟活动{noun}"
     if recommend_type in {"challenge", "challenge_all"}:
-        return "每日挑战组卡"
+        return f"每日挑战{noun}"
     if recommend_type == "bonus":
-        return f"活动#{event_id}加成组卡"
+        return f"活动#{event_id}加成{noun}"
     if recommend_type == "wl_bonus":
-        return f"WL活动#{event_id}加成组卡"
+        return f"WL活动#{event_id}加成{noun}"
     if recommend_type == "event":
-        return f"活动#{event_id}组卡"
+        return f"活动#{event_id}{noun}"
     if recommend_type == "wl":
         if event_id:
-            return f"WL活动#{event_id}组卡"
-        return "WL模拟组卡" if wl_chara_name else "WL终章活动组卡"
-    return {"unit_attr": "团队+颜色模拟活动组卡", "no_event": "无活动组卡"}.get(recommend_type, "")
+            return f"WL活动#{event_id}{noun}"
+        return f"WL模拟{noun}" if wl_chara_name else f"WL终章活动{noun}"
+    return {"unit_attr": f"团队+颜色模拟活动{noun}", "no_event": f"无活动{noun}"}.get(recommend_type, "")
+
+
+# Shown only when the caller sent no live_name for the live_type key.
+_LIVE_TYPE_FALLBACK_LABELS = {"multi": "多人", "solo": "单人", "auto": "AUTO"}
+
+
+def _recommend_live_label(live_type: str | None, live_name: str | None) -> str:
+    """The caller's localized ``live_name`` for any live type, else this renderer's label for the ``live_type`` key."""
+    if name := (live_name or "").strip():
+        return name
+    return _LIVE_TYPE_FALLBACK_LABELS.get((live_type or "").strip().lower(), "")
 
 
 def _recommend_live_suffix(live_type: str | None, live_name: str | None) -> str:
-    if live_type == "multi":
-        return f"({live_name})"
-    return {"solo": "(单人)", "auto": "(AUTO)"}.get(live_type, "")
+    label = _recommend_live_label(live_type, live_name)
+    return f"({label})" if label else ""
 
 
 def build_recommend_title(
@@ -636,17 +654,14 @@ def _deck_score_name(rqd: DeckRequest) -> str:
 
 def _deck_base_title(rqd: DeckRequest) -> str:
     """The title without its live suffix, which is drawn as a chip beside it."""
-    title = _recommend_type_title(rqd.recommend_type, rqd.event_id, rqd.wl_chara_name)
-    if rqd.event_planner:
-        title = title.replace("组卡", "规划")
-    return title
+    noun = _PLANNER_NOUN if rqd.event_planner else _DECK_NOUN
+    return _recommend_type_title(rqd.recommend_type, rqd.event_id, rqd.wl_chara_name, noun)
 
 
 def _deck_live_label(rqd: DeckRequest) -> str:
     if rqd.recommend_type in _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX:
         return ""
-    suffix = _recommend_live_suffix(rqd.live_type, rqd.live_name)
-    return suffix[1:-1] if suffix.startswith("(") and suffix.endswith(")") else suffix
+    return _recommend_live_label(rqd.live_type, rqd.live_name)
 
 
 # ---------------------------------------------------------------------------
@@ -812,7 +827,7 @@ def _deck_title_chips(rqd: DeckRequest) -> list[tuple[str, Color]]:
     if live := _deck_live_label(rqd):
         chips.append((live, _deck_accent(rqd)))
     if rqd.is_max_deck:
-        chips.append((f"{rqd.region.upper()} 顶配", _RED))
+        chips.append((f"{region_display(rqd.region, rqd.region_label)} 顶配", _RED))
     return chips
 
 

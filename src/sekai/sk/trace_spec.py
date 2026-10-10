@@ -11,6 +11,7 @@ import math
 from typing import Literal
 
 from src.sekai.base.paint_types import lerp_color, rgb_to_color_code
+from src.sekai.base.timezone import region_tag
 from src.sekai.base.utils import truncate
 
 from .model import PlayerTraceRequest, RankTraceRequest
@@ -30,11 +31,16 @@ SCORE_COLORS = (
 )
 
 
-def event_title(region: str, event_id: int, event_name: str = "") -> str:
+def event_title(region: str, event_id: int, event_name: str = "", region_label: str | None = None) -> str:
+    """``【日服(JP) 123】name`` with a region label, else the legacy ``【JP-123】name``."""
     if event_id < 1000:
-        return f"【{region.upper()}-{event_id}】{event_name}"
+        return f"【{region_tag(region, region_label, event_id)}】{event_name}"
     chapter, event = divmod(event_id, 1000)
-    return f"【{region.upper()}-{event}-第{chapter}章单榜】{event_name}"
+    return f"【{region_tag(region, region_label, event)}-第{chapter}章单榜】{event_name}"
+
+
+def _request_event_title(request: PlayerTraceRequest | RankTraceRequest) -> str:
+    return event_title(request.region, request.event_id, region_label=request.region_label)
 
 
 def score_text(score: int | None, width: int | None = None) -> str:
@@ -191,7 +197,7 @@ def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
         last = rows[-1]
         annotations.append(TraceAnnotation("secondary", last.time, last.rank * 1.02, str(int(last.rank)), color))
     return TraceSpec(
-        title=f"{event_title(request.region, request.event_id)} 玩家: {' vs '.join(names)}",
+        title=f"{_request_event_title(request)} 玩家: {' vs '.join(names)}",
         start=min(r.time for r in all_rows),
         end=max(r.time for r in all_rows),
         series=tuple(series),
@@ -245,7 +251,7 @@ def build_rank_trace_spec(request: RankTraceRequest) -> TraceSpec:
         )
     valid_speeds = [v for v in speeds if v >= 0]
     return TraceSpec(
-        title=f"{event_title(request.region, request.event_id)} T{request.target_rank} 分数线",
+        title=f"{_request_event_title(request)} T{request.target_rank} 分数线",
         start=times[0],
         end=times[-1],
         series=series,

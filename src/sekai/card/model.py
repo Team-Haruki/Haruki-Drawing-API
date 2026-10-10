@@ -152,7 +152,11 @@ class CardBasic(BaseModel):
     release_at : Optional[int]
         发布时间（毫秒时间戳）
     supply_type : Optional[str]
-        限定类型（非限定/期间限定/Fes限定等）
+        限定类型的显示文本（由调用方本地化，只用于显示）
+    supply_type_key : Optional[str]
+        限定类型的原始 key（``normal``、``term_limited``、``colorful_festival_limited``、
+        ``bloom_festival_limited``、``unit_event_limited``、``collaboration_limited``、``birthday``）；
+        图标和背景按它选择。缺省时按 ``supply_type`` 的旧显示文本推断
     card_rarity_type : Optional[str]
         稀有度
     attr : Optional[str]
@@ -177,6 +181,7 @@ class CardBasic(BaseModel):
     unit: str | None = None
     release_at: int | None = None
     supply_type: str | None = None
+    supply_type_key: str | None = None
     rare: str | None = None
     attr: str | None = None
     prefix: str | None = None

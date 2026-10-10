@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from src.core.debug import set_request_stage
 from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
 from src.sekai.profile.drawer import try_render_info_panel_payload, try_render_profile_payload
@@ -67,7 +68,7 @@ async def profile(request: ProfileRequest):
         set_request_stage("profile:image_to_response")
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -85,7 +86,7 @@ async def info_panel(request: ProfileCardRequest):
         set_request_stage("info_panel:image_to_response")
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise render_http_exception(e) from e
 
 
 @router.post(
@@ -122,4 +123,4 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
     except Exception as e:
         if attempt is not None:
             attempt.record(500)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

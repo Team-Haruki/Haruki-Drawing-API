@@ -28,6 +28,12 @@ def test_build_recommend_title_keeps_finale_label_without_character() -> None:
         ("unit_attr", None, None, "auto", None, "团队+颜色模拟活动组卡(AUTO)"),
         ("no_event", None, None, None, None, "无活动组卡"),
         ("unknown", None, None, "multi", "协力", "(协力)"),
+        # The caller's live_name is drawn for every live type, not only multi.
+        ("event", 22, None, "solo", "单人 Live", "活动#22组卡(单人 Live)"),
+        ("event", 22, None, "auto", "自动 Live", "活动#22组卡(自动 Live)"),
+        # Without one, the live_type key picks this renderer's label (multi used to print "(None)").
+        ("event", 22, None, "multi", None, "活动#22组卡(多人)"),
+        ("event", 22, None, "multi", "  ", "活动#22组卡(多人)"),
     ],
 )
 def test_build_recommend_title_covers_all_type_and_live_labels(
@@ -39,3 +45,11 @@ def test_build_recommend_title_covers_all_type_and_live_labels(
     expected: str,
 ) -> None:
     assert build_recommend_title(recommend_type, event_id, character, live_type, live_name) == expected
+
+
+def test_planner_title_swaps_the_noun_not_the_text() -> None:
+    from src.sekai.deck.drawer import _recommend_type_title
+
+    assert _recommend_type_title("event", 5, None, "规划") == "活动#5规划"
+    assert _recommend_type_title("wl", None, "x", "规划") == "WL模拟规划"
+    assert _recommend_type_title("no_event", None, None) == "无活动组卡"

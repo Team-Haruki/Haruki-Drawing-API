@@ -138,7 +138,9 @@ class AliasListRequest(TimeZoneRequest):
     title : str
         图片标题
     entity_label : str
-        实体 ID 标签，如“歌曲ID”“角色ID”
+        实体 ID 标签的显示文本，如“歌曲 ID”“角色 ID”（只用于显示）
+    entity_type : str | None = None
+        实体类型的原始 key：``music`` 或 ``character``；强调色按它选择。缺省时按 ``entity_label`` 推断
     entity_id : int
         实体 ID
     entity_name : str
@@ -155,6 +157,7 @@ class AliasListRequest(TimeZoneRequest):
 
     title: str
     entity_label: str
+    entity_type: str | None = None
     entity_id: int
     entity_name: str
     music_jacket_path: str | None = None
