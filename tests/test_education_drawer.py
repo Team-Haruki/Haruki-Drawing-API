@@ -46,7 +46,7 @@ def isolated_assets(monkeypatch: pytest.MonkeyPatch) -> None:
         (10_000, "1万"),
         (15_000, "1.5万"),
         (100_000, "10万"),
-        (10_000_000, "1千万"),
+        (10_000_000, "1000万"),
     ],
 )
 def test_get_quant_text_boundaries(quantity: int, expected: str) -> None:
@@ -643,3 +643,17 @@ def test_education_models_accept_optional_area_item_56_fields() -> None:
     )
     assert "multi_unit_bonus" in PowerBonusDetailRequest.model_fields
     assert PowerBonusDetailRequest.model_fields["multi_unit_bonus"].default is None
+
+
+def test_large_area_material_quantities_shrink_to_fit_the_icon() -> None:
+    from src.sekai.base.chrome import text_w
+
+    material = SimpleNamespace(
+        material_icon_path=None, quantity=30_000_000, have_quantity=12_345_678, sum_quantity=35_000_000, is_enough=False
+    )
+    widget = drawer._build_area_material(material, {}, has_profile=True)
+    boxes = {box.text: box for box in _walk_widgets(widget) if isinstance(box, TextBox)}
+    quantity, totals = boxes["x3000万"], boxes["1234万/3500万"]
+    assert text_w(quantity.style, quantity.text) <= drawer._AREA_MATERIAL_QUANTITY_W
+    assert text_w(totals.style, totals.text) <= drawer._AREA_MATERIAL_TOTALS_W
+    assert quantity.style.size >= drawer._AREA_MATERIAL_MIN_FONT

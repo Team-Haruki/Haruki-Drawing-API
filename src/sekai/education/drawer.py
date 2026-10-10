@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from src.core.image_payload import EncodedImagePayload
 from src.sekai.base.asset_key import AssetKey, legacy_key
+from src.sekai.base.chrome import text_w
 from src.sekai.base.draw import (
     BG_PADDING,
     SEKAI_BLUE_BG,
@@ -416,9 +417,7 @@ async def try_render_power_bonus_detail_payload(
 
 
 def _get_quant_text(q: int) -> str:
-    """格式化数量显示：一千万以上用“千万”（3千万），一万以上用“万”（1.2万、35万），一千以上用“千”（1.2千、5千）"""
-    if q >= 10000000:
-        return f"{q // 10000000}千万"
+    """格式化数量显示：一万以上用“万”（1.2万、35万、3000万），一千以上用“千”（1.2千、5千）"""
     if q >= 10000:
         x, y = q // 10000, (q % 10000) // 1000
         if x < 10 and y > 0:
@@ -492,6 +491,21 @@ def _build_completed_area_material_placeholder() -> VSplit:
     return placeholder
 
 
+# A material's quantity sits on its 64 px icon and its have/needed totals under it; long 万 amounts
+# ("x3000万", "1234万/3500万") step the font down instead of spilling past the icon or widening the row.
+_AREA_MATERIAL_QUANTITY_W = 64
+_AREA_MATERIAL_TOTALS_W = 96
+_AREA_MATERIAL_MIN_FONT = 11
+
+
+def _fitted_style(text: str, size: int, max_w: int, color) -> TextStyle:
+    style = TextStyle(font=DEFAULT_BOLD_FONT, size=size, color=color)
+    while size > _AREA_MATERIAL_MIN_FONT and text_w(style, text) > max_w:
+        size -= 1
+        style = style.replace(size=size)
+    return style
+
+
 def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profile: bool) -> VSplit:
     gray_color, red_color, green_color = (50, 50, 50), (200, 0, 0), (0, 200, 0)
     material_widget = VSplit().set_content_align("c").set_item_align("c").set_sep(4)
@@ -500,11 +514,9 @@ def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profi
     material_icon = icon_cache.get(legacy_key(material.material_icon_path))
     if material_icon:
         icon_frame.add_item(ImageBox(material_icon, size=(size, size)))
+    quantity_text = f"x{_get_quant_text(material.quantity)}"
     icon_frame.add_item(
-        TextBox(
-            f"x{_get_quant_text(material.quantity)}",
-            TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=gray_color),
-        )
+        TextBox(quantity_text, _fitted_style(quantity_text, 16, _AREA_MATERIAL_QUANTITY_W, gray_color))
         .set_offset((size, size))
         .set_offset_anchor("rb")
     )
@@ -515,7 +527,7 @@ def _build_area_material(material, icon_cache: dict[str, ImageSource], has_profi
     have_text = _get_quant_text(material.have_quantity)
     sum_text = _get_quant_text(material.sum_quantity)
     text = f"{have_text}/{sum_text}" if has_profile else sum_text
-    material_widget.add_item(TextBox(text, TextStyle(font=DEFAULT_BOLD_FONT, size=15, color=color)))
+    material_widget.add_item(TextBox(text, _fitted_style(text, 15, _AREA_MATERIAL_TOTALS_W, color)))
     return material_widget
 
 
