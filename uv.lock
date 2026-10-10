@@ -537,7 +537,6 @@ dependencies = [
     { name = "python-dateutil" },
     { name = "pyyaml" },
     { name = "redis" },
-    { name = "ruff" },
 ]
 
 [package.dev-dependencies]
@@ -550,6 +549,7 @@ dev = [
     { name = "pilmoji" },
     { name = "pytest" },
     { name = "pytest-xdist" },
+    { name = "ruff" },
 ]
 legacy-renderer = [
     { name = "matplotlib" },
@@ -575,7 +575,6 @@ requires-dist = [
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "redis", specifier = ">=8.1.0" },
-    { name = "ruff", specifier = ">=0.16.3" },
 ]
 
 [package.metadata.requires-dev]
@@ -588,6 +587,7 @@ dev = [
     { name = "pilmoji", specifier = "==2.0.5" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = ">=0.16.3" },
 ]
 legacy-renderer = [
     { name = "matplotlib", specifier = ">=3.11.0" },

@@ -1,4 +1,4 @@
-"""Pins the production dependency boundary: storage wheels in, legacy renderer and libpq drivers out."""
+"""Pins the production dependency boundary: storage wheels in; legacy renderer, libpq drivers and dev tools out."""
 
 from pathlib import Path
 import re
@@ -6,7 +6,7 @@ import tomllib
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_NAME = "haruki-drawing-api"
-FORBIDDEN = ("pillow", "matplotlib", "pilmoji", "psycopg")
+FORBIDDEN = ("pillow", "matplotlib", "pilmoji", "psycopg", "ruff")
 STORAGE_PACKAGES = ("opendal", "asyncpg")
 
 
@@ -75,3 +75,34 @@ def test_free_threaded_smoke_asserts_storage_imports():
 
     assert "./scripts/ci/free-threaded-smoke.sh" in workflow
     assert '-X gil=0 -W error::RuntimeWarning -c "import opendal, asyncpg; import src.core.main"' in smoke
+
+
+def test_dockerfile_layers_keep_version_bumps_small():
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    runtime = dockerfile[dockerfile.index("FROM base AS runtime") :]
+
+    # third-party wheels come from the lock without the project, so a version bump leaves that layer alone
+    assert "--no-emit-project" in dockerfile
+    # bottom to top: interpreter, third-party wheels, renderer wheel, app code
+    order = [
+        "COPY --from=python /opt/uv/python",
+        "COPY --from=deps",
+        "COPY --from=native",
+        "COPY --exclude=docker . .",
+    ]
+    positions = [runtime.index(step) for step in order]
+    assert positions == sorted(positions)
+    # the self-checks must not leave __pycache__ in the (per-release) top layers
+    checks = [line for line in runtime.splitlines() if line.startswith("RUN ") and "/.venv/bin/python" in line]
+    assert checks
+    assert all(line.startswith("RUN PYTHONDONTWRITEBYTECODE=1 ") for line in checks)
+
+
+def test_dockerfile_runtime_packages_exclude_unused_libraries():
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    base = dockerfile[dockerfile.index("FROM debian:trixie-slim AS base") : dockerfile.index("AS python")]
+    packages = set(re.findall(r"^\s+([a-z0-9][a-z0-9.+-]+) \\$", base, flags=re.MULTILINE))
+
+    assert {"libfreetype6", "fontconfig", "ttf-wqy-zenhei", "libstdc++6", "libexpat1", "zlib1g"} <= packages
+    for unused in ("libgl1", "libglib2.0-0", "libsm6", "libxext6", "libxrender1", "fonts-noto-color-emoji", "openntpd"):
+        assert unused not in packages, unused

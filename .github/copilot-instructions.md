@@ -549,6 +549,26 @@ push the tag `v<version>`. `release-gate` refuses a tag that differs from `pypro
 
 `renderer-release.yml` stays a manual full-asset validation on a configured fixture runner (see README).
 
+## Docker image
+
+The runtime image is layered so that a release which only bumps the version re-ships only the small top
+layers. Bottom to top: `debian:trixie-slim` → apt runtime packages → the free-threaded CPython from uv (stage
+`python`, keyed only by `PYTHON_BUILD` and the pinned uv image) → third-party wheels installed from
+`uv export --no-emit-project` (the project's own version is not in that export, so a bump does not touch the
+layer) → the Skia renderer wheel (installed with `--target` into its own layer) → app code. Keep that order:
+
+- Nothing that changes per release (`pyproject.toml`, `uv.lock`, source, build args) may feed a layer below the
+  app code. The `lock` stage reads both files, but only its export output reaches the image.
+- Self-check `RUN`s set `PYTHONDONTWRITEBYTECODE=1`, so they add empty layers. Third-party bytecode is compiled
+  once in the deps layer (`--compile-bytecode`), which keeps cold start as fast as before.
+- System packages are only what an ELF file or a `ctypes` lookup needs. Check with `ldd` over every ELF file in the
+  built image before adding or removing one. Today: libstdc++/libgcc/zlib/expat for the wheels (the renderer wheel
+  bundles its own FreeType, fontconfig, libpng, brotli and bz2), `libfreetype6` for custom profile's
+  `ctypes.util.find_library("freetype")`, fontconfig plus `ttf-wqy-zenhei` as the face Skia falls back to when a
+  configured font is missing. Nothing links libGL, glib or X11. Emoji come from `font.dir`, not a system font.
+- The uv interpreter is trimmed of Tcl/Tk, IDLE, the turtle demo and the C headers. `ruff` is a dev dependency.
+- `tests/test_prod_dependency_tree.py` pins the layer order, the bytecode rule and the removed packages.
+
 ## Code Style
 
 Ruff with `line-length = 120`. See `pyproject.toml [tool.ruff]` for the full ruleset. Notable: isort via ruff, pyupgrade rules enabled, `RUF001-003` (ambiguous unicode) ignored since the codebase contains CJK text.
