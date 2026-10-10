@@ -46,6 +46,7 @@ BRIEF_FIELDS = {
     "index_written",
     "upload_elapsed",
     "node_name",
+    "missing_assets",
 }
 
 
@@ -76,7 +77,7 @@ def _ref(**overrides) -> ArtifactRef:
 def test_json_key_set_is_exactly_the_brief_fields() -> None:
     body = _ref().to_json()
     assert set(body) == BRIEF_FIELDS
-    assert len(body) == 17
+    assert len(body) == 18
     assert "node_name" in body
     assert "node" not in body
     assert set(REF_FIELDS) == BRIEF_FIELDS

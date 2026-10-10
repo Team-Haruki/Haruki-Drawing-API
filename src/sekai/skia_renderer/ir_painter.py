@@ -28,6 +28,7 @@ import emoji
 if TYPE_CHECKING:
     from PIL import Image
 
+from src.core.missing_asset_telemetry import MISSING_VANISHED, record_missing_asset
 from src.core.pillow_telemetry import (
     PILLOW_TOUCH_IRPAINTER_MEM_RASTER,
     PILLOW_TOUCH_IRPAINTER_PIL_IMAGE,
@@ -281,6 +282,9 @@ class IRPainter(PaintContext):
                         return relative.as_posix()
         if isinstance(img, AssetImageRef):
             if not img.path.is_file():
+                # The asset vanished after it was probed; count it like every other placeholder so the
+                # response is not reported (and cached) as complete.
+                record_missing_asset(MISSING_VANISHED)
                 return self._image_ref(missing_image_ref(placeholder_variant(str(img.path))))
             # Root confinement still applies to native file references. For an
             # already authorized external source, transport encoded bytes lazily.

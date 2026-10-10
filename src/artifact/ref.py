@@ -101,6 +101,9 @@ class ArtifactRef:
     index_written: bool
     upload_elapsed: float
     node_name: str
+    # Missing-asset placeholders in the stored image. Always 0 on an index-written ref (such renders are never
+    # stored under a request key); a store-ref carries the render's count, like X-Haruki-Render-Missing-Assets.
+    missing_assets: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {field.name: getattr(self, field.name) for field in fields(self)}

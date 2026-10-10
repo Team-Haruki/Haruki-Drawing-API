@@ -64,6 +64,13 @@ Every response path leaves through one exit and is always **one** body.
 | store-ref degraded | as above, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
 | rejected | invalid directive | 400 JSON (above) | `X-Haruki-Directive-Error`, `X-Haruki-Node` |
 
+`X-Haruki-Render-Missing-Assets: <n>` is added to any of the image branches above (bytes, store 0, degraded,
+store-ref, store-ref degraded) when the render drew `n > 0` missing-asset placeholders ("?" images). `n` is the
+request scope's count plus the heavy worker's (`EncodedImagePayload.missing_asset_count`). A complete render
+does not carry the header, so its response is unchanged. Such a render always also carries
+`X-Haruki-Cache-Store: 0`; the count lets a caller tell "drew a placeholder" apart from the other no-store
+reasons and give it a short, non-sliding cache life instead of none (Cloud's `drawing_cache.placeholder_ttl`).
+
 `X-Haruki-Node` is on **every** response. Its value is `storage.node_name`, or the host name when that is
 empty. Cloud uses `ref.node_name` on the artifact branch and this header on the bytes and degraded
 branches, where there is no ref.
@@ -92,7 +99,7 @@ returned without an artifact directive. Callers must not cache those bytes or a 
 
 `/ready` is never influenced by storage or index health.
 
-## 3. `artifact_ref` — the 17 fields
+## 3. `artifact_ref` — the 18 fields
 
 ```json
 {
@@ -112,7 +119,8 @@ returned without an artifact directive. Callers must not cache those bytes or a 
   "reused": false,
   "index_written": true,
   "upload_elapsed": 0.0052,
-  "node_name": "cn09"
+  "node_name": "cn09",
+  "missing_assets": 0
 }
 ```
 
@@ -132,6 +140,7 @@ returned without an artifact directive. Callers must not cache those bytes or a 
 | `index_written` | `true` only when both index rows were written |
 | `upload_elapsed` | seconds spent in the upload step; `0.0` when reused |
 | `node_name` | original writer when its persisted `written_at` is within 120 seconds; otherwise the rendering node |
+| `missing_assets` | missing-asset placeholders in the image. Always `0` here (such renders are answered as store 0); a store-ref (§12) carries the render's count. Older consumers ignore it |
 
 ### Object keys, the reuse rule, and the `pjsk/api/` ops prefix
 
@@ -562,7 +571,7 @@ The full directive (§1) with `X-Haruki-Cache-Store: 0` **and** `X-Haruki-Artifa
 | uploaded | 200 `application/json` `artifact_ref` | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: store-ref`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
 | not uploaded | 200 image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
 
-The ref has the same 17 fields as §3, with these values:
+The ref has the same 18 fields as §3, with these values:
 
 | field | store-ref value |
 | --- | --- |
@@ -570,6 +579,7 @@ The ref has the same 17 fields as §3, with these values:
 | `reused` | always `false`: there is no lookup |
 | `index_written` | always `false`: the caller records the row |
 | `node_name` | `storage.writer_node` (default: `storage.node_name`), the node whose Garage accepted the PUT, so a URL built from it is served by a node that holds the object before replication completes |
+| `missing_assets` | the render's placeholder count, the same value as `X-Haruki-Render-Missing-Assets` (`0` when the header is absent) |
 | everything else | as §3; `cache_key`, `ttl_seconds` and `expires_at` echo the directive |
 
 `X-Haruki-Node` stays the rendering node.

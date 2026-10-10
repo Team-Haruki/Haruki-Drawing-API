@@ -43,6 +43,7 @@ ARTIFACT_REF_SCHEMA: Final = {
         "index_written",
         "upload_elapsed",
         "node_name",
+        "missing_assets",
     ],
     "properties": {
         "kind": {"type": "string", "enum": ["artifact_ref"]},
@@ -70,6 +71,10 @@ ARTIFACT_REF_SCHEMA: Final = {
         "node_name": {
             "type": "string",
             "description": "fresh writer: the rendering node, or in store-ref mode the storage.writer_node gateway",
+        },
+        "missing_assets": {
+            "type": "integer",
+            "description": "missing-asset placeholders drawn into the image; non-zero only on a store-ref",
         },
     },
 }
