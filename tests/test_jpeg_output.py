@@ -20,7 +20,8 @@ except ImportError:
     native = None
 
 needs_native = pytest.mark.skipif(
-    native is None or native.IR_CAPABILITY < REQUIRED_NATIVE_IR_CAPABILITY, reason="current native renderer required"
+    native is None or getattr(native, "IR_CAPABILITY", 0) < REQUIRED_NATIVE_IR_CAPABILITY,
+    reason="current native renderer required",
 )
 
 # PIL's JpegImagePlugin.get_sampling() codes.

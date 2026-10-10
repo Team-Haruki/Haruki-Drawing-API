@@ -249,7 +249,7 @@ loop on already flattened FontTools contours. It does not substitute Skia/FreeTy
 It uses separate float32 operations, wrapping int16 winding and ties-to-even gray8 quantization.
 Inputs are bounded to 16,777,216 pixels, 262,144 points, 500,000,000 point-pixel operations and
 finite coordinates within 1e9; oversized/unsupported Python calls retain the original NumPy path.
-This helper added no cache or IR node and did not change the IR capability (now 29; see below). Rebuild the wheel to get this helper;
+This helper added no cache or IR node and did not change the IR capability (now 30; see below). Rebuild the wheel to get this helper;
 older extensions keep the NumPy calculation. Cold/warm parity AND before/after PNG checks are
 required: current Pillow and Skia share this arithmetic helper, so their agreement alone is insufficient.
 
@@ -393,8 +393,8 @@ an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 `HARUKI_SKIA_SDF_FONT_CACHE_MB`, `HARUKI_SKIA_SDF_FONT_CACHE_MAX_ENTRY_MB`, `HARUKI_SKIA_TEXT_HINTING`,
 `HARUKI_SKIA_TEXT_GAMMA`, `HARUKI_SKIA_PROFILE`.
 
-**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **29**) and `RAW_BUFFER_CAPABILITY`;
-`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 29). A too-old
+**Capability handshake.** The extension exports `IR_CAPABILITY` (currently **30**) and `RAW_BUFFER_CAPABILITY`;
+`src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 30). A too-old
 extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides.** The CI smoke checks
 (`scripts/ci/repair-freetype.sh`, `scripts/skia_codec_smoke.py`) read `REQUIRED_NATIVE_IR_CAPABILITY`. The Docker build's
 self-check needs **no** edit: it calls `load_native_renderer()`, which compares the installed

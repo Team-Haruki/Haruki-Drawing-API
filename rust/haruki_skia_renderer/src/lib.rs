@@ -429,7 +429,8 @@ fn validate_raw_image(
 /// 23 = natural-size alpha crop LUT, isolated before downstream raster resizing.
 /// 24 = WebP image sources and native foreground metadata are required by lazy layouts.
 // 28 = unquantized float32 SdfQuad fields and bounded fail-closed shading.
-pub const IR_CAPABILITY: u32 = 29;
+// 30 = scene `jpg_subsampling` (JPEG chroma subsampling; older wheels ignore it and emit 4:2:0).
+pub const IR_CAPABILITY: u32 = 30;
 
 /// Capability of the raw `mem:` pixel transport (the tuple forms `extract_mem_image` accepts).
 /// 2 = the six-tuple accepts color type `"a8"` (ColorType::Alpha8, row_bytes == width) for
