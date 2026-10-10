@@ -631,7 +631,7 @@ Callers classify by `code`, so codes are API: add new ones, never rename.
 
 A successful render that drew any missing-asset placeholder ("?") answers `X-Haruki-Render-Missing-Assets: <n>`
 on every image exit (store-ref refs also carry `missing_assets`), next to the existing `X-Haruki-Cache-Store: 0`;
-Cloud uses it to cache such a render briefly instead of under its rule TTL. Every substitution must go through
+Cloud logs it per route and keeps such renders uncached (an opt-in short TTL exists). Every substitution must go through
 `record_missing_asset` (directly or via `_log_missing_image_once` / `on_missing="raise"`), and no cache may
 store output drawn while `current_missing_asset_count() > 0` — a later hit would not count the placeholder.
 See docs/artifact-storage.md §2.

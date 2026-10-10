@@ -26,7 +26,7 @@ DEGRADED_HEADER = "X-Haruki-Artifact-Degraded"
 CACHE_STORE_HEADER = "X-Haruki-Cache-Store"
 NODE_HEADER = "X-Haruki-Node"
 # Missing assets drawn as "?" placeholders in this render. Sent only when > 0, on every image exit (bytes,
-# store 0, degraded, store-ref), so a caller can give such a render a short cache life instead of its rule TTL.
+# store 0, degraded, store-ref), so a caller can tell it from other no-store answers and see which routes show "?".
 MISSING_ASSETS_HEADER = "X-Haruki-Render-Missing-Assets"
 
 

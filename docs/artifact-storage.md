@@ -69,7 +69,8 @@ store-ref, store-ref degraded) when the render drew `n > 0` missing-asset placeh
 request scope's count plus the heavy worker's (`EncodedImagePayload.missing_asset_count`). A complete render
 does not carry the header, so its response is unchanged. Such a render always also carries
 `X-Haruki-Cache-Store: 0`; the count lets a caller tell "drew a placeholder" apart from the other no-store
-reasons and give it a short, non-sliding cache life instead of none (Cloud's `drawing_cache.placeholder_ttl`).
+reasons. Cloud logs such renders per route and, by default, still never caches them (an opt-in
+`drawing_cache.placeholder_ttl` gives them a short, non-sliding in-process life).
 
 `X-Haruki-Node` is on **every** response. Its value is `storage.node_name`, or the host name when that is
 empty. Cloud uses `ref.node_name` on the artifact branch and this header on the bytes and degraded
