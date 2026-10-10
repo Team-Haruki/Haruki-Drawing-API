@@ -1,106 +1,149 @@
-FROM python:3.14-slim-trixie AS builder
+# Layer order is chosen so a release that only bumps the version re-ships only the small top layers
+# (native wheel when it changed, app code, labels). From the bottom of the runtime image:
+#   1. debian:trixie-slim (shared with the asset-updater image on the render nodes)
+#   2. apt runtime packages                      -> changes with the package list / base image
+#   3. free-threaded CPython from uv             -> changes with PYTHON_BUILD / UV_VERSION only
+#   4. third-party wheels (uv export of the lock without the project itself)
+#                                                -> changes only when a dependency changes, not on a
+#                                                   version bump (the project line is not exported)
+#   5. haruki_skia_renderer wheel                -> changes only when the renderer bytes change
+#   6. app code                                  -> every release
+# Every self-check runs with PYTHONDONTWRITEBYTECODE=1 so it adds no __pycache__ to the image.
 
-# 构建部分三方包（例如 psutil）需要编译工具链
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+ARG PYTHON_BUILD=cpython-3.14.3+freethreaded
+ARG VENV=/app/haruki_drawing_api/.venv
+ARG SITE_PACKAGES=/app/haruki_drawing_api/.venv/lib/python3.14t/site-packages
 
-# 安装 uv（避免依赖 ghcr 拉取权限）
-RUN pip install --no-cache-dir uv
-# 工作目录
-WORKDIR /app/haruki_drawing_api
+FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
 
-# 设置uv缓存目录
-ENV UV_CACHE_DIR=/root/.cache/uv \
-    UV_PYTHON_INSTALL_DIR=/opt/uv/python \
-    UV_PYTHON=cpython-3.14.3+freethreaded \
-    UV_PROJECT_ENVIRONMENT=/app/haruki_drawing_api/.venv
-# 复制依赖文件
-COPY pyproject.toml uv.lock ./
+# ── Runtime base: system packages first, so they sit below everything that changes more often ──
+FROM debian:trixie-slim AS base
 
-# 安装依赖
-RUN --mount=type=cache,target=$UV_CACHE_DIR \
-    uv python install ${UV_PYTHON} \
-    && uv venv ${UV_PROJECT_ENVIRONMENT} --python ${UV_PYTHON} \
-    && uv sync --frozen --no-install-project --no-dev --python ${UV_PROJECT_ENVIRONMENT}/bin/python
-
-# The service requires its matching native wheel; an absent or incompatible wheel is a build failure.
-COPY docker/skia-wheels/ /tmp/skia-wheels/
-RUN --mount=type=cache,target=$UV_CACHE_DIR \
-    set -eux; \
-    test "$(find /tmp/skia-wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1; \
-    uv pip install --python ${UV_PROJECT_ENVIRONMENT}/bin/python /tmp/skia-wheels/*.whl; \
-    rm -rf /tmp/skia-wheels
-
-# 运行阶段
-FROM python:3.14-slim-trixie AS runtime
-
-# 工作目录
-WORKDIR /app/haruki_drawing_api
-# 复制虚拟环境
-COPY --from=builder /app/haruki_drawing_api/.venv /app/haruki_drawing_api/.venv
-COPY --from=builder /opt/uv/python /opt/uv/python
-
-# 设置时区，配置环境变量，确保优先使用虚拟环境中的 Python 和 Bin
 ENV TZ=Asia/Shanghai \
-    PYTHON_GIL=0 \
-    MALLOC_ARENA_MAX=2 \
-    MALLOC_TRIM_THRESHOLD_=131072 \
-    PATH="/app/haruki_drawing_api/.venv/bin:$PATH"
+    LANG=C.UTF-8
 
-# 安装图片渲染运行时依赖：
-# - libstdc++/libgcc/expat/zlib/freetype/fontconfig 是 haruki_skia_renderer（skia-safe）wheel 的外部 ELF 依赖；
-#   pjsekai-scores-rs 0.6+ 是纯 Rust 栅格后端，不需要任何系统库。
-# - libgl/glib/x11 相关库用于现有图像依赖链。
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Runtime system packages (verified with ldd over every ELF file in the image):
+# - libstdc++6 / libgcc-s1 / zlib1g / libexpat1: external ELF dependencies of the Skia renderer
+#   wheel (it bundles its own FreeType, fontconfig, libpng, brotli and bz2) and of numpy/granian.
+# - libfreetype6: custom-profile rendering loads it through ctypes.util.find_library("freetype").
+# - fontconfig + ttf-wqy-zenhei: the system CJK face Skia's FontMgr falls back to when a configured
+#   font file is missing (startup reports such a fallback). Emoji come from the data volume's font dir.
+# - ca-certificates / netbase / tzdata: TLS roots, /etc/services and /etc/protocols, the timezone.
+# pjsekai-scores-rs 0.6+ is pure Rust and needs no system library. Nothing links libGL, glib or X11.
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates \
+    netbase \
+    tzdata \
     libstdc++6 \
     libgcc-s1 \
     libexpat1 \
     zlib1g \
     libfreetype6 \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
-    fonts-noto-color-emoji \
-    # 设置时区
-    tzdata \
-    openntpd \
-    # 下载中文字体
     fontconfig \
     ttf-wqy-zenhei \
     && ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone \
-    && fc-cache -fv \
-    && apt-get clean && rm -rf /var/lib/apt/lists/*
+    && fc-cache -f \
+    && rm -rf \
+    /var/lib/apt/lists/* \
+    /var/cache/debconf/*-old \
+    /usr/share/doc/* \
+    /usr/share/info/* \
+    /usr/share/lintian/* \
+    /usr/share/man/*
 
-# pjsekai-scores-rs 0.6+ renders PNG/JPEG with its pure-Rust backend and links no system
-# libraries. Fail the image build early if the chart extension cannot be imported.
-RUN /app/haruki_drawing_api/.venv/bin/python -c "import pjsekai_scores_rs; from pjsekai_scores_rs import Drawing; print(pjsekai_scores_rs.RASTER_BACKEND, Drawing.jpg)"
+# ── Free-threaded CPython, keyed only by PYTHON_BUILD and the uv version ──
+FROM debian:trixie-slim AS python
+ARG PYTHON_BUILD
+COPY --from=uv /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python \
+    UV_PYTHON_DOWNLOADS=manual \
+    UV_NO_CACHE=1
+# Trim what a headless service never loads: Tcl/Tk (tkinter, IDLE, turtle demo), the IDLE editor and
+# the C headers. The interpreter's own stdlib __pycache__ is kept (it speeds up startup).
+RUN set -eux; \
+    uv python install "${PYTHON_BUILD}"; \
+    root="$(uv python find "${PYTHON_BUILD}")"; root="$(dirname "$(dirname "$(readlink -f "$root")")")"; \
+    cd "$root"; \
+    rm -rf include bin/idle3* \
+      lib/libtcl* lib/libtk* lib/tcl* lib/tk* lib/itcl* lib/thread* \
+      lib/python3.14t/tkinter lib/python3.14t/idlelib lib/python3.14t/turtledemo lib/python3.14t/turtle.py \
+      lib/python3.14t/lib-dynload/_tkinter.*; \
+    "$root/bin/python3.14t" -c "import sys, ssl, sqlite3, ctypes; assert not sys._is_gil_enabled()"
 
-# 复制项目代码
-COPY . .
+# ── Third-party wheels from the lock, without the project (a version bump does not change them) ──
+FROM python AS lock
+WORKDIR /src
+COPY pyproject.toml uv.lock ./
+RUN uv export --frozen --no-dev --no-emit-project --format requirements.txt -o /requirements.txt
 
-# Validate the actual runtime dependency boundary and render with the installed extension.
+FROM python AS deps
+ARG PYTHON_BUILD
+ARG VENV
+COPY --from=lock /requirements.txt /tmp/requirements.txt
+# Every runtime dependency ships a cp314t manylinux wheel; --no-build makes a missing one a build failure.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    UV_NO_CACHE=0 UV_LINK_MODE=copy sh -eux -c '\
+    uv venv "$0" --python "$1"; \
+    uv pip install --python "$0/bin/python" --require-hashes --no-deps --no-build --compile-bytecode \
+      -r /tmp/requirements.txt' "${VENV}" "${PYTHON_BUILD}"
+
+# ── The Skia renderer wheel on its own; the service refuses to start without it ──
+FROM python AS native
+ARG PYTHON_BUILD
+COPY docker/skia-wheels/ /tmp/skia-wheels/
+RUN set -eux; \
+    test "$(find /tmp/skia-wheels -maxdepth 1 -name '*.whl' | wc -l)" -eq 1; \
+    uv pip install --python "$(uv python find "${PYTHON_BUILD}")" --target /native --no-deps --no-build \
+      --compile-bytecode /tmp/skia-wheels/*.whl
+
+# ── Runtime ──
+FROM base AS runtime
+ARG VENV
+ARG SITE_PACKAGES
+
+WORKDIR /app/haruki_drawing_api
+COPY --from=python /opt/uv/python /opt/uv/python
+COPY --from=deps ${VENV} ${VENV}
+COPY --from=native /native/ ${SITE_PACKAGES}/
+
+ENV PYTHON_GIL=0 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_TRIM_THRESHOLD_=131072 \
+    PATH="${VENV}/bin:$PATH"
+
+# 复制项目代码（docker/ 只装着构建用的 wheel，不进运行镜像）
+COPY --exclude=docker . .
+
+# Validate the actual runtime dependency boundary and render with the installed extensions.
 # The codec smoke reads the capability requirement from Python and exercises native image APIs.
-RUN /app/haruki_drawing_api/.venv/bin/python -X gil=0 - <<'PYTHON'
+# PYTHONDONTWRITEBYTECODE keeps these checks from leaving __pycache__ in the image.
+RUN PYTHONDONTWRITEBYTECODE=1 /app/haruki_drawing_api/.venv/bin/python -X gil=0 - <<'PYTHON'
 import importlib.util
 import sys
 
 assert not sys._is_gil_enabled(), "the service requires CPython free-threading"
 for name in ("PIL", "matplotlib", "pilmoji"):
     assert importlib.util.find_spec(name) is None, f"legacy renderer leaked into production: {name}"
+# pjsekai-scores-rs 0.6+ renders charts with its pure-Rust backend and links no system library.
+import pjsekai_scores_rs
+from pjsekai_scores_rs import Drawing
+print(f"chart self-check passed ({pjsekai_scores_rs.RASTER_BACKEND}, {Drawing.jpg})")
 from fontTools.ttLib import TTFont  # TMP vector contours require this independently of Matplotlib.
 from src.sekai.skia_renderer.canvas import load_native_renderer
 native = load_native_renderer()
 print(f"native renderer self-check passed (IR_CAPABILITY={native.IR_CAPABILITY})")
+# Custom-profile text loads the system FreeType through ctypes.
+import ctypes.util
+assert ctypes.util.find_library("freetype"), "libfreetype not found"
 # Object storage (Garage) and the render index; both must load without re-enabling the GIL.
 import opendal
 import asyncpg
+import granian
+import numpy
 assert not sys._is_gil_enabled(), "opendal/asyncpg re-enabled the GIL"
 print(f"storage self-check passed (opendal={opendal.__version__}, asyncpg={asyncpg.__version__})")
 PYTHON
-RUN /app/haruki_drawing_api/.venv/bin/python -X gil=0 scripts/skia_codec_smoke.py
+RUN PYTHONDONTWRITEBYTECODE=1 /app/haruki_drawing_api/.venv/bin/python -X gil=0 scripts/skia_codec_smoke.py
 
 # 构建溯源。放在自检之后:ARG 的值每次构建都变,写在上面会让它下面的每一层缓存全部失效。
 # .github/workflows/docker.yml 一直在传这三个 --build-arg,但 Dockerfile 里没有对应的 ARG,

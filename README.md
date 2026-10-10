@@ -46,7 +46,7 @@ Compose 默认把 `./data` 挂载到容器内 `/pjskdata/Data`，并把 `configs
 
 公开仓库中的 `src/sekai/mysekai/drawer.py` 与 `src/sekai/mysekai/content_drawer.py`（商店 / 一键采集 / 期间蓝图）只是接口占位文件。生产环境必须将真实实现分别 bind-mount 到同一路径；不要把 `drawer.real.py`、`content_drawer.real.py` 复制进镜像或提交到仓库。
 
-Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。CI 在 GitHub 托管 runner 上每个 commit 只构建一次 wheel，通过 ABI、能力握手和原生编解码检查后用于测试和 main 镜像；打标签只把该 commit 的 main 镜像重打标签。
+Docker 构建前必须在 `docker/skia-wheels/` 放入且只放入一个匹配目标平台的 wheel。构建检查原生能力、实际编解码及生产依赖树，Pillow、Matplotlib、Pilmoji 均不得存在。镜像按变化频率分层（系统包 → 解释器 → 第三方依赖 → 渲染器 wheel → 应用代码），只改版本号的发布只会新增顶部几层。CI 在 GitHub 托管 runner 上每个 commit 只构建一次 wheel，通过 ABI、能力握手和原生编解码检查后用于测试和 main 镜像；打标签只把该 commit 的 main 镜像重打标签。
 
 ## 运维端点
 
