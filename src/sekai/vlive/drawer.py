@@ -22,7 +22,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import request_now
+from src.sekai.base.timezone import caller_label, format_user_time, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     collect_asset_signatures,
@@ -50,9 +50,9 @@ _VLIVE_ENTRY_CONTENT_W = 724
 # no tag at all, so ordinary lives keep their exact layout. Unknown future types show verbatim.
 _VLIVE_TYPE_LABELS: dict[str, str | None] = {
     "normal": None,
-    "solo_virtual_live": "个人Live",
+    "solo_virtual_live": "个人 Live",
     "virtual_message": "Virtual Message",
-    "cheerful_carnival": "欢乐嘉年华",
+    "cheerful_carnival": "欢乐嘉年华(5v5)",
     "streaming": "直播",
     "beginner": "新手",
 }
@@ -60,11 +60,15 @@ _TYPE_TAG_STYLE = TextStyle(font=DEFAULT_BOLD_FONT, size=14, color=(255, 255, 25
 _TYPE_TAG_FILL = (90, 110, 200, 220)
 
 
-def vlive_type_label(virtual_live_type: str | None) -> str | None:
+def vlive_type_label(virtual_live_type: str | None, request=None) -> str | None:
     kind = str(virtual_live_type or "").strip()
     if not kind:
         return None
-    return _VLIVE_TYPE_LABELS.get(kind.lower(), kind)
+    key = kind.lower()
+    if key not in _VLIVE_TYPE_LABELS:
+        return kind
+    fallback = _VLIVE_TYPE_LABELS[key]
+    return None if fallback is None else caller_label(request, f"vlive.type.{key}", fallback)
 
 
 def _type_tag(label: str) -> TextBox:
@@ -75,14 +79,14 @@ def _type_tag(label: str) -> TextBox:
 def _vlive_entry_title(vlive: VLiveBrief) -> str:
     title = f"【{vlive.id}】{vlive.group_name or vlive.name}"
     if vlive.group_count:
-        title += f" (共{vlive.group_count}场个人Live)"
+        title += f"（共 {vlive.group_count} 场个人 Live）"
     return title
 
 
 def _format_time(dt: datetime | None) -> str:
     if dt is None:
         return "-"
-    return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return format_user_time(dt)
 
 
 def _format_relative(target: datetime | None, now: datetime) -> str:
@@ -103,14 +107,14 @@ def _format_relative(target: datetime | None, now: datetime) -> str:
 
 
 def _build_vlive_time_text(label: str, target: datetime | None, now: datetime) -> str:
-    return f"{label} {_format_time(target)} ({_format_relative(target, now)})"
+    return f"{label} {_format_time(target)}（{_format_relative(target, now)}）"
 
 
 def _build_vlive_status_text(vlive: VLiveBrief, now: datetime) -> str:
     if vlive.living:
-        return "当前Live进行中!"
+        return "当前 Live 进行中"
     if vlive.current_start_at is not None:
-        return f"下一场: {_format_relative(vlive.current_start_at, now)}"
+        return f"下一场：{_format_relative(vlive.current_start_at, now)}"
     return "已结束"
 
 
@@ -123,19 +127,28 @@ def _vlive_entry_time_texts(vlive: VLiveBrief, now: datetime) -> tuple[str, str,
     return (
         _build_vlive_time_text("开始于", start, now),
         _build_vlive_time_text("结束于", end, now),
-        f"{_build_vlive_status_text(vlive, now)} | 剩余场次: {vlive.rest_count}",
+        f"{_build_vlive_status_text(vlive, now)} | 剩余场次：{vlive.rest_count}",
     )
 
 
 def _build_vlive_entry_cache_key(
-    vlive: VLiveBrief, now: datetime, *, time_texts: tuple[str, str, str] | None = None
+    vlive: VLiveBrief,
+    now: datetime,
+    *,
+    time_texts: tuple[str, str, str] | None = None,
+    type_label: str | None = None,
 ) -> str:
     material = vlive.model_dump(mode="json")
+    if type_label is None:
+        type_label = vlive_type_label(vlive.virtual_live_type)
     return build_rendered_image_cache_key(
         "vlive_list_entry",
         material,
         asset_signatures=collect_asset_signatures(ASSETS_BASE_DIR, material),
-        extra={"time_texts": time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)},
+        extra={
+            "time_texts": time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now),
+            "type_label": type_label,
+        },
     )
 
 
@@ -164,6 +177,7 @@ def _build_vlive_entry_canvas(
     now: datetime,
     *,
     time_texts: tuple[str, str, str] | None = None,
+    type_label: str | None = None,
 ) -> Canvas:
     title_style = TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(20, 20, 20))
     info_style = TextStyle(font=DEFAULT_FONT, size=18, color=(50, 50, 50))
@@ -175,7 +189,8 @@ def _build_vlive_entry_canvas(
     banner = loaded.get("banner")
     start_text, end_text, status_text = time_texts if time_texts is not None else _vlive_entry_time_texts(vlive, now)
 
-    type_label = vlive_type_label(vlive.virtual_live_type)
+    if type_label is None:
+        type_label = vlive_type_label(vlive.virtual_live_type)
 
     with Canvas().set_padding(0) as canvas:
         with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
@@ -232,15 +247,16 @@ async def _compose_vlive_entry_image(vlive: VLiveBrief, loaded: dict[str, object
     return await _build_vlive_entry_canvas(vlive, loaded, now).get_img()
 
 
-async def _get_vlive_list_entry_canvas(vlive: VLiveBrief, now: datetime):
+async def _get_vlive_list_entry_canvas(vlive: VLiveBrief, now: datetime, request=None):
     from src.sekai.base.canvas_cache import prepare_cached_canvas
 
     time_texts = _vlive_entry_time_texts(vlive, now)
-    cache_key = _build_vlive_entry_cache_key(vlive, now, time_texts=time_texts)
+    type_label = vlive_type_label(vlive.virtual_live_type, request)
+    cache_key = _build_vlive_entry_cache_key(vlive, now, time_texts=time_texts, type_label=type_label)
 
     async def build():
         loaded = await _preload_vlive_entry_assets(vlive)
-        return _build_vlive_entry_canvas(vlive, loaded, now, time_texts=time_texts)
+        return _build_vlive_entry_canvas(vlive, loaded, now, time_texts=time_texts, type_label=type_label)
 
     return await prepare_cached_canvas(cache_key, build), cache_key
 
@@ -251,7 +267,7 @@ async def _build_vlive_list_canvas(rqd: VLiveListRequest, now: datetime | None =
         now = request_now(rqd.timezone)
 
     entry_canvases = (
-        await asyncio.gather(*[_get_vlive_list_entry_canvas(vlive, now) for vlive in lives]) if lives else []
+        await asyncio.gather(*[_get_vlive_list_entry_canvas(vlive, now, rqd) for vlive in lives]) if lives else []
     )
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
@@ -304,10 +320,10 @@ def _detail_styles() -> dict[str, TextStyle]:
 
 def _detail_live_status_text(live: VLiveDetailLive, now: datetime) -> str:
     if live.living:
-        return "当前Live进行中!"
+        return "当前 Live 进行中"
     if live.current_start_at is not None:
         start = live.current_start_at
-        return f"下一场 {start.strftime('%m-%d %H:%M')} ({_format_relative(start, now)})"
+        return f"下一场 {start.strftime('%m-%d %H:%M')}（{_format_relative(start, now)}）"
     return "已结束"
 
 
@@ -341,10 +357,10 @@ def _detail_summary_text(rqd: VLiveDetailRequest, now: datetime) -> str:
     rest = sum(live.rest_count for live in rqd.lives)
     parts: list[str] = []
     if rqd.lives:
-        parts.append(f"{len(rqd.lives)}场Live")
+        parts.append(f"{len(rqd.lives)} 场 Live")
         if living:
-            parts.append(f"{living}场进行中")
-        parts.append(f"剩余场次: {rest}")
+            parts.append(f"{living} 场进行中")
+        parts.append(f"剩余场次：{rest}")
     elif rqd.end_at < now:
         parts.append("已结束")
     return " | ".join(parts)
@@ -397,7 +413,7 @@ def _reward_row(rewards: list[VLiveRewardItem], icons: list[object], styles: dic
 
 
 def _detail_header(rqd: VLiveDetailRequest, banner: object | None, now: datetime, styles) -> None:
-    type_label = vlive_type_label(rqd.virtual_live_type)
+    type_label = vlive_type_label(rqd.virtual_live_type, rqd)
     with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
         if type_label is not None:
             _type_tag(type_label)
@@ -445,7 +461,7 @@ def _detail_cheer_rewards(rqd: VLiveDetailRequest, icons: list[list[object]], st
     with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
         header = "累计应援点奖励"
         if rqd.total_cheer_point is not None:
-            header += f"  (当前累计 {rqd.total_cheer_point:,} pt)"
+            header += f"（当前累计 {rqd.total_cheer_point:,} pt）"
         TextBox(header, styles["section"])
         for reward, reward_icons in zip(rewards, icons):
             state, color = _cheer_reward_state(reward, rqd.total_cheer_point)
@@ -463,7 +479,7 @@ def _detail_surplus(rqd: VLiveDetailRequest, icons: list[object], styles) -> Non
         with HSplit().set_content_align("l").set_item_align("c").set_sep(12):
             text = f"之后每 {surplus.base_point:,} pt"
             if surplus.received_count is not None:
-                text += f" (已领取 {surplus.received_count} 次)"
+                text += f"（已领取 {surplus.received_count} 次）"
             TextBox(text, styles["info"])
             _reward_row(surplus.rewards, icons, styles)
 

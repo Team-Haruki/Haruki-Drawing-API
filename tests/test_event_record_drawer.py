@@ -53,13 +53,13 @@ def test_event_record_sort_rank_supports_all_rank_forms() -> None:
 def test_event_record_rows_sort_ranked_and_point_only_records() -> None:
     ranked = [_event(1, rank_display="T20", point=100), _event(2, rank=10, point=50)]
     title, has_rank, rows = drawer._event_record_rows("活动", ranked)
-    assert title == "排名前30的活动记录"
+    assert title == "排名前 30 的活动记录"
     assert has_rank is True
     assert [item.id for item in rows] == [2, 1]
 
     point_only = [_event(3, point=None), _event(4, point=200)]
-    title, has_rank, rows = drawer._event_record_rows("WL单榜", point_only)
-    assert title == "活动点数前30的WL单榜记录"
+    title, has_rank, rows = drawer._event_record_rows("WL 单榜", point_only)
+    assert title == "活动 PT 前 30 的 WL 单榜记录"
     assert has_rank is False
     assert [item.id for item in rows] == [4, 3]
     assert drawer._event_record_point(rows[-1]) == 0
@@ -87,7 +87,7 @@ def test_build_event_record_canvas_dispatches_both_groups(monkeypatch) -> None:
     canvas = asyncio.run(drawer._build_event_record_canvas(request))
 
     assert canvas is not None
-    assert calls == [("活动", [1]), ("WL单榜", [2])]
+    assert calls == [("活动", [1]), ("WL 单榜", [2])]
 
 
 def test_build_event_record_canvas_accepts_empty_history_without_note(monkeypatch) -> None:

@@ -162,7 +162,7 @@ def test_build_gacha_list_canvas_covers_time_and_image_variants(monkeypatch) -> 
         (GachaBehavior(type="once_a_week", spin_count=10), "每周/十连"),
         (
             GachaBehavior(type="normal", spin_count=10, colorful_pass=True, execute_limit=2),
-            "月卡普通/十连(限2次)",
+            "月卡普通/十连（限 2 次）",
         ),
         (GachaBehavior(type="unknown", spin_count=5), "未知"),
     ],
@@ -188,7 +188,7 @@ def test_group_gacha_behaviors_preserves_first_seen_order() -> None:
     ("rate", "guaranteed_rate", "expected"),
     [
         (0.03, 0.0, "3%"),
-        (0.03, 1.0, "3% / 100% (保底)"),
+        (0.03, 1.0, "3% / 100%（保底）"),
     ],
 )
 def test_rate_text_includes_guaranteed_rate(rate: float, guaranteed_rate: float, expected: str) -> None:
@@ -201,7 +201,7 @@ def test_pickup_rate_text_scales_guaranteed_rate() -> None:
         weight_info=SimpleNamespace(rarity_4_rate=0.03, guaranteed_rates={"rarity_4": 1.0}),
     )
 
-    assert gacha_drawer._pickup_rate_text(request) == "1% / 33.3333% (保底)"
+    assert gacha_drawer._pickup_rate_text(request) == "1% / 33.3333%（保底）"
 
     request.weight_info.rarity_4_rate = 0.0
     assert gacha_drawer._pickup_rate_text(request) == "1%"

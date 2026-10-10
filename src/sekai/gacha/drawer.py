@@ -33,7 +33,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import datetime_from_millis, id_with_region, request_now
+from src.sekai.base.timezone import caller_label, datetime_from_millis, format_user_time, id_with_region, request_now
 from src.sekai.base.utils import (
     ImageSource,
     get_asset_image_ref,
@@ -142,17 +142,19 @@ GACHA_TYPE_NAMES = {
 # 保底行为类型映射
 GACHA_BEHAVIOR_NAMES = {
     "normal": "普通",
-    "over_rarity_3_once": "保底3星",
-    "over_rarity_4_once": "保底4星",
+    "over_rarity_3_once": "保底 3 星",
+    "over_rarity_4_once": "保底 4 星",
+    "once_a_day": "每日",
+    "once_a_week": "每周",
 }
 
 GACHA_RATE_RARITIES = ["rarity_1", "rarity_2", "rarity_3", "rarity_4", "rarity_birthday"]
 
 GACHA_RARE_NAMES = {
-    "rarity_1": "1星",
-    "rarity_2": "2星",
-    "rarity_3": "3星",
-    "rarity_4": "4星",
+    "rarity_1": "1 星",
+    "rarity_2": "2 星",
+    "rarity_3": "3 星",
+    "rarity_4": "4 星",
     "rarity_birthday": "生日",
     "pickup": "当期",
 }
@@ -327,7 +329,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                     TextBox(id_with_region(rqd.gacha.id, rqd.region, rqd.region_label), text_style)
                     Spacer(w=24)
                     TextBox("类型", label_style)
-                    TextBox(GACHA_TYPE_NAMES.get(rqd.gacha.gacha_type, rqd.gacha.gacha_type), text_style)
+                    TextBox(_gacha_type_label(rqd.gacha.gacha_type, rqd), text_style)
                     if rqd.gacha.ceil_item_img_path:
                         Spacer(w=24)
                         TextBox("交换物品", label_style)
@@ -338,14 +340,14 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                 with VSplit().set_padding(16).set_sep(8).set_content_align("c").set_item_align("c"):
                     with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         TextBox("开始时间", label_style)
-                        TextBox(start_time.strftime("%Y-%m-%d %H:%M"), text_style)
+                        TextBox(format_user_time(start_time), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         TextBox("结束时间", label_style)
-                        TextBox(end_time.strftime("%Y-%m-%d %H:%M"), text_style)
+                        TextBox(format_user_time(end_time), text_style)
                     with HSplit().set_padding(0).set_sep(8).set_content_align("c").set_item_align("c"):
                         if start_time >= now:
                             TextBox("距离开始还有", label_style)
-                            TextBox(get_readable_timedelta(end_time - now), text_style)
+                            TextBox(get_readable_timedelta(start_time - now), text_style)
                         elif end_time >= now:
                             TextBox("距离结束还有", label_style)
                             TextBox(get_readable_timedelta(end_time - now), text_style)
@@ -355,23 +357,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                 # 抽卡消耗
                 with VSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
                     # 合并相同类型不同消耗
-                    behaviors: dict[str, list[GachaBehavior]] = {}
-                    for behavior in rqd.gacha.behaviors:
-                        text = GACHA_BEHAVIOR_NAMES.get(behavior.type, "未知")
-                        match behavior.type:
-                            case "once_a_day":
-                                text = "每日"
-                            case "once_a_week":
-                                text = "每周"
-                        if behavior.spin_count == 1:
-                            text += "/单抽"
-                        elif behavior.spin_count == 10:
-                            text += "/十连"
-                        if behavior.colorful_pass:
-                            text = "月卡" + text
-                        if behavior.execute_limit:
-                            text += f"(限{behavior.execute_limit}次)"
-                        behaviors.setdefault(text, []).append(behavior)
+                    behaviors = _group_gacha_behaviors(rqd.gacha.behaviors, rqd)
                     with Grid(col_count=2).set_padding(0).set_sep(8, 8).set_content_align("l").set_item_align("l"):
                         for text, behavior_list in behaviors.items():
                             TextBox(text, label_style)
@@ -385,7 +371,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                             if cost_icon:
                                                 ImageBox(cost_icon, size=(None, 48))
                                         if "paid" in behavior.cost_type:
-                                            TextBox("(付费)", text_style)
+                                            TextBox("（付费）", text_style)
                                         if behavior.cost_quantity and behavior.cost_quantity > 1:
                                             TextBox(f"x{behavior.cost_quantity}", text_style)
                                     else:
@@ -394,7 +380,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                 # 当期卡牌
                 if rqd.pickup_cards:
                     with HSplit().set_padding(16).set_sep(16).set_content_align("c").set_item_align("c"):
-                        TextBox("当期卡片", label_style)
+                        TextBox("当期卡牌", label_style)
                         with (
                             Grid(col_count=min(5, len(rqd.pickup_cards)))
                             .set_padding(0)
@@ -421,23 +407,8 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                 TextBox("当期", label_style)
                                 TextBox(f"({len(rqd.pickup_cards)})", text_style)
 
-                            # 计算并显示UP卡总概率 (包含保底概率)
-                            pickup_total_rate = sum(card.rate for card in rqd.pickup_cards)
-                            pickup_rate_text = f"{get_float_str(pickup_total_rate * 100, 4)}%"
-
-                            # 检查4星是否有保底概率，如果有则计算UP卡的保底概率
-                            guaranteed_4star_rate = rqd.weight_info.guaranteed_rates.get("rarity_4", 0.0)
-                            if guaranteed_4star_rate > 0 and pickup_total_rate > 0:
-                                # 按比例计算UP卡在保底中的概率
-                                normal_4star_rate = rqd.weight_info.rarity_4_rate
-                                if normal_4star_rate > 0:
-                                    pickup_guaranteed_rate = guaranteed_4star_rate * (
-                                        pickup_total_rate / normal_4star_rate
-                                    )
-                                    pickup_guaranteed_text = f"{get_float_str(pickup_guaranteed_rate * 100, 4)}%"
-                                    pickup_rate_text = f"{pickup_rate_text} / {pickup_guaranteed_text} (保底)"
-
-                            TextBox(pickup_rate_text, text_style)
+                            # UP 卡总概率（含按比例折算的 4 星保底概率）
+                            TextBox(_pickup_rate_text(rqd), text_style)
 
                         # 显示各稀有度概率
                         for rarity in GACHA_RATE_RARITIES:
@@ -447,7 +418,7 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
 
                             # 获取该稀有度的卡牌数量
                             count = getattr(rqd.gacha, f"{rarity}_count", 0)
-                            rarity_name = GACHA_RARE_NAMES.get(rarity, rarity.replace("rarity_", ""))
+                            rarity_name = _gacha_rarity_label(rarity, rqd)
 
                             if count > 0:
                                 # 显示稀有度名称和数量
@@ -461,16 +432,8 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                     TextBox(f"({count})", text_style)
 
                                 # 显示概率
-                                normal_rate_text = f"{get_float_str(rate * 100, 4)}%"
-
                                 guaranteed_rate = rqd.weight_info.guaranteed_rates.get(rarity, 0.0)
-                                if guaranteed_rate > 0:
-                                    guaranteed_rate_text = f"{get_float_str(guaranteed_rate * 100, 4)}%"
-                                    rate_text = f"{normal_rate_text} / {guaranteed_rate_text} (保底)"
-                                else:
-                                    rate_text = normal_rate_text
-
-                                TextBox(rate_text, text_style)
+                                TextBox(_rate_text(rate, guaranteed_rate), text_style)
                             else:
                                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                                     rarity_img = _gd_cache.get(f"rarity_{rarity}")
@@ -479,20 +442,9 @@ async def _build_gacha_detail_canvas(rqd: GachaDetailRequest) -> Canvas:
                                     else:
                                         TextBox(rarity_name, label_style)
 
-                                # 显示概率 (包含保底概率)
-                                normal_rate_text = f"{get_float_str(rate * 100, 4)}%"
-
-                                # 检查是否有外部传入的保底概率
+                                # 显示概率（包含外部传入的保底概率）
                                 guaranteed_rate = rqd.weight_info.guaranteed_rates.get(rarity, 0.0)
-                                if guaranteed_rate > 0:
-                                    # 显示普通概率和保底概率
-                                    guaranteed_rate_text = f"{get_float_str(guaranteed_rate * 100, 4)}%"
-                                    rate_text = f"{normal_rate_text} / {guaranteed_rate_text} (保底)"
-                                else:
-                                    # 只显示普通概率
-                                    rate_text = normal_rate_text
-
-                                TextBox(rate_text, text_style)
+                                TextBox(_rate_text(rate, guaranteed_rate), text_style)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -523,30 +475,43 @@ def _rate_text(rate: float, guaranteed_rate: float) -> str:
     if guaranteed_rate <= 0:
         return normal_text
     guaranteed_text = f"{get_float_str(guaranteed_rate * 100, 4)}%"
-    return f"{normal_text} / {guaranteed_text} (保底)"
+    return f"{normal_text} / {guaranteed_text}（保底）"
 
 
-def _group_gacha_behaviors(behaviors: list[GachaBehavior]) -> dict[str, list[GachaBehavior]]:
+def _gacha_type_label(gacha_type: str, request=None) -> str:
+    fallback = GACHA_TYPE_NAMES.get(gacha_type)
+    return caller_label(request, f"gacha.type.{gacha_type}", fallback) if fallback else gacha_type
+
+
+def _gacha_rarity_label(rarity: str, request=None) -> str:
+    fallback = GACHA_RARE_NAMES.get(rarity)
+    if fallback is None:
+        return rarity.replace("rarity_", "")
+    return caller_label(request, f"gacha.rarity.{rarity}", fallback)
+
+
+def _group_gacha_behaviors(behaviors: list[GachaBehavior], request=None) -> dict[str, list[GachaBehavior]]:
     grouped: dict[str, list[GachaBehavior]] = {}
     for behavior in behaviors:
-        grouped.setdefault(_gacha_behavior_label(behavior), []).append(behavior)
+        grouped.setdefault(_gacha_behavior_label(behavior, request), []).append(behavior)
     return grouped
 
 
-def _gacha_behavior_label(behavior: GachaBehavior) -> str:
-    text = GACHA_BEHAVIOR_NAMES.get(behavior.type, "未知")
-    if behavior.type == "once_a_day":
-        text = "每日"
-    elif behavior.type == "once_a_week":
-        text = "每周"
+def _gacha_behavior_label(behavior: GachaBehavior, request=None) -> str:
+    """``保底 4 星/十连``, ``月卡每日/单抽（限 1 次）``: the behaviour name, its spin count, pass and limit."""
+    fallback = GACHA_BEHAVIOR_NAMES.get(behavior.type)
+    if fallback is None:
+        text = caller_label(request, "gacha.behavior.unknown", "未知")
+    else:
+        text = caller_label(request, f"gacha.behavior.{behavior.type}", fallback)
     if behavior.spin_count == 1:
-        text += "/单抽"
+        text += caller_label(request, "gacha.spin.single", "/单抽")
     elif behavior.spin_count == 10:
-        text += "/十连"
+        text += caller_label(request, "gacha.spin.ten", "/十连")
     if behavior.colorful_pass:
-        text = "月卡" + text
+        text = caller_label(request, "gacha.colorful_pass", "月卡{behavior}", behavior=text)
     if behavior.execute_limit:
-        text += f"(限{behavior.execute_limit}次)"
+        text += caller_label(request, "gacha.execute_limit", "（限 {count} 次）", count=behavior.execute_limit)
     return text
 
 

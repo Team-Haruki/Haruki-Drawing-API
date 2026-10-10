@@ -118,15 +118,16 @@ def test_request_watermark_datetime_formatting(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(draw, "datetime_from_millis", lambda _value, _timezone: aware)
 
     assert draw._format_request_watermark_datetime(None, None) is None
-    assert draw._format_request_watermark_datetime("Asia/Shanghai", 1) == "DT: 2026-08-30 12:34:56 (Asia/Shanghai)"
-    assert draw._format_request_watermark_datetime("", 1) == "DT: 2026-08-30 12:34:56 (CST)"
+    assert draw._format_request_watermark_datetime("Asia/Shanghai", 1) == "DT: 2026-08-30 12:34 (UTC+8)"
+    assert draw._format_request_watermark_datetime("", 1) == "DT: 2026-08-30 12:34 (UTC+8)"
 
+    # A naive datetime is read as UTC, like every other unzoned time, and shown in the default zone.
     monkeypatch.setattr(draw, "datetime_from_millis", lambda _value, _timezone: naive)
-    assert draw._format_request_watermark_datetime("", 1) == "DT: 2026-08-30 12:34:56"
+    assert draw._format_request_watermark_datetime("", 1) == "DT: 2026-08-30 20:34 (UTC+8)"
 
     monkeypatch.setattr(draw, "datetime_from_millis", lambda _value, _timezone: None)
     monkeypatch.setattr(draw, "request_now", lambda _timezone: aware)
-    assert draw._format_request_watermark_datetime(None, 0) == "DT: 2026-08-30 12:34:56 (CST)"
+    assert draw._format_request_watermark_datetime(None, 0) == "DT: 2026-08-30 12:34 (UTC+8)"
 
 
 def test_build_request_watermark_text_and_delegate(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -119,7 +119,7 @@ def test_music_detail_renderer_normalizes_display_values_and_leaderboard():
     assert renderer.name == "Test Song [FULL]"
     assert renderer.bpm_main == "180 BPM"
     assert renderer.event_id == 99
-    assert renderer._mv_text() == "原版MV & 3DMV & 2DMV"
+    assert renderer._mv_text() == "原版 MV & 3DMV & 2DMV"
     assert renderer._difficulty_order() == (
         ["easy", "normal", "hard", "expert", "master", "append"],
         True,

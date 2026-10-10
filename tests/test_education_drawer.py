@@ -41,12 +41,12 @@ def isolated_assets(monkeypatch: pytest.MonkeyPatch) -> None:
     ("quantity", "expected"),
     [
         (999, "999"),
-        (1_000, "1k"),
-        (1_500, "1k5"),
-        (10_000, "1w"),
-        (15_000, "1w5"),
-        (100_000, "10w"),
-        (10_000_000, "1kw"),
+        (1_000, "1千"),
+        (1_500, "1.5千"),
+        (10_000, "1万"),
+        (15_000, "1.5万"),
+        (100_000, "10万"),
+        (10_000_000, "1000万"),
     ],
 )
 def test_get_quant_text_boundaries(quantity: int, expected: str) -> None:
@@ -192,7 +192,7 @@ def test_power_bonus_builder_groups_each_bonus_kind(
     canvas = asyncio.run(drawer._build_power_bonus_detail_canvas(request))
 
     assert isinstance(canvas, Canvas)
-    assert {"0.0%", "4.0%", "5.0%", "区域道具1.0% + 烤森门3.0%"}.issubset(_texts(canvas))
+    assert {"0.0%", "4.0%", "5.0%", "区域道具 1.0% + 烤森门 3.0%"}.issubset(_texts(canvas))
 
 
 def test_area_item_helpers_and_builder_cover_profile_states(isolated_assets: None) -> None:
@@ -249,8 +249,8 @@ def test_area_item_helpers_and_builder_cover_profile_states(isolated_assets: Non
     assert drawer._area_level_color(2, 1, False, True) == (200, 0, 0)
     assert drawer._area_level_color(2, 1, False, False) == (50, 50, 50)
     assert isinstance(canvas.items[0].items[1], HSplit)
-    assert {"x1k5", "2k/3k", "0/1w"}.issubset(_texts(canvas))
-    assert {"3k", "1w"}.issubset(_texts(without_profile))
+    assert {"x1.5千", "2千/3千", "0/1万"}.issubset(_texts(canvas))
+    assert {"3千", "1万"}.issubset(_texts(without_profile))
 
 
 def test_bonds_builder_covers_absent_max_and_progress_states(isolated_assets: None) -> None:
@@ -374,7 +374,7 @@ def test_character_mission_progress_covers_badge_unbounded_and_completed_states(
     completed = drawer._draw_character_mission_progress("任务", 10, 10, 0, 200)
     unbounded = drawer._draw_character_mission_progress("任务", 1, None, 2, 200)
 
-    assert {"EX 2", "5/10 (50.0%)", "下一档5/10 EXP+?"}.issubset(_texts(active))
+    assert {"EX 2", "5/10 (50.0%)", "下一档 5/10 EXP+?"}.issubset(_texts(active))
     assert "下一档已满" in _texts(completed)
     assert "1/∞ (-)" in _texts(unbounded)
 
@@ -417,7 +417,7 @@ def test_character_mission_all_builder_chunks_normal_and_ex_tables(isolated_asse
     assert [len(chunk) for chunk in drawer._character_mission_table_chunks(normal, None)] == [40, 1]
     assert [len(chunk) for chunk in drawer._character_mission_table_chunks(normal, 2)] == [21, 20]
     assert drawer._character_mission_table_chunks(_section(is_ex=False, rows=[]), None) == [[]]
-    assert {"普通任务", "EX任务", "当前回目 EX 2", "#1", "#41"}.issubset(_texts(canvas))
+    assert {"普通任务", "EX 任务", "当前回目 EX 2", "#1", "#41"}.issubset(_texts(canvas))
     assert "没有可显示的任务表数据" in _texts(empty_canvas)
 
 
@@ -595,7 +595,7 @@ def test_area_item_renders_target_label_and_multi_unit_bonus(isolated_assets: No
     request = SimpleNamespace(profile=_profile(), area_items=[item], has_profile=True)
     canvas = asyncio.run(drawer._build_area_item_upgrade_materials_canvas(request))
     texts = _texts(canvas)
-    assert {"全角色", "+0.5%", "多团+0.5%", "+1.0%", "多团+1.0%"}.issubset(texts)
+    assert {"全角色", "+0.5%", "多团 +0.5%", "+1.0%", "多团 +1.0%"}.issubset(texts)
 
 
 def _power_request(**extra) -> SimpleNamespace:
@@ -617,8 +617,8 @@ def test_power_bonus_multi_unit_row_only_when_present(isolated_assets: None) -> 
 
     assert _texts(legacy) == _texts(explicit_none)
     assert _render_bytes(legacy) == _render_bytes(explicit_none)
-    assert "混合编成(2种以上组合) +10.0%" not in _texts(legacy)
-    assert _texts(present)[-1] == "混合编成(2种以上组合) +10.0%"
+    assert "混合编成（2 种以上组合）+10.0%" not in _texts(legacy)
+    assert _texts(present)[-1] == "混合编成（2 种以上组合）+10.0%"
 
 
 def test_education_models_accept_optional_area_item_56_fields() -> None:

@@ -40,7 +40,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.timezone import datetime_from_millis, id_with_region, request_now
+from src.sekai.base.timezone import caller_label, datetime_from_millis, format_user_time, id_with_region, request_now
 from src.sekai.base.utils import (
     get_asset_image_ref,
 )
@@ -239,8 +239,9 @@ def _normalize_card_box_attr(attr: str | None) -> str:
     return "unknown"
 
 
-def _card_box_attr_label(attr: str) -> str:
-    return CARD_BOX_ATTR_LABELS.get(attr, attr)
+def _card_box_attr_label(attr: str, request=None) -> str:
+    fallback = CARD_BOX_ATTR_LABELS.get(attr)
+    return caller_label(request, f"card.attr.{attr}", fallback) if fallback else attr
 
 
 def _card_box_attr_color(attr: str) -> str:
@@ -631,7 +632,7 @@ def _card_box_attribute_stats(
         stats.append(
             CardDistributionAttributeStat(
                 attr=attr,
-                label=_card_box_attr_label(attr),
+                label=_card_box_attr_label(attr, rqd),
                 count=bucket["count"],
                 owned_count=bucket["owned_count"],
                 bar_count=bar_count,
@@ -767,8 +768,8 @@ def _draw_card_detail_event(rqd: CardDetailRequest, extra_images: dict[str, obje
         with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
             ImageBox(extra_images["event_banner"], size=(250, None))
             with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
-                TextBox(f"开始时间: {event.start_at.strftime('%Y-%m-%d %H:%M')}", styles.small)
-                TextBox(f"结束时间: {event.end_at.strftime('%Y-%m-%d %H:%M')}", styles.small)
+                TextBox(f"开始时间：{format_user_time(event.start_at)}", styles.small)
+                TextBox(f"结束时间：{format_user_time(event.end_at)}", styles.small)
                 Spacer(h=4)
                 with HSplit().set_padding(0).set_sep(8).set_content_align("l").set_item_align("l"):
                     if event.bonus_attr and rqd.event_attr_icon_path:
@@ -788,8 +789,8 @@ def _draw_card_detail_gacha(rqd: CardDetailRequest, extra_images: dict[str, obje
         with HSplit().set_padding(0).set_sep(8).set_content_align("lt").set_item_align("lt"):
             ImageBox(extra_images["gacha_banner"], size=(250, None))
             with VSplit().set_content_align("c").set_item_align("c").set_sep(6):
-                TextBox(f"开始时间: {gacha.start_at.strftime('%Y-%m-%d %H:%M')}", styles.small)
-                TextBox(f"结束时间: {gacha.end_at.strftime('%Y-%m-%d %H:%M')}", styles.small)
+                TextBox(f"开始时间：{format_user_time(gacha.start_at)}", styles.small)
+                TextBox(f"结束时间：{format_user_time(gacha.end_at)}", styles.small)
 
 
 def _draw_card_detail_left(
@@ -857,7 +858,7 @@ def _draw_card_detail_info(rqd: CardDetailRequest, images: _CardDetailImages, st
             TextBox("综合力", styles.label)
             TextBox(
                 f"{card.power.power_total} ({card.power.power1}/{card.power.power2}/{card.power.power3}) "
-                "(满级0破无剧情)",
+                "（满级 0 破无剧情）",
                 styles.text,
             )
         _draw_card_detail_skill("技能", card.skill, images.skill_type_icon, styles, width, width - 24 * 2 - 32 - 16)
@@ -873,7 +874,7 @@ def _draw_card_detail_info(rqd: CardDetailRequest, images: _CardDetailImages, st
         release_time = datetime_from_millis(card.release_at, rqd.timezone)
         with HSplit().set_padding(16).set_sep(8).set_content_align("lb").set_item_align("lb"):
             TextBox("发布时间", styles.label)
-            TextBox(release_time.strftime("%Y-%m-%d %H:%M:%S"), styles.text)
+            TextBox(format_user_time(release_time), styles.text)
         with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
             TextBox("缩略图", styles.label)
             for layers in images.thumbnails:
@@ -1057,12 +1058,13 @@ def _draw_card_list_card(
     styles: _CardListStyles,
     now,
     timezone: str,
+    request=None,
 ) -> None:
     limited = not is_non_limited_supply_type(card.supply_type_key, card.supply_type)
     background = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True) if limited else roundrect_bg(alpha=80)
     with Frame().set_content_align("lb").set_bg(background):
         if datetime_from_millis(card.release_at, timezone) > now:
-            TextBox("未上线", styles.leak).set_offset((4, -4))
+            TextBox(caller_label(request, "card.unreleased", "未上线"), styles.leak).set_offset((4, -4))
         with Frame().set_content_align("rb"):
             if card.skill and card.skill.skill_type:
                 skill_img = assets.skills.get(card.skill.skill_type_icon_path)
@@ -1092,7 +1094,7 @@ def _draw_card_list_grid(
     now = request_now(rqd.timezone)
     with Grid(col_count=3).set_bg(roundrect_bg(alpha=80)).set_padding(16):
         for card, thumb_group in card_and_thumbs:
-            _draw_card_list_card(card, thumb_group, assets, styles, now, rqd.timezone)
+            _draw_card_list_card(card, thumb_group, assets, styles, now, rqd.timezone, rqd)
 
 
 async def _build_card_list_canvas(rqd: CardListRequest) -> Canvas:
@@ -1517,7 +1519,7 @@ class _CardBoxRenderer:
             else:
                 Spacer(w=8, h=22).set_bg(RoundRectBg(color, 4))
             TextBox(
-                stat.label or _card_box_attr_label(stat.attr),
+                stat.label or _card_box_attr_label(stat.attr, self.rqd),
                 TextStyle(font=DEFAULT_BOLD_FONT, size=20, color=(45, 52, 62)),
                 overflow="shrink",
             ).set_w(CARD_BOX_ATTR_LABEL_WIDTH)
@@ -1546,7 +1548,7 @@ class _CardBoxRenderer:
         return [
             CardDistributionAttributeStat(
                 attr=attribute,
-                label=_card_box_attr_label(attribute),
+                label=_card_box_attr_label(attribute, self.rqd),
                 count=sum(len(cards) for _, cards in self.layout.attribute_groups.get(attribute, [])),
                 color_code=_card_box_attr_color(attribute),
             )

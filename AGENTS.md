@@ -100,7 +100,7 @@ Skia chapter), and every other endpoint re-renders.
    iterates `HONOR_ASSET_MANIFEST` in `honor/assets.py`, so a new image field added there is keyed automatically; a
    path list written out by hand would drift silently, so **prefer the collector or a shared manifest**). Without them, an asset **replaced** at a
    path the request already names — or one that finally **arrives** after a `?` placeholder was cached in its place —
-   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` keys on the JSON request, collected asset signatures, and the exact displayed
+   does not move the key, and the stale picture is served until the entry expires. `vlive/drawer.py` keys on the JSON request, collected asset signatures, the drawn type tag and the exact displayed
    start/end/status strings. Its native preparation lookup reuses a fragment before asset loading/layout;
    the footer remains outside the fragment, and countdown changes within a minute invalidate the entry.
 
@@ -601,6 +601,37 @@ either side can deploy first.
 
 `region_display` / `id_with_region` / `region_tag` in `src/sekai/base/timezone.py` draw the label and fall back
 to the upper-cased code. Do not add new comparisons against caller text; add a key.
+
+**Labels Drawing used to localize itself come from the caller too.** Every request (`TimeZoneRequest`) takes an
+optional `labels` map from a stable label key to display text; `caller_label(request, key, fallback, **slots)`
+(`base/timezone.py`) draws the caller's text, else Drawing's own fallback, and fills `{slot}` tokens in either.
+The key names the raw value it labels (`gacha.type.ceil`, `deck.algorithm.dfs_ga`), so behaviour stays on the raw
+key and the label is only drawn. A request without `labels` renders as before. The keys:
+
+| Image | Keys |
+|---|---|
+| profile card (every `profile` / `user_info` and the info panel) | `profile.rank_level` (`{level}`), `profile.mysekai_level` (`{level}`) |
+| SK pages | `sk.time_to_end` (`{duration}`), `sk.event_ended`, `sk.prediction_notice`, `sk.single_chapter` |
+| player / rank trace | `sk.trace.player_score`, `sk.trace.player_rank` (`{name}`), `sk.trace.compare_line`, `sk.trace.compare_current`, `sk.trace.rank_title` (`{rank}`), `sk.trace.reference_line`, `sk.trace.reference_current`, `sk.trace.player_title` (`{names}`), `sk.trace.score_line`, `sk.trace.speed`, `sk.trace.predicted_final` (`{score}`) |
+| deck / event planner | `deck.title.<title key>` (`{event_id}`, `{noun}`), `deck.noun.deck`, `deck.noun.planner`, `deck.algorithm.<alg>`, `deck.skill_order.<strategy>`, `deck.skill_reference.<strategy>`, `deck.planner.title`, `deck.planner.source` (`{source}`), `deck.planner.target` / `current` / `remaining` (`{point}`) |
+| gacha detail | `gacha.type.<type>`, `gacha.behavior.<type>`, `gacha.spin.single`, `gacha.spin.ten`, `gacha.colorful_pass` (`{behavior}`), `gacha.execute_limit` (`{count}`), `gacha.rarity.<rarity>` |
+| inventory | `inventory.resource_type.<type>` |
+| costume list | `costume.part.<body\|head\|hair>` |
+| card list / card box | `card.unreleased`, `card.attr.<attr>` |
+| score control | `score.target_pt` |
+| vlive list / detail | `vlive.type.<virtualLiveType>` (the list entry fragment key includes the drawn tag) |
+
+The event planner merges its root `labels` into the deck request it renders (the deck request's own keys win).
+`DetailedProfileCardRequest` also takes `data_source_kind` (`suite`, `mysekai`, `public`) and `data_source_label`;
+its profile card draws the label, else Drawing's name for the kind (抓包数据 / 烤森数据 / 公开信息).
+
+**Drawn text follows the caller's copy spec** (Haruki-Cloud AGENTS.md §12): a full-width colon after Chinese,
+full-width parentheses in Chinese (except a region label such as `日服(JP)` and `欢乐嘉年华(5v5)`), a space between
+Chinese and Latin letters or digits, PT as a noun and pt as a unit, 万 rather than `w`, 演出能量 rather than 体力
+or 火, and times as `2026-10-09 14:05 (UTC+8)` through `format_user_time` / `format_user_time_range`
+(`base/timezone.py`, Cloud's `FormatUserTime`). Compact cells that cannot fit the offset (list entries, chart
+ticks, short ranges) keep `MM-DD HH:MM`. `tests/test_copy_style.py` lints every Chinese literal under
+`src/sekai` with Cloud's catalog rules; its allowlist holds only text that is never drawn.
 
 Failed renders answer `{"detail": "<text>", "code": "<code>"}` (`src/core/render_errors.py`): `detail` is the
 unchanged text, `code` is one of `RENDER_ERROR_CODES` in `src/sekai/base/render_errors.py` (`asset_missing`,

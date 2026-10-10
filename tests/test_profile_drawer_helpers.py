@@ -1,7 +1,5 @@
 from datetime import UTC, datetime
 
-from src.sekai.base.painter import DEFAULT_FONT
-from src.sekai.base.plot import TextBox, TextStyle
 from src.sekai.profile.drawer import (
     _CARD_AGE_FRESH,
     _CARD_AGE_STALE,
@@ -27,13 +25,9 @@ def _profile(*, hidden: bool = False) -> BasicProfile:
     )
 
 
-def test_profile_card_level_label_uses_compact_form_for_long_names() -> None:
-    short = [TextBox("Short", TextStyle(font=DEFAULT_FONT, size=12))]
-    long = [TextBox("abcdefghijklmnop", TextStyle(font=DEFAULT_FONT, size=12))]
-
-    assert _profile_card_level_label(short, None) is None
-    assert _profile_card_level_label(short, 42) == "MySekai Lv.42"
-    assert _profile_card_level_label(long, 42) == "MSLv.42"
+def test_profile_card_level_label_draws_the_mysekai_level() -> None:
+    assert _profile_card_level_label(None) is None
+    assert _profile_card_level_label(42) == "烤森 Lv.42"
 
 
 def test_profile_account_line_prefers_caller_labels() -> None:

@@ -26,7 +26,7 @@ def test_base_request_accepts_the_label() -> None:
 
 def test_sk_event_titles() -> None:
     assert get_event_id_and_name_text("jp", 42, "Event", "日服(JP)") == "【日服(JP) 42】Event"
-    assert get_event_id_and_name_text("en", 3007, "WL", "国际服(EN)") == "【国际服(EN) 7-第3章单榜】WL"
+    assert get_event_id_and_name_text("en", 3007, "WL", "国际服(EN)") == "【国际服(EN) 7-第 3 章单榜】WL"
     assert trace_spec.event_title("jp", 42) == "【JP-42】"
 
 

@@ -22,7 +22,7 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("size", [10 * 100 / 72, 12 * 100 / 72])
-@pytest.mark.parametrize("text", ["07-09 20:00", "123.4567w", "分数线", "排名", " ", ""])
+@pytest.mark.parametrize("text", ["07-09 20:00", "123.4567万", "榜线", "排名", " ", ""])
 def test_hinted_advances_match_legacy_chart_at_100_dpi(size, text):
     from src.sekai.base.pillow_vector import text_geometry
 

@@ -55,6 +55,10 @@ class PlayerFramePaths(BaseModel):
     side_right_bottom: str | None = None
 
 
+# Drawing's own data source names, used only when the caller sent no label (see AGENTS.md, decision C).
+DATA_SOURCE_FALLBACK_NAMES = {"suite": "抓包数据", "mysekai": "烤森数据", "public": "公开信息"}
+
+
 class DetailedProfileCardRequest(TimeZoneRequest):
     r"""DetailedProfileCardRequest
 
@@ -100,12 +104,26 @@ class DetailedProfileCardRequest(TimeZoneRequest):
     user_cards: list[dict] | None = None
     rank: int | None = None
     account_label: str | None = None
+    # What the profile's data came from: the raw key (suite, mysekai, public) and the caller's localized
+    # name for it. Drawing draws the name; without one it falls back to its own name for the key.
+    data_source_kind: str | None = None
+    data_source_label: str | None = None
+
+    def data_source_name(self) -> str:
+        """The data source label to draw: the caller's, else Drawing's own name for ``data_source_kind``."""
+        label = (self.data_source_label or "").strip()
+        if label:
+            return label
+        return DATA_SOURCE_FALLBACK_NAMES.get(
+            (self.data_source_kind or "").strip().lower(), DATA_SOURCE_FALLBACK_NAMES["suite"]
+        )
 
     def to_profile_card_request(self) -> "ProfileCardRequest":
         """转换为 ProfileCardRequest"""
         return ProfileCardRequest(
             timezone=self.timezone,
             region_label=self.region_label,
+            labels=self.labels,
             bg_alpha=80,
             rank=self.rank,
             profile=BasicProfile(
@@ -122,10 +140,11 @@ class DetailedProfileCardRequest(TimeZoneRequest):
             ),
             data_sources=[
                 ProfileDataSource(
-                    name="Suite数据",
+                    name=self.data_source_name(),
                     source=self.source,
                     update_time=self.update_time,
                     mode=self.mode,
+                    kind=(self.data_source_kind or "").strip().lower() or "suite",
                 )
             ],
         )

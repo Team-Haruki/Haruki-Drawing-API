@@ -101,12 +101,15 @@ def test_collect_speed_display_rows_uses_payload_ranks_without_default_filter():
 
 def test_basic_sk_formatters_cover_event_and_time_variants() -> None:
     assert drawer.get_event_id_and_name_text("jp", 42, "Event") == "【JP-42】Event"
-    assert drawer.get_event_id_and_name_text("en", 3007, "World Link") == "【EN-7-第3章单榜】World Link"
+    assert drawer.get_event_id_and_name_text("en", 3007, "World Link") == "【EN-7-第 3 章单榜】World Link"
     assert drawer.get_board_rank_str(12345) == "12,345"
     assert drawer.get_board_score_str(None) == "?"
-    assert drawer.get_board_score_str(123456, width=10) == "  12.3456w"
-    assert drawer._time_to_event_end_text(NOW - timedelta(seconds=1), NOW) == "活动已结束"
-    assert drawer._time_to_event_end_text(NOW + timedelta(hours=1), NOW).startswith("距离活动结束还有")
+    assert drawer.get_board_score_str(123456, width=10) == "  12.3456万"
+    assert drawer._time_to_event_end_text(None, NOW - timedelta(seconds=1), NOW) == "活动已结束"
+    assert drawer._time_to_event_end_text(None, NOW + timedelta(hours=1), NOW) == "距离活动结束还有 1小时"
+    labelled = SimpleNamespace(labels={"sk.time_to_end": "{duration} left", "sk.event_ended": "Ended"})
+    assert drawer._time_to_event_end_text(labelled, NOW + timedelta(hours=1), NOW) == "1小时 left"
+    assert drawer._time_to_event_end_text(labelled, NOW, NOW) == "Ended"
     assert drawer._readable_datetime_or_dash(None) == "-"
     assert drawer._rank_score_or_dash(None) == "-"
     assert drawer._rank_score_or_dash(_rank(1, score=None)) == "-"
@@ -185,8 +188,8 @@ def test_build_cf_canvas_covers_single_and_multi_player_details() -> None:
     )
     single_texts = _tree_texts(asyncio.run(drawer._build_cf_canvas(single)))
     assert "Requested Player" in single_texts
-    assert any("↑1.0000w" in text for text in single_texts)
-    assert any("20min×3时速" in text for text in single_texts)
+    assert any("↑1.0000万" in text for text in single_texts)
+    assert any("20min×3 时速" in text for text in single_texts)
 
     incomplete = _rank(
         30,
@@ -234,8 +237,8 @@ def test_build_sk_canvas_covers_single_multi_neighbors_and_icon() -> None:
     )
     single_texts = _tree_texts(asyncio.run(drawer._build_sk_canvas(single)))
     assert "Single" in single_texts
-    assert any("↑1.0000w" in text for text in single_texts)
-    assert any("↓1.0000w" in text for text in single_texts)
+    assert any("↑1.0000万" in text for text in single_texts)
+    assert any("↓1.0000万" in text for text in single_texts)
 
     multi = _request(
         id=42,

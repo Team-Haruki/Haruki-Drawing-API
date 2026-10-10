@@ -14,7 +14,7 @@ from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, Canvas, add_request_w
 from src.sekai.base.font_metrics import get_layout_font as get_font
 from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyle, VSplit
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.timezone import normalize_unix_millis, request_now
+from src.sekai.base.timezone import caller_label, normalize_unix_millis, request_now
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -51,7 +51,7 @@ RESOURCE_TYPE_DESCRIPTIONS = {
     "gacha_ceil_item": "招募",
     "practice_ticket": "育成",
     "skill_practice_ticket": "育成",
-    "mysekai_material": "MySekai",
+    "mysekai_material": "烤森",
     # JP 7.0.0 resource types
     "honor_background": "称号背景",
     "honor_word": "称号文字",
@@ -72,7 +72,7 @@ async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
             with VSplit().set_w(PANEL_WIDTH).set_content_align("lt").set_item_align("lt").set_sep(14):
                 _draw_header()
                 for section in rqd.sections:
-                    _draw_section(section, icon_cache, now)
+                    _draw_section(section, icon_cache, now, rqd)
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -125,7 +125,9 @@ def _draw_header() -> None:
     TextBox("背包一览", TITLE_STYLE).set_padding((8, 0))
 
 
-def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource], now: datetime | None = None) -> None:
+def _draw_section(
+    section: InventorySection, icon_cache: dict[str, ImageSource], now: datetime | None = None, request=None
+) -> None:
     with (
         VSplit()
         .set_w(PANEL_WIDTH)
@@ -143,10 +145,12 @@ def _draw_section(section: InventorySection, icon_cache: dict[str, ImageSource],
 
         with Grid(col_count=TILE_COL_COUNT).set_sep(TILE_GAP, TILE_GAP).set_item_align("lt"):
             for item in section.items:
-                _draw_item_tile(item, icon_cache, now)
+                _draw_item_tile(item, icon_cache, now, request)
 
 
-def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource], now: datetime | None = None) -> None:
+def _draw_item_tile(
+    item: InventoryItem, icon_cache: dict[str, ImageSource], now: datetime | None = None, request=None
+) -> None:
     icon = icon_cache.get(_inventory_icon_key(item.icon_path))
     with (
         HSplit()
@@ -167,7 +171,7 @@ def _draw_item_tile(item: InventoryItem, icon_cache: dict[str, ImageSource], now
             TextBox(item.name, _name_style(item.name), line_count=2, overflow="clip").set_w(
                 ITEM_TEXT_WIDTH
             ).set_padding(0)
-            TextBox(_item_description_text(item), DESC_STYLE, line_count=2, overflow="clip").set_w(
+            TextBox(_item_description_text(item, request), DESC_STYLE, line_count=2, overflow="clip").set_w(
                 ITEM_TEXT_WIDTH
             ).set_padding(0)
             quantity = _format_quantity(item.quantity)
@@ -201,13 +205,16 @@ def _expiry_text(item: InventoryItem, now: datetime | None) -> tuple[str, bool] 
     return f"有效期至 {expires:%m-%d %H:%M}", False
 
 
-def _item_description_text(item: InventoryItem) -> str:
+def _item_description_text(item: InventoryItem, request=None) -> str:
     description = " ".join((item.description or "").split())
     if description:
         return description
     if item.recovery_value:
-        return f"+{item.recovery_value} 能量"
-    return RESOURCE_TYPE_DESCRIPTIONS.get(item.resource_type, f"ID {item.id}")
+        return f"+{item.recovery_value} 演出能量"
+    fallback = RESOURCE_TYPE_DESCRIPTIONS.get(item.resource_type)
+    if fallback is None:
+        return f"ID {item.id}"
+    return caller_label(request, f"inventory.resource_type.{item.resource_type}", fallback)
 
 
 def _format_quantity(value: int) -> str:

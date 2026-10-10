@@ -649,7 +649,7 @@ def build_info_panel_body(profile_body: dict) -> dict:
     return {
         "profile": profile_body["profile"],
         "rank": profile_body["rank"],
-        "data_sources": [{"name": "Suite数据", "update_time": profile_body["update_time"]}],
+        "data_sources": [{"name": "抓包数据", "update_time": profile_body["update_time"]}],
     }
 
 

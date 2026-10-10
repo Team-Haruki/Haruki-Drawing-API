@@ -36,7 +36,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.timezone import datetime_from_millis, region_tag
+from src.sekai.base.timezone import datetime_from_millis, format_user_time, format_user_time_range, region_tag
 from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_asset_image_refs, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -230,7 +230,7 @@ def _draw_custom_chart_info(rqd: MusicDetailRequest, width: int, height: int):
         rate = info.full_combo_rate * 100 if info.full_combo_rate <= 1 else info.full_combo_rate
         fc_rate = f"{rate:.2f}%"
 
-    rows = [("游玩数", info.play_count), ("评价数", info.review_count), ("FC率", fc_rate)]
+    rows = [("游玩数", info.play_count), ("评价数", info.review_count), ("FC 率", fc_rate)]
     card_w = (width - 24 * 2 - 12 * 2) // 3
     with VSplit().set_padding(16).set_content_align("c").set_item_align("c").set_w(width).set_h(height):
         with HSplit().set_sep(12).set_content_align("c").set_item_align("c"):
@@ -634,7 +634,7 @@ async def _build_detail_music_rewards_canvas(rqd: DetailMusicRewardsRequest) -> 
                     .set_padding(16)
                     .set_bg(roundrect_bg(alpha=80))
                 ):
-                    TextBox("歌曲评级奖励(S)", style1).set_size((None, gh)).set_content_align("c")
+                    TextBox("歌曲评级奖励（S）", style1).set_size((None, gh)).set_content_align("c")
                     draw_text_icon(rqd.rank_rewards, jewel_icon, style2).set_size((None, gh))
                 # 连击奖励
                 with (
@@ -724,7 +724,7 @@ async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Ca
             ):
                 # 说明
                 TextBox(
-                    "仅显示简略估计数据（假设Clear的歌曲都是S评级，未FC的歌曲都没拿到连击奖励）",
+                    "仅显示简略估计数据（假设 Clear 的歌曲都是 S 评级，未 FC 的歌曲都没拿到连击奖励）",
                     TextStyle(DEFAULT_FONT, 20, (200, 75, 75)),
                     use_real_line_count=True,
                 ).set_w(480)
@@ -737,7 +737,7 @@ async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Ca
                     .set_padding(16)
                     .set_bg(roundrect_bg(alpha=80))
                 ):
-                    TextBox("歌曲评级奖励(S)", style1).set_size((None, gh)).set_content_align("c")
+                    TextBox("歌曲评级奖励（S）", style1).set_size((None, gh)).set_content_align("c")
                     draw_text_icon(rqd.rank_rewards, jewel_icon, style2).set_size((None, gh))
                 # 连击奖励
                 with (
@@ -930,13 +930,11 @@ class _MusicDetailRenderer:
         self.custom_chart = rqd.custom_chart_info
         self.mid = rqd.music_info.id
         self.name = rqd.music_info.title + (" [FULL]" if rqd.music_info.is_full_length else "")
-        self.publish_time = datetime_from_millis(rqd.music_info.release_at, rqd.timezone).strftime("%Y-%m-%d %H:%M:%S")
+        self.publish_time = format_user_time(datetime_from_millis(rqd.music_info.release_at, rqd.timezone))
         self.bpm_main = f"{rqd.bpm} BPM" if rqd.bpm else "?"
         if self.custom_chart:
             if self.custom_chart.published_at:
-                self.publish_time = datetime_from_millis(self.custom_chart.published_at, rqd.timezone).strftime(
-                    "%Y-%m-%d %H:%M:%S"
-                )
+                self.publish_time = format_user_time(datetime_from_millis(self.custom_chart.published_at, rqd.timezone))
             if self.custom_chart.bpm:
                 self.bpm_main = f"{self.custom_chart.bpm} BPM"
         self.event_id = None if self.custom_chart else rqd.event_id
@@ -945,7 +943,7 @@ class _MusicDetailRenderer:
     def _draw_heading(self) -> None:
         _draw_rqd_title(self.rqd)
         if self.custom_chart:
-            custom_title = self.custom_chart.title or "自定义谱面"
+            custom_title = self.custom_chart.title or "自制谱面"
             with VSplit().set_padding(16).set_sep(6).set_content_align("lt").set_item_align("lt").set_w(800):
                 TextBox(
                     f"【{region_tag(self.rqd.region, self.rqd.region_label, 'CUSTOM')}】{self.name} / {custom_title}",
@@ -980,7 +978,7 @@ class _MusicDetailRenderer:
         ).set_padding(16).set_w(800)
 
     def _mv_text(self) -> str:
-        labels = {"original": "原版MV", "mv": "3DMV", "mv_2d": "2DMV"}
+        labels = {"original": "原版 MV", "mv": "3DMV", "mv_2d": "2DMV"}
         parts = [labels[item] for item in self.rqd.music_info.mv_info or [] if item in labels]
         return " & ".join(parts) or "无"
 
@@ -1033,7 +1031,7 @@ class _MusicDetailRenderer:
                     start_at = datetime_from_millis(start, self.rqd.timezone)
                     end_at = datetime_from_millis(end, self.rqd.timezone)
                     TextBox(
-                        f"{start_at.strftime('%Y-%m-%d %H:%M')} ~ {end_at.strftime('%Y-%m-%d %H:%M')}",
+                        format_user_time_range(start_at, end_at),
                         TextStyle(font=DEFAULT_FONT, size=24, color=(70, 70, 70)),
                     )
 

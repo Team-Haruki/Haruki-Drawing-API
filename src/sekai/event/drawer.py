@@ -35,7 +35,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import datetime_from_millis, region_display, request_now
+from src.sekai.base.timezone import caller_label, datetime_from_millis, format_user_time, region_display, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     collect_asset_signatures,
@@ -158,7 +158,7 @@ def _normalize_wl_chapters(chapters: list[dict] | None, timezone: str | None) ->
         item["character_name"] = _dict_str(chapter, "character_name", "chara_name")
         item["character_icon_path"] = _dict_str(chapter, "character_icon_path", "chara_icon_path", "icon_path")
         item["chapter_label"] = (
-            f"{item['character_name']} 章节" if item["character_name"] else f"{item['chapter_no']}章"
+            f"{item['character_name']} 章节" if item["character_name"] else f"第 {item['chapter_no']} 章"
         )
         item["color"] = _resolve_wl_chapter_color(chapter, index)
         normalized.append(item)
@@ -253,10 +253,10 @@ async def _load_event_detail_images(
 
 def _event_status_text(start_time, end_time, now) -> str:
     if start_time <= now <= end_time:
-        return f"距结束还有{get_readable_timedelta(end_time - now)}"
+        return f"距结束还有 {get_readable_timedelta(end_time - now)}"
     if now > end_time:
         return "活动已结束"
-    return f"距开始还有{get_readable_timedelta(start_time - now)}"
+    return f"距开始还有 {get_readable_timedelta(start_time - now)}"
 
 
 def _current_wl_chapter(wl_chapters: list[dict], now) -> dict | None:
@@ -280,7 +280,7 @@ def _draw_event_identity(
                 Spacer(w=8)
                 if (ban_chara_icon := images.get("ban_icon")) is not None:
                     ImageBox(ban_chara_icon, size=(30, 30))
-                TextBox(f"{detail.banner_index}箱", styles.label)
+                TextBox(f"{detail.banner_index} 箱", styles.label)
 
 
 def _draw_wl_chapter_row(
@@ -376,10 +376,10 @@ def _draw_event_timing(
     with VSplit().set_padding(16).set_sep(12).set_item_align("c").set_content_align("c"):
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox("开始时间", styles.label)
-            TextBox(detail.start_at.strftime("%Y-%m-%d %H:%M:%S"), styles.text)
+            TextBox(format_user_time(detail.start_at), styles.text)
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox("结束时间", styles.label)
-            TextBox(detail.end_at.strftime("%Y-%m-%d %H:%M:%S"), styles.text)
+            TextBox(format_user_time(detail.end_at), styles.text)
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox(_event_status_text(detail.start_at, detail.end_at, now), styles.text)
 
@@ -387,7 +387,7 @@ def _draw_event_timing(
             current_chapter = _current_wl_chapter(wl_chapters, now)
             if current_chapter:
                 TextBox(
-                    f"距章节结束还有{get_readable_timedelta(current_chapter['end_time'] - now)}",
+                    f"距章节结束还有 {get_readable_timedelta(current_chapter['end_time'] - now)}",
                     styles.text,
                 )
             _draw_wl_chapters(
@@ -531,12 +531,13 @@ def _event_record_point(item: EventHistoryInfo) -> int:
 
 def _event_record_rows(name: str, events: list[EventHistoryInfo]) -> tuple[str, bool, list[EventHistoryInfo]]:
     topk = 30
+    name = f" {name}" if name[:1].isascii() else name  # 的 WL 单榜: a space between Chinese and Latin
     has_rank = any(item.rank is not None or item.rank_display or item.rank_tier is not None for item in events)
     if has_rank:
         events.sort(key=lambda item: (_event_record_sort_rank(item), -_event_record_point(item)))
-        return f"排名前{topk}的{name}记录", True, events[:topk]
+        return f"排名前 {topk} 的{name}记录", True, events[:topk]
     events.sort(key=lambda item: -_event_record_point(item))
-    return f"活动点数前{topk}的{name}记录", False, events[:topk]
+    return f"活动 PT 前 {topk} 的{name}记录", False, events[:topk]
 
 
 async def _draw_event_record_events_column(
@@ -638,7 +639,9 @@ async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
                 if rqd.event_info:
                     await _draw_event_record_group("活动", rqd.event_info, header_style, detail_style, value_style)
                 if rqd.wl_event_info:
-                    await _draw_event_record_group("WL单榜", rqd.wl_event_info, header_style, detail_style, value_style)
+                    await _draw_event_record_group(
+                        "WL 单榜", rqd.wl_event_info, header_style, detail_style, value_style
+                    )
 
     add_request_watermark(canvas, rqd)
     return canvas
@@ -704,8 +707,12 @@ def _event_planner_fallback_deck_request(rqd: EventPlannerRequest) -> DeckReques
         total_power=rqd.deck_total_power,
         multi_live_score_up=rqd.deck_skill_up,
     )
-    planner_title = (
-        f"目标 {rqd.target_point:,}pt / 当前 {(rqd.current_point or 0):,}pt / 还需 {rqd.remaining_point:,}pt"
+    planner_title = " / ".join(
+        (
+            caller_label(rqd, "deck.planner.target", "目标 {point} pt", point=f"{rqd.target_point:,}"),
+            caller_label(rqd, "deck.planner.current", "当前 {point} pt", point=f"{(rqd.current_point or 0):,}"),
+            caller_label(rqd, "deck.planner.remaining", "还需 {point} pt", point=f"{rqd.remaining_point:,}"),
+        )
     )
     return DeckRequest(
         region=rqd.region,
@@ -734,6 +741,8 @@ def _build_event_planner_deck_request(rqd: EventPlannerRequest) -> DeckRequest:
         else _event_planner_fallback_deck_request(rqd)
     )
     deck_request.event_planner = _event_planner_info(rqd)
+    if rqd.labels:
+        deck_request.labels = {**rqd.labels, **(deck_request.labels or {})}
     if not deck_request.event_banner_path and rqd.event_banner_path:
         deck_request.event_banner_path = rqd.event_banner_path
     if not deck_request.event_name and rqd.event_name:

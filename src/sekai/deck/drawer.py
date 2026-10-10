@@ -62,7 +62,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_layout_font, get_text_size, ink_centered_text_offset_y
-from src.sekai.base.timezone import region_display
+from src.sekai.base.timezone import caller_label, region_display
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
 from src.sekai.profile.custom_profile.font_field import basic_text_field
 from src.sekai.profile.drawer import (
@@ -85,23 +85,27 @@ from .model import (
 
 OMAKASE_MUSIC_ID = 10000
 OMAKASE_MUSIC_DIFFS = ["master", "expert", "hard"]
-_DFS_GA_DISPLAY_NAME = "DFS 预热遗传"
+# Drawing's own names for the algorithm keys; the caller's labels["deck.algorithm.<key>"] wins.
 RECOMMEND_ALG_NAMES = {
     "dfs": "暴力搜索",
-    "DFS": "暴力搜索",
     "sa": "模拟退火",
-    "SA": "模拟退火",
     "ga": "遗传算法",
-    "GA": "遗传算法",
-    "dfs_ga": _DFS_GA_DISPLAY_NAME,
-    "dfs-ga": _DFS_GA_DISPLAY_NAME,
-    "dga": _DFS_GA_DISPLAY_NAME,
-    "DGA": _DFS_GA_DISPLAY_NAME,
+    "dfs_ga": "DFS 预热遗传",
     "rl": "强化学习",
-    "RL": "强化学习",
     "all": "全部算法",
-    "ALL": "全部算法",
 }
+_ALG_KEY_ALIASES = {"dfs-ga": "dfs_ga", "dga": "dfs_ga"}
+
+
+def recommend_algorithm_name(alg: str, request=None) -> str:
+    """The display name of a deck algorithm key (any case; ``dga``/``dfs-ga`` mean ``dfs_ga``)."""
+    key = (alg or "").strip().lower()
+    key = _ALG_KEY_ALIASES.get(key, key)
+    fallback = RECOMMEND_ALG_NAMES.get(key)
+    if fallback is None:
+        return alg
+    return caller_label(request, f"deck.algorithm.{key}", fallback)
+
 
 BOOST_BONUS_DICT = {
     0: 1,
@@ -153,43 +157,29 @@ def algorithm_label_font_size(alg: str | None) -> int:
     return 9
 
 
-def format_skill_order_text(strategy: str | None) -> str:
-    match (strategy or "").strip().lower():
-        case "average":
-            return "技能顺序: 平均情况"
-        case "max":
-            return "技能顺序: 最优顺序"
-        case "min":
-            return "技能顺序: 最差顺序"
-        case "specific":
-            return "技能顺序: 指定顺序"
-        case _:
-            return ""
+_SKILL_ORDER_TEXTS = {
+    "average": "技能顺序：平均情况",
+    "max": "技能顺序：最优顺序",
+    "min": "技能顺序：最差顺序",
+    "specific": "技能顺序：指定顺序",
+}
+_SKILL_REFERENCE_TEXTS = {
+    "average": "BFes 花前吸取：平均值",
+    "max": "BFes 花前吸取：最大值",
+    "min": "BFes 花前吸取：最小值",
+}
 
 
-def format_skill_reference_text(strategy: str | None) -> str:
-    match (strategy or "").strip().lower():
-        case "average":
-            return "BloomFes花前吸取: 平均值"
-        case "max":
-            return "BloomFes花前吸取: 最大值"
-        case "min":
-            return "BloomFes花前吸取: 最小值"
-        case _:
-            return ""
+def format_skill_order_text(strategy: str | None, request=None) -> str:
+    key = (strategy or "").strip().lower()
+    fallback = _SKILL_ORDER_TEXTS.get(key)
+    return caller_label(request, f"deck.skill_order.{key}", fallback) if fallback else ""
 
 
-def build_algorithm_runtime_text(cost_times: dict | None, wait_times: dict | None) -> str:
-    if not cost_times:
-        return ""
-
-    wait_times = wait_times or {}
-    lines = ["本次组卡使用算法:"]
-    for index, (alg, cost) in enumerate(cost_times.items(), start=1):
-        alg_name = RECOMMEND_ALG_NAMES.get(alg, alg)
-        wait_time = wait_times.get(alg, 0.0)
-        lines.append(f"{index}. {alg_name} 等待{wait_time:.2f}s / 耗时{cost:.2f}s")
-    return "\n".join(lines)
+def format_skill_reference_text(strategy: str | None, request=None) -> str:
+    key = (strategy or "").strip().lower()
+    fallback = _SKILL_REFERENCE_TEXTS.get(key)
+    return caller_label(request, f"deck.skill_reference.{key}", fallback) if fallback else ""
 
 
 def format_planner_int(value: int | None) -> str:
@@ -347,7 +337,7 @@ def _circle_badge(text: str, fill, diameter: int, style: TextStyle) -> None:
 
 _PLANNER_ACCENT: Color = (0, 168, 206, 255)
 _PLANNER_ENERGY: Color = (142, 94, 190, 255)
-_PLANNER_COLS = (("每把PT", 140), ("需要把数", 128), ("体力", 112), ("日速", 140))
+_PLANNER_COLS = (("每把 PT", 140), ("需要把数", 128), ("演出能量", 112), ("日速", 140))
 _PLANNER_ROW_H = 68
 _PLANNER_COL_SEP = 12
 _PLANNER_DEFAULT_W = 960
@@ -358,19 +348,33 @@ def _planner_song_w(width: int) -> int:
     return max(300, width - 2 * _PANEL_PAD - fixed)
 
 
-def _draw_planner_summary(planner: DeckPlannerInfo) -> None:
+def _draw_planner_summary(planner: DeckPlannerInfo, request=None) -> None:
     chip_fill = (255, 255, 255, 200)
     chip_style = _CHIP_STYLE.replace(size=15, color=_TEXT)
+    source = planner.target_source
     _section_header(
-        "活动规划",
+        caller_label(request, "deck.planner.title", "活动规划"),
         _PLANNER_ACCENT,
-        captions=[f"来源 {planner.target_source}" if planner.target_source else ""],
+        captions=[caller_label(request, "deck.planner.source", "来源：{source}", source=source) if source else ""],
     )
     with HSplit().set_content_align("l").set_item_align("c").set_sep(8).set_padding(0):
-        _chip(f"目标 {format_planner_int(planner.target_point)} pt", chip_fill, style=chip_style, radius=11)
-        _chip(f"当前 {format_planner_int(planner.current_point)} pt", chip_fill, style=chip_style, radius=11)
+        target = format_planner_int(planner.target_point)
+        current = format_planner_int(planner.current_point)
+        remaining = format_planner_int(planner.remaining_point)
         _chip(
-            f"还需 {format_planner_int(planner.remaining_point)} pt",
+            caller_label(request, "deck.planner.target", "目标 {point} pt", point=target),
+            chip_fill,
+            style=chip_style,
+            radius=11,
+        )
+        _chip(
+            caller_label(request, "deck.planner.current", "当前 {point} pt", point=current),
+            chip_fill,
+            style=chip_style,
+            radius=11,
+        )
+        _chip(
+            caller_label(request, "deck.planner.remaining", "还需 {point} pt", point=remaining),
             _PLANNER_ACCENT,
             style=chip_style.replace(color=WHITE),
             radius=11,
@@ -379,7 +383,7 @@ def _draw_planner_summary(planner: DeckPlannerInfo) -> None:
 
 def _draw_planner_header(song_w: int) -> None:
     with HSplit().set_content_align("l").set_item_align("c").set_sep(_PLANNER_COL_SEP).set_padding((12, 0)):
-        TextBox("歌曲 / 火数", _COL_LABEL_STYLE).set_w(song_w).set_content_align("l")
+        TextBox("歌曲 / 演出能量", _COL_LABEL_STYLE).set_w(song_w).set_content_align("l")
         for label, width in _PLANNER_COLS:
             TextBox(label, _COL_LABEL_STYLE).set_w(width).set_content_align("c")
 
@@ -411,7 +415,7 @@ def _draw_planner_song_cell(
                     radius=8,
                     padding=(6, 2),
                 )
-                _soft_chip(f"{row.boost}火" if row else "-", _PLANNER_ENERGY, radius=8, padding=(6, 2))
+                _soft_chip(f"演出能量 {row.boost}" if row else "-", _PLANNER_ENERGY, radius=8, padding=(6, 2))
 
 
 def _draw_planner_number_cell(
@@ -450,33 +454,36 @@ def _draw_planner_row(
         _draw_planner_number_cell(
             format_planner_int(row.plays if row else 0), "把", widths[1], style, _mix(_PLANNER_ACCENT, _INK, 0.1)
         )
-        _draw_planner_number_cell(format_planner_int(row.energy if row else 0), "火", widths[2], style, _PLANNER_ENERGY)
+        _draw_planner_number_cell(format_planner_int(row.energy if row else 0), "点", widths[2], style, _PLANNER_ENERGY)
         _draw_planner_number_cell(format_planner_optional_int(planner.daily_point), "pt/日", widths[3], style)
 
 
 def _draw_planner_tips(planner: DeckPlannerInfo, text_w: int) -> None:
     with VSplit().set_content_align("lt").set_item_align("lt").set_sep(2).set_padding((4, 0)):
         for tip in (
-            "活动规划按当前数据估算，实际结算以游戏内和榜线更新为准。",
-            "未指定当前 pt 时按 0 计算；不写歌曲时默认虾 EXPERT / 龙 HARD。",
+            "活动规划按当前数据估算，实际结算以游戏内和榜线更新为准",
+            "未指定当前 PT 时按 0 计算；不写歌曲时默认虾 EXPERT / 龙 HARD",
         ):
             TextBox(tip, _NOTE_STYLE, use_real_line_count=True).set_w(text_w)
         for warning in planner.warnings or []:
             TextBox(
-                f"提示: {warning}",
+                f"提示：{warning}",
                 TextStyle(font=DEFAULT_BOLD_FONT, size=16, color=_RED),
                 use_real_line_count=True,
             ).set_w(text_w)
 
 
 def draw_event_planner_block(
-    planner: DeckPlannerInfo, planner_music_imgs: dict[str, ImageSource], width: int = _PLANNER_DEFAULT_W
+    planner: DeckPlannerInfo,
+    planner_music_imgs: dict[str, ImageSource],
+    width: int = _PLANNER_DEFAULT_W,
+    request=None,
 ) -> None:
     rows = _planner_rows(planner)
     song_w = _planner_song_w(width)
     style = TextStyle(font=DEFAULT_BOLD_FONT, size=22, color=_INK)
     with _panel(width).set_sep(8):
-        _draw_planner_summary(planner)
+        _draw_planner_summary(planner, request)
         Spacer(h=2)
         _draw_planner_header(song_w)
         if rows:
@@ -492,31 +499,52 @@ _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX = {"mysekai", "challenge", "challenge_all",
 
 _DECK_NOUN = "组卡"
 _PLANNER_NOUN = "规划"
+# Title templates per title key; the caller's labels["deck.title.<key>"] wins. {noun} is 组卡 or 规划.
+_RECOMMEND_TITLES = {
+    "mysekai_event": "烤森活动 #{event_id} {noun}",
+    "mysekai_simulated": "烤森模拟活动{noun}",
+    "challenge": "每日挑战{noun}",
+    "bonus": "活动 #{event_id} 加成{noun}",
+    "wl_bonus": "WL 活动 #{event_id} 加成{noun}",
+    "event": "活动 #{event_id} {noun}",
+    "wl_event": "WL 活动 #{event_id} {noun}",
+    "wl_simulated": "WL 模拟{noun}",
+    "wl_final": "WL 终章活动{noun}",
+    "unit_attr": "团队+颜色模拟活动{noun}",
+    "no_event": "无活动{noun}",
+}
+
+
+def _recommend_title_key(recommend_type: str, event_id: int | None, wl_chara_name: str | None) -> str | None:
+    if recommend_type == "mysekai":
+        return "mysekai_event" if event_id else "mysekai_simulated"
+    if recommend_type in {"challenge", "challenge_all"}:
+        return "challenge"
+    if recommend_type == "wl":
+        if event_id:
+            return "wl_event"
+        return "wl_simulated" if wl_chara_name else "wl_final"
+    return recommend_type if recommend_type in _RECOMMEND_TITLES else None
 
 
 def _recommend_type_title(
-    recommend_type: str, event_id: int | None, wl_chara_name: str | None, noun: str = _DECK_NOUN
+    recommend_type: str,
+    event_id: int | None,
+    wl_chara_name: str | None,
+    noun: str | None = None,
+    request=None,
 ) -> str:
     """The title of a recommend type; ``noun`` is what the page is (a deck recommendation or a plan)."""
-    if recommend_type == "mysekai":
-        return f"烤森活动#{event_id}{noun}" if event_id else f"烤森模拟活动{noun}"
-    if recommend_type in {"challenge", "challenge_all"}:
-        return f"每日挑战{noun}"
-    if recommend_type == "bonus":
-        return f"活动#{event_id}加成{noun}"
-    if recommend_type == "wl_bonus":
-        return f"WL活动#{event_id}加成{noun}"
-    if recommend_type == "event":
-        return f"活动#{event_id}{noun}"
-    if recommend_type == "wl":
-        if event_id:
-            return f"WL活动#{event_id}{noun}"
-        return f"WL模拟{noun}" if wl_chara_name else f"WL终章活动{noun}"
-    return {"unit_attr": f"团队+颜色模拟活动{noun}", "no_event": f"无活动{noun}"}.get(recommend_type, "")
+    key = _recommend_title_key(recommend_type, event_id, wl_chara_name)
+    if key is None:
+        return ""
+    if noun is None:
+        noun = caller_label(request, "deck.noun.deck", _DECK_NOUN)
+    return caller_label(request, f"deck.title.{key}", _RECOMMEND_TITLES[key], event_id=event_id, noun=noun)
 
 
 # Shown only when the caller sent no live_name for the live_type key.
-_LIVE_TYPE_FALLBACK_LABELS = {"multi": "多人", "solo": "单人", "auto": "AUTO"}
+_LIVE_TYPE_FALLBACK_LABELS = {"multi": "多人", "solo": "单人", "auto": "自动"}
 
 
 def _recommend_live_label(live_type: str | None, live_name: str | None) -> str:
@@ -524,24 +552,6 @@ def _recommend_live_label(live_type: str | None, live_name: str | None) -> str:
     if name := (live_name or "").strip():
         return name
     return _LIVE_TYPE_FALLBACK_LABELS.get((live_type or "").strip().lower(), "")
-
-
-def _recommend_live_suffix(live_type: str | None, live_name: str | None) -> str:
-    label = _recommend_live_label(live_type, live_name)
-    return f"({label})" if label else ""
-
-
-def build_recommend_title(
-    recommend_type: str,
-    event_id: int | None,
-    wl_chara_name: str | None,
-    live_type: str | None,
-    live_name: str | None,
-) -> str:
-    title = _recommend_type_title(recommend_type, event_id, wl_chara_name)
-    if recommend_type in _RECOMMEND_TYPES_WITHOUT_LIVE_SUFFIX:
-        return title
-    return title + _recommend_live_suffix(live_type, live_name)
 
 
 @dataclass(frozen=True)
@@ -654,8 +664,11 @@ def _deck_score_name(rqd: DeckRequest) -> str:
 
 def _deck_base_title(rqd: DeckRequest) -> str:
     """The title without its live suffix, which is drawn as a chip beside it."""
-    noun = _PLANNER_NOUN if rqd.event_planner else _DECK_NOUN
-    return _recommend_type_title(rqd.recommend_type, rqd.event_id, rqd.wl_chara_name, noun)
+    if rqd.event_planner:
+        noun = caller_label(rqd, "deck.noun.planner", _PLANNER_NOUN)
+    else:
+        noun = caller_label(rqd, "deck.noun.deck", _DECK_NOUN)
+    return _recommend_type_title(rqd.recommend_type, rqd.event_id, rqd.wl_chara_name, noun, rqd)
 
 
 def _deck_live_label(rqd: DeckRequest) -> str:
@@ -1037,10 +1050,10 @@ def _deck_strategy_texts(rqd: DeckRequest) -> list[str]:
     if rqd.recommend_type in {"bonus", "wl_bonus", "mysekai"}:
         return []
     texts = (
-        format_skill_order_text(rqd.skill_order_choose_strategy),
-        format_skill_reference_text(rqd.skill_reference_choose_strategy),
+        format_skill_order_text(rqd.skill_order_choose_strategy, rqd),
+        format_skill_reference_text(rqd.skill_reference_choose_strategy, rqd),
     )
-    return [text.replace(": ", " ") for text in texts if text]
+    return [text for text in texts if text]
 
 
 async def _draw_deck_settings(rqd: DeckRequest, width: int) -> None:
@@ -1095,7 +1108,7 @@ async def _draw_deck_settings(rqd: DeckRequest, width: int) -> None:
                 _chip(text, chip_fill, style=chip_style, radius=11)
                 used += _text_w(chip_style, text) + 20 + 8
             if excluded_cards:
-                text = f"排除 {', '.join(map(str, excluded_cards))}"
+                text = f"排除 {'、'.join(map(str, excluded_cards))}"
                 if _text_w(chip_style, text) + 20 <= width - used:
                     _chip(text, chip_fill, style=chip_style, radius=11)
                 else:  # a long exclusion list wraps inside the chip instead of widening the panel
@@ -1128,11 +1141,11 @@ def _draw_alert(text: str, color, width: int, *, size: int = 17) -> None:
 
 def _draw_deck_warnings(rqd: DeckRequest, width: int) -> None:
     if rqd.recommend_type in {"bonus", "wl_bonus"}:
-        _draw_alert("友情提醒：控分前请核对加成和体力设置", _RED, width)
+        _draw_alert("友情提醒：控分前请核对加成和演出能量设置", _RED, width)
         if rqd.recommend_type == "wl_bonus" and not any(deck.support_card_data for deck in rqd.deck_data):
-            _draw_alert("WL仅支持自动组主队，支援队请自行配置", _TEXT, width)
+            _draw_alert("WL 只自动组出卡组，支援卡组请自行配置", _TEXT, width)
     if rqd.is_max_deck:
-        _draw_alert("“顶配”为该服截止当前的全卡满养成配置(并非基于你的卡组计算)", _RED, width)
+        _draw_alert("“顶配”为该区服截至当前的全卡满养成配置（并非基于你的卡组计算）", _RED, width)
 
 
 async def _draw_deck_header(rqd: DeckRequest, assets: _DeckRecommendAssets, width: int) -> None:
@@ -1600,7 +1613,7 @@ def _draw_runtime_rows(rqd: DeckRequest, width: int) -> None:
     chip_style = _CHIP_STYLE.replace(size=12)
     items = []
     for alg, cost in rqd.cost_times.items():
-        name = RECOMMEND_ALG_NAMES.get(alg, alg)
+        name = recommend_algorithm_name(alg, rqd)
         detail = f"耗时 {cost:.2f}s · 等待 {wait_times.get(alg, 0.0):.2f}s"
         items.append((name, detail, _text_w(chip_style, name) + 22 + 6 + _text_w(_NOTE_STYLE, detail) + 4 + 16))
     label = "本次组卡使用算法"
@@ -1631,12 +1644,12 @@ def _draw_deck_notes(rqd: DeckRequest, width: int | None = None) -> None:
             Spacer(h=2)
         if rqd.recommend_type not in {"bonus", "wl_bonus"}:
             TextBox(
-                "12星卡默认全满，34星及生日卡默认满级，oc的bfes花前技能活动组卡为平均值，挑战组卡为最大值",
+                "1~2 星卡默认全满，3~4 星及生日卡默认满级，OC 的 BFes 花前技能活动组卡为平均值，挑战组卡为最大值",
                 _NOTE_STYLE,
                 use_real_line_count=True,
             ).set_w(inner)
         TextBox(
-            "功能移植并修改自33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责",
+            "功能移植并修改自 33Kit https://3-3.dev/sekai/deck-recommend 算错概不负责",
             _NOTE_STYLE,
             use_real_line_count=True,
         ).set_w(inner)
@@ -1654,7 +1667,7 @@ async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
             await _draw_deck_header(rqd, assets, width)
             _draw_deck_results(rqd, assets, layout, width)
             if rqd.event_planner:
-                draw_event_planner_block(rqd.event_planner, assets.planner_music_imgs, width)
+                draw_event_planner_block(rqd.event_planner, assets.planner_music_imgs, width, rqd)
             _draw_deck_notes(rqd, width)
 
     add_request_watermark(canvas, rqd)

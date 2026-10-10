@@ -97,12 +97,74 @@ def region_tag(region: str | None, region_label: str | None, suffix: object) -> 
     return f"{(region or '').strip().upper()}-{suffix}"
 
 
+UNKNOWN_TIME_TEXT = "未知时间"
+
+
+def utc_offset_label(dt: datetime) -> str:
+    """``UTC+8``, ``UTC+5:30`` or ``UTC-3`` for an aware datetime (Cloud's ``utcOffset``)."""
+    offset = dt.utcoffset()
+    seconds = int(offset.total_seconds()) if offset is not None else 0
+    sign = "+"
+    if seconds < 0:
+        sign, seconds = "-", -seconds
+    hours, minutes = seconds // 3600, seconds % 3600 // 60
+    return f"UTC{sign}{hours}" if minutes == 0 else f"UTC{sign}{hours}:{minutes:02d}"
+
+
+def format_user_time(value: datetime | float | str | None, timezone_name: str | None = None) -> str:
+    """The spec time format, mirroring Cloud's ``i18n.FormatUserTime``: ``2026-10-09 14:05 (UTC+8)``.
+
+    ``value`` is shown in ``timezone_name`` (the request's time zone; default Asia/Shanghai). An aware datetime
+    passed without a time zone keeps its own zone. A missing value is ``未知时间``.
+    """
+    dt = _user_datetime(value, timezone_name)
+    if dt is None:
+        return UNKNOWN_TIME_TEXT
+    return f"{dt:%Y-%m-%d %H:%M} ({utc_offset_label(dt)})"
+
+
+def format_user_time_range(
+    start: datetime | float | str | None, end: datetime | float | str | None, timezone_name: str | None = None
+) -> str:
+    """``2026-10-09 14:05 ~ 2026-10-12 20:59 (UTC+8)``: one offset when both ends share it."""
+    start_dt, end_dt = _user_datetime(start, timezone_name), _user_datetime(end, timezone_name)
+    if start_dt is None or end_dt is None:
+        return f"{format_user_time(start_dt)} ~ {format_user_time(end_dt)}"
+    start_offset, end_offset = utc_offset_label(start_dt), utc_offset_label(end_dt)
+    if start_offset != end_offset:
+        return f"{format_user_time(start_dt)} ~ {format_user_time(end_dt)}"
+    return f"{start_dt:%Y-%m-%d %H:%M} ~ {end_dt:%Y-%m-%d %H:%M} ({start_offset})"
+
+
+def _user_datetime(value: datetime | float | str | None, timezone_name: str | None) -> datetime | None:
+    if isinstance(value, datetime) and timezone_name is None:
+        return value if value.tzinfo is not None else localize_datetime(value, None)
+    return localize_datetime(value, timezone_name)
+
+
+def caller_label(request: object, key: str, fallback: str, /, **values: object) -> str:
+    """Display text the caller localized for ``key`` (``request.labels``), else Drawing's own ``fallback``.
+
+    Labels are only drawn, never compared. ``{name}`` slots in either text are filled from ``values``.
+    """
+    labels = getattr(request, "labels", None)
+    text = labels.get(key) if isinstance(labels, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        text = fallback
+    for name, value in values.items():
+        text = text.replace("{" + name + "}", str(value))
+    return text
+
+
 class TimeZoneRequest(BaseModel):
     timezone: str = Field(default=DEFAULT_TIMEZONE)
     dt: int | None = Field(default=None)
     # Localized display name of the request's region code, sent by the caller (Cloud). Optional: without it the
     # drawers fall back to the upper-cased code (see region_display).
     region_label: str | None = Field(default=None)
+    # Localized display text for Drawing's own labels, keyed by label key (see caller_label and AGENTS.md
+    # "Caller labels and raw keys"). Optional: a missing key falls back to Drawing's text.
+    labels: dict[str, str] | None = Field(default=None)
 
     def model_post_init(self, __context, /) -> None:
         self.timezone = normalize_timezone(self.timezone)

@@ -94,14 +94,14 @@ def test_vlive_brief_group_fields_are_optional_and_parse() -> None:
         }
     )
     assert drawer._vlive_entry_title(plain) == "【1】Live"
-    assert drawer._vlive_entry_title(grouped) == "【2】Solo Live (共26场个人Live)"
+    assert drawer._vlive_entry_title(grouped) == "【2】Solo Live（共 26 场个人 Live）"
 
 
 def test_vlive_type_labels_hide_normal_and_keep_unknown_types() -> None:
     assert drawer.vlive_type_label(None) is None
     assert drawer.vlive_type_label("") is None
     assert drawer.vlive_type_label("normal") is None
-    assert drawer.vlive_type_label("solo_virtual_live") == "个人Live"
+    assert drawer.vlive_type_label("solo_virtual_live") == "个人 Live"
     assert drawer.vlive_type_label("future_type") == "future_type"
 
 
@@ -109,11 +109,11 @@ def test_vlive_list_entry_without_new_fields_has_no_tag_or_group_text() -> None:
     plain = VLiveBrief(id=1, name="Live", start_at=NOW, end_at=NOW + timedelta(hours=1))
     texts = _texts(drawer._build_vlive_entry_canvas(plain, {}, NOW))
     assert texts[0] == "【1】Live"
-    assert not any("个人Live" in text for text in texts)
+    assert not any("个人 Live" in text for text in texts)
 
     grouped = plain.model_copy(update={"virtual_live_type": "solo_virtual_live", "group_name": "G", "group_count": 3})
     texts = _texts(drawer._build_vlive_entry_canvas(grouped, {}, NOW))
-    assert texts[:2] == ["个人Live", "【1】G (共3场个人Live)"]
+    assert texts[:2] == ["个人 Live", "【1】G（共 3 场个人 Live）"]
 
 
 def test_vlive_detail_request_localizes_times() -> None:
@@ -150,10 +150,10 @@ def test_cheer_reward_state_and_live_texts() -> None:
     assert drawer._detail_live_name(first.model_copy(update={"short_name": "一歌"}), "unrelated") == "【491】一歌"
     assert drawer._detail_live_count_text(first) == "剩余 10/12 场"
     assert drawer._detail_live_count_text(second) == "剩余 3 场"
-    assert drawer._detail_live_status_text(second, NOW) == "当前Live进行中!"
+    assert drawer._detail_live_status_text(second, NOW) == "当前 Live 进行中"
     assert drawer._detail_live_status_text(first, NOW).startswith("下一场 10-01 14:00")
     assert drawer._detail_live_status_text(first.model_copy(update={"current_start_at": None}), NOW) == "已结束"
-    assert drawer._detail_summary_text(request, NOW) == "2场Live | 1场进行中 | 剩余场次: 13"
+    assert drawer._detail_summary_text(request, NOW) == "2 场 Live | 1 场进行中 | 剩余场次：13"
 
 
 @pytest.mark.anyio
@@ -162,17 +162,17 @@ async def test_vlive_detail_canvas_contains_every_section(fake_assets) -> None:
     canvas = await drawer._build_vlive_detail_canvas(request, NOW)
     texts = _texts(canvas)
     for expected in (
-        "个人Live",
+        "个人 Live",
         "【2】Solo Live",
         "场次一览",
         "【491】（一歌）",
-        "累计应援点奖励  (当前累计 1,000 pt)",
+        "累计应援点奖励（当前累计 1,000 pt）",
         "300 pt",
         "已领取",
         "已达成",
         "未达成",
         "超额应援点奖励",
-        "之后每 10 pt (已领取 3 次)",
+        "之后每 10 pt（已领取 3 次）",
         "虚拟道具消耗",
         "Cheer Coin  持有 30",
     ):
