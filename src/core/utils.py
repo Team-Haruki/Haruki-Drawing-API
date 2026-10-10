@@ -1,4 +1,5 @@
 from collections.abc import Mapping
+from dataclasses import replace
 import io
 import logging
 
@@ -24,6 +25,17 @@ ARTIFACT_HEADER = "X-Haruki-Artifact"
 DEGRADED_HEADER = "X-Haruki-Artifact-Degraded"
 CACHE_STORE_HEADER = "X-Haruki-Cache-Store"
 NODE_HEADER = "X-Haruki-Node"
+# Missing assets drawn as "?" placeholders in this render. Sent only when > 0, on every image exit (bytes,
+# store 0, degraded, store-ref), so a caller can tell it from other no-store answers and see which routes show "?".
+MISSING_ASSETS_HEADER = "X-Haruki-Render-Missing-Assets"
+
+
+def _placeholder_headers(missing: int, headers: Mapping[str, str] | None = None) -> dict[str, str]:
+    """`headers` plus `MISSING_ASSETS_HEADER` when the render drew any missing-asset placeholder."""
+    merged = dict(headers or {})
+    if missing > 0:
+        merged[MISSING_ASSETS_HEADER] = str(missing)
+    return merged
 
 
 def _encode_image(
@@ -135,7 +147,7 @@ def encoded_image_payload_to_bytes_response(
 ) -> Response:
     """Today's bytes body, verbatim, plus optional extra headers (ONE body message, `Content-Length` set)."""
     missing = current_missing_asset_count() + payload.missing_asset_count
-    headers = dict(extra_headers or {})
+    headers = _placeholder_headers(missing, extra_headers)
     if missing or payload.has_missing_resources:
         headers[CACHE_STORE_HEADER] = "0"
     return _log_and_return_bytes(
@@ -157,7 +169,7 @@ async def encoded_image_payload_to_response(payload: EncodedImagePayload) -> Res
     """
     directive = current_render_directive()
     missing = current_missing_asset_count() + payload.missing_asset_count
-    node = {NODE_HEADER: artifact_node_name()}
+    node = _placeholder_headers(missing, {NODE_HEADER: artifact_node_name()})
     if directive is None:
         artifact_stats.incr("bytes_no_directive")
         if missing or payload.has_missing_resources:
@@ -224,9 +236,8 @@ async def _store_ref_response(
             ),
         )
         set_request_stage("send_response")
-        return JSONResponse(
-            ref.to_json(), headers={ARTIFACT_HEADER: "1", HEADER_ARTIFACT_MODE: MODE_STORE_REF, **headers}
-        )
+        document = replace(ref, missing_assets=missing).to_json()
+        return JSONResponse(document, headers={ARTIFACT_HEADER: "1", HEADER_ARTIFACT_MODE: MODE_STORE_REF, **headers})
     return _log_and_return_bytes(
         payload,
         artifact="store_ref_degraded",

@@ -704,6 +704,10 @@ def get_composed_image_cached(cache_key: str) -> Image.Image | None:
 
 
 def put_composed_image_cache(cache_key: str, image: Image.Image) -> None:
+    # Same rule as the Skia payload/fragment caches: a fragment drawn while this request had a missing asset
+    # may hold a "?" placeholder, and a later hit would not count it, so the page would look complete.
+    if current_missing_asset_count() > 0:
+        return
     _composed_image_cache.set(cache_key, image)
 
 
@@ -714,6 +718,8 @@ def get_composed_image_disk_cached(namespace: str, cache_key: str) -> Image.Imag
 
 
 def put_composed_image_disk_cache(namespace: str, cache_key: str, image: Image.Image) -> None:
+    if current_missing_asset_count() > 0:
+        return
     _composed_image_disk_cache.set(namespace, cache_key, image)
 
 
