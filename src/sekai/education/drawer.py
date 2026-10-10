@@ -178,7 +178,7 @@ def _build_challenge_live_header(
     header.add_item(TextBox("角色", header_style).set_w(w1).set_content_align("c"))
     header.add_item(TextBox("等级", header_style).set_w(w2).set_content_align("c"))
     header.add_item(TextBox("分数", header_style).set_w(w3).set_content_align("c"))
-    header.add_item(TextBox(f"进度（上限 {max_score // 10000}万）", header_style).set_w(w4).set_content_align("c"))
+    header.add_item(TextBox(f"进度（上限 {max_score // 10000}w）", header_style).set_w(w4).set_content_align("c"))
     for width, icon in ((w5, jewel_icon), (w6, shard_icon)):
         icon_frame = Frame().set_w(width).set_content_align("c")
         if icon:
@@ -416,11 +416,7 @@ async def try_render_power_bonus_detail_payload(
 
 
 def _get_quant_text(q: int) -> str:
-    """Compact quantity on an area-item material chip: ``3kw``, ``1w5``, ``2k5``.
-
-    Deliberately kept in this k/w/kw shorthand (players read it; 万 is used everywhere else). This is the one
-    exception to the 万 rule, listed in ``tests/test_copy_style.py``.
-    """
+    """格式化数量显示"""
     if q >= 10000000:
         return f"{q // 10000000}kw"
     elif q >= 10000:

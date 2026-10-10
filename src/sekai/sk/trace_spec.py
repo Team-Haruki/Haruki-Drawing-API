@@ -48,7 +48,7 @@ def score_text(score: int | None, width: int | None = None) -> str:
         result = "?"
     else:
         value = int(score)
-        result = f"{value // 10000}.{value % 10000:04d}万"
+        result = f"{value // 10000}.{value % 10000:04d}w"
     return result.rjust(width) if width else result
 
 

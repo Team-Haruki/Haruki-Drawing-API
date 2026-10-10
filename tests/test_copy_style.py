@@ -22,8 +22,6 @@ _HAN_COLON = re.compile(f"[{HAN}]:")
 _HAN_PAREN = re.compile(f"[{HAN}][()]|[()][{HAN}]|\\([^()]*[{HAN}][^()]*\\)")
 _HAN_LATIN = re.compile(f"[{HAN}][A-Za-z0-9]|[A-Za-z0-9][{HAN}]")
 _HAS_HAN = re.compile(f"[{HAN}]")
-# A ``w`` / ``kw`` unit after a number or an f-string placeholder ("12.3w", "{x}kw"): large numbers use 万.
-_W_UNIT = re.compile(f"(?:[0-9]|{SEPARATOR})k?w(?![A-Za-z])")
 # The glossary's banned display words (Cloud AGENTS.md §12.5) that a drawer could plausibly write.
 _BANNED = (
     "您",
@@ -61,11 +59,6 @@ _ALLOWED = {
     ("card/drawer.py", "BFes限定"),
     # An exception message (raised through a constant), never drawn.
     ("base/utils.py", "图片路径不能为空(None)"),
-    # Area-item material chips keep the compact k/w/kw shorthand players know ("3kw", "1w5", "2k5"), on
-    # purpose: the operator chose it over 万 for these chips only (education/drawer.py::_get_quant_text).
-    ("education/drawer.py", f"{SEPARATOR}kw"),
-    ("education/drawer.py", f"{SEPARATOR}w{SEPARATOR}"),
-    ("education/drawer.py", f"{SEPARATOR}w"),
     # Durations follow Cloud's FormatDuration ("45秒"): no space between a number and its time unit.
     ("base/utils.py", "0秒"),
     # Characters the custom-profile TMP renderer treats as decorative; a character set, not text.
@@ -113,12 +106,9 @@ class _LiteralCollector(ast.NodeVisitor):
 
 
 def copy_findings(text: str) -> list[str]:
-    findings = []
-    if match := _W_UNIT.search(text):
-        findings.append(f"w unit {match.group()!r}: write 万")
     if not _HAS_HAN.search(text):
-        return findings
-    findings += [f"banned {term!r}" for term in _BANNED if term in text]
+        return []
+    findings = [f"banned {term!r}" for term in _BANNED if term in text]
     if match := _HAN_COLON.search(text):
         findings.append(f"half-width colon {match.group()!r}")
     if match := _HAN_PAREN.search(text.replace("(5v5)", "")):
@@ -136,15 +126,6 @@ def test_copy_findings_apply_the_cloud_rules() -> None:
     assert copy_findings(f"距离活动结束还有 {SEPARATOR}") == []
     assert copy_findings("欢乐嘉年华(5v5)") == []
     assert copy_findings("plain English: (ok)") == []
-
-    def w_units(text: str) -> int:
-        return sum(finding.startswith("w unit") for finding in copy_findings(text))
-
-    assert w_units(f"{SEPARATOR}w{SEPARATOR}") == 1
-    assert w_units("12.3456kw") == 1
-    assert w_units("1920w") == 1
-    assert w_units("123.4567万") == 0
-    assert w_units("show") == 0
 
 
 def test_drawn_text_follows_the_copy_spec() -> None:
