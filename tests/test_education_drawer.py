@@ -46,7 +46,7 @@ def isolated_assets(monkeypatch: pytest.MonkeyPatch) -> None:
         (10_000, "1万"),
         (15_000, "1.5万"),
         (100_000, "10万"),
-        (10_000_000, "1000万"),
+        (10_000_000, "1千万"),
     ],
 )
 def test_get_quant_text_boundaries(quantity: int, expected: str) -> None:

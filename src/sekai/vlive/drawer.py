@@ -208,12 +208,10 @@ def _build_vlive_entry_canvas(
                     ImageBox(banner, size=(320, None), use_alpha_blend=True)
 
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
-                    TextBox(start_text, info_style).set_w(388)
-                    TextBox(end_text, info_style).set_w(388)
-                    TextBox(
-                        status_text,
-                        info_style,
-                    ).set_w(388)
+                    # The time lines carry the UTC offset; a long relative time wraps instead of clipping.
+                    TextBox(start_text, info_style, use_real_line_count=True).set_w(388)
+                    TextBox(end_text, info_style, use_real_line_count=True).set_w(388)
+                    TextBox(status_text, info_style, use_real_line_count=True).set_w(388)
 
             if rewards or characters:
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(12):
@@ -425,8 +423,10 @@ def _detail_header(rqd: VLiveDetailRequest, banner: object | None, now: datetime
                 ImageBox(banner, size=(320, None), use_alpha_blend=True)
             info_w = _DETAIL_CONTENT_W - (336 if banner is not None else 0)
             with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
-                TextBox(_build_vlive_time_text("开始于", rqd.start_at, now), styles["info"]).set_w(info_w)
-                TextBox(_build_vlive_time_text("结束于", rqd.end_at, now), styles["info"]).set_w(info_w)
+                start_text = _build_vlive_time_text("开始于", rqd.start_at, now)
+                end_text = _build_vlive_time_text("结束于", rqd.end_at, now)
+                TextBox(start_text, styles["info"], use_real_line_count=True).set_w(info_w)
+                TextBox(end_text, styles["info"], use_real_line_count=True).set_w(info_w)
                 summary = _detail_summary_text(rqd, now)
                 if summary:
                     TextBox(summary, styles["info"]).set_w(info_w)
