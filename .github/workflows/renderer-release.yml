@@ -62,17 +62,8 @@ jobs:
           uv venv .venv314t --python cpython-3.14.3+freethreaded
           uv sync --frozen --all-groups --python .venv314t/bin/python
 
-      - name: Repair chart extension FreeType linkage
-        run: |
-          set -euo pipefail
-          system_freetype="$(ldconfig -p | awk '/libfreetype\.so\.6 / { print $NF; exit }')"
-          bundled_freetype="$(find .venv314t/lib -path '*/pjsekai_scores_rs_skia_image.libs/libfreetype-*.so.6' -print -quit)"
-          if [ -n "$bundled_freetype" ]; then
-            test -n "$system_freetype"
-            rm "$bundled_freetype"
-            ln -s "$system_freetype" "$bundled_freetype"
-          fi
-          .venv314t/bin/python -X gil=0 -c 'import pjsekai_scores_rs'
+      - name: Check the chart extension imports
+        run: .venv314t/bin/python -X gil=0 -c 'import pjsekai_scores_rs'
 
       - name: Setup Rust stable
         uses: dtolnay/rust-toolchain@stable

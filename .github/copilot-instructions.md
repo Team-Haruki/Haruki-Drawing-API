@@ -392,7 +392,7 @@ an older backend. Renderer tunables: `HARUKI_SKIA_PNG_ENCODER`,
 **Capability handshake.** The extension exports `IR_CAPABILITY` (currently **29**) and `RAW_BUFFER_CAPABILITY`;
 `src/sekai/skia_renderer/canvas.py` checks the former against `REQUIRED_NATIVE_IR_CAPABILITY` (also 29). A too-old
 extension raises `ImportError` and prevents service startup. **When you add an IR node, bump BOTH sides.** The CI smoke checks
-(`scripts/ci/repair-freetype.sh`, `scripts/skia_codec_smoke.py`) read `REQUIRED_NATIVE_IR_CAPABILITY`. The Docker build's
+(`scripts/ci/check-native-wheels.sh`, `scripts/skia_codec_smoke.py`) read `REQUIRED_NATIVE_IR_CAPABILITY`. The Docker build's
 self-check needs **no** edit: it calls `load_native_renderer()`, which compares the installed
 wheel against `REQUIRED_NATIVE_IR_CAPABILITY` (it used to hardcode its own number, which drifted below the required one, so a stale wheel passed
 the image self-check and then silently fell back to Pillow at runtime). Two hardcoded copies of the
@@ -525,8 +525,8 @@ commit and reuses that wheel everywhere:
   Its rust-cache covers both target dirs and is saved only from `main`.
 - `Python` (`python-uv-ci`): ruff check + format check (the locked ruff), `compileall` and
   `scripts/ci/repo-guards.sh` (both YAML configs validate, `drawer.real.py` and `content_drawer.real.py` stay untracked,
-  `docker compose config`), then the test job installs `renderer-wheel`, repairs the bundled FreeType
-  (`scripts/ci/repair-freetype.sh`, which also checks `IR_CAPABILITY` against
+  `docker compose config`), then the test job installs `renderer-wheel`, import-checks both native extensions
+  (`scripts/ci/check-native-wheels.sh`, which also checks `IR_CAPABILITY` against
   `REQUIRED_NATIVE_IR_CAPABILITY`), downloads the OFL/CC fonts (`scripts/ci/fetch-fonts.sh`), runs the native
   codec smoke and one pytest run under `coverage` (90% floor from `[tool.coverage.report]`), uploaded for
   `Sonar`.
