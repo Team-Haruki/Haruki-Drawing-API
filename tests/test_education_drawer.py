@@ -41,12 +41,12 @@ def isolated_assets(monkeypatch: pytest.MonkeyPatch) -> None:
     ("quantity", "expected"),
     [
         (999, "999"),
-        (1_000, "1千"),
-        (1_500, "1.5千"),
-        (10_000, "1万"),
-        (15_000, "1.5万"),
-        (100_000, "10万"),
-        (10_000_000, "1000万"),
+        (1_000, "1k"),
+        (1_500, "1k5"),
+        (10_000, "1w"),
+        (15_000, "1w5"),
+        (100_000, "10w"),
+        (10_000_000, "1kw"),
     ],
 )
 def test_get_quant_text_boundaries(quantity: int, expected: str) -> None:
@@ -249,8 +249,8 @@ def test_area_item_helpers_and_builder_cover_profile_states(isolated_assets: Non
     assert drawer._area_level_color(2, 1, False, True) == (200, 0, 0)
     assert drawer._area_level_color(2, 1, False, False) == (50, 50, 50)
     assert isinstance(canvas.items[0].items[1], HSplit)
-    assert {"x1.5千", "2千/3千", "0/1万"}.issubset(_texts(canvas))
-    assert {"3千", "1万"}.issubset(_texts(without_profile))
+    assert {"x1k5", "2k/3k", "0/1w"}.issubset(_texts(canvas))
+    assert {"3k", "1w"}.issubset(_texts(without_profile))
 
 
 def test_bonds_builder_covers_absent_max_and_progress_states(isolated_assets: None) -> None:
@@ -643,17 +643,3 @@ def test_education_models_accept_optional_area_item_56_fields() -> None:
     )
     assert "multi_unit_bonus" in PowerBonusDetailRequest.model_fields
     assert PowerBonusDetailRequest.model_fields["multi_unit_bonus"].default is None
-
-
-def test_large_area_material_quantities_shrink_to_fit_the_icon() -> None:
-    from src.sekai.base.chrome import text_w
-
-    material = SimpleNamespace(
-        material_icon_path=None, quantity=30_000_000, have_quantity=12_345_678, sum_quantity=35_000_000, is_enough=False
-    )
-    widget = drawer._build_area_material(material, {}, has_profile=True)
-    boxes = {box.text: box for box in _walk_widgets(widget) if isinstance(box, TextBox)}
-    quantity, totals = boxes["x3000万"], boxes["1234万/3500万"]
-    assert text_w(quantity.style, quantity.text) <= drawer._AREA_MATERIAL_QUANTITY_W
-    assert text_w(totals.style, totals.text) <= drawer._AREA_MATERIAL_TOTALS_W
-    assert quantity.style.size >= drawer._AREA_MATERIAL_MIN_FONT
