@@ -1587,7 +1587,7 @@ def get_readable_datetime(t: datetime, show_original_time=True, use_en_unit=Fals
         text = f"{diff.days}{day_unit}"
     text += suffix
     if show_original_time:
-        text = f"{format_user_time(t)}（{text}）"
+        text = f"{format_user_time(t, seconds=True)}（{text}）"
     return text
 
 

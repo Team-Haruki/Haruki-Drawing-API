@@ -111,16 +111,20 @@ def utc_offset_label(dt: datetime) -> str:
     return f"UTC{sign}{hours}" if minutes == 0 else f"UTC{sign}{hours}:{minutes:02d}"
 
 
-def format_user_time(value: datetime | float | str | None, timezone_name: str | None = None) -> str:
+def format_user_time(
+    value: datetime | float | str | None, timezone_name: str | None = None, *, seconds: bool = False
+) -> str:
     """The spec time format, mirroring Cloud's ``i18n.FormatUserTime``: ``2026-10-09 14:05 (UTC+8)``.
 
     ``value`` is shown in ``timezone_name`` (the request's time zone; default Asia/Shanghai). An aware datetime
-    passed without a time zone keeps its own zone. A missing value is ``未知时间``.
+    passed without a time zone keeps its own zone. A missing value is ``未知时间``. ``seconds`` adds them
+    (``2026-10-09 14:05:00 (UTC+8)``) for the watermark and the times that always showed them.
     """
     dt = _user_datetime(value, timezone_name)
     if dt is None:
         return UNKNOWN_TIME_TEXT
-    return f"{dt:%Y-%m-%d %H:%M} ({utc_offset_label(dt)})"
+    stamp = f"{dt:%Y-%m-%d %H:%M:%S}" if seconds else f"{dt:%Y-%m-%d %H:%M}"
+    return f"{stamp} ({utc_offset_label(dt)})"
 
 
 def format_user_time_range(

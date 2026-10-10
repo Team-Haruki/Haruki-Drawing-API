@@ -9,9 +9,10 @@ from httpx import ASGITransport, AsyncClient
 from PIL import Image
 import pytest
 
-from src.sekai.base.plot import Canvas, TextBox
+from src.sekai.base.plot import Canvas, TextBox, TextStyle
 from src.sekai.vlive import drawer
 from src.sekai.vlive.model import VLiveBrief, VLiveDetailRequest, VLiveTotalCheerPointReward
+from src.settings import DEFAULT_FONT
 
 NOW = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 START_MS = int((NOW - timedelta(days=1)).timestamp() * 1000)
@@ -230,3 +231,11 @@ def test_vlive_detail_endpoint_renders_png() -> None:
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("image/png")
     assert response.content.startswith(b"\x89PNG")
+
+
+def test_long_time_lines_move_the_relative_part_to_its_own_line() -> None:
+    style = TextStyle(font=DEFAULT_FONT, size=18)
+    text = "结束于 2026-10-31 02:19:00 (UTC+8)（19天后）"
+    assert drawer._fit_time_text(text, style, 2000) == text
+    assert drawer._fit_time_text(text, style, 200) == "结束于 2026-10-31 02:19:00 (UTC+8)\n（19天后）"
+    assert drawer._fit_time_text("开始于 -", style, 10) == "开始于 -"

@@ -930,11 +930,15 @@ class _MusicDetailRenderer:
         self.custom_chart = rqd.custom_chart_info
         self.mid = rqd.music_info.id
         self.name = rqd.music_info.title + (" [FULL]" if rqd.music_info.is_full_length else "")
-        self.publish_time = format_user_time(datetime_from_millis(rqd.music_info.release_at, rqd.timezone))
+        self.publish_time = format_user_time(
+            datetime_from_millis(rqd.music_info.release_at, rqd.timezone), seconds=True
+        )
         self.bpm_main = f"{rqd.bpm} BPM" if rqd.bpm else "?"
         if self.custom_chart:
             if self.custom_chart.published_at:
-                self.publish_time = format_user_time(datetime_from_millis(self.custom_chart.published_at, rqd.timezone))
+                self.publish_time = format_user_time(
+                    datetime_from_millis(self.custom_chart.published_at, rqd.timezone), seconds=True
+                )
             if self.custom_chart.bpm:
                 self.bpm_main = f"{self.custom_chart.bpm} BPM"
         self.event_id = None if self.custom_chart else rqd.event_id

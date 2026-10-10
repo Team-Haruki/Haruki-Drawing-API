@@ -61,7 +61,7 @@ def _watermark_lines(canvas: Canvas) -> list[TextBox]:
 def test_request_watermark_fits_any_page_width(wide_glyphs: float, content_w: int) -> None:
     request = SimpleNamespace(timezone=LONG_TIMEZONE, dt=WIDE_DT)
     text = draw.build_request_watermark_text(request, extra_suffix="Region: EN  Event 12345")
-    assert "DT: 2026-12-28 23:58 (UTC-3)" in text
+    assert "DT: 2026-12-28 23:58:59 (UTC-3)" in text
 
     canvas = Canvas().set_padding(8)
     canvas.add_item(Frame().set_size((content_w, 30)))

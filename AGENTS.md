@@ -629,7 +629,7 @@ its profile card draws the label, else Drawing's name for the kind (抓包数据
 full-width parentheses in Chinese (except a region label such as `日服(JP)` and `欢乐嘉年华(5v5)`), a space between
 Chinese and Latin letters or digits, PT as a noun and pt as a unit, 演出能量 rather than 体力
 or 火 (number units such as `12.3456w` / `3kw` / `2k5` stay as they are), and times as `2026-10-09 14:05 (UTC+8)` through `format_user_time` / `format_user_time_range`
-(`base/timezone.py`, Cloud's `FormatUserTime`). Compact cells that cannot fit the offset (list entries, chart
+(`base/timezone.py`, Cloud's `FormatUserTime`; `seconds=True` for the watermark `DT:` and the detail times that always showed seconds). Compact cells that cannot fit the offset (list entries, chart
 ticks, short ranges) keep `MM-DD HH:MM`. `tests/test_copy_style.py` lints every Chinese literal under
 `src/sekai` with Cloud's catalog rules; its allowlist holds only text that is never drawn.
 

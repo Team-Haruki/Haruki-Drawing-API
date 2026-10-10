@@ -569,7 +569,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     TextBox(
-                        f"预测更新时间：{format_user_time(rqd.updated_at)}"
+                        f"预测更新时间：{format_user_time(rqd.updated_at, seconds=True)}"
                         f"（{get_readable_datetime(rqd.updated_at, show_original_time=False)}）",
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )

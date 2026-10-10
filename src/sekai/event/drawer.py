@@ -376,10 +376,10 @@ def _draw_event_timing(
     with VSplit().set_padding(16).set_sep(12).set_item_align("c").set_content_align("c"):
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox("开始时间", styles.label)
-            TextBox(format_user_time(detail.start_at), styles.text)
+            TextBox(format_user_time(detail.start_at, seconds=True), styles.text)
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox("结束时间", styles.label)
-            TextBox(format_user_time(detail.end_at), styles.text)
+            TextBox(format_user_time(detail.end_at, seconds=True), styles.text)
         with HSplit().set_padding(0).set_sep(8).set_item_align("lb").set_content_align("lb"):
             TextBox(_event_status_text(detail.start_at, detail.end_at, now), styles.text)
 

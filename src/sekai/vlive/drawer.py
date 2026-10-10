@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from PIL import Image
 
 from src.core.image_payload import EncodedImagePayload
+from src.sekai.base.chrome import text_w as _text_width
 from src.sekai.base.draw import BG_PADDING, SEKAI_BLUE_BG, add_request_watermark, roundrect_bg
 from src.sekai.base.plot import (
     Canvas,
@@ -86,7 +87,7 @@ def _vlive_entry_title(vlive: VLiveBrief) -> str:
 def _format_time(dt: datetime | None) -> str:
     if dt is None:
         return "-"
-    return format_user_time(dt)
+    return format_user_time(dt, seconds=True)
 
 
 def _format_relative(target: datetime | None, now: datetime) -> str:
@@ -104,6 +105,17 @@ def _format_relative(target: datetime | None, now: datetime) -> str:
     if seconds > 0:
         return f"{get_readable_timedelta(delta)}后"
     return f"{get_readable_timedelta(now - target)}前"
+
+
+def _fit_time_text(text: str, style: TextStyle, width: int) -> str:
+    """Move a time line's relative part (``（3天后）``) to its own line when the whole line is wider than ``width``.
+
+    One glyph of margin: the text box wraps a line that ends right at the edge, leaving ``）`` alone.
+    """
+    if _text_width(style, text) <= width - style.size or "（" not in text:
+        return text
+    head, _, tail = text.partition("（")
+    return f"{head.rstrip()}\n（{tail}"
 
 
 def _build_vlive_time_text(label: str, target: datetime | None, now: datetime) -> str:
@@ -209,8 +221,10 @@ def _build_vlive_entry_canvas(
 
                 with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
                     # The time lines carry the UTC offset; a long relative time wraps instead of clipping.
-                    TextBox(start_text, info_style, use_real_line_count=True).set_w(388)
-                    TextBox(end_text, info_style, use_real_line_count=True).set_w(388)
+                    TextBox(_fit_time_text(start_text, info_style, 388), info_style, use_real_line_count=True).set_w(
+                        388
+                    )
+                    TextBox(_fit_time_text(end_text, info_style, 388), info_style, use_real_line_count=True).set_w(388)
                     TextBox(status_text, info_style, use_real_line_count=True).set_w(388)
 
             if rewards or characters:
@@ -425,8 +439,9 @@ def _detail_header(rqd: VLiveDetailRequest, banner: object | None, now: datetime
             with VSplit().set_content_align("l").set_item_align("l").set_sep(8):
                 start_text = _build_vlive_time_text("开始于", rqd.start_at, now)
                 end_text = _build_vlive_time_text("结束于", rqd.end_at, now)
-                TextBox(start_text, styles["info"], use_real_line_count=True).set_w(info_w)
-                TextBox(end_text, styles["info"], use_real_line_count=True).set_w(info_w)
+                for text in (start_text, end_text):
+                    fitted = _fit_time_text(text, styles["info"], info_w)
+                    TextBox(fitted, styles["info"], use_real_line_count=True).set_w(info_w)
                 summary = _detail_summary_text(rqd, now)
                 if summary:
                     TextBox(summary, styles["info"]).set_w(info_w)

@@ -103,3 +103,9 @@ def test_event_planner_labels_reach_the_deck_request() -> None:
     )
     deck = _build_event_planner_deck_request(request)
     assert deck.labels == {"deck.planner.target": "Target {point} pt", "deck.noun.planner": "Plan"}
+
+
+def test_format_user_time_can_show_seconds() -> None:
+    value = datetime(2026, 10, 11, 1, 41, 7, tzinfo=SHANGHAI)
+    assert format_user_time(value, seconds=True) == "2026-10-11 01:41:07 (UTC+8)"
+    assert format_user_time(value) == "2026-10-11 01:41 (UTC+8)"

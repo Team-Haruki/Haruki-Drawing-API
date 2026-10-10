@@ -874,7 +874,7 @@ def _draw_card_detail_info(rqd: CardDetailRequest, images: _CardDetailImages, st
         release_time = datetime_from_millis(card.release_at, rqd.timezone)
         with HSplit().set_padding(16).set_sep(8).set_content_align("lb").set_item_align("lb"):
             TextBox("发布时间", styles.label)
-            TextBox(format_user_time(release_time), styles.text)
+            TextBox(format_user_time(release_time, seconds=True), styles.text)
         with HSplit().set_padding(16).set_sep(16).set_content_align("l").set_item_align("l"):
             TextBox("缩略图", styles.label)
             for layers in images.thumbnails:

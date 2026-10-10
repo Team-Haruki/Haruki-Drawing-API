@@ -35,7 +35,7 @@ async def _async_value(value):
 
 def test_vlive_time_status_window_and_cache_key_helpers_cover_all_states(monkeypatch) -> None:
     assert drawer._format_time(None) == "-"
-    assert drawer._format_time(NOW) == "2026-01-02 12:00 (UTC+0)"
+    assert drawer._format_time(NOW) == "2026-01-02 12:00:00 (UTC+0)"
     assert drawer._format_relative(None, NOW) == "-"
     assert drawer._format_relative(NOW + timedelta(seconds=20), NOW) == "刚刚"
     assert drawer._format_relative(NOW + timedelta(days=2), NOW) == "2天后"
