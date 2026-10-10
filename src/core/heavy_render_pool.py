@@ -15,6 +15,7 @@ from uuid import uuid4
 
 # Compatibility re-export for callers that still import the payload from this module.
 from src.core.image_payload import EncodedImagePayload, require_native_payload
+from src.sekai.base.render_errors import render_error_code
 from src.settings import (
     ISOLATED_WORKER_POOL_SIZE,
     ISOLATED_WORKER_QUEUE_LIMIT,
@@ -54,6 +55,7 @@ class _WorkerResult:
     payload: EncodedImagePayload | None = None
     error: str | None = None
     traceback_text: str | None = None
+    error_code: str | None = None
 
 
 class HeavyRenderTaskTimeoutError(TimeoutError):
@@ -61,7 +63,11 @@ class HeavyRenderTaskTimeoutError(TimeoutError):
 
 
 class HeavyRenderTaskExecutionError(RuntimeError):
-    pass
+    """A failed heavy render; ``render_error_code`` carries the worker exception's structured code, if any."""
+
+    def __init__(self, message: str, render_error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.render_error_code = render_error_code
 
 
 class HeavyRenderQueueFullError(RuntimeError):
@@ -175,6 +181,7 @@ def _heavy_render_worker_main(
                     ok=False,
                     error=f"{exc.__class__.__name__}: {exc}",
                     traceback_text=traceback.format_exc(),
+                    error_code=render_error_code(exc),
                 )
             )
         finally:
@@ -493,7 +500,9 @@ class HeavyRenderWorkerPool:
                 result.error,
                 (result.traceback_text or "").rstrip(),
             )
-            raise HeavyRenderTaskExecutionError(result.error or f"heavy render task failed: {task.kind}")
+            raise HeavyRenderTaskExecutionError(
+                result.error or f"heavy render task failed: {task.kind}", result.error_code
+            )
         logger.info(
             "heavy render task completed: worker=%s kind=%s task_id=%s elapsed=%.3fs pid=%s",
             slot.name,

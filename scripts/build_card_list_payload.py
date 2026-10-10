@@ -280,6 +280,7 @@ def build_card_basic(
         "unit": resolve_unit(card, character),
         "release_at": card.get("releaseAt"),
         "supply_type": format_supply_type_for_list(supply_raw),
+        "supply_type_key": normalize_supply_type(supply_raw),
         "rare": card.get("cardRarityType"),
         "attr": card.get("attr"),
         "prefix": card.get("prefix"),

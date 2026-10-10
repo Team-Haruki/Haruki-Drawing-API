@@ -51,7 +51,7 @@ from src.sekai.base.plot import (
     colored_text_box,
     parse_colored_text_segments,
 )
-from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.timezone import datetime_from_millis, region_display, request_now
 from src.sekai.base.utils import (
     AssetImageRef,
     EncodedImageRef,
@@ -726,6 +726,19 @@ async def _frame_profile_info_panel(ctx: _ProfileLayoutContext, panel: Widget) -
     )
 
 
+def _profile_account_line(profile: BasicProfile, request_region_label: str | None = None) -> str:
+    """The account line: the caller's ``account_label`` (``[日服(JP)] 123***789``), else built here.
+
+    With only a region label the UID is still hidden by this renderer; without either the legacy ``JP: <uid>``.
+    """
+    if account_label := (profile.account_label or "").strip():
+        return account_label
+    uid = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
+    if region_label := (profile.region_label or request_region_label or "").strip():
+        return f"[{region_label}] {uid}"
+    return f"{profile.region.upper()}: {uid}"
+
+
 def _build_profile_identity_text_module(ctx: _ProfileLayoutContext) -> Widget:
     profile = ctx.profile
     request = ctx.request
@@ -738,7 +751,7 @@ def _build_profile_identity_text_module(ctx: _ProfileLayoutContext) -> Widget:
     )
     text_col.add_item(
         TextBox(
-            f"{profile.region.upper()}: {process_hide_uid(profile.is_hide_uid, profile.id, keep=6)}",
+            _profile_account_line(profile, request.region_label),
             TextStyle(font=DEFAULT_FONT, size=20, color=ADAPTIVE_WB),
         )
     )
@@ -1281,14 +1294,6 @@ async def try_render_profile_payload(rqd: ProfileRequest) -> EncodedImagePayload
     return await render_canvas_payload(canvas, endpoint=_PROFILE_ENDPOINT, scale=_PROFILE_SCALE)
 
 
-def _profile_card_data_source_label(name: str | None) -> str:
-    if not name:
-        return "数据"
-    if name.endswith("数据"):
-        return name[:-2]
-    return name
-
-
 def _profile_card_level_label(name: str | list[Widget], mysekai_level: int | None) -> str | None:
     """``MySekai Lv.N``, or the compact ``MSLv.N`` next to a long name (its visible text, or its text items)."""
     if not mysekai_level:
@@ -1298,33 +1303,6 @@ def _profile_card_level_label(name: str | list[Widget], mysekai_level: int | Non
     else:
         name_length = sum(get_str_display_length(item.text) for item in name if isinstance(item, TextBox))
     return f"MySekai Lv.{mysekai_level}" if name_length <= 12 else f"MSLv.{mysekai_level}"
-
-
-def _profile_card_summary_line(profile: BasicProfile, data_sources: list[ProfileDataSource]) -> str:
-    user_id = process_hide_uid(profile.is_hide_uid, profile.id, keep=6)
-    summary_line = f"{profile.region.upper()}: {user_id}"
-    primary_source = data_sources[0] if data_sources else None
-    if len(data_sources) <= 1 and primary_source and primary_source.name:
-        summary_line += f" {primary_source.name}"
-    return summary_line
-
-
-def _profile_card_update_lines(data_sources: list[ProfileDataSource], timezone_name: str | None) -> list[str]:
-    if len(data_sources) <= 1:
-        primary_source = data_sources[0] if data_sources else None
-        if primary_source is None or not primary_source.update_time:
-            return []
-        update_time = datetime_from_millis(primary_source.update_time, timezone_name)
-        return [f"更新时间: {format_info_panel_update_time(update_time, timezone_name)}"]
-
-    update_lines = []
-    for data_source in data_sources[:2]:
-        if not data_source.update_time:
-            continue
-        update_time = datetime_from_millis(data_source.update_time, timezone_name)
-        update_time_text = format_info_panel_update_time(update_time, timezone_name)
-        update_lines.append(f"{_profile_card_data_source_label(data_source.name)}更新时间: {update_time_text}")
-    return update_lines
 
 
 # ---------------------------------------------------------------------------
@@ -1439,8 +1417,7 @@ async def _build_profile_card_avatar_module(rqd: ProfileCardRequest) -> Widget |
     if not rqd.profile:
         return None
     avatar_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.profile.leader_image_path)
-    region = rqd.profile.region.upper()
-    ring = _profile_card_region_chip_fill(region)
+    ring = _profile_card_region_chip_fill(rqd.profile.region)
     well = _CARD_AVATAR_WELL
     inner = well - 2 * _CARD_AVATAR_RING
     # the avatar fills the well up to the region-coloured ring; the region chip sits on the ID line
@@ -1502,8 +1479,11 @@ def _build_profile_card_identity_module(rqd: ProfileCardRequest, data_sources: l
             free = _CARD_TEXT_W - sum(chip._get_self_size()[0] + 8 for chip in chips)
             name_row.set_items([*_profile_card_name(profile.nickname, free), *chips])
         with HSplit().set_content_align("l").set_item_align("c").set_sep(8) as id_row:
-            region = profile.region.upper()
-            chip = _profile_card_chip(region, _profile_card_region_chip_fill(region), style=_CARD_BADGE_STYLE)
+            # Text from the caller's region label, colour from the raw region code.
+            region_text = region_display(profile.region, profile.region_label or rqd.region_label)
+            chip = _profile_card_chip(
+                region_text, _profile_card_region_chip_fill(profile.region), style=_CARD_BADGE_STYLE
+            )
             # The row must never outgrow the text column (an unmasked 19-digit ID plus a long timezone
             # does): the timezone moves to its own line when it does not fit whole, the ID shrinks last.
             free = _CARD_TEXT_W - chip._get_self_size()[0] - 8

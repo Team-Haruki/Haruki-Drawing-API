@@ -150,6 +150,27 @@ async def test_card_list_draws_notice_and_supply_variants(monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_card_list_keys_supply_behaviour_on_the_raw_key():
+    """The icon, the background and the suffix follow supply_type_key; supply_type is only the text."""
+    birthday = _card(1, 1000)
+    birthday.supply_type, birthday.supply_type_key = "生日", "birthday"
+    wl = _card(2, 2000)
+    wl.supply_type, wl.supply_type_key = "WL 限定", "unit_event_limited"
+    renamed = _card(3, 3000)
+    renamed.supply_type, renamed.supply_type_key = "Anything", "bloom_festival_limited"
+    request = _request(birthday, wl, renamed)
+    request.term_limited_icon_path = "term.png"
+    request.fes_limited_icon_path = "fes.png"
+
+    canvas = await card._build_card_list_canvas(request)
+
+    texts = [widget.text for widget in _walk(canvas) if isinstance(widget, card.TextBox)]
+    assert "ID:1" in texts  # birthday: not limited, no 【生日】 suffix
+    assert "ID:2【WL 限定】" in texts
+    assert "ID:3【Anything】" in texts
+
+
+@pytest.mark.anyio
 async def test_skia_disabled_returns_none_without_rendering(monkeypatch):
     monkeypatch.setattr(card, "skia_plot_enabled", lambda: False)
 

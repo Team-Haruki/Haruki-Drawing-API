@@ -302,27 +302,8 @@ def _strip_command_help_frontmatter(markdown: str) -> str:
     return markdown
 
 
-def _strip_command_help_output_section(markdown: str) -> str:
-    kept: list[str] = []
-    skipping = False
-    skip_level = 0
-    for raw in markdown.splitlines():
-        heading = _command_help_heading(raw.strip())
-        if heading is not None:
-            text, level = heading
-            if text.strip() == "输出":
-                skipping = True
-                skip_level = level
-                continue
-            if skipping and level <= skip_level:
-                skipping = False
-        if not skipping:
-            kept.append(raw)
-    return "\n".join(kept)
-
-
 def _layout_command_help_markdown(markdown: str) -> tuple[str, list[_CommandHelpSection]]:
-    markdown = _strip_command_help_output_section(_strip_command_help_frontmatter(markdown or ""))
+    markdown = _strip_command_help_frontmatter(markdown or "")
     title = "指令帮助"
     sections: list[_CommandHelpSection] = []
     lines: list[_CommandHelpLine] = []
@@ -857,8 +838,16 @@ _ALIAS_MUSIC_ACCENT: Color = (64, 132, 226, 255)
 _ALIAS_CHARA_FALLBACK_ACCENT: Color = (112, 122, 146, 255)
 
 
-def _resolve_alias_accent(entity_label: str, entity_id: int) -> Color:
-    if "角色" in entity_label:
+def _alias_is_character(entity_type: str | None, entity_label: str) -> bool:
+    """Whether the alias list is a character's: by the raw ``entity_type`` key, else the legacy label text."""
+    key = (entity_type or "").strip().lower()
+    if key:
+        return key == "character"
+    return "角色" in entity_label  # callers that predate entity_type
+
+
+def _resolve_alias_accent(entity_type: str | None, entity_label: str, entity_id: int) -> Color:
+    if _alias_is_character(entity_type, entity_label):
         if color_code := CHARACTER_COLOR_CODE.get(entity_id):
             return tuple(color_code_to_rgb(color_code))
         return _ALIAS_CHARA_FALLBACK_ACCENT
@@ -1023,7 +1012,7 @@ def _build_alias_trim_panel(trim_img: AlphaTrimImageBox, column_h: int) -> Frame
 
 async def _build_alias_list_canvas(rqd: AliasListRequest) -> Canvas:
     aliases = [alias.strip() for alias in rqd.aliases if alias and alias.strip()]
-    accent = _resolve_alias_accent(rqd.entity_label, rqd.entity_id)
+    accent = _resolve_alias_accent(rqd.entity_type, rqd.entity_label, rqd.entity_id)
     jacket_img = None
     if rqd.music_jacket_path:
         jacket_img = await get_asset_image_ref(ASSETS_BASE_DIR, rqd.music_jacket_path)

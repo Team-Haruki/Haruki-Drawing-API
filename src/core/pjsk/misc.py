@@ -10,6 +10,7 @@ from src.core.heavy_render_pool import (
 )
 from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.misc.drawer import try_render_alias_list_payload
 from src.sekai.misc.model import AliasListRequest, CharaBirthdayRequest
@@ -38,9 +39,9 @@ async def chara_birthday(request: CharaBirthdayRequest):
     except HeavyRenderTaskTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except HeavyRenderTaskExecutionError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise render_http_exception(exc) from exc
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -61,4 +62,4 @@ async def alias_list(request: AliasListRequest):
         set_request_stage("misc:alias_list:image_to_response")
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

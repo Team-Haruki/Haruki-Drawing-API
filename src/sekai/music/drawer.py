@@ -36,7 +36,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.timezone import datetime_from_millis
+from src.sekai.base.timezone import datetime_from_millis, region_tag
 from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_asset_image_refs, get_str_display_length
 from src.sekai.profile.drawer import get_profile_card
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -948,7 +948,7 @@ class _MusicDetailRenderer:
             custom_title = self.custom_chart.title or "自定义谱面"
             with VSplit().set_padding(16).set_sep(6).set_content_align("lt").set_item_align("lt").set_w(800):
                 TextBox(
-                    f"【{self.rqd.region.upper()}-CUSTOM】{self.name} / {custom_title}",
+                    f"【{region_tag(self.rqd.region, self.rqd.region_label, 'CUSTOM')}】{self.name} / {custom_title}",
                     TextStyle(font=DEFAULT_BOLD_FONT, size=30, color=(20, 20, 20)),
                     line_count=1,
                     overflow="shrink",
@@ -970,7 +970,7 @@ class _MusicDetailRenderer:
                     ).set_w(768)
             return
 
-        name_text = f"【{self.rqd.region.upper()}-{self.mid}】{self.name}"
+        name_text = f"【{region_tag(self.rqd.region, self.rqd.region_label, self.mid)}】{self.name}"
         if self.rqd.cn_name:
             name_text += f"  ({self.rqd.cn_name})"
         TextBox(

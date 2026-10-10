@@ -47,9 +47,14 @@ def _walk(widget):
 def test_alias_accent_trim_path_and_image_preparation_cover_variants(monkeypatch) -> None:
     monkeypatch.setitem(drawer.CHARACTER_COLOR_CODE, 1, "#112233")
     assert drawer._with_alpha((1, 2, 3), 4) == (1, 2, 3, 4)
-    assert drawer._resolve_alias_accent("角色ID", 1) == (17, 34, 51, 255)
-    assert drawer._resolve_alias_accent("角色ID", 999) == drawer._ALIAS_CHARA_FALLBACK_ACCENT
-    assert drawer._resolve_alias_accent("歌曲ID", 1) == drawer._ALIAS_MUSIC_ACCENT
+    # The raw entity_type decides, whatever the label says.
+    assert drawer._resolve_alias_accent("character", "Character ID", 1) == (17, 34, 51, 255)
+    assert drawer._resolve_alias_accent("character", "", 999) == drawer._ALIAS_CHARA_FALLBACK_ACCENT
+    assert drawer._resolve_alias_accent("music", "角色 ID", 1) == drawer._ALIAS_MUSIC_ACCENT
+    # Legacy callers without entity_type: the label text.
+    assert drawer._resolve_alias_accent(None, "角色ID", 1) == (17, 34, 51, 255)
+    assert drawer._resolve_alias_accent(None, "角色ID", 999) == drawer._ALIAS_CHARA_FALLBACK_ACCENT
+    assert drawer._resolve_alias_accent(None, "歌曲ID", 1) == drawer._ALIAS_MUSIC_ACCENT
 
     assert drawer._resolve_alias_trim_path(_request()) is None
     assert drawer._resolve_alias_trim_path(_request(character_trim_path=" trim.png ")) == "trim.png"

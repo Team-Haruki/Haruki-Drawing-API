@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.sk.drawer import (
     CFRequest,
@@ -37,7 +38,7 @@ async def sk_line(request: SklRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -52,7 +53,7 @@ async def sk_query(request: SKRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -67,7 +68,7 @@ async def sk_check_room(request: CFRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -82,7 +83,7 @@ async def sk_csb(request: CSBRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -97,7 +98,7 @@ async def sk_speed(request: SpeedRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -112,7 +113,7 @@ async def sk_player_trace(request: PlayerTraceRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -127,7 +128,7 @@ async def sk_rank_trace(request: RankTraceRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -142,4 +143,4 @@ async def sk_winrate(request: WinRateRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

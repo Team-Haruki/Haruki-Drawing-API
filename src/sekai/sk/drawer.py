@@ -210,7 +210,7 @@ async def _build_sk_canvas(rqd: SKRequest) -> Canvas:
             with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
                 with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
                     TextBox(
-                        get_event_id_and_name_text(rqd.region, eid, truncate(title, 20)),
+                        get_event_id_and_name_text(rqd.region, eid, truncate(title, 20), rqd.region_label),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     time_to_end = event_end - now
@@ -268,6 +268,7 @@ async def _build_cf_canvas(rqd: CFRequest) -> Canvas:
                 now,
                 wl_chara_img,
                 show_icon=bool(rqd.wl_chara_icon_path),
+                region_label=rqd.region_label,
             )
             with VSplit().set_content_align("lt").set_item_align("lt").set_sep(6).set_padding(16):
                 for text, style in texts:
@@ -332,6 +333,7 @@ async def _build_csb_canvas(rqd: CSBRequest) -> tuple[Canvas, float]:
                 now,
                 wl_chara_img,
                 show_icon=bool(rqd.wl_chara_icon_path),
+                region_label=rqd.region_label,
                 extra_lines=update_line,
             )
             _draw_csb_heatmap(
@@ -382,7 +384,7 @@ async def _build_sks_canvas(rqd: SpeedRequest) -> Canvas:
             with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
                 with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
                     TextBox(
-                        get_event_id_and_name_text(rqd.region, eid, truncate(title, 16)),
+                        get_event_id_and_name_text(rqd.region, eid, truncate(title, 16), rqd.region_label),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     TextBox(
@@ -556,7 +558,7 @@ async def _build_winrate_predict_canvas(rqd: WinRateRequest) -> Canvas:
             with HSplit().set_content_align("rt").set_item_align("rt").set_padding(16).set_sep(7):
                 with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
                     TextBox(
-                        f"【{rqd.region.upper()}-{eid}】{truncate(event_name, 20)}",
+                        get_event_id_and_name_text(rqd.region, eid, truncate(event_name, 20), rqd.region_label),
                         TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
                     )
                     TextBox(
@@ -667,7 +669,7 @@ def _player_trace_title(
     primary: _PlayerTraceSeries,
     secondary: _PlayerTraceSeries | None,
 ) -> str:
-    prefix = get_event_id_and_name_text(rqd.region, rqd.event_id, "")
+    prefix = get_event_id_and_name_text(rqd.region, rqd.event_id, "", rqd.region_label)
     if secondary is None:
         return f"{prefix} 玩家: {primary.name}"
     return f"{prefix} 玩家: {primary.name} vs {secondary.name}"
@@ -967,11 +969,12 @@ def _draw_query_header(
     *,
     show_icon: bool,
     extra_lines: tuple[StyledText, ...] = (),
+    region_label: str | None = None,
 ) -> None:
     with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
             TextBox(
-                get_event_id_and_name_text(region, event_id, truncate(title, 20)),
+                get_event_id_and_name_text(region, event_id, truncate(title, 20), region_label),
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
             TextBox(
@@ -1245,7 +1248,7 @@ def _draw_skl_header(
     with HSplit().set_content_align("rt").set_item_align("rt").set_padding(8).set_sep(7):
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(5):
             TextBox(
-                get_event_id_and_name_text(rqd.region, rqd.id, truncate(rqd.name, 16)),
+                get_event_id_and_name_text(rqd.region, rqd.id, truncate(rqd.name, 16), rqd.region_label),
                 TextStyle(font=DEFAULT_BOLD_FONT, size=18, color=BLACK),
             )
             TextBox(

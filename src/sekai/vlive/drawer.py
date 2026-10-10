@@ -312,7 +312,9 @@ def _detail_live_status_text(live: VLiveDetailLive, now: datetime) -> str:
 
 
 def _detail_live_name(live: VLiveDetailLive, group_title: str) -> str:
-    """Drop the shared group title so a narrow cell keeps the distinguishing part (the character)."""
+    """The caller's ``short_name``, else the name without the shared group title (the distinguishing part)."""
+    if short_name := (live.short_name or "").strip():
+        return f"【{live.id}】{short_name}"
     name = (live.name or "").strip()
     title = group_title.strip()
     if title and name.startswith(title) and name[len(title) :].strip():

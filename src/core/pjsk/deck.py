@@ -11,6 +11,7 @@ from src.core.heavy_render_pool import (
     get_heavy_render_worker_pool,
 )
 from src.core.http_responses import HEAVY_RENDER_ERROR_RESPONSES
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.deck.model import DeckRequest
 
@@ -38,7 +39,7 @@ async def deck_recommend(request: DeckRequest):
     except HeavyRenderTaskTimeoutError as exc:
         raise HTTPException(status_code=504, detail=str(exc)) from exc
     except HeavyRenderTaskExecutionError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise render_http_exception(exc) from exc
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

@@ -99,16 +99,20 @@ class DetailedProfileCardRequest(TimeZoneRequest):
     frame_paths: PlayerFramePaths | None = None
     user_cards: list[dict] | None = None
     rank: int | None = None
+    account_label: str | None = None
 
     def to_profile_card_request(self) -> "ProfileCardRequest":
         """转换为 ProfileCardRequest"""
         return ProfileCardRequest(
             timezone=self.timezone,
+            region_label=self.region_label,
             bg_alpha=80,
             rank=self.rank,
             profile=BasicProfile(
                 id=self.id,
                 region=self.region,
+                region_label=self.region_label,
+                account_label=self.account_label,
                 nickname=self.nickname,
                 is_hide_uid=self.is_hide_uid,
                 leader_image_path=self.leader_image_path,
@@ -148,6 +152,10 @@ class BasicProfile(BaseModel):
         是否有框
     frame_path : Optional[ str ] = None
         框的路径
+    region_label : Optional[ str ] = None
+        区服显示名（由调用方本地化，如 ``日服(JP)``）；缺省时显示大写区服代码
+    account_label : Optional[ str ] = None
+        账号行（由调用方本地化并按 ``is_hide_uid`` 隐藏 UID，如 ``[日服(JP)] 123***789``）
     """
 
     id: str
@@ -158,6 +166,8 @@ class BasicProfile(BaseModel):
     has_frame: bool = False
     frame_path: str | None = None
     frame_paths: PlayerFramePaths | None = None
+    region_label: str | None = None
+    account_label: str | None = None
 
 
 class ProfileDataSource(BaseModel):
@@ -181,6 +191,8 @@ class ProfileDataSource(BaseModel):
     source: str | None = None
     update_time: int | None = None
     mode: str | None = None
+    # Raw source key (suite, mysekai, public) sent by the caller; ``name`` is display text only.
+    kind: str | None = None
 
 
 class ProfileCardRequest(TimeZoneRequest):

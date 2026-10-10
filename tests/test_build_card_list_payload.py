@@ -116,6 +116,7 @@ def test_build_card_list_payload_from_masterdata(tmp_path):
     assert first["character_name"] == "星乃一歌"
     assert first["unit"] == "light_sound"
     assert first["supply_type"] == "期间限定"
+    assert first["supply_type_key"] == "term_limited"
     assert first["skill"]["skill_type_icon_path"] == "static_images/skill_score_up.png"
     assert first["skill"]["skill_detail"] == "5.0秒間 スコアが40%UPする"
     assert first["special_skill_info"]["skill_type_icon_path"] == "static_images/skill_life_recovery.png"
@@ -129,6 +130,7 @@ def test_build_card_list_payload_from_masterdata(tmp_path):
     second = payload["cards"][1]
     assert second["unit"] == "light_sound"
     assert second["supply_type"] == "生日"
+    assert second["supply_type_key"] == "birthday"
     assert second["thumbnail_info"] == [
         {
             "card_id": 102,
@@ -168,3 +170,4 @@ def test_build_card_list_payload_maps_world_link3_supply(tmp_path):
     payload = build_payload(tmp_path, card_ids=[101], region="jp", title=None)
 
     assert payload["cards"][0]["supply_type"] == "WL限定"
+    assert payload["cards"][0]["supply_type_key"] == "unit_event_limited"

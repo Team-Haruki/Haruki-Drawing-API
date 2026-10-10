@@ -35,6 +35,7 @@ from .paint_types import (
     get_font_desc,
     image_resample_filter as pillow_resample_for_image_sampling,
 )
+from .render_errors import RenderContentTooLargeError
 from .text_layout import get_text_size
 from .utils import AssetImageRef, ImageSource, resolve_image_source_sync, run_in_pool
 
@@ -313,7 +314,7 @@ class Widget:
             content_h_limit = self.h - self.v_padding * 2 if self.h is not None else content_h
             if content_w > content_w_limit or content_h > content_h_limit:
                 if not self.allow_draw_outside:
-                    raise ValueError(
+                    raise RenderContentTooLargeError(
                         f"Content size is too large with ({content_w}, {content_h}) > "
                         f"({content_w_limit}, {content_h_limit})"
                     )
@@ -1898,6 +1899,12 @@ async def prefetch_asset_refs(root: Widget) -> None:
     )
 
 
+def _check_canvas_size(size: tuple[int, int]) -> None:
+    size_limit = CANVAS_SIZE_LIMIT
+    if size[0] * size[1] > size_limit[0] * size_limit[1]:
+        raise RenderContentTooLargeError(f"Canvas size is too large ({size[0]}x{size[1]})")
+
+
 class Canvas(Frame):
     def __init__(self, w=None, h=None, bg: WidgetBg = None) -> None:
         super().__init__()
@@ -1918,8 +1925,7 @@ class Canvas(Frame):
     async def get_img(self, scale: float | None = None, cache_key: str | None = None) -> Image.Image:
         t = datetime.now()
         size = self._get_self_size()
-        size_limit = CANVAS_SIZE_LIMIT
-        assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        _check_canvas_size(size)
         await prefetch_asset_refs(self)
         from .painter import Painter
 
@@ -1942,8 +1948,7 @@ class Canvas(Frame):
         badge); lazy ``AssetImageRef``s resolve inline in the paste impls instead of being
         prefetched concurrently, so prefer :meth:`get_img` from async code."""
         size = self._get_self_size()
-        size_limit = CANVAS_SIZE_LIMIT
-        assert size[0] * size[1] <= size_limit[0] * size_limit[1], f"Canvas size is too large ({size[0]}x{size[1]})"
+        _check_canvas_size(size)
         from .painter import Painter
 
         p = Painter(size=size)

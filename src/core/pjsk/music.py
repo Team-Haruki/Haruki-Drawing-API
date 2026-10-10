@@ -1,7 +1,8 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.music.drawer import (
     try_render_basic_music_rewards_payload,
@@ -39,7 +40,7 @@ async def music_detail(request: MusicDetailRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -58,7 +59,7 @@ async def music_brief_list(request: MusicBriefListRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -77,7 +78,7 @@ async def music_list(request: MusicListRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -96,7 +97,7 @@ async def music_progress(request: PlayProgressRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -115,7 +116,7 @@ async def music_rewards_detail(request: DetailMusicRewardsRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -134,4 +135,4 @@ async def music_rewards_basic(request: BasicMusicRewardsRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

@@ -1,9 +1,10 @@
 import traceback
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.education.drawer import (
     try_render_area_item_upgrade_materials_payload,
@@ -43,7 +44,7 @@ async def challenge_live_detail(request: ChallengeLiveDetailsRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -63,7 +64,7 @@ async def power_bonus_detail(request: PowerBonusDetailRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -83,7 +84,7 @@ async def area_item_materials(request: AreaItemUpgradeMaterialsRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -103,7 +104,7 @@ async def bonds_level(request: BondsRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -122,7 +123,7 @@ async def leader_count(request: LeaderCountRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -136,7 +137,7 @@ async def character_mission_overview(request: CharacterMissionOverviewRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -150,4 +151,4 @@ async def character_mission_all(request: CharacterMissionAllRequest):
         payload = require_native_payload(payload)
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

@@ -35,7 +35,7 @@ from src.sekai.base.plot import (
     TextStyle,
     VSplit,
 )
-from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.timezone import datetime_from_millis, region_display, request_now
 from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     collect_asset_signatures,
@@ -271,7 +271,7 @@ def _draw_event_identity(
     detail = rqd.event_info
     with VSplit().set_padding(16).set_sep(12).set_item_align("l").set_content_align("l"):
         with HSplit().set_padding(0).set_sep(8).set_item_align("l").set_content_align("l"):
-            TextBox(rqd.region.upper(), styles.label)
+            TextBox(region_display(rqd.region, rqd.region_label), styles.label)
             TextBox(f"{detail.id}", styles.text)
             Spacer(w=8)
             TextBox("类型", styles.label)
@@ -719,7 +719,7 @@ def _event_planner_fallback_deck_request(rqd: EventPlannerRequest) -> DeckReques
         recommend_type="event",
         event_id=rqd.event_id,
         live_type="multi",
-        live_name=rqd.live_name or "协力",
+        live_name=rqd.live_name,
         multi_live_teammate_power=250000,
         multi_live_teammate_score_up=200,
         target="score",
@@ -744,7 +744,7 @@ def _build_event_planner_deck_request(rqd: EventPlannerRequest) -> DeckRequest:
     deck_request.music_cover_path = None
     deck_request.target = deck_request.target or "score"
     deck_request.live_type = deck_request.live_type or "multi"
-    deck_request.live_name = deck_request.live_name or rqd.live_name or "协力"
+    deck_request.live_name = deck_request.live_name or rqd.live_name
     deck_request.recommend_type = deck_request.recommend_type or "event"
     return deck_request
 

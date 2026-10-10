@@ -44,6 +44,7 @@ def _request(**overrides):
         "timezone": "UTC",
         "dt": NOW_MS,
         "region": "jp",
+        "region_label": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)

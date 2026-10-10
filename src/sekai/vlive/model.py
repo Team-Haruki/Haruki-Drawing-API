@@ -58,6 +58,9 @@ class VLiveDetailLive(BaseModel):
 
     id: int
     name: str | None = None
+    # The part of ``name`` that tells this live from the others in its group (e.g. the character), chosen by
+    # the caller. Without it the renderer strips the group title from ``name`` itself.
+    short_name: str | None = None
     character_icon_path: AssetKey | None = None
     current_start_at: datetime | None = None
     current_end_at: datetime | None = None

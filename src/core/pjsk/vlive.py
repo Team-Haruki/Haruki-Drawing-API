@@ -1,9 +1,10 @@
 import traceback
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.http_responses import INTERNAL_SERVER_ERROR_RESPONSES
 from src.core.image_payload import require_native_payload
+from src.core.render_errors import render_http_exception
 from src.core.utils import encoded_image_payload_to_response
 from src.sekai.vlive.drawer import try_render_vlive_detail_payload, try_render_vlive_list_payload
 from src.sekai.vlive.model import VLiveDetailRequest, VLiveListRequest
@@ -28,7 +29,7 @@ async def vlive_list(request: VLiveListRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)
 
 
 @router.post(
@@ -49,4 +50,4 @@ async def vlive_detail(request: VLiveDetailRequest):
         return await encoded_image_payload_to_response(payload)
     except Exception as e:
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise render_http_exception(e)

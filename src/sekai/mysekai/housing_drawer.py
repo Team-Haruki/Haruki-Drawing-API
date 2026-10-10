@@ -23,7 +23,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import ink_centered_text_offset_y
-from src.sekai.base.timezone import datetime_from_millis
+from src.sekai.base.timezone import datetime_from_millis, region_tag
 from src.sekai.base.utils import EncodedImageRef, ImageSource, get_asset_image_ref, get_encoded_image_ref, run_in_pool
 from src.sekai.mysekai.model import MysekaiHousingCompetitionEntry, MysekaiHousingCompetitionRequest
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
@@ -86,7 +86,7 @@ async def _build_mysekai_housing_competition_canvas(rqd: MysekaiHousingCompetiti
                     with VSplit().set_sep(6).set_content_align("lt").set_item_align("lt"):
                         TextBox(rqd.name, TITLE_STYLE, line_count=2, overflow="shrink").set_w(420)
                         with HSplit().set_sep(6).set_content_align("l").set_item_align("c"):
-                            _chip(f"{rqd.region.upper()}-{rqd.competition_id}", CHIP_SLATE)
+                            _chip(region_tag(rqd.region, rqd.region_label, rqd.competition_id), CHIP_SLATE)
                             _chip(f"统计 {rqd.unique_count} 个投稿", CHIP_BLUE)
                             if rqd.sampled_at:
                                 sampled = datetime_from_millis(rqd.sampled_at, rqd.timezone)

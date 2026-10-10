@@ -40,7 +40,7 @@ from src.sekai.base.plot import (
     VSplit,
 )
 from src.sekai.base.text_layout import get_text_size
-from src.sekai.base.timezone import datetime_from_millis, request_now
+from src.sekai.base.timezone import datetime_from_millis, id_with_region, request_now
 from src.sekai.base.utils import (
     get_asset_image_ref,
 )
@@ -63,9 +63,33 @@ from .model import (
 # 从 model.py 导入数据模型
 from .timeline import draw_timeline, timeline_columns, timeline_width
 
-NON_LIMITED_SUPPLY_TYPES = {"", "normal", "非限定"}
-TERM_LIMITED_SUPPLY_TYPES = {"期间限定", "WL限定", "联动限定"}
-FES_LIMITED_SUPPLY_TYPES = {"Fes限定", "CFes限定", "BFes限定"}
+# Behaviour is keyed on the raw supply key (``supply_type_key``); ``supply_type`` is display text only.
+NON_LIMITED_SUPPLY_KEYS = frozenset({"normal", "birthday"})
+TERM_LIMITED_SUPPLY_KEYS = frozenset({"term_limited", "unit_event_limited", "collaboration_limited"})
+FES_LIMITED_SUPPLY_KEYS = frozenset({"colorful_festival_limited", "bloom_festival_limited"})
+# Raw keys a caller may send for the same supply type.
+_SUPPLY_KEY_ALIASES = {
+    "": "normal",
+    "not_limited": "normal",
+    "festival_limited": "colorful_festival_limited",
+    "rarity_birthday": "birthday",
+}
+# Fallback for callers that send only the display text: the labels older Cloud releases sent.
+_LEGACY_SUPPLY_LABEL_KEYS = {
+    "": "normal",
+    "非限定": "normal",
+    "常驻": "normal",
+    "期间限定": "term_limited",
+    "WL限定": "unit_event_limited",
+    "WL 限定": "unit_event_limited",
+    "联动限定": "collaboration_limited",
+    "Fes限定": "colorful_festival_limited",
+    "CFes限定": "colorful_festival_limited",
+    "CFes 限定": "colorful_festival_limited",
+    "BFes限定": "bloom_festival_limited",
+    "BFes 限定": "bloom_festival_limited",
+    "生日": "birthday",
+}
 CARD_BOX_GROUP_BY_ATTR = "attr"
 CARD_BOX_ATTR_ORDER = ["cute", "cool", "pure", "happy", "mysterious"]
 CARD_BOX_ATTR_LABELS = {
@@ -164,8 +188,29 @@ class _CardBoxAssets:
     birthday_rarity: object | None
 
 
-def is_non_limited_supply_type(value: str | None) -> bool:
-    return (value or "").strip() in NON_LIMITED_SUPPLY_TYPES
+def supply_type_key(key: str | None, label: str | None = None) -> str:
+    """The raw supply key of a card: ``key`` when the caller sent one, else inferred from the legacy ``label``.
+
+    An unknown label is returned as is, which no key set contains (a limited card without an icon).
+    """
+    raw = (key or "").strip().lower()
+    if raw:
+        return _SUPPLY_KEY_ALIASES.get(raw, raw)
+    text = (label or "").strip()
+    return _LEGACY_SUPPLY_LABEL_KEYS.get(text) or _SUPPLY_KEY_ALIASES.get(text.lower(), text.lower())
+
+
+def is_non_limited_supply_type(key: str | None, label: str | None = None) -> bool:
+    return supply_type_key(key, label) in NON_LIMITED_SUPPLY_KEYS
+
+
+def _limited_icon_kind(key: str | None, label: str | None = None) -> str | None:
+    resolved = supply_type_key(key, label)
+    if resolved in TERM_LIMITED_SUPPLY_KEYS:
+        return "term"
+    if resolved in FES_LIMITED_SUPPLY_KEYS:
+        return "fes"
+    return None
 
 
 def get_notice_dimensions(content_width: int, min_width: int = 520) -> tuple[int, int]:
@@ -420,10 +465,11 @@ def _card_box_attr_content_width(
     return 16 * 2 + max(max(attr_row_widths or [0]), attr_header_min_width)
 
 
-def _rarity_progress_bucket(rare: str | None, supply_type: str | None = None) -> str | None:
+def _rarity_progress_bucket(
+    rare: str | None, supply_key: str | None = None, supply_label: str | None = None
+) -> str | None:
     rare = (rare or "").strip().lower()
-    supply_type = (supply_type or "").strip().lower()
-    if rare == "rarity_birthday" or supply_type == "birthday":
+    if rare == "rarity_birthday" or supply_type_key(supply_key, supply_label) == "birthday":
         return "birthday"
     if rare in {"rarity_1", "rarity_2", "rarity_3", "rarity_4"}:
         return rare
@@ -441,7 +487,9 @@ def _single_character_progress(rqd: CardBoxRequest) -> dict | None:
     stats = {"total": {"owned": 0, "total": 0}}
     stats.update({bucket: {"owned": 0, "total": 0} for bucket, _ in CARD_BOX_PROGRESS_BUCKETS})
     for user_card in rqd.cards:
-        bucket = _rarity_progress_bucket(user_card.card.rare, user_card.card.supply_type)
+        bucket = _rarity_progress_bucket(
+            user_card.card.rare, user_card.card.supply_type_key, user_card.card.supply_type
+        )
         if bucket is None:
             continue
         stats[bucket]["total"] += 1
@@ -801,7 +849,7 @@ def _draw_card_detail_info(rqd: CardDetailRequest, images: _CardDetailImages, st
     ):
         with HSplit().set_padding(16).set_sep(8).set_content_align("l").set_item_align("l"):
             TextBox("ID", styles.label)
-            TextBox(f"{card.card_id} ({rqd.region.upper()})", styles.text)
+            TextBox(id_with_region(card.card_id, rqd.region, rqd.region_label), styles.text)
             Spacer(w=32)
             TextBox("限定类型", styles.label)
             TextBox(card.supply_type, styles.text)
@@ -996,12 +1044,8 @@ def _draw_card_list_notice(rqd: CardListRequest, styles: _CardListStyles, panel_
         TextBox(rqd.title, styles.notice_text, use_real_line_count=True).set_w(text_width)
 
 
-def _draw_card_list_limited_icon(supply_name: str, assets: _CardListAssets) -> None:
-    image = None
-    if supply_name in TERM_LIMITED_SUPPLY_TYPES:
-        image = assets.term
-    elif supply_name in FES_LIMITED_SUPPLY_TYPES:
-        image = assets.fes
+def _draw_card_list_limited_icon(icon_kind: str | None, assets: _CardListAssets) -> None:
+    image = {"term": assets.term, "fes": assets.fes}.get(icon_kind) if icon_kind else None
     if image:
         ImageBox(image, size=(75, None))
 
@@ -1014,7 +1058,7 @@ def _draw_card_list_card(
     now,
     timezone: str,
 ) -> None:
-    limited = not is_non_limited_supply_type(card.supply_type)
+    limited = not is_non_limited_supply_type(card.supply_type_key, card.supply_type)
     background = roundrect_bg(fill=(255, 250, 220, 200), blur_glass=True) if limited else roundrect_bg(alpha=80)
     with Frame().set_content_align("lb").set_bg(background):
         if datetime_from_millis(card.release_at, timezone) > now:
@@ -1027,15 +1071,15 @@ def _draw_card_list_card(
             with VSplit().set_content_align("c").set_item_align("c").set_sep(5).set_padding(8):
                 grid_width = 300
                 with HSplit().set_content_align("c").set_w(grid_width).set_padding(8).set_sep(16):
-                    supply_name = card.supply_type or ""
+                    icon_kind = _limited_icon_kind(card.supply_type_key, card.supply_type)
                     for thumb in thumb_group:
                         with Frame().set_content_align("rt"):
                             CardFullThumbnailBox(thumb, size=(100, 100), image_size_mode="fill", shadow=True)
-                            _draw_card_list_limited_icon(supply_name, assets)
+                            _draw_card_list_limited_icon(icon_kind, assets)
                 TextBox(card.prefix, styles.name).set_w(grid_width).set_content_align("c")
                 card_id_text = f"ID:{card.card_id}"
-                if limited:
-                    card_id_text += f"【{card.supply_type}】"
+                if limited and (card.supply_type or "").strip():
+                    card_id_text += f"【{card.supply_type.strip()}】"
                 TextBox(card_id_text, styles.card_id).set_w(grid_width).set_content_align("c")
 
 
@@ -1323,12 +1367,9 @@ class _CardBoxRenderer:
         )
         return _safe_color(color_code)
 
-    def _draw_limited_icon(self, supply_name: str) -> None:
-        image = None
-        if supply_name in TERM_LIMITED_SUPPLY_TYPES:
-            image = self.assets.term
-        elif supply_name in FES_LIMITED_SUPPLY_TYPES:
-            image = self.assets.fes
+    def _draw_limited_icon(self, card: dict) -> None:
+        icon_kind = _limited_icon_kind(card.get("supply_type_key"), card.get("supply_type"))
+        image = {"term": self.assets.term, "fes": self.assets.fes}.get(icon_kind) if icon_kind else None
         if image:
             ImageBox(image, size=(int(self.layout.card_size * 0.75), None))
 
@@ -1337,7 +1378,7 @@ class _CardBoxRenderer:
         with VSplit().set_content_align("rt").set_sep(0):
             with Frame().set_content_align("rt"):
                 CardFullThumbnailBox(card_data["thumb_layers"], size=(size, size))
-                self._draw_limited_icon(card_data["card"].get("supply_type", ""))
+                self._draw_limited_icon(card_data["card"])
                 if not card_data["has"] and self.rqd.user_info:
                     Spacer(w=size, h=size).set_bg(RoundRectBg(fill=(0, 0, 0, 120), radius=2))
             if self.rqd.show_id:

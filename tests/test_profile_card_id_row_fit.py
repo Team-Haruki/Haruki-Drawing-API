@@ -16,7 +16,8 @@ from src.sekai.profile.model import BasicProfile, ProfileCardRequest, ProfileDat
 
 @pytest.mark.parametrize("timezone", ["Asia/Shanghai", "America/Argentina/Buenos_Aires", "UTC"])
 @pytest.mark.parametrize("hide_uid", [False, True])
-def test_profile_card_id_row_never_outgrows_the_card(timezone: str, hide_uid: bool) -> None:
+@pytest.mark.parametrize("region_label", [None, "国际服(EN)"])
+def test_profile_card_id_row_never_outgrows_the_card(timezone: str, hide_uid: bool, region_label: str | None) -> None:
     rqd = ProfileCardRequest(
         timezone=timezone,
         profile=BasicProfile(
@@ -26,6 +27,7 @@ def test_profile_card_id_row_never_outgrows_the_card(timezone: str, hide_uid: bo
             is_hide_uid=hide_uid,
             leader_image_path="static_images/skill_score_up.png",
             has_frame=False,
+            region_label=region_label,
         ),
         data_sources=[
             ProfileDataSource(name="Suite数据", source="suite", update_time=1719100000000),
