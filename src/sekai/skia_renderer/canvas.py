@@ -38,6 +38,7 @@ from src.settings import (
     EXPORT_IMAGE_FORMAT,
     FONT_DIR,
     JPG_QUALITY,
+    JPG_SUBSAMPLING,
     settings,
 )
 
@@ -206,6 +207,7 @@ def build_canvas_ir(
     heavy_font: str | _UnsetFont | None = _UNSET_FONT,
     emoji_font: str | _UnsetFont | None = _UNSET_FONT,
     jpg_quality: int | None = None,
+    jpg_subsampling: str | None = None,
     text_engine: str = "skia",
 ) -> tuple[IRBuilder, dict[str, Any]]:
     """Draw a built Canvas into an :class:`IRPainter` and hand back its scene builder.
@@ -233,6 +235,7 @@ def build_canvas_ir(
         bg_hour=background_hour() if bg_hour is None else bg_hour,
         export_format=EXPORT_IMAGE_FORMAT if export_format is None else export_format,
         jpg_quality=JPG_QUALITY if jpg_quality is None else jpg_quality,
+        jpg_subsampling=JPG_SUBSAMPLING if jpg_subsampling is None else jpg_subsampling,
         text_engine=text_engine,
     )
     canvas.draw(painter)
@@ -325,6 +328,7 @@ async def _render_canvas_uncounted(
             "emoji_font": DEFAULT_EMOJI_FONT,
             "export_format": EXPORT_IMAGE_FORMAT if export_format is None else export_format,
             "jpg_quality": JPG_QUALITY,
+            "jpg_subsampling": JPG_SUBSAMPLING,
         }
         with native_canvas_preparation(options, bg):
             built = await canvas()

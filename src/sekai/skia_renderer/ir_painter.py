@@ -100,7 +100,8 @@ class IRPainter(PaintContext):
         emoji_font: str | None = None,
         bg_hour: float = 12.0,
         export_format: str = "png",
-        jpg_quality: int = 90,
+        jpg_quality: int = 85,
+        jpg_subsampling: str = "444",
         text_engine: str = "skia",
     ) -> None:
         super().__init__(size=size)
@@ -122,6 +123,7 @@ class IRPainter(PaintContext):
             emoji_font=emoji_font,
             export_format=export_format,
             jpg_quality=jpg_quality,
+            jpg_subsampling=jpg_subsampling,
         )
         self._default_name = default_font
         self._bold_name = bold_font
@@ -483,6 +485,7 @@ class IRPainter(PaintContext):
             "bg_hour": self._bg_hour,
             "export_format": parent_scene["export_format"],
             "jpg_quality": parent_scene["jpg_quality"],
+            "jpg_subsampling": parent_scene["jpg_subsampling"],
         }
         fragment = None
         lookup_key = None

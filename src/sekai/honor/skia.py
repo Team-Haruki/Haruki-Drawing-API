@@ -54,7 +54,15 @@ from src.sekai.skia_renderer.render_stats import (
     record_render,
 )
 from src.sekai.skia_renderer.subtree import lower_canvas_subtree
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, EXPORT_IMAGE_FORMAT, FONT_DIR, JPG_QUALITY
+from src.settings import (
+    ASSETS_BASE_DIR,
+    DEFAULT_BOLD_FONT,
+    DEFAULT_FONT,
+    EXPORT_IMAGE_FORMAT,
+    FONT_DIR,
+    JPG_QUALITY,
+    JPG_SUBSAMPLING,
+)
 
 from .model import HonorRequest
 
@@ -94,6 +102,7 @@ def _new_builder(width: int, height: int, export_format: str = "png") -> IRBuild
         bold_font=DEFAULT_BOLD_FONT,
         export_format=export_format,
         jpg_quality=JPG_QUALITY,
+        jpg_subsampling=JPG_SUBSAMPLING,
     )
 
 
@@ -119,7 +128,8 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
     # The cached payload embeds the footer, so the key must cover everything the footer text
     # derives from (dt/timezone) on top of the Pillow composed key (which excludes timezone).
     watermark_text = build_request_watermark_text(rqd)
-    cache_key = f"{build_full_honor_cache_key(rqd)}|skia|{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}|wm:{watermark_text}"
+    encoding = f"{EXPORT_IMAGE_FORMAT}|{JPG_QUALITY}|{JPG_SUBSAMPLING}"
+    cache_key = f"{build_full_honor_cache_key(rqd)}|skia|{encoding}|wm:{watermark_text}"
     cached = get_skia_payload_cached(cache_key)
     if cached is not None:
         _record(OUTCOME_CACHE_HIT, cached)
@@ -136,6 +146,7 @@ async def try_render_full_honor_payload(rqd: HonorRequest) -> EncodedImagePayloa
                 DEFAULT_BOLD_FONT,
                 EXPORT_IMAGE_FORMAT,
                 JPG_QUALITY,
+                JPG_SUBSAMPLING,
             ],
         )
         cached_badge = get_native_fragment_cached(badge_key)

@@ -158,7 +158,10 @@ def test_epoch_excludes_node_tuning_but_tracks_fonts_templates_and_pixels(monkey
         template_changed = identity()
         assert template_changed != font_changed
         monkeypatch.setattr(settings.drawing, "jpg_quality", 42)
-        assert identity() != template_changed
+        quality_changed = identity()
+        assert quality_changed != template_changed
+        monkeypatch.setattr(settings.drawing, "jpg_subsampling", "420")
+        assert identity() != quality_changed
     finally:
         cache_identity.renderer_epoch.cache_clear()
 

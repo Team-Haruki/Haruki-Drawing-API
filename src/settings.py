@@ -315,6 +315,8 @@ class DrawingSettings(BaseModel):
     composed_image_cache_ttl_seconds: int = 7 * 24 * 3600  # 合成图片缓存 TTL（秒）
     export_image_format: Literal["png", "jpg"] = "png"  # 导出图片格式
     jpg_quality: int = Field(default=85, ge=1, le=100)  # JPEG 压缩质量 (1-100)
+    # JPEG 色度子采样:"444" 不降采样(文字/细线的彩色边缘不糊),"422"/"420" 以画质换体积。
+    jpg_subsampling: Literal["444", "422", "420"] = "444"
     # Skia 门控:默认开启(2026-07-12 全端点真实数据对拍通过后切换)。扩展缺失时 fail-open
     # 回退 Pillow 并打 ERROR。开关一律不写入 configs.yaml,生产用 HARUKI_DRAWING__* 环境变量覆盖。
     use_skia_plot: bool = True  # plot.py widget 树端点的 IRPainter → Skia 渲染
@@ -537,6 +539,7 @@ COMPOSED_IMAGE_CACHE_MAX_BYTES = settings.drawing.composed_image_cache_max_mb * 
 COMPOSED_IMAGE_CACHE_TTL_SECONDS = settings.drawing.composed_image_cache_ttl_seconds
 EXPORT_IMAGE_FORMAT = settings.drawing.export_image_format
 JPG_QUALITY = settings.drawing.jpg_quality
+JPG_SUBSAMPLING = settings.drawing.jpg_subsampling
 CUSTOM_PROFILE_ASSETS_DIR = settings.drawing.custom_profile_assets_dir
 CUSTOM_PROFILE_FONTS_DIR = settings.drawing.custom_profile_fonts_dir
 CUSTOM_PROFILE_TMP_FONT_METADATA = settings.drawing.custom_profile_tmp_font_metadata

@@ -41,6 +41,7 @@ _PIXEL_ENV = (
 _PIXEL_SETTINGS = (
     "export_image_format",
     "jpg_quality",
+    "jpg_subsampling",
     "use_skia_plot",
     "custom_profile_max_elements",
     "custom_profile_max_scale",

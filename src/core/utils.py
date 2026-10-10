@@ -17,6 +17,7 @@ from src.core.debug import (
 )
 from src.core.image_payload import EncodedImagePayload
 from src.core.missing_asset_telemetry import current_missing_asset_count
+from src.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,10 @@ CACHE_STORE_HEADER = "X-Haruki-Cache-Store"
 NODE_HEADER = "X-Haruki-Node"
 
 
+# drawing.jpg_subsampling -> Pillow's ``subsampling`` save option.
+PIL_JPEG_SUBSAMPLING = {"444": "4:4:4", "422": "4:2:2", "420": "4:2:0"}
+
+
 def _encode_image(
     image,
     export_format: str,
@@ -33,6 +38,11 @@ def _encode_image(
     *,
     jpeg_subsampling: int | str | None = None,
 ) -> tuple[io.BytesIO, str, str]:
+    """Pillow encode (reference tools only; service routes leave through the native encoder).
+
+    JPEG uses ``drawing.jpg_subsampling`` unless ``jpeg_subsampling`` overrides it, so a reference
+    JPEG is encoded the way the native renderer encodes production output.
+    """
     buffer = io.BytesIO()
     try:
         if export_format == "jpg":
@@ -41,10 +51,9 @@ def _encode_image(
                 rgb = image.convert("RGB")
                 image.close()
                 image = rgb
-            save_kwargs = {"quality": jpg_quality}
-            if jpeg_subsampling is not None:
-                save_kwargs["subsampling"] = jpeg_subsampling
-            image.save(buffer, format="JPEG", **save_kwargs)
+            if jpeg_subsampling is None:
+                jpeg_subsampling = PIL_JPEG_SUBSAMPLING[settings.drawing.jpg_subsampling]
+            image.save(buffer, format="JPEG", quality=jpg_quality, subsampling=jpeg_subsampling)
             media_type = "image/jpeg"
             filename = "image.jpg"
         else:

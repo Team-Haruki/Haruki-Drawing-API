@@ -29,6 +29,10 @@ Color = Sequence[int]
 Vec2 = Sequence[float]
 Node = dict[str, Any]
 
+# Scene-level JPEG chroma subsampling, as the native encoder names it: "444" keeps full-resolution
+# chroma (no subsampling), "422" halves it horizontally, "420" in both directions.
+JPG_SUBSAMPLING_MODES = frozenset({"444", "422", "420"})
+
 
 # ---- process-level PIL font cache -------------------------------------------------
 #
@@ -289,7 +293,8 @@ class IRBuilder:
         emoji_font: str | None = None,
         extra_fonts: dict[str, str] | None = None,
         export_format: str = "png",
-        jpg_quality: int = 90,
+        jpg_quality: int = 85,
+        jpg_subsampling: str = "444",
         max_node_pixels: int | None = None,
         max_scene_bytes: int | None = None,
     ) -> None:
@@ -298,6 +303,9 @@ class IRBuilder:
         self._assets_base_dir = str(assets_base_dir)
         self._export_format = export_format
         self._jpg_quality = int(jpg_quality)
+        if jpg_subsampling not in JPG_SUBSAMPLING_MODES:
+            raise ValueError(f"unsupported JPEG subsampling: {jpg_subsampling!r}")
+        self._jpg_subsampling = jpg_subsampling
         self._font_dir = str(font_dir)
         self._fonts: Node = {"dir": str(font_dir), "default": default_font, "bold": bold_font}
         if heavy_font:
@@ -1315,6 +1323,7 @@ class IRBuilder:
             "assets_base_dir": self._assets_base_dir,
             "export_format": self._export_format,
             "jpg_quality": self._jpg_quality,
+            "jpg_subsampling": self._jpg_subsampling,
             "fonts": self._fonts,
             "canvas": {"width": self.width, "height": self.height},
             "root": {

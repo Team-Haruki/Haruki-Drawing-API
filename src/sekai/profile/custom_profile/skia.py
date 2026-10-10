@@ -146,6 +146,7 @@ from src.settings import (
     DEFAULT_FONT,
     FONT_DIR,
     JPG_QUALITY,
+    JPG_SUBSAMPLING,
 )
 
 logger = logging.getLogger("custom_profile.draw.perf")
@@ -306,6 +307,7 @@ def _new_builder(width: int, height: int, *, general_font_path: Path | None = No
         extra_fonts={_GENERAL_FONT_IR_NAME: str(general_font_path)} if general_font_path is not None else None,
         export_format="png",
         jpg_quality=JPG_QUALITY,
+        jpg_subsampling=JPG_SUBSAMPLING,
         max_node_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
         max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
     )

@@ -1042,9 +1042,15 @@ pub(crate) fn render_scene_inner(
             size.height,
             &scene.export_format,
             scene.jpg_quality,
+            scene.jpg_subsampling,
         )?
     } else {
-        encode_surface(surface, &scene.export_format, scene.jpg_quality)?
+        encode_surface(
+            surface,
+            &scene.export_format,
+            scene.jpg_quality,
+            scene.jpg_subsampling,
+        )?
     };
     metrics.total_elapsed = total_started.elapsed().as_secs_f64();
     rendered.metrics = metrics;

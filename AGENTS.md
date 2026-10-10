@@ -282,7 +282,11 @@ Notable `drawing.*` keys:
   final-output cache. These same three keys also size the **Skia payload cache** (honor's encoded responses),
   so zeroing any one of them disables **both** pools — see the cache chapter.
 - `export_image_format` — `"png"` or `"jpg"`.
-- `jpg_quality` — JPEG quality (1–100), only applied when format is `"jpg"`.
+- `jpg_quality` — JPEG quality (1–100, default 85), only applied when format is `"jpg"`.
+- `jpg_subsampling` — JPEG chroma subsampling: `"444"` (default, full-resolution chroma), `"422"` or `"420"`. It
+  reaches the native encoder as the scene's `jpg_subsampling` key (`jpeg_encoder::Downsample`); Skia's plain
+  `Image::encode` would always use 4:2:0, which smears coloured text and one-pixel lines. 4:4:4 at q85 measured
+  about +20% bytes and about 1.6x JPEG encode time (a few ms per page) against 4:2:0.
 - `custom_profile_glyph_cache_size/_max_mb`, `custom_profile_sprite_cache_size/_max_mb` — the custom-profile
   process pools (see the cache chapter). **On by default**; zero a pair to disable that pool (the rollback knob).
 - `debug_dump_request_dir` / `debug_dump_request_paths` — raw request-body capture for parity fixtures/debugging.

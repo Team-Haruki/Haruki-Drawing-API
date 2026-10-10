@@ -39,7 +39,7 @@ from src.sekai.skia_renderer.render_stats import (
     record_native_metrics,
     record_render,
 )
-from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR, JPG_QUALITY
+from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, FONT_DIR, JPG_QUALITY, JPG_SUBSAMPLING
 
 from .model import GenerateMusicChartRequest
 
@@ -269,6 +269,7 @@ async def try_render_music_chart_payload(rqd: GenerateMusicChartRequest) -> Enco
             bold_font=DEFAULT_BOLD_FONT,
             export_format=CHART_EXPORT_FORMAT,  # the /chart route pins PNG
             jpg_quality=JPG_QUALITY,
+            jpg_subsampling=JPG_SUBSAMPLING,
         )
         b.image("mem:chart", (0, 0), (w, h), fit="stretch")
         # Footer background: the bottom footer_h strip of the chart, stretched (add_watermark_to_image).

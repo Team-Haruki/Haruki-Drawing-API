@@ -16,6 +16,9 @@ pub struct Scene {
     pub export_format: String,
     #[serde(default = "default_jpg_quality")]
     pub jpg_quality: i32,
+    /// JPEG chroma subsampling (`"444"`, `"422"` or `"420"`); only read when `export_format` is `jpg`.
+    #[serde(default)]
+    pub jpg_subsampling: JpegSubsampling,
     pub fonts: FontsIr,
     pub canvas: CanvasIr,
     /// Output scale: allocate the target raster and draw through a scaled canvas matrix.
@@ -43,7 +46,20 @@ fn default_export_format() -> String {
 }
 
 fn default_jpg_quality() -> i32 {
-    90
+    85
+}
+
+/// JPEG chroma subsampling. The default keeps full-resolution chroma: 4:2:0 averages each 2x2
+/// block's colour, which smears coloured text and one-pixel lines into their background.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+pub enum JpegSubsampling {
+    #[default]
+    #[serde(rename = "444")]
+    S444,
+    #[serde(rename = "422")]
+    S422,
+    #[serde(rename = "420")]
+    S420,
 }
 
 fn default_scale() -> f32 {

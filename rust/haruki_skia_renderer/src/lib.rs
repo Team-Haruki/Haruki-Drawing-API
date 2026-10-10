@@ -15,10 +15,10 @@ use pyo3::buffer::PyBuffer;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use skia_safe::{
-    AlphaType, BlurStyle, Canvas, ClipOp, Color, ColorType, Data, EncodedImageFormat, FilterMode,
-    FontMgr, Image, ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point,
-    RRect, Rect, SamplingOptions, Surface, TileMode, Typeface, canvas::SrcRectConstraint, gradient,
-    image_filters, png_encoder, surfaces,
+    AlphaType, BlurStyle, Canvas, ClipOp, Color, ColorType, Data, FilterMode, FontMgr, Image,
+    ImageInfo, MaskFilter, MipmapMode, Paint, PaintStyle, Path as SkPath, Point, RRect, Rect,
+    SamplingOptions, Surface, TileMode, Typeface, canvas::SrcRectConstraint, gradient,
+    image_filters, jpeg_encoder, png_encoder, surfaces,
 };
 
 /// Smooth (bilinear) sampling, matching Pillow's BILINEAR down/upscale in the blur
@@ -1240,10 +1240,24 @@ fn draw_glass_overlay(
     }
 }
 
+/// Skia's JPEG options for a scene: `Image::encode` would always subsample chroma 4:2:0.
+fn jpeg_options(jpg_quality: i32, subsampling: ir::JpegSubsampling) -> jpeg_encoder::Options {
+    jpeg_encoder::Options {
+        quality: jpg_quality.clamp(1, 100) as u32,
+        downsample: match subsampling {
+            ir::JpegSubsampling::S444 => jpeg_encoder::Downsample::No,
+            ir::JpegSubsampling::S422 => jpeg_encoder::Downsample::Horizontal,
+            ir::JpegSubsampling::S420 => jpeg_encoder::Downsample::BothDirections,
+        },
+        ..jpeg_encoder::Options::default()
+    }
+}
+
 fn encode_surface(
     mut surface: Surface,
     export_format: &str,
     jpg_quality: i32,
+    jpg_subsampling: ir::JpegSubsampling,
 ) -> Result<RenderedImage, String> {
     let started = Instant::now();
     let width = surface.width();
@@ -1268,10 +1282,8 @@ fn encode_surface(
         EncodedBytes::Owned(pixels)
     } else if export_format == "jpg" {
         let image = surface.image_snapshot();
-        let quality = jpg_quality.clamp(1, 100) as u32;
         EncodedBytes::Skia(
-            image
-                .encode(None, EncodedImageFormat::JPEG, Some(quality))
+            jpeg_encoder::encode_image(None, &image, &jpeg_options(jpg_quality, jpg_subsampling))
                 .ok_or_else(|| "failed to encode image".to_string())?,
         )
     } else if std::env::var("HARUKI_SKIA_PNG_ENCODER").as_deref() != Ok("skia") {
@@ -1358,6 +1370,7 @@ fn encode_rgba8(
     height: i32,
     export_format: &str,
     jpg_quality: i32,
+    jpg_subsampling: ir::JpegSubsampling,
 ) -> Result<RenderedImage, String> {
     let started = Instant::now();
     let jpeg = export_format == "jpg";
@@ -1375,11 +1388,7 @@ fn encode_rgba8(
                 .ok_or_else(|| "failed to create resized output image".to_string())?;
         drop(pixels);
         let data = if jpeg {
-            image.encode(
-                None,
-                EncodedImageFormat::JPEG,
-                Some(jpg_quality.clamp(1, 100) as u32),
-            )
+            jpeg_encoder::encode_image(None, &image, &jpeg_options(jpg_quality, jpg_subsampling))
         } else {
             let mut options = png_encoder::Options::default();
             options.z_lib_level = 3;
@@ -2439,11 +2448,102 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel[3] > 0 && pixel[3] < 97)
         );
-        let result = encode_surface(surface, "raw_rgba_premul", 90).expect("raw fragment");
+        let result = encode_surface(surface, "raw_rgba_premul", 90, ir::JpegSubsampling::S444)
+            .expect("raw fragment");
         assert_eq!(result.bytes.as_bytes(), expected.as_slice());
         assert_eq!((result.width, result.height), (17, 13));
         assert_eq!(result.media_type, "application/octet-stream");
         assert_eq!(result.filename, "fragment.rgba");
+    }
+
+    /// `(component id, sampling factors)` from the JPEG's baseline/progressive frame header.
+    fn jpeg_component_sampling(bytes: &[u8]) -> Vec<(u8, u8)> {
+        let mut at = 2;
+        while at + 4 <= bytes.len() {
+            assert_eq!(bytes[at], 0xFF, "marker expected at {at}");
+            let marker = bytes[at + 1];
+            let length = u16::from_be_bytes([bytes[at + 2], bytes[at + 3]]) as usize;
+            if marker == 0xC0 || marker == 0xC2 {
+                let count = bytes[at + 9] as usize;
+                return (0..count)
+                    .map(|i| (bytes[at + 10 + i * 3], bytes[at + 11 + i * 3]))
+                    .collect();
+            }
+            at += 2 + length;
+        }
+        panic!("no SOF marker");
+    }
+
+    fn striped_surface() -> Surface {
+        // One-pixel red/blue columns: the chroma detail 4:2:0 averages away.
+        let mut surface = surfaces::raster_n32_premul((32, 16)).expect("surface");
+        surface.canvas().clear(Color::WHITE);
+        let mut paint = Paint::default();
+        for x in 0..32 {
+            paint.set_color(if x % 2 == 0 { Color::RED } else { Color::BLUE });
+            surface
+                .canvas()
+                .draw_rect(Rect::from_xywh(x as f32, 0.0, 1.0, 16.0), &paint);
+        }
+        surface
+    }
+
+    #[test]
+    fn jpeg_subsampling_sets_the_frame_sampling_factors() {
+        for (mode, luma) in [
+            (ir::JpegSubsampling::S444, 0x11),
+            (ir::JpegSubsampling::S422, 0x21),
+            (ir::JpegSubsampling::S420, 0x22),
+        ] {
+            let result = encode_surface(striped_surface(), "jpg", 85, mode).expect("jpeg");
+            assert_eq!(result.media_type, "image/jpeg");
+            let sampling = jpeg_component_sampling(result.bytes.as_bytes());
+            assert_eq!(sampling.len(), 3, "{mode:?}");
+            assert_eq!(sampling[0].1, luma, "{mode:?}");
+            assert!(
+                sampling[1..].iter().all(|(_, factor)| *factor == 0x11),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resized_jpeg_output_uses_the_scene_subsampling() {
+        let info = ImageInfo::new((32, 16), ColorType::RGBA8888, AlphaType::Unpremul, None);
+        let mut pixels = vec![0u8; 32 * 16 * 4];
+        assert!(striped_surface().read_pixels(&info, &mut pixels, 32 * 4, (0, 0)));
+        let full = encode_rgba8(pixels.clone(), 32, 16, "jpg", 85, ir::JpegSubsampling::S444)
+            .expect("4:4:4");
+        let halved =
+            encode_rgba8(pixels, 32, 16, "jpg", 85, ir::JpegSubsampling::S420).expect("4:2:0");
+        assert_eq!(jpeg_component_sampling(full.bytes.as_bytes())[0].1, 0x11);
+        assert_eq!(jpeg_component_sampling(halved.bytes.as_bytes())[0].1, 0x22);
+    }
+
+    #[test]
+    fn scene_jpeg_settings_default_to_q85_without_subsampling() {
+        let scene: ir::Scene = serde_json::from_str(
+            r#"{"version":2,"assets_base_dir":".","fonts":{"dir":".","default":"a","bold":"a"},
+                "canvas":{"width":1,"height":1},"root":{"type":"Group","offset":[0,0],"size":[1,1],"children":[]}}"#,
+        )
+        .expect("scene");
+        assert_eq!(scene.jpg_quality, 85);
+        assert_eq!(scene.jpg_subsampling, ir::JpegSubsampling::S444);
+        let scene: ir::Scene = serde_json::from_str(
+            r#"{"version":2,"assets_base_dir":".","jpg_subsampling":"420",
+                "fonts":{"dir":".","default":"a","bold":"a"},
+                "canvas":{"width":1,"height":1},"root":{"type":"Group","offset":[0,0],"size":[1,1],"children":[]}}"#,
+        )
+        .expect("scene");
+        assert_eq!(scene.jpg_subsampling, ir::JpegSubsampling::S420);
+        assert!(
+            serde_json::from_str::<ir::Scene>(
+                r#"{"version":2,"assets_base_dir":".","jpg_subsampling":"411",
+                    "fonts":{"dir":".","default":"a","bold":"a"},
+                    "canvas":{"width":1,"height":1},"root":{"type":"Group","offset":[0,0],"size":[1,1],"children":[]}}"#,
+            )
+            .is_err()
+        );
     }
 
     #[test]
