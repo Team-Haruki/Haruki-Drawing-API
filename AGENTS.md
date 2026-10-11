@@ -638,12 +638,22 @@ unchanged text, `code` is one of `RENDER_ERROR_CODES` in `src/sekai/base/render_
 `asset_broken`, `data_insufficient`, `content_too_large`) and is present only when the reason is known. Routes
 raise `render_http_exception(exc)`; the heavy pool carries the worker's code across the process boundary.
 Callers classify by `code`, so codes are API: add new ones, never rename.
+`render_http_exception` also logs `render.failed` at WARN (with the traceback when the code is unknown) and
+counts the failure in `/render-stats` under `renders.request_failures` (by code and by request path): most
+failures are raised while the request is turned into a widget tree, before `render_canvas_payload` records an
+outcome. A request whose data cannot fill the page (e.g. a player trace with no point inside the top-100 rank
+axis) raises `RenderDataInsufficientError`. A custom profile `render_scene` failure is logged at ERROR with the
+native message, and one that hit a native size limit answers `content_too_large` (the limits are unchanged).
 
 A successful render that drew any missing-asset placeholder ("?") answers `X-Haruki-Render-Missing-Assets: <n>`
 on every image exit (store-ref refs also carry `missing_assets`), next to the existing `X-Haruki-Cache-Store: 0`;
 Cloud logs it per route and keeps such renders uncached (an opt-in short TTL exists). Every substitution must go through
 `record_missing_asset` (directly or via `_log_missing_image_once` / `on_missing="raise"`), and no cache may
 store output drawn while `current_missing_asset_count() > 0` — a later hit would not count the placeholder.
+An asset the game does not ship for every entity (honor `rank_img` / `word_img` / `medal_img` overlays, an
+event's story background) is probed with `get_optional_asset_image_ref`: an absent file returns `None` and is
+not counted, so a complete picture is not flagged; a mirror outage or an unreadable file is still counted. Never
+use it for an asset that should exist.
 See docs/artifact-storage.md §2.
 
 ## When Making Changes

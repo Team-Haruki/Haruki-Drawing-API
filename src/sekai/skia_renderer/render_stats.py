@@ -85,6 +85,11 @@ _pillow_touch_render_counts: dict[str, dict[str, int]] = {}
 _pillow_touch_call_counts: dict[str, dict[str, int]] = {}
 _scene_completeness: dict[str, dict] = {}
 _error_stage_counters: dict[str, dict[str, int]] = {}
+# Requests that failed with a render error (`render_http_exception`), by request path and error code. Most of
+# these fail while the request is turned into a widget tree, BEFORE render_canvas_payload, so they never reach
+# the per-endpoint outcome counters above.
+_request_failures: dict[str, dict[str, int]] = {}
+UNKNOWN_FAILURE_CODE = "unknown"
 _font_fallbacks: int = 0
 
 _SCENE_SUM_KEYS: tuple[str, ...] = (
@@ -313,6 +318,29 @@ def record_worker_payload_backend(
     return backend
 
 
+def record_request_failure(path: str | None, code: str | None) -> None:
+    """Count one request that failed with a render error. Never raises."""
+    name = (path or "").strip() or "unknown"
+    key = code or UNKNOWN_FAILURE_CODE
+    with _lock:
+        bucket = _request_failures.setdefault(name, {})
+        bucket[key] = bucket.get(key, 0) + 1
+
+
+def _request_failure_stats() -> dict:
+    by_code: dict[str, int] = {}
+    by_path: dict[str, dict[str, int]] = {}
+    for name, bucket in _request_failures.items():
+        by_path[name] = dict(sorted(bucket.items()))
+        for code, count in bucket.items():
+            by_code[code] = by_code.get(code, 0) + count
+    return {
+        "total": sum(by_code.values()),
+        "by_code": dict(sorted(by_code.items())),
+        "by_path": dict(sorted(by_path.items())),
+    }
+
+
 def get_render_stats() -> dict:
     """Per-endpoint outcome/purity counters plus totals. JSON-serializable."""
     totals = dict.fromkeys(OUTCOMES, 0)
@@ -367,12 +395,15 @@ def get_render_stats() -> dict:
         totals["total"] = sum(totals[outcome] for outcome in OUTCOMES)
         totals["pillow_touch_reasons"] = dict(sorted(total_touch_reasons.items()))
         font_fallbacks = _font_fallbacks
+        request_failures = _request_failure_stats()
     return {
         "endpoints": dict(sorted(endpoints.items())),
         "totals": totals,
         # Text that rendered in sans-serif because the configured face could not be resolved.
         # Anything above 0 means a broken font config — the images are wrong, not just slow.
         "font_fallbacks": font_fallbacks,
+        # Requests answered with a render error, by `code` (``unknown`` when the reason is not known).
+        "request_failures": request_failures,
     }
 
 
@@ -385,4 +416,5 @@ def reset_render_stats() -> None:
         _pillow_touch_call_counts.clear()
         _scene_completeness.clear()
         _error_stage_counters.clear()
+        _request_failures.clear()
         _font_fallbacks = 0

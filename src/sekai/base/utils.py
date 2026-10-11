@@ -27,6 +27,7 @@ from src.core.missing_asset_telemetry import (
     MISSING_CANDIDATES_EXHAUSTED,
     MISSING_EMPTY_PATH,
     MISSING_LOCAL_NOT_FOUND,
+    MISSING_MIRROR_NOT_FOUND,
     MISSING_VANISHED,
     begin_missing_asset_scope as begin_missing_asset_scope,
     current_missing_asset_count as current_missing_asset_count,
@@ -1324,6 +1325,44 @@ async def get_asset_image_ref(
             return missing_image_ref(_guess_missing_placeholder_variant(label))
         _record_missing(exc)
         raise
+
+
+# Miss reasons meaning "this file does not exist", which is what an optional asset is allowed to be. A mirror
+# fetch error or an open breaker is not on this list: the asset may well exist, so leaving it out of the picture
+# is a real degradation and is counted like any other miss.
+_OPTIONAL_ABSENT_REASONS = frozenset(
+    {MISSING_EMPTY_PATH, MISSING_LOCAL_NOT_FOUND, MISSING_MIRROR_NOT_FOUND, MISSING_CANDIDATES_EXHAUSTED}
+)
+
+
+async def get_optional_asset_image_ref(base_path: Path, path: AssetKey | None) -> AssetImageRef | None:
+    """`get_asset_image_ref` for an asset the caller draws only when it exists; ``None`` when it does not.
+
+    For assets the game legitimately does not ship for every entity (honor rank/word/medal overlays, an
+    event's story background): an absent file is the expected answer, the caller skips or substitutes it,
+    and the picture is complete, so the miss is NOT counted towards ``X-Haruki-Render-Missing-Assets``. A
+    miss that may hide an existing asset (mirror fetch error, open breaker) or an unreadable file is still
+    counted and logged, and also returns ``None``. A path traversal still raises ``ValueError``.
+
+    Never use this for an asset that should exist: that miss must stay counted (``on_missing="raise"``).
+    """
+    label = _key_label(path)
+    if not candidates(path):
+        return None
+    try:
+        return await run_in_pool(_load_asset_image_ref_sync, base_path, path)
+    except FileNotFoundError as exc:
+        reason = _missing_reason_of(exc)
+        if reason in _OPTIONAL_ABSENT_REASONS:
+            logger.debug("optional asset absent: %s (%s)", label, reason)
+            return None
+        record_missing_asset(reason)
+        logger.warning("optional asset unavailable: %s (%s: %s)", label, reason, exc)
+        return None
+    except OSError as exc:
+        _record_missing(exc)
+        logger.warning("optional asset unreadable: %s (%s: %s)", label, exc.__class__.__name__, exc)
+        return None
 
 
 _ASSET_REF_BATCH = 16

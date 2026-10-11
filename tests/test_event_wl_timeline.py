@@ -219,7 +219,12 @@ def test_load_event_detail_images_selects_background_and_optional_chara(
         calls.append(path)
         return path
 
+    async def fake_optional_ref(_base_dir, path):
+        calls.append(path)
+        return path
+
     monkeypatch.setattr(event_drawer, "get_asset_image_ref", fake_asset_ref)
+    monkeypatch.setattr(event_drawer, "get_optional_asset_image_ref", fake_optional_ref)
 
     images = asyncio.run(event_drawer._load_event_detail_images(request, chapters, event_type != "world_bloom"))
 

@@ -1,11 +1,14 @@
 """Trace filtering, reference precedence and hourly speed are renderer-independent."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
+import logging
 import subprocess
 import sys
 
 import pytest
 
+from src.sekai.base.render_errors import DATA_INSUFFICIENT, RenderDataInsufficientError, render_error_code
 from src.sekai.sk.model import PlayerTraceRequest, RankTraceRequest
 from src.sekai.sk.trace_spec import SCORE_COLORS, build_player_trace_spec, build_rank_trace_spec, day_night_spans
 
@@ -66,6 +69,36 @@ def test_player_filter_and_sort_do_not_mutate_request():
 def test_player_without_top100_points_remains_invalid():
     with pytest.raises(ValueError, match="top 100"):
         build_player_trace_spec(_player(ranks=[_rank(0, 100, rank=101)]))
+
+
+def test_player_seen_only_outside_top100_is_data_insufficient():
+    # A real /ptr request: the player only appeared at rank 500 and 1000, and the rank axis covers the top 100.
+    request = _player(ranks=[_rank(0, 100, rank=500), _rank(60, 90, rank=1000)])
+    with pytest.raises(RenderDataInsufficientError, match="top 100") as raised:
+        build_player_trace_spec(request)
+    assert render_error_code(raised.value) == DATA_INSUFFICIENT
+
+
+def test_rank_trace_without_rows_is_data_insufficient():
+    with pytest.raises(RenderDataInsufficientError) as raised:
+        build_rank_trace_spec(_rank_request([]))
+    assert render_error_code(raised.value) == DATA_INSUFFICIENT
+
+
+def test_player_trace_route_answers_data_insufficient(monkeypatch, caplog):
+    from src.core.pjsk import sk as sk_route
+    from src.core.render_errors import RenderHTTPException
+    from src.sekai.skia_renderer import canvas as canvas_mod
+
+    monkeypatch.setattr(canvas_mod.settings.drawing, "use_skia_plot", True)
+    request = _player(ranks=[_rank(0, 100, rank=500), _rank(60, 90, rank=1000)])
+    with caplog.at_level(logging.WARNING, logger="src.core.render_errors"):
+        with pytest.raises(RenderHTTPException) as raised:
+            asyncio.run(sk_route.sk_player_trace(request))
+    assert (raised.value.status_code, raised.value.code) == (500, DATA_INSUFFICIENT)
+    warnings = [record for record in caplog.records if "render.failed" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "code=data_insufficient" in warnings[0].getMessage()
 
 
 @pytest.mark.parametrize(("explicit", "expected"), [(None, 400), (300, 300)])
