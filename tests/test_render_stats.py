@@ -24,6 +24,7 @@ from src.sekai.skia_renderer.render_stats import (
     get_render_stats,
     record_native_metrics,
     record_render,
+    record_request_failure,
     record_scene_completeness,
     record_worker_payload_backend,
     reset_render_stats,
@@ -117,6 +118,7 @@ def test_record_render_never_raises_on_unknown_outcome():
 
 def test_reset_render_stats_clears_counters():
     record_render("card_list", "skia")
+    record_request_failure("/api/pjsk/sk/player-trace", "data_insufficient")
     record_native_metrics({"font_fallbacks": 3})
     reset_render_stats()
     assert get_render_stats() == {
@@ -128,6 +130,7 @@ def test_reset_render_stats_clears_counters():
             "pillow_touch_reasons": {},
         },
         "font_fallbacks": 0,
+        "request_failures": {"total": 0, "by_code": {}, "by_path": {}},
     }
 
 
@@ -492,3 +495,21 @@ def test_global_payload_cache_is_reported_and_cleared():
 
     clear_skia_payload_cache()
     assert get_runtime_cache_stats()["skia_payload_cache"]["entries"] == 0
+
+
+def test_request_failures_aggregate_by_path_and_code():
+    record_request_failure("/api/pjsk/sk/player-trace", "data_insufficient")
+    record_request_failure("/api/pjsk/sk/player-trace", "data_insufficient")
+    record_request_failure("/api/pjsk/profile/custom-profile-card", "content_too_large")
+    record_request_failure("/api/pjsk/profile/custom-profile-card", None)
+    record_request_failure("", None)
+
+    assert get_render_stats()["request_failures"] == {
+        "total": 5,
+        "by_code": {"content_too_large": 1, "data_insufficient": 2, "unknown": 2},
+        "by_path": {
+            "/api/pjsk/profile/custom-profile-card": {"content_too_large": 1, "unknown": 1},
+            "/api/pjsk/sk/player-trace": {"data_insufficient": 2},
+            "unknown": {"unknown": 1},
+        },
+    }

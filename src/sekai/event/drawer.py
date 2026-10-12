@@ -40,6 +40,7 @@ from src.sekai.base.utils import (
     build_rendered_image_cache_key,
     collect_asset_signatures,
     get_asset_image_ref,
+    get_optional_asset_image_ref,
     get_readable_timedelta,
 )
 from src.sekai.deck.drawer import compose_deck_recommend_image, try_render_deck_recommend_payload
@@ -210,11 +211,24 @@ async def _load_event_detail_card_layers(rqd: EventDetailRequest) -> list[CardFu
     return card_layers
 
 
+async def _load_event_detail_background(rqd: EventDetailRequest, use_story_bg: bool):
+    """The page background: the story background when the event has one, else the event background.
+
+    Not every event ships ``event_story/.../screen_image/story_bg.png`` (test events do not), while the caller
+    sends that path for every non-WL event. A story background that does not exist is expected, so it falls
+    back to ``event_bg_path`` without counting a missing asset; a missing event background still counts.
+    """
+    if use_story_bg and (rqd.event_assets.event_story_bg_path or "").strip():
+        story_bg = await get_optional_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_story_bg_path)
+        if story_bg is not None:
+            return story_bg
+    return await get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
+
+
 def _event_detail_image_tasks(rqd: EventDetailRequest, wl_chapters: list[dict], use_story_bg: bool) -> dict:
     tasks = {}
-    bg_path = rqd.event_assets.event_story_bg_path if use_story_bg else rqd.event_assets.event_bg_path
     # ImageBg 的 fade/blur 已由共享 Painter 原语表达；保持 ref，Skia 直接解码路径。
-    tasks["bg"] = get_asset_image_ref(ASSETS_BASE_DIR, bg_path)
+    tasks["bg"] = _load_event_detail_background(rqd, use_story_bg)
     event_chara_path = (rqd.event_assets.event_ban_chara_img or "").strip()
     if use_story_bg and event_chara_path:
         tasks["chara"] = get_asset_image_ref(ASSETS_BASE_DIR, event_chara_path)

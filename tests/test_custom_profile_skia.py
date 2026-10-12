@@ -197,6 +197,95 @@ def test_pool_render_exception_is_contained_and_recorded(monkeypatch, caplog):
     assert "committed_error stage=" in errors[0].message
 
 
+_SCENE_LIMIT_MESSAGE = (
+    "scene render failed: scene output, request buffers, and isolated-subscene runtime require at least "
+    "300000000 bytes; scene limit is 268435456"
+)
+
+
+def _stub_native_render_failure(monkeypatch, message: str) -> None:
+    """Make the pool render fail in ``render_scene`` with ``message``, as the Rust extension reports it."""
+    monkeypatch.setattr(skia_mod, "skia_plot_enabled", lambda: True)
+    monkeypatch.setattr(skia_mod, "load_native_renderer", lambda: object())
+    monkeypatch.setattr(skia_mod, "persist_custom_profile_diagnostic", lambda **kwargs: True)
+
+    def _fail(*args):
+        try:
+            raise RuntimeError(message)
+        except RuntimeError as exc:
+            raise skia_mod._CustomProfileSkiaStageError("native_render") from exc
+
+    monkeypatch.setattr(skia_mod, "_render_custom_profile_native_scene", _fail)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        _SCENE_LIMIT_MESSAGE,
+        "scene render failed: Image would retain or allocate 300000000 bytes; scene limit is 268435456",
+        "scene render failed: pillow_rrect mask construction requires 9 bytes; only 3 bytes remain in the scene limit",
+        "scene render failed: vector coverage exceeds node pixel/dimension limit",
+        "scene render failed: native text mask exceeds pixel limit",
+        "scene render failed: SdfFontQuad requires 9 distance evaluations; native limit is 4",
+        "scene render failed: fragment byte count overflow",
+    ],
+)
+def test_native_limit_messages_are_content_too_large(message):
+    assert skia_mod._is_native_limit_error(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    ["scene render failed: asset decode failed: bad PNG header", "scene render failed: unknown font id 3"],
+)
+def test_other_native_failures_are_not_content_too_large(message):
+    assert not skia_mod._is_native_limit_error(message)
+
+
+def test_native_scene_limit_is_logged_and_answers_content_too_large(monkeypatch, caplog):
+    from src.core.render_errors import RenderHTTPException
+
+    _stub_native_render_failure(monkeypatch, _SCENE_LIMIT_MESSAGE)
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        with pytest.raises(RenderHTTPException) as excinfo:
+            asyncio.run(route_mod.custom_profile_card(_request()))
+
+    assert excinfo.value.status_code == 500
+    assert excinfo.value.code == "content_too_large"
+    assert excinfo.value.detail == _SCENE_LIMIT_MESSAGE
+    messages = [record.getMessage() for record in caplog.records if record.name == "custom_profile.draw.perf"]
+    native = [message for message in messages if "native_render failed" in message]
+    assert len(native) == 1
+    assert "error_type=RuntimeError content_too_large=True" in native[0]
+    assert "scene limit is 268435456" in native[0]
+    assert _endpoint_stats()["errors_by_stage"] == {"native_render": 1}
+
+
+def test_other_native_failure_is_logged_and_stays_uncoded(monkeypatch, caplog):
+    from src.core.render_errors import RenderHTTPException
+
+    _stub_native_render_failure(monkeypatch, "scene render failed: asset decode failed: bad PNG header")
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(route_mod.custom_profile_card(_request()))
+
+    assert not isinstance(excinfo.value, RenderHTTPException)
+    assert excinfo.value.status_code == 500
+    native = [record for record in caplog.records if "native_render failed" in record.getMessage()]
+    assert len(native) == 1
+    assert native[0].levelno == logging.ERROR
+    assert "content_too_large=False message=scene render failed: asset decode failed" in native[0].getMessage()
+
+
+def test_logged_native_message_is_truncated(monkeypatch, caplog):
+    _stub_native_render_failure(monkeypatch, "scene render failed: " + "x" * 2000)
+    with caplog.at_level(logging.ERROR, logger="custom_profile.draw.perf"):
+        attempt = asyncio.run(skia_mod.try_render_custom_profile_card_attempt(_request()))
+    assert str(attempt.error).endswith("x" * 2000)  # the error itself is unchanged
+    (record,) = [record for record in caplog.records if "native_render failed" in record.getMessage()]
+    assert record.getMessage().endswith("x" * (500 - len("scene render failed: ")) + "...")
+
+
 def test_incomplete_visible_scene_declines_before_native_render(monkeypatch, tmp_path):
     from src.sekai.profile.custom_profile import resource_paths as drawer_mod
 

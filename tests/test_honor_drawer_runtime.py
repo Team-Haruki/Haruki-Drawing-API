@@ -22,7 +22,11 @@ async def test_load_honor_images_resolves_required_skips_missing_optional_and_em
             raise FileNotFoundError(path)
         return f"ref:{path}"
 
+    async def load_optional(_base, path):
+        return None if path == "missing.png" else f"optional:{path}"
+
     monkeypatch.setattr(drawer, "get_asset_image_ref", load)
+    monkeypatch.setattr(drawer, "get_optional_asset_image_ref", load_optional)
     request = HonorRequest(honor_img_path="honor.png", rank_img_path="missing.png")
     assert await drawer.load_honor_images(request) == {"honor_img": "ref:honor.png", "rank_img": None}
 

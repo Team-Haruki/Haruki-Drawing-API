@@ -7,6 +7,7 @@ still match it keep working.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from fastapi import FastAPI, HTTPException
 import httpx
@@ -120,3 +121,58 @@ def test_heavy_route_forwards_the_worker_code(monkeypatch: pytest.MonkeyPatch) -
     with pytest.raises(RenderHTTPException) as raised:
         asyncio.run(deck.deck_recommend(_Request()))
     assert (raised.value.status_code, raised.value.code) == (500, "asset_missing")
+
+
+def test_render_failures_are_logged_and_counted(caplog) -> None:
+    """A failure raised before render_canvas_payload never reaches the per-endpoint outcome counters, so
+    `render_http_exception` logs it at WARN and counts it in /render-stats by path and code."""
+    from src.core.debug import pop_request_context, push_request_context, set_request_stage
+    from src.sekai.skia_renderer.render_stats import get_render_stats, reset_render_stats
+
+    reset_render_stats()
+    tokens = push_request_context("req-1", "/api/pjsk/sk/player-trace", "POST")
+    try:
+        set_request_stage("sk:player_trace")
+        with caplog.at_level(logging.WARNING, logger="src.core.render_errors"):
+            render_http_exception(RenderDataInsufficientError("player trace requires at least one rank entry"))
+            render_http_exception(RuntimeError("boom"))
+        failures = get_render_stats()["request_failures"]
+    finally:
+        pop_request_context(tokens)
+        reset_render_stats()
+
+    assert failures == {
+        "total": 2,
+        "by_code": {"data_insufficient": 1, "unknown": 1},
+        "by_path": {"/api/pjsk/sk/player-trace": {"data_insufficient": 1, "unknown": 1}},
+    }
+    records = [record for record in caplog.records if "render.failed" in record.getMessage()]
+    assert [record.levelno for record in records] == [logging.WARNING, logging.WARNING]
+    known, unknown = records
+    assert "path=/api/pjsk/sk/player-trace stage=sk:player_trace status=500 code=data_insufficient" in (
+        known.getMessage()
+    )
+    assert "error_type=RenderDataInsufficientError" in known.getMessage()
+    assert known.exc_info is None  # a known reason needs no traceback
+    assert "code=- error_type=RuntimeError detail=boom" in unknown.getMessage()
+    assert unknown.exc_info is not None
+
+
+def test_logged_failure_detail_is_truncated(caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger="src.core.render_errors"):
+        exc = render_http_exception(RuntimeError("x" * 1000))
+    assert exc.detail == "x" * 1000  # the response body is unchanged
+    (record,) = [record for record in caplog.records if "render.failed" in record.getMessage()]
+    assert record.getMessage().endswith("x" * 300 + "...")
+
+
+def test_render_stats_endpoint_exposes_request_failures() -> None:
+    from src.core.health import render_stats
+    from src.sekai.skia_renderer.render_stats import reset_render_stats
+
+    reset_render_stats()
+    try:
+        body = asyncio.run(render_stats())
+    finally:
+        reset_render_stats()
+    assert body["renders"]["request_failures"] == {"total": 0, "by_code": {}, "by_path": {}}

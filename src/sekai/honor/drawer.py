@@ -15,6 +15,7 @@ from src.sekai.base.utils import (
     get_asset_image_ref,
     get_composed_image_cached,
     get_image_asset_signature,
+    get_optional_asset_image_ref,
     put_composed_image_cache,
     run_in_pool,
 )
@@ -54,9 +55,11 @@ def compose_full_honor_image_from_loaded_assets(
 async def load_honor_images(rqd: HonorRequest) -> dict[str, ImageSource | None]:
     """Resolve every asset the request's branch needs, concurrently, without decoding pixels.
 
-    Required assets raise (the caller surfaces the canonical error); only ``rank_img`` is
-    optional, and a missing one is logged and skipped, exactly as before. Pillow resolves these
-    lazy refs inside its render worker; IRPainter keeps them as asset paths for Rust."""
+    Required assets raise (the caller surfaces the canonical error) and count as missing. The
+    ``on_supplied_missing="ignore"`` overlays (``rank_img``, ``word_img``, ``medal_img``) are optional:
+    official bundles do not ship them for many honors, so an absent one is skipped without counting
+    towards the missing-asset header. Pillow resolves these lazy refs inside its render worker;
+    IRPainter keeps them as asset paths for Rust."""
 
     async def load_honor_image(path: str | None):
         return await get_asset_image_ref(ASSETS_BASE_DIR, path, on_missing="raise")
@@ -65,9 +68,9 @@ async def load_honor_images(rqd: HonorRequest) -> dict[str, ImageSource | None]:
         if not path:
             return None
         try:
-            return await load_honor_image(path)
-        except (FileNotFoundError, OSError, ValueError):
-            logger.warning("optional honor asset missing: %s", path)
+            return await get_optional_asset_image_ref(ASSETS_BASE_DIR, path)
+        except ValueError:
+            logger.warning("optional honor asset rejected: %s", path)
             return None
 
     tasks: dict[str, object] = {}

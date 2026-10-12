@@ -80,6 +80,7 @@ from src.core.pillow_telemetry import (
     PILLOW_TOUCH_CUSTOM_PROFILE_MEM_RASTER,
     record_pillow_touch,
 )
+from src.sekai.base.render_errors import CONTENT_TOO_LARGE, RENDER_ERROR_CODE_ATTR
 from src.sekai.base.utils import AssetImageRef, ImageSource, run_in_pool
 from src.sekai.honor.assets import resolve_honor_assets
 from src.sekai.honor.model import HonorRequest
@@ -1526,6 +1527,8 @@ async def try_render_custom_profile_card_attempt(
         # FAIL-OPEN (honor doctrine): anything escaping here would skip _record and 500 instead
         # of letting Pillow render and raise the canonical error (e.g. the ValueError -> 400).
         cause = exc.__cause__ or exc
+        if exc.stage == "native_render":
+            _classify_native_render_error(cause)
         return CustomProfileSkiaAttempt(
             None,
             OUTCOME_ERROR,
@@ -2537,6 +2540,42 @@ def _is_empty_text_noop(renderer: PNGRenderer, content: Any) -> bool:
         return False
     text = str(content.item.get("text", ""))
     return not text.strip() and "<" not in text and ">" not in text
+
+
+# Phrases the native renderer uses when a scene, node, mask or buffer would exceed one of its size limits
+# (e.g. "... would retain or allocate N bytes; scene limit is 268435456", "vector coverage exceeds node
+# pixel/dimension limit", "... byte count overflow"). Matched case-insensitively against the error message.
+_NATIVE_LIMIT_MARKERS = ("scene limit", "limit is", "limit exceeded", "exceeds", "exceed raster", "overflow")
+_NATIVE_ERROR_LOG_LIMIT = 500
+
+
+def _is_native_limit_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(marker in lowered for marker in _NATIVE_LIMIT_MARKERS)
+
+
+def _classify_native_render_error(cause: BaseException) -> None:
+    """Log a native ``render_scene`` failure and tag a size-limit failure as ``content_too_large``.
+
+    The native message (stage + sizes, never request secrets) is the only clue to why a scene failed, so it
+    is logged at ERROR. A scene that exceeds a native size limit is the card's content being too large, not
+    a renderer fault: the code lets the caller tell it apart. The limits themselves are unchanged.
+    """
+    message = str(cause)
+    limit = _is_native_limit_error(message)
+    if len(message) > _NATIVE_ERROR_LOG_LIMIT:
+        message = message[:_NATIVE_ERROR_LOG_LIMIT] + "..."
+    logger.error(
+        "custom_profile_card native_render failed error_type=%s content_too_large=%s message=%s",
+        type(cause).__name__,
+        limit,
+        message,
+    )
+    if limit and getattr(cause, RENDER_ERROR_CODE_ATTR, None) is None:
+        try:
+            setattr(cause, RENDER_ERROR_CODE_ATTR, CONTENT_TOO_LARGE)
+        except (AttributeError, TypeError):
+            pass
 
 
 class _CustomProfileSkiaStageError(Exception):

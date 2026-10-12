@@ -11,6 +11,7 @@ import math
 from typing import Literal
 
 from src.sekai.base.paint_types import lerp_color, rgb_to_color_code
+from src.sekai.base.render_errors import RenderDataInsufficientError
 from src.sekai.base.timezone import caller_label, region_tag
 from src.sekai.base.utils import truncate
 
@@ -120,7 +121,9 @@ def day_night_spans(start: datetime, end: datetime) -> tuple[tuple[datetime, dat
 def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
     primary = sorted((r for r in request.ranks if r.rank <= 100), key=lambda r: r.time)
     if not primary:
-        raise ValueError("player trace requires at least one rank entry within top 100")
+        # The rank axis is fixed to the top 100 (secondary_limits below), so a player seen only at rank 500 or
+        # 1000 has nothing to draw: tell the caller the data is insufficient instead of failing the render.
+        raise RenderDataInsufficientError("player trace requires at least one rank entry within top 100")
     secondary = sorted((r for r in request.ranks2 or () if r.rank <= 100), key=lambda r: r.time)
     reference = sorted((r for r in request.compare_rank_trace or () if r.score is not None), key=lambda r: r.time)
     compare_rank = request.compare_rank or (reference[-1].rank if reference else None)
@@ -236,7 +239,7 @@ def build_player_trace_spec(request: PlayerTraceRequest) -> TraceSpec:
 def build_rank_trace_spec(request: RankTraceRequest) -> TraceSpec:
     rows = sorted(request.ranks, key=lambda r: r.time)
     if not rows:
-        raise ValueError("ranks must not be empty")
+        raise RenderDataInsufficientError("ranks must not be empty")
     times = tuple(r.time for r in rows)
     scores = tuple(r.score for r in rows)
     speeds = []
