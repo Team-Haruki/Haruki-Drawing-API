@@ -2369,7 +2369,7 @@ fn load_typeface_uncached(dir: &str, name: &str) -> CachedTypeface {
     for candidate in font_candidates(dir, name) {
         if candidate.exists()
             && let Ok(bytes) = fs::read(candidate)
-            && let Some(typeface) = mgr.new_from_data(&bytes, None)
+            && let Some(typeface) = mgr.new_from_data(Data::new_copy(&bytes), None)
         {
             return CachedTypeface {
                 typeface,
