@@ -175,3 +175,64 @@ def test_synthetic_asset_layers_keep_native_placement_and_alpha(tmp_path, monkey
     assert all(bounds)
     assert max(abs(a - b) for a, b in zip(*bounds, strict=True)) <= 2
     assert np.abs(np.asarray(actual).astype(int) - np.asarray(expected).astype(int)).mean() < 0.25
+
+
+@pytest.mark.parametrize("font_id", [1, 2])
+@pytest.mark.parametrize(
+    ("text", "font_size", "scale"),
+    [("<size=5000>A</size>", 28, 0.1), ("<scale=80>I</scale>", 28, 0.1), ("A", 2049, 0.1), ("A", 4, 10)],
+)
+def test_large_rich_text_renders_when_visible_geometry_fits(tmp_path, monkeypatch, font_id, text, font_size, scale):
+    from src.sekai.profile.custom_profile.limits import validate_custom_profile_card
+
+    try:
+        native = load_native_renderer()
+    except ImportError:
+        pytest.skip("native renderer required")
+    monkeypatch.setattr("src.sekai.profile.custom_profile.skia.ASSETS_BASE_DIR", tmp_path)
+    fixture = build_tmp_fixture(tmp_path)
+    width, height = int(PROFILE_RENDER_VIEW_W), int(PROFILE_RENDER_VIEW_H)
+    renderer = PNGRenderer(
+        masterdata=None,
+        assets=tmp_path,
+        fonts=tmp_path,
+        tmp_font_metadata=fixture.metadata,
+        resources=fixture.resources,
+        shape_sprite_dir=tmp_path,
+        unity_ui_sprite_dir=tmp_path,
+        canvas_w=width,
+        canvas_h=height,
+        origin_x=width / 2,
+        origin_y=height / 2,
+    )
+    card = {
+        "customProfileCard": {
+            "texts": [
+                {
+                    "fontId": font_id,
+                    "colorId": 1,
+                    "alpha": 1,
+                    "size": font_size,
+                    "text": text,
+                    "objectData": {
+                        "position": {"x": 0, "y": 0},
+                        "scale": {"x": scale, "y": scale},
+                        "rotation": {"z": 0, "w": 1},
+                        "layer": 1,
+                        "visible": True,
+                    },
+                }
+            ]
+        }
+    }
+    validate_custom_profile_card(card)
+    token = begin_pillow_touch_scope()
+    try:
+        scene, memory, _ = _build_scene(renderer, card)
+        result = native.render_scene(scene, memory)
+        assert take_pillow_touch_snapshot().counts == {}
+    finally:
+        end_pillow_touch_scope(token)
+    image = Image.open(BytesIO(result["image_bytes"])).convert("RGB")
+    assert image.size == (width, height)
+    assert ImageChops.difference(image, Image.new("RGB", image.size, "white")).getbbox() is not None

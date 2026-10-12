@@ -65,17 +65,17 @@ fn decode_rgba_limited(
 }
 
 /// Keep RGBA within Rust; Python receives immutable A8 data only. Both the caller's
-/// layer limit and the gray-field hard limit are checked before pixel allocation.
+/// pixel budget is checked before allocation; no separate gray-field quota applies.
 pub(crate) fn alpha_field(
     data: Data,
     max_pixels: u64,
 ) -> Result<(Vec<u8>, i32, i32), AnalysisError> {
-    if max_pixels == 0 || max_pixels > 16 * 1024 * 1024 {
+    if max_pixels == 0 {
         return Err(AnalysisError::Invalid(
-            "alpha field max_pixels must be in 1..=16777216".to_string(),
+            "alpha field max_pixels must be positive".to_string(),
         ));
     }
-    let (pixels, width, height) = decode_rgba_limited(data, max_pixels, 32767)?;
+    let (pixels, width, height) = decode_rgba_limited(data, max_pixels, i32::MAX)?;
     let mut alpha = Vec::new();
     alpha
         .try_reserve_exact(pixels.len() / 4)
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(alpha, vec![255; 221]);
         assert!(alpha_field(Data::new_copy(source), 220).is_err());
         assert!(alpha_field(Data::new_copy(source), 0).is_err());
-        assert!(alpha_field(Data::new_copy(source), 16 * 1024 * 1024 + 1).is_err());
+        assert!(alpha_field(Data::new_copy(source), u64::MAX).is_ok());
         assert!(alpha_field(Data::new_copy(b"invalid"), 221).is_err());
     }
 }

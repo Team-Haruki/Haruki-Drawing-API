@@ -28,7 +28,8 @@ def test_rotation_rejects_nonfinite_angles(angle):
         expanded_rotation((2, 3), angle)
 
 
-def test_expansion_checks_output_capacity_before_allocating():
-    # Source fits under 16 Mi pixels, but its 45-degree bounding square does not.
-    with pytest.raises(ValueError, match="limits"):
-        expanded_rotation((32760, 1), 45)
+def test_expansion_has_no_custom_profile_pixel_quota():
+    plan = expanded_rotation((32760, 1), 45)
+    assert abs(plan.size[0] - plan.size[1]) <= 1
+    assert plan.size[0] * plan.size[1] > 16 * 1024 * 1024
+    assert all(np.isfinite(value) for value in plan.inverse)

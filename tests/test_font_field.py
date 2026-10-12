@@ -3,6 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import math
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 from PIL import Image, ImageDraw, ImageFont
@@ -60,23 +61,28 @@ def test_native_masks_match_legacy_bytes(native, font, monkeypatch, size):
         end_pillow_touch_scope(token)
 
 
-@pytest.mark.parametrize("size", [0, -1, math.inf, math.nan, 2049])
+@pytest.mark.parametrize("size", [0, -1, math.inf, math.nan])
 def test_mask_rejects_invalid_size_before_font_access(native, size):
     with pytest.raises(ValueError, match="size"):
         native.basic_text_mask("", "absent.ttf", "A", size, 100)
 
 
-@pytest.mark.parametrize("limit", [0, 16 * 1024 * 1024 + 1])
+@pytest.mark.parametrize("limit", [0])
 def test_mask_rejects_invalid_budget(native, limit):
     with pytest.raises(ValueError, match="pixel limit"):
         native.basic_text_mask("", "absent.ttf", "A", 90, limit)
 
 
-def test_mask_rejects_oversized_text(native, font):
-    with pytest.raises(ValueError, match=r"character|scalar"):
+def test_mask_accepts_large_font_and_long_text(native, font):
+    mask = native.basic_text_mask("", str(font), "A", 2049, sys.maxsize)
+    assert mask["size"][1] > 1000
+    whitespace = native.basic_text_mask("", str(font), " " * 20000, 10, sys.maxsize)
+    assert not whitespace["pixels"]
+
+
+def test_mask_respects_explicit_caller_budget(native, font):
+    with pytest.raises(ValueError, match="pixel limit"):
         native.basic_text_mask("", str(font), "A" * 16385, 90, 100)
-    with pytest.raises(ValueError, match="dimension limit"):
-        native.basic_text_mask("", str(font), "A" * 4000, 90, 16 * 1024 * 1024)
 
 
 def test_mask_pixel_rejection_does_not_retry_pillow(native, font, monkeypatch):

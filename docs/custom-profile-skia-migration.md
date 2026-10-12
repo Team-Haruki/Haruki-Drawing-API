@@ -9,7 +9,7 @@
 - 所有可见元素都有明确处理结果，`missing == unresolved == 0`；
 - `mem_images == 0`、`custom_profile_pil_mem_raster == 0`；
 - `/render-stats` 将请求计为 `native_pure`，而不是仅仅 `backend=skia`；
-- 恶意 scale、超大字体、超多元素、超大源图和多素材累计内存都在分配前拒绝；
+- 自定义名片不设置元素数量、文字长度、字号、缩放、排版偏移、图层像素或场景内存配额；只验证结构、有限数、正尺寸和底层整数可表示范围；
 - native 失败继续 fail-open，但 Pillow 回退不能绕过相同的输入、路径和源图预算。
 
 ## 当前里程碑
@@ -67,7 +67,7 @@
 
 已补安全/正确性契约：
 
-- 路由元素数、有限数、scale、文字大小/长度限制，以及 custom-profile 专用并发槽；
+- 路由只校验结构与有限数，专用并发槽负责排队，不按名片内容大小拒绝请求；原有 `custom_profile_max_elements`、`custom_profile_max_scale`、`custom_profile_max_text_size`、`custom_profile_max_text_length`、`custom_profile_max_layer_pixels`、`custom_profile_max_scene_mb` 配置已移除；
 - Pillow 与 Rust 共用的单层像素限制；Rust IR 额外携带全场字节预算；
 - native 源图在绘制前完整解码，单节点和多素材累计内存都受限；
 - `UnitySubscene` 在任何素材解码前完成纯几何/峰值内存预检，子树内缺失或损坏素材会

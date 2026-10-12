@@ -1,15 +1,11 @@
-"""Hard safety limits for user-provided custom-profile Unity scenes.
-
-These checks intentionally run before either renderer.  They are not a replacement for
-renderer-side allocation guards: the request does not carry source-asset dimensions, so the
-last reliable check for a resize still lives next to the allocation.
-"""
+"""Shape and numeric validity checks for custom-profile Unity scenes."""
 
 from __future__ import annotations
 
 import math
 from typing import Any
 
+from src.sekai.base.render_errors import RenderContentTooLargeError
 from src.sekai.profile.custom_profile.svg import TextStyle, parse_tmp_text
 
 CONTENT_BUCKETS = (
@@ -39,11 +35,6 @@ CONTENT_BUCKETS = (
 # that silently omitted content or reviving Pillow for an input it cannot render either.
 UNSUPPORTED_DYNAMIC_BUCKETS = frozenset({"miniCharas", "screenFilters"})
 
-# TMP tags in real cards intentionally exceed the outer editor fields for decorative effects.
-# Keep compatibility headroom while still rejecting the orders-of-magnitude values that can
-# turn one glyph into a multi-gigabyte raster. Renderer-side pixel guards remain authoritative.
-_TMP_RICH_TEXT_SIZE_HEADROOM = 4.0
-_TMP_RICH_TEXT_SCALE_HEADROOM = 8.0
 _TMP_LAYOUT_FIELDS = (
     "cspace",
     "mspace",
@@ -58,7 +49,7 @@ _TMP_LAYOUT_FIELDS = (
 )
 
 
-class RasterSizeLimitError(ValueError):
+class RasterSizeLimitError(RenderContentTooLargeError):
     """A named raster allocation exceeded the configured per-layer pixel budget."""
 
     def __init__(self, *, label: str, width: int, height: int, max_pixels: int) -> None:
@@ -80,39 +71,30 @@ def _finite_number(value: Any, label: str) -> float:
     return number
 
 
-def _validate_tmp_layout_fields(style: TextStyle, *, label: str, max_magnitude: float) -> None:
+def _validate_tmp_layout_fields(style: TextStyle, *, label: str) -> None:
     for key in _TMP_LAYOUT_FIELDS:
         value = getattr(style, key)
         if value is None:
             continue
-        number = _finite_number(value, f"{label}.richText.{key}")
-        if abs(number) > max_magnitude:
-            raise ValueError(f"{label}.richText.{key} must be within [-{max_magnitude:g}, {max_magnitude:g}]")
+        _finite_number(value, f"{label}.richText.{key}")
 
 
 def _validate_tmp_style(
     style: TextStyle,
     *,
     label: str,
-    max_scale: float,
-    max_text_size: float,
 ) -> None:
-    max_rich_text_size = max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM
     size = _finite_number(style.size, f"{label}.richText.size")
-    if size <= 0 or size > max_rich_text_size:
-        raise ValueError(f"{label}.richText.size must be within (0, {max_rich_text_size:g}]")
+    if size <= 0:
+        raise ValueError(f"{label}.richText.size must be positive")
 
-    max_rich_text_scale = max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
-    scale_x = _finite_number(style.scale_x, f"{label}.richText.scale")
-    if abs(scale_x) > max_rich_text_scale:
-        raise ValueError(f"{label}.richText.scale must be within [-{max_rich_text_scale:g}, {max_rich_text_scale:g}]")
+    _finite_number(style.scale_x, f"{label}.richText.scale")
 
     _finite_number(style.alpha, f"{label}.richText.alpha")
     _finite_number(style.rotate, f"{label}.richText.rotate")
     _validate_tmp_layout_fields(
         style,
         label=label,
-        max_magnitude=max_rich_text_size * max_rich_text_scale,
     )
 
 
@@ -121,14 +103,12 @@ def _validate_tmp_text_styles(
     base_size: float,
     *,
     label: str,
-    max_scale: float,
-    max_text_size: float,
 ) -> None:
     """Validate values after TMP rich-text tags have been applied.
 
     The request-level ``size`` and object scale are only defaults.  TMP ``<size>`` and
     ``<scale>`` tags replace them inside individual runs, so checking the outer fields alone
-    still lets a small-looking request create a multi-gigabyte glyph raster.
+    does not establish the effective values. Both must be valid finite numbers.
     """
 
     base_style = TextStyle(
@@ -153,7 +133,7 @@ def _validate_tmp_text_styles(
         style = getattr(token, "style", None)
         if style is None:
             continue
-        _validate_tmp_style(style, label=label, max_scale=max_scale, max_text_size=max_text_size)
+        _validate_tmp_style(style, label=label)
 
 
 def _content_bucket_items(layout: dict[str, Any], bucket: str) -> list:
@@ -169,7 +149,7 @@ def _content_bucket_items(layout: dict[str, Any], bucket: str) -> list:
     return items
 
 
-def _validate_object_transform(object_data: object, *, label: str, max_scale: float) -> None:
+def _validate_object_transform(object_data: object, *, label: str) -> None:
     if not isinstance(object_data, dict):
         raise ValueError(f"{label}.objectData must be an object")
 
@@ -178,8 +158,8 @@ def _validate_object_transform(object_data: object, *, label: str, max_scale: fl
         raise ValueError(f"{label}.objectData.scale must be an object")
     sx = _finite_number(scale.get("x", 1.0), f"{label}.objectData.scale.x")
     sy = _finite_number(scale.get("y", sx), f"{label}.objectData.scale.y")
-    if sx <= 0 or sy <= 0 or sx > max_scale or sy > max_scale:
-        raise ValueError(f"{label}.objectData.scale must be within (0, {max_scale:g}] on both axes")
+    if sx <= 0 or sy <= 0:
+        raise ValueError(f"{label}.objectData.scale must be positive on both axes")
 
     for group in ("position", "rotation"):
         values = object_data.get(group) or {}
@@ -193,17 +173,12 @@ def _validate_text_content(
     item: dict[str, Any],
     *,
     label: str,
-    max_scale: float,
-    max_text_size: float,
-    max_text_length: int,
 ) -> None:
     text = str(item.get("text", "") or "")
-    if len(text) > max_text_length:
-        raise ValueError(f"{label}.text has {len(text)} characters; limit is {max_text_length}")
     size = _finite_number(item.get("size", 1.0), f"{label}.size")
-    if size <= 0 or size > max_text_size:
-        raise ValueError(f"{label}.size must be within (0, {max_text_size:g}]")
-    _validate_tmp_text_styles(text, size, label=label, max_scale=max_scale, max_text_size=max_text_size)
+    if size <= 0:
+        raise ValueError(f"{label}.size must be positive")
+    _validate_tmp_text_styles(text, size, label=label)
 
 
 def _validate_item_scalars(
@@ -211,16 +186,11 @@ def _validate_item_scalars(
     *,
     bucket: str,
     label: str,
-    max_scale: float,
-    max_text_size: float,
 ) -> None:
-    max_line_spacing = max_text_size * _TMP_RICH_TEXT_SIZE_HEADROOM * max_scale * _TMP_RICH_TEXT_SCALE_HEADROOM
     for numeric_key in ("alpha", "outlineAlpha", "outlineSize", "lineSpacing"):
         if numeric_key not in item or item[numeric_key] is None:
             continue
-        number = _finite_number(item[numeric_key], f"{label}.{numeric_key}")
-        if bucket == "texts" and numeric_key == "lineSpacing" and abs(number) > max_line_spacing:
-            raise ValueError(f"{label}.lineSpacing must be within [-{max_line_spacing:g}, {max_line_spacing:g}]")
+        _finite_number(item[numeric_key], f"{label}.{numeric_key}")
 
 
 def _validate_content_item(
@@ -228,50 +198,31 @@ def _validate_content_item(
     *,
     bucket: str,
     label: str,
-    max_scale: float,
-    max_text_size: float,
-    max_text_length: int,
 ) -> None:
     if not isinstance(item, dict):
         raise ValueError(f"{label} must be an object")
-    _validate_object_transform(item.get("objectData"), label=label, max_scale=max_scale)
+    _validate_object_transform(item.get("objectData"), label=label)
     if bucket == "texts":
         _validate_text_content(
             item,
             label=label,
-            max_scale=max_scale,
-            max_text_size=max_text_size,
-            max_text_length=max_text_length,
         )
     _validate_item_scalars(
         item,
         bucket=bucket,
         label=label,
-        max_scale=max_scale,
-        max_text_size=max_text_size,
     )
 
 
-def validate_custom_profile_card(
-    card: dict[str, Any],
-    *,
-    max_elements: int,
-    max_scale: float,
-    max_text_size: float,
-    max_text_length: int,
-) -> None:
-    """Reject scene shapes that can make either backend allocate without a useful bound."""
+def validate_custom_profile_card(card: dict[str, Any]) -> None:
+    """Check structure and finite numeric values without content-size quotas."""
 
     layout = card.get("customProfileCard")
     if not isinstance(layout, dict):
         raise ValueError("card.customProfileCard must be an object")
 
-    element_count = 0
     for bucket in CONTENT_BUCKETS:
         items = _content_bucket_items(layout, bucket)
-        element_count += len(items)
-        if element_count > max_elements:
-            raise ValueError(f"custom profile has {element_count} elements; limit is {max_elements}")
 
         for index, item in enumerate(items):
             label = f"card.customProfileCard.{bucket}[{index}]"
@@ -279,9 +230,6 @@ def validate_custom_profile_card(
                 item,
                 bucket=bucket,
                 label=label,
-                max_scale=max_scale,
-                max_text_size=max_text_size,
-                max_text_length=max_text_length,
             )
 
 

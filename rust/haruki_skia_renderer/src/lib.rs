@@ -463,27 +463,24 @@ fn basic_text_mask(
     size: f32,
     max_pixels: u64,
 ) -> PyResult<Py<PyDict>> {
-    if max_pixels == 0 || max_pixels > gray_affine::MAX_GRAY_PIXELS as u64 {
+    if max_pixels == 0 {
         return Err(pyo3::exceptions::PyValueError::new_err(
-            "BASIC text mask pixel limit must be 1..=16777216",
+            "BASIC text mask pixel limit must be positive",
         ));
     }
-    if text.len() > text_metrics::MAX_TEXT_METRICS_CHARS * 4 {
-        return Err(pyo3::exceptions::PyValueError::new_err(
-            "text mask character limit",
-        ));
-    }
-    text_metrics::validate_text_metrics_requests(
-        font_dir,
-        font_name,
-        &[text_metrics::TextMetricsRequest {
-            text: text.to_owned(),
-            size,
-        }],
-    )
-    .map_err(pyo3::exceptions::PyValueError::new_err)?;
+    basic_text::validate_mask_request(font_dir, font_name, text, size)
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
     let mask = py
-        .detach(|| basic_text::raster_bounded(font_dir, font_name, text, size, max_pixels, 32767))
+        .detach(|| {
+            basic_text::raster_bounded(
+                font_dir,
+                font_name,
+                text,
+                size,
+                max_pixels,
+                i32::MAX as usize,
+            )
+        })
         .map_err(|error| {
             if error.contains("pixel limit")
                 || error.contains("dimension limit")
@@ -530,13 +527,16 @@ fn resize_gray8_bicubic(
     output_size: (usize, usize),
 ) -> PyResult<Py<PyBytes>> {
     const MAX_PIXELS: usize = gray_affine::MAX_GRAY_PIXELS;
-    const MAX_WORKING: usize = 128 * 1024 * 1024;
+    const MAX_WORKING: usize = isize::MAX as usize;
     gray_affine::validate_sizes(source_size, output_size)
         .map_err(pyo3::exceptions::PyValueError::new_err)?;
     // Reserve both the returned Vec and the Python bytes copy in addition to filter scratch.
     let output_bytes = output_size.0 * output_size.1;
-    let limits =
-        pillow_resize::PillowResizeLimits::new(MAX_PIXELS, MAX_WORKING - 2 * output_bytes, 32767);
+    let limits = pillow_resize::PillowResizeLimits::new(
+        MAX_PIXELS,
+        MAX_WORKING.saturating_sub(output_bytes.saturating_mul(2)),
+        i32::MAX as usize,
+    );
     let resized = py
         .detach(|| {
             pillow_resize::resize_gray8_pillow_bicubic(

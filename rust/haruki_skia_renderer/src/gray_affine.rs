@@ -4,14 +4,14 @@
 //! bicubic_filter8); license retained in docs/licenses/pillow.txt.
 //! This interpolation polynomial is NOT the scale-adaptive resize kernel.
 
-pub(crate) const MAX_GRAY_PIXELS: usize = 16 * 1024 * 1024;
+pub(crate) const MAX_GRAY_PIXELS: usize = isize::MAX as usize;
 
 pub(crate) fn validate_sizes(source: (usize, usize), output: (usize, usize)) -> Result<(), String> {
     for (w, h) in [source, output] {
         if w == 0
             || h == 0
-            || w > 32767
-            || h > 32767
+            || w > i32::MAX as usize
+            || h > i32::MAX as usize
             || w.checked_mul(h).is_none_or(|n| n > MAX_GRAY_PIXELS)
         {
             return Err("gray8 dimensions exceed raster limits".into());
@@ -67,7 +67,7 @@ pub(crate) fn transform(
     if !inverse.iter().all(|v| v.is_finite()) {
         return Err("gray8 affine coefficients must be finite".into());
     }
-    // Only the output is allocated, at most 16 MiB. The binding reserves an equal
+    // Only the output is allocated. The binding reserves an equal
     // Python bytes copy, while borrowing the immutable source across py.detach.
     let mut pixels = vec![0; output.0 * output.1];
     let [a, b, c, d, e, f] = inverse;
@@ -128,7 +128,7 @@ mod tests {
                 .contains("limits")
         );
         assert!(
-            transform(&[0], (1, 1), (8192, 8192), [0.; 6])
+            transform(&[0], (1, 1), (usize::MAX, 2), [0.; 6])
                 .unwrap_err()
                 .contains("limits")
         );

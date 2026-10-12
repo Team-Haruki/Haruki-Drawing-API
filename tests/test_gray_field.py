@@ -80,9 +80,7 @@ def test_gray_cached_fields_are_immutable():
         (b"", (0, 1), (1, 1)),
         (b"", (1, 1), (1, 1)),
         (b"x", (1, 1), (0, 1)),
-        (b"x", (1, 1), (32768, 1)),
         (b"", (8192, 8192), (1, 1)),
-        (b"x", (1, 1), (8192, 8192)),
     ],
 )
 def test_native_gray_rejects_invalid_allocations(native, pixels, source, target):
@@ -184,7 +182,7 @@ def test_native_field_limit_errors_do_not_retry_an_unbounded_legacy_resize(monke
 
 def test_gray_windows_validate_size_before_allocation():
     field = GrayField(1, 1, b"x")
-    for box in ((0, 0, 0, 1), (0, 0, 8192, 8192), (0, 0, 32768, 1)):
+    for box in ((0, 0, 0, 1), (0, 0, -1, 1)):
         with pytest.raises(ValueError, match="raster limits"):
             field.crop(box)
 
@@ -228,5 +226,20 @@ def test_gray_affine_native_and_legacy_recovery(native, monkeypatch):
     assert field.transform_bicubic((7, 9), matrix) == reference
     with pytest.raises(ValueError, match="finite"):
         native.transform_gray8_bicubic(b"x", (1, 1), (1, 1), [float("nan")] * 6)
-    with pytest.raises(ValueError, match="limits"):
-        native.transform_gray8_bicubic(b"x", (1, 1), (8192, 8192), [0] * 6)
+    wide = native.transform_gray8_bicubic(b"x", (1, 1), (32768, 1), [1, 0, 0, 0, 1, 0])
+    assert len(wide) == 32768
+    assert wide[0] == ord("x")
+
+
+def test_gray_field_has_no_card_pixel_or_axis_quota():
+    from src.sekai.profile.custom_profile.gray_field import field_size
+
+    assert field_size((8192, 8192)) == (8192, 8192)
+    field = GrayField(1, 1, b"x").crop((0, 0, 32768, 1))
+    assert field.size == (32768, 1)
+    assert field.pixels[0] == ord("x")
+
+
+def test_native_gray_accepts_long_thin_field(native):
+    pixels = native.resize_gray8_bicubic(b"x", (1, 1), (32768, 1))
+    assert pixels == b"x" * 32768
