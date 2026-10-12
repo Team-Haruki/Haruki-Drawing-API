@@ -18,7 +18,7 @@ serde_json = "1.0"
 # format, so enable its decoder explicitly. Upstream has no minimal webpd binary
 # variant: CI installs the source-build toolchain and caches the compiled Skia tree.
 # Color emoji still uses a COLR font (TwemojiMozilla), rendered by FreeType.
-skia-safe = { version = "0.99.0", features = ["webp-decode"] }
+skia-safe = { version = "0.153.3", features = ["webp-decode"] }
 freetype-rs = "0.38.0"
 
 # Linux already links system FreeType for Skia. macOS Skia uses CoreText, so
