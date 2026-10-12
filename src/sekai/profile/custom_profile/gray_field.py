@@ -8,9 +8,11 @@ from dataclasses import dataclass
 import importlib
 import math
 import operator
+import sys
 
-MAX_FIELD_PIXELS = 16 * 1024 * 1024
-MAX_FIELD_DIMENSION = 32767
+# Buffer addressability, not a content-size quota.
+MAX_FIELD_PIXELS = sys.maxsize
+MAX_FIELD_DIMENSION = sys.maxsize
 
 
 def field_size(size: tuple[int, int]) -> tuple[int, int]:

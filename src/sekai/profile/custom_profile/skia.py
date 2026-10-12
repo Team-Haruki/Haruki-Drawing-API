@@ -37,10 +37,12 @@ import json
 import logging
 import math
 from pathlib import Path
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, Any
 
+from src.sekai.base.render_errors import RenderContentTooLargeError
 from src.sekai.profile.custom_profile.collection_prefab import (
     OmikujiAssetOp,
     OmikujiRectOp,
@@ -140,8 +142,6 @@ from src.sekai.skia_renderer.render_stats import (
 from src.sekai.skia_renderer.subtree import NativeSubtree, NativeSubtreeError, lower_canvas_subtree
 from src.settings import (
     ASSETS_BASE_DIR,
-    CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-    CUSTOM_PROFILE_MAX_SCENE_BYTES,
     DEFAULT_BOLD_FONT,
     DEFAULT_FONT,
     FONT_DIR,
@@ -306,8 +306,8 @@ def _new_builder(width: int, height: int, *, general_font_path: Path | None = No
         extra_fonts={_GENERAL_FONT_IR_NAME: str(general_font_path)} if general_font_path is not None else None,
         export_format="png",
         jpg_quality=JPG_QUALITY,
-        max_node_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-        max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
+        max_node_pixels=sys.maxsize,
+        max_scene_bytes=sys.maxsize,
     )
 
 
@@ -326,7 +326,7 @@ class _SceneAssembler:
     def _reserve_mem(self, byte_count: int) -> None:
         total = self.mem_bytes + max(0, int(byte_count))
         if total > self.max_mem_bytes:
-            raise ValueError(
+            raise RenderContentTooLargeError(
                 f"custom profile native scene would retain {total} raw bytes; limit is {self.max_mem_bytes}"
             )
         self.mem_bytes = total
@@ -720,7 +720,7 @@ def _native_asset_info(asset_path: str) -> dict[str, Any] | None:
     height = int(info.get("height", 0))
     ensure_raster_size(
         (width, height),
-        max_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
+        max_pixels=sys.maxsize,
         label=f"custom profile native asset {asset_path}",
     )
     if int(info.get("mtime_ns", 0)) < 0 or int(info.get("file_size", 0)) < 0:
@@ -1378,7 +1378,7 @@ def _build_scene(
     # render_card starts from an OPAQUE WHITE base (Image.new(..., (255, 255, 255, 255))), not a
     # transparent canvas — the story background does not always cover the outermost pixels.
     builder.rect((0, 0), canvas_size, fill=(255, 255, 255, 255))
-    scene = _SceneAssembler(builder, canvas_size, CUSTOM_PROFILE_MAX_SCENE_BYTES)
+    scene = _SceneAssembler(builder, canvas_size, sys.maxsize)
     card_ref = renderer.native_card_ref(card)
     contents = renderer.build_native_contents(card)
     report = CustomProfileSceneReport(elements_total=len(contents))
@@ -1599,7 +1599,6 @@ def _render_custom_profile_native_scene(
     from src.settings import (
         CUSTOM_PROFILE_ASSETS_DIR,
         CUSTOM_PROFILE_FONTS_DIR,
-        CUSTOM_PROFILE_MAX_LAYER_PIXELS,
         CUSTOM_PROFILE_PARALLEL_WORKERS,
         CUSTOM_PROFILE_SHAPE_SPRITE_DIR,
         CUSTOM_PROFILE_TMP_FONT_METADATA,
@@ -1630,8 +1629,8 @@ def _render_custom_profile_native_scene(
                 "custom_profile_unity_ui_sprite_dir", CUSTOM_PROFILE_UNITY_UI_SPRITE_DIR, region
             ),
             region=region,
-            max_layer_pixels=CUSTOM_PROFILE_MAX_LAYER_PIXELS,
-            max_scene_bytes=CUSTOM_PROFILE_MAX_SCENE_BYTES,
+            max_layer_pixels=sys.maxsize,
+            max_scene_bytes=sys.maxsize,
         )
     except Exception as exc:
         raise _CustomProfileSkiaStageError("renderer_init") from exc

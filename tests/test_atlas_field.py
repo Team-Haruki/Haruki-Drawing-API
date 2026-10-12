@@ -153,9 +153,18 @@ def test_native_honors_cold_layer_limit(native, tmp_path):
         native.asset_alpha_field(str(tmp_path), path.name, 62)
     with pytest.raises(ValueError, match="pixel/dimension limit"):
         atlas_field.load_atlas_alpha(path, max_pixels=62, legacy_decode=_unexpected)
-    for limit in (0, 16 * 1024 * 1024 + 1):
+    for limit in (0,):
         with pytest.raises(ValueError, match="max_pixels"):
             native.asset_alpha_field(str(tmp_path), path.name, limit)
+
+
+def test_native_alpha_accepts_unrestricted_pixel_budget(native, tmp_path):
+    import sys
+
+    path = tmp_path / "atlas.png"
+    Image.new("RGBA", (9, 7)).save(path)
+    width, height, pixels = native.asset_alpha_field(str(tmp_path), path.name, sys.maxsize)
+    assert (width, height, len(pixels)) == (9, 7, 63)
 
 
 def test_disabled_or_too_small_pool_does_not_keep_fields(native, monkeypatch, tmp_path):

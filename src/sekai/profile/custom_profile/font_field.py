@@ -10,7 +10,7 @@ def basic_text_field(
     path: Path, text: str, size: float, *, max_pixels: int = MAX_FIELD_PIXELS
 ) -> tuple[GrayField, tuple[int, int, int, int]]:
     if not 0 < max_pixels <= MAX_FIELD_PIXELS:
-        raise ValueError("text mask pixel limit must be 1..=16777216")
+        raise ValueError("text mask pixel budget must be positive and addressable")
     size = max(1, round(size))
     try:
         native = import_module("haruki_skia_renderer")

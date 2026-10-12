@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import sys
+import sys
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -21,6 +22,7 @@ from src.core.path_safety import resolve_cli_path
 
 from src.sekai.base.asset_key import AssetKey, candidates
 from src.sekai.base.paint_types import RasterResample
+from src.sekai.base.render_errors import RenderContentTooLargeError
 from src.sekai.profile.custom_profile.gray_field import MAX_FIELD_PIXELS, GrayField, field_size
 from src.sekai.profile.custom_profile.float_field import FloatField
 
@@ -114,7 +116,8 @@ from src.sekai.profile.custom_profile.split import (
 )
 
 
-DEFAULT_MAX_SCENE_BYTES = 256 * 1024 * 1024
+# No custom-profile quota; retain only the addressable size of a Python buffer.
+DEFAULT_MAX_SCENE_BYTES = sys.maxsize
 _CARD_ASSET_STATE_KEYS = {
     ("deck", False): ("deckNormalPath", "deck_normal_path"),
     ("deck", True): ("deckAfterTrainingPath", "deck_after_training_path"),
@@ -251,7 +254,7 @@ SHAPE_SDF_FACE_FACTOR = SHAPE_NATIVE_FACE_DILATE_FACTOR
 # and DistanceFieldImage.Update pushes that field to the material every frame.
 SHAPE_SDF_SOFTNESS = 0.0
 SHAPE_SDF_SCREEN_FWIDTH = True
-DEFAULT_MAX_LAYER_PIXELS = 8 * 1024 * 1024
+DEFAULT_MAX_LAYER_PIXELS = sys.maxsize
 LAYER_ROTATION_SUPERSAMPLE = 2.0
 RODIN_FONT_VARIANTS = ("ttf", "otf", "auto")
 TMP_BLOCK_MODES = ("large-em", "source-glyph", "em", "glyph")
@@ -9414,7 +9417,7 @@ class PNGRenderer:
         # Reserve both the float32 distance array and immutable transport copy
         # before producing any glyph pixels. Existing fields remain live here.
         if max_field_bytes is not None and width * height * 8 > max_field_bytes:
-            raise ValueError("fallback TMP field exceeds remaining native scene memory")
+            raise RenderContentTooLargeError("fallback TMP field exceeds remaining native scene memory")
         if self.tmp_native_visible_character(char):
             glyph_char = self.tmp_render_glyph_char(font_name, char, font_size)
             glyph, glyph_bbox = basic_text_field(
@@ -9442,7 +9445,7 @@ class PNGRenderer:
         if self.tmp_scale_mode == "x" and not math.isclose(style.scale_x, 1.0, rel_tol=0.0, abs_tol=0.0):
             scaled_size = (max(1, round(mask.width * style.scale_x)), mask.height)
             if max_field_bytes is not None and scaled_size[0] * scaled_size[1] * 8 > max_field_bytes:
-                raise ValueError("fallback TMP scaled field exceeds remaining native scene memory")
+                raise RenderContentTooLargeError("fallback TMP scaled field exceeds remaining native scene memory")
             ensure_raster_size(scaled_size, max_pixels=self.max_layer_pixels, label="fallback TMP scaled mask")
             mask = mask.resize_bicubic(scaled_size)
         field = cached_fallback_sdf_field(mask, spread, tmp_dynamic_sdf_alpha_threshold(asset))
@@ -10075,7 +10078,7 @@ class PNGRenderer:
                         return None
                     glyph, retained_field_bytes = prepared
                     if max_field_bytes is not None and retained_field_bytes > max_field_bytes:
-                        raise ValueError("TMP glyph fields exceed remaining native scene memory")
+                        raise RenderContentTooLargeError("TMP glyph fields exceed remaining native scene memory")
                     direct_glyphs.append(glyph)
                     continue
                 style = char_info.style
@@ -10087,7 +10090,7 @@ class PNGRenderer:
                 quad_w, quad_h = self.tmp_native_unrotated_quad_size(char_info)
                 retained_field_bytes += quad_w * quad_h
                 if max_field_bytes is not None and retained_field_bytes > max_field_bytes:
-                    raise ValueError("TMP glyph fields exceed remaining native scene memory")
+                    raise RenderContentTooLargeError("TMP glyph fields exceed remaining native scene memory")
                 character_field = self.render_tmp_sdf_character_field(
                     font_name,
                     font_path,
@@ -10496,7 +10499,7 @@ class PNGRenderer:
             label="custom profile warped TMP glyph field",
         )
         if max_output_bytes is not None and out_w * out_h > max(0, int(max_output_bytes)):
-            raise ValueError(
+            raise RenderContentTooLargeError(
                 f"custom profile warped TMP glyph field would retain {out_w * out_h} bytes; "
                 f"remaining limit is {max(0, int(max_output_bytes))}"
             )
@@ -12804,7 +12807,7 @@ class PNGRenderer:
 
         total = max(0, int(current)) + max(0, int(additional))
         if total > self.max_scene_bytes:
-            raise ValueError(f"{label} would retain {total} bytes; limit is {self.max_scene_bytes}")
+            raise RenderContentTooLargeError(f"{label} would retain {total} bytes; limit is {self.max_scene_bytes}")
         return total
 
 

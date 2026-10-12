@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 
 from src.core.debug import set_request_stage
 from src.core.http_responses import CUSTOM_PROFILE_ERROR_RESPONSES, INTERNAL_SERVER_ERROR_RESPONSES
@@ -13,10 +13,6 @@ from src.sekai.profile.drawer import try_render_info_panel_payload, try_render_p
 from src.sekai.profile.model import CustomProfileCardRenderRequest, ProfileCardRequest, ProfileRequest
 from src.settings import (
     CUSTOM_PROFILE_MAX_CONCURRENT_REQUESTS,
-    CUSTOM_PROFILE_MAX_ELEMENTS,
-    CUSTOM_PROFILE_MAX_SCALE,
-    CUSTOM_PROFILE_MAX_TEXT_LENGTH,
-    CUSTOM_PROFILE_MAX_TEXT_SIZE,
 )
 
 router = APIRouter(tags=["Profile"], responses=CUSTOM_PROFILE_ERROR_RESPONSES)
@@ -99,10 +95,6 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
     try:
         validate_custom_profile_card(
             dict(request.card),
-            max_elements=CUSTOM_PROFILE_MAX_ELEMENTS,
-            max_scale=CUSTOM_PROFILE_MAX_SCALE,
-            max_text_size=CUSTOM_PROFILE_MAX_TEXT_SIZE,
-            max_text_length=CUSTOM_PROFILE_MAX_TEXT_LENGTH,
         )
         async with _custom_profile_render_slots:
             set_request_stage("custom_profile_card:compose_image")
@@ -119,7 +111,7 @@ async def custom_profile_card(request: CustomProfileCardRenderRequest):
     except ValueError as e:
         if attempt is not None:
             attempt.reject()
-        raise HTTPException(status_code=400, detail=str(e))
+        raise render_http_exception(e, status_code=400) from e
     except Exception as e:
         if attempt is not None:
             attempt.record(500)

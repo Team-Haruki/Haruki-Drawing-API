@@ -20,6 +20,7 @@ import json
 import logging
 import math
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 from fastapi import HTTPException
@@ -1173,7 +1174,7 @@ def test_route_preserves_the_value_error_400(monkeypatch):
     assert "bad card" in excinfo.value.detail
 
 
-def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
+def test_route_rejects_nonfinite_scale_before_native_or_fallback(monkeypatch):
     request = CustomProfileCardRenderRequest(
         card={
             "customProfileCard": {
@@ -1184,7 +1185,7 @@ def test_route_rejects_unbounded_scale_before_native_or_fallback(monkeypatch):
                             "visible": True,
                             "layer": 1,
                             "position": {"x": 0, "y": 0},
-                            "scale": {"x": 1.0e9, "y": 1.0e9},
+                            "scale": {"x": math.inf, "y": math.inf},
                             "rotation": {"z": 0, "w": 1},
                         },
                     }
@@ -2351,9 +2352,9 @@ def test_scene_oversized_tmp_text_uses_sparse_native_quads_before_pillow(monkeyp
 
     assert mem_images == {}
     assert len(renderer.direct_calls) == 2
-    assert renderer.direct_calls[0][2] == {"max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES}
+    assert renderer.direct_calls[0][2] == {"max_field_bytes": sys.maxsize}
     assert renderer.direct_calls[1][2] == {
-        "max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES,
+        "max_field_bytes": sys.maxsize,
         "defer_static_atlas": True,
         "defer_dynamic_font": True,
     }
@@ -2454,7 +2455,7 @@ def test_scene_oversized_non_decorative_tmp_uses_sparse_native_quads(monkeypatch
             {
                 "defer_static_atlas": True,
                 "defer_dynamic_font": True,
-                "max_field_bytes": skia_mod.CUSTOM_PROFILE_MAX_SCENE_BYTES,
+                "max_field_bytes": sys.maxsize,
             },
         )
     ]
@@ -2786,3 +2787,23 @@ def test_native_honor_candidates_follow_pillow_order_for_customized_slots():
 
     plain = _NS(kind="honor", item={"id": 1, "fullSize": True})
     assert list(skia_module._native_honor_candidates(renderer, plain)) == ["plain", "id", "masterdata:False"]
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_custom_profile_route_preserves_allocation_error_code(monkeypatch, deferred):
+    from src.core.render_errors import RenderHTTPException
+    from src.sekai.profile.custom_profile.limits import RasterSizeLimitError
+
+    error = RasterSizeLimitError(label="glyph", width=4000, height=4000, max_pixels=8 * 1024 * 1024)
+
+    async def fake_try_render(request):
+        if deferred:
+            return skia_mod.CustomProfileSkiaAttempt(None, OUTCOME_ERROR, error=error)
+        raise error
+
+    monkeypatch.setattr(route_mod, "try_render_custom_profile_card_attempt", fake_try_render)
+    with pytest.raises(RenderHTTPException) as caught:
+        asyncio.run(route_mod.custom_profile_card(_request()))
+    assert caught.value.status_code == 400
+    assert caught.value.code == "content_too_large"
+    assert "16000000 pixels" in caught.value.detail

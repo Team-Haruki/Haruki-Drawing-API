@@ -42,12 +42,6 @@ _PIXEL_SETTINGS = (
     "export_image_format",
     "jpg_quality",
     "use_skia_plot",
-    "custom_profile_max_elements",
-    "custom_profile_max_scale",
-    "custom_profile_max_text_size",
-    "custom_profile_max_text_length",
-    "custom_profile_max_layer_pixels",
-    "custom_profile_max_scene_mb",
 )
 
 # Extensions the renderer can read from the static tree: decoded images, plus the

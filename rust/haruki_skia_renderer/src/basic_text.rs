@@ -400,18 +400,19 @@ pub(crate) fn raster_bounded(
     })
 }
 
-fn validate_mask_request(dir: &str, name: &str, text: &str, size: f32) -> Result<(), String> {
-    if text.len() > crate::text_metrics::MAX_TEXT_METRICS_CHARS * 4 {
-        return Err("native text mask exceeds character limit".into());
+pub(crate) fn validate_mask_request(
+    _dir: &str,
+    name: &str,
+    _text: &str,
+    size: f32,
+) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("font name/path must not be empty".into());
     }
-    validate_text_metrics_requests(
-        dir,
-        name,
-        &[TextMetricsRequest {
-            text: text.to_owned(),
-            size,
-        }],
-    )
+    if !size.is_finite() || size <= 0.0 {
+        return Err("font size must be positive and finite".into());
+    }
+    Ok(())
 }
 
 fn raster_face(

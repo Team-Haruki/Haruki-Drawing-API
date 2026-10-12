@@ -15,7 +15,7 @@ HEAVY_RENDER_ERROR_RESPONSES: Final = {
 }
 
 CUSTOM_PROFILE_ERROR_RESPONSES: Final = {
-    400: {"description": "The custom profile payload is invalid or exceeds a configured limit."},
+    400: {"description": "The custom profile payload is invalid."},
     500: {"description": _IMAGE_GENERATION_FAILED},
 }
 
