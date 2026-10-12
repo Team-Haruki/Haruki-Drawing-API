@@ -598,6 +598,7 @@ either side can deploy first.
 | `DeckRequest.live_name` | `live_type` (drawn for every live type; the renderer's own label only when `live_name` is empty) |
 | `VLiveDetailLive.name` | `short_name` (the caller picks the distinguishing part; no comparison with the group title) |
 | `region_label` (`TimeZoneRequest`, `BasicProfile`), `BasicProfile.account_label` | the raw `region` code (chip/ring colours, assets) |
+| `labels["mysekai.fixture_list.first_craft_badge"]` | `MysekaiFixture.first_craft` (whether the tile gets the ribbon; the label is only its text) |
 
 `region_display` / `id_with_region` / `region_tag` in `src/sekai/base/timezone.py` draw the label and fall back
 to the upper-cased code. Do not add new comparisons against caller text; add a key.
@@ -620,6 +621,7 @@ key and the label is only drawn. A request without `labels` renders as before. T
 | card list / card box | `card.unreleased`, `card.attr.<attr>` |
 | score control | `score.target_pt` |
 | vlive list / detail | `vlive.type.<virtualLiveType>` (the list entry fragment key includes the drawn tag) |
+| MySekai fixture list | `mysekai.fixture_list.legend` (the caption under the progress header; the caller writes what grey means in its view, one line per `\n`), `mysekai.fixture_list.first_craft_badge` (the ribbon text on tiles whose `first_craft` is true, drawn in the corner opposite the birthday icon) |
 
 The event planner merges its root `labels` into the deck request it renders (the deck request's own keys win).
 `DetailedProfileCardRequest` also takes `data_source_kind` (`suite`, `mysekai`, `public`) and `data_source_label`;

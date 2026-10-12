@@ -407,6 +407,9 @@ class MysekaiFixture(BaseModel):
         角色id，如果是生日家具，在上面绘制对应的角色图片
     obtained : bool
         是否已拥有家具，未拥有的家具将显示为灰色
+    first_craft : bool = False
+        是否现在可以制作并获得首次制作经验，为 True 时在图标上绘制首次制作标记
+        （标记文字取 labels 的 ``mysekai.fixture_list.first_craft_badge``）
     """
 
     id: int
@@ -414,6 +417,7 @@ class MysekaiFixture(BaseModel):
     character_id: int | None = None
     chara_icon_path: str | None = None
     obtained: bool
+    first_craft: bool = False
 
 
 class MysekaiFixtureSubGenre(BaseModel):
