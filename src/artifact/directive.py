@@ -6,10 +6,10 @@ which the debug middleware turns into a 400 before the route runs.
 
 `X-Haruki-Artifact-Mode` is the one exception to strict validation: it selects an optional output mode
 (`store-ref`, docs/artifact-storage.md §12, or `cache-ref`, §13) and an unknown value is ignored rather than
-rejected, so a caller
-can introduce a new mode without a node that predates it answering 400. The mode travels in its own header
-because a Drawing that predates it rejects any `X-Haruki-Artifact` value other than `0`/`1`, while it
-ignores an unknown header and answers `Cache-Store: 0` with bytes — the fallback the caller relies on.
+rejected, so a caller can introduce a new mode without a node that predates it answering 400. The mode travels
+in its own header because a Drawing that predates it rejects any `X-Haruki-Artifact` value other than `0`/`1`,
+while it ignores an unknown header (or value) and answers as it would without one — the fallback the caller
+relies on.
 """
 
 from __future__ import annotations
