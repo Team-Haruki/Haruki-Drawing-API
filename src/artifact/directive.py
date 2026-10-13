@@ -5,7 +5,8 @@ When it is `1`, every directive header is validated strictly and a violation rai
 which the debug middleware turns into a 400 before the route runs.
 
 `X-Haruki-Artifact-Mode` is the one exception to strict validation: it selects an optional output mode
-(`store-ref`, docs/artifact-storage.md §12) and an unknown value is ignored rather than rejected, so a caller
+(`store-ref`, docs/artifact-storage.md §12, or `cache-ref`, §13) and an unknown value is ignored rather than
+rejected, so a caller
 can introduce a new mode without a node that predates it answering 400. The mode travels in its own header
 because a Drawing that predates it rejects any `X-Haruki-Artifact` value other than `0`/`1`, while it
 ignores an unknown header and answers `Cache-Store: 0` with bytes — the fallback the caller relies on.
@@ -32,6 +33,8 @@ HEADER_ARTIFACT_MODE = "X-Haruki-Artifact-Mode"
 
 # Upload the bytes to the image-cache bucket and return a ref, writing no index row (the caller records it).
 MODE_STORE_REF = "store-ref"
+# The same upload-only ref for a render the caller caches: the caller writes both index rows (§13).
+MODE_CACHE_REF = "cache-ref"
 
 DEFAULT_GROUP = "pjsk"
 DEFAULT_USER_ID = "public"
@@ -61,6 +64,8 @@ class RenderCacheDirective:
     force: bool = False
     # `X-Haruki-Artifact-Mode: store-ref`; honoured only together with `X-Haruki-Cache-Store: 0`.
     store_ref: bool = False
+    # `X-Haruki-Artifact-Mode: cache-ref`; honoured only together with `X-Haruki-Cache-Store: 1`.
+    cache_ref: bool = False
 
 
 class DirectiveError(ValueError):
@@ -130,9 +135,9 @@ def _store(headers: Mapping[str, str]) -> bool:
     return _flag(headers, HEADER_CACHE_STORE, True)
 
 
-def _store_ref(headers: Mapping[str, str]) -> bool:
+def _artifact_mode(headers: Mapping[str, str]) -> str:
     value = _get(headers, HEADER_ARTIFACT_MODE)
-    return value is not None and value.lower() == MODE_STORE_REF
+    return value.lower() if value is not None else ""
 
 
 def is_artifact_requested(headers: Mapping[str, str]) -> bool:
@@ -160,6 +165,7 @@ def parse_render_cache_directive(headers: Mapping[str, str], *, ttl_max: int) ->
     store = _store(headers)
     group = _optional_token(headers, HEADER_CACHE_GROUP, _GROUP_RE, DEFAULT_GROUP)
     user_id = _optional_token(headers, HEADER_USER_ID, _USER_ID_RE, DEFAULT_USER_ID)
+    mode = _artifact_mode(headers)
     return RenderCacheDirective(
         cache_key=cache_key,
         key_version=key_version,
@@ -171,5 +177,6 @@ def parse_render_cache_directive(headers: Mapping[str, str], *, ttl_max: int) ->
         asset_revision=_optional_token(headers, HEADER_ASSET_REVISION, _DIGEST_RE, ""),
         renderer_epoch=_optional_token(headers, HEADER_RENDERER_EPOCH, _DIGEST_RE, ""),
         force=_flag(headers, HEADER_RENDER_FORCE, False),
-        store_ref=_store_ref(headers),
+        store_ref=mode == MODE_STORE_REF,
+        cache_ref=mode == MODE_CACHE_REF,
     )
