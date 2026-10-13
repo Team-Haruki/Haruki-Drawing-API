@@ -31,7 +31,7 @@ read**. When it is `1`, every directive header is validated strictly.
 | `X-Haruki-User-Id` | no, default `public` | `^[A-Za-z0-9._-]{1,128}$`; index metadata only, never part of an object key |
 | `X-Haruki-Asset-Revision` | no | 64 lowercase hex characters; global game-asset revision, used as the mirror namespace |
 | `X-Haruki-Renderer-Epoch` | no | 64 lowercase hex characters; expected backend identity from `/cache/identity` |
-| `X-Haruki-Artifact-Mode` | no | `store-ref` (case-insensitive) selects store-ref mode (§12), honoured only with `X-Haruki-Cache-Store: 0`. Any other value is **ignored**, not rejected. |
+| `X-Haruki-Artifact-Mode` | no | Case-insensitive. `store-ref` selects store-ref mode (§12), honoured only with `X-Haruki-Cache-Store: 0`; `cache-ref` selects cache-ref mode (§13), honoured only with `X-Haruki-Cache-Store: 1`. Any other value is **ignored**, not rejected. |
 
 Cloud always sends the **full** directive in artifact mode, including for endpoints it deliberately does
 not cache (those carry `X-Haruki-Cache-Store: 0`). There is no `Accept` negotiation and no
@@ -62,10 +62,12 @@ Every response path leaves through one exit and is always **one** body.
 | degraded | artifact mode, store 1, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
 | store-ref | artifact mode, store 0, `X-Haruki-Artifact-Mode: store-ref`, upload succeeded | 200, `application/json` `artifact_ref` with `index_written: false` (§12) | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: store-ref`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
 | store-ref degraded | as above, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
+| cache-ref | artifact mode, store 1, storable render, `X-Haruki-Artifact-Mode: cache-ref`, upload succeeded | 200, `application/json` `artifact_ref` with `index_written: false` (§13) | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: cache-ref`, `X-Haruki-Node` |
+| cache-ref degraded | as above, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
 | rejected | invalid directive | 400 JSON (above) | `X-Haruki-Directive-Error`, `X-Haruki-Node` |
 
 `X-Haruki-Render-Missing-Assets: <n>` is added to any of the image branches above (bytes, store 0, degraded,
-store-ref, store-ref degraded) when the render drew `n > 0` missing-asset placeholders ("?" images). `n` is the
+store-ref, store-ref degraded; a cache-ref request with missing assets is answered store 0) when the render drew `n > 0` missing-asset placeholders ("?" images). `n` is the
 request scope's count plus the heavy worker's (`EncodedImagePayload.missing_asset_count`). A complete render
 does not carry the header, so its response is unchanged. Such a render always also carries
 `X-Haruki-Cache-Store: 0`; the count lets a caller tell "drew a placeholder" apart from the other no-store
