@@ -47,7 +47,7 @@ from src.sekai.base.utils import (
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
     get_card_full_thumbnail_layers,
-    get_profile_card,
+    get_profile_header,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 
@@ -1340,7 +1340,7 @@ async def _card_box_background(rqd: CardBoxRequest):
 async def _card_box_profile(rqd: CardBoxRequest, layout: _CardBoxLayout) -> tuple[object | None, int, int]:
     if rqd.user_info is None:
         return None, layout.panel_width, layout.panel_text_width
-    profile = await get_profile_card(rqd.user_info.to_profile_card_request())
+    profile = await get_profile_header(rqd.user_info.to_profile_card_request())
     panel_width = max(layout.panel_width, profile._get_self_size()[0])
     return profile, panel_width, max(240, panel_width - 120)
 

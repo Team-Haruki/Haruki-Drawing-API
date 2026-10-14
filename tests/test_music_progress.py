@@ -21,7 +21,7 @@ def test_play_progress_result_counts_keep_their_text_shadows(monkeypatch):
     async def fake_asset_ref(*_args, **_kwargs):
         return Image.new("RGBA", (16, 16), (255, 255, 255, 255))
 
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile_card)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile_card)
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset_ref)
 
     request = PlayProgressRequest(

@@ -38,7 +38,7 @@ from src.sekai.base.plot import (
 from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.timezone import datetime_from_millis, format_user_time, format_user_time_range, region_tag
 from src.sekai.base.utils import ImageSource, get_asset_image_ref, get_asset_image_refs, get_str_display_length
-from src.sekai.profile.drawer import get_profile_card
+from src.sekai.profile.drawer import get_profile_header
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT, RESULT_ASSET_PATH
 
@@ -321,7 +321,7 @@ async def _build_music_brief_list_canvas(rqd: MusicBriefListRequest) -> Canvas:
             _draw_rqd_title(rqd)
 
             if profile:
-                await get_profile_card(profile)
+                await get_profile_header(profile)
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 for m in rqd.music_list:
@@ -389,7 +389,7 @@ async def _build_music_list_canvas(rqd: MusicListRequest) -> Canvas:
             _draw_rqd_title(rqd)
 
             if profile:
-                await get_profile_card(profile.to_profile_card_request())
+                await get_profile_header(profile.to_profile_card_request())
 
             with VSplit().set_bg(roundrect_bg(alpha=80)).set_padding(16).set_sep(16):
                 for (diff, lv), musics in lv_musics:
@@ -450,7 +450,7 @@ async def _build_play_progress_canvas(rqd: PlayProgressRequest) -> Canvas:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
             if rqd.profile:
-                await get_profile_card(rqd.profile)
+                await get_profile_header(rqd.profile)
 
             # 52 px columns fit any three-digit count in bold 24 (digits are 16 px each in the widened-Latin font)
             bar_h, item_h, w = 200, 48, 52
@@ -616,7 +616,7 @@ async def _build_detail_music_rewards_canvas(rqd: DetailMusicRewardsRequest) -> 
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(rqd.profile)
+            await get_profile_header(rqd.profile)
             with (
                 VSplit()
                 .set_content_align("lt")
@@ -713,7 +713,7 @@ async def _build_basic_music_rewards_canvas(rqd: BasicMusicRewardsRequest) -> Ca
     # 绘图
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(rqd.profile)
+            await get_profile_header(rqd.profile)
             with (
                 VSplit()
                 .set_content_align("lt")

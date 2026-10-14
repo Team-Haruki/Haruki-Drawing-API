@@ -40,7 +40,7 @@ from src.sekai.base.plot import (
     Widget,
 )
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
-from src.sekai.profile.drawer import get_profile_card
+from src.sekai.profile.drawer import get_profile_header
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
@@ -254,7 +254,7 @@ async def _build_challenge_live_detail_canvas(rqd: ChallengeLiveDetailsRequest) 
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
     table = (
         VSplit().set_content_align("c").set_item_align("c").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
@@ -329,7 +329,7 @@ async def _build_power_bonus_detail_canvas(rqd: PowerBonusDetailRequest) -> Canv
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(profile.to_profile_card_request())
+            await get_profile_header(profile.to_profile_card_request())
 
             with (
                 VSplit()
@@ -599,7 +599,7 @@ async def _build_area_item_upgrade_materials_canvas(rqd: AreaItemUpgradeMaterial
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
     if rqd.profile:
-        root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+        root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
     columns = (
         HSplit().set_content_align("lt").set_item_align("lt").set_sep(16).set_bg(roundrect_bg(alpha=80)).set_padding(8)
     )
@@ -722,7 +722,7 @@ async def _build_bonds_canvas(rqd: BondsRequest) -> Canvas:
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
     table = (
         VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
@@ -812,7 +812,7 @@ async def _build_leader_count_canvas(rqd: LeaderCountRequest) -> Canvas:
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
     table = (
         VSplit().set_content_align("l").set_item_align("l").set_sep(8).set_padding(16).set_bg(roundrect_bg(alpha=80))
     )
@@ -1101,7 +1101,7 @@ async def _build_character_mission_overview_canvas(rqd: CharacterMissionOverview
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(16)
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
     root.add_item(_build_character_mission_note_panel(note_style))
     root.add_item(_build_character_mission_summary_panel(rqd, chara_icon, header_style))
     root.add_item(
@@ -1282,7 +1282,7 @@ async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(_character_mission_panel_bg())
-    root.add_item(await get_profile_card(rqd.profile.to_profile_card_request()))
+    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
 
     header = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8)
     title_row = HSplit().set_content_align("lb").set_item_align("c").set_sep(8)
