@@ -68,7 +68,7 @@ from src.sekai.profile.custom_profile.font_field import basic_text_field
 from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
     get_card_full_thumbnail_layers,
-    get_profile_card,
+    get_profile_header,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
@@ -1663,7 +1663,7 @@ async def _build_deck_recommend_canvas(rqd: DeckRequest) -> Canvas:
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(14).set_padding(16):
             if not rqd.is_max_deck:
-                await get_profile_card(rqd.profile.to_profile_card_request())
+                await get_profile_header(rqd.profile.to_profile_card_request())
             await _draw_deck_header(rqd, assets, width)
             _draw_deck_results(rqd, assets, layout, width)
             if rqd.event_planner:

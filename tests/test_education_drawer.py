@@ -33,7 +33,7 @@ def isolated_assets(monkeypatch: pytest.MonkeyPatch) -> None:
         return Spacer(100, 40)
 
     monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
-    monkeypatch.setattr(drawer, "get_profile_card", fake_profile)
+    monkeypatch.setattr(drawer, "get_profile_header", fake_profile)
     monkeypatch.setattr(drawer, "add_request_watermark", lambda _canvas, _request: None)
 
 

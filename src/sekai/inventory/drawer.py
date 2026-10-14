@@ -16,7 +16,7 @@ from src.sekai.base.plot import Frame, Grid, HSplit, ImageBox, TextBox, TextStyl
 from src.sekai.base.text_layout import get_text_size
 from src.sekai.base.timezone import caller_label, normalize_unix_millis, request_now
 from src.sekai.base.utils import ImageSource, get_asset_image_ref
-from src.sekai.profile.drawer import get_profile_card
+from src.sekai.profile.drawer import get_profile_header
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT
 
@@ -67,7 +67,7 @@ async def _build_inventory_canvas(rqd: InventoryListRequest) -> Canvas:
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(rqd.profile.to_profile_card_request())
+            await get_profile_header(rqd.profile.to_profile_card_request())
 
             with VSplit().set_w(PANEL_WIDTH).set_content_align("lt").set_item_align("lt").set_sep(14):
                 _draw_header()

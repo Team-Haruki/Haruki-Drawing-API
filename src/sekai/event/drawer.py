@@ -56,7 +56,7 @@ from src.sekai.profile.drawer import (
     CardFullThumbnailBox,
     CardFullThumbnailLayers,
     get_card_full_thumbnail_layers,
-    get_profile_card,
+    get_profile_header,
 )
 from src.sekai.skia_renderer.canvas import render_canvas_payload, skia_plot_enabled
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
@@ -644,7 +644,7 @@ async def _build_event_record_canvas(rqd: EventRecordRequest) -> Canvas:
 
     with Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING) as canvas:
         with VSplit().set_content_align("lt").set_item_align("lt").set_sep(16):
-            await get_profile_card(rqd.user_info.to_profile_card_request())
+            await get_profile_header(rqd.user_info.to_profile_card_request())
             note = "每次上传时进行增量更新，未上传过的记录将会丢失"
             if rqd.rank_note:
                 note = f"{note}\n{rqd.rank_note}"
