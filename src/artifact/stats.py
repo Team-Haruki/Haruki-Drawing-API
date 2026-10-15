@@ -68,6 +68,17 @@ STORE_REF_DEGRADED_REASONS: tuple[str, ...] = (
     "internal",
 )
 STORE_REF_STAGES: tuple[str, ...] = ("hash", "upload", "total")
+# Cache-ref mode (`X-Haruki-Artifact-Mode: cache-ref`) is the same upload for a render the caller caches and
+# indexes itself. A render with missing assets never gets here (it is answered `store0`), so it has no
+# `missing_assets` counter.
+CACHE_REF_COUNTERS: tuple[str, ...] = ("requests", "published", "upload_bytes")
+CACHE_REF_DEGRADED_REASONS: tuple[str, ...] = STORE_REF_DEGRADED_REASONS
+CACHE_REF_STAGES: tuple[str, ...] = STORE_REF_STAGES
+# Upload-only modes: counters, degraded reasons and stages per `/render-stats["artifacts"]` block.
+UPLOAD_ONLY_MODES: dict[str, tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = {
+    "store_ref": (STORE_REF_COUNTERS, STORE_REF_DEGRADED_REASONS, STORE_REF_STAGES),
+    "cache_ref": (CACHE_REF_COUNTERS, CACHE_REF_DEGRADED_REASONS, CACHE_REF_STAGES),
+}
 
 _node_name_lock = threading.Lock()
 _node_name: str | None = None
@@ -123,10 +134,10 @@ class ArtifactStats:
         self._index_configured = False
         self._index_usable = False
         self._index_last_error: dict[str, Any] | None = None
-        self._store_ref: Counter[str] = Counter()
-        self._store_ref_degraded: Counter[str] = Counter()
-        self._store_ref_stage_counts: Counter[str] = Counter()
-        self._store_ref_stage_totals: dict[str, float] = {}
+        self._upload_only: dict[str, Counter[str]] = {mode: Counter() for mode in UPLOAD_ONLY_MODES}
+        self._upload_only_degraded: dict[str, Counter[str]] = {mode: Counter() for mode in UPLOAD_ONLY_MODES}
+        self._upload_only_stage_counts: dict[str, Counter[str]] = {mode: Counter() for mode in UPLOAD_ONLY_MODES}
+        self._upload_only_stage_totals: dict[str, dict[str, float]] = {mode: {} for mode in UPLOAD_ONLY_MODES}
 
     def incr(self, name: str, amount: int = 1) -> None:
         if name not in SIMPLE_COUNTERS:
@@ -155,22 +166,30 @@ class ArtifactStats:
             self._stage_counts[stage] += 1
             self._stage_totals[stage] = self._stage_totals.get(stage, 0.0) + max(0.0, float(elapsed))
 
-    def store_ref_incr(self, name: str, amount: int = 1) -> None:
-        if name not in STORE_REF_COUNTERS:
+    def upload_only_incr(self, mode: str, name: str, amount: int = 1) -> None:
+        if name not in UPLOAD_ONLY_MODES[mode][0]:
             raise KeyError(name)
         with self._lock:
-            self._store_ref[name] += amount
+            self._upload_only[mode][name] += amount
+
+    def upload_only_degraded(self, mode: str, reason: str) -> None:
+        with self._lock:
+            self._upload_only_degraded[mode][reason] += 1
+
+    def record_upload_only_stage(self, mode: str, stage: str, elapsed: float) -> None:
+        with self._lock:
+            totals = self._upload_only_stage_totals[mode]
+            self._upload_only_stage_counts[mode][stage] += 1
+            totals[stage] = totals.get(stage, 0.0) + max(0.0, float(elapsed))
+
+    def store_ref_incr(self, name: str, amount: int = 1) -> None:
+        self.upload_only_incr("store_ref", name, amount)
 
     def store_ref_degraded(self, reason: str) -> None:
-        with self._lock:
-            self._store_ref_degraded[reason] += 1
+        self.upload_only_degraded("store_ref", reason)
 
     def record_store_ref_stage(self, stage: str, elapsed: float) -> None:
-        with self._lock:
-            self._store_ref_stage_counts[stage] += 1
-            self._store_ref_stage_totals[stage] = self._store_ref_stage_totals.get(stage, 0.0) + max(
-                0.0, float(elapsed)
-            )
+        self.record_upload_only_stage("store_ref", stage, elapsed)
 
     def record_error(self, stage: str, exc: BaseException | str) -> None:
         with self._lock:
@@ -229,18 +248,17 @@ class ArtifactStats:
                 for stage in stage_names
             }
             payload["last_error"] = dict(self._last_error) if self._last_error else None
-            store_ref: dict[str, Any] = {name: self._store_ref.get(name, 0) for name in STORE_REF_COUNTERS}
-            store_ref["degraded"] = {
-                reason: self._store_ref_degraded.get(reason, 0) for reason in STORE_REF_DEGRADED_REASONS
-            }
-            store_ref["stages"] = {
-                stage: {
-                    "count": self._store_ref_stage_counts.get(stage, 0),
-                    "total": round(self._store_ref_stage_totals.get(stage, 0.0), 6),
+            for mode, (counters, reasons, stages) in UPLOAD_ONLY_MODES.items():
+                block: dict[str, Any] = {name: self._upload_only[mode].get(name, 0) for name in counters}
+                block["degraded"] = {reason: self._upload_only_degraded[mode].get(reason, 0) for reason in reasons}
+                block["stages"] = {
+                    stage: {
+                        "count": self._upload_only_stage_counts[mode].get(stage, 0),
+                        "total": round(self._upload_only_stage_totals[mode].get(stage, 0.0), 6),
+                    }
+                    for stage in stages
                 }
-                for stage in STORE_REF_STAGES
-            }
-            payload["store_ref"] = store_ref
+                payload[mode] = block
         return payload
 
     def reset(self) -> None:
@@ -258,10 +276,11 @@ class ArtifactStats:
             self._index_configured = False
             self._index_usable = False
             self._index_last_error = None
-            self._store_ref.clear()
-            self._store_ref_degraded.clear()
-            self._store_ref_stage_counts.clear()
-            self._store_ref_stage_totals.clear()
+            for mode in UPLOAD_ONLY_MODES:
+                self._upload_only[mode].clear()
+                self._upload_only_degraded[mode].clear()
+                self._upload_only_stage_counts[mode].clear()
+                self._upload_only_stage_totals[mode].clear()
 
 
 artifact_stats = ArtifactStats()

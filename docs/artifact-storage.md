@@ -31,7 +31,7 @@ read**. When it is `1`, every directive header is validated strictly.
 | `X-Haruki-User-Id` | no, default `public` | `^[A-Za-z0-9._-]{1,128}$`; index metadata only, never part of an object key |
 | `X-Haruki-Asset-Revision` | no | 64 lowercase hex characters; global game-asset revision, used as the mirror namespace |
 | `X-Haruki-Renderer-Epoch` | no | 64 lowercase hex characters; expected backend identity from `/cache/identity` |
-| `X-Haruki-Artifact-Mode` | no | `store-ref` (case-insensitive) selects store-ref mode (§12), honoured only with `X-Haruki-Cache-Store: 0`. Any other value is **ignored**, not rejected. |
+| `X-Haruki-Artifact-Mode` | no | Case-insensitive. `store-ref` selects store-ref mode (§12), honoured only with `X-Haruki-Cache-Store: 0`; `cache-ref` selects cache-ref mode (§13), honoured only with `X-Haruki-Cache-Store: 1`. Any other value is **ignored**, not rejected. |
 
 Cloud always sends the **full** directive in artifact mode, including for endpoints it deliberately does
 not cache (those carry `X-Haruki-Cache-Store: 0`). There is no `Accept` negotiation and no
@@ -62,10 +62,12 @@ Every response path leaves through one exit and is always **one** body.
 | degraded | artifact mode, store 1, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
 | store-ref | artifact mode, store 0, `X-Haruki-Artifact-Mode: store-ref`, upload succeeded | 200, `application/json` `artifact_ref` with `index_written: false` (§12) | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: store-ref`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
 | store-ref degraded | as above, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Cache-Store: 0`, `X-Haruki-Node` |
+| cache-ref | artifact mode, store 1, storable render, `X-Haruki-Artifact-Mode: cache-ref`, upload succeeded | 200, `application/json` `artifact_ref` with `index_written: false` (§13) | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: cache-ref`, `X-Haruki-Node` |
+| cache-ref degraded | as above, upload not possible | 200, image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
 | rejected | invalid directive | 400 JSON (above) | `X-Haruki-Directive-Error`, `X-Haruki-Node` |
 
 `X-Haruki-Render-Missing-Assets: <n>` is added to any of the image branches above (bytes, store 0, degraded,
-store-ref, store-ref degraded) when the render drew `n > 0` missing-asset placeholders ("?" images). `n` is the
+store-ref, store-ref degraded; a cache-ref request with missing assets is answered store 0) when the render drew `n > 0` missing-asset placeholders ("?" images). `n` is the
 request scope's count plus the heavy worker's (`EncodedImagePayload.missing_asset_count`). A complete render
 does not carry the header, so its response is unchanged. Such a render always also carries
 `X-Haruki-Cache-Store: 0`; the count lets a caller tell "drew a placeholder" apart from the other no-store
@@ -352,9 +354,12 @@ window. Rollback is `HARUKI_ASSETS__USER_UPLOAD__ENABLED=false`.
 | `store_ref.{requests,published,missing_assets,upload_bytes}` | store-ref mode (§12): requests seen, refs returned, uploads of a render with missing assets, bytes written |
 | `store_ref.degraded.{disabled,runtime_unavailable,upload_failed,upload_timeout,unsupported_media,internal}` | store-ref requests answered with bytes |
 | `store_ref.stages.{hash,upload,total}.{count,total}` | seconds per store-ref stage; kept apart from `stages` so the artifact-mode averages stay comparable |
+| `cache_ref.{requests,published,upload_bytes}` | cache-ref mode (§13): requests that reached the upload, refs returned, bytes written |
+| `cache_ref.degraded.<reason>`, `cache_ref.stages.{hash,upload,total}.{count,total}` | as `store_ref` |
 
 The object-write counters (`uploads`, `upload_bytes`, `upload_elapsed_total`, `upload_failures`, `upload_timeouts`)
-count store-ref writes too. `degraded`, `published`, `store_skipped` and `stages` do not.
+count store-ref and cache-ref writes too. `degraded`, `published`, `store_skipped` and `stages` do not; a cache-ref
+request answered `store0` (missing assets, stale renderer) counts `store_skipped` and nothing under `cache_ref`.
 
 `GET /cache/stats` → `asset_mirror`: `enabled`, `source`, `disabled_reason`, `manifest_version`, `provider`,
 `bucket`, `local_hits`, `fetches`, `fetch_bytes`, `fetch_elapsed_total`, `remote_miss`, `fetch_errors`,
@@ -366,7 +371,7 @@ count store-ref writes too. `degraded`, `published`, `store_skipped` and `stages
 mirror_fetch_error, mirror_breaker_open, candidates_exhausted, birthday_fallback, vanished}`.
 
 Every image response also logs one `image.response` line with
-`artifact=0|1|store0|degraded|store_ref|store_ref_degraded`,
+`artifact=0|1|store0|degraded|store_ref|store_ref_degraded|cache_ref|cache_ref_degraded`,
 `missing_assets=N`, and, depending on the branch, `hash= reused= index_written= upload=` or `reason=`. Artifact and degraded lines include a `stages=` breakdown for the request.
 
 ## 6. Index (PostgreSQL) — Cloud owns the DDL
@@ -618,3 +623,61 @@ needed. A node with storage enabled and no DSN still serves store-ref.
 
 Rollback is per path in Cloud, or `HARUKI_STORAGE__ENABLED=false` on a node. In both cases the node answers
 with degraded bytes, which Cloud already handles.
+
+## 13. Cache-ref mode (upload only, the caller indexes)
+
+Artifact mode (§2, §6) makes the rendering node write both index rows itself. When the index database is not
+local to the render nodes, those round trips (intent, then lock, gated upsert and commit) cost far more than the
+upload. Cache-ref mode is store-ref's upload (§12) for a render the caller **does** cache: Drawing writes the
+bytes under the caller's key layout and returns a ref, and the caller, which sits next to the database, writes
+the `image_cache_entries` row and the `render_cache_index` row in one transaction. Drawing makes no index round
+trip, so the mode also works on a node without `HARUKI_STORAGE__INDEX__DSN`.
+
+### Request
+
+The full directive (§1) with `X-Haruki-Cache-Store: 1` **and** `X-Haruki-Artifact-Mode: cache-ref`.
+
+- A node that predates the mode ignores the unknown value and runs artifact mode: it writes both rows and
+  returns an `index_written: true` ref with no mode header. That is the caller's existing path.
+- With `X-Haruki-Cache-Store: 0` the mode is ignored and the request is answered `store0`.
+
+### Response
+
+Every rule that keeps a render out of the cache runs first and does not change: missing assets, missing
+resources (font fallbacks) and a mismatched renderer epoch are answered `store0` with bytes, exactly as without
+the mode (§2), so a placeholder render is never uploaded or keyed under the request.
+
+| outcome | status / body | headers |
+| --- | --- | --- |
+| uploaded | 200 `application/json` `artifact_ref` | `X-Haruki-Artifact: 1`, `X-Haruki-Artifact-Mode: cache-ref`, `X-Haruki-Node` |
+| not uploaded | 200 image bytes | `X-Haruki-Artifact-Degraded: 1`, `X-Haruki-Node` |
+| not storable | 200 image bytes (`store0`) | `X-Haruki-Cache-Store: 0`, `X-Haruki-Node`, `X-Haruki-Render-Missing-Assets` when > 0 |
+
+The ref is store-ref's (§12): `pjsk/<sha256>-<generation>.<ext>`, `index_written` and `reused` always `false`,
+`node_name` the Garage writer node, `missing_assets` always `0`. `cache_key`, `ttl_seconds` and `expires_at`
+echo the directive. Like store-ref objects, cache-ref objects are not under the `pjsk/api/` ops prefix (§3). Failures count `cache_ref.degraded.<reason>` with §12's reasons; a degraded answer carries no
+`Cache-Store: 0`, like an artifact-mode degrade, because the render itself is complete.
+
+### Caller obligations
+
+- **Record both rows under the content lock (§6).** The `image_cache_entries` row as for a store-ref
+  (`writer_node = ref.node_name`; an existing row for the hash keeps its path and the duplicate object is queued
+  for deletion), then the `render_cache_index` row for the caller's own directive values (request key, api path,
+  user, group, key version, TTL), in the same transaction, so GC never sees the content row without its
+  reference.
+- **Check the ref.** Its `cache_key` must be the request's key, its bucket the caller's image-cache bucket and
+  its path the caller's key layout. A ref the caller cannot use carries no bytes: request the render again
+  without the mode.
+- **Handle every fallback.** Degraded bytes, `store0` bytes and an `index_written: true` ref from an older node
+  are today's paths.
+
+### Rollout
+
+1. Deploy the Drawing nodes. Nothing changes until a caller sends the mode; `cache_ref.requests` stays 0.
+2. Keep `HARUKI_STORAGE__WRITER_NODE` as for store-ref (§12).
+3. Enable the mode in the caller, per API path if it supports that.
+4. Watch `/render-stats["artifacts"]`: `cache_ref.published` grows, `cache_ref.degraded.*` stays 0, and the
+   artifact-mode `index_writes` and `stages.index_*` stop growing for the switched paths.
+
+Rollback is in the caller (stop sending the mode). Drawing keeps its artifact-mode index writer, so a caller
+without the mode is served exactly as before.
