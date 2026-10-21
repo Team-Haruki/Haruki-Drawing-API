@@ -381,3 +381,26 @@ def test_limited_auto_notice_is_drawn_only_when_applied(monkeypatch, recommend_t
     with drawer.Canvas():
         drawer._draw_deck_notes(_request(recommend_type=recommend_type, auto_score_notice=notice))
     assert any("终章期间限定 AUTO" in text for text in texts) == bool(notice)
+
+
+@pytest.mark.parametrize("recommend_type", ["event", "bonus", "mysekai"])
+@pytest.mark.parametrize("with_attribute", [False, True])
+def test_simulated_event_header_keeps_unit_badge_without_attribute(monkeypatch, recommend_type, with_attribute):
+    request = _request(recommend_type=recommend_type, event_id=None, unit_filter=None, attr_filter=None)
+    assets = _assets(attr_icon=_asset("green") if with_attribute else None)
+    badges = []
+    monkeypatch.setattr(drawer, "_deck_shows_music", lambda *_: False)
+    monkeypatch.setattr(drawer, "_icon_pill", lambda icons: badges.append(icons) or "unit badge")
+
+    assert drawer._deck_header_pills(request, assets) == ["unit badge"]
+    expected = [(assets.unit_logo, (None, drawer._PILL_ICON))]
+    if with_attribute:
+        expected.append((assets.attr_icon, (30, 30)))
+    assert badges == [expected]
+
+
+@pytest.mark.parametrize(("unit_filter", "attr_filter"), [("street", None), (None, "cool")])
+def test_filter_icons_remain_in_settings_instead_of_header(monkeypatch, unit_filter, attr_filter):
+    request = _request(unit_filter=unit_filter, attr_filter=attr_filter)
+    monkeypatch.setattr(drawer, "_deck_shows_music", lambda *_: False)
+    assert drawer._deck_header_pills(request, _assets(attr_icon=None)) == []
