@@ -988,13 +988,16 @@ def _icon_pill(icons: list[tuple[ImageSource, tuple[int | None, int]]], text: st
 
 
 def _deck_header_pills(rqd: DeckRequest, assets: _DeckRecommendAssets) -> list[_HeaderPill]:
-    """WL chapter, simulated unit + attribute, then the song (filters are drawn with the settings instead)."""
+    """WL chapter, simulated unit with optional attribute, then song; filters stay in settings."""
     pills = []
     if rqd.is_wl and rqd.wl_chara_name:
         icons = [(assets.wl_chara_icon, (_PILL_ICON, _PILL_ICON))] if assets.wl_chara_icon is not None else []
         pills.append(_icon_pill(icons, f"{rqd.wl_chara_name} 章节"))
-    if assets.unit_logo and assets.attr_icon and not (rqd.unit_filter or rqd.attr_filter):
-        pills.append(_icon_pill([(assets.unit_logo, (None, _PILL_ICON)), (assets.attr_icon, (30, 30))]))
+    if assets.unit_logo and not (rqd.unit_filter or rqd.attr_filter):
+        icons = [(assets.unit_logo, (None, _PILL_ICON))]
+        if assets.attr_icon:
+            icons.append((assets.attr_icon, (30, 30)))
+        pills.append(_icon_pill(icons))
     if _deck_shows_music(rqd, assets):
         pills.append(_music_pill(rqd, assets))
     return pills
