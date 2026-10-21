@@ -181,3 +181,20 @@ async def test_event_list_canvas_compose_and_native_routes_cover_empty_enabled_a
     monkeypatch.setattr(drawer, "skia_plot_enabled", lambda: True)
     monkeypatch.setattr(drawer, "render_canvas_payload", lambda *_args, **_kwargs: _async_value(payload))
     assert await drawer.try_render_event_list_payload(request) is payload
+
+
+@pytest.mark.anyio
+async def test_event_list_loads_and_draws_all_bonus_attributes(monkeypatch) -> None:
+    paths = [f"attr-{i}.png" for i in range(5)]
+    event = _event(event_attr_paths=paths, event_attr_path="legacy.png")
+
+    async def fake_asset(_root, path):
+        return path
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", fake_asset)
+    loaded = await drawer._preload_event_entry_assets(event)
+    assert set(loaded.values()) == set(paths)
+    drawn = []
+    monkeypatch.setattr(drawer, "ImageBox", lambda image, **_kwargs: drawn.append(image))
+    drawer._build_event_list_entry_canvas(event, loaded, "current", *_styles())
+    assert drawn == paths
