@@ -225,6 +225,14 @@ async def _load_event_detail_background(rqd: EventDetailRequest, use_story_bg: b
     return await get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_bg_path)
 
 
+def _event_attribute_paths(paths: list[str] | None, fallback: str | None) -> list[str]:
+    return list(dict.fromkeys(path for path in (paths or [fallback]) if path))
+
+
+def _event_attribute_key(index: int) -> str:
+    return "attr" if index == 0 else f"attr_{index}"
+
+
 def _event_detail_image_tasks(rqd: EventDetailRequest, wl_chapters: list[dict], use_story_bg: bool) -> dict:
     tasks = {}
     # ImageBg 的 fade/blur 已由共享 Painter 原语表达；保持 ref，Skia 直接解码路径。
@@ -235,8 +243,10 @@ def _event_detail_image_tasks(rqd: EventDetailRequest, wl_chapters: list[dict], 
     tasks["logo"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_logo_path)
     if rqd.event_assets.ban_chara_icon_path:
         tasks["ban_icon"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.ban_chara_icon_path)
-    if rqd.event_assets.event_attr_image_path:
-        tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, rqd.event_assets.event_attr_image_path)
+    for index, path in enumerate(
+        _event_attribute_paths(rqd.event_assets.event_attr_image_paths, rqd.event_assets.event_attr_image_path)
+    ):
+        tasks[_event_attribute_key(index)] = get_asset_image_ref(ASSETS_BASE_DIR, path)
     if rqd.event_assets.bonus_chara_path:
         for index, chara_path in enumerate(rqd.event_assets.bonus_chara_path):
             tasks[f"bonus_chara_{index}"] = get_asset_image_ref(ASSETS_BASE_DIR, chara_path)
@@ -441,21 +451,25 @@ def _draw_event_cards(
 
 
 def _draw_event_bonus(rqd: EventDetailRequest, images: dict, styles: _EventDetailStyles) -> None:
-    detail = rqd.event_info
-    if not (detail.bonus_attr or detail.bonus_chara_id):
+    attr_paths = _event_attribute_paths(rqd.event_assets.event_attr_image_paths, rqd.event_assets.event_attr_image_path)
+    if not (attr_paths or rqd.event_assets.bonus_chara_path):
         return
-    with HSplit().set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
-        if detail.bonus_attr:
-            TextBox("加成属性", styles.label)
-            ImageBox(images["attr"], size=(None, 40))
+    layout = VSplit() if len(attr_paths) > 1 else HSplit()
+    with layout.set_padding(16).set_sep(8).set_item_align("c").set_content_align("c"):
+        if attr_paths:
+            with HSplit().set_padding(0).set_sep(8).set_item_align("c"):
+                TextBox("加成属性", styles.label)
+                for index in range(len(attr_paths)):
+                    ImageBox(images[_event_attribute_key(index)], size=(None, 40))
         if rqd.event_assets.bonus_chara_path:
-            TextBox("加成角色", styles.label)
-            bonus_chara_images = [
-                images[f"bonus_chara_{index}"] for index in range(len(rqd.event_assets.bonus_chara_path))
-            ]
-            with Grid(col_count=5 if len(bonus_chara_images) < 20 else 7).set_sep(4, 4):
-                for image in bonus_chara_images:
-                    ImageBox(image, size=(None, 40))
+            with HSplit().set_padding(0).set_sep(8).set_item_align("c"):
+                TextBox("加成角色", styles.label)
+                bonus_chara_images = [
+                    images[f"bonus_chara_{index}"] for index in range(len(rqd.event_assets.bonus_chara_path))
+                ]
+                with Grid(col_count=5 if len(bonus_chara_images) < 20 else 7).set_sep(4, 4):
+                    for image in bonus_chara_images:
+                        ImageBox(image, size=(None, 40))
 
 
 def _draw_event_detail_panel(
@@ -824,8 +838,8 @@ async def _preload_event_entry_assets(d) -> dict[str, object]:
         tasks["banner"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_banner_path)
     if d.event_cards:
         tasks["cards"] = asyncio.gather(*[get_card_full_thumbnail_layers(thumb) for thumb in d.event_cards])
-    if d.event_attr_path:
-        tasks["attr"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_attr_path)
+    for index, path in enumerate(_event_attribute_paths(d.event_attr_paths, d.event_attr_path)):
+        tasks[_event_attribute_key(index)] = get_asset_image_ref(ASSETS_BASE_DIR, path)
     if d.event_unit_path:
         tasks["unit"] = get_asset_image_ref(ASSETS_BASE_DIR, d.event_unit_path)
     if d.event_chara_path:
@@ -875,13 +889,18 @@ def _build_event_list_entry_canvas(
                 TextBox(f"S {d.start_at.strftime('%Y-%m-%d %H:%M')}", style2)
                 TextBox(f"T {d.end_at.strftime('%Y-%m-%d %H:%M')}", style2)
                 with HSplit().set_padding(0).set_sep(4):
-                    if loaded.get("attr") is not None:
-                        ImageBox(loaded["attr"], size=(None, 24), sampling="pillow_bicubic")
+                    attr_paths = _event_attribute_paths(d.event_attr_paths, d.event_attr_path)
+                    attr_size = 16 if len(attr_paths) > 1 else 24
+                    for index in range(len(attr_paths)):
+                        if loaded.get(_event_attribute_key(index)) is not None:
+                            ImageBox(
+                                loaded[_event_attribute_key(index)], size=(None, attr_size), sampling="pillow_bicubic"
+                            )
                     if loaded.get("unit") is not None:
                         ImageBox(loaded["unit"], size=(None, 24), sampling="pillow_bicubic")
                     if loaded.get("chara") is not None:
                         ImageBox(loaded["chara"], size=(None, 24), sampling="pillow_bicubic")
-                    if not (d.event_attr_path or d.event_unit_path or d.event_chara_path):
+                    if not (attr_paths or d.event_unit_path or d.event_chara_path):
                         Spacer(w=24, h=24)
 
     return canvas

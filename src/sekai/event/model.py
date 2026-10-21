@@ -53,6 +53,7 @@ class EventInfo(BaseModel):
     banner_cid: int
     banner_index: int
     bonus_attr: str
+    bonus_attrs: list[str] | None = None
     bonus_chara_id: list[int] | None = None
     wl_time_list: list[dict[str, Any]] | None = None
 
@@ -138,6 +139,7 @@ class EventAssets(BaseModel):
     event_logo_path: AssetKey
     event_story_bg_path: str
     event_attr_image_path: str
+    event_attr_image_paths: list[str] | None = None
     event_ban_chara_img: str
     ban_chara_icon_path: str | None = None
     bonus_chara_path: list[str] | None = None
@@ -181,6 +183,7 @@ class EventBrief(BaseModel):
     event_banner_path: str | None = None
     event_cards: list[CardFullThumbnailRequest] | None = None
     event_attr_path: str | None = None
+    event_attr_paths: list[str] | None = None
     event_chara_path: str | None = None
     event_unit_path: str | None = None
 
