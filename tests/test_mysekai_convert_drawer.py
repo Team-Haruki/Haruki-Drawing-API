@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
+from pydantic import ValidationError
 import pytest
 
 from src.core.pillow_telemetry import begin_pillow_touch_scope, end_pillow_touch_scope, take_pillow_touch_snapshot
@@ -67,6 +68,30 @@ def test_convert_model_preserves_unknown_quantity_and_candidate_paths():
         not {"page", "page_count", "previous_command", "next_command"}
         & MysekaiConvertRecipesRequest.model_fields.keys()
     )
+
+
+@pytest.mark.parametrize(("total", "expected"), [(None, 2), (0, 0), (42, 42)])
+def test_omitted_total_uses_recipe_count_but_explicit_total_is_preserved(total, expected, recipe_assets, real_fonts):
+    values = {"recipes": [_recipe(1), _recipe(2)]}
+    if total is not None:
+        values["total"] = total
+    canvas = asyncio.run(drawer.build_mysekai_convert_recipes_canvas(MysekaiConvertRecipesRequest(**values)))
+    texts = [widget.text for widget in _walk(canvas) if isinstance(widget, TextBox)]
+    assert f"共 {expected} 条配方" in texts
+
+
+def test_resource_names_are_bounded_without_truncating_accepted_names(recipe_assets, real_fonts):
+    name = "材" * 128
+    with pytest.raises(ValidationError, match="String should have at most 128 characters"):
+        MysekaiConvertResource(name=name + "料")
+    recipe = _recipe()
+    recipe.inputs[0].name = name
+    recipe.outputs = [MysekaiConvertResource(name=name, image_path="item.png", quantity=1)]
+    canvas = asyncio.run(drawer.build_mysekai_convert_recipes_canvas(MysekaiConvertRecipesRequest(recipes=[recipe])))
+    labels = [widget for widget in _walk(canvas) if isinstance(widget, TextBox) and widget.text == name]
+    assert len(labels) == 2
+    assert all("".join(label._get_lines()) == name for label in labels)
+    assert canvas_size_within_limit(canvas._get_self_size())
 
 
 @pytest.mark.parametrize("input_count", [0, 1, 2, 7])

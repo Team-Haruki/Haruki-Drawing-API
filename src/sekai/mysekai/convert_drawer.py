@@ -14,7 +14,12 @@ from src.sekai.base.text_layout import ink_centered_text_offset_y
 from src.sekai.base.timezone import caller_label
 from src.sekai.base.utils import ImageSource, get_asset_image_refs
 from src.sekai.base.vector import VectorPath
-from src.sekai.mysekai.convert_model import MysekaiConvertRecipe, MysekaiConvertRecipesRequest, MysekaiConvertResource
+from src.sekai.mysekai.convert_model import (
+    RESOURCE_NAME_MAX_LENGTH,
+    MysekaiConvertRecipe,
+    MysekaiConvertRecipesRequest,
+    MysekaiConvertResource,
+)
 from src.sekai.skia_renderer.canvas import render_canvas_payload
 from src.settings import ASSETS_BASE_DIR, DEFAULT_BOLD_FONT, DEFAULT_FONT, DEFAULT_HEAVY_FONT
 
@@ -99,9 +104,12 @@ def _resource_slot(resource: MysekaiConvertResource, image: ImageSource, size: i
 def _resource_cell(resource: MysekaiConvertResource, image: ImageSource, size: int = SLOT_SIZE) -> None:
     with VSplit().set_w(size).set_sep(3).set_content_align("t").set_item_align("t"):
         _resource_slot(resource, image, size)
-        TextBox(resource.name or f"#{resource.id}", RESOURCE_STYLE, use_real_line_count=True).set_w(size).set_padding(
-            0
-        ).set_content_align("t")
+        TextBox(
+            resource.name or f"#{resource.id}",
+            RESOURCE_STYLE,
+            line_count=RESOURCE_NAME_MAX_LENGTH,
+            use_real_line_count=True,
+        ).set_w(size).set_padding(0).set_content_align("t")
 
 
 def _draw_arrow(_widget, painter) -> None:
@@ -140,9 +148,12 @@ def _recipe_flow(
             if len(recipe.outputs) == 1:
                 resource = recipe.outputs[0]
                 _resource_slot(resource, output_images[0], 108)
-                TextBox(resource.name or f"#{resource.id}", INFO_STYLE, use_real_line_count=True).set_w(
-                    OUTPUT_WIDTH
-                ).set_content_align("t")
+                TextBox(
+                    resource.name or f"#{resource.id}",
+                    INFO_STYLE,
+                    line_count=RESOURCE_NAME_MAX_LENGTH,
+                    use_real_line_count=True,
+                ).set_w(OUTPUT_WIDTH).set_content_align("t")
             elif recipe.outputs:
                 with Grid(col_count=min(3, len(recipe.outputs))).set_sep(SLOT_GAP, SLOT_GAP).set_item_align("t"):
                     for resource, image in zip(recipe.outputs, output_images, strict=True):
@@ -191,6 +202,7 @@ def _recipe_card(
 
 
 async def build_mysekai_convert_recipes_canvas(rqd: MysekaiConvertRecipesRequest) -> Canvas:
+    total = len(rqd.recipes) if rqd.total is None else rqd.total
     columns = _column_count(len(rqd.recipes))
     inner_width = CARD_WIDTH * columns + CARD_GAP * (columns - 1)
     panel_width = inner_width + 2 * PANEL_PADDING
@@ -205,7 +217,7 @@ async def build_mysekai_convert_recipes_canvas(rqd: MysekaiConvertRecipesRequest
         with VSplit().set_sep(16).set_content_align("lt").set_item_align("lt"):
             with _panel(panel_width):
                 TextBox(rqd.title, TITLE_STYLE, use_real_line_count=True).set_w(inner_width)
-                TextBox(caller_label(rqd, "mysekai.convert.total", "共 {total} 条配方", total=rqd.total), INFO_STYLE)
+                TextBox(caller_label(rqd, "mysekai.convert.total", "共 {total} 条配方", total=total), INFO_STYLE)
                 if rqd.filter:
                     TextBox(
                         caller_label(rqd, "mysekai.convert.filter", "筛选：{filter}", filter=rqd.filter),
