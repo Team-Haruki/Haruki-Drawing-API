@@ -54,6 +54,11 @@ _ROUTE_CASES = (
     ),
     _RouteCase("mysekai_shop", "try_render_mysekai_shop_payload", "compose_mysekai_shop_image"),
     _RouteCase(
+        "mysekai_convert_recipes",
+        "try_render_mysekai_convert_recipes_payload",
+        "compose_mysekai_convert_recipes_image",
+    ),
+    _RouteCase(
         "mysekai_bulk_harvest",
         "try_render_mysekai_bulk_harvest_payload",
         "compose_mysekai_bulk_harvest_image",
@@ -69,6 +74,7 @@ _ROUTE_CASES = (
 _PUBLIC_ROUTE_ENDPOINTS = {
     "mysekai_housing_competition",
     "mysekai_shop",
+    "mysekai_convert_recipes",
     "mysekai_bulk_harvest",
     "mysekai_blueprint_term",
 }

@@ -260,6 +260,15 @@ CASES: tuple[Case, ...] = (
         "MysekaiHousingCompetitionRequest",
         drawer="src.sekai.mysekai.housing_drawer",
     ),
+    Case(
+        name="mysekai_convert_recipes",
+        drawer="src.sekai.mysekai.convert_drawer",
+        compose="compose_mysekai_convert_recipes_image",
+        model_module="src.sekai.mysekai.convert_model",
+        model_cls="MysekaiConvertRecipesRequest",
+        try_render="try_render_mysekai_convert_recipes_payload",
+        budget=PARITY_BUDGETS.get("mysekai_convert_recipes"),
+    ),
     # JP 7.0.0 views (private content_drawer.real.py): shop / bulk harvest / blueprint term tabs.
     _case("mysekai_shop", "mysekai", "mysekai_shop", "MysekaiShopRequest", drawer=MYSEKAI_CONTENT_REAL),
     _case(
