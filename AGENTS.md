@@ -622,6 +622,7 @@ key and the label is only drawn. A request without `labels` renders as before. T
 | score control | `score.target_pt` |
 | vlive list / detail | `vlive.type.<virtualLiveType>` (the list entry fragment key includes the drawn tag) |
 | MySekai fixture list | `mysekai.fixture_list.legend` (the caption under the progress header; the caller writes what grey means in its view, one line per `\n`), `mysekai.fixture_list.first_craft_badge` (the ribbon text on tiles whose `first_craft` is true, drawn in the corner opposite the birthday icon) |
+| MySekai converter recipes | `mysekai.convert.inputs`, `mysekai.convert.outputs`, `mysekai.convert.duration` (`{duration}`), `mysekai.convert.level` (`{level}`), `mysekai.convert.limits` (`{limits}`), `mysekai.convert.total` (`{total}`), `mysekai.convert.filter` (`{filter}`), `mysekai.convert.group_count` (`{count}`), `mysekai.convert.other`, `mysekai.convert.empty`, `mysekai.convert.note`; grouping and accent colours use raw `category_key`, while `category` is only the display title |
 
 The event planner merges its root `labels` into the deck request it renders (the deck request's own keys win).
 `DetailedProfileCardRequest` also takes `data_source_kind` (`suite`, `mysekai`, `public`) and `data_source_label`;
