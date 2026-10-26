@@ -1282,7 +1282,7 @@ async def _build_character_mission_all_canvas(rqd: CharacterMissionAllRequest) -
 
     canvas = Canvas(bg=SEKAI_BLUE_BG).set_padding(BG_PADDING)
     root = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_item_bg(_character_mission_panel_bg())
-    root.add_item(await get_profile_header(rqd.profile.to_profile_card_request()))
+    root.add_item((await get_profile_header(rqd.profile.to_profile_card_request())).set_omit_parent_bg(True))
 
     header = VSplit().set_content_align("lt").set_item_align("lt").set_sep(8).set_padding(8)
     title_row = HSplit().set_content_align("lb").set_item_align("c").set_sep(8)
