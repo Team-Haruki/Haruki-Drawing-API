@@ -382,3 +382,98 @@ async def test_explicit_parts_serve_only_the_cells_they_supply(monkeypatch):
     requested.clear()
     assert await drawer.get_player_frame_layers(row_only, "vertical") is None
     assert requested == []
+
+
+def _continuous_frame_parts(name, cell="vertical"):
+    root = f"static_images/custom_frames/endfield_avatars_20261001/{name}/{cell}"
+    return {
+        field: f"{root}/frame_{field}.png"
+        for field in ("base", "lefttop", "righttop", "centertop", "rightbottom", "leftbottom")
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("name", ["rgb_coiled_dragon", "rgb_thunder", "other_frame"])
+@pytest.mark.parametrize("cell", ["horizontal", "vertical"])
+async def test_continuous_frame_fitting_is_limited_to_known_vertical_assets(monkeypatch, name, cell):
+    parts = _continuous_frame_parts(name, cell)
+    paths = PlayerFramePaths(**parts, **{cell: parts})
+
+    async def asset(_root, _path, **_kwargs):
+        return Image.new("RGBA", (132, 132))
+
+    monkeypatch.setattr(drawer, "get_asset_image_ref", asset)
+    layers = await drawer.get_player_frame_layers(paths, cell)
+    assert layers.continuous_edges is (cell == "vertical" and name != "other_frame")
+
+
+def _write_continuous_frame(tmp_path):
+    """Connected L-shaped strips with an empty base, as in the dragon's missing horizontal edges."""
+    parts = _continuous_frame_parts("rgb_coiled_dragon")
+    for name, path in parts.items():
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        image = Image.new("RGBA", (164, 180))
+        if name not in ("base", "centertop"):
+            left, top = name.startswith("left"), name.endswith("top")
+            x = 16 if left else 144
+            y = 32 if top else 168
+            image.paste((40, 180, 240, 255), (x, 32 if top else 0, x + 4, 180 if top else 172))
+            image.paste((40, 180, 240, 255), (16 if left else 0, y, 164 if left else 148, y + 4))
+            # Corner detail must keep its size when the edge runs are extended.
+            mx, my = (24 if left else 124), (40 if top else 124)
+            image.paste((240, 40, 100, 255), (mx, my, mx + 16, my + 16))
+        image.save(target)
+    return PlayerFramePaths(**parts, vertical=parts)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("backend", ["skia", "pillow"])
+@pytest.mark.parametrize(("size", "scale"), [((340, 748), 1), ((471, 841), 0.75), ((720, 600), 1.25)])
+async def test_continuous_frame_has_no_middle_gaps_and_preserves_corners(
+    tmp_path, monkeypatch, real_fonts, backend, size, scale
+):
+    if backend == "skia":
+        pytest.importorskip("haruki_skia_renderer")
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    monkeypatch.setattr(canvas_mod, "ASSETS_BASE_DIR", tmp_path)
+    paths = _write_continuous_frame(tmp_path)
+    padding = 64
+    with Canvas().set_padding(padding) as canvas:
+        framed = await drawer.wrap_with_player_frame(Spacer(*size), paths, cell="vertical", scale=scale)
+    if backend == "skia":
+        payload = await canvas_mod.render_canvas_payload(canvas, export_format="png")
+        assert payload is not None
+        image = Image.open(BytesIO(payload.image_bytes)).convert("RGBA")
+    else:
+        image = (await canvas.get_img()).convert("RGBA")
+    w, h = size
+    assert framed._get_self_size() == size
+    assert image.size == (w + 2 * padding, h + 2 * padding)
+    assert image.getpixel((padding + w // 2, padding + h // 2))[3] == 0
+    # Scan every row/column, including the centre seam and both cap-to-run joins.
+    for x in range(padding + 30, padding + w - 30):
+        for start in (padding, padding + h - 6):
+            assert max(image.getpixel((x, y))[3] for y in range(start, start + 6)) > 200, (x, start)
+    for y in range(padding + 30, padding + h - 30):
+        for start in (padding, padding + w - 6):
+            assert max(image.getpixel((x, y))[3] for x in range(start, start + 6)) > 200, (start, y)
+    # The isolated red corner detail retains the native 16px footprint at the chosen scale.
+    corner = image.crop((padding, padding, padding + round(64 * scale), padding + round(64 * scale)))
+    red = Image.new("1", corner.size)
+    pixels = (corner.getpixel((x, y)) for y in range(corner.height) for x in range(corner.width))
+    red.putdata([r > 200 and g < 80 and b < 150 and a > 200 for r, g, b, a in pixels])
+    bounds = red.getbbox()
+    assert bounds is not None
+    assert bounds[2] - bounds[0] == round(16 * scale)
+    assert bounds[3] - bounds[1] == round(16 * scale)
+
+
+@pytest.mark.anyio
+async def test_continuous_frame_handles_panels_smaller_than_corner_art(tmp_path, monkeypatch, real_fonts):
+    monkeypatch.setattr(drawer, "ASSETS_BASE_DIR", tmp_path)
+    paths = _write_continuous_frame(tmp_path)
+    with Canvas().set_padding(64) as canvas:
+        await drawer.wrap_with_player_frame(Spacer(21, 19), paths, cell="vertical", scale=1)
+    image = await canvas.get_img()
+    assert image.size == (149, 147)

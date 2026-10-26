@@ -403,6 +403,14 @@ _FRAME_PART_FIELDS = {
 # corner and leaves only straight edge to stretch.
 _FRAME_BASE_BORDER = 0.38
 
+# These custom sprites carry continuous edge artwork, unlike the game's detached
+# corner decorations. Fit their edge runs to the panel without enlarging the corners.
+_CONTINUOUS_FRAME_BASES = {
+    f"static_images/custom_frames/endfield_avatars_20261001/{name}/vertical/frame_base.png"
+    for name in ("rgb_coiled_dragon", "rgb_thunder")
+}
+_CONTINUOUS_FRAME_CORNER_SIZE = 80
+
 
 def _frame_part_dirs(frame_paths) -> dict[int, str] | None:
     """Bundle directory of each part, recovered from the per-sprite paths (``…/<bundle>/<cell>/frame_x.png``)."""
@@ -428,6 +436,7 @@ class PlayerFrameLayers:
     cell: str
     base: ImageSource
     ornaments: list[tuple[ImageSource, str]]  # (sprite, slot) in the client's draw order
+    continuous_edges: bool = False
 
 
 async def get_player_frame_layers(frame_paths, cell: str = "horizontal") -> PlayerFrameLayers | None:
@@ -462,7 +471,10 @@ async def get_player_frame_layers(frame_paths, cell: str = "horizontal") -> Play
     if any(isinstance(image, MissingImageRef) for image in sources):
         return None
     return PlayerFrameLayers(
-        cell, sources[0], [(image, slot) for image, (_, _, slot) in zip(sources[1:], sprites, strict=True)]
+        cell,
+        sources[0],
+        [(image, slot) for image, (_, _, slot) in zip(sources[1:], sprites, strict=True)],
+        cell == "vertical" and paths[0] in _CONTINUOUS_FRAME_BASES,
     )
 
 
@@ -528,6 +540,9 @@ class PlayerFrameBox(Widget):
         o = -self.outset
         mid = o + w / 2
         for image, slot in self.layers.ornaments:
+            if self.layers.continuous_edges and slot != "tc" and min(image.size) > 1:
+                self._draw_continuous_corner(p, image, slot)
+                continue
             ax, ay, ox, oy = slots[slot]
             iw, ih = image.size
             dw, dh = max(1, round(iw * s)), max(1, round(ih * s))
@@ -545,6 +560,40 @@ class PlayerFrameBox(Widget):
                 if dw <= 0:
                     continue
             p.paste_with_alpha_blend(image, (x, y), (dw, dh), src_rect=src if src != (0, 0, iw, ih) else None)
+
+    def _draw_continuous_corner(self, p: Painter, image: ImageSource, slot: str) -> None:
+        """Keep the corner at native scale and extend its edge strips to the panel centre."""
+        w, h = self.frame_size
+        s = self.frame_scale
+        ax, ay, ox, oy = _FRAME_SLOTS[self.layers.cell][slot]
+        iw, ih = image.size
+        o = -self.outset
+        # The first/last 80 source pixels contain the corner art in these assets.
+        # Adjacent runs share the same integer centre so rounding cannot leave a gap.
+        cx, cy = min(_CONTINUOUS_FRAME_CORNER_SIZE, iw - 1), min(_CONTINUOUS_FRAME_CORNER_SIZE, ih - 1)
+        mx, my = round(o + w / 2), round(o + h / 2)
+        if ax == 0:
+            x = round(o + ox * s)
+            sx, dx = (0, cx, iw), (x, min(mx, x + round(cx * s)), mx)
+        else:
+            x = round(o + w + ox * s)
+            sx, dx = (0, iw - cx, iw), (mx, max(mx, x - round(cx * s)), x)
+        if ay == 0:
+            y = round(o - oy * s)
+            sy, dy = (0, cy, ih), (y, min(my, y + round(cy * s)), my)
+        else:
+            y = round(o + h - oy * s)
+            sy, dy = (0, ih - cy, ih), (my, max(my, y - round(cy * s)), y)
+        for j in range(2):
+            for i in range(2):
+                if dx[i + 1] <= dx[i] or dy[j + 1] <= dy[j]:
+                    continue
+                p.paste_with_alpha_blend(
+                    image,
+                    (dx[i], dy[j]),
+                    (dx[i + 1] - dx[i], dy[j + 1] - dy[j]),
+                    src_rect=(sx[i], sy[j], sx[i + 1], sy[j + 1]),
+                )
 
 
 def frame_scale_for(layers: PlayerFrameLayers, size: tuple[int, int]) -> float:
