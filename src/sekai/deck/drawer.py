@@ -1164,15 +1164,19 @@ async def _draw_deck_header(rqd: DeckRequest, assets: _DeckRecommendAssets, widt
 # ---------------------------------------------------------------------------
 
 
-def _deck_score(rqd: DeckRequest, deck, target_score: bool, boost_bonus: int) -> int:
+def _deck_uses_live_boost(rqd: DeckRequest) -> bool:
+    return rqd.recommend_type in {"event", "wl", "unit_attr"} and rqd.target == "score" and rqd.boost is not None
+
+
+def _deck_score(rqd: DeckRequest, deck) -> int:
     if rqd.recommend_type == "no_event":
         score = deck.live_score or 0
     elif rqd.recommend_type == "mysekai":
         score = deck.mysekai_event_point or 0
     else:
         score = deck.score or 0
-    if rqd.boost is not None and target_score:
-        score = int(score * boost_bonus)
+    if _deck_uses_live_boost(rqd):
+        score = int(score * _boost_bonus(rqd))
     return score
 
 
@@ -1186,7 +1190,7 @@ def _metric_label(rqd: DeckRequest, key: str) -> str:
 
 def _metric_value(rqd: DeckRequest, deck, key: str) -> str:
     if key == "score":
-        return format_deck_int(_deck_score(rqd, deck, rqd.target == "score", _boost_bonus(rqd)))
+        return format_deck_int(_deck_score(rqd, deck))
     if key == "bonus":
         total = (deck.event_bonus_rate or 0) + ((deck.support_deck_bonus_rate or 0) if rqd.is_wl else 0)
         return format_deck_percent(total)
@@ -1587,7 +1591,7 @@ def _draw_deck_results(rqd: DeckRequest, assets: _DeckRecommendAssets, layout: _
     with _panel(width):
         chips = [(f"{len(rqd.deck_data)} 组", accent)] if rqd.deck_data else []
         boost = []
-        if rqd.boost is not None and rqd.target == "score":
+        if _deck_uses_live_boost(rqd):
             boost.append((f"{rqd.boost}🔥 PT×{_boost_bonus(rqd)}", _BONUS_ORANGE))
         _section_header("推荐卡组", accent, chips=chips, soft_chips=boost, captions=_deck_results_captions(rqd))
         if not rqd.deck_data:
