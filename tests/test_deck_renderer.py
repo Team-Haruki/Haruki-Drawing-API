@@ -239,11 +239,68 @@ def test_deck_renderer_helpers_cover_story_and_score_defaults():
     request = _request(boost=None)
     deck = _deck(score=None, live_score=None, mysekai_event_point=None)
 
-    assert drawer._deck_score(request, deck, False, 1) == 0
+    assert drawer._deck_score(request, deck) == 0
     assert drawer._story_read_color(None) == (255, 255, 255, 255)
     assert drawer._story_read_color(True) == (50, 150, 50, 255)
     assert drawer._story_read_color(False) == (150, 50, 50, 255)
     assert drawer._deck_card_is_fixed(request, 101, 999)
+
+
+@pytest.mark.parametrize(
+    ("recommend_type", "base_score", "uses_boost"),
+    [
+        ("no_event", 900_000, False),
+        ("challenge", 1_000_000, False),
+        ("challenge_all", 1_000_000, False),
+        ("mysekai", 5000, False),
+        ("event", 1_000_000, True),
+        ("wl", 1_000_000, True),
+        ("unit_attr", 1_000_000, True),
+    ],
+)
+@pytest.mark.parametrize(("boost", "multiplier"), [(None, 1), (0, 1), (1, 5), (5, 25), (10, 35)])
+def test_deck_score_boost_only_scales_live_event_points(recommend_type, base_score, uses_boost, boost, multiplier):
+    request = _request(recommend_type=recommend_type, boost=boost, event_id=None)
+    expected = base_score * multiplier if uses_boost else base_score
+
+    assert drawer._metric_value(request, request.deck_data[0], "score") == f"{expected:,}"
+
+
+@pytest.mark.parametrize("target", [None, "skill", "bonus", "power", "total_power"])
+def test_deck_boost_preserves_secondary_score_behavior(target):
+    request = _request(target=target, boost=5)
+
+    assert drawer._metric_value(request, request.deck_data[0], "score") == "1,000,000"
+
+
+@pytest.mark.parametrize(
+    ("recommend_type", "uses_boost"),
+    [
+        ("no_event", False),
+        ("challenge", False),
+        ("challenge_all", False),
+        ("mysekai", False),
+        ("bonus", False),
+        ("wl_bonus", False),
+        ("event", True),
+        ("wl", True),
+        ("unit_attr", True),
+    ],
+)
+@pytest.mark.parametrize("boost", [None, 0, 5])
+@pytest.mark.parametrize("target", ["score", "skill"])
+def test_deck_boost_caption_matches_event_point_multiplier(monkeypatch, recommend_type, uses_boost, boost, target):
+    request = _request(recommend_type=recommend_type, boost=boost, target=target, event_id=None, deck_data=[])
+    captions = []
+    monkeypatch.setattr(drawer, "_section_header", lambda *args, **kwargs: captions.extend(kwargs["soft_chips"]))
+
+    with drawer.Canvas():
+        drawer._draw_deck_results(request, _assets(), drawer._deck_layout(request), drawer._deck_page_width(request))
+
+    expected = uses_boost and boost is not None and target == "score"
+    assert bool(captions) == expected
+    if expected:
+        assert f"PT×{25 if boost == 5 else 1}" in captions[0][0]
 
 
 async def _card_id_badge_gaps(text: str, size: int, backend: str) -> tuple[int, int, int, int]:
